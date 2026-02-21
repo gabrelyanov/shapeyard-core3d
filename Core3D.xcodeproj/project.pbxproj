@@ -1,0 +1,1116 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1804F28D2C51140A0045084A /* CylinderDriver.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 1804F28C2C51140A0045084A /* CylinderDriver.hpp */; };
+		1804F28E2C51140A0045084A /* CylinderDriver.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1804F28B2C51140A0045084A /* CylinderDriver.cpp */; };
+		1804F2912C5114A80045084A /* BaseDriver.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1804F28F2C5114A80045084A /* BaseDriver.cpp */; };
+		1804F2922C5114A80045084A /* BaseDriver.h in Headers */ = {isa = PBXBuildFile; fileRef = 1804F2902C5114A80045084A /* BaseDriver.h */; };
+		1808B29A2CC7B864007BD76E /* Ionized.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B28A2CC7B864007BD76E /* Ionized.png */; };
+		1808B29B2CC7B864007BD76E /* Plastified.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2912CC7B864007BD76E /* Plastified.png */; };
+		1808B29C2CC7B864007BD76E /* Stone.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2962CC7B864007BD76E /* Stone.png */; };
+		1808B29D2CC7B864007BD76E /* Obsidian.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B28E2CC7B864007BD76E /* Obsidian.png */; };
+		1808B29E2CC7B864007BD76E /* Neon.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B28D2CC7B864007BD76E /* Neon.png */; };
+		1808B29F2CC7B864007BD76E /* Charcoal.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2862CC7B864007BD76E /* Charcoal.png */; };
+		1808B2A02CC7B864007BD76E /* Metalized.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B28C2CC7B864007BD76E /* Metalized.png */; };
+		1808B2A12CC7B864007BD76E /* Silver.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2942CC7B864007BD76E /* Silver.png */; };
+		1808B2A22CC7B864007BD76E /* Shiny_plastified.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2932CC7B864007BD76E /* Shiny_plastified.png */; };
+		1808B2A32CC7B864007BD76E /* Steel.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2952CC7B864007BD76E /* Steel.png */; };
+		1808B2A42CC7B864007BD76E /* Gold.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2892CC7B864007BD76E /* Gold.png */; };
+		1808B2A52CC7B864007BD76E /* Copper.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2882CC7B864007BD76E /* Copper.png */; };
+		1808B2A62CC7B864007BD76E /* Pewter.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B28F2CC7B864007BD76E /* Pewter.png */; };
+		1808B2A72CC7B864007BD76E /* Aluminium.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2832CC7B864007BD76E /* Aluminium.png */; };
+		1808B2A82CC7B864007BD76E /* Chrome.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2872CC7B864007BD76E /* Chrome.png */; };
+		1808B2A92CC7B864007BD76E /* Plastered.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2902CC7B864007BD76E /* Plastered.png */; };
+		1808B2AA2CC7B864007BD76E /* Brass.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2842CC7B864007BD76E /* Brass.png */; };
+		1808B2AB2CC7B864007BD76E /* Bronze.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2852CC7B864007BD76E /* Bronze.png */; };
+		1808B2AC2CC7B864007BD76E /* Jade.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B28B2CC7B864007BD76E /* Jade.png */; };
+		1808B2AD2CC7B864007BD76E /* Water.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2972CC7B864007BD76E /* Water.png */; };
+		1808B2AE2CC7B864007BD76E /* Satined.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2922CC7B864007BD76E /* Satined.png */; };
+		1808B2B22CC8E8C2007BD76E /* Diamond.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2B02CC8E8C2007BD76E /* Diamond.png */; };
+		1808B2B32CC8E8C2007BD76E /* Glass.png in Resources */ = {isa = PBXBuildFile; fileRef = 1808B2B12CC8E8C2007BD76E /* Glass.png */; };
+		180D48C82CD2505200B20035 /* ListOfColors.h in Headers */ = {isa = PBXBuildFile; fileRef = 180D48C72CD2504900B20035 /* ListOfColors.h */; };
+		181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */ = {isa = PBXBuildFile; fileRef = 181242912CC25F96002E5A39 /* Core3DMaterialController.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		181242942CC262A3002E5A39 /* Core3DMaterialController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 181242932CC2629B002E5A39 /* Core3DMaterialController.mm */; };
+		18247AD72C0FAF2000674D04 /* Core3DManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18247AD62C0FAF2000674D04 /* Core3DManipulator.hpp */; };
+		18247AD82C0FAF2000674D04 /* Core3DManipulator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18247AD52C0FAF2000674D04 /* Core3DManipulator.cpp */; };
+		185461B72C0F299E00C794A8 /* Core3DView.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 185461B52C0F299E00C794A8 /* Core3DView.cpp */; };
+		185461B82C0F299E00C794A8 /* Core3DView.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 185461B62C0F299E00C794A8 /* Core3DView.hpp */; };
+		185461BB2C0F412B00C794A8 /* Core3DContext.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 185461BA2C0F412B00C794A8 /* Core3DContext.hpp */; };
+		185461BC2C0F412B00C794A8 /* Core3DContext.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 185461B92C0F412B00C794A8 /* Core3DContext.cpp */; };
+		185552D22D01BE8000CCFA2B /* SimpleSingleton.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 185552D12D01BE8000CCFA2B /* SimpleSingleton.hpp */; };
+		185552D42D01BEA200CCFA2B /* Snapping.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 185552D32D01BE9000CCFA2B /* Snapping.hpp */; };
+		185552D62D01C07300CCFA2B /* Snapping.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 185552D52D01C07000CCFA2B /* Snapping.cpp */; };
+		186250002C21DCFC00F86ADD /* Core3DCocoa_Window.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 18624FFE2C21DCFB00F86ADD /* Core3DCocoa_Window.hxx */; };
+		186250012C21DCFC00F86ADD /* Core3DCocoa_Window.mm in Sources */ = {isa = PBXBuildFile; fileRef = 18624FFF2C21DCFB00F86ADD /* Core3DCocoa_Window.mm */; };
+		18665EFF2CA2BDC600141E05 /* NSBundle+Path.h in Headers */ = {isa = PBXBuildFile; fileRef = 18665EFD2CA2BDC600141E05 /* NSBundle+Path.h */; };
+		18665F002CA2BDC600141E05 /* NSBundle+Path.m in Sources */ = {isa = PBXBuildFile; fileRef = 18665EFE2CA2BDC600141E05 /* NSBundle+Path.m */; };
+		18665F032CA2DA8500141E05 /* ModelPart.h in Headers */ = {isa = PBXBuildFile; fileRef = 18665F012CA2DA8500141E05 /* ModelPart.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		18665F042CA2DA8500141E05 /* ModelPart.mm in Sources */ = {isa = PBXBuildFile; fileRef = 18665F022CA2DA8500141E05 /* ModelPart.mm */; };
+		18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A006282BD2A23C004931B1 /* ObjectInteractor.cpp */; };
+		18A0062B2BD2A23C004931B1 /* ObjectInteractor.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18A006292BD2A23C004931B1 /* ObjectInteractor.hpp */; };
+		18A0062E2BD2A2E5004931B1 /* Interactor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A0062C2BD2A2E5004931B1 /* Interactor.cpp */; };
+		18A0062F2BD2A2E5004931B1 /* Interactor.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18A0062D2BD2A2E5004931B1 /* Interactor.hpp */; };
+		18A006322BD2B306004931B1 /* ShapeInteractor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A006302BD2B305004931B1 /* ShapeInteractor.cpp */; };
+		18A006332BD2B306004931B1 /* ShapeInteractor.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18A006312BD2B305004931B1 /* ShapeInteractor.hpp */; };
+		18A779572CA44D44003E266B /* GuidedObjectsMatcher.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A779552CA44D44003E266B /* GuidedObjectsMatcher.cpp */; };
+		18A779582CA44D44003E266B /* GuidedObjectsMatcher.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18A779562CA44D44003E266B /* GuidedObjectsMatcher.hpp */; };
+		18BA97432C918588004A8662 /* Core3DGuidedController.h in Headers */ = {isa = PBXBuildFile; fileRef = 18BA97412C918588004A8662 /* Core3DGuidedController.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		18BA97442C918588004A8662 /* Core3DGuidedController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 18BA97422C918588004A8662 /* Core3DGuidedController.mm */; };
+		3201971D2BD7AF0500F30E62 /* AssetBundle.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3201971C2BD7AF0500F30E62 /* AssetBundle.mm */; };
+		3201971F2BD7AF5800F30E62 /* AssetBundleReaderInterface.h in Headers */ = {isa = PBXBuildFile; fileRef = 3201971E2BD7AF5800F30E62 /* AssetBundleReaderInterface.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */ = {isa = PBXBuildFile; fileRef = 320197202BD7AF7A00F30E62 /* AssetBundleWriterInterface.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		320197222BD7AFDD00F30E62 /* AssetBundle.h in Headers */ = {isa = PBXBuildFile; fileRef = 3201971B2BD7AF0500F30E62 /* AssetBundle.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		320197252BD7B7F400F30E62 /* AssetBundleItem.h in Headers */ = {isa = PBXBuildFile; fileRef = 320197232BD7B7F400F30E62 /* AssetBundleItem.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		320197262BD7B7F400F30E62 /* AssetBundleItem.m in Sources */ = {isa = PBXBuildFile; fileRef = 320197242BD7B7F400F30E62 /* AssetBundleItem.m */; };
+		3221604B2BB560CB00040E84 /* Core3D.h in Headers */ = {isa = PBXBuildFile; fileRef = 3221604A2BB560CB00040E84 /* Core3D.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		322160572BB56F2300040E84 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160562BB56F2300040E84 /* UIKit.framework */; platformFilter = ios; };
+		322160592BB56F2D00040E84 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160582BB56F2D00040E84 /* QuartzCore.framework */; };
+		3221605B2BB56F4500040E84 /* OpenGLES.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221605A2BB56F4500040E84 /* OpenGLES.framework */; platformFilter = ios; };
+		3221608E2BB56FC600040E84 /* libTKG2d.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160732BB56F9800040E84 /* libTKG2d.a */; };
+		3221608F2BB56FC600040E84 /* libTKOffset.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160882BB56F9900040E84 /* libTKOffset.a */; };
+		322160902BB56FC600040E84 /* libTKDESTL.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221606C2BB56F9800040E84 /* libTKDESTL.a */; };
+		322160912BB56FC600040E84 /* libTKMath.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221608D2BB56F9900040E84 /* libTKMath.a */; };
+		322160922BB56FC600040E84 /* libTKV3d.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160712BB56F9800040E84 /* libTKV3d.a */; };
+		322160932BB56FC600040E84 /* libTKXMesh.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160642BB56F9800040E84 /* libTKXMesh.a */; };
+		322160942BB56FC600040E84 /* libTKDEOBJ.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221606D2BB56F9800040E84 /* libTKDEOBJ.a */; };
+		322160952BB56FC600040E84 /* libTKDE.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160742BB56F9800040E84 /* libTKDE.a */; };
+		322160962BB56FC600040E84 /* libTKDEIGES.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221607E2BB56F9800040E84 /* libTKDEIGES.a */; };
+		322160972BB56FC600040E84 /* libTKGeomBase.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160832BB56F9900040E84 /* libTKGeomBase.a */; };
+		322160982BB56FC600040E84 /* libTKTObj.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221605C2BB56F9800040E84 /* libTKTObj.a */; };
+		322160992BB56FC600040E84 /* libTKXmlTObj.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221605F2BB56F9800040E84 /* libTKXmlTObj.a */; };
+		3221609A2BB56FC600040E84 /* libTKShHealing.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160792BB56F9800040E84 /* libTKShHealing.a */; };
+		3221609B2BB56FC600040E84 /* libTKG3d.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160622BB56F9800040E84 /* libTKG3d.a */; };
+		3221609C2BB56FC600040E84 /* libTKExpress.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160862BB56F9900040E84 /* libTKExpress.a */; };
+		3221609D2BB56FC600040E84 /* libTKRWMesh.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160752BB56F9800040E84 /* libTKRWMesh.a */; };
+		3221609E2BB56FC600040E84 /* libTKPrim.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160652BB56F9800040E84 /* libTKPrim.a */; };
+		3221609F2BB56FC600040E84 /* libTKService.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160672BB56F9800040E84 /* libTKService.a */; };
+		322160A02BB56FC600040E84 /* libTKBRep.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221607A2BB56F9800040E84 /* libTKBRep.a */; };
+		322160A12BB56FC600040E84 /* libTKVCAF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160802BB56F9800040E84 /* libTKVCAF.a */; };
+		322160A22BB56FC600040E84 /* libTKBinXCAF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160702BB56F9800040E84 /* libTKBinXCAF.a */; };
+		322160A32BB56FC700040E84 /* libTKDEPLY.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221607C2BB56F9800040E84 /* libTKDEPLY.a */; };
+		322160A42BB56FC700040E84 /* libTKHLR.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160632BB56F9800040E84 /* libTKHLR.a */; };
+		322160A52BB56FC700040E84 /* libTKTopAlgo.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160602BB56F9800040E84 /* libTKTopAlgo.a */; };
+		322160A62BB56FC700040E84 /* libTKCDF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160612BB56F9800040E84 /* libTKCDF.a */; };
+		322160A72BB56FC700040E84 /* libTKLCAF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221605E2BB56F9800040E84 /* libTKLCAF.a */; };
+		322160A82BB56FC700040E84 /* libTKDEVRML.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221607F2BB56F9800040E84 /* libTKDEVRML.a */; };
+		322160A92BB56FC700040E84 /* libTKXmlXCAF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160842BB56F9900040E84 /* libTKXmlXCAF.a */; };
+		322160AA2BB56FC700040E84 /* libTKCAF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160722BB56F9800040E84 /* libTKCAF.a */; };
+		322160AB2BB56FC700040E84 /* libTKMeshVS.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221607D2BB56F9800040E84 /* libTKMeshVS.a */; };
+		322160AC2BB56FC700040E84 /* libTKOpenGles.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160782BB56F9800040E84 /* libTKOpenGles.a */; };
+		322160AD2BB56FC700040E84 /* libTKDECascade.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160662BB56F9800040E84 /* libTKDECascade.a */; };
+		322160AE2BB56FC700040E84 /* libTKGeomAlgo.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221608B2BB56F9900040E84 /* libTKGeomAlgo.a */; };
+		322160AF2BB56FC800040E84 /* libTKStd.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221607B2BB56F9800040E84 /* libTKStd.a */; };
+		322160B02BB56FC800040E84 /* libTKDESTEP.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160772BB56F9800040E84 /* libTKDESTEP.a */; };
+		322160B12BB56FC800040E84 /* libTKBin.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160682BB56F9800040E84 /* libTKBin.a */; };
+		322160B22BB56FC800040E84 /* libTKXCAF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221606A2BB56F9800040E84 /* libTKXCAF.a */; };
+		322160B32BB56FC800040E84 /* libTKFeat.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221606B2BB56F9800040E84 /* libTKFeat.a */; };
+		322160B42BB56FC800040E84 /* libTKMesh.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221608C2BB56F9900040E84 /* libTKMesh.a */; };
+		322160B52BB56FC800040E84 /* libTKFillet.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160812BB56F9900040E84 /* libTKFillet.a */; };
+		322160B62BB56FC800040E84 /* libTKXSBase.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160852BB56F9900040E84 /* libTKXSBase.a */; };
+		322160B72BB56FC900040E84 /* libTKXml.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221608A2BB56F9900040E84 /* libTKXml.a */; };
+		322160B82BB56FC900040E84 /* libTKStdL.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160872BB56F9900040E84 /* libTKStdL.a */; };
+		322160B92BB56FC900040E84 /* libTKXmlL.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160692BB56F9800040E84 /* libTKXmlL.a */; };
+		322160BA2BB56FC900040E84 /* libTKernel.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160892BB56F9900040E84 /* libTKernel.a */; };
+		322160BB2BB56FC900040E84 /* libTKBinL.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160822BB56F9900040E84 /* libTKBinL.a */; };
+		322160BC2BB56FC900040E84 /* libTKBO.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221606F2BB56F9800040E84 /* libTKBO.a */; };
+		322160BD2BB56FC900040E84 /* libTKBool.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221605D2BB56F9800040E84 /* libTKBool.a */; };
+		322160BE2BB56FC900040E84 /* libTKDEGLTF.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160762BB56F9800040E84 /* libTKDEGLTF.a */; };
+		322160BF2BB56FCA00040E84 /* libTKBinTObj.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3221606E2BB56F9800040E84 /* libTKBinTObj.a */; };
+		322160C12BB5706900040E84 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 322160C02BB5702800040E84 /* libz.tbd */; };
+		322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3221856A2BB5CC1300040E84 /* OcctDocument.mm */; };
+		322185752BB5CC1500040E84 /* GLView.h in Headers */ = {isa = PBXBuildFile; fileRef = 3221856B2BB5CC1300040E84 /* GLView.h */; };
+		322185762BB5CC1500040E84 /* OcctViewer.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3221856C2BB5CC1300040E84 /* OcctViewer.mm */; };
+		322185772BB5CC1500040E84 /* OcctViewer.h in Headers */ = {isa = PBXBuildFile; fileRef = 3221856D2BB5CC1400040E84 /* OcctViewer.h */; };
+		322185782BB5CC1500040E84 /* CafShapePrs.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3221856E2BB5CC1400040E84 /* CafShapePrs.mm */; };
+		322185792BB5CC1500040E84 /* CafShapePrs.h in Headers */ = {isa = PBXBuildFile; fileRef = 3221856F2BB5CC1400040E84 /* CafShapePrs.h */; };
+		3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */ = {isa = PBXBuildFile; fileRef = 322185702BB5CC1400040E84 /* OcctDocument.h */; };
+		3221857B2BB5CC1500040E84 /* GLViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 322185712BB5CC1500040E84 /* GLViewController.mm */; };
+		3221857C2BB5CC1500040E84 /* GLViewController.h in Headers */ = {isa = PBXBuildFile; fileRef = 322185722BB5CC1500040E84 /* GLViewController.h */; };
+		3221857D2BB5CC1500040E84 /* GLView.mm in Sources */ = {isa = PBXBuildFile; fileRef = 322185732BB5CC1500040E84 /* GLView.mm */; };
+		322185852BB5D5E100040E84 /* Core3DViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 322185842BB5D5E100040E84 /* Core3DViewController.mm */; };
+		322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */ = {isa = PBXBuildFile; fileRef = 322185832BB5D5E100040E84 /* Core3DViewController.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		3229D3222C00D7780025AECD /* ExportType.h in Headers */ = {isa = PBXBuildFile; fileRef = 3229D3212C00D7780025AECD /* ExportType.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		323E89E22BD13F3F0035FF45 /* GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */; };
+		323E89E52BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm in Sources */ = {isa = PBXBuildFile; fileRef = 323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */; };
+		323E89E62BD145ED0035FF45 /* Core3DViewController+GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */; };
+		3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 324047592C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm */; };
+		3240475B2C00C8C9009E4B86 /* Core3DViewController+ExportManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 324047582C00C7F6009E4B86 /* Core3DViewController+ExportManager.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		32466AAC2BDC0F5800C61638 /* NSString+StdString.h in Headers */ = {isa = PBXBuildFile; fileRef = 32466AAA2BDC0F5800C61638 /* NSString+StdString.h */; };
+		32466AAD2BDC0F5800C61638 /* NSString+StdString.mm in Sources */ = {isa = PBXBuildFile; fileRef = 32466AAB2BDC0F5800C61638 /* NSString+StdString.mm */; };
+		324EF2CC2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */; };
+		325C835A2BCE77CB000292E4 /* dispatch_cancelable_block.h in Headers */ = {isa = PBXBuildFile; fileRef = 325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */; };
+		325F58D72BD8D37C0076FC53 /* objc_try.h in Headers */ = {isa = PBXBuildFile; fileRef = 325F58D62BD8D37C0076FC53 /* objc_try.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		326B3F962BBC245300030C30 /* PrimitiveType.h in Headers */ = {isa = PBXBuildFile; fileRef = 326B3F952BBC244700030C30 /* PrimitiveType.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		326E38B32CE340D700E20D0C /* OrthoProjectionType.h in Headers */ = {isa = PBXBuildFile; fileRef = 326E38B22CE340CD00E20D0C /* OrthoProjectionType.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		3280C8282BBFE33D00862483 /* libfreetype.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3280C8272BBFE2EC00862483 /* libfreetype.a */; };
+		328FBF2B2BC82E8300176AEA /* Core3DViewer.mm in Sources */ = {isa = PBXBuildFile; fileRef = 328FBF2A2BC82E8300176AEA /* Core3DViewer.mm */; };
+		328FBF2C2BC82E8300176AEA /* Core3DViewer.h in Headers */ = {isa = PBXBuildFile; fileRef = 328FBF292BC82E8300176AEA /* Core3DViewer.h */; };
+		329B2ECF2C1AF53900F3A763 /* kdtree.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2EC62C1AF53800F3A763 /* kdtree.h */; };
+		329B2ED02C1AF53900F3A763 /* importstl.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 329B2EC72C1AF53800F3A763 /* importstl.cpp */; };
+		329B2ED12C1AF53900F3A763 /* geombase.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2EC82C1AF53800F3A763 /* geombase.h */; };
+		329B2ED22C1AF53900F3A763 /* vectornd.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2EC92C1AF53800F3A763 /* vectornd.h */; };
+		329B2ED32C1AF53900F3A763 /* importstl.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2ECA2C1AF53800F3A763 /* importstl.h */; };
+		329B2ED42C1AF53900F3A763 /* geometry.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2ECB2C1AF53900F3A763 /* geometry.h */; };
+		329B2ED52C1AF53900F3A763 /* visitor.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2ECC2C1AF53900F3A763 /* visitor.h */; };
+		329B2ED62C1AF53900F3A763 /* exportobj.h in Headers */ = {isa = PBXBuildFile; fileRef = 329B2ECD2C1AF53900F3A763 /* exportobj.h */; };
+		329B2ED72C1AF53900F3A763 /* exportobj.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 329B2ECE2C1AF53900F3A763 /* exportobj.cpp */; };
+		32BD97752C20678100ECF581 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 32BD97742C20678100ECF581 /* CoreGraphics.framework */; };
+		32ECC7CC2BC9428900770594 /* PrimitiveSelectionType.h in Headers */ = {isa = PBXBuildFile; fileRef = 32ECC7CB2BC9428900770594 /* PrimitiveSelectionType.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		32ECC7CE2BC94AC800770594 /* PrimitiveGizmoType.h in Headers */ = {isa = PBXBuildFile; fileRef = 32ECC7CD2BC94AC800770594 /* PrimitiveGizmoType.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		32ECC7DA2BC9603700770594 /* UIStateChanging.h in Headers */ = {isa = PBXBuildFile; fileRef = 32ECC7D92BC9603700770594 /* UIStateChanging.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		32ECC7DD2BCD35B100770594 /* Core3DViewController+AvailabilityManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */; };
+		32ECC7DE2BCD36E600770594 /* Core3DViewController+AvailabilityManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		713D36DF2CD4F482002E7F21 /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 713D36DE2CD4F482002E7F21 /* CoreImage.framework */; };
+		71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */; };
+		71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */; };
+		71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1804F28B2C51140A0045084A /* CylinderDriver.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CylinderDriver.cpp; sourceTree = "<group>"; };
+		1804F28C2C51140A0045084A /* CylinderDriver.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = CylinderDriver.hpp; sourceTree = "<group>"; };
+		1804F28F2C5114A80045084A /* BaseDriver.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = BaseDriver.cpp; sourceTree = "<group>"; };
+		1804F2902C5114A80045084A /* BaseDriver.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = BaseDriver.h; sourceTree = "<group>"; };
+		1808B2832CC7B864007BD76E /* Aluminium.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Aluminium.png; sourceTree = "<group>"; };
+		1808B2842CC7B864007BD76E /* Brass.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Brass.png; sourceTree = "<group>"; };
+		1808B2852CC7B864007BD76E /* Bronze.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Bronze.png; sourceTree = "<group>"; };
+		1808B2862CC7B864007BD76E /* Charcoal.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Charcoal.png; sourceTree = "<group>"; };
+		1808B2872CC7B864007BD76E /* Chrome.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Chrome.png; sourceTree = "<group>"; };
+		1808B2882CC7B864007BD76E /* Copper.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Copper.png; sourceTree = "<group>"; };
+		1808B2892CC7B864007BD76E /* Gold.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Gold.png; sourceTree = "<group>"; };
+		1808B28A2CC7B864007BD76E /* Ionized.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Ionized.png; sourceTree = "<group>"; };
+		1808B28B2CC7B864007BD76E /* Jade.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Jade.png; sourceTree = "<group>"; };
+		1808B28C2CC7B864007BD76E /* Metalized.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Metalized.png; sourceTree = "<group>"; };
+		1808B28D2CC7B864007BD76E /* Neon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Neon.png; sourceTree = "<group>"; };
+		1808B28E2CC7B864007BD76E /* Obsidian.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Obsidian.png; sourceTree = "<group>"; };
+		1808B28F2CC7B864007BD76E /* Pewter.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Pewter.png; sourceTree = "<group>"; };
+		1808B2902CC7B864007BD76E /* Plastered.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Plastered.png; sourceTree = "<group>"; };
+		1808B2912CC7B864007BD76E /* Plastified.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Plastified.png; sourceTree = "<group>"; };
+		1808B2922CC7B864007BD76E /* Satined.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Satined.png; sourceTree = "<group>"; };
+		1808B2932CC7B864007BD76E /* Shiny_plastified.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Shiny_plastified.png; sourceTree = "<group>"; };
+		1808B2942CC7B864007BD76E /* Silver.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Silver.png; sourceTree = "<group>"; };
+		1808B2952CC7B864007BD76E /* Steel.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Steel.png; sourceTree = "<group>"; };
+		1808B2962CC7B864007BD76E /* Stone.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Stone.png; sourceTree = "<group>"; };
+		1808B2972CC7B864007BD76E /* Water.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Water.png; sourceTree = "<group>"; };
+		1808B2B02CC8E8C2007BD76E /* Diamond.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Diamond.png; sourceTree = "<group>"; };
+		1808B2B12CC8E8C2007BD76E /* Glass.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Glass.png; sourceTree = "<group>"; };
+		180D48C72CD2504900B20035 /* ListOfColors.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ListOfColors.h; sourceTree = "<group>"; };
+		181242912CC25F96002E5A39 /* Core3DMaterialController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DMaterialController.h; sourceTree = "<group>"; };
+		181242932CC2629B002E5A39 /* Core3DMaterialController.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DMaterialController.mm; sourceTree = "<group>"; };
+		18247AD52C0FAF2000674D04 /* Core3DManipulator.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Core3DManipulator.cpp; sourceTree = "<group>"; };
+		18247AD62C0FAF2000674D04 /* Core3DManipulator.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DManipulator.hpp; sourceTree = "<group>"; };
+		185461B52C0F299E00C794A8 /* Core3DView.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Core3DView.cpp; sourceTree = "<group>"; };
+		185461B62C0F299E00C794A8 /* Core3DView.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DView.hpp; sourceTree = "<group>"; };
+		185461B92C0F412B00C794A8 /* Core3DContext.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Core3DContext.cpp; sourceTree = "<group>"; };
+		185461BA2C0F412B00C794A8 /* Core3DContext.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DContext.hpp; sourceTree = "<group>"; };
+		185552D12D01BE8000CCFA2B /* SimpleSingleton.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SimpleSingleton.hpp; sourceTree = "<group>"; };
+		185552D32D01BE9000CCFA2B /* Snapping.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Snapping.hpp; sourceTree = "<group>"; };
+		185552D52D01C07000CCFA2B /* Snapping.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Snapping.cpp; sourceTree = "<group>"; };
+		18624FFE2C21DCFB00F86ADD /* Core3DCocoa_Window.hxx */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = Core3DCocoa_Window.hxx; sourceTree = "<group>"; };
+		18624FFF2C21DCFB00F86ADD /* Core3DCocoa_Window.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DCocoa_Window.mm; sourceTree = "<group>"; };
+		18665EFD2CA2BDC600141E05 /* NSBundle+Path.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "NSBundle+Path.h"; sourceTree = "<group>"; };
+		18665EFE2CA2BDC600141E05 /* NSBundle+Path.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = "NSBundle+Path.m"; sourceTree = "<group>"; };
+		18665F012CA2DA8500141E05 /* ModelPart.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ModelPart.h; sourceTree = "<group>"; };
+		18665F022CA2DA8500141E05 /* ModelPart.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ModelPart.mm; sourceTree = "<group>"; };
+		18A006282BD2A23C004931B1 /* ObjectInteractor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ObjectInteractor.cpp; sourceTree = "<group>"; };
+		18A006292BD2A23C004931B1 /* ObjectInteractor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ObjectInteractor.hpp; sourceTree = "<group>"; };
+		18A0062C2BD2A2E5004931B1 /* Interactor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Interactor.cpp; sourceTree = "<group>"; };
+		18A0062D2BD2A2E5004931B1 /* Interactor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Interactor.hpp; sourceTree = "<group>"; };
+		18A006302BD2B305004931B1 /* ShapeInteractor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ShapeInteractor.cpp; sourceTree = "<group>"; };
+		18A006312BD2B305004931B1 /* ShapeInteractor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ShapeInteractor.hpp; sourceTree = "<group>"; };
+		18A779552CA44D44003E266B /* GuidedObjectsMatcher.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = GuidedObjectsMatcher.cpp; sourceTree = "<group>"; };
+		18A779562CA44D44003E266B /* GuidedObjectsMatcher.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GuidedObjectsMatcher.hpp; sourceTree = "<group>"; };
+		18BA97412C918588004A8662 /* Core3DGuidedController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DGuidedController.h; sourceTree = "<group>"; };
+		18BA97422C918588004A8662 /* Core3DGuidedController.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DGuidedController.mm; sourceTree = "<group>"; };
+		3201971B2BD7AF0500F30E62 /* AssetBundle.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AssetBundle.h; sourceTree = "<group>"; };
+		3201971C2BD7AF0500F30E62 /* AssetBundle.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AssetBundle.mm; sourceTree = "<group>"; };
+		3201971E2BD7AF5800F30E62 /* AssetBundleReaderInterface.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AssetBundleReaderInterface.h; sourceTree = "<group>"; };
+		320197202BD7AF7A00F30E62 /* AssetBundleWriterInterface.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AssetBundleWriterInterface.h; sourceTree = "<group>"; };
+		320197232BD7B7F400F30E62 /* AssetBundleItem.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AssetBundleItem.h; sourceTree = "<group>"; };
+		320197242BD7B7F400F30E62 /* AssetBundleItem.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AssetBundleItem.m; sourceTree = "<group>"; };
+		322160472BB560CB00040E84 /* Core3D.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Core3D.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		3221604A2BB560CB00040E84 /* Core3D.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3D.h; sourceTree = "<group>"; };
+		322160562BB56F2300040E84 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS17.4.sdk/System/Library/Frameworks/UIKit.framework; sourceTree = DEVELOPER_DIR; };
+		322160582BB56F2D00040E84 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS17.4.sdk/System/Library/Frameworks/QuartzCore.framework; sourceTree = DEVELOPER_DIR; };
+		3221605A2BB56F4500040E84 /* OpenGLES.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGLES.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS17.4.sdk/System/Library/Frameworks/OpenGLES.framework; sourceTree = DEVELOPER_DIR; };
+		3221605C2BB56F9800040E84 /* libTKTObj.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKTObj.a; path = Core3D/occt/lib/libTKTObj.a; sourceTree = "<group>"; };
+		3221605D2BB56F9800040E84 /* libTKBool.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBool.a; path = Core3D/occt/lib/libTKBool.a; sourceTree = "<group>"; };
+		3221605E2BB56F9800040E84 /* libTKLCAF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKLCAF.a; path = Core3D/occt/lib/libTKLCAF.a; sourceTree = "<group>"; };
+		3221605F2BB56F9800040E84 /* libTKXmlTObj.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXmlTObj.a; path = Core3D/occt/lib/libTKXmlTObj.a; sourceTree = "<group>"; };
+		322160602BB56F9800040E84 /* libTKTopAlgo.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKTopAlgo.a; path = Core3D/occt/lib/libTKTopAlgo.a; sourceTree = "<group>"; };
+		322160612BB56F9800040E84 /* libTKCDF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKCDF.a; path = Core3D/occt/lib/libTKCDF.a; sourceTree = "<group>"; };
+		322160622BB56F9800040E84 /* libTKG3d.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKG3d.a; path = Core3D/occt/lib/libTKG3d.a; sourceTree = "<group>"; };
+		322160632BB56F9800040E84 /* libTKHLR.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKHLR.a; path = Core3D/occt/lib/libTKHLR.a; sourceTree = "<group>"; };
+		322160642BB56F9800040E84 /* libTKXMesh.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXMesh.a; path = Core3D/occt/lib/libTKXMesh.a; sourceTree = "<group>"; };
+		322160652BB56F9800040E84 /* libTKPrim.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKPrim.a; path = Core3D/occt/lib/libTKPrim.a; sourceTree = "<group>"; };
+		322160662BB56F9800040E84 /* libTKDECascade.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDECascade.a; path = Core3D/occt/lib/libTKDECascade.a; sourceTree = "<group>"; };
+		322160672BB56F9800040E84 /* libTKService.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKService.a; path = Core3D/occt/lib/libTKService.a; sourceTree = "<group>"; };
+		322160682BB56F9800040E84 /* libTKBin.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBin.a; path = Core3D/occt/lib/libTKBin.a; sourceTree = "<group>"; };
+		322160692BB56F9800040E84 /* libTKXmlL.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXmlL.a; path = Core3D/occt/lib/libTKXmlL.a; sourceTree = "<group>"; };
+		3221606A2BB56F9800040E84 /* libTKXCAF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXCAF.a; path = Core3D/occt/lib/libTKXCAF.a; sourceTree = "<group>"; };
+		3221606B2BB56F9800040E84 /* libTKFeat.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKFeat.a; path = Core3D/occt/lib/libTKFeat.a; sourceTree = "<group>"; };
+		3221606C2BB56F9800040E84 /* libTKDESTL.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDESTL.a; path = Core3D/occt/lib/libTKDESTL.a; sourceTree = "<group>"; };
+		3221606D2BB56F9800040E84 /* libTKDEOBJ.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDEOBJ.a; path = Core3D/occt/lib/libTKDEOBJ.a; sourceTree = "<group>"; };
+		3221606E2BB56F9800040E84 /* libTKBinTObj.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBinTObj.a; path = Core3D/occt/lib/libTKBinTObj.a; sourceTree = "<group>"; };
+		3221606F2BB56F9800040E84 /* libTKBO.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBO.a; path = Core3D/occt/lib/libTKBO.a; sourceTree = "<group>"; };
+		322160702BB56F9800040E84 /* libTKBinXCAF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBinXCAF.a; path = Core3D/occt/lib/libTKBinXCAF.a; sourceTree = "<group>"; };
+		322160712BB56F9800040E84 /* libTKV3d.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKV3d.a; path = Core3D/occt/lib/libTKV3d.a; sourceTree = "<group>"; };
+		322160722BB56F9800040E84 /* libTKCAF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKCAF.a; path = Core3D/occt/lib/libTKCAF.a; sourceTree = "<group>"; };
+		322160732BB56F9800040E84 /* libTKG2d.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKG2d.a; path = Core3D/occt/lib/libTKG2d.a; sourceTree = "<group>"; };
+		322160742BB56F9800040E84 /* libTKDE.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDE.a; path = Core3D/occt/lib/libTKDE.a; sourceTree = "<group>"; };
+		322160752BB56F9800040E84 /* libTKRWMesh.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKRWMesh.a; path = Core3D/occt/lib/libTKRWMesh.a; sourceTree = "<group>"; };
+		322160762BB56F9800040E84 /* libTKDEGLTF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDEGLTF.a; path = Core3D/occt/lib/libTKDEGLTF.a; sourceTree = "<group>"; };
+		322160772BB56F9800040E84 /* libTKDESTEP.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDESTEP.a; path = Core3D/occt/lib/libTKDESTEP.a; sourceTree = "<group>"; };
+		322160782BB56F9800040E84 /* libTKOpenGles.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKOpenGles.a; path = Core3D/occt/lib/libTKOpenGles.a; sourceTree = "<group>"; };
+		322160792BB56F9800040E84 /* libTKShHealing.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKShHealing.a; path = Core3D/occt/lib/libTKShHealing.a; sourceTree = "<group>"; };
+		3221607A2BB56F9800040E84 /* libTKBRep.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBRep.a; path = Core3D/occt/lib/libTKBRep.a; sourceTree = "<group>"; };
+		3221607B2BB56F9800040E84 /* libTKStd.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKStd.a; path = Core3D/occt/lib/libTKStd.a; sourceTree = "<group>"; };
+		3221607C2BB56F9800040E84 /* libTKDEPLY.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDEPLY.a; path = Core3D/occt/lib/libTKDEPLY.a; sourceTree = "<group>"; };
+		3221607D2BB56F9800040E84 /* libTKMeshVS.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKMeshVS.a; path = Core3D/occt/lib/libTKMeshVS.a; sourceTree = "<group>"; };
+		3221607E2BB56F9800040E84 /* libTKDEIGES.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDEIGES.a; path = Core3D/occt/lib/libTKDEIGES.a; sourceTree = "<group>"; };
+		3221607F2BB56F9800040E84 /* libTKDEVRML.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKDEVRML.a; path = Core3D/occt/lib/libTKDEVRML.a; sourceTree = "<group>"; };
+		322160802BB56F9800040E84 /* libTKVCAF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKVCAF.a; path = Core3D/occt/lib/libTKVCAF.a; sourceTree = "<group>"; };
+		322160812BB56F9900040E84 /* libTKFillet.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKFillet.a; path = Core3D/occt/lib/libTKFillet.a; sourceTree = "<group>"; };
+		322160822BB56F9900040E84 /* libTKBinL.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKBinL.a; path = Core3D/occt/lib/libTKBinL.a; sourceTree = "<group>"; };
+		322160832BB56F9900040E84 /* libTKGeomBase.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKGeomBase.a; path = Core3D/occt/lib/libTKGeomBase.a; sourceTree = "<group>"; };
+		322160842BB56F9900040E84 /* libTKXmlXCAF.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXmlXCAF.a; path = Core3D/occt/lib/libTKXmlXCAF.a; sourceTree = "<group>"; };
+		322160852BB56F9900040E84 /* libTKXSBase.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXSBase.a; path = Core3D/occt/lib/libTKXSBase.a; sourceTree = "<group>"; };
+		322160862BB56F9900040E84 /* libTKExpress.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKExpress.a; path = Core3D/occt/lib/libTKExpress.a; sourceTree = "<group>"; };
+		322160872BB56F9900040E84 /* libTKStdL.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKStdL.a; path = Core3D/occt/lib/libTKStdL.a; sourceTree = "<group>"; };
+		322160882BB56F9900040E84 /* libTKOffset.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKOffset.a; path = Core3D/occt/lib/libTKOffset.a; sourceTree = "<group>"; };
+		322160892BB56F9900040E84 /* libTKernel.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKernel.a; path = Core3D/occt/lib/libTKernel.a; sourceTree = "<group>"; };
+		3221608A2BB56F9900040E84 /* libTKXml.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKXml.a; path = Core3D/occt/lib/libTKXml.a; sourceTree = "<group>"; };
+		3221608B2BB56F9900040E84 /* libTKGeomAlgo.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKGeomAlgo.a; path = Core3D/occt/lib/libTKGeomAlgo.a; sourceTree = "<group>"; };
+		3221608C2BB56F9900040E84 /* libTKMesh.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKMesh.a; path = Core3D/occt/lib/libTKMesh.a; sourceTree = "<group>"; };
+		3221608D2BB56F9900040E84 /* libTKMath.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libTKMath.a; path = Core3D/occt/lib/libTKMath.a; sourceTree = "<group>"; };
+		322160C02BB5702800040E84 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS17.4.sdk/usr/lib/libz.tbd; sourceTree = DEVELOPER_DIR; };
+		3221856A2BB5CC1300040E84 /* OcctDocument.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = OcctDocument.mm; sourceTree = "<group>"; };
+		3221856B2BB5CC1300040E84 /* GLView.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = GLView.h; sourceTree = "<group>"; };
+		3221856C2BB5CC1300040E84 /* OcctViewer.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = OcctViewer.mm; sourceTree = "<group>"; };
+		3221856D2BB5CC1400040E84 /* OcctViewer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = OcctViewer.h; sourceTree = "<group>"; };
+		3221856E2BB5CC1400040E84 /* CafShapePrs.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = CafShapePrs.mm; sourceTree = "<group>"; };
+		3221856F2BB5CC1400040E84 /* CafShapePrs.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CafShapePrs.h; sourceTree = "<group>"; };
+		322185702BB5CC1400040E84 /* OcctDocument.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = OcctDocument.h; sourceTree = "<group>"; };
+		322185712BB5CC1500040E84 /* GLViewController.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = GLViewController.mm; sourceTree = "<group>"; };
+		322185722BB5CC1500040E84 /* GLViewController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = GLViewController.h; sourceTree = "<group>"; };
+		322185732BB5CC1500040E84 /* GLView.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = GLView.mm; sourceTree = "<group>"; };
+		322185832BB5D5E100040E84 /* Core3DViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DViewController.h; sourceTree = "<group>"; };
+		322185842BB5D5E100040E84 /* Core3DViewController.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DViewController.mm; sourceTree = "<group>"; wrapsLines = 0; };
+		3229D3212C00D7780025AECD /* ExportType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ExportType.h; sourceTree = "<group>"; };
+		323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GLViewControllerProtocol.h; sourceTree = "<group>"; };
+		323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+GLViewControllerProtocol.mm"; sourceTree = "<group>"; };
+		323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+GLViewControllerProtocol.h"; sourceTree = "<group>"; };
+		324047582C00C7F6009E4B86 /* Core3DViewController+ExportManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+ExportManager.h"; sourceTree = "<group>"; };
+		324047592C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+ExportManager.mm"; sourceTree = "<group>"; };
+		32466AAA2BDC0F5800C61638 /* NSString+StdString.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "NSString+StdString.h"; sourceTree = "<group>"; };
+		32466AAB2BDC0F5800C61638 /* NSString+StdString.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "NSString+StdString.mm"; sourceTree = "<group>"; };
+		324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+PrimitiveManager.h"; sourceTree = "<group>"; };
+		324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+PrimitiveManager.mm"; sourceTree = "<group>"; };
+		324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GLViewController+Trick.h"; sourceTree = "<group>"; };
+		325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = dispatch_cancelable_block.h; sourceTree = "<group>"; };
+		325F58D62BD8D37C0076FC53 /* objc_try.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = objc_try.h; sourceTree = "<group>"; };
+		3262C21F2BF500F4004B5AAB /* SelectedObjectType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SelectedObjectType.h; sourceTree = "<group>"; };
+		326B3F952BBC244700030C30 /* PrimitiveType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrimitiveType.h; sourceTree = "<group>"; };
+		326E38B22CE340CD00E20D0C /* OrthoProjectionType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OrthoProjectionType.h; sourceTree = "<group>"; };
+		3280C8272BBFE2EC00862483 /* libfreetype.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libfreetype.a; path = Core3D/occt/lib/libfreetype.a; sourceTree = "<group>"; };
+		328FBF292BC82E8300176AEA /* Core3DViewer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = Core3DViewer.h; path = Core3D/UI/Core3DViewer.h; sourceTree = SOURCE_ROOT; };
+		328FBF2A2BC82E8300176AEA /* Core3DViewer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = Core3DViewer.mm; path = Core3D/UI/Core3DViewer.mm; sourceTree = SOURCE_ROOT; };
+		329B2EC62C1AF53800F3A763 /* kdtree.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = kdtree.h; sourceTree = "<group>"; };
+		329B2EC72C1AF53800F3A763 /* importstl.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = importstl.cpp; sourceTree = "<group>"; };
+		329B2EC82C1AF53800F3A763 /* geombase.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = geombase.h; sourceTree = "<group>"; };
+		329B2EC92C1AF53800F3A763 /* vectornd.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = vectornd.h; sourceTree = "<group>"; };
+		329B2ECA2C1AF53800F3A763 /* importstl.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = importstl.h; sourceTree = "<group>"; };
+		329B2ECB2C1AF53900F3A763 /* geometry.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = geometry.h; sourceTree = "<group>"; };
+		329B2ECC2C1AF53900F3A763 /* visitor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = visitor.h; sourceTree = "<group>"; };
+		329B2ECD2C1AF53900F3A763 /* exportobj.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = exportobj.h; sourceTree = "<group>"; };
+		329B2ECE2C1AF53900F3A763 /* exportobj.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = exportobj.cpp; sourceTree = "<group>"; };
+		32BD97742C20678100ECF581 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS17.5.sdk/System/Library/Frameworks/CoreGraphics.framework; sourceTree = DEVELOPER_DIR; };
+		32ECC7CB2BC9428900770594 /* PrimitiveSelectionType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrimitiveSelectionType.h; sourceTree = "<group>"; };
+		32ECC7CD2BC94AC800770594 /* PrimitiveGizmoType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrimitiveGizmoType.h; sourceTree = "<group>"; };
+		32ECC7D92BC9603700770594 /* UIStateChanging.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = UIStateChanging.h; sourceTree = "<group>"; };
+		32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+AvailabilityManager.mm"; sourceTree = "<group>"; };
+		32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+AvailabilityManager.h"; sourceTree = "<group>"; };
+		713D36DE2CD4F482002E7F21 /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/CoreImage.framework; sourceTree = DEVELOPER_DIR; };
+		71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ConstructorManipulator.cpp; sourceTree = "<group>"; };
+		71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ConstructorManipulator.hpp; sourceTree = "<group>"; };
+		71F7ACEB2C09D29A00FDF2EA /* BooleanOperationController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BooleanOperationController.hpp; sourceTree = "<group>"; };
+		71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = BooleanOperationController.cpp; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		322160442BB560CB00040E84 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				322160B32BB56FC800040E84 /* libTKFeat.a in Frameworks */,
+				322160BB2BB56FC900040E84 /* libTKBinL.a in Frameworks */,
+				322160912BB56FC600040E84 /* libTKMath.a in Frameworks */,
+				322160A32BB56FC700040E84 /* libTKDEPLY.a in Frameworks */,
+				322160B42BB56FC800040E84 /* libTKMesh.a in Frameworks */,
+				3221609D2BB56FC600040E84 /* libTKRWMesh.a in Frameworks */,
+				322160BD2BB56FC900040E84 /* libTKBool.a in Frameworks */,
+				322160942BB56FC600040E84 /* libTKDEOBJ.a in Frameworks */,
+				3221608E2BB56FC600040E84 /* libTKG2d.a in Frameworks */,
+				322160A52BB56FC700040E84 /* libTKTopAlgo.a in Frameworks */,
+				322160A12BB56FC600040E84 /* libTKVCAF.a in Frameworks */,
+				322160B02BB56FC800040E84 /* libTKDESTEP.a in Frameworks */,
+				3221609C2BB56FC600040E84 /* libTKExpress.a in Frameworks */,
+				322160932BB56FC600040E84 /* libTKXMesh.a in Frameworks */,
+				322160AC2BB56FC700040E84 /* libTKOpenGles.a in Frameworks */,
+				322160BF2BB56FCA00040E84 /* libTKBinTObj.a in Frameworks */,
+				3221609F2BB56FC600040E84 /* libTKService.a in Frameworks */,
+				3280C8282BBFE33D00862483 /* libfreetype.a in Frameworks */,
+				322160A82BB56FC700040E84 /* libTKDEVRML.a in Frameworks */,
+				322160A42BB56FC700040E84 /* libTKHLR.a in Frameworks */,
+				322160A02BB56FC600040E84 /* libTKBRep.a in Frameworks */,
+				322160AF2BB56FC800040E84 /* libTKStd.a in Frameworks */,
+				322160952BB56FC600040E84 /* libTKDE.a in Frameworks */,
+				322160972BB56FC600040E84 /* libTKGeomBase.a in Frameworks */,
+				322160B62BB56FC800040E84 /* libTKXSBase.a in Frameworks */,
+				322160592BB56F2D00040E84 /* QuartzCore.framework in Frameworks */,
+				322160C12BB5706900040E84 /* libz.tbd in Frameworks */,
+				322160A92BB56FC700040E84 /* libTKXmlXCAF.a in Frameworks */,
+				322160BA2BB56FC900040E84 /* libTKernel.a in Frameworks */,
+				322160572BB56F2300040E84 /* UIKit.framework in Frameworks */,
+				322160A62BB56FC700040E84 /* libTKCDF.a in Frameworks */,
+				3221609A2BB56FC600040E84 /* libTKShHealing.a in Frameworks */,
+				322160A22BB56FC600040E84 /* libTKBinXCAF.a in Frameworks */,
+				322160BC2BB56FC900040E84 /* libTKBO.a in Frameworks */,
+				322160992BB56FC600040E84 /* libTKXmlTObj.a in Frameworks */,
+				713D36DF2CD4F482002E7F21 /* CoreImage.framework in Frameworks */,
+				322160AE2BB56FC700040E84 /* libTKGeomAlgo.a in Frameworks */,
+				3221609E2BB56FC600040E84 /* libTKPrim.a in Frameworks */,
+				322160AB2BB56FC700040E84 /* libTKMeshVS.a in Frameworks */,
+				322160B12BB56FC800040E84 /* libTKBin.a in Frameworks */,
+				322160B52BB56FC800040E84 /* libTKFillet.a in Frameworks */,
+				322160AD2BB56FC700040E84 /* libTKDECascade.a in Frameworks */,
+				322160962BB56FC600040E84 /* libTKDEIGES.a in Frameworks */,
+				322160922BB56FC600040E84 /* libTKV3d.a in Frameworks */,
+				322160B72BB56FC900040E84 /* libTKXml.a in Frameworks */,
+				322160AA2BB56FC700040E84 /* libTKCAF.a in Frameworks */,
+				3221605B2BB56F4500040E84 /* OpenGLES.framework in Frameworks */,
+				322160B22BB56FC800040E84 /* libTKXCAF.a in Frameworks */,
+				3221608F2BB56FC600040E84 /* libTKOffset.a in Frameworks */,
+				322160B92BB56FC900040E84 /* libTKXmlL.a in Frameworks */,
+				322160902BB56FC600040E84 /* libTKDESTL.a in Frameworks */,
+				322160982BB56FC600040E84 /* libTKTObj.a in Frameworks */,
+				322160BE2BB56FC900040E84 /* libTKDEGLTF.a in Frameworks */,
+				32BD97752C20678100ECF581 /* CoreGraphics.framework in Frameworks */,
+				322160A72BB56FC700040E84 /* libTKLCAF.a in Frameworks */,
+				3221609B2BB56FC600040E84 /* libTKG3d.a in Frameworks */,
+				322160B82BB56FC900040E84 /* libTKStdL.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1808B2982CC7B864007BD76E /* MaterialPreview */ = {
+			isa = PBXGroup;
+			children = (
+				1808B2832CC7B864007BD76E /* Aluminium.png */,
+				1808B2842CC7B864007BD76E /* Brass.png */,
+				1808B2852CC7B864007BD76E /* Bronze.png */,
+				1808B2862CC7B864007BD76E /* Charcoal.png */,
+				1808B2872CC7B864007BD76E /* Chrome.png */,
+				1808B2882CC7B864007BD76E /* Copper.png */,
+				1808B2892CC7B864007BD76E /* Gold.png */,
+				1808B28A2CC7B864007BD76E /* Ionized.png */,
+				1808B28B2CC7B864007BD76E /* Jade.png */,
+				1808B28C2CC7B864007BD76E /* Metalized.png */,
+				1808B28D2CC7B864007BD76E /* Neon.png */,
+				1808B28E2CC7B864007BD76E /* Obsidian.png */,
+				1808B28F2CC7B864007BD76E /* Pewter.png */,
+				1808B2902CC7B864007BD76E /* Plastered.png */,
+				1808B2912CC7B864007BD76E /* Plastified.png */,
+				1808B2922CC7B864007BD76E /* Satined.png */,
+				1808B2932CC7B864007BD76E /* Shiny_plastified.png */,
+				1808B2942CC7B864007BD76E /* Silver.png */,
+				1808B2952CC7B864007BD76E /* Steel.png */,
+				1808B2962CC7B864007BD76E /* Stone.png */,
+				1808B2972CC7B864007BD76E /* Water.png */,
+				1808B2B02CC8E8C2007BD76E /* Diamond.png */,
+				1808B2B12CC8E8C2007BD76E /* Glass.png */,
+			);
+			path = MaterialPreview;
+			sourceTree = "<group>";
+		};
+		1808B2992CC7B864007BD76E /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				1808B2982CC7B864007BD76E /* MaterialPreview */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		3201971A2BD7AED400F30E62 /* Bundle */ = {
+			isa = PBXGroup;
+			children = (
+				3201971E2BD7AF5800F30E62 /* AssetBundleReaderInterface.h */,
+				320197202BD7AF7A00F30E62 /* AssetBundleWriterInterface.h */,
+				3201971B2BD7AF0500F30E62 /* AssetBundle.h */,
+				3201971C2BD7AF0500F30E62 /* AssetBundle.mm */,
+				320197232BD7B7F400F30E62 /* AssetBundleItem.h */,
+				320197242BD7B7F400F30E62 /* AssetBundleItem.m */,
+			);
+			path = Bundle;
+			sourceTree = "<group>";
+		};
+		3221603D2BB560CB00040E84 = {
+			isa = PBXGroup;
+			children = (
+				1808B2992CC7B864007BD76E /* Resources */,
+				322160492BB560CB00040E84 /* Core3D */,
+				322160482BB560CB00040E84 /* Products */,
+				322160552BB56F2200040E84 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		322160482BB560CB00040E84 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				322160472BB560CB00040E84 /* Core3D.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		322160492BB560CB00040E84 /* Core3D */ = {
+			isa = PBXGroup;
+			children = (
+				3240475C2C00D1FC009E4B86 /* Export */,
+				3201971A2BD7AED400F30E62 /* Bundle */,
+				325C83582BCE77AD000292E4 /* Common */,
+				326B3F942BBC23AC00030C30 /* Primitives */,
+				3221857E2BB5D57900040E84 /* UI */,
+				322185692BB5CB9A00040E84 /* OCCTKit */,
+				3221604A2BB560CB00040E84 /* Core3D.h */,
+			);
+			path = Core3D;
+			sourceTree = "<group>";
+		};
+		322160552BB56F2200040E84 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				713D36DE2CD4F482002E7F21 /* CoreImage.framework */,
+				32BD97742C20678100ECF581 /* CoreGraphics.framework */,
+				3280C8272BBFE2EC00862483 /* libfreetype.a */,
+				322160C02BB5702800040E84 /* libz.tbd */,
+				322160682BB56F9800040E84 /* libTKBin.a */,
+				322160822BB56F9900040E84 /* libTKBinL.a */,
+				3221606E2BB56F9800040E84 /* libTKBinTObj.a */,
+				322160702BB56F9800040E84 /* libTKBinXCAF.a */,
+				3221606F2BB56F9800040E84 /* libTKBO.a */,
+				3221605D2BB56F9800040E84 /* libTKBool.a */,
+				3221607A2BB56F9800040E84 /* libTKBRep.a */,
+				322160722BB56F9800040E84 /* libTKCAF.a */,
+				322160612BB56F9800040E84 /* libTKCDF.a */,
+				322160742BB56F9800040E84 /* libTKDE.a */,
+				322160662BB56F9800040E84 /* libTKDECascade.a */,
+				322160762BB56F9800040E84 /* libTKDEGLTF.a */,
+				3221607E2BB56F9800040E84 /* libTKDEIGES.a */,
+				3221606D2BB56F9800040E84 /* libTKDEOBJ.a */,
+				3221607C2BB56F9800040E84 /* libTKDEPLY.a */,
+				322160772BB56F9800040E84 /* libTKDESTEP.a */,
+				3221606C2BB56F9800040E84 /* libTKDESTL.a */,
+				3221607F2BB56F9800040E84 /* libTKDEVRML.a */,
+				322160892BB56F9900040E84 /* libTKernel.a */,
+				322160862BB56F9900040E84 /* libTKExpress.a */,
+				3221606B2BB56F9800040E84 /* libTKFeat.a */,
+				322160812BB56F9900040E84 /* libTKFillet.a */,
+				322160732BB56F9800040E84 /* libTKG2d.a */,
+				322160622BB56F9800040E84 /* libTKG3d.a */,
+				3221608B2BB56F9900040E84 /* libTKGeomAlgo.a */,
+				322160832BB56F9900040E84 /* libTKGeomBase.a */,
+				322160632BB56F9800040E84 /* libTKHLR.a */,
+				3221605E2BB56F9800040E84 /* libTKLCAF.a */,
+				3221608D2BB56F9900040E84 /* libTKMath.a */,
+				3221608C2BB56F9900040E84 /* libTKMesh.a */,
+				3221607D2BB56F9800040E84 /* libTKMeshVS.a */,
+				322160882BB56F9900040E84 /* libTKOffset.a */,
+				322160782BB56F9800040E84 /* libTKOpenGles.a */,
+				322160652BB56F9800040E84 /* libTKPrim.a */,
+				322160752BB56F9800040E84 /* libTKRWMesh.a */,
+				322160672BB56F9800040E84 /* libTKService.a */,
+				322160792BB56F9800040E84 /* libTKShHealing.a */,
+				3221607B2BB56F9800040E84 /* libTKStd.a */,
+				322160872BB56F9900040E84 /* libTKStdL.a */,
+				3221605C2BB56F9800040E84 /* libTKTObj.a */,
+				322160602BB56F9800040E84 /* libTKTopAlgo.a */,
+				322160712BB56F9800040E84 /* libTKV3d.a */,
+				322160802BB56F9800040E84 /* libTKVCAF.a */,
+				3221606A2BB56F9800040E84 /* libTKXCAF.a */,
+				322160642BB56F9800040E84 /* libTKXMesh.a */,
+				3221608A2BB56F9900040E84 /* libTKXml.a */,
+				322160692BB56F9800040E84 /* libTKXmlL.a */,
+				3221605F2BB56F9800040E84 /* libTKXmlTObj.a */,
+				322160842BB56F9900040E84 /* libTKXmlXCAF.a */,
+				322160852BB56F9900040E84 /* libTKXSBase.a */,
+				3221605A2BB56F4500040E84 /* OpenGLES.framework */,
+				322160582BB56F2D00040E84 /* QuartzCore.framework */,
+				322160562BB56F2300040E84 /* UIKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		322185692BB5CB9A00040E84 /* OCCTKit */ = {
+			isa = PBXGroup;
+			children = (
+				18624FFE2C21DCFB00F86ADD /* Core3DCocoa_Window.hxx */,
+				18624FFF2C21DCFB00F86ADD /* Core3DCocoa_Window.mm */,
+				3221856F2BB5CC1400040E84 /* CafShapePrs.h */,
+				3221856E2BB5CC1400040E84 /* CafShapePrs.mm */,
+				3221856B2BB5CC1300040E84 /* GLView.h */,
+				322185732BB5CC1500040E84 /* GLView.mm */,
+				322185722BB5CC1500040E84 /* GLViewController.h */,
+				322185712BB5CC1500040E84 /* GLViewController.mm */,
+				322185702BB5CC1400040E84 /* OcctDocument.h */,
+				3221856A2BB5CC1300040E84 /* OcctDocument.mm */,
+				3221856D2BB5CC1400040E84 /* OcctViewer.h */,
+				3221856C2BB5CC1300040E84 /* OcctViewer.mm */,
+			);
+			path = OCCTKit;
+			sourceTree = "<group>";
+		};
+		3221857E2BB5D57900040E84 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				326E38B22CE340CD00E20D0C /* OrthoProjectionType.h */,
+				180D48C72CD2504900B20035 /* ListOfColors.h */,
+				181242912CC25F96002E5A39 /* Core3DMaterialController.h */,
+				181242932CC2629B002E5A39 /* Core3DMaterialController.mm */,
+				324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */,
+				322185832BB5D5E100040E84 /* Core3DViewController.h */,
+				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
+				324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */,
+				324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */,
+				32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */,
+				32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */,
+				324047582C00C7F6009E4B86 /* Core3DViewController+ExportManager.h */,
+				324047592C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm */,
+				323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */,
+				323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */,
+				323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */,
+				328FBF292BC82E8300176AEA /* Core3DViewer.h */,
+				328FBF2A2BC82E8300176AEA /* Core3DViewer.mm */,
+				32ECC7D92BC9603700770594 /* UIStateChanging.h */,
+				18A006282BD2A23C004931B1 /* ObjectInteractor.cpp */,
+				18A006292BD2A23C004931B1 /* ObjectInteractor.hpp */,
+				18A006302BD2B305004931B1 /* ShapeInteractor.cpp */,
+				18A006312BD2B305004931B1 /* ShapeInteractor.hpp */,
+				18A0062C2BD2A2E5004931B1 /* Interactor.cpp */,
+				18A0062D2BD2A2E5004931B1 /* Interactor.hpp */,
+				3262C21F2BF500F4004B5AAB /* SelectedObjectType.h */,
+				71F7ACEB2C09D29A00FDF2EA /* BooleanOperationController.hpp */,
+				71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */,
+				185552D12D01BE8000CCFA2B /* SimpleSingleton.hpp */,
+				185552D32D01BE9000CCFA2B /* Snapping.hpp */,
+				185552D52D01C07000CCFA2B /* Snapping.cpp */,
+				18247AD52C0FAF2000674D04 /* Core3DManipulator.cpp */,
+				18247AD62C0FAF2000674D04 /* Core3DManipulator.hpp */,
+				185461B92C0F412B00C794A8 /* Core3DContext.cpp */,
+				185461BA2C0F412B00C794A8 /* Core3DContext.hpp */,
+				185461B52C0F299E00C794A8 /* Core3DView.cpp */,
+				185461B62C0F299E00C794A8 /* Core3DView.hpp */,
+				71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */,
+				71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */,
+				18665F012CA2DA8500141E05 /* ModelPart.h */,
+				18665F022CA2DA8500141E05 /* ModelPart.mm */,
+				18A779552CA44D44003E266B /* GuidedObjectsMatcher.cpp */,
+				18A779562CA44D44003E266B /* GuidedObjectsMatcher.hpp */,
+				18BA97412C918588004A8662 /* Core3DGuidedController.h */,
+				18BA97422C918588004A8662 /* Core3DGuidedController.mm */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		3240475C2C00D1FC009E4B86 /* Export */ = {
+			isa = PBXGroup;
+			children = (
+				329B2EC52C1AF51000F3A763 /* obj */,
+				3229D3212C00D7780025AECD /* ExportType.h */,
+			);
+			path = Export;
+			sourceTree = "<group>";
+		};
+		325C83582BCE77AD000292E4 /* Common */ = {
+			isa = PBXGroup;
+			children = (
+				18665EFD2CA2BDC600141E05 /* NSBundle+Path.h */,
+				18665EFE2CA2BDC600141E05 /* NSBundle+Path.m */,
+				325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */,
+				325F58D62BD8D37C0076FC53 /* objc_try.h */,
+				32466AAA2BDC0F5800C61638 /* NSString+StdString.h */,
+				32466AAB2BDC0F5800C61638 /* NSString+StdString.mm */,
+			);
+			path = Common;
+			sourceTree = "<group>";
+		};
+		326B3F942BBC23AC00030C30 /* Primitives */ = {
+			isa = PBXGroup;
+			children = (
+				326B3F952BBC244700030C30 /* PrimitiveType.h */,
+				32ECC7CB2BC9428900770594 /* PrimitiveSelectionType.h */,
+				32ECC7CD2BC94AC800770594 /* PrimitiveGizmoType.h */,
+				1804F28F2C5114A80045084A /* BaseDriver.cpp */,
+				1804F2902C5114A80045084A /* BaseDriver.h */,
+				1804F28B2C51140A0045084A /* CylinderDriver.cpp */,
+				1804F28C2C51140A0045084A /* CylinderDriver.hpp */,
+			);
+			path = Primitives;
+			sourceTree = "<group>";
+		};
+		329B2EC52C1AF51000F3A763 /* obj */ = {
+			isa = PBXGroup;
+			children = (
+				329B2ECE2C1AF53900F3A763 /* exportobj.cpp */,
+				329B2ECD2C1AF53900F3A763 /* exportobj.h */,
+				329B2EC82C1AF53800F3A763 /* geombase.h */,
+				329B2ECB2C1AF53900F3A763 /* geometry.h */,
+				329B2EC72C1AF53800F3A763 /* importstl.cpp */,
+				329B2ECA2C1AF53800F3A763 /* importstl.h */,
+				329B2EC62C1AF53800F3A763 /* kdtree.h */,
+				329B2EC92C1AF53800F3A763 /* vectornd.h */,
+				329B2ECC2C1AF53900F3A763 /* visitor.h */,
+			);
+			path = obj;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		322160422BB560CB00040E84 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */,
+				18665F032CA2DA8500141E05 /* ModelPart.h in Headers */,
+				32ECC7CC2BC9428900770594 /* PrimitiveSelectionType.h in Headers */,
+				18665EFF2CA2BDC600141E05 /* NSBundle+Path.h in Headers */,
+				185461B82C0F299E00C794A8 /* Core3DView.hpp in Headers */,
+				3201971F2BD7AF5800F30E62 /* AssetBundleReaderInterface.h in Headers */,
+				325C835A2BCE77CB000292E4 /* dispatch_cancelable_block.h in Headers */,
+				180D48C82CD2505200B20035 /* ListOfColors.h in Headers */,
+				329B2ED42C1AF53900F3A763 /* geometry.h in Headers */,
+				185552D42D01BEA200CCFA2B /* Snapping.hpp in Headers */,
+				320197222BD7AFDD00F30E62 /* AssetBundle.h in Headers */,
+				3221857C2BB5CC1500040E84 /* GLViewController.h in Headers */,
+				3240475B2C00C8C9009E4B86 /* Core3DViewController+ExportManager.h in Headers */,
+				322185752BB5CC1500040E84 /* GLView.h in Headers */,
+				18A0062B2BD2A23C004931B1 /* ObjectInteractor.hpp in Headers */,
+				329B2ED22C1AF53900F3A763 /* vectornd.h in Headers */,
+				323E89E22BD13F3F0035FF45 /* GLViewControllerProtocol.h in Headers */,
+				185552D22D01BE8000CCFA2B /* SimpleSingleton.hpp in Headers */,
+				326E38B32CE340D700E20D0C /* OrthoProjectionType.h in Headers */,
+				320197252BD7B7F400F30E62 /* AssetBundleItem.h in Headers */,
+				18BA97432C918588004A8662 /* Core3DGuidedController.h in Headers */,
+				325F58D72BD8D37C0076FC53 /* objc_try.h in Headers */,
+				322185772BB5CC1500040E84 /* OcctViewer.h in Headers */,
+				3221604B2BB560CB00040E84 /* Core3D.h in Headers */,
+				32ECC7DA2BC9603700770594 /* UIStateChanging.h in Headers */,
+				326B3F962BBC245300030C30 /* PrimitiveType.h in Headers */,
+				186250002C21DCFC00F86ADD /* Core3DCocoa_Window.hxx in Headers */,
+				323E89E62BD145ED0035FF45 /* Core3DViewController+GLViewControllerProtocol.h in Headers */,
+				1804F2922C5114A80045084A /* BaseDriver.h in Headers */,
+				329B2ED62C1AF53900F3A763 /* exportobj.h in Headers */,
+				329B2ED12C1AF53900F3A763 /* geombase.h in Headers */,
+				1804F28D2C51140A0045084A /* CylinderDriver.hpp in Headers */,
+				3229D3222C00D7780025AECD /* ExportType.h in Headers */,
+				32466AAC2BDC0F5800C61638 /* NSString+StdString.h in Headers */,
+				324EF2CC2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h in Headers */,
+				329B2ED32C1AF53900F3A763 /* importstl.h in Headers */,
+				71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */,
+				328FBF2C2BC82E8300176AEA /* Core3DViewer.h in Headers */,
+				185461BB2C0F412B00C794A8 /* Core3DContext.hpp in Headers */,
+				18247AD72C0FAF2000674D04 /* Core3DManipulator.hpp in Headers */,
+				32ECC7DE2BCD36E600770594 /* Core3DViewController+AvailabilityManager.h in Headers */,
+				322185792BB5CC1500040E84 /* CafShapePrs.h in Headers */,
+				322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */,
+				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
+				3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */,
+				18A006332BD2B306004931B1 /* ShapeInteractor.hpp in Headers */,
+				329B2ECF2C1AF53900F3A763 /* kdtree.h in Headers */,
+				18A779582CA44D44003E266B /* GuidedObjectsMatcher.hpp in Headers */,
+				329B2ED52C1AF53900F3A763 /* visitor.h in Headers */,
+				18A0062F2BD2A2E5004931B1 /* Interactor.hpp in Headers */,
+				32ECC7CE2BC94AC800770594 /* PrimitiveGizmoType.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		322160462BB560CB00040E84 /* Core3D */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3221604E2BB560CB00040E84 /* Build configuration list for PBXNativeTarget "Core3D" */;
+			buildPhases = (
+				322160422BB560CB00040E84 /* Headers */,
+				322160432BB560CB00040E84 /* Sources */,
+				322160442BB560CB00040E84 /* Frameworks */,
+				322160452BB560CB00040E84 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Core3D;
+			productName = Core3D;
+			productReference = 322160472BB560CB00040E84 /* Core3D.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3221603E2BB560CB00040E84 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 1530;
+				TargetAttributes = {
+					322160462BB560CB00040E84 = {
+						CreatedOnToolsVersion = 15.3;
+					};
+				};
+			};
+			buildConfigurationList = 322160412BB560CB00040E84 /* Build configuration list for PBXProject "Core3D" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 3221603D2BB560CB00040E84;
+			productRefGroup = 322160482BB560CB00040E84 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				322160462BB560CB00040E84 /* Core3D */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		322160452BB560CB00040E84 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1808B29A2CC7B864007BD76E /* Ionized.png in Resources */,
+				1808B29B2CC7B864007BD76E /* Plastified.png in Resources */,
+				1808B29C2CC7B864007BD76E /* Stone.png in Resources */,
+				1808B29D2CC7B864007BD76E /* Obsidian.png in Resources */,
+				1808B29E2CC7B864007BD76E /* Neon.png in Resources */,
+				1808B29F2CC7B864007BD76E /* Charcoal.png in Resources */,
+				1808B2B22CC8E8C2007BD76E /* Diamond.png in Resources */,
+				1808B2B32CC8E8C2007BD76E /* Glass.png in Resources */,
+				1808B2A02CC7B864007BD76E /* Metalized.png in Resources */,
+				1808B2A12CC7B864007BD76E /* Silver.png in Resources */,
+				1808B2A22CC7B864007BD76E /* Shiny_plastified.png in Resources */,
+				1808B2A32CC7B864007BD76E /* Steel.png in Resources */,
+				1808B2A42CC7B864007BD76E /* Gold.png in Resources */,
+				1808B2A52CC7B864007BD76E /* Copper.png in Resources */,
+				1808B2A62CC7B864007BD76E /* Pewter.png in Resources */,
+				1808B2A72CC7B864007BD76E /* Aluminium.png in Resources */,
+				1808B2A82CC7B864007BD76E /* Chrome.png in Resources */,
+				1808B2A92CC7B864007BD76E /* Plastered.png in Resources */,
+				1808B2AA2CC7B864007BD76E /* Brass.png in Resources */,
+				1808B2AB2CC7B864007BD76E /* Bronze.png in Resources */,
+				1808B2AC2CC7B864007BD76E /* Jade.png in Resources */,
+				1808B2AD2CC7B864007BD76E /* Water.png in Resources */,
+				1808B2AE2CC7B864007BD76E /* Satined.png in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		322160432BB560CB00040E84 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */,
+				71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */,
+				322185782BB5CC1500040E84 /* CafShapePrs.mm in Sources */,
+				186250012C21DCFC00F86ADD /* Core3DCocoa_Window.mm in Sources */,
+				329B2ED72C1AF53900F3A763 /* exportobj.cpp in Sources */,
+				1804F2912C5114A80045084A /* BaseDriver.cpp in Sources */,
+				18247AD82C0FAF2000674D04 /* Core3DManipulator.cpp in Sources */,
+				18A779572CA44D44003E266B /* GuidedObjectsMatcher.cpp in Sources */,
+				185461BC2C0F412B00C794A8 /* Core3DContext.cpp in Sources */,
+				18A006322BD2B306004931B1 /* ShapeInteractor.cpp in Sources */,
+				324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */,
+				71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */,
+				3221857D2BB5CC1500040E84 /* GLView.mm in Sources */,
+				320197262BD7B7F400F30E62 /* AssetBundleItem.m in Sources */,
+				3201971D2BD7AF0500F30E62 /* AssetBundle.mm in Sources */,
+				1804F28E2C51140A0045084A /* CylinderDriver.cpp in Sources */,
+				18665F042CA2DA8500141E05 /* ModelPart.mm in Sources */,
+				328FBF2B2BC82E8300176AEA /* Core3DViewer.mm in Sources */,
+				322185852BB5D5E100040E84 /* Core3DViewController.mm in Sources */,
+				3221857B2BB5CC1500040E84 /* GLViewController.mm in Sources */,
+				323E89E52BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm in Sources */,
+				32466AAD2BDC0F5800C61638 /* NSString+StdString.mm in Sources */,
+				181242942CC262A3002E5A39 /* Core3DMaterialController.mm in Sources */,
+				32ECC7DD2BCD35B100770594 /* Core3DViewController+AvailabilityManager.mm in Sources */,
+				185461B72C0F299E00C794A8 /* Core3DView.cpp in Sources */,
+				322185762BB5CC1500040E84 /* OcctViewer.mm in Sources */,
+				18BA97442C918588004A8662 /* Core3DGuidedController.mm in Sources */,
+				185552D62D01C07300CCFA2B /* Snapping.cpp in Sources */,
+				329B2ED02C1AF53900F3A763 /* importstl.cpp in Sources */,
+				18A0062E2BD2A2E5004931B1 /* Interactor.cpp in Sources */,
+				18665F002CA2BDC600141E05 /* NSBundle+Path.m in Sources */,
+				322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */,
+				3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		3221604C2BB560CB00040E84 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		3221604D2BB560CB00040E84 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+		3221604F2BB560CB00040E84 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 74V7AJ74L3;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/Core3D/occt/inc";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 14.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = (
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Core3D/occt/lib",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = "io.magic-app.Core3D";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = org.shapeyard.Core3D;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = auto;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		322160502BB560CB00040E84 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 74V7AJ74L3;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/Core3D/occt/inc";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 14.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = (
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Core3D/occt/lib",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = "io.magic-app.Core3D";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = org.shapeyard.Core3D;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = auto;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		322160412BB560CB00040E84 /* Build configuration list for PBXProject "Core3D" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3221604C2BB560CB00040E84 /* Debug */,
+				3221604D2BB560CB00040E84 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		3221604E2BB560CB00040E84 /* Build configuration list for PBXNativeTarget "Core3D" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3221604F2BB560CB00040E84 /* Debug */,
+				322160502BB560CB00040E84 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 3221603E2BB560CB00040E84 /* Project object */;
+}
