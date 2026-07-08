@@ -115,6 +115,150 @@ Handle(OcctDocument) Core3DViewer::getDocument() {
     return myDoc;
 }
 
+static Quantity_NameOfColor colorNameFromString(NSString* colorStr) {
+    static NSDictionary<NSString*, NSNumber*>* colorMap = @{
+        @"white":   @(Quantity_NOC_WHITE),
+        @"black":   @(Quantity_NOC_BLACK),
+        @"red":     @(Quantity_NOC_RED),
+        @"green":   @(Quantity_NOC_GREEN),
+        @"blue":    @(Quantity_NOC_BLUE1),
+        @"yellow":  @(Quantity_NOC_YELLOW),
+        @"orange":  @(Quantity_NOC_ORANGE),
+        @"brown":   @(Quantity_NOC_SADDLEBROWN),
+        @"gray":    @(Quantity_NOC_GRAY80),
+        @"grey":    @(Quantity_NOC_GRAY80),
+        @"pink":    @(Quantity_NOC_PINK),
+        @"purple":  @(Quantity_NOC_PURPLE),
+        @"cyan":    @(Quantity_NOC_CYAN1),
+    };
+    NSNumber* val = colorMap[colorStr.lowercaseString];
+    return val ? (Quantity_NameOfColor)val.intValue : Quantity_NOC_GRAY50;
+}
+
+void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
+    NSData* data = [json dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return;
+
+    NSError* error = nil;
+    NSDictionary* root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (error || !root) return;
+
+    NSArray* primitives = root[@"primitives"];
+    if (![primitives isKindOfClass:[NSArray class]]) return;
+
+    deselectAll();
+
+    for (NSDictionary* prim in primitives) {
+        NSString* type = prim[@"type"];
+        NSArray* pos = prim[@"position"];    // [x, y, z] — Z is up
+        NSArray* scl = prim[@"scale"];       // [sx, sy, sz]
+        NSArray* rot = prim[@"rotation"];    // [rx, ry, rz] degrees
+        NSString* color = prim[@"color"];
+
+        if (!type || !pos || !scl) continue;
+
+        double px = [pos[0] doubleValue];
+        double py = [pos[1] doubleValue];
+        double pz = [pos[2] doubleValue];
+        double sx = [scl[0] doubleValue];
+        double sy = [scl[1] doubleValue];
+        double sz = [scl[2] doubleValue];
+        double rx = rot ? [rot[0] doubleValue] : 0;
+        double ry = rot ? [rot[1] doubleValue] : 0;
+        double rz = rot ? [rot[2] doubleValue] : 0;
+
+        // No coordinate conversion — JSON uses Z-up matching OCCT natively.
+        // Create shapes with correct dimensions directly (no GTransform).
+        TopoDS_Shape shape;
+        if ([type isEqualToString:@"cube"]) {
+            gp_Pnt corner(-25.0 * sx, -25.0 * sy, 0.0);
+            BRepPrimAPI_MakeBox maker(corner, 50.0 * sx, 50.0 * sy, 50.0 * sz);
+            shape = maker.Shape();
+        } else if ([type isEqualToString:@"sphere"]) {
+            // Average scale for radius, then apply non-uniform via GTransform only if needed
+            double avgScale = (sx + sy + sz) / 3.0;
+            if (fabs(sx - sy) < 0.01 && fabs(sy - sz) < 0.01) {
+                // Uniform scale — create sphere with scaled radius directly
+                BRepPrimAPI_MakeSphere maker(25.0 * avgScale);
+                shape = maker.Shape();
+            } else {
+                // Non-uniform — use GTransform
+                BRepPrimAPI_MakeSphere maker(25.0);
+                gp_GTrsf gTrsf;
+                gTrsf.SetValue(1, 1, sx);
+                gTrsf.SetValue(2, 2, sy);
+                gTrsf.SetValue(3, 3, sz);
+                BRepBuilderAPI_GTransform scaler(maker.Shape(), gTrsf, true);
+                shape = scaler.Shape();
+            }
+        } else if ([type isEqualToString:@"cylinder"]) {
+            // Cylinder: radius from avg(sx,sy), height from sz
+            double radius = 25.0 * (sx + sy) / 2.0;
+            double height = 50.0 * sz;
+            BRepPrimAPI_MakeCylinder maker(radius, height);
+            shape = maker.Shape();
+        } else if ([type isEqualToString:@"cone"]) {
+            // Cone: base radius from avg(sx,sy), height from sz
+            double radius = 25.0 * (sx + sy) / 2.0;
+            double height = 50.0 * sz;
+            gp_Ax2 anAxis;
+            anAxis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
+            BRepPrimAPI_MakeCone maker(anAxis, radius, 0.0, height);
+            shape = maker.Shape();
+        } else if ([type isEqualToString:@"torus"]) {
+            gp_Ax2 anAxis;
+            anAxis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
+            double majorR = 25.0 * (sx + sy) / 2.0;
+            double minorR = 10.0 * sz;
+            BRepPrimAPI_MakeTorus maker(anAxis, majorR, minorR);
+            shape = maker.Shape();
+        } else {
+            continue;
+        }
+
+        // Apply rotation (degrees → radians) — X then Y then Z, no axis swapping
+        if (rx != 0 || ry != 0 || rz != 0) {
+            gp_Trsf rx_trsf, ry_trsf, rz_trsf;
+            if (rx != 0) rx_trsf.SetRotation(gp_Ax1(gp::Origin(), gp::DX()), rx * M_PI / 180.0);
+            if (ry != 0) ry_trsf.SetRotation(gp_Ax1(gp::Origin(), gp::DY()), ry * M_PI / 180.0);
+            if (rz != 0) rz_trsf.SetRotation(gp_Ax1(gp::Origin(), gp::DZ()), rz * M_PI / 180.0);
+            gp_Trsf rotTrsf = rz_trsf * ry_trsf * rx_trsf;
+            BRepBuilderAPI_Transform rotator(shape, rotTrsf, true);
+            shape = rotator.Shape();
+        }
+
+        // Apply translation — direct, no conversion
+        gp_Trsf transTrsf;
+        transTrsf.SetTranslation(gp_Vec(px, py, pz));
+        BRepBuilderAPI_Transform translator(shape, transTrsf, true);
+        shape = translator.Shape();
+
+        // Display with color
+        Handle(AIS_Shape) aShapePrs = new AIS_Shape(shape);
+        myContext->ApplyDefaultMaterial(aShapePrs);
+        myDoc->addSolidObject(shape);
+        myDoc->SaveObjectMaterial(aShapePrs, Graphic3d_NameOfMaterial_ShinyPlastified);
+
+        if (color) {
+            Quantity_NameOfColor qColor = colorNameFromString(color);
+            aShapePrs->SetColor(qColor);
+            myDoc->SaveObjectColor(aShapePrs, qColor);
+        } else {
+            Quantity_Color qc;
+            aShapePrs->Color(qc);
+            myDoc->SaveObjectColor(aShapePrs, qc.Name());
+        }
+
+        myContext->Display(aShapePrs, AIS_Shaded, (Standard_Integer)_shapeInteractor->getSelectionMode(), false);
+    }
+
+    // Fit all to show the full model
+    if (myView) {
+        myView->FitAll();
+        myView->Redraw();
+    }
+}
+
 void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 
     TopoDS_Shape shape;

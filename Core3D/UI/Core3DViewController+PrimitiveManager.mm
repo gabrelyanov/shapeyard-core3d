@@ -14,6 +14,29 @@
 
 @implementation Core3DViewController (PrimitiveManager)
 
+- (void)addPrimitivesFromJSON:(NSString *)json {
+    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    [self setSelectionType:PrimitiveSelectionTypeShape];
+    [GLController addPrimitivesFromJSON:json];
+    self.can_undo = YES;
+    self.can_delete = YES;
+    self.can_duplicate = YES;
+    self.can_apply_material = YES;
+    _availableGizmoTypes = @[@(PrimitiveGizmoTypeMoveRotate),
+                             @(PrimitiveGizmoTypeScale),
+                             @(PrimitiveGizmoTypeChamfer),
+                             @(PrimitiveGizmoTypeMirror),
+                             @(PrimitiveGizmoTypeSubtract),
+                             @(PrimitiveGizmoTypeUnion),
+                             @(PrimitiveGizmoTypeMaterial)];
+    [self sendNotifyUIState:UIStateChangingGizmo
+                            | UIStateChangingSelection
+                            | UIStateChangingDelete
+                            | UIStateChangingDuplicate
+                            | UIStateChangingHistory
+                            | UIStateChangingApplyMaterial];
+}
+
 - (void)addPrimitive:(PrimitiveType)primitiveType {
     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
     [self setSelectionType:PrimitiveSelectionTypeShape];

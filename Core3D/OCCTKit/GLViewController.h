@@ -51,6 +51,7 @@
 
 - (void)addTestPrimitives;
 - (void)addPrimitive:(PrimitiveType)primitiveType;
+- (void)addPrimitivesFromJSON:(NSString *)json;
 
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (PrimitiveSelectionType)getSelectionType;

@@ -12,6 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface Core3DViewController (PrimitiveManager)<PrimitiveManagerProtocol>
 
 - (void)addPrimitive:(PrimitiveType)primitiveType;
+- (void)addPrimitivesFromJSON:(NSString *)json;
 - (void)deleteSelected;
 - (void)duplicateSelected;
 - (void)setChamfer:(CGFloat)value;
