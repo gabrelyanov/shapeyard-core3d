@@ -13,10 +13,22 @@
 #include <BRep_Tool.hxx>
 #include <StlAPI_Writer.hxx>
 #include <RWObj_CafWriter.hxx>
+#include <RWGltf_CafWriter.hxx>
+#include <STEPControl_Writer.hxx>
+#include <Interface_Static.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TopoDS_Compound.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <BRepTools.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <StdPrs_ToolTriangulatedShape.hxx>
+#include <Standard_Failure.hxx>
+#include <cstdio>
 
 #include "../Export/obj/vectornd.h"
 #include "../Export/obj/geometry.h"
@@ -378,13 +390,141 @@ namespace core3d {
         tessel.visit (ExportOBJ (filename));
         printf("OBJ file: %s\n", filename.c_str());
 #else
-		myDoc->ChangeDocument()->NewCommand();
+        // OBJ export writes the mesh stored in the XCAF document. RWObj_CafWriter does
+        // NOT tessellate — its header states "Triangulation data should be precomputed
+        // within shapes!" — so any untriangulated face makes it raise a Standard_Failure.
+        // Shapes authored or edited in-session are only tessellated for on-screen display,
+        // never in the document, and because the write below used to be unguarded that
+        // exception unwound across the Obj-C++/Swift boundary into std::terminate, instantly
+        // quitting the app. (STL is unaffected: it reads the already-tessellated display
+        // shapes and StlAPI_Writer meshes internally.) Mirror the model-load / glTF paths:
+        // triangulate the free shapes first, and guard the whole operation so a failure
+        // yields an empty file (handled as nil upstream) instead of crashing.
+        myDoc->ChangeDocument()->NewCommand();
+        bool exportSucceeded = false;
+
+        try {
+            myDoc->ApplyTransforms();
+
+            Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main());
+            TDF_LabelSequence labels;
+            shapeTool->GetFreeShapes(labels);
+
+            if (labels.IsEmpty()) {
+                // Nothing to export. RWObj_CafWriter creates the output file at
+                // construction, so an empty document would otherwise leave a
+                // header-only .obj that passes the non-empty guard upstream. Bail
+                // out before the writer is constructed so no file is produced.
+                printf("Error creating OBJ file (no shapes to export): %s\n", filename.c_str());
+            } else {
+                TopoDS_Compound compound;
+                BRep_Builder builder;
+                builder.MakeCompound(compound);
+                for (Standard_Integer i = 1; i <= labels.Length(); ++i) {
+                    TopoDS_Shape shape = shapeTool->GetShape(labels.Value(i));
+                    if (!shape.IsNull()) {
+                        builder.Add(compound, shape);
+                    }
+                }
+
+                // Use the display-relative deflection (as the load path does) instead of a
+                // fixed absolute value: on a large, mm-scale scene an absolute deflection
+                // explodes the triangle count and can OOM the export on iPad.
+                Handle(Prs3d_Drawer) drawer = myContext->DefaultDrawer();
+                Standard_Real deflection = StdPrs_ToolTriangulatedShape::GetDeflection(compound, drawer);
+                if (!BRepTools::Triangulation(compound, deflection)) {
+                    BRepMesh_IncrementalMesh mesher;
+                    mesher.ChangeParameters().Deflection = deflection;
+                    mesher.ChangeParameters().Angle = drawer->DeviationAngle();
+                    mesher.ChangeParameters().InParallel = Standard_True;
+                    mesher.SetShape(compound);
+                    mesher.Perform();
+                }
+
+                TColStd_IndexedDataMapOfStringString aFileInfo;
+                aFileInfo.Add("Author", "Shapeyard 3D");
+
+                auto writer = RWObj_CafWriter(TCollection_AsciiString(filename.c_str()));
+                exportSucceeded = writer.Perform(myDoc->Document(), aFileInfo, Message_ProgressRange());
+                if (!exportSucceeded) {
+                    printf("Error creating OBJ file (writer reported failure): %s\n", filename.c_str());
+                }
+            }
+        } catch (const Standard_Failure &theFailure) {
+            printf("Error creating OBJ file (exception): %s [%s]\n", filename.c_str(), theFailure.GetMessageString());
+        } catch (...) {
+            printf("Error creating OBJ file (exception): %s\n", filename.c_str());
+        }
+
+        // Always roll back the transient NewCommand()/ApplyTransforms() so the live
+        // document is left untouched for continued editing — even if the export above
+        // threw. Leaving the command open would let a later NewCommand() commit stale
+        // (double-transformed) geometry.
+        if (myDoc->ChangeDocument()->HasOpenCommand()) {
+            myDoc->ChangeDocument()->AbortCommand();
+        }
+
+        // A failed or aborted write can leave a partial (non-empty) file behind, which
+        // would pass the size check upstream and share a corrupt OBJ — remove it so
+        // failure reliably surfaces as nil (no share sheet) instead.
+        if (!exportSucceeded) {
+            std::remove(filename.c_str());
+        }
+#endif
+    }
+
+    void ShapeInteractor::exportToGltf(const std::string &filename) {
+        // Use the same document-based approach as OBJ export (which works)
+        myDoc->ChangeDocument()->NewCommand();
         myDoc->ApplyTransforms();
-        auto writer = RWObj_CafWriter(TCollection_AsciiString(filename.c_str()));
+
+        // Triangulate all shapes in the document for mesh-based export
+        Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main());
+        TDF_LabelSequence labels;
+        shapeTool->GetFreeShapes(labels);
+        for (Standard_Integer i = 1; i <= labels.Length(); i++) {
+            TopoDS_Shape shape = shapeTool->GetShape(labels.Value(i));
+            if (!shape.IsNull()) {
+                BRepMesh_IncrementalMesh mesher(shape, 0.1);
+                mesher.Perform();
+            }
+        }
+
         TColStd_IndexedDataMapOfStringString aFileInfo;
         aFileInfo.Add("Author", "Shapeyard 3D");
-        writer.Perform(myDoc->Document(), aFileInfo, Message_ProgressRange());
-		myDoc->ChangeDocument()->AbortCommand();
-#endif
+
+        try {
+            auto writer = RWGltf_CafWriter(TCollection_AsciiString(filename.c_str()), Standard_True);
+            writer.Perform(myDoc->Document(), aFileInfo, Message_ProgressRange());
+        } catch (...) {
+            printf("Error creating glTF file (exception): %s\n", filename.c_str());
+        }
+
+        myDoc->ChangeDocument()->AbortCommand();
+    }
+
+    void ShapeInteractor::exportToStep(const std::string &filename) {
+        AIS_ListOfInteractive objects;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
+        AIS_ListIteratorOfListOfInteractive iobject(objects);
+
+        TopoDS_Compound resultShape;
+        BRep_Builder builder;
+        builder.MakeCompound(resultShape);
+
+        while (iobject.More()) {
+            TopoDS_Shape shape = BRepBuilderAPI_Transform(
+                Handle(AIS_Shape)::DownCast(iobject.Value())->Shape(),
+                iobject.Value()->LocalTransformation());
+            builder.Add(resultShape, shape);
+            iobject.Next();
+        }
+
+        Interface_Static::SetCVal("write.step.schema", "AP214");
+        STEPControl_Writer stepWriter;
+        stepWriter.Transfer(resultShape, STEPControl_AsIs);
+        if (stepWriter.Write(filename.c_str()) != IFSelect_RetDone) {
+            printf("Error creating STEP file: %s\n", filename.c_str());
+        }
     }
 }

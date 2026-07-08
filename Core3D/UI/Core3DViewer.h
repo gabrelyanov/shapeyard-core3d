@@ -31,6 +31,7 @@ namespace core3d {
         
         Standard_EXPORT NSString* addTestPrimitives();
         void addPrimitive(PrimitiveType primitiveType);
+        void addPrimitivesFromJSON(NSString* json);
         
         void showGrid(bool show);
         

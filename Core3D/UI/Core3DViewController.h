@@ -24,6 +24,7 @@ typedef struct {
 @protocol PrimitiveManagerProtocol<NSObject>
 
 - (void)addPrimitive:(PrimitiveType)primitiveType;
+- (void)addPrimitivesFromJSON:(NSString *)json;
 - (void)deleteSelected;
 - (void)selectAll;
 - (void)duplicateSelected;

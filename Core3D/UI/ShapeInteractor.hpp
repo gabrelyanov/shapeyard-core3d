@@ -60,6 +60,8 @@ namespace core3d {
         void exportShapes();
         void exportToStl(const std::string &filename, const Standard_Boolean isASCII = Standard_True);
         void exportToObj(const std::string &filename);
+        void exportToGltf(const std::string &filename);
+        void exportToStep(const std::string &filename);
 
 	private:
 		void setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio);

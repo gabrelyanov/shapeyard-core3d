@@ -424,6 +424,10 @@ using namespace core3d;
     _viewer->FitAll();
 }
 
+- (void)addPrimitivesFromJSON:(NSString *)json {
+    _viewer->addPrimitivesFromJSON(json);
+}
+
 - (void)addPrimitive:(PrimitiveType)primitiveType {
     _viewer->addPrimitive(primitiveType);
     _viewer->redraw();
@@ -744,6 +748,12 @@ using namespace core3d;
         case ExportTypeStl:
             pathExtension = @"stl";
             break;
+        case ExportTypeGltf:
+            pathExtension = @"glb";
+            break;
+        case ExportTypeStep:
+            pathExtension = @"step";
+            break;
         default:
             assert(false);
             break;
@@ -761,12 +771,32 @@ using namespace core3d;
         case ExportTypeStl:
             _viewer->getShapeInteractor()->exportToStl(exportPath);
             break;
+        case ExportTypeGltf:
+            _viewer->getShapeInteractor()->exportToGltf(exportPath);
+            break;
+        case ExportTypeStep:
+            _viewer->getShapeInteractor()->exportToStep(exportPath);
+            break;
         default:
             assert(false);
             break;
     }
 
 
+    // Verify the file was actually created
+    if (![NSFileManager.defaultManager fileExistsAtPath:exportUrl.path]) {
+        NSLog(@"[Export] File was NOT created at: %@", exportUrl.path);
+        return nil;
+    }
+    
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:exportUrl.path error:nil];
+    NSLog(@"[Export] File created: %@ (%llu bytes)", exportUrl.lastPathComponent, [attrs fileSize]);
+    
+    if ([attrs fileSize] == 0) {
+        NSLog(@"[Export] File is empty, returning nil");
+        return nil;
+    }
+    
     return exportUrl;
 }
 

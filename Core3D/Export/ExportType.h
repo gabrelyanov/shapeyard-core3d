@@ -10,7 +10,9 @@
 
 typedef NS_ENUM(NSUInteger, ExportType) {
     ExportTypeObj = 1,
-    ExportTypeStl = 2
+    ExportTypeStl = 2,
+    ExportTypeGltf = 3,
+    ExportTypeStep = 4
 };
 
 #endif /* ExportType_h */
