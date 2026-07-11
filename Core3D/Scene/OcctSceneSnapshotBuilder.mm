@@ -81,11 +81,44 @@ constexpr std::size_t kMaxLabelInstanceMappings = 1'000'000;
 constexpr std::size_t kMaxSelectedElements = 50'000;
 constexpr std::size_t kMaxRetainedDefinitionRevisions = 250'000;
 constexpr std::size_t kMaxOverlayMeshes = 16;
+constexpr std::size_t kMaxRetainedOverlayDefinitions = 32;
 constexpr std::size_t kMaxOverlayInstances = 16;
 constexpr std::size_t kMaxOverlayMaterials = 8;
 constexpr std::size_t kMaxOverlayVertices = 100'000;
 constexpr std::size_t kMaxOverlayIndices = 300'000;
 constexpr std::size_t kMaxOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
+constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
+    "gizmo/mirroring/x/negative",
+    "gizmo/mirroring/y/negative",
+    "gizmo/mirroring/z/negative",
+    "gizmo/mirroring/x/positive",
+    "gizmo/mirroring/y/positive",
+    "gizmo/mirroring/z/positive",
+};
+constexpr std::array<const char*, 6> kMirrorMeshIdentifiers = {
+    "gizmo/mirroring/x/negative/mesh",
+    "gizmo/mirroring/y/negative/mesh",
+    "gizmo/mirroring/z/negative/mesh",
+    "gizmo/mirroring/x/positive/mesh",
+    "gizmo/mirroring/y/positive/mesh",
+    "gizmo/mirroring/z/positive/mesh",
+};
+constexpr std::array<const char*, 6> kMirrorMaterialIdentifiers = {
+    "gizmo/material/mirroring/x/negative",
+    "gizmo/material/mirroring/y/negative",
+    "gizmo/material/mirroring/z/negative",
+    "gizmo/material/mirroring/x/positive",
+    "gizmo/material/mirroring/y/positive",
+    "gizmo/material/mirroring/z/positive",
+};
+constexpr std::array<const char*, 6> kMirrorNames = {
+    "Negative X mirror plane",
+    "Negative Y mirror plane",
+    "Negative Z mirror plane",
+    "Positive X mirror plane",
+    "Positive Y mirror plane",
+    "Positive Z mirror plane",
+};
 
 class Fingerprint {
 public:
@@ -1105,22 +1138,42 @@ bool ValidatePresentationOverlayPayload(
                 return false;
             }
             break;
+        case PresentationOverlayKind::MirrorGizmo:
+            if (isEmpty || theMeshes.size() != 6
+                || theInstances.size() != 6
+                || theMaterials.size() != 6) {
+                return false;
+            }
+            break;
         default:
             return false;
     }
 
     std::unordered_set<std::string> aMaterialIdentifiers;
     aMaterialIdentifiers.reserve(theMaterials.size());
-    for (const MaterialSnapshot& aMaterial : theMaterials) {
+    for (std::size_t aMaterialIndex = 0;
+         aMaterialIndex < theMaterials.size(); ++aMaterialIndex) {
+        const MaterialSnapshot& aMaterial = theMaterials[aMaterialIndex];
         const auto isUnit = [](const float theValue) {
             return IsFinite(theValue) && theValue >= 0.0f && theValue <= 1.0f;
         };
-        if (!IsValidIdentifier(aMaterial.identifier)
+        const bool expectsBlendedMirrorPlane =
+            theKind == PresentationOverlayKind::MirrorGizmo
+            && aMaterialIndex >= 3;
+        const bool hasExpectedAlpha = expectsBlendedMirrorPlane
+            ? aMaterial.alphaMode == AlphaMode::Blend
+                && std::abs(aMaterial.baseColor.w - 0.75f) <= 1.0e-6f
+            : aMaterial.alphaMode == AlphaMode::Opaque
+                && aMaterial.baseColor.w == 1.0f;
+        if ((theKind == PresentationOverlayKind::MirrorGizmo
+                && aMaterial.identifier
+                    != kMirrorMaterialIdentifiers[aMaterialIndex])
+            || !IsValidIdentifier(aMaterial.identifier)
             || !aMaterialIdentifiers.insert(aMaterial.identifier).second
             || !isUnit(aMaterial.baseColor.x)
             || !isUnit(aMaterial.baseColor.y)
             || !isUnit(aMaterial.baseColor.z)
-            || aMaterial.baseColor.w != 1.0f
+            || !hasExpectedAlpha
             || !IsFinite(aMaterial.emission.x)
             || !IsFinite(aMaterial.emission.y)
             || !IsFinite(aMaterial.emission.z)
@@ -1131,8 +1184,7 @@ bool ValidatePresentationOverlayPayload(
             || !isUnit(aMaterial.roughness)
             || !IsFinite(aMaterial.indexOfRefraction)
             || aMaterial.indexOfRefraction <= 0.0f
-            || !isUnit(aMaterial.alphaCutoff)
-            || aMaterial.alphaMode != AlphaMode::Opaque) {
+            || !isUnit(aMaterial.alphaCutoff)) {
             return false;
         }
     }
@@ -1142,8 +1194,13 @@ bool ValidatePresentationOverlayPayload(
     std::size_t aNumericByteCount = 0;
     std::unordered_set<std::string> aDefinitionIdentifiers;
     aDefinitionIdentifiers.reserve(theMeshes.size());
-    for (const MeshSnapshot& aMesh : theMeshes) {
-        if (!IsValidIdentifier(aMesh.definitionIdentifier)
+    for (std::size_t aMeshIndex = 0;
+         aMeshIndex < theMeshes.size(); ++aMeshIndex) {
+        const MeshSnapshot& aMesh = theMeshes[aMeshIndex];
+        if ((theKind == PresentationOverlayKind::MirrorGizmo
+                && aMesh.definitionIdentifier
+                    != kMirrorMeshIdentifiers[aMeshIndex])
+            || !IsValidIdentifier(aMesh.definitionIdentifier)
             || !aDefinitionIdentifiers.insert(
                 aMesh.definitionIdentifier).second
             || (theHasPublishedGeometryRevisions
@@ -1206,8 +1263,16 @@ bool ValidatePresentationOverlayPayload(
     std::vector<std::uint8_t> aMaterialReferences(theMaterials.size(), 0);
     std::unordered_set<std::string> anEntityIdentifiers;
     anEntityIdentifiers.reserve(theInstances.size());
-    for (const InstanceSnapshot& anInstance : theInstances) {
-        if (!IsValidIdentifier(anInstance.entityIdentifier)
+    std::optional<std::array<double, 16>> aMirrorWorldAnchor;
+    for (std::size_t anInstanceIndex = 0;
+         anInstanceIndex < theInstances.size(); ++anInstanceIndex) {
+        const InstanceSnapshot& anInstance = theInstances[anInstanceIndex];
+        if ((theKind == PresentationOverlayKind::MirrorGizmo
+                && (anInstance.entityIdentifier
+                        != kMirrorEntityIdentifiers[anInstanceIndex]
+                    || anInstance.name != kMirrorNames[anInstanceIndex]
+                    || anInstance.meshIndex != anInstanceIndex))
+            || !IsValidIdentifier(anInstance.entityIdentifier)
             || !anEntityIdentifiers.insert(
                 anInstance.entityIdentifier).second
             || anInstance.name.size() > 4'096
@@ -1228,9 +1293,19 @@ bool ValidatePresentationOverlayPayload(
         }
         const PrimitiveBinding& aBinding =
             anInstance.primitiveBindings.front();
-        if (aBinding.materialIndex >= theMaterials.size()
+        if ((theKind == PresentationOverlayKind::MirrorGizmo
+                && aBinding.materialIndex != anInstanceIndex)
+            || aBinding.materialIndex >= theMaterials.size()
             || aBinding.pickToken != 0 || !aBinding.visible) {
             return false;
+        }
+        if (theKind == PresentationOverlayKind::MirrorGizmo) {
+            if (!aMirrorWorldAnchor.has_value()) {
+                aMirrorWorldAnchor = anInstance.worldFromObject.values;
+            } else if (*aMirrorWorldAnchor
+                       != anInstance.worldFromObject.values) {
+                return false;
+            }
         }
         aMaterialReferences[aBinding.materialIndex] = 1;
     }
@@ -1302,8 +1377,9 @@ struct OcctSceneSnapshotBuilder::State {
     };
 
     //! Small, independently transactional state for transient presentation.
-    //! Definitions are bounded by kMaxOverlayMeshes, unlike the committed
-    //! document definition map below.
+    //! Live payloads remain bounded by kMaxOverlayMeshes. Retained revisions
+    //! cover the stable union of supported gizmos so revisiting a tool cannot
+    //! recycle a geometry revision already held in a renderer cache.
     struct OverlayState {
         std::uint64_t revision = 0;
         std::optional<std::uint64_t> fingerprint;
@@ -1475,7 +1551,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
                 aMesh.definitionIdentifier);
             if (aRevisionFound == aNextOverlayState.definitions.end()) {
                 if (aNextOverlayState.definitions.size()
-                    >= kMaxOverlayMeshes) {
+                    >= kMaxRetainedOverlayDefinitions) {
                     return {};
                 }
                 aRevisionFound = aNextOverlayState.definitions.emplace(

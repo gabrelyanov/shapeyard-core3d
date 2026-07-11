@@ -76,9 +76,11 @@ namespace core3d {
 		void applyBoolean(BooleanAction action);
 		void cancelBoolean(BooleanAction action);
         const bool canApplyBoolean() const;
-        void applyMirror();
-		void tryMirror(Standard_Integer axisIndex, bool backward);
-		void clearTrialMirrorObjects();
+		void applyMirror();
+		void tryMirror(Standard_Integer axisIndex, bool backward) noexcept;
+		void clearTrialMirrorObjects() noexcept;
+		const bool hasTrialMirrorObjects() const;
+		const bool hasUnresolvedMirrorObjects() const;
 		
 		void setManipulator(Handle(Core3DManipulator) manipulator) { _manipulator = manipulator; }
 		void setObjectTransparent(Handle(AIS_InteractiveObject) selected, const bool on);
@@ -88,12 +90,14 @@ namespace core3d {
         void createManipulatorIfNeeded();
         void attachManipulator(Handle(AIS_InteractiveObject) toObject);
 		void detachManipulator(Handle(AIS_InteractiveObject) fromObject);
+		void tryMirrorImpl(Standard_Integer axisIndex, bool backward);
 		
 		void setSelectionTransparent(Handle(AIS_InteractiveObject) selected, const bool on);
 		
     private:
-        Standard_ShortReal _manipulatorSide;
+		Standard_ShortReal _manipulatorSide;
 		std::vector<Handle(AIS_InteractiveObject)> _trialMirrorObjects;
+		bool _trialMirrorObjectsValid = false;
     };
 }
 #endif /* Core3dObjectInteractor_hpp */

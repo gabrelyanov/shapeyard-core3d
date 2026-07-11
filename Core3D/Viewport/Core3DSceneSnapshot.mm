@@ -9,6 +9,7 @@
 
 #include "../Scene/SceneSnapshot.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -503,6 +504,38 @@ constexpr std::size_t kMaximumOverlayMaterials = 8;
 constexpr std::size_t kMaximumOverlayVertices = 100'000;
 constexpr std::size_t kMaximumOverlayIndices = 300'000;
 constexpr std::size_t kMaximumOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
+constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
+    "gizmo/mirroring/x/negative",
+    "gizmo/mirroring/y/negative",
+    "gizmo/mirroring/z/negative",
+    "gizmo/mirroring/x/positive",
+    "gizmo/mirroring/y/positive",
+    "gizmo/mirroring/z/positive",
+};
+constexpr std::array<const char*, 6> kMirrorMeshIdentifiers = {
+    "gizmo/mirroring/x/negative/mesh",
+    "gizmo/mirroring/y/negative/mesh",
+    "gizmo/mirroring/z/negative/mesh",
+    "gizmo/mirroring/x/positive/mesh",
+    "gizmo/mirroring/y/positive/mesh",
+    "gizmo/mirroring/z/positive/mesh",
+};
+constexpr std::array<const char*, 6> kMirrorMaterialIdentifiers = {
+    "gizmo/material/mirroring/x/negative",
+    "gizmo/material/mirroring/y/negative",
+    "gizmo/material/mirroring/z/negative",
+    "gizmo/material/mirroring/x/positive",
+    "gizmo/material/mirroring/y/positive",
+    "gizmo/material/mirroring/z/positive",
+};
+constexpr std::array<const char*, 6> kMirrorNames = {
+    "Negative X mirror plane",
+    "Negative Y mirror plane",
+    "Negative Z mirror plane",
+    "Positive X mirror plane",
+    "Positive Y mirror plane",
+    "Positive Z mirror plane",
+};
 
 bool CheckedAdd(
     const std::size_t left,
@@ -1104,6 +1137,13 @@ bool IsValidPresentationOverlaySnapshotImpl(
                 return false;
             }
             break;
+        case PresentationOverlayKind::MirrorGizmo:
+            if (isEmpty || snapshot.meshes.size() != 6
+                || snapshot.instances.size() != 6
+                || snapshot.materials.size() != 6) {
+                return false;
+            }
+            break;
         default:
             return false;
     }
@@ -1111,14 +1151,26 @@ bool IsValidPresentationOverlaySnapshotImpl(
     std::size_t stringBytes = snapshot.publicationSourceIdentifier.size();
     std::unordered_set<std::string> materialIdentifiers;
     materialIdentifiers.reserve(snapshot.materials.size());
-    for (const MaterialSnapshot& material : snapshot.materials) {
+    for (std::size_t materialIndex = 0;
+         materialIndex < snapshot.materials.size(); ++materialIndex) {
+        const MaterialSnapshot& material = snapshot.materials[materialIndex];
         const auto isUnit = [](const float component) {
             return IsFinite(component)
                 && component >= 0.0f && component <= 1.0f;
         };
-        if (!IsValid(material)
-            || material.alphaMode != AlphaMode::Opaque
-            || material.baseColor.w != 1.0f
+        const bool expectsBlendedMirrorPlane =
+            snapshot.kind == PresentationOverlayKind::MirrorGizmo
+            && materialIndex >= 3;
+        const bool hasExpectedAlpha = expectsBlendedMirrorPlane
+            ? material.alphaMode == AlphaMode::Blend
+                && std::abs(material.baseColor.w - 0.75f) <= 1.0e-6f
+            : material.alphaMode == AlphaMode::Opaque
+                && material.baseColor.w == 1.0f;
+        if ((snapshot.kind == PresentationOverlayKind::MirrorGizmo
+                && material.identifier
+                    != kMirrorMaterialIdentifiers[materialIndex])
+            || !IsValid(material)
+            || !hasExpectedAlpha
             || !isUnit(material.baseColor.x)
             || !isUnit(material.baseColor.y)
             || !isUnit(material.baseColor.z)
@@ -1139,8 +1191,13 @@ bool IsValidPresentationOverlaySnapshotImpl(
     std::size_t totalNumericBytes = 0;
     std::unordered_set<std::string> definitionIdentifiers;
     definitionIdentifiers.reserve(snapshot.meshes.size());
-    for (const MeshSnapshot& mesh : snapshot.meshes) {
-        if (!IsValidIdentifier(mesh.definitionIdentifier)
+    for (std::size_t meshIndex = 0;
+         meshIndex < snapshot.meshes.size(); ++meshIndex) {
+        const MeshSnapshot& mesh = snapshot.meshes[meshIndex];
+        if ((snapshot.kind == PresentationOverlayKind::MirrorGizmo
+                && mesh.definitionIdentifier
+                    != kMirrorMeshIdentifiers[meshIndex])
+            || !IsValidIdentifier(mesh.definitionIdentifier)
             || !definitionIdentifiers.insert(
                 mesh.definitionIdentifier).second
             || mesh.geometryRevision == 0
@@ -1205,8 +1262,16 @@ bool IsValidPresentationOverlaySnapshotImpl(
     std::vector<std::uint8_t> materialReferences(snapshot.materials.size(), 0);
     std::unordered_set<std::string> entityIdentifiers;
     entityIdentifiers.reserve(snapshot.instances.size());
-    for (const InstanceSnapshot& instance : snapshot.instances) {
-        if (!IsValidIdentifier(instance.entityIdentifier)
+    std::optional<std::array<double, 16>> mirrorWorldAnchor;
+    for (std::size_t instanceIndex = 0;
+         instanceIndex < snapshot.instances.size(); ++instanceIndex) {
+        const InstanceSnapshot& instance = snapshot.instances[instanceIndex];
+        if ((snapshot.kind == PresentationOverlayKind::MirrorGizmo
+                && (instance.entityIdentifier
+                        != kMirrorEntityIdentifiers[instanceIndex]
+                    || instance.name != kMirrorNames[instanceIndex]
+                    || instance.meshIndex != instanceIndex))
+            || !IsValidIdentifier(instance.entityIdentifier)
             || !entityIdentifiers.insert(instance.entityIdentifier).second
             || instance.meshIndex >= snapshot.meshes.size()
             || instance.reversesWinding || !instance.visible
@@ -1232,9 +1297,19 @@ bool IsValidPresentationOverlaySnapshotImpl(
             return false;
         }
         const PrimitiveBinding& binding = instance.primitiveBindings.front();
-        if (binding.materialIndex >= snapshot.materials.size()
+        if ((snapshot.kind == PresentationOverlayKind::MirrorGizmo
+                && binding.materialIndex != instanceIndex)
+            || binding.materialIndex >= snapshot.materials.size()
             || binding.pickToken != 0 || !binding.visible) {
             return false;
+        }
+        if (snapshot.kind == PresentationOverlayKind::MirrorGizmo) {
+            if (!mirrorWorldAnchor.has_value()) {
+                mirrorWorldAnchor = instance.worldFromObject.values;
+            } else if (*mirrorWorldAnchor
+                       != instance.worldFromObject.values) {
+                return false;
+            }
         }
         materialReferences[binding.materialIndex] = 1;
     }
@@ -1397,6 +1472,8 @@ Core3DScenePresentationOverlayKind PresentationOverlayKindFromScene(
             return Core3DScenePresentationOverlayKindMoveRotateGizmo;
         case PresentationOverlayKind::ScaleGizmo:
             return Core3DScenePresentationOverlayKindScaleGizmo;
+        case PresentationOverlayKind::MirrorGizmo:
+            return Core3DScenePresentationOverlayKindMirrorGizmo;
     }
 
     NSCAssert(NO, @"Unknown presentation-overlay kind: %u",

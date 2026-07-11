@@ -293,6 +293,11 @@ public: //! @name Setters for parameters
   Standard_EXPORT Standard_Boolean CaptureIdleScaleOverlay(
       core3d::scene::PresentationOverlayContent& theContent) const noexcept;
 
+  //! Deep-copy the exact six positive/negative mirror-plane presentations.
+  //! Positive planes preserve OCCT's 25% transparency as 75% opacity.
+  Standard_EXPORT Standard_Boolean CaptureIdleMirrorOverlay(
+      core3d::scene::PresentationOverlayContent& theContent) const noexcept;
+
   //! Sets position of the manipulator object.
   Standard_EXPORT void SetPosition (const gp_Ax2& thePosition);
 

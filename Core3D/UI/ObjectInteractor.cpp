@@ -145,6 +145,12 @@ namespace core3d {
         scene::PresentationOverlayContent& theContent) const noexcept {
         try {
             theContent = {};
+            // Any tracked mirror presentation is either a valid OCCT preview
+            // or a cleanup residue. Neither may be omitted from an alternate
+            // renderer publication.
+            if (!_trialMirrorObjects.empty()) {
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
             if (_manipulatorType
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
                 return PresentationOverlayCaptureStatus::Available;
@@ -153,7 +159,9 @@ namespace core3d {
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
             const bool isScale = _manipulatorType
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
-            if (!isMoveRotate && !isScale) {
+            const bool isMirror = _manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror;
+            if (!isMoveRotate && !isScale && !isMirror) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             if (_manipulator.IsNull() || !_manipulator->IsAttached()) {
@@ -171,7 +179,9 @@ namespace core3d {
             }
             const Standard_Boolean didCapture = isMoveRotate
                 ? _manipulator->CaptureIdleMoveRotateOverlay(theContent)
-                : _manipulator->CaptureIdleScaleOverlay(theContent);
+                : isScale
+                    ? _manipulator->CaptureIdleScaleOverlay(theContent)
+                    : _manipulator->CaptureIdleMirrorOverlay(theContent);
             if (!didCapture) {
                 theContent = {};
                 return PresentationOverlayCaptureStatus::Unsafe;
@@ -636,13 +646,44 @@ namespace core3d {
         return _booleanOpController.canApply();
     }
 
-	void ObjectInteractor::tryMirror(Standard_Integer axisIndex, bool backward) {
+	void ObjectInteractor::tryMirror(
+		Standard_Integer axisIndex,
+		bool backward) noexcept {
+		try {
+			tryMirrorImpl(axisIndex, backward);
+		} catch (...) {
+			clearTrialMirrorObjects();
+		}
+	}
+
+	void ObjectInteractor::tryMirrorImpl(
+		Standard_Integer axisIndex,
+		bool backward) {
+		if (!_trialMirrorObjects.empty() && !_trialMirrorObjectsValid) {
+			clearTrialMirrorObjects();
+			if (!_trialMirrorObjects.empty()) {
+				return;
+			}
+		}
+		if (_manipulator.IsNull()
+			|| !_manipulator->IsAttached()
+			|| axisIndex < 0
+			|| axisIndex > 2) {
+			return;
+		}
+
 		const gp_Ax2 &manipulatorTransform = _manipulator->Position();
 		
 		Standard_ShortReal sign = backward ? -1.0f : 1.0f;
 		
 		Handle(Core3DManipulatorObjectSequence) anObjects = _manipulator->Objects();
+		if (anObjects.IsNull() || anObjects->Size() == 0) {
+			return;
+		}
 		Core3DManipulatorObjectSequence::Iterator anObjIter (*anObjects);
+		std::vector<Handle(AIS_InteractiveObject)> replacementObjects;
+		replacementObjects.reserve(
+			static_cast<std::size_t>(anObjects->Size()));
 		
 		Bnd_Box aBox, aBoxSum;
 	
@@ -700,22 +741,78 @@ namespace core3d {
             Quantity_Color color;
             selected->Color(color);
             aShapePrs->SetColor(color.Name());
-			myContext->Display(aShapePrs, AIS_Shaded, (Standard_Integer)0, Standard_False);
-			
-			_trialMirrorObjects.push_back(aShapePrs);
+			replacementObjects.push_back(aShapePrs);
+		}
+
+		// A plane is a choice for the current mirror operation, not an
+		// additional operation. Take ownership of every handle that might be
+		// displayed before mutating OCCT. Until the full swap succeeds the set
+		// is deliberately non-applicable, and cleanup retains any handle whose
+		// erase operation fails so no presentation can become orphaned.
+		const std::vector<Handle(AIS_InteractiveObject)> previousObjects =
+			_trialMirrorObjects;
+		std::vector<Handle(AIS_InteractiveObject)> transitionObjects =
+			previousObjects;
+		transitionObjects.insert(
+			transitionObjects.end(),
+			replacementObjects.begin(),
+			replacementObjects.end());
+		_trialMirrorObjects = std::move(transitionObjects);
+		_trialMirrorObjectsValid = false;
+
+		for (const Handle(AIS_InteractiveObject)& aShapePrs : replacementObjects) {
+			myContext->Display(
+				aShapePrs,
+				AIS_Shaded,
+				(Standard_Integer)0,
+				Standard_False);
+		}
+		for (const Handle(AIS_InteractiveObject)& aShapePrs
+			 : previousObjects) {
+			myContext->Erase(aShapePrs, Standard_False);
+		}
+		_trialMirrorObjects = std::move(replacementObjects);
+		_trialMirrorObjectsValid = true;
+		myContext->UpdateCurrentViewer();
+	}
+
+	void ObjectInteractor::clearTrialMirrorObjects() noexcept {
+		_trialMirrorObjectsValid = false;
+		std::vector<Handle(AIS_InteractiveObject)> unresolvedObjects;
+		try {
+			unresolvedObjects.reserve(_trialMirrorObjects.size());
+		} catch (...) {
+			return;
+		}
+		for (const Handle(AIS_InteractiveObject)& aShapePrs
+			 : _trialMirrorObjects) {
+			try {
+				myContext->Erase(aShapePrs, Standard_False);
+			} catch (...) {
+				unresolvedObjects.push_back(aShapePrs);
+			}
+		}
+		_trialMirrorObjects = std::move(unresolvedObjects);
+		try {
+			myContext->UpdateCurrentViewer();
+		} catch (...) {
+			// Cleanup state remains authoritative and can be retried later.
 		}
 	}
 
-	void ObjectInteractor::clearTrialMirrorObjects() {
-		for (Handle(AIS_InteractiveObject) aShapePrs : _trialMirrorObjects) {
-			myContext->Erase(aShapePrs, Standard_False);
-		}
-		myContext->UpdateCurrentViewer();
-		_trialMirrorObjects.clear();
+	const bool ObjectInteractor::hasTrialMirrorObjects() const {
+		return _trialMirrorObjectsValid && !_trialMirrorObjects.empty();
+	}
+
+	const bool ObjectInteractor::hasUnresolvedMirrorObjects() const {
+		return !_trialMirrorObjects.empty();
 	}
 
 	void ObjectInteractor::applyMirror() {
-		if (_trialMirrorObjects.empty()) {
+		if (!hasTrialMirrorObjects()) {
+			if (hasUnresolvedMirrorObjects()) {
+				clearTrialMirrorObjects();
+			}
 			return;
 		}
 
@@ -759,5 +856,6 @@ namespace core3d {
 		}
 		myDoc->NotifyChanges();
 		_trialMirrorObjects.clear();
+		_trialMirrorObjectsValid = false;
 	}
 }

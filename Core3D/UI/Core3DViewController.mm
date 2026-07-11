@@ -348,8 +348,13 @@
 
 - (void)viewDidEndPrimaryInteractionCancelled:(BOOL)cancelled {
     (void)cancelled;
-    // Renderer-neutral observation point. OCCT has already resolved the
-    // interaction and alternate renderers may now capture a fresh scene.
+    // OCCT has already resolved the interaction. Mirror Apply is valid only
+    // while an authoritative transient body exists; lifecycle cancellation
+    // clears that body through the same renderer-neutral callback.
+    if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
+        self.can_apply = [GLController hasTrialMirrorObjects];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {
@@ -421,7 +426,7 @@
                 self.can_apply = [_glController canApplyBoolean];
                 break;
             case PrimitiveGizmoTypeMirror:
-                self.can_apply = YES;
+                self.can_apply = NO;
                 break;
             default:
                 break;

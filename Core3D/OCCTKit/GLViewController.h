@@ -91,6 +91,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void) applyUnion;
 - (void) cancelUnion;
 - (BOOL) canApplyBoolean;
+- (BOOL) hasTrialMirrorObjects;
 
 - (void) setConstructorMode;
 

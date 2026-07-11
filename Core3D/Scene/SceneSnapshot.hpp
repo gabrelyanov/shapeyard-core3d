@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 1;
-inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 2;
+inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 3;
 
 struct Float2 {
     float x = 0.0f;
@@ -109,6 +109,7 @@ enum class PresentationOverlayKind : std::uint8_t {
     None = 0,
     MoveRotateGizmo,
     ScaleGizmo,
+    MirrorGizmo,
 };
 
 enum class ElementKind : std::uint8_t {

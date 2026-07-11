@@ -158,10 +158,18 @@
 
 - (void)undo {
     [GLController undo];
+    if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
+        self.can_apply = [GLController hasTrialMirrorObjects];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (void)redo {
     [GLController redo];
+    if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
+        self.can_apply = [GLController hasTrialMirrorObjects];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (NSString *_Nullable)getCoreInfoText {

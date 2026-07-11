@@ -213,7 +213,8 @@ bool CopyTriangleArray(
 
 core3d::scene::MaterialSnapshot GizmoMaterial(
     const std::string& theIdentifier,
-    const Quantity_Color& theColor)
+    const Quantity_Color& theColor,
+    const float theOpacity = 1.0f)
 {
     core3d::scene::MaterialSnapshot aMaterial;
     aMaterial.identifier = theIdentifier;
@@ -221,12 +222,14 @@ core3d::scene::MaterialSnapshot GizmoMaterial(
         static_cast<float>(theColor.Red()),
         static_cast<float>(theColor.Green()),
         static_cast<float>(theColor.Blue()),
-        1.0f,
+        theOpacity,
     };
     aMaterial.metallic = 0.0f;
     aMaterial.roughness = 1.0f;
     aMaterial.indexOfRefraction = 1.5f;
-    aMaterial.alphaMode = core3d::scene::AlphaMode::Opaque;
+    aMaterial.alphaMode = theOpacity < 0.999f
+        ? core3d::scene::AlphaMode::Blend
+        : core3d::scene::AlphaMode::Opaque;
     aMaterial.alphaCutoff = 0.5f;
     aMaterial.doubleSided = true;
     return aMaterial;
@@ -498,6 +501,88 @@ Standard_Boolean Core3DManipulator::CaptureIdleScaleOverlay(
         if (aContent.meshes.size() != 5
             || aContent.instances.size() != 5
             || aContent.materials.size() != 4) {
+            return Standard_False;
+        }
+        theContent = std::move(aContent);
+        return Standard_True;
+    } catch (const Standard_Failure&) {
+        return Standard_False;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean Core3DManipulator::CaptureIdleMirrorOverlay(
+    core3d::scene::PresentationOverlayContent& theContent) const noexcept
+{
+    try {
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            if (!myAxes[anAxis].HasMirroringPos()
+                || !myAxes[anAxis].HasMirroringNeg()
+                || myAxes[anAxis].HasTranslation()
+                || myAxes[anAxis].HasRotation()
+                || myAxes[anAxis].HasScaling()
+                || myAxes[anAxis].HasScalingUniform()
+                || myAxes[anAxis].HasDragging()) {
+                return Standard_False;
+            }
+        }
+
+        core3d::scene::PresentationOverlayContent aContent;
+        aContent.kind = core3d::scene::PresentationOverlayKind::MirrorGizmo;
+        aContent.meshes.reserve(6);
+        aContent.instances.reserve(6);
+        aContent.materials.reserve(6);
+
+        static constexpr const char* kAxisNames[3] = {"x", "y", "z"};
+        static constexpr const char* kAxisDisplayNames[3] = {"X", "Y", "Z"};
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            aContent.materials.push_back(GizmoMaterial(
+                std::string("gizmo/material/mirroring/")
+                    + kAxisNames[anAxis] + "/negative",
+                myAxes[anAxis].Color()));
+        }
+        // Prs3d_ShadingAspect::SetTransparency(0.25) means 75% opacity.
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            aContent.materials.push_back(GizmoMaterial(
+                std::string("gizmo/material/mirroring/")
+                    + kAxisNames[anAxis] + "/positive",
+                myAxes[anAxis].Color(),
+                0.75f));
+        }
+
+        const core3d::scene::Matrix4d aWorldFromPixels =
+            GizmoWorldAnchor(myPosition);
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            if (!AddGizmoComponent(
+                    aContent,
+                    aWorldFromPixels,
+                    myAxes[anAxis].MirroringPlaneNeg().Array(),
+                    std::string("gizmo/mirroring/")
+                        + kAxisNames[anAxis] + "/negative",
+                    std::string("Negative ")
+                        + kAxisDisplayNames[anAxis] + " mirror plane",
+                    static_cast<std::uint32_t>(anAxis))) {
+                return Standard_False;
+            }
+        }
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            if (!AddGizmoComponent(
+                    aContent,
+                    aWorldFromPixels,
+                    myAxes[anAxis].MirroringPlanePos().Array(),
+                    std::string("gizmo/mirroring/")
+                        + kAxisNames[anAxis] + "/positive",
+                    std::string("Positive ")
+                        + kAxisDisplayNames[anAxis] + " mirror plane",
+                    static_cast<std::uint32_t>(anAxis + 3))) {
+                return Standard_False;
+            }
+        }
+
+        if (aContent.meshes.size() != 6
+            || aContent.instances.size() != 6
+            || aContent.materials.size() != 6) {
             return Standard_False;
         }
         theContent = std::move(aContent);

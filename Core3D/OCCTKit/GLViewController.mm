@@ -228,8 +228,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     const BOOL hadRawPrimaryInteraction = _rawTouchRendering;
     const BOOL hadActiveInteraction =
         _rawTouchRendering || _pinchRendering || _panRendering;
+    const BOOL hadUnresolvedMirrorObjects =
+        _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasUnresolvedMirrorObjects();
     if (hadActiveInteraction && _viewer != nullptr) {
         _viewer->CancelInteraction(0, 0);
+    }
+    if (hadUnresolvedMirrorObjects) {
+        _viewer->getObjectInteractor()->clearTrialMirrorObjects();
     }
     if (_rawTouchRendering) {
         _rawTouchRendering = NO;
@@ -244,10 +251,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _panRendering = NO;
         [view endInteractiveRendering];
     }
-    if (hadActiveInteraction) {
+    if (hadActiveInteraction || hadUnresolvedMirrorObjects) {
         [self requestRender];
     }
-    if (hadRawPrimaryInteraction
+    if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects)
         && _delegate
         && [_delegate respondsToSelector:
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -1043,6 +1050,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (BOOL) canApplyBoolean {
     return _viewer->getObjectInteractor()->canApplyBoolean();
+}
+
+- (BOOL) hasTrialMirrorObjects {
+	return _viewer != nullptr
+		&& _viewer->getObjectInteractor() != nullptr
+		&& _viewer->getObjectInteractor()->hasTrialMirrorObjects();
 }
 
 - (BOOL)isEmptyOfDisplayedObjects {
