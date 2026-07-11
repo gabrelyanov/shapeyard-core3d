@@ -108,6 +108,9 @@ static_assert(sizeof(std::uint32_t) == 4,
                                  selected:(BOOL)selected
                                      name:(NSString *)name
                                renderRole:(Core3DSceneRenderRole)renderRole
+                          coordinateSpace:(Core3DSceneCoordinateSpace)coordinateSpace
+                              depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
+                              renderStyle:(Core3DSceneRenderStyle)renderStyle
                         primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings;
 @end
 
@@ -124,12 +127,27 @@ static_assert(sizeof(std::uint32_t) == 4,
 @end
 
 @interface Core3DSceneFrameSnapshot ()
-- (instancetype)initWithRevisions:(Core3DSceneRevisionVector *)revisions
+- (instancetype)initWithPublicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+                                           revisions:(Core3DSceneRevisionVector *)revisions
                             camera:(Core3DSceneCameraSnapshot *)camera;
+@end
+
+@interface Core3DScenePresentationOverlaySnapshot ()
+- (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
+           publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+                  baseSnapshotRevision:(uint64_t)baseSnapshotRevision
+                baseDocumentGeneration:(uint64_t)baseDocumentGeneration
+                     baseModelRevision:(uint64_t)baseModelRevision
+              basePresentationRevision:(uint64_t)basePresentationRevision
+                       overlayRevision:(uint64_t)overlayRevision
+                                meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
+                           renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
+                             materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials;
 @end
 
 @interface Core3DSceneSnapshot ()
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
+           publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
                              revisions:(Core3DSceneRevisionVector *)revisions
                           renderOrigin:(simd_double3)renderOrigin
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
@@ -318,6 +336,9 @@ static_assert(sizeof(std::uint32_t) == 4,
                                  selected:(BOOL)selected
                                      name:(NSString *)name
                                renderRole:(Core3DSceneRenderRole)renderRole
+                          coordinateSpace:(Core3DSceneCoordinateSpace)coordinateSpace
+                              depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
+                              renderStyle:(Core3DSceneRenderStyle)renderStyle
                         primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings {
     self = [super init];
     if (self) {
@@ -330,6 +351,9 @@ static_assert(sizeof(std::uint32_t) == 4,
         _selected = selected;
         _name = [name copy];
         _renderRole = renderRole;
+        _coordinateSpace = coordinateSpace;
+        _depthPolicy = depthPolicy;
+        _renderStyle = renderStyle;
         _primitiveBindings = [primitiveBindings copy];
     }
     return self;
@@ -374,12 +398,45 @@ static_assert(sizeof(std::uint32_t) == 4,
 
 @implementation Core3DSceneFrameSnapshot
 
-- (instancetype)initWithRevisions:(Core3DSceneRevisionVector *)revisions
+- (instancetype)initWithPublicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+                                           revisions:(Core3DSceneRevisionVector *)revisions
                             camera:(Core3DSceneCameraSnapshot *)camera {
     self = [super init];
     if (self) {
+        _publicationSourceIdentifier = [publicationSourceIdentifier copy];
         _revisions = revisions;
         _camera = camera;
+    }
+    return self;
+}
+
+@end
+
+
+@implementation Core3DScenePresentationOverlaySnapshot
+
+- (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
+           publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+                  baseSnapshotRevision:(uint64_t)baseSnapshotRevision
+                baseDocumentGeneration:(uint64_t)baseDocumentGeneration
+                     baseModelRevision:(uint64_t)baseModelRevision
+              basePresentationRevision:(uint64_t)basePresentationRevision
+                       overlayRevision:(uint64_t)overlayRevision
+                                meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
+                           renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
+                             materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials {
+    self = [super init];
+    if (self) {
+        _schemaVersion = schemaVersion;
+        _publicationSourceIdentifier = [publicationSourceIdentifier copy];
+        _baseSnapshotRevision = baseSnapshotRevision;
+        _baseDocumentGeneration = baseDocumentGeneration;
+        _baseModelRevision = baseModelRevision;
+        _basePresentationRevision = basePresentationRevision;
+        _overlayRevision = overlayRevision;
+        _meshes = [meshes copy];
+        _renderItems = [renderItems copy];
+        _materials = [materials copy];
     }
     return self;
 }
@@ -390,6 +447,7 @@ static_assert(sizeof(std::uint32_t) == 4,
 @implementation Core3DSceneSnapshot
 
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
+           publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
                              revisions:(Core3DSceneRevisionVector *)revisions
                           renderOrigin:(simd_double3)renderOrigin
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
@@ -401,6 +459,7 @@ static_assert(sizeof(std::uint32_t) == 4,
     self = [super init];
     if (self) {
         _schemaVersion = schemaVersion;
+        _publicationSourceIdentifier = [publicationSourceIdentifier copy];
         _revisions = revisions;
         _renderOrigin = renderOrigin;
         _meshes = [meshes copy];
@@ -435,6 +494,12 @@ constexpr std::size_t kMaximumDTONumericBytes = 96ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumDTOStringBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumIdentifierBytes = 128;
 constexpr std::size_t kMaximumNameBytes = 4'096;
+constexpr std::size_t kMaximumOverlayMeshes = 16;
+constexpr std::size_t kMaximumOverlayInstances = 16;
+constexpr std::size_t kMaximumOverlayMaterials = 8;
+constexpr std::size_t kMaximumOverlayVertices = 100'000;
+constexpr std::size_t kMaximumOverlayIndices = 300'000;
+constexpr std::size_t kMaximumOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
 
 bool CheckedAdd(
     const std::size_t left,
@@ -464,6 +529,30 @@ bool IsValidIdentifier(const std::string& value) noexcept {
     }
     for (const unsigned char character : value) {
         if (character < 0x21U || character > 0x7eU) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsValidPublicationSourceIdentifier(const std::string& value) noexcept {
+    if (value.size() != 36) {
+        return false;
+    }
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const bool isSeparator = index == 8 || index == 13
+            || index == 18 || index == 23;
+        const unsigned char character = value[index];
+        if (isSeparator) {
+            if (character != '-') {
+                return false;
+            }
+            continue;
+        }
+        const bool isHex = (character >= '0' && character <= '9')
+            || (character >= 'a' && character <= 'f')
+            || (character >= 'A' && character <= 'F');
+        if (!isHex) {
             return false;
         }
     }
@@ -574,6 +663,33 @@ bool IsValid(const RenderRole value) noexcept {
     return false;
 }
 
+bool IsValid(const CoordinateSpace value) noexcept {
+    switch (value) {
+        case CoordinateSpace::World:
+        case CoordinateSpace::WorldAnchorPixels:
+            return true;
+    }
+    return false;
+}
+
+bool IsValid(const DepthPolicy value) noexcept {
+    switch (value) {
+        case DepthPolicy::Scene:
+        case DepthPolicy::Topmost:
+            return true;
+    }
+    return false;
+}
+
+bool IsValid(const RenderStyle value) noexcept {
+    switch (value) {
+        case RenderStyle::Shaded:
+        case RenderStyle::Wireframe:
+            return true;
+    }
+    return false;
+}
+
 bool IsValid(const ElementKind value) noexcept {
     switch (value) {
         case ElementKind::None:
@@ -656,6 +772,13 @@ bool IsValid(const MaterialSnapshot& value) noexcept {
 
 bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     if (snapshot.schemaVersion != kSceneSnapshotSchemaVersion
+        || !IsValidPublicationSourceIdentifier(
+            snapshot.publicationSourceIdentifier)
+        || snapshot.revisions.snapshot == 0
+        || snapshot.revisions.documentGeneration == 0
+        || snapshot.revisions.model == 0
+        || snapshot.revisions.presentation == 0
+        || snapshot.revisions.camera == 0
         || !IsFinite(snapshot.renderOrigin)
         || !IsValid(snapshot.camera)
         || snapshot.meshes.size() > kMaximumDTOMeshes
@@ -677,6 +800,9 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         return CheckedAdd(totalStringBytes, value.size(), totalStringBytes)
             && totalStringBytes <= kMaximumDTOStringBytes;
     };
+    if (!accountString(snapshot.publicationSourceIdentifier)) {
+        return false;
+    }
 
     std::unordered_set<std::string> materialIdentifiers;
     materialIdentifiers.reserve(snapshot.materials.size());
@@ -775,6 +901,9 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                 instance.entityIdentifier, instanceIndex).second
             || instance.meshIndex >= snapshot.meshes.size()
             || !IsValid(instance.role)
+            || !IsValid(instance.coordinateSpace)
+            || !IsValid(instance.depthPolicy)
+            || !IsValid(instance.renderStyle)
             || (!instance.visible && instance.selectable)
             || !CheckedAdd(totalBindings,
                            instance.primitiveBindings.size(),
@@ -904,6 +1033,212 @@ bool IsValidSceneSnapshot(const SceneSnapshot& snapshot) noexcept {
     }
 }
 
+bool IsRigidWorldAnchorTransform(const Matrix4d& value) noexcept {
+    for (const double component : value.values) {
+        if (!IsFinite(component)) {
+            return false;
+        }
+    }
+    constexpr double tolerance = 1.0e-6;
+    if (std::abs(value.values[3]) > tolerance
+        || std::abs(value.values[7]) > tolerance
+        || std::abs(value.values[11]) > tolerance
+        || std::abs(value.values[15] - 1.0) > tolerance) {
+        return false;
+    }
+    const Double3 x = {value.values[0], value.values[1], value.values[2]};
+    const Double3 y = {value.values[4], value.values[5], value.values[6]};
+    const Double3 z = {value.values[8], value.values[9], value.values[10]};
+    const auto dot = [](const Double3& left, const Double3& right) {
+        return left.x * right.x + left.y * right.y + left.z * right.z;
+    };
+    const double determinant =
+        x.x * (y.y * z.z - y.z * z.y)
+        - y.x * (x.y * z.z - x.z * z.y)
+        + z.x * (x.y * y.z - x.z * y.y);
+    return std::abs(dot(x, x) - 1.0) <= tolerance
+        && std::abs(dot(y, y) - 1.0) <= tolerance
+        && std::abs(dot(z, z) - 1.0) <= tolerance
+        && std::abs(dot(x, y)) <= tolerance
+        && std::abs(dot(x, z)) <= tolerance
+        && std::abs(dot(y, z)) <= tolerance
+        && std::abs(determinant - 1.0) <= tolerance;
+}
+
+bool IsValidPresentationOverlaySnapshotImpl(
+    const PresentationOverlaySnapshot& snapshot) {
+    if (snapshot.schemaVersion
+            != kPresentationOverlaySnapshotSchemaVersion
+        || !IsValidPublicationSourceIdentifier(
+            snapshot.publicationSourceIdentifier)
+        || snapshot.baseSnapshotRevision == 0
+        || snapshot.baseDocumentGeneration == 0
+        || snapshot.baseModelRevision == 0
+        || snapshot.basePresentationRevision == 0
+        || snapshot.overlayRevision == 0
+        || snapshot.meshes.size() > kMaximumOverlayMeshes
+        || snapshot.instances.size() > kMaximumOverlayInstances
+        || snapshot.materials.size() > kMaximumOverlayMaterials) {
+        return false;
+    }
+
+    const bool isEmpty = snapshot.meshes.empty()
+        && snapshot.instances.empty() && snapshot.materials.empty();
+    if (isEmpty) {
+        return true;
+    }
+    // Schema 1 is deliberately the bounded idle move/rotate gizmo slice.
+    if (snapshot.meshes.size() != 7
+        || snapshot.instances.size() != 7
+        || snapshot.materials.size() != 4) {
+        return false;
+    }
+
+    std::size_t stringBytes = snapshot.publicationSourceIdentifier.size();
+    std::unordered_set<std::string> materialIdentifiers;
+    materialIdentifiers.reserve(snapshot.materials.size());
+    for (const MaterialSnapshot& material : snapshot.materials) {
+        const auto isUnit = [](const float component) {
+            return IsFinite(component)
+                && component >= 0.0f && component <= 1.0f;
+        };
+        if (!IsValid(material)
+            || material.alphaMode != AlphaMode::Opaque
+            || material.baseColor.w != 1.0f
+            || !isUnit(material.baseColor.x)
+            || !isUnit(material.baseColor.y)
+            || !isUnit(material.baseColor.z)
+            || material.emission.x < 0.0f
+            || material.emission.y < 0.0f
+            || material.emission.z < 0.0f
+            || !materialIdentifiers.insert(material.identifier).second
+            || !CheckedAdd(stringBytes,
+                           material.identifier.size(),
+                           stringBytes)
+            || stringBytes > kMaximumDTOStringBytes) {
+            return false;
+        }
+    }
+
+    std::size_t totalVertices = 0;
+    std::size_t totalIndices = 0;
+    std::size_t totalNumericBytes = 0;
+    std::unordered_set<std::string> definitionIdentifiers;
+    definitionIdentifiers.reserve(snapshot.meshes.size());
+    for (const MeshSnapshot& mesh : snapshot.meshes) {
+        if (!IsValidIdentifier(mesh.definitionIdentifier)
+            || !definitionIdentifiers.insert(
+                mesh.definitionIdentifier).second
+            || mesh.geometryRevision == 0
+            || !mesh.localBounds.valid || !IsValid(mesh.localBounds)
+            || mesh.vertices.empty() || mesh.indices.empty()
+            || mesh.primitives.size() != 1
+            || mesh.primitives.front().firstIndex != 0
+            || mesh.primitives.front().indexCount != mesh.indices.size()
+            || mesh.primitives.front().indexCount == 0
+            || mesh.primitives.front().indexCount % 3 != 0
+            || mesh.primitives.front().faceIndex != 0
+            || !CheckedAdd(totalVertices,
+                           mesh.vertices.size(),
+                           totalVertices)
+            || totalVertices > kMaximumOverlayVertices
+            || !CheckedAdd(totalIndices,
+                           mesh.indices.size(),
+                           totalIndices)
+            || totalIndices > kMaximumOverlayIndices
+            || !CheckedAdd(stringBytes,
+                           mesh.definitionIdentifier.size(),
+                           stringBytes)
+            || stringBytes > kMaximumDTOStringBytes) {
+            return false;
+        }
+        std::size_t vertexBytes = 0;
+        std::size_t indexBytes = 0;
+        if (!CheckedMultiply(mesh.vertices.size(), sizeof(Vertex), vertexBytes)
+            || !CheckedMultiply(mesh.indices.size(),
+                                sizeof(std::uint32_t),
+                                indexBytes)
+            || !CheckedAdd(totalNumericBytes,
+                           vertexBytes,
+                           totalNumericBytes)
+            || !CheckedAdd(totalNumericBytes,
+                           indexBytes,
+                           totalNumericBytes)
+            || totalNumericBytes > kMaximumOverlayNumericBytes) {
+            return false;
+        }
+        for (const Vertex& vertex : mesh.vertices) {
+            const double normalSquared =
+                static_cast<double>(vertex.normalX) * vertex.normalX
+                + static_cast<double>(vertex.normalY) * vertex.normalY
+                + static_cast<double>(vertex.normalZ) * vertex.normalZ;
+            if (!IsFinite(vertex.positionX) || !IsFinite(vertex.positionY)
+                || !IsFinite(vertex.positionZ) || !IsFinite(vertex.normalX)
+                || !IsFinite(vertex.normalY) || !IsFinite(vertex.normalZ)
+                || !IsFinite(vertex.textureU) || !IsFinite(vertex.textureV)
+                || !IsFinite(normalSquared) || normalSquared <= 1.0e-12) {
+                return false;
+            }
+        }
+        for (const std::uint32_t index : mesh.indices) {
+            if (index >= mesh.vertices.size()) {
+                return false;
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> meshReferences(snapshot.meshes.size(), 0);
+    std::vector<std::uint8_t> materialReferences(snapshot.materials.size(), 0);
+    std::unordered_set<std::string> entityIdentifiers;
+    entityIdentifiers.reserve(snapshot.instances.size());
+    for (const InstanceSnapshot& instance : snapshot.instances) {
+        if (!IsValidIdentifier(instance.entityIdentifier)
+            || !entityIdentifiers.insert(instance.entityIdentifier).second
+            || instance.meshIndex >= snapshot.meshes.size()
+            || instance.reversesWinding || !instance.visible
+            || instance.selectable || instance.selected
+            || instance.role != RenderRole::Gizmo
+            || instance.coordinateSpace
+                != CoordinateSpace::WorldAnchorPixels
+            || instance.depthPolicy != DepthPolicy::Topmost
+            || instance.renderStyle != RenderStyle::Shaded
+            || instance.name.size() > kMaximumNameBytes
+            || !CheckedAdd(stringBytes,
+                           instance.entityIdentifier.size(),
+                           stringBytes)
+            || !CheckedAdd(stringBytes,
+                           instance.name.size(),
+                           stringBytes)
+            || stringBytes > kMaximumDTOStringBytes
+            || !IsRigidWorldAnchorTransform(instance.worldFromObject)
+            || instance.primitiveBindings.size() != 1) {
+            return false;
+        }
+        if (++meshReferences[instance.meshIndex] != 1) {
+            return false;
+        }
+        const PrimitiveBinding& binding = instance.primitiveBindings.front();
+        if (binding.materialIndex >= snapshot.materials.size()
+            || binding.pickToken != 0 || !binding.visible) {
+            return false;
+        }
+        materialReferences[binding.materialIndex] = 1;
+    }
+    return std::all_of(meshReferences.begin(), meshReferences.end(),
+                       [](const std::uint8_t count) { return count == 1; })
+        && std::all_of(materialReferences.begin(), materialReferences.end(),
+                       [](const std::uint8_t count) { return count == 1; });
+}
+
+bool IsValidPresentationOverlaySnapshot(
+    const PresentationOverlaySnapshot& snapshot) noexcept {
+    try {
+        return IsValidPresentationOverlaySnapshotImpl(snapshot);
+    } catch (...) {
+        return false;
+    }
+}
+
 NSString *StringFromUTF8(const std::string& value) {
     if (value.empty()) {
         return @"";
@@ -998,6 +1333,45 @@ Core3DSceneRenderRole RenderRoleFromScene(RenderRole value) {
 
     NSCAssert(NO, @"Unknown scene render role value: %u", static_cast<unsigned>(value));
     return Core3DSceneRenderRoleModel;
+}
+
+Core3DSceneCoordinateSpace CoordinateSpaceFromScene(CoordinateSpace value) {
+    switch (value) {
+        case CoordinateSpace::World:
+            return Core3DSceneCoordinateSpaceWorld;
+        case CoordinateSpace::WorldAnchorPixels:
+            return Core3DSceneCoordinateSpaceWorldAnchorPixels;
+    }
+
+    NSCAssert(NO, @"Unknown scene coordinate-space value: %u",
+              static_cast<unsigned>(value));
+    return Core3DSceneCoordinateSpaceWorld;
+}
+
+Core3DSceneDepthPolicy DepthPolicyFromScene(DepthPolicy value) {
+    switch (value) {
+        case DepthPolicy::Scene:
+            return Core3DSceneDepthPolicyScene;
+        case DepthPolicy::Topmost:
+            return Core3DSceneDepthPolicyTopmost;
+    }
+
+    NSCAssert(NO, @"Unknown scene depth-policy value: %u",
+              static_cast<unsigned>(value));
+    return Core3DSceneDepthPolicyScene;
+}
+
+Core3DSceneRenderStyle RenderStyleFromScene(RenderStyle value) {
+    switch (value) {
+        case RenderStyle::Shaded:
+            return Core3DSceneRenderStyleShaded;
+        case RenderStyle::Wireframe:
+            return Core3DSceneRenderStyleWireframe;
+    }
+
+    NSCAssert(NO, @"Unknown scene render-style value: %u",
+              static_cast<unsigned>(value));
+    return Core3DSceneRenderStyleShaded;
 }
 
 Core3DSceneElementKind ElementKindFromScene(ElementKind value) {
@@ -1139,6 +1513,9 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
                         selected:value.selected
                             name:StringFromUTF8(value.name)
                       renderRole:RenderRoleFromScene(value.role)
+                 coordinateSpace:CoordinateSpaceFromScene(value.coordinateSpace)
+                     depthPolicy:DepthPolicyFromScene(value.depthPolicy)
+                     renderStyle:RenderStyleFromScene(value.renderStyle)
                primitiveBindings:bindings];
 }
 
@@ -1184,6 +1561,8 @@ Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
 
         return [[Core3DSceneSnapshot alloc]
             initWithSchemaVersion:snapshot.schemaVersion
+            publicationSourceIdentifier:StringFromUTF8(
+                snapshot.publicationSourceIdentifier)
                         revisions:RevisionVectorFromScene(snapshot.revisions)
                      renderOrigin:Double3FromScene(snapshot.renderOrigin)
                            meshes:meshes
@@ -1199,8 +1578,12 @@ Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
 
 Core3DSceneFrameSnapshot *Core3DCreateSceneFrameSnapshotDTO(
     const FrameSnapshot& snapshot) noexcept {
-    if (snapshot.revisions.snapshot == 0
+    if (!IsValidPublicationSourceIdentifier(
+            snapshot.publicationSourceIdentifier)
+        || snapshot.revisions.snapshot == 0
         || snapshot.revisions.documentGeneration == 0
+        || snapshot.revisions.model == 0
+        || snapshot.revisions.presentation == 0
         || snapshot.revisions.camera == 0
         || !IsValid(snapshot.camera)) {
         return nil;
@@ -1208,8 +1591,51 @@ Core3DSceneFrameSnapshot *Core3DCreateSceneFrameSnapshotDTO(
 
     try {
         return [[Core3DSceneFrameSnapshot alloc]
-            initWithRevisions:RevisionVectorFromScene(snapshot.revisions)
-                         camera:CameraFromScene(snapshot.camera)];
+            initWithPublicationSourceIdentifier:StringFromUTF8(
+                snapshot.publicationSourceIdentifier)
+                                           revisions:RevisionVectorFromScene(
+                                               snapshot.revisions)
+                                              camera:CameraFromScene(
+                                                  snapshot.camera)];
+    } catch (...) {
+        return nil;
+    }
+}
+
+Core3DScenePresentationOverlaySnapshot *
+Core3DCreateScenePresentationOverlaySnapshotDTO(
+    const PresentationOverlaySnapshot& snapshot) noexcept {
+    if (!IsValidPresentationOverlaySnapshot(snapshot)) {
+        return nil;
+    }
+
+    try {
+        NSArray<Core3DSceneMeshSnapshot *> *meshes =
+            ObjectArrayFromVector<MeshSnapshot, Core3DSceneMeshSnapshot>(
+                snapshot.meshes,
+                MeshFromScene);
+        NSArray<Core3DSceneRenderItemSnapshot *> *renderItems =
+            ObjectArrayFromVector<InstanceSnapshot,
+                                  Core3DSceneRenderItemSnapshot>(
+                snapshot.instances,
+                RenderItemFromScene);
+        NSArray<Core3DSceneMaterialSnapshot *> *materials =
+            ObjectArrayFromVector<MaterialSnapshot,
+                                  Core3DSceneMaterialSnapshot>(
+                snapshot.materials,
+                MaterialFromScene);
+        return [[Core3DScenePresentationOverlaySnapshot alloc]
+            initWithSchemaVersion:snapshot.schemaVersion
+            publicationSourceIdentifier:StringFromUTF8(
+                snapshot.publicationSourceIdentifier)
+            baseSnapshotRevision:snapshot.baseSnapshotRevision
+            baseDocumentGeneration:snapshot.baseDocumentGeneration
+            baseModelRevision:snapshot.baseModelRevision
+            basePresentationRevision:snapshot.basePresentationRevision
+            overlayRevision:snapshot.overlayRevision
+            meshes:meshes
+            renderItems:renderItems
+            materials:materials];
     } catch (...) {
         return nil;
     }

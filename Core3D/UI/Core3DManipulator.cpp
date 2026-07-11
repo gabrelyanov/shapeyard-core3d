@@ -1,4 +1,5 @@
 #include "Core3DManipulator.hpp"
+#include "../Scene/SceneSnapshot.hpp"
 
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
@@ -25,7 +26,14 @@
 #include <TopExp_Explorer.hxx>
 #include <ShapeUpgrade_RemoveLocations.hxx>
 #include <gp_Quaternion.hxx>
+#include <Standard_Failure.hxx>
 #include "Snapping.hpp"
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <utility>
 
 IMPLEMENT_STANDARD_RTTIEXT(Core3DManipulator, AIS_InteractiveObject)
 IMPLEMENT_STANDARD_HANDLE (Core3DManipulator, AIS_InteractiveObject)
@@ -107,6 +115,122 @@ public:
         && Select3D_SensitiveTriangulation::Matches (theMgr, thePickResult);
     }
 };
+
+constexpr Standard_Integer kMaximumOverlayVerticesPerComponent = 100'000;
+constexpr Standard_Integer kMaximumOverlayIndicesPerComponent = 300'000;
+
+bool CopyTriangleArray(
+    const Handle(Graphic3d_ArrayOfTriangles)& theArray,
+    const std::string& theDefinitionIdentifier,
+    core3d::scene::MeshSnapshot& theMesh)
+{
+    if (theArray.IsNull() || !theArray->HasVertexNormals()) {
+        return false;
+    }
+    const Standard_Integer aVertexCount = theArray->VertexNumber();
+    const Standard_Integer anEdgeCount = theArray->EdgeNumber();
+    if (aVertexCount <= 0
+        || aVertexCount > kMaximumOverlayVerticesPerComponent
+        || anEdgeCount == 0 || anEdgeCount < -1
+        || anEdgeCount > kMaximumOverlayIndicesPerComponent) {
+        return false;
+    }
+    const Standard_Integer anIndexCount = anEdgeCount > 0
+        ? anEdgeCount
+        : aVertexCount;
+    if (anIndexCount <= 0 || anIndexCount % 3 != 0
+        || static_cast<std::uint64_t>(aVertexCount)
+            > std::numeric_limits<std::uint32_t>::max()
+        || static_cast<std::uint64_t>(anIndexCount)
+            > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    core3d::scene::MeshSnapshot aMesh;
+    aMesh.definitionIdentifier = theDefinitionIdentifier;
+    aMesh.vertices.reserve(static_cast<std::size_t>(aVertexCount));
+    aMesh.indices.reserve(static_cast<std::size_t>(anIndexCount));
+    for (Standard_Integer aRank = 1; aRank <= aVertexCount; ++aRank) {
+        const gp_Pnt aPoint = theArray->Vertice(aRank);
+        const gp_Dir aNormal = theArray->VertexNormal(aRank);
+        core3d::scene::Vertex aVertex;
+        aVertex.positionX = static_cast<float>(aPoint.X());
+        aVertex.positionY = static_cast<float>(aPoint.Y());
+        aVertex.positionZ = static_cast<float>(aPoint.Z());
+        aVertex.normalX = static_cast<float>(aNormal.X());
+        aVertex.normalY = static_cast<float>(aNormal.Y());
+        aVertex.normalZ = static_cast<float>(aNormal.Z());
+        if (!std::isfinite(aVertex.positionX)
+            || !std::isfinite(aVertex.positionY)
+            || !std::isfinite(aVertex.positionZ)
+            || !std::isfinite(aVertex.normalX)
+            || !std::isfinite(aVertex.normalY)
+            || !std::isfinite(aVertex.normalZ)) {
+            return false;
+        }
+        aMesh.vertices.push_back(aVertex);
+        if (!aMesh.localBounds.valid) {
+            aMesh.localBounds.minimum = {aPoint.X(), aPoint.Y(), aPoint.Z()};
+            aMesh.localBounds.maximum = aMesh.localBounds.minimum;
+            aMesh.localBounds.valid = true;
+        } else {
+            aMesh.localBounds.minimum.x = Min(
+                aMesh.localBounds.minimum.x, aPoint.X());
+            aMesh.localBounds.minimum.y = Min(
+                aMesh.localBounds.minimum.y, aPoint.Y());
+            aMesh.localBounds.minimum.z = Min(
+                aMesh.localBounds.minimum.z, aPoint.Z());
+            aMesh.localBounds.maximum.x = Max(
+                aMesh.localBounds.maximum.x, aPoint.X());
+            aMesh.localBounds.maximum.y = Max(
+                aMesh.localBounds.maximum.y, aPoint.Y());
+            aMesh.localBounds.maximum.z = Max(
+                aMesh.localBounds.maximum.z, aPoint.Z());
+        }
+    }
+    if (anEdgeCount > 0) {
+        for (Standard_Integer aRank = 1; aRank <= anEdgeCount; ++aRank) {
+            const Standard_Integer anIndex = theArray->Edge(aRank) - 1;
+            if (anIndex < 0 || anIndex >= aVertexCount) {
+                return false;
+            }
+            aMesh.indices.push_back(static_cast<std::uint32_t>(anIndex));
+        }
+    } else {
+        for (Standard_Integer anIndex = 0;
+             anIndex < aVertexCount; ++anIndex) {
+            aMesh.indices.push_back(static_cast<std::uint32_t>(anIndex));
+        }
+    }
+    aMesh.primitives.push_back({
+        0,
+        static_cast<std::uint32_t>(aMesh.indices.size()),
+        0,
+    });
+    theMesh = std::move(aMesh);
+    return true;
+}
+
+core3d::scene::MaterialSnapshot GizmoMaterial(
+    const std::string& theIdentifier,
+    const Quantity_Color& theColor)
+{
+    core3d::scene::MaterialSnapshot aMaterial;
+    aMaterial.identifier = theIdentifier;
+    aMaterial.baseColor = {
+        static_cast<float>(theColor.Red()),
+        static_cast<float>(theColor.Green()),
+        static_cast<float>(theColor.Blue()),
+        1.0f,
+    };
+    aMaterial.metallic = 0.0f;
+    aMaterial.roughness = 1.0f;
+    aMaterial.indexOfRefraction = 1.5f;
+    aMaterial.alphaMode = core3d::scene::AlphaMode::Opaque;
+    aMaterial.alphaCutoff = 0.5f;
+    aMaterial.doubleSided = true;
+    return aMaterial;
+}
 }
 
 //=======================================================================
@@ -158,6 +282,128 @@ void Core3DManipulator::init()
 	
 	myOldScaleFactor = 1.0;
 	myOldIndexScale = 0;
+}
+
+Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
+    core3d::scene::PresentationOverlayContent& theContent) const noexcept
+{
+    try {
+        if (!myHasCenter) {
+            return Standard_False;
+        }
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            if (!myAxes[anAxis].HasTranslation()
+                || !myAxes[anAxis].HasRotation()) {
+                return Standard_False;
+            }
+        }
+
+        core3d::scene::PresentationOverlayContent aContent;
+        aContent.meshes.reserve(7);
+        aContent.instances.reserve(7);
+        aContent.materials.reserve(4);
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/center", Quantity_Color(Quantity_NOC_WHITE)));
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/x", myAxes[0].Color()));
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/y", myAxes[1].Color()));
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/z", myAxes[2].Color()));
+
+        const gp_Dir anX = myPosition.XDirection();
+        const gp_Dir aY = myPosition.YDirection();
+        const gp_Dir aZ = myPosition.Direction();
+        const gp_Pnt anAnchor = myPosition.Location();
+        core3d::scene::Matrix4d aWorldFromPixels;
+        aWorldFromPixels.values = {
+            anX.X(), anX.Y(), anX.Z(), 0.0,
+            aY.X(), aY.Y(), aY.Z(), 0.0,
+            aZ.X(), aZ.Y(), aZ.Z(), 0.0,
+            anAnchor.X(), anAnchor.Y(), anAnchor.Z(), 1.0,
+        };
+
+        const auto addComponent = [&aContent, &aWorldFromPixels](
+            const Handle(Graphic3d_ArrayOfTriangles)& theArray,
+            const char* theIdentifier,
+            const char* theName,
+            const std::uint32_t theMaterialIndex) {
+            core3d::scene::MeshSnapshot aMesh;
+            const std::string aDefinitionIdentifier =
+                std::string(theIdentifier) + "/mesh";
+            if (!CopyTriangleArray(theArray,
+                                   aDefinitionIdentifier,
+                                   aMesh)) {
+                return false;
+            }
+            const std::uint32_t aMeshIndex =
+                static_cast<std::uint32_t>(aContent.meshes.size());
+            core3d::scene::InstanceSnapshot anInstance;
+            anInstance.entityIdentifier = theIdentifier;
+            anInstance.meshIndex = aMeshIndex;
+            anInstance.worldFromObject = aWorldFromPixels;
+            anInstance.reversesWinding = false;
+            anInstance.visible = true;
+            anInstance.selectable = false;
+            anInstance.selected = false;
+            anInstance.name = theName;
+            anInstance.role = core3d::scene::RenderRole::Gizmo;
+            anInstance.coordinateSpace =
+                core3d::scene::CoordinateSpace::WorldAnchorPixels;
+            anInstance.depthPolicy = core3d::scene::DepthPolicy::Topmost;
+            anInstance.renderStyle = core3d::scene::RenderStyle::Shaded;
+            anInstance.primitiveBindings.push_back({
+                theMaterialIndex,
+                0,
+                true,
+            });
+            aContent.meshes.push_back(std::move(aMesh));
+            aContent.instances.push_back(std::move(anInstance));
+            return true;
+        };
+
+        if (!addComponent(myCenter.Array(),
+                          "gizmo/center",
+                          "Move/rotate center",
+                          0)) {
+            return Standard_False;
+        }
+        static constexpr const char* kAxisNames[3] = {"x", "y", "z"};
+        static constexpr const char* kAxisDisplayNames[3] = {"X", "Y", "Z"};
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            const std::string aTranslationIdentifier =
+                std::string("gizmo/translation/") + kAxisNames[anAxis];
+            const std::string aTranslationName =
+                std::string(kAxisDisplayNames[anAxis]) + " translation";
+            if (!addComponent(myAxes[anAxis].TriangleArrayF(),
+                              aTranslationIdentifier.c_str(),
+                              aTranslationName.c_str(),
+                              static_cast<std::uint32_t>(anAxis + 1))) {
+                return Standard_False;
+            }
+            const std::string aRotationIdentifier =
+                std::string("gizmo/rotation/") + kAxisNames[anAxis];
+            const std::string aRotationName =
+                std::string(kAxisDisplayNames[anAxis]) + " rotation";
+            if (!addComponent(myAxes[anAxis].RotatorDisk().Array(),
+                              aRotationIdentifier.c_str(),
+                              aRotationName.c_str(),
+                              static_cast<std::uint32_t>(anAxis + 1))) {
+                return Standard_False;
+            }
+        }
+        if (aContent.meshes.size() != 7
+            || aContent.instances.size() != 7
+            || aContent.materials.size() != 4) {
+            return Standard_False;
+        }
+        theContent = std::move(aContent);
+        return Standard_True;
+    } catch (const Standard_Failure&) {
+        return Standard_False;
+    } catch (...) {
+        return Standard_False;
+    }
 }
 
 //=======================================================================

@@ -25,6 +25,7 @@ namespace core3d::scene {
 class OcctSceneSnapshotBuilder final {
 public:
     using SnapshotPointer = std::shared_ptr<const SceneSnapshot>;
+    using OverlayPointer = std::shared_ptr<const PresentationOverlaySnapshot>;
 
     OcctSceneSnapshotBuilder();
     ~OcctSceneSnapshotBuilder();
@@ -53,6 +54,14 @@ public:
         const Handle(OcctDocument)& theDocument,
         const Handle(V3d_View)& theView,
         const UInt2& theViewportPixels) noexcept;
+
+    //! Publish already-extracted transient presentation data against the most
+    //! recent full scene. This never traverses the document and has an
+    //! independent revision domain. Empty content is an explicit clear; a
+    //! null result means the base scene or content is unsafe. Main-thread only.
+    OverlayPointer PublishPresentationOverlay(
+        const Handle(OcctDocument)& theDocument,
+        PresentationOverlayContent&& theContent) noexcept;
 
 private:
     struct State;

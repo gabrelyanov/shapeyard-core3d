@@ -20,6 +20,7 @@
 namespace core3d::scene {
 
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 1;
+inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 1;
 
 struct Float2 {
     float x = 0.0f;
@@ -87,6 +88,21 @@ enum class RenderRole : std::uint8_t {
     Gizmo,
     Grid,
     Trihedron,
+};
+
+enum class CoordinateSpace : std::uint8_t {
+    World = 0,
+    WorldAnchorPixels,
+};
+
+enum class DepthPolicy : std::uint8_t {
+    Scene = 0,
+    Topmost,
+};
+
+enum class RenderStyle : std::uint8_t {
+    Shaded = 0,
+    Wireframe,
 };
 
 enum class ElementKind : std::uint8_t {
@@ -170,6 +186,9 @@ struct InstanceSnapshot {
     bool selected = false;
     std::string name;
     RenderRole role = RenderRole::Model;
+    CoordinateSpace coordinateSpace = CoordinateSpace::World;
+    DepthPolicy depthPolicy = DepthPolicy::Scene;
+    RenderStyle renderStyle = RenderStyle::Shaded;
     std::vector<PrimitiveBinding> primitiveBindings;
 };
 
@@ -194,6 +213,9 @@ struct SelectionSnapshot {
 
 struct SceneSnapshot {
     std::uint32_t schemaVersion = kSceneSnapshotSchemaVersion;
+    //! Stable identity of the builder publication stream. This deliberately
+    //! sits outside RevisionVector because it is an identity, not a revision.
+    std::string publicationSourceIdentifier;
     RevisionVector revisions;
     Double3 renderOrigin;
     std::vector<MeshSnapshot> meshes;
@@ -209,8 +231,32 @@ struct SceneSnapshot {
 //! carries no geometry so interactive camera motion and drawable-size changes
 //! never retraverse or remesh the mutable CAD document.
 struct FrameSnapshot {
+    std::string publicationSourceIdentifier;
     RevisionVector revisions;
     CameraSnapshot camera;
+};
+
+//! Renderer-neutral transient presentation values produced without traversing
+//! or mutating the committed OCAF document.
+struct PresentationOverlayContent {
+    std::vector<MeshSnapshot> meshes;
+    std::vector<InstanceSnapshot> instances;
+    std::vector<MaterialSnapshot> materials;
+};
+
+//! Immutable transient presentation paired with one exact full scene. Overlay
+//! publication has its own revision domain and never changes modelRevision.
+struct PresentationOverlaySnapshot {
+    std::uint32_t schemaVersion = kPresentationOverlaySnapshotSchemaVersion;
+    std::string publicationSourceIdentifier;
+    std::uint64_t baseSnapshotRevision = 0;
+    std::uint64_t baseDocumentGeneration = 0;
+    std::uint64_t baseModelRevision = 0;
+    std::uint64_t basePresentationRevision = 0;
+    std::uint64_t overlayRevision = 0;
+    std::vector<MeshSnapshot> meshes;
+    std::vector<InstanceSnapshot> instances;
+    std::vector<MaterialSnapshot> materials;
 };
 
 } // namespace core3d::scene

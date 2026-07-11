@@ -6,6 +6,7 @@
 //
 
 #include "ObjectInteractor.hpp"
+#include "../Scene/SceneSnapshot.hpp"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -122,6 +123,40 @@ namespace core3d {
 		else
 			return gp_XYZ();
 	}
+
+    PresentationOverlayCaptureStatus
+    ObjectInteractor::captureIdlePresentationOverlay(
+        scene::PresentationOverlayContent& theContent) const noexcept {
+        try {
+            theContent = {};
+            if (_manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
+                return PresentationOverlayCaptureStatus::Available;
+            }
+            if (_manipulatorType
+                != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate) {
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
+            if (_manipulator.IsNull() || !_manipulator->IsAttached()) {
+                return PresentationOverlayCaptureStatus::Available;
+            }
+            if (myContext.IsNull()
+                || !_manipulator->IsInstance(
+                    STANDARD_TYPE(Core3DManipulator))
+                || !myContext->IsDisplayed(_manipulator)
+                || !_manipulator->ZoomPersistence()
+                || _manipulator->HasActiveMode()
+                || _manipulator->HasActiveTransformation()
+                || !_manipulator->CaptureIdleMoveRotateOverlay(theContent)) {
+                theContent = {};
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
+            return PresentationOverlayCaptureStatus::Available;
+        } catch (...) {
+            theContent = {};
+            return PresentationOverlayCaptureStatus::Unsafe;
+        }
+    }
 
     void ObjectInteractor::deleteSelected() {
         if (_manipulator.IsNull() || !_manipulator->IsAttached()) { return; }

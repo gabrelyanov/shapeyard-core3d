@@ -23,6 +23,12 @@
 #include "Core3DView.hpp"
 #include <map>
 
+namespace core3d {
+namespace scene {
+struct PresentationOverlayContent;
+}
+}
+
 NCOLLECTION_HSEQUENCE(Core3DManipulatorObjectSequence, Handle(AIS_InteractiveObject))
 
 DEFINE_STANDARD_HANDLE (Core3DManipulator, AIS_InteractiveObject)
@@ -230,7 +236,7 @@ public:
 	return IsAttached() && myCurrentMode != AIS_MM_None;
   }
 
-  Standard_Boolean HasActiveTransformation() { return myHasStartedTransformation; }
+  Standard_Boolean HasActiveTransformation() const { return myHasStartedTransformation; }
 
   gp_Trsf StartTransformation() const { return !myStartTrsfs.IsEmpty() ? myStartTrsfs.First() : gp_Trsf(); }
 
@@ -274,6 +280,12 @@ public: //! @name Setters for parameters
 
   //! @return poition of manipulator interactive object.
   const gp_Ax2& Position() const { return myPosition; }
+
+  //! Deep-copy the exact cached center, translation-arrow, and rotation-ring
+  //! triangle arrays into renderer-neutral values. No mutable OCCT handle
+  //! escapes. Returns false when the presentation cache is incomplete.
+  Standard_EXPORT Standard_Boolean CaptureIdleMoveRotateOverlay(
+      core3d::scene::PresentationOverlayContent& theContent) const noexcept;
 
   //! Sets position of the manipulator object.
   Standard_EXPORT void SetPosition (const gp_Ax2& thePosition);

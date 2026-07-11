@@ -13,6 +13,8 @@
 #include <AIS_Shape.hxx>
 #include "BooleanOperationController.hpp"
 
+#include <cstdint>
+
 namespace core3d {
 
     enum struct PrimitiveManipulatorType {
@@ -24,6 +26,11 @@ namespace core3d {
         PrimitiveGizmoTypeUnion,
         PrimitiveGizmoTypeMirror,
         PrimitiveGizmoTypeMaterial,
+    };
+
+    enum class PresentationOverlayCaptureStatus : std::uint8_t {
+        Available = 0,
+        Unsafe,
     };
 
     class ObjectInteractor : public Interactor {
@@ -55,6 +62,11 @@ namespace core3d {
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         const bool isManipulatorAttached() const;
         const PrimitiveManipulatorType getManipulatorType() const;
+
+        //! Capture only an idle move/rotate gizmo. Available with empty content
+        //! is an explicit clear; Unsafe means a renderer must retain OCCT.
+        PresentationOverlayCaptureStatus captureIdlePresentationOverlay(
+            scene::PresentationOverlayContent& theContent) const noexcept;
 
         const bool isSelected() const;
 		

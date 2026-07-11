@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DSceneSnapshot;
 @class Core3DSceneFrameSnapshot;
+@class Core3DScenePresentationOverlaySnapshot;
 
 typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
     Core3DAssetLoadResultSuccess = 0,
@@ -156,6 +157,12 @@ typedef struct {
 //! or copying scene geometry. Returns nil until a full snapshot has established
 //! the active document. Main-thread only.
 - (Core3DSceneFrameSnapshot *_Nullable)captureSceneFrameSnapshot;
+
+//! Capture the idle move/rotate gizmo paired with the last full scene. A
+//! nonnull snapshot with empty arrays explicitly clears the overlay; nil means
+//! the current interaction or tool is unsafe for alternate presentation.
+- (Core3DScenePresentationOverlaySnapshot *_Nullable)
+    captureScenePresentationOverlay;
 
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;

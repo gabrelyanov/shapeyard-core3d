@@ -103,6 +103,11 @@ namespace core3d {
         std::optional<scene::FrameSnapshot> captureSceneFrameSnapshot(
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
+
+        //! Capture an immutable idle move/rotate gizmo paired with the most
+        //! recent full scene. Empty content is a valid explicit clear.
+        scene::OcctSceneSnapshotBuilder::OverlayPointer
+        captureScenePresentationOverlay() noexcept;
     private:
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);

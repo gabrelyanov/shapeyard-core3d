@@ -26,6 +26,7 @@
 #include <StdPrs_ToolTriangulatedShape.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDF_Data.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
@@ -79,6 +80,12 @@ constexpr std::size_t kMaxOccurrenceDepth = 1'024;
 constexpr std::size_t kMaxLabelInstanceMappings = 1'000'000;
 constexpr std::size_t kMaxSelectedElements = 50'000;
 constexpr std::size_t kMaxRetainedDefinitionRevisions = 250'000;
+constexpr std::size_t kMaxOverlayMeshes = 16;
+constexpr std::size_t kMaxOverlayInstances = 16;
+constexpr std::size_t kMaxOverlayMaterials = 8;
+constexpr std::size_t kMaxOverlayVertices = 100'000;
+constexpr std::size_t kMaxOverlayIndices = 300'000;
+constexpr std::size_t kMaxOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
 
 class Fingerprint {
 public:
@@ -259,6 +266,55 @@ bool IsValid(const Bounds3d& theBounds)
         && theBounds.minimum.x <= theBounds.maximum.x
         && theBounds.minimum.y <= theBounds.maximum.y
         && theBounds.minimum.z <= theBounds.maximum.z;
+}
+
+bool IsValidIdentifier(const std::string& theValue)
+{
+    if (theValue.empty() || theValue.size() > 128) {
+        return false;
+    }
+    return std::all_of(
+        theValue.begin(), theValue.end(), [](const unsigned char theCharacter) {
+            return theCharacter >= 0x21U && theCharacter <= 0x7eU;
+        });
+}
+
+bool IsRigidWorldAnchorTransform(const Matrix4d& theMatrix)
+{
+    for (const double aValue : theMatrix.values) {
+        if (!IsFinite(aValue)) {
+            return false;
+        }
+    }
+    constexpr double aTolerance = 1.0e-6;
+    if (std::abs(theMatrix.values[3]) > aTolerance
+        || std::abs(theMatrix.values[7]) > aTolerance
+        || std::abs(theMatrix.values[11]) > aTolerance
+        || std::abs(theMatrix.values[15] - 1.0) > aTolerance) {
+        return false;
+    }
+    const Double3 anX = {
+        theMatrix.values[0], theMatrix.values[1], theMatrix.values[2]};
+    const Double3 aY = {
+        theMatrix.values[4], theMatrix.values[5], theMatrix.values[6]};
+    const Double3 aZ = {
+        theMatrix.values[8], theMatrix.values[9], theMatrix.values[10]};
+    const auto dot = [](const Double3& theLeft, const Double3& theRight) {
+        return theLeft.x * theRight.x
+            + theLeft.y * theRight.y
+            + theLeft.z * theRight.z;
+    };
+    const double aDeterminant =
+        anX.x * (aY.y * aZ.z - aY.z * aZ.y)
+        - aY.x * (anX.y * aZ.z - anX.z * aZ.y)
+        + aZ.x * (anX.y * aY.z - anX.z * aY.y);
+    return std::abs(dot(anX, anX) - 1.0) <= aTolerance
+        && std::abs(dot(aY, aY) - 1.0) <= aTolerance
+        && std::abs(dot(aZ, aZ) - 1.0) <= aTolerance
+        && std::abs(dot(anX, aY)) <= aTolerance
+        && std::abs(dot(anX, aZ)) <= aTolerance
+        && std::abs(dot(aY, aZ)) <= aTolerance
+        && std::abs(aDeterminant - 1.0) <= aTolerance;
 }
 
 Double3 Center(const Bounds3d& theBounds)
@@ -987,6 +1043,12 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
         aHash.AddBool(anInstance.selectable);
         aHash.AddBool(anInstance.selected);
         aHash.AddInteger(static_cast<std::uint8_t>(anInstance.role));
+        aHash.AddInteger(
+            static_cast<std::uint8_t>(anInstance.coordinateSpace));
+        aHash.AddInteger(
+            static_cast<std::uint8_t>(anInstance.depthPolicy));
+        aHash.AddInteger(
+            static_cast<std::uint8_t>(anInstance.renderStyle));
         aHash.AddInteger<std::uint64_t>(anInstance.primitiveBindings.size());
         for (const PrimitiveBinding& aBinding : anInstance.primitiveBindings) {
             aHash.AddInteger(aBinding.materialIndex);
@@ -1012,6 +1074,209 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
     return aHash.Value();
 }
 
+bool ValidatePresentationOverlayPayload(
+    const std::vector<MeshSnapshot>& theMeshes,
+    const std::vector<InstanceSnapshot>& theInstances,
+    const std::vector<MaterialSnapshot>& theMaterials,
+    const bool theHasPublishedGeometryRevisions)
+{
+    if (theMeshes.size() > kMaxOverlayMeshes
+        || theInstances.size() > kMaxOverlayInstances
+        || theMaterials.size() > kMaxOverlayMaterials) {
+        return false;
+    }
+    const bool isEmpty = theMeshes.empty()
+        && theInstances.empty() && theMaterials.empty();
+    if (isEmpty) {
+        return true;
+    }
+    if (theMeshes.size() != 7
+        || theInstances.size() != 7
+        || theMaterials.size() != 4) {
+        return false;
+    }
+
+    std::unordered_set<std::string> aMaterialIdentifiers;
+    aMaterialIdentifiers.reserve(theMaterials.size());
+    for (const MaterialSnapshot& aMaterial : theMaterials) {
+        const auto isUnit = [](const float theValue) {
+            return IsFinite(theValue) && theValue >= 0.0f && theValue <= 1.0f;
+        };
+        if (!IsValidIdentifier(aMaterial.identifier)
+            || !aMaterialIdentifiers.insert(aMaterial.identifier).second
+            || !isUnit(aMaterial.baseColor.x)
+            || !isUnit(aMaterial.baseColor.y)
+            || !isUnit(aMaterial.baseColor.z)
+            || aMaterial.baseColor.w != 1.0f
+            || !IsFinite(aMaterial.emission.x)
+            || !IsFinite(aMaterial.emission.y)
+            || !IsFinite(aMaterial.emission.z)
+            || aMaterial.emission.x < 0.0f
+            || aMaterial.emission.y < 0.0f
+            || aMaterial.emission.z < 0.0f
+            || !isUnit(aMaterial.metallic)
+            || !isUnit(aMaterial.roughness)
+            || !IsFinite(aMaterial.indexOfRefraction)
+            || aMaterial.indexOfRefraction <= 0.0f
+            || !isUnit(aMaterial.alphaCutoff)
+            || aMaterial.alphaMode != AlphaMode::Opaque) {
+            return false;
+        }
+    }
+
+    std::size_t aVertexCount = 0;
+    std::size_t anIndexCount = 0;
+    std::size_t aNumericByteCount = 0;
+    std::unordered_set<std::string> aDefinitionIdentifiers;
+    aDefinitionIdentifiers.reserve(theMeshes.size());
+    for (const MeshSnapshot& aMesh : theMeshes) {
+        if (!IsValidIdentifier(aMesh.definitionIdentifier)
+            || !aDefinitionIdentifiers.insert(
+                aMesh.definitionIdentifier).second
+            || (theHasPublishedGeometryRevisions
+                    ? aMesh.geometryRevision == 0
+                    : aMesh.geometryRevision != 0)
+            || !IsValid(aMesh.localBounds)
+            || aMesh.vertices.empty() || aMesh.indices.empty()
+            || aMesh.primitives.size() != 1
+            || aMesh.primitives.front().firstIndex != 0
+            || aMesh.primitives.front().indexCount != aMesh.indices.size()
+            || aMesh.primitives.front().indexCount == 0
+            || aMesh.primitives.front().indexCount % 3 != 0
+            || aMesh.primitives.front().faceIndex != 0
+            || !CheckedAdd(aVertexCount,
+                           aMesh.vertices.size(),
+                           aVertexCount)
+            || aVertexCount > kMaxOverlayVertices
+            || !CheckedAdd(anIndexCount,
+                           aMesh.indices.size(),
+                           anIndexCount)
+            || anIndexCount > kMaxOverlayIndices) {
+            return false;
+        }
+        std::size_t aVertexBytes = 0;
+        std::size_t anIndexBytes = 0;
+        if (!CheckedMultiply(aMesh.vertices.size(), sizeof(Vertex), aVertexBytes)
+            || !CheckedMultiply(aMesh.indices.size(),
+                                sizeof(std::uint32_t),
+                                anIndexBytes)
+            || !CheckedAdd(aNumericByteCount,
+                           aVertexBytes,
+                           aNumericByteCount)
+            || !CheckedAdd(aNumericByteCount,
+                           anIndexBytes,
+                           aNumericByteCount)
+            || aNumericByteCount > kMaxOverlayNumericBytes) {
+            return false;
+        }
+        for (const Vertex& aVertex : aMesh.vertices) {
+            const double aNormalSquared =
+                static_cast<double>(aVertex.normalX) * aVertex.normalX
+                + static_cast<double>(aVertex.normalY) * aVertex.normalY
+                + static_cast<double>(aVertex.normalZ) * aVertex.normalZ;
+            if (!IsFinite(aVertex.positionX) || !IsFinite(aVertex.positionY)
+                || !IsFinite(aVertex.positionZ) || !IsFinite(aVertex.normalX)
+                || !IsFinite(aVertex.normalY) || !IsFinite(aVertex.normalZ)
+                || !IsFinite(aVertex.textureU) || !IsFinite(aVertex.textureV)
+                || !IsFinite(aNormalSquared) || aNormalSquared <= 1.0e-12) {
+                return false;
+            }
+        }
+        for (const std::uint32_t anIndex : aMesh.indices) {
+            if (anIndex >= aMesh.vertices.size()) {
+                return false;
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> aMeshReferences(theMeshes.size(), 0);
+    std::vector<std::uint8_t> aMaterialReferences(theMaterials.size(), 0);
+    std::unordered_set<std::string> anEntityIdentifiers;
+    anEntityIdentifiers.reserve(theInstances.size());
+    for (const InstanceSnapshot& anInstance : theInstances) {
+        if (!IsValidIdentifier(anInstance.entityIdentifier)
+            || !anEntityIdentifiers.insert(
+                anInstance.entityIdentifier).second
+            || anInstance.name.size() > 4'096
+            || anInstance.meshIndex >= theMeshes.size()
+            || anInstance.reversesWinding || !anInstance.visible
+            || anInstance.selectable || anInstance.selected
+            || anInstance.role != RenderRole::Gizmo
+            || anInstance.coordinateSpace
+                != CoordinateSpace::WorldAnchorPixels
+            || anInstance.depthPolicy != DepthPolicy::Topmost
+            || anInstance.renderStyle != RenderStyle::Shaded
+            || !IsRigidWorldAnchorTransform(anInstance.worldFromObject)
+            || anInstance.primitiveBindings.size() != 1) {
+            return false;
+        }
+        if (++aMeshReferences[anInstance.meshIndex] != 1) {
+            return false;
+        }
+        const PrimitiveBinding& aBinding =
+            anInstance.primitiveBindings.front();
+        if (aBinding.materialIndex >= theMaterials.size()
+            || aBinding.pickToken != 0 || !aBinding.visible) {
+            return false;
+        }
+        aMaterialReferences[aBinding.materialIndex] = 1;
+    }
+    return std::all_of(aMeshReferences.begin(), aMeshReferences.end(),
+                       [](const std::uint8_t theCount) {
+                           return theCount == 1;
+                       })
+        && std::all_of(aMaterialReferences.begin(), aMaterialReferences.end(),
+                       [](const std::uint8_t theCount) {
+                           return theCount == 1;
+                       });
+}
+
+std::uint64_t PresentationOverlayPayloadFingerprint(
+    const PresentationOverlaySnapshot& theOverlay)
+{
+    Fingerprint aHash;
+    // Base compatibility is published and validated separately. This revision
+    // identifies only immutable overlay content, so camera-only full captures
+    // do not advance it when the gizmo itself is unchanged.
+    aHash.AddInteger<std::uint64_t>(theOverlay.meshes.size());
+    for (const MeshSnapshot& aMesh : theOverlay.meshes) {
+        aHash.AddInteger(MeshFingerprint(aMesh, 0.0, 0.0));
+        aHash.AddInteger(aMesh.geometryRevision);
+    }
+    aHash.AddInteger<std::uint64_t>(theOverlay.materials.size());
+    for (const MaterialSnapshot& aMaterial : theOverlay.materials) {
+        aHash.AddString(aMaterial.identifier);
+        AddMaterialValues(aHash, aMaterial);
+    }
+    aHash.AddInteger<std::uint64_t>(theOverlay.instances.size());
+    for (const InstanceSnapshot& anInstance : theOverlay.instances) {
+        aHash.AddString(anInstance.entityIdentifier);
+        aHash.AddInteger(anInstance.meshIndex);
+        for (const double aValue : anInstance.worldFromObject.values) {
+            aHash.AddDouble(aValue);
+        }
+        aHash.AddBool(anInstance.reversesWinding);
+        aHash.AddBool(anInstance.visible);
+        aHash.AddBool(anInstance.selectable);
+        aHash.AddBool(anInstance.selected);
+        aHash.AddString(anInstance.name);
+        aHash.AddInteger(static_cast<std::uint8_t>(anInstance.role));
+        aHash.AddInteger(
+            static_cast<std::uint8_t>(anInstance.coordinateSpace));
+        aHash.AddInteger(
+            static_cast<std::uint8_t>(anInstance.depthPolicy));
+        aHash.AddInteger(
+            static_cast<std::uint8_t>(anInstance.renderStyle));
+        for (const PrimitiveBinding& aBinding :
+             anInstance.primitiveBindings) {
+            aHash.AddInteger(aBinding.materialIndex);
+            aHash.AddInteger(aBinding.pickToken);
+            aHash.AddBool(aBinding.visible);
+        }
+    }
+    return aHash.Value();
+}
+
 } // namespace
 
 struct OcctSceneSnapshotBuilder::State {
@@ -1022,22 +1287,47 @@ struct OcctSceneSnapshotBuilder::State {
         bool hasFingerprint = false;
     };
 
+    //! Small, independently transactional state for transient presentation.
+    //! Definitions are bounded by kMaxOverlayMeshes, unlike the committed
+    //! document definition map below.
+    struct OverlayState {
+        std::uint64_t revision = 0;
+        std::optional<std::uint64_t> fingerprint;
+        std::unordered_map<std::string, DefinitionRevision> definitions;
+
+        void Swap(OverlayState& theOther) noexcept
+        {
+            std::swap(revision, theOther.revision);
+            fingerprint.swap(theOther.fingerprint);
+            definitions.swap(theOther.definitions);
+        }
+    };
+
     Handle(TDocStd_Document) documentObject;
+    std::string publicationSourceIdentifier;
     std::string documentIdentifier;
     std::uint64_t snapshotRevision = 0;
+    std::uint64_t lastFullSnapshotRevision = 0;
     std::uint64_t documentGeneration = 0;
     std::uint64_t modelRevision = 0;
     std::uint64_t presentationRevision = 0;
     std::uint64_t cameraRevision = 0;
+    Standard_Integer lastFullDocumentTime = 0;
     std::optional<std::uint64_t> modelFingerprint;
     std::optional<std::uint64_t> presentationFingerprint;
     std::optional<std::uint64_t> cameraFingerprint;
     std::unordered_map<std::string, DefinitionRevision> definitions;
+    OverlayState overlay;
 };
 
 OcctSceneSnapshotBuilder::OcctSceneSnapshotBuilder()
 : myState(std::make_unique<State>())
 {
+    NSString *aSourceIdentifier = NSUUID.UUID.UUIDString;
+    const char *aUtf8 = aSourceIdentifier.UTF8String;
+    if (aUtf8 != nullptr) {
+        myState->publicationSourceIdentifier = aUtf8;
+    }
 }
 
 OcctSceneSnapshotBuilder::~OcctSceneSnapshotBuilder() = default;
@@ -1053,6 +1343,7 @@ std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(
         || theViewportPixels.x == 0
         || theViewportPixels.y == 0
         || myState == nullptr
+        || myState->publicationSourceIdentifier.empty()
         || myState->documentObject.IsNull()
         || myState->documentGeneration == 0
         || myState->snapshotRevision == 0) {
@@ -1071,6 +1362,8 @@ std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(
         }
 
         FrameSnapshot aFrame;
+        aFrame.publicationSourceIdentifier =
+            myState->publicationSourceIdentifier;
         if (!BuildCamera(theView, theViewportPixels, aFrame.camera)) {
             return std::nullopt;
         }
@@ -1105,6 +1398,125 @@ std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(
     }
 }
 
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishPresentationOverlay(
+    const Handle(OcctDocument)& theDocument,
+    PresentationOverlayContent&& theContent) noexcept
+{
+    if (![NSThread isMainThread]
+        || theDocument.IsNull()
+        || myState == nullptr
+        || myState->publicationSourceIdentifier.empty()
+        || myState->documentObject.IsNull()
+        || myState->lastFullSnapshotRevision == 0
+        || myState->documentGeneration == 0
+        || myState->modelRevision == 0
+        || myState->presentationRevision == 0) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument = theDocument->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier()
+                != myState->documentIdentifier) {
+            return {};
+        }
+        const Handle(TDF_Data)& aData = aDocument->GetData();
+        if (aData.IsNull()
+            || aData->Time() != myState->lastFullDocumentTime
+            || !ValidatePresentationOverlayPayload(
+                theContent.meshes,
+                theContent.instances,
+                theContent.materials,
+                false)) {
+            return {};
+        }
+
+        // Copy only bounded transient state. The committed definition cache can
+        // contain hundreds of thousands of entries and must not be copied for
+        // a seven-item overlay publication.
+        State::OverlayState aNextOverlayState = myState->overlay;
+        PresentationOverlaySnapshot anOverlay;
+        anOverlay.publicationSourceIdentifier =
+            myState->publicationSourceIdentifier;
+        anOverlay.baseSnapshotRevision =
+            myState->lastFullSnapshotRevision;
+        anOverlay.baseDocumentGeneration =
+            myState->documentGeneration;
+        anOverlay.baseModelRevision = myState->modelRevision;
+        anOverlay.basePresentationRevision =
+            myState->presentationRevision;
+        anOverlay.meshes = std::move(theContent.meshes);
+        anOverlay.instances = std::move(theContent.instances);
+        anOverlay.materials = std::move(theContent.materials);
+
+        for (MeshSnapshot& aMesh : anOverlay.meshes) {
+            auto aRevisionFound = aNextOverlayState.definitions.find(
+                aMesh.definitionIdentifier);
+            if (aRevisionFound == aNextOverlayState.definitions.end()) {
+                if (aNextOverlayState.definitions.size()
+                    >= kMaxOverlayMeshes) {
+                    return {};
+                }
+                aRevisionFound = aNextOverlayState.definitions.emplace(
+                    aMesh.definitionIdentifier,
+                    State::DefinitionRevision()).first;
+            }
+            State::DefinitionRevision& aRevision = aRevisionFound->second;
+            const std::uint64_t aFingerprint =
+                MeshFingerprint(aMesh, 0.0, 0.0);
+            if (!aRevision.hasFingerprint
+                || aRevision.fingerprint != aFingerprint) {
+                if (!IncrementRevision(aRevision.revision)) {
+                    return {};
+                }
+                aRevision.fingerprint = aFingerprint;
+                aRevision.hasFingerprint = true;
+            }
+            aRevision.lastSeenSnapshot =
+                myState->lastFullSnapshotRevision;
+            aMesh.geometryRevision = aRevision.revision;
+        }
+        if (!ValidatePresentationOverlayPayload(
+                anOverlay.meshes,
+                anOverlay.instances,
+                anOverlay.materials,
+                true)) {
+            return {};
+        }
+
+        const std::uint64_t aFingerprint =
+            PresentationOverlayPayloadFingerprint(anOverlay);
+        if (!aNextOverlayState.fingerprint.has_value()
+            || *aNextOverlayState.fingerprint != aFingerprint) {
+            if (!IncrementRevision(aNextOverlayState.revision)) {
+                return {};
+            }
+            aNextOverlayState.fingerprint = aFingerprint;
+        }
+        if (aNextOverlayState.revision == 0) {
+            return {};
+        }
+        anOverlay.overlayRevision = aNextOverlayState.revision;
+
+        OverlayPointer aSnapshot =
+            std::make_shared<const PresentationOverlaySnapshot>(
+                std::move(anOverlay));
+        // Allocation and validation are complete. This bounded swap is the
+        // only mutation and cannot expose a partially advanced revision.
+        myState->overlay.Swap(aNextOverlayState);
+        return aSnapshot;
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
 OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
     const Handle(OcctDocument)& theDocument,
     const Handle(AIS_InteractiveContext)& theContext,
@@ -1115,6 +1527,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         || theDocument.IsNull()
         || theContext.IsNull()
         || theView.IsNull()
+        || myState == nullptr
+        || myState->publicationSourceIdentifier.empty()
         || theViewportPixels.x == 0
         || theViewportPixels.y == 0) {
         return {};
@@ -1305,10 +1719,16 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aNextState.modelFingerprint.reset();
             aNextState.presentationFingerprint.reset();
             aNextState.cameraFingerprint.reset();
+            aNextState.overlay.fingerprint.reset();
             aNextState.definitions.clear();
+            aNextState.overlay.definitions.clear();
+            aNextState.lastFullSnapshotRevision = 0;
+            aNextState.lastFullDocumentTime = 0;
         }
 
         SceneSnapshot aScene;
+        aScene.publicationSourceIdentifier =
+            aNextState.publicationSourceIdentifier;
         aScene.meshes.reserve(aDefinitions.size());
         std::vector<std::string> aLiveRevisionKeys;
         aLiveRevisionKeys.reserve(aDefinitions.size());
@@ -1847,6 +2267,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         aScene.revisions.model = aNextState.modelRevision;
         aScene.revisions.presentation = aNextState.presentationRevision;
         aScene.revisions.camera = aNextState.cameraRevision;
+        const Handle(TDF_Data)& aData = aDocument->GetData();
+        if (aData.IsNull()) {
+            return {};
+        }
+        aNextState.lastFullSnapshotRevision =
+            aNextState.snapshotRevision;
+        aNextState.lastFullDocumentTime = aData->Time();
 
         // Finish every potentially allocating operation before publishing
         // state. A failed allocation must not consume any revision.

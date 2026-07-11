@@ -301,6 +301,25 @@
     }
 }
 
+- (Core3DScenePresentationOverlaySnapshot *)captureScenePresentationOverlay {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return nil;
+    }
+
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
+        if (viewer == nullptr) {
+            return nil;
+        }
+        const auto overlay = viewer->captureScenePresentationOverlay();
+        return overlay == nullptr
+            ? nil
+            : Core3DCreateScenePresentationOverlaySnapshotDTO(*overlay);
+    } catch (...) {
+        return nil;
+    }
+}
+
 - (void)viewDidInvalidateSceneSnapshot {
     // Renderer-neutral extension point. The OpenGL backend owns invalidation;
     // clients may coalesce immutable snapshot publication for another renderer.

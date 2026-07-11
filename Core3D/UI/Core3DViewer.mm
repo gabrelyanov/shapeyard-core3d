@@ -1170,6 +1170,21 @@ Core3DViewer::captureSceneFrameSnapshot(
         scene::UInt2{viewportWidth, viewportHeight});
 }
 
+scene::OcctSceneSnapshotBuilder::OverlayPointer
+Core3DViewer::captureScenePresentationOverlay() noexcept {
+    if (_objectInteractor == nullptr) {
+        return {};
+    }
+    scene::PresentationOverlayContent aContent;
+    if (_objectInteractor->captureIdlePresentationOverlay(aContent)
+        != PresentationOverlayCaptureStatus::Available) {
+        return {};
+    }
+    return _sceneSnapshotBuilder.PublishPresentationOverlay(
+        myDoc,
+        std::move(aContent));
+}
+
 void Core3DViewer::Rotation(int theX, int theY) {
     if(_objectInteractor == nullptr) {
         return;

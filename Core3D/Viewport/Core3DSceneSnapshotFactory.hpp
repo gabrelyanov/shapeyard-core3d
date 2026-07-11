@@ -18,6 +18,7 @@
 namespace core3d {
 namespace scene {
 struct FrameSnapshot;
+struct PresentationOverlaySnapshot;
 struct SceneSnapshot;
 }
 }
@@ -32,6 +33,11 @@ Core3DSceneSnapshot * _Nullable Core3DCreateSceneSnapshotDTO(
 //! Converts a validated camera-only publication into its immutable public DTO.
 Core3DSceneFrameSnapshot * _Nullable Core3DCreateSceneFrameSnapshotDTO(
     const core3d::scene::FrameSnapshot& snapshot) noexcept;
+
+//! Deep-copies a validated transient presentation into its immutable DTO.
+Core3DScenePresentationOverlaySnapshot * _Nullable
+Core3DCreateScenePresentationOverlaySnapshotDTO(
+    const core3d::scene::PresentationOverlaySnapshot& snapshot) noexcept;
 
 NS_ASSUME_NONNULL_END
 

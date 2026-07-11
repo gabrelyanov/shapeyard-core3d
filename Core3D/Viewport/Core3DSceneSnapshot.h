@@ -53,6 +53,21 @@ typedef NS_ENUM(NSInteger, Core3DSceneRenderRole) {
     Core3DSceneRenderRoleTrihedron,
 };
 
+typedef NS_ENUM(NSInteger, Core3DSceneCoordinateSpace) {
+    Core3DSceneCoordinateSpaceWorld = 0,
+    Core3DSceneCoordinateSpaceWorldAnchorPixels,
+};
+
+typedef NS_ENUM(NSInteger, Core3DSceneDepthPolicy) {
+    Core3DSceneDepthPolicyScene = 0,
+    Core3DSceneDepthPolicyTopmost,
+};
+
+typedef NS_ENUM(NSInteger, Core3DSceneRenderStyle) {
+    Core3DSceneRenderStyleShaded = 0,
+    Core3DSceneRenderStyleWireframe,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneElementKind) {
     Core3DSceneElementKindNone = 0,
     Core3DSceneElementKindObject,
@@ -198,6 +213,9 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly, getter=isSelected) BOOL selected;
 @property (nonatomic, copy, readonly) NSString *name;
 @property (nonatomic, assign, readonly) Core3DSceneRenderRole renderRole;
+@property (nonatomic, assign, readonly) Core3DSceneCoordinateSpace coordinateSpace;
+@property (nonatomic, assign, readonly) Core3DSceneDepthPolicy depthPolicy;
+@property (nonatomic, assign, readonly) Core3DSceneRenderStyle renderStyle;
 //! One binding for each face primitive in the referenced mesh.
 @property (nonatomic, copy, readonly) NSArray<Core3DScenePrimitiveBindingSnapshot *> *primitiveBindings;
 
@@ -240,8 +258,31 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneFrameSnapshot : NSObject
 
+@property (nonatomic, copy, readonly) NSString *publicationSourceIdentifier;
 @property (nonatomic, strong, readonly) Core3DSceneRevisionVector *revisions;
 @property (nonatomic, strong, readonly) Core3DSceneCameraSnapshot *camera;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@end
+
+
+//! Transient renderer-neutral presentation paired with one exact committed
+//! full-scene publication. Empty arrays are a valid explicit overlay clear.
+CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
+@interface Core3DScenePresentationOverlaySnapshot : NSObject
+
+@property (nonatomic, assign, readonly) uint32_t schemaVersion;
+@property (nonatomic, copy, readonly) NSString *publicationSourceIdentifier;
+@property (nonatomic, assign, readonly) uint64_t baseSnapshotRevision;
+@property (nonatomic, assign, readonly) uint64_t baseDocumentGeneration;
+@property (nonatomic, assign, readonly) uint64_t baseModelRevision;
+@property (nonatomic, assign, readonly) uint64_t basePresentationRevision;
+@property (nonatomic, assign, readonly) uint64_t overlayRevision;
+@property (nonatomic, copy, readonly) NSArray<Core3DSceneMeshSnapshot *> *meshes;
+@property (nonatomic, copy, readonly) NSArray<Core3DSceneRenderItemSnapshot *> *renderItems;
+@property (nonatomic, copy, readonly) NSArray<Core3DSceneMaterialSnapshot *> *materials;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -253,6 +294,7 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneSnapshot : NSObject
 
 @property (nonatomic, assign, readonly) uint32_t schemaVersion;
+@property (nonatomic, copy, readonly) NSString *publicationSourceIdentifier;
 @property (nonatomic, strong, readonly) Core3DSceneRevisionVector *revisions;
 //! Convenience alias for revisions.snapshotRevision.
 @property (nonatomic, assign, readonly) uint64_t snapshotRevision;
