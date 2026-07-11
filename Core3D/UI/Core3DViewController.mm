@@ -306,6 +306,11 @@
     // clients may coalesce immutable snapshot publication for another renderer.
 }
 
+- (void)viewDidChangeViewportPresentationState {
+    // Renderer-neutral observation point. Core3D's editing state is already
+    // authoritative, while the UI notification remains deliberately debounced.
+}
+
 - (void)viewWillSelectAtDrawablePoint:(CGPoint)point
                          drawableSize:(CGSize)drawableSize {
     (void)point;
@@ -366,6 +371,11 @@
                 break;
         }
 
+        // GLController emits render invalidations while this method is still
+        // reconciling the public selection/gizmo state. Observe once more only
+        // after that state is authoritative so alternate renderers cannot stay
+        // gated by an intermediate mode until the debounced UI refresh.
+        [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingSelection
                                  | UIStateChangingGizmo
                                  | UIStateChangingDelete
@@ -391,6 +401,10 @@
             default:
                 break;
         }
+        // GLController invalidates the native view before the public gizmo and
+        // capability state above is final. Publish one final-state observation
+        // so alternate renderers cannot remain promoted over an OCCT preview.
+        [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingGizmo | UIStateChangingApply];
     }
 }

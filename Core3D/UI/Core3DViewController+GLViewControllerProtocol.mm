@@ -145,6 +145,7 @@
         }
     }
 
+    [self viewDidChangeViewportPresentationState];
     [self sendNotifyUIState:UIStateChangingGizmo
                              | UIStateChangingDelete
                              | UIStateChangingDuplicate

@@ -175,6 +175,11 @@ typedef struct {
 - (void)viewWillSelectAtDrawablePoint:(CGPoint)point
                          drawableSize:(CGSize)drawableSize
     NS_SWIFT_NAME(viewWillSelect(atDrawablePoint:drawableSize:));
+//! Called synchronously after Core3D finalizes selection, gizmo, and related
+//! presentation state, before the debounced UI-state notification. Renderer
+//! clients should re-evaluate fallback policy and capture a full presentation
+//! snapshot rather than republishing a camera-only frame.
+- (void)viewDidChangeViewportPresentationState;
 //! Called after the native viewport has been invalidated. Subclasses should
 //! coalesce work and must not synchronously recapture full geometry per call.
 - (void)viewDidInvalidateSceneSnapshot;
