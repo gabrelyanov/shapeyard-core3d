@@ -310,7 +310,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     }
 
     _cancelTouches = NO;
-	if (!_rawTouchRendering) {
+	const BOOL didBeginPrimaryInteraction = !_rawTouchRendering;
+	if (didBeginPrimaryInteraction) {
 		_rawTouchRendering = YES;
 		[[self viewportView] beginInteractiveRendering];
 	}
@@ -318,6 +319,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     UITouch *aTouch = [theTouches anyObject];
     if (aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
+        if (didBeginPrimaryInteraction
+            && theEvent.allTouches.count == 1
+            && _delegate
+            && [_delegate respondsToSelector:
+                @selector(viewer:willBeginPrimaryInteractionAtDrawablePoint:drawableSize:)]) {
+            [_delegate viewer:self
+                willBeginPrimaryInteractionAtDrawablePoint:point
+                                             drawableSize:self.drawableSize];
+        }
         _viewer->StartRotation((int)point.x, (int)point.y);
         [self requestRender];
     }
@@ -595,8 +605,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
     const CGPoint aTapPoint =
         [self drawablePointForPoint:[tapRecognizer locationInView:self.view]];
-	if (!_isConstructorMode)
+	if (!_isConstructorMode) {
+		if (_delegate
+			&& [_delegate respondsToSelector:
+				@selector(viewer:willSelectAtDrawablePoint:drawableSize:)]) {
+			[_delegate viewer:self
+				willSelectAtDrawablePoint:aTapPoint
+				             drawableSize:self.drawableSize];
+		}
 		_viewer->Select((int)aTapPoint.x, (int)aTapPoint.y);
+	}
 
 	[self checkSelections];
 	[self requestRender];
@@ -695,8 +713,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 -(NSString*) statusString {
-	auto pos = _viewer->getObjectInteractor()->manipulatorPosition();
-	auto rot = _viewer->getObjectInteractor()->manipulatorTransform()->Trsf().GetRotation();// .GetRotation();
+	auto interactor = _viewer->getObjectInteractor();
+	auto transform = interactor->manipulatorTransform();
+	if (transform.IsNull()) {
+		return @"No active selection";
+	}
+	auto pos = interactor->manipulatorPosition();
+	auto rot = transform->Trsf().GetRotation();
 	Standard_Real rotX, rotY, rotZ;
 	rot.GetEulerAngles(gp_YawPitchRoll, rotX, rotY, rotZ);
 	NSString* status = [NSString stringWithFormat:@"Coord: x%.3f, y%.3f, z%.3f. Angle:x%.3f, y%.3f, z%.3f",

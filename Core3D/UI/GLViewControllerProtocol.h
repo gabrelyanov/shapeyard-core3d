@@ -8,9 +8,23 @@
 #ifndef GLViewControllerProtocol_h
 #define GLViewControllerProtocol_h
 
+#import <UIKit/UIKit.h>
+
+#include "Core3DViewer.h"
+
 @protocol GLViewControllerProtocol <NSObject>
 
 -(void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selectionType;
+
+@optional
+-(void)viewer:(id)sender
+    willBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
+                                  drawableSize:(CGSize)drawableSize;
+-(void)viewer:(id)sender
+    willSelectAtDrawablePoint:(CGPoint)point
+                 drawableSize:(CGSize)drawableSize;
+
+@required
 -(void)didSetupViewer:(id)sender;
 -(void)didInvalidateSceneSnapshot:(id)sender;
 

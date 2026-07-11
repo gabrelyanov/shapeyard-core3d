@@ -306,6 +306,22 @@
     // clients may coalesce immutable snapshot publication for another renderer.
 }
 
+- (void)viewWillSelectAtDrawablePoint:(CGPoint)point
+                         drawableSize:(CGSize)drawableSize {
+    (void)point;
+    (void)drawableSize;
+    // Renderer-neutral observation point. OCCT remains authoritative and the
+    // tap continues through its normal selection/tool path after this returns.
+}
+
+- (void)viewWillBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
+                                          drawableSize:(CGSize)drawableSize {
+    (void)point;
+    (void)drawableSize;
+    // Renderer-neutral observation point used to retain a presented frame
+    // before the authoritative OCCT interaction invalidates it.
+}
+
 - (void)setSelectionType:(PrimitiveSelectionType)type {
     if (_currentSelectionType != type) {
         [GLController setSelectionType:type];

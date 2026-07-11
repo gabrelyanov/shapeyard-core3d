@@ -153,6 +153,21 @@
                              | UIStateChangingApplyMaterial];
 }
 
+- (void)viewer:(id)sender
+    willBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
+                                  drawableSize:(CGSize)drawableSize {
+    (void)sender;
+    [self viewWillBeginPrimaryInteractionAtDrawablePoint:point
+                                            drawableSize:drawableSize];
+}
+
+- (void)viewer:(id)sender
+    willSelectAtDrawablePoint:(CGPoint)point
+                 drawableSize:(CGSize)drawableSize {
+    (void)sender;
+    [self viewWillSelectAtDrawablePoint:point drawableSize:drawableSize];
+}
+
 - (void)didSetupViewer:(id)sender { 
     [self viewDidSetup];
 }

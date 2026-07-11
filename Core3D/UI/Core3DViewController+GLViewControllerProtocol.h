@@ -7,6 +7,8 @@
 
 #import <Core3D/Core3DViewController.h>
 
+#import "GLViewControllerProtocol.h"
+
 NS_ASSUME_NONNULL_BEGIN
 
 @interface Core3DViewController(GLViewControllerProtocol)<GLViewControllerProtocol>

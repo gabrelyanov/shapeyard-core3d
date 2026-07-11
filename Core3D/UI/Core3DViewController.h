@@ -165,6 +165,16 @@ typedef struct {
 - (void)sendNotifyUIState:(UIStateChanging)state NS_REFINED_FOR_SWIFT;
 - (void)viewWillUpdateUIState:(UIStateChanging)state;
 - (void)viewDidSetup;
+//! Called before the first raw primary touch can invalidate the viewport.
+//! Coordinates use top-left-origin drawable pixels.
+- (void)viewWillBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
+                                          drawableSize:(CGSize)drawableSize
+    NS_SWIFT_NAME(viewWillBeginPrimaryInteraction(atDrawablePoint:drawableSize:));
+//! Called once for a recognized viewport tap, before OCCT applies its existing
+//! selection semantics. Coordinates use top-left-origin drawable pixels.
+- (void)viewWillSelectAtDrawablePoint:(CGPoint)point
+                         drawableSize:(CGSize)drawableSize
+    NS_SWIFT_NAME(viewWillSelect(atDrawablePoint:drawableSize:));
 //! Called after the native viewport has been invalidated. Subclasses should
 //! coalesce work and must not synchronously recapture full geometry per call.
 - (void)viewDidInvalidateSceneSnapshot;
