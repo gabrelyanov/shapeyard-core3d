@@ -544,6 +544,16 @@ private:
         [self setNeedsLayout];
     }
     [self updateDisplayLinkState];
+
+    // This is the single normalized invalidation path for controller requests,
+    // lifecycle recovery, and OCCT's Cocoa window callback. Keep clients on the
+    // main thread even when the original render request came from a worker.
+    GLViewController *controller = myController;
+    id<GLViewControllerProtocol> delegate = controller.delegate;
+    if (delegate
+        && [delegate respondsToSelector:@selector(didInvalidateSceneSnapshot:)]) {
+        [delegate didInvalidateSceneSnapshot:controller];
+    }
 }
 
 - (void)beginInteractiveRendering

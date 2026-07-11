@@ -17,6 +17,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DSceneSnapshot;
+@class Core3DSceneFrameSnapshot;
 
 typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
     Core3DAssetLoadResultSuccess = 0,
@@ -151,6 +152,11 @@ typedef struct {
 //! the native viewer has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
 
+//! Capture the current semantic camera and revision vector without traversing
+//! or copying scene geometry. Returns nil until a full snapshot has established
+//! the active document. Main-thread only.
+- (Core3DSceneFrameSnapshot *_Nullable)captureSceneFrameSnapshot;
+
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
@@ -159,6 +165,9 @@ typedef struct {
 - (void)sendNotifyUIState:(UIStateChanging)state NS_REFINED_FOR_SWIFT;
 - (void)viewWillUpdateUIState:(UIStateChanging)state;
 - (void)viewDidSetup;
+//! Called after the native viewport has been invalidated. Subclasses should
+//! coalesce work and must not synchronously recapture full geometry per call.
+- (void)viewDidInvalidateSceneSnapshot;
 - (void)viewDidAssetModify;
 - (void)viewDidLoadFromBundle;
 - (void)viewDidFailToLoadFromBundle:(Core3DAssetLoadResult)result

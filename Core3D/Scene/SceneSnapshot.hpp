@@ -178,6 +178,7 @@ struct CameraSnapshot {
     Double3 eye;
     Double3 center;
     Double3 up = {0.0, 1.0, 0.0};
+    //! True vertical projection values, independent of viewport aspect.
     double verticalFovRadians = 0.0;
     double orthographicHeight = 0.0;
     double nearPlane = 0.0;
@@ -202,6 +203,14 @@ struct SceneSnapshot {
     std::vector<ElementIdentifier> pickTable = {ElementIdentifier()};
     CameraSnapshot camera;
     SelectionSnapshot selection;
+};
+
+//! Lightweight publication used between full scene snapshots. It intentionally
+//! carries no geometry so interactive camera motion and drawable-size changes
+//! never retraverse or remesh the mutable CAD document.
+struct FrameSnapshot {
+    RevisionVector revisions;
+    CameraSnapshot camera;
 };
 
 } // namespace core3d::scene

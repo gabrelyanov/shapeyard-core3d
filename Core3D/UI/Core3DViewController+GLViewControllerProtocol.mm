@@ -157,6 +157,10 @@
     [self viewDidSetup];
 }
 
+- (void)didInvalidateSceneSnapshot:(id)sender {
+    [self viewDidInvalidateSceneSnapshot];
+}
+
 - (void)didChangeStatusString:(NSString *)status {
     self->_coreInfoText = status;
     [self sendNotifyUIState:UIStateChangingCoreInfoText];

@@ -889,12 +889,21 @@ bool BuildCamera(const Handle(V3d_View)& theView,
     theCamera.projection = aCamera->IsOrthographic()
         ? Projection::Orthographic
         : Projection::Perspective;
-    theCamera.verticalFovRadians = aCamera->FOVy() * kPi / 180.0;
-    theCamera.orthographicHeight = aCamera->Scale();
-    theCamera.nearPlane = aCamera->ZNear();
-    theCamera.farPlane = aCamera->ZFar();
     theCamera.aspect = static_cast<double>(theViewportPixels.x)
         / static_cast<double>(theViewportPixels.y);
+
+    // OCCT defines FOVy()/Scale() against the viewport's minor dimension.
+    // Publish renderer-neutral values against the actual vertical dimension
+    // so consumers can always use a conventional vertical projection.
+    const double aMinorToVertical = theCamera.aspect < 1.0
+        ? 1.0 / theCamera.aspect
+        : 1.0;
+    const double aMinorFovRadians = aCamera->FOVy() * kPi / 180.0;
+    theCamera.verticalFovRadians = 2.0 * std::atan(
+        std::tan(aMinorFovRadians * 0.5) * aMinorToVertical);
+    theCamera.orthographicHeight = aCamera->Scale() * aMinorToVertical;
+    theCamera.nearPlane = aCamera->ZNear();
+    theCamera.farPlane = aCamera->ZFar();
     theCamera.viewportPixels = theViewportPixels;
 
     const double aViewDirectionSquared =
@@ -906,6 +915,7 @@ bool BuildCamera(const Handle(V3d_View)& theView,
         && IsFinite(theCamera.center.x) && IsFinite(theCamera.center.y)
         && IsFinite(theCamera.center.z) && IsFinite(theCamera.up.x)
         && IsFinite(theCamera.up.y) && IsFinite(theCamera.up.z)
+        && IsFinite(aMinorFovRadians) && IsFinite(aMinorToVertical)
         && IsFinite(theCamera.verticalFovRadians)
         && IsFinite(theCamera.orthographicHeight)
         && IsFinite(theCamera.nearPlane) && IsFinite(theCamera.farPlane)
@@ -918,6 +928,8 @@ bool BuildCamera(const Handle(V3d_View)& theView,
     }
     return theCamera.projection == Projection::Orthographic
         || (theCamera.nearPlane > 0.0
+            && aMinorFovRadians > 0.0
+            && aMinorFovRadians < kPi
             && theCamera.verticalFovRadians > 0.0
             && theCamera.verticalFovRadians < kPi);
 }
@@ -1029,6 +1041,69 @@ OcctSceneSnapshotBuilder::OcctSceneSnapshotBuilder()
 }
 
 OcctSceneSnapshotBuilder::~OcctSceneSnapshotBuilder() = default;
+
+std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(
+    const Handle(OcctDocument)& theDocument,
+    const Handle(V3d_View)& theView,
+    const UInt2& theViewportPixels) noexcept
+{
+    if (![NSThread isMainThread]
+        || theDocument.IsNull()
+        || theView.IsNull()
+        || theViewportPixels.x == 0
+        || theViewportPixels.y == 0
+        || myState == nullptr
+        || myState->documentObject.IsNull()
+        || myState->documentGeneration == 0
+        || myState->snapshotRevision == 0) {
+        return std::nullopt;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument = theDocument->Document();
+        if (aDocument.IsNull()
+            || aDocument->HasOpenCommand()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier() != myState->documentIdentifier) {
+            return std::nullopt;
+        }
+
+        FrameSnapshot aFrame;
+        if (!BuildCamera(theView, theViewportPixels, aFrame.camera)) {
+            return std::nullopt;
+        }
+
+        const std::uint64_t aFingerprint = CameraFingerprint(aFrame.camera);
+        std::uint64_t aCameraRevision = myState->cameraRevision;
+        std::uint64_t aSnapshotRevision = myState->snapshotRevision;
+        const bool isChanged = !myState->cameraFingerprint.has_value()
+            || *myState->cameraFingerprint != aFingerprint;
+        if (isChanged
+            && (!IncrementRevision(aCameraRevision)
+                || !IncrementRevision(aSnapshotRevision))) {
+            return std::nullopt;
+        }
+
+        aFrame.revisions.snapshot = aSnapshotRevision;
+        aFrame.revisions.documentGeneration = myState->documentGeneration;
+        aFrame.revisions.model = myState->modelRevision;
+        aFrame.revisions.presentation = myState->presentationRevision;
+        aFrame.revisions.camera = aCameraRevision;
+
+        if (isChanged) {
+            myState->cameraFingerprint = aFingerprint;
+            myState->cameraRevision = aCameraRevision;
+            myState->snapshotRevision = aSnapshotRevision;
+        }
+        return aFrame;
+    } catch (const Standard_Failure&) {
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
 
 OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
     const Handle(OcctDocument)& theDocument,

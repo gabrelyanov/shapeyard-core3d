@@ -101,6 +101,7 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) simd_double3 center;
 @property (nonatomic, assign, readonly) simd_double3 up;
 @property (nonatomic, assign, readonly) Core3DSceneProjection projection;
+//! True vertical projection values, independent of viewport aspect.
 @property (nonatomic, assign, readonly) double verticalFieldOfViewRadians;
 @property (nonatomic, assign, readonly) double orthographicHeight;
 @property (nonatomic, assign, readonly) double nearPlane;
@@ -225,6 +226,22 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneElementIdentifier *> *selectedElements;
 @property (nonatomic, strong, readonly, nullable) Core3DSceneElementIdentifier *hoveredElement;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@end
+
+
+//! Lightweight camera publication paired with the most recent committed full
+//! scene. Document, model, and presentation revisions stay anchored to that
+//! scene; snapshot and camera revisions may advance. This object contains no
+//! mesh or material payload.
+CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
+@interface Core3DSceneFrameSnapshot : NSObject
+
+@property (nonatomic, strong, readonly) Core3DSceneRevisionVector *revisions;
+@property (nonatomic, strong, readonly) Core3DSceneCameraSnapshot *camera;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

@@ -17,6 +17,7 @@
 
 namespace core3d {
 namespace scene {
+struct FrameSnapshot;
 struct SceneSnapshot;
 }
 }
@@ -27,6 +28,10 @@ NS_ASSUME_NONNULL_BEGIN
 //! immutable DTO. Returns nil when a producer violates the public contract.
 Core3DSceneSnapshot * _Nullable Core3DCreateSceneSnapshotDTO(
     const core3d::scene::SceneSnapshot& snapshot) noexcept;
+
+//! Converts a validated camera-only publication into its immutable public DTO.
+Core3DSceneFrameSnapshot * _Nullable Core3DCreateSceneFrameSnapshotDTO(
+    const core3d::scene::FrameSnapshot& snapshot) noexcept;
 
 NS_ASSUME_NONNULL_END
 

@@ -123,6 +123,11 @@ static_assert(sizeof(std::uint32_t) == 4,
                            hoveredElement:(nullable Core3DSceneElementIdentifier *)hoveredElement;
 @end
 
+@interface Core3DSceneFrameSnapshot ()
+- (instancetype)initWithRevisions:(Core3DSceneRevisionVector *)revisions
+                            camera:(Core3DSceneCameraSnapshot *)camera;
+@end
+
 @interface Core3DSceneSnapshot ()
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
                              revisions:(Core3DSceneRevisionVector *)revisions
@@ -360,6 +365,21 @@ static_assert(sizeof(std::uint32_t) == 4,
     if (self) {
         _selectedElements = [selectedElements copy];
         _hoveredElement = hoveredElement;
+    }
+    return self;
+}
+
+@end
+
+
+@implementation Core3DSceneFrameSnapshot
+
+- (instancetype)initWithRevisions:(Core3DSceneRevisionVector *)revisions
+                            camera:(Core3DSceneCameraSnapshot *)camera {
+    self = [super init];
+    if (self) {
+        _revisions = revisions;
+        _camera = camera;
     }
     return self;
 }
@@ -1172,6 +1192,24 @@ Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
                         pickTable:pickTable
                            camera:CameraFromScene(snapshot.camera)
                         selection:SelectionFromScene(snapshot.selection)];
+    } catch (...) {
+        return nil;
+    }
+}
+
+Core3DSceneFrameSnapshot *Core3DCreateSceneFrameSnapshotDTO(
+    const FrameSnapshot& snapshot) noexcept {
+    if (snapshot.revisions.snapshot == 0
+        || snapshot.revisions.documentGeneration == 0
+        || snapshot.revisions.camera == 0
+        || !IsValid(snapshot.camera)) {
+        return nil;
+    }
+
+    try {
+        return [[Core3DSceneFrameSnapshot alloc]
+            initWithRevisions:RevisionVectorFromScene(snapshot.revisions)
+                         camera:CameraFromScene(snapshot.camera)];
     } catch (...) {
         return nil;
     }

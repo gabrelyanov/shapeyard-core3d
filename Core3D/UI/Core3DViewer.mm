@@ -1160,6 +1160,16 @@ Core3DViewer::captureSceneSnapshot(
         scene::UInt2{viewportWidth, viewportHeight});
 }
 
+std::optional<scene::FrameSnapshot>
+Core3DViewer::captureSceneFrameSnapshot(
+    const std::uint32_t viewportWidth,
+    const std::uint32_t viewportHeight) noexcept {
+    return _sceneSnapshotBuilder.CaptureFrame(
+        myDoc,
+        myView,
+        scene::UInt2{viewportWidth, viewportHeight});
+}
+
 void Core3DViewer::Rotation(int theX, int theY) {
     if(_objectInteractor == nullptr) {
         return;

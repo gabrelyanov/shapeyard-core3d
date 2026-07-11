@@ -269,6 +269,43 @@
     }
 }
 
+- (Core3DSceneFrameSnapshot *)captureSceneFrameSnapshot {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return nil;
+    }
+
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
+        if (viewer == nullptr) {
+            return nil;
+        }
+
+        const CGSize drawableSize = GLController.drawableSize;
+        if (!std::isfinite(drawableSize.width)
+            || !std::isfinite(drawableSize.height)
+            || drawableSize.width < 1.0
+            || drawableSize.height < 1.0
+            || drawableSize.width > std::numeric_limits<std::uint32_t>::max()
+            || drawableSize.height > std::numeric_limits<std::uint32_t>::max()) {
+            return nil;
+        }
+
+        const auto frame = viewer->captureSceneFrameSnapshot(
+            static_cast<std::uint32_t>(std::llround(drawableSize.width)),
+            static_cast<std::uint32_t>(std::llround(drawableSize.height)));
+        return !frame.has_value()
+            ? nil
+            : Core3DCreateSceneFrameSnapshotDTO(*frame);
+    } catch (...) {
+        return nil;
+    }
+}
+
+- (void)viewDidInvalidateSceneSnapshot {
+    // Renderer-neutral extension point. The OpenGL backend owns invalidation;
+    // clients may coalesce immutable snapshot publication for another renderer.
+}
+
 - (void)setSelectionType:(PrimitiveSelectionType)type {
     if (_currentSelectionType != type) {
         [GLController setSelectionType:type];

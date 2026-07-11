@@ -97,6 +97,12 @@ namespace core3d {
         scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
+
+        //! Capture only the current semantic camera and established revision
+        //! vector. Main-thread only and constant with respect to mesh size.
+        std::optional<scene::FrameSnapshot> captureSceneFrameSnapshot(
+            std::uint32_t viewportWidth,
+            std::uint32_t viewportHeight) noexcept;
     private:
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);

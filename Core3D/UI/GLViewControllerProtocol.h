@@ -12,6 +12,7 @@
 
 -(void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selectionType;
 -(void)didSetupViewer:(id)sender;
+-(void)didInvalidateSceneSnapshot:(id)sender;
 
 #ifdef DEBUG
 -(void)didChangeStatusString:(NSString *)status;
