@@ -170,6 +170,10 @@ typedef struct {
 - (void)viewWillBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
                                           drawableSize:(CGSize)drawableSize
     NS_SWIFT_NAME(viewWillBeginPrimaryInteraction(atDrawablePoint:drawableSize:));
+//! Called once after the last raw touch ends or is cancelled and OCCT has
+//! committed or rolled back its authoritative interaction.
+- (void)viewDidEndPrimaryInteractionCancelled:(BOOL)cancelled
+    NS_SWIFT_NAME(viewDidEndPrimaryInteraction(cancelled:));
 //! Called once for a recognized viewport tap, before OCCT applies its existing
 //! selection semantics. Coordinates use top-left-origin drawable pixels.
 - (void)viewWillSelectAtDrawablePoint:(CGPoint)point

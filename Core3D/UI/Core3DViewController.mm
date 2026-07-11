@@ -327,6 +327,12 @@
     // before the authoritative OCCT interaction invalidates it.
 }
 
+- (void)viewDidEndPrimaryInteractionCancelled:(BOOL)cancelled {
+    (void)cancelled;
+    // Renderer-neutral observation point. OCCT has already resolved the
+    // interaction and alternate renderers may now capture a fresh scene.
+}
+
 - (void)setSelectionType:(PrimitiveSelectionType)type {
     if (_currentSelectionType != type) {
         [GLController setSelectionType:type];

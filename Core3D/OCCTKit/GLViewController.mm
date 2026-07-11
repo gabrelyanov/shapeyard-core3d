@@ -72,6 +72,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 @interface GLViewController () <UIGestureRecognizerDelegate>
 - (void)endActiveRenderingInteractions;
+- (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 @end
 
 @implementation GLViewController {
@@ -79,6 +80,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     BOOL _cancelTouches;
     BOOL _didSetupViewer;
     BOOL _rawTouchRendering;
+    BOOL _rawTouchWasCancelled;
+    NSMutableSet<UITouch *> *_rawViewportTouches;
     BOOL _pinchRendering;
     BOOL _panRendering;
     CGPoint _pinchPreviousTouch[2];
@@ -120,6 +123,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (self) {
         _viewer = std::make_shared<Core3DViewer>();
         _assetDataQueue = dispatch_queue_create("com.shapeyard.sync", NULL);
+		_rawViewportTouches = [NSMutableSet set];
 		_isConstructorMode = false;
         [[NSNotificationCenter defaultCenter]
             addObserver:self
@@ -219,6 +223,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)endActiveRenderingInteractions
 {
     GLView *view = [self viewportView];
+    const BOOL hadRawPrimaryInteraction = _rawTouchRendering;
     const BOOL hadActiveInteraction =
         _rawTouchRendering || _pinchRendering || _panRendering;
     if (hadActiveInteraction && _viewer != nullptr) {
@@ -228,6 +233,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _rawTouchRendering = NO;
         [view endInteractiveRendering];
     }
+    [_rawViewportTouches removeAllObjects];
     if (_pinchRendering) {
         _pinchRendering = NO;
         [view endInteractiveRendering];
@@ -239,6 +245,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (hadActiveInteraction) {
         [self requestRender];
     }
+    if (hadRawPrimaryInteraction
+        && _delegate
+        && [_delegate respondsToSelector:
+            @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+        [_delegate viewer:self didEndPrimaryInteractionCancelled:YES];
+    }
+    _rawTouchWasCancelled = NO;
 }
 // =======================================================================
 // function : Draw
@@ -301,7 +314,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 // function : touchesBegan
 // purpose  :
 // =======================================================================
-- (void)touchesBegan:(NSSet *)theTouches withEvent:(UIEvent *)theEvent
+- (void)touchesBegan:(NSSet<UITouch *> *)theTouches withEvent:(UIEvent *)theEvent
 {
     [super touchesBegan:theTouches withEvent:theEvent];
 
@@ -309,9 +322,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         return;
     }
 
-    _cancelTouches = NO;
-	const BOOL didBeginPrimaryInteraction = !_rawTouchRendering;
+	const BOOL didBeginPrimaryInteraction = _rawViewportTouches.count == 0;
+	[_rawViewportTouches unionSet:theTouches];
 	if (didBeginPrimaryInteraction) {
+		_cancelTouches = NO;
+		_rawTouchWasCancelled = NO;
 		_rawTouchRendering = YES;
 		[[self viewportView] beginInteractiveRendering];
 	}
@@ -320,7 +335,6 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
         if (didBeginPrimaryInteraction
-            && theEvent.allTouches.count == 1
             && _delegate
             && [_delegate respondsToSelector:
                 @selector(viewer:willBeginPrimaryInteractionAtDrawablePoint:drawableSize:)]) {
@@ -330,6 +344,22 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         }
         _viewer->StartRotation((int)point.x, (int)point.y);
         [self requestRender];
+    }
+}
+
+- (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled {
+    if (!_rawTouchRendering || _rawViewportTouches.count != 0) {
+        return;
+    }
+    _rawTouchRendering = NO;
+    [[self viewportView] endInteractiveRendering];
+    const BOOL resolvedAsCancelled = cancelled || _rawTouchWasCancelled;
+    _rawTouchWasCancelled = NO;
+    if (_delegate
+        && [_delegate respondsToSelector:
+            @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+        [_delegate viewer:self
+            didEndPrimaryInteractionCancelled:resolvedAsCancelled];
     }
 }
 
@@ -383,17 +413,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             [_delegate didChangeStatusString:[self statusString]];
         }
 #endif
-    }
-	if (_rawTouchRendering) {
-		_rawTouchRendering = NO;
-		[[self viewportView] endInteractiveRendering];
 	}
+	[_rawViewportTouches minusSet:touches];
+	[self endRawPrimaryInteractionIfNeededCancelled:NO];
 
     return;
 }
 
 -(void) touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event{
     [super touchesCancelled:touches withEvent:event];
+	_rawTouchWasCancelled = YES;
 
     UITouch *aTouch = [touches anyObject];
     if (!_isPreviewMode && aTouch != NULL) {
@@ -406,11 +435,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             [_delegate didChangeStatusString:[self statusString]];
         }
 #endif
-    }
-	if (_rawTouchRendering) {
-		_rawTouchRendering = NO;
-		[[self viewportView] endInteractiveRendering];
 	}
+	[_rawViewportTouches minusSet:touches];
+	[self endRawPrimaryInteractionIfNeededCancelled:YES];
 
     return;
 }

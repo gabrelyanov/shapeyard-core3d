@@ -163,6 +163,12 @@
 }
 
 - (void)viewer:(id)sender
+    didEndPrimaryInteractionCancelled:(BOOL)cancelled {
+    (void)sender;
+    [self viewDidEndPrimaryInteractionCancelled:cancelled];
+}
+
+- (void)viewer:(id)sender
     willSelectAtDrawablePoint:(CGPoint)point
                  drawableSize:(CGSize)drawableSize {
     (void)sender;

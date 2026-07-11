@@ -21,6 +21,8 @@
     willBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
                                   drawableSize:(CGSize)drawableSize;
 -(void)viewer:(id)sender
+    didEndPrimaryInteractionCancelled:(BOOL)cancelled;
+-(void)viewer:(id)sender
     willSelectAtDrawablePoint:(CGPoint)point
                  drawableSize:(CGSize)drawableSize;
 
