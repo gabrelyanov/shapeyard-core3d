@@ -21,6 +21,15 @@
 namespace core3d {
     typedef unsigned char selection_t;
 
+    enum class AssetImportResult {
+        Success = 0,
+        InvalidData,
+        TemporaryFileFailure,
+        Busy,
+        UnsupportedVersion,
+        InternalFailure,
+    };
+
     class Core3DViewer: public OcctViewer {
     public:
         static constexpr selection_t kSelectionTypeNone = 0;
@@ -68,7 +77,8 @@ namespace core3d {
                             int theWidth,
                             int theHeight);
         
-        bool ImportCbf(const std::string &theFilename);
+        AssetImportResult ImportCbf(const std::string &theFilename);
+        AssetImportResult ValidateCbf(const std::string &theFilename) const;
         void redrawDocument();
 
         void setPreviewMode();
@@ -80,10 +90,13 @@ namespace core3d {
     private:
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);
-        bool traverseLabel (const TDF_Label& theLabel,
+        bool traverseLabel (const Handle(TDocStd_Document)& theDoc,
+                            const TDF_Label& theLabel,
                                             const TCollection_AsciiString& theNamePrefix,
                                             const TopLoc_Location& theLoc,
                                             MapOfPrsForShapes& theMapOfShapes);
+        void recreateInteractors(PrimitiveManipulatorType theManipulatorType,
+                                 ShapeSelectionMode theSelectionMode);
 
     private:
         std::shared_ptr<ObjectInteractor> _objectInteractor;

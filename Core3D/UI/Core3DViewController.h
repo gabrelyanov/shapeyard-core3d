@@ -16,6 +16,15 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
+    Core3DAssetLoadResultSuccess = 0,
+    Core3DAssetLoadResultInvalidData,
+    Core3DAssetLoadResultTemporaryFileFailure,
+    Core3DAssetLoadResultBusy,
+    Core3DAssetLoadResultUnsupportedVersion,
+    Core3DAssetLoadResultInternalFailure,
+};
+
 typedef struct {
     double min;
     double max;
@@ -81,6 +90,8 @@ typedef struct {
 
 @optional
 - (void)viewDidLoadFromBundle;
+- (void)viewDidFailToLoadFromBundle:(Core3DAssetLoadResult)result
+    NS_SWIFT_NAME(viewDidFailToLoadFromBundle(_:));
 
 @end
 
@@ -111,13 +122,14 @@ typedef struct {
 @property (nonatomic, assign) BOOL can_apply_material NS_REFINED_FOR_SWIFT;
 
 @property (nonatomic, assign, readonly) BOOL isEmptyOfDisplayedObjects;
+@property (nonatomic, assign, readonly) NSInteger numberOfDisplayedShapes;
 
 @property (nonatomic, weak, nullable) id<Core3DViewControllerProtocol> delegate;
 
 - (void)setPreviewMode;
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
-- (NSData *)thumbData;
+- (NSData *_Nullable)thumbData;
 
 - (void)loadFromBundle:(NSURL *)bundleUrl;
 - (void)saveSnapshot;
@@ -132,6 +144,8 @@ typedef struct {
 - (void)viewDidSetup;
 - (void)viewDidAssetModify;
 - (void)viewDidLoadFromBundle;
+- (void)viewDidFailToLoadFromBundle:(Core3DAssetLoadResult)result
+    NS_SWIFT_NAME(viewDidFailToLoadFromBundle(_:));
 
 @end
 

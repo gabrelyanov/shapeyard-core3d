@@ -105,7 +105,7 @@
     if (_currentGizmoType != PrimitiveGizmoTypeChamfer) {
         return;
     }
-    [self setChamfer:0];
+    [GLController cancelChamfer];
     [self completeOperationInteraction];
 }
 
@@ -119,7 +119,11 @@
     }
     self.can_delete = NO;
     self.can_duplicate = NO;
-    [self sendNotifyUIState:UIStateChangingGizmo | UIStateChangingDuplicate | UIStateChangingDelete];
+    self.can_apply = NO;
+    [self sendNotifyUIState:UIStateChangingGizmo
+                             | UIStateChangingDuplicate
+                             | UIStateChangingDelete
+                             | UIStateChangingApply];
 }
 
 - (void)applyMirror {

@@ -11,6 +11,7 @@
 #include "AIS_InteractiveContext.hxx"
 #include "OcctDocument.h"
 #include <map>
+#include <vector>
 
 namespace core3d {
 
@@ -27,7 +28,11 @@ namespace core3d {
 
 	struct TemporalBooleanObject {
 		Handle(AIS_InteractiveObject) copy;
+		Handle(AIS_InteractiveObject) original;
 		BooleanSelectionType selectionType;
+		TDF_Label documentLabel;
+		Graphic3d_NameOfMaterial materialName = Graphic3d_NameOfMaterial_ShinyPlastified;
+		Quantity_NameOfColor colorName = Quantity_NOC_GRAY80;
 	};
 
 	class BooleanOperationController {
@@ -43,16 +48,26 @@ namespace core3d {
 		
 	private:
 		void showInteractiveByType(const Handle(AIS_InteractiveObject) shape, BooleanSelectionType type);
-		void boolSubtract(const std::vector<Handle(AIS_InteractiveObject)> &actorIOArray,
+		Standard_Boolean boolSubtract(const std::vector<Handle(AIS_InteractiveObject)> &actorIOArray,
 					  const std::vector<Handle(AIS_InteractiveObject)> &actedIOArray);
-		void boolUnion(const std::vector<Handle(AIS_InteractiveObject)> &actedIOArray);
+		Standard_Boolean boolUnion(const std::vector<Handle(AIS_InteractiveObject)> &actedIOArray);
 		void resetCachedSelection();
-		void copyMaterial(Handle(AIS_InteractiveObject) &to, const Handle(AIS_InteractiveObject) &from);
-		Handle(AIS_InteractiveObject) ioCopyWithMaterial(const Handle(AIS_InteractiveObject) &orig);
+		void clearOperationState();
+		void rememberSubjectSelection(const TDF_Label& label);
+		void forgetSubjectSelection(const TDF_Label& label);
+		std::vector<Handle(AIS_InteractiveObject)> orderedSubjectPresentations(
+			Standard_Boolean& isComplete) const;
+		void applyStyle(Handle(AIS_InteractiveObject)& object, const TemporalBooleanObject& style);
+		void persistStyle(const TDF_Label& label, const TemporalBooleanObject& style);
+		Handle(AIS_InteractiveObject) ioCopyWithStyle(const Handle(AIS_InteractiveObject)& orig,
+			const TemporalBooleanObject& style);
 		
     private:
         std::vector<Handle(AIS_InteractiveObject)> _actedIOArray;
         std::vector<Handle(AIS_InteractiveObject)> _actorIOArray;
+		// AIS presentations are recreated while previewing. Persistent labels keep
+		// the semantic first-selected order stable across those pointer changes.
+		std::vector<TDF_Label> _subjectSelectionOrder;
 
 	protected:
         Handle(AIS_InteractiveContext)  myContext;

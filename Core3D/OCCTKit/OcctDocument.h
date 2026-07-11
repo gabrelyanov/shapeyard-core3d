@@ -58,20 +58,23 @@ public:
 
     TDF_Label AddShape(Handle(AIS_Shape) object);
     TDF_Label AddShape(Handle(AIS_InteractiveObject) object);
-    void addSolidObject(const TopoDS_Shape& solid);
+    TDF_Label ShapeLabel(Handle(AIS_InteractiveObject) object) const;
     
     Graphic3d_NameOfMaterial MaterialNameForShape(Handle(AIS_Shape) object);
+    Graphic3d_NameOfMaterial MaterialNameForLabel(const TDF_Label& label) const;
+    Quantity_NameOfColor ColorNameForLabel(const TDF_Label& label) const;
 
     void ReplaceShape(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     
     void RemoveShape(TopoDS_Shape object);
     void RemoveShape(Handle(AIS_Shape) object);
     void RemoveShape(Handle(AIS_InteractiveObject) object);
+    Standard_Boolean RemoveShape(const TDF_Label& label);
     
     void ApplyTransforms();
 
-    void undo();
-    void redo();
+	Standard_Boolean undo();
+	Standard_Boolean redo();
     const bool canUndo() const;
     const bool canRedo() const;
     

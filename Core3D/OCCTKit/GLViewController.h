@@ -33,6 +33,9 @@
 #import "GLViewControllerProtocol.h"
 
 #include "OrthoProjectionType.h"
+#import "../UI/Core3DViewController.h"
+
+NS_ASSUME_NONNULL_BEGIN
 
 //! OpenGL view controller
 @interface GLViewController : UIViewController {
@@ -72,9 +75,11 @@
 - (void)setPreviewMode;
 
 - (BOOL)isEmptyOfDisplayedObjects;
+- (NSInteger)numberOfDisplayedShapes;
 - (NSInteger)numberOfDetectedEdges;
 
 - (void)setChamfer:(CGFloat)value;
+- (void)cancelChamfer;
 - (void) applyMirror;
 - (void) cancelMirror;
 - (void) applySubtract;
@@ -91,7 +96,7 @@
 - (void)redo;
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
-- (void)setAssetData:(NSData *_Nonnull)data completion:(void(^)(void))completion;
+- (void)setAssetData:(NSData *_Nonnull)data completion:(void(^)(Core3DAssetLoadResult result))completion;
 - (NSData *_Nullable)thumbData;
 - (BOOL)saveSnapshot;
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;
@@ -100,5 +105,7 @@
 -(NSString*) statusString;
 
 @end
+
+NS_ASSUME_NONNULL_END
 
 #endif // GLViewController_h

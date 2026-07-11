@@ -28,10 +28,13 @@ namespace core3d {
 
 	struct EdgesSelection {
 		Handle(SelectMgr_EntityOwner) detectedOwner;
+		TDF_Label documentLabel;
 		std::vector<TopoDS_Edge> edges;
 		Handle(AIS_Shape) tempFilletShapePrs;
 		Handle(AIS_Shape) filletShapePrs;
 		gp_Trsf transform;
+		Graphic3d_NameOfMaterial materialName = Graphic3d_NameOfMaterial_ShinyPlastified;
+		Quantity_NameOfColor colorName = Quantity_NOC_GRAY80;
 	};
 
     class ShapeInteractor : public Interactor {
@@ -41,6 +44,7 @@ namespace core3d {
 		Handle(AIS_InteractiveObject) _subtractorObjectPrs;
 		std::vector<EdgesSelection> _detectedEdges;
         Standard_Real _chamferValue = 0;
+		Standard_Boolean _ownsChamferCommand = Standard_False;
 
         void extractGeometryShapes(const TopoDS_Shape &shape,
                                    std::vector<TopoDS_Face> &faces,
@@ -55,8 +59,10 @@ namespace core3d {
         const ShapeSelectionMode getSelectionMode() const;
 		Standard_Boolean setChamferValueForSelection(const Standard_Real value);
 		void resetWireframeTemplateShape();
+		void cancelChamfer();
 		Standard_Size saveSelectionEdges(bool preventRechamfer = PREVENT_RECHAMFER);
 		const Standard_Boolean isEmptyOfDisplayedObjects() const;
+		const Standard_Size getNumberOfDisplayedShapes() const;
         void exportShapes();
         void exportToStl(const std::string &filename, const Standard_Boolean isASCII = Standard_True);
         void exportToObj(const std::string &filename);
@@ -66,6 +72,7 @@ namespace core3d {
 	private:
 		void setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio);
 		void copyMaterial(Handle(AIS_Shape) &to, const Handle(AIS_Shape) &from);
+		void discardChamferPreview();
 
     };
 }

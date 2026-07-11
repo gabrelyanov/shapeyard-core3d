@@ -96,33 +96,64 @@ void OcctDocument::InitDoc()
   if (!myOcafDoc.IsNull())
   {
     myOcafDoc->SetUndoLimit(40);
+
+	// Create the persistent XCAF tools before the first undoable command. If the
+	// first shape command creates these infrastructure attributes, Undo removes
+	// them and a viewport redraw recreates them outside history; Redo then fails
+	// because the same labels already carry those attributes.
+	(void)XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+	(void)XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
   }
 }
 
 void OcctDocument::RemoveShape(Handle(AIS_InteractiveObject) object) {
-    Handle(AIS_Shape) aisShape = Handle(AIS_Shape)::DownCast(object);
-    RemoveShape(aisShape);
+    RemoveShape(ShapeLabel(object));
 }
 
 void OcctDocument::RemoveShape(Handle(AIS_Shape) aisShape) {
-    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
-    TDF_Label label;
-
-    if(!aisShape.IsNull()) {
-        if(shapeTool->FindShape(aisShape->Shape(), label)
-           || shapeTool->FindShape(aisShape->Shape(), label, Standard_True)) {
-            shapeTool->RemoveShape(label);
-        }
-    }
+    RemoveShape(ShapeLabel(aisShape));
 }
 
 void OcctDocument::RemoveShape(TopoDS_Shape object) {
+    if (myOcafDoc.IsNull() || object.IsNull()) {
+        return;
+    }
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
     TDF_Label label;
     if(shapeTool->FindShape(object, label)
        || shapeTool->FindShape(object, label, Standard_True)) {
-        shapeTool->RemoveShape(label);
+        RemoveShape(label);
     }
+}
+
+TDF_Label OcctDocument::ShapeLabel(Handle(AIS_InteractiveObject) object) const {
+    TDF_Label label;
+    if (myOcafDoc.IsNull() || object.IsNull()) {
+        return label;
+    }
+
+    Handle(AIS_Shape) aisShape = Handle(AIS_Shape)::DownCast(object);
+    if (aisShape.IsNull() || aisShape->Shape().IsNull()) {
+        return label;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    if (shapeTool.IsNull()) {
+        return label;
+    }
+    shapeTool->FindShape(aisShape->Shape(), label)
+        || shapeTool->FindShape(aisShape->Shape(), label, Standard_True);
+    return label;
+}
+
+Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
+    if (myOcafDoc.IsNull() || label.IsNull()) {
+        return Standard_False;
+    }
+    Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    return !shapeTool.IsNull() && shapeTool->RemoveShape(label, Standard_True);
 }
 
 TDF_Label OcctDocument::AddShape(Handle(AIS_InteractiveObject) object) {
@@ -189,14 +220,30 @@ void OcctDocument::SaveObjectColor(const TDF_Label& label, const Quantity_NameOf
 Graphic3d_NameOfMaterial OcctDocument::MaterialNameForShape(Handle(AIS_Shape) object) {
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
     TDF_Label label;
-    Handle(TDataStd_Integer) aCurrentint;
     if(shapeTool->FindShape(object->Shape(), label)) {
-        label.FindChild(11).FindAttribute(TDataStd_Integer::GetID(), aCurrentint);
-        if(!aCurrentint.IsNull()) {
-            return (Graphic3d_NameOfMaterial)aCurrentint->Get();
-        }
+        return MaterialNameForLabel(label);
     }
     return Graphic3d_NameOfMaterial_UserDefined;
+}
+
+Graphic3d_NameOfMaterial OcctDocument::MaterialNameForLabel(const TDF_Label& label) const {
+    Handle(TDataStd_Integer) attribute;
+    if (!label.IsNull()
+        && label.FindChild(11).FindAttribute(TDataStd_Integer::GetID(), attribute)
+        && !attribute.IsNull()) {
+        return static_cast<Graphic3d_NameOfMaterial>(attribute->Get());
+    }
+    return Graphic3d_NameOfMaterial_ShinyPlastified;
+}
+
+Quantity_NameOfColor OcctDocument::ColorNameForLabel(const TDF_Label& label) const {
+    Handle(TDataStd_Integer) attribute;
+    if (!label.IsNull()
+        && label.FindChild(12).FindAttribute(TDataStd_Integer::GetID(), attribute)
+        && !attribute.IsNull()) {
+        return static_cast<Quantity_NameOfColor>(attribute->Get());
+    }
+    return Quantity_NOC_GRAY80;
 }
 
 void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
@@ -286,52 +333,69 @@ void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(
     anAis->SetLocalTransformation(LabelTransform(aRefLabel));
 }
 
-void OcctDocument::addSolidObject(const TopoDS_Shape& solid) {
-    myOcafDoc->NewCommand();
-    
-    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
-    TDF_Label label = shapeTool->NewShape();
-    shapeTool->SetShape(label, solid);
-    
-    myOcafDoc->CommitCommand();
-    NotifyChanges();
-}
-
-void OcctDocument::undo() {
-    if(!canUndo()) {
-        return;
-    }
-    myOcafDoc->Undo();
-}
-void OcctDocument::redo() {
-    if(!canRedo()) {
-        return;
+Standard_Boolean OcctDocument::undo() {
+    if (!canUndo()) {
+		return Standard_False;
     }
     try {
-        myOcafDoc->Redo();
-    } catch(const Standard_DomainError& ex) {
+        if (myOcafDoc->Undo()) {
+            NotifyChanges();
+			return Standard_True;
+        }
+    } catch (const Standard_Failure& ex) {
         std::cout << ex.GetMessageString() << std::endl;
     }
+	return Standard_False;
+}
+Standard_Boolean OcctDocument::redo() {
+    if (!canRedo()) {
+		return Standard_False;
+    }
+    try {
+		if (myOcafDoc->Redo()) {
+			NotifyChanges();
+			return Standard_True;
+		}
+	} catch(const Standard_Failure& ex) {
+        std::cout << ex.GetMessageString() << std::endl;
+    }
+	return Standard_False;
 }
 
 const bool OcctDocument::canUndo() const {
-    return myOcafDoc->GetAvailableUndos() > 0;
+	return !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()
+		&& myOcafDoc->GetAvailableUndos() > 0;
 }
 
 const bool OcctDocument::canRedo() const {
-    return myOcafDoc->GetAvailableRedos() > 0;
+	return !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()
+		&& myOcafDoc->GetAvailableRedos() > 0;
 }
 
 std::string OcctDocument::save(const std::string& path) {
+    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()) {
+        return {};
+    }
+
     auto app =  Handle(TDocStd_Application)::DownCast(myOcafDoc->Application());
-    PCDM_StoreStatus status = app->SaveAs(myOcafDoc, path.c_str()); // ".cbf"
-    std::cout << "Save CBF status: " << status << std::endl;
-    std::cout << "Save path: " << path << std::endl;
-    return path + ".cbf";
+    if (app.IsNull()) {
+        return {};
+    }
+
+    try {
+        PCDM_StoreStatus status = app->SaveAs(myOcafDoc, path.c_str()); // ".cbf"
+        if (status != PCDM_SS_OK) {
+            return {};
+        }
+        return path + ".cbf";
+    } catch (const Standard_Failure& failure) {
+        std::cout << "Save CBF failure: " << failure.GetMessageString() << std::endl;
+        return {};
+    }
 }
 
 void OcctDocument::NotifyChanges() {
     [[NSNotificationCenter defaultCenter]
      postNotificationName:@"OcctDocumentChanges"
-     object:nil];
+     object:[NSValue valueWithPointer:this]];
 }

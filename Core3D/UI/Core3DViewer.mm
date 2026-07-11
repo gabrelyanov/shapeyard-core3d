@@ -30,18 +30,334 @@
 #include "BRepAlgoAPI_Cut.hxx"
 #include "BRepAlgoAPI_Fuse.hxx"
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <BinDrivers.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDF_ChildIterator.hxx>
+#include <TDF_LabelSequence.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
 
 
 #include <BRepBuilderAPI_GTransform.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <Standard_Failure.hxx>
+#include <array>
+#include <cmath>
+#include <exception>
+#include <new>
+#include <vector>
 
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreImage/CIFilter.h>
 
 namespace core3d {
+
+namespace {
+
+bool IsTopologicallyValid(const TopoDS_Shape& shape) {
+    if (shape.IsNull()) {
+        return false;
+    }
+    try {
+        BRepCheck_Analyzer analyzer(shape, Standard_True);
+        return analyzer.IsValid();
+    } catch (...) {
+        return false;
+    }
+}
+
+constexpr NSUInteger kMaximumPrimitiveCount = 1024;
+constexpr double kMinimumPrimitiveScale = 1.0e-4;
+constexpr double kMaximumPrimitiveScale = 1.0e4;
+constexpr double kMinimumPrimitiveDimension = 1.0e-3;
+constexpr double kMaximumPrimitiveDimension = 1.0e6;
+constexpr double kMaximumPositionMagnitude = 1.0e6;
+constexpr double kMaximumRotationMagnitude = 360000.0;
+
+struct PreparedPrimitive {
+    Handle(AIS_Shape) presentation;
+    Graphic3d_NameOfMaterial material;
+    Quantity_NameOfColor color;
+};
+
+bool ReadFiniteJSONNumber(id value, double& result) {
+    if (![value isKindOfClass:[NSNumber class]]) {
+        return false;
+    }
+
+    NSNumber* number = static_cast<NSNumber*>(value);
+    if (CFGetTypeID((__bridge CFTypeRef)number) == CFBooleanGetTypeID()) {
+        return false;
+    }
+
+    result = number.doubleValue;
+    return std::isfinite(result);
+}
+
+bool ReadFiniteVector3(id value, std::array<double, 3>& result) {
+    if (![value isKindOfClass:[NSArray class]]) {
+        return false;
+    }
+
+    NSArray* values = static_cast<NSArray*>(value);
+    if (values.count != result.size()) {
+        return false;
+    }
+
+    for (NSUInteger index = 0; index < values.count; ++index) {
+        if (!ReadFiniteJSONNumber(values[index], result[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsBoundedMagnitude(const std::array<double, 3>& values, double maximum) {
+    for (double value : values) {
+        if (std::abs(value) > maximum) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsValidScale(const std::array<double, 3>& scale) {
+    for (double value : scale) {
+        if (value < kMinimumPrimitiveScale || value > kMaximumPrimitiveScale) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsValidDimension(double value) {
+    return std::isfinite(value)
+        && value >= kMinimumPrimitiveDimension
+        && value <= kMaximumPrimitiveDimension;
+}
+
+void AbortCommandNoThrow(const Handle(TDocStd_Document)& document) noexcept {
+    if (document.IsNull()) {
+        return;
+    }
+    try {
+        if (document->HasOpenCommand()) {
+            document->AbortCommand();
+        }
+    } catch (...) {
+        // Preserve the original transaction failure.
+    }
+}
+
+bool StagePreparedPrimitives(
+    const Handle(OcctDocument)& document,
+    const std::vector<PreparedPrimitive>& primitives) {
+    if (document.IsNull() || primitives.empty()) {
+        return false;
+    }
+
+    Handle(TDocStd_Document) transaction = document->ChangeDocument();
+    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+        return false;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        transaction->NewCommand();
+        if (!transaction->HasOpenCommand()) {
+            return false;
+        }
+
+        for (const PreparedPrimitive& primitive : primitives) {
+            if (primitive.presentation.IsNull()
+                || primitive.presentation->Shape().IsNull()) {
+                AbortCommandNoThrow(transaction);
+                return false;
+            }
+
+            const TDF_Label label = document->AddShape(primitive.presentation);
+            if (label.IsNull()) {
+                AbortCommandNoThrow(transaction);
+                return false;
+            }
+            document->SaveObjectMaterial(label, primitive.material);
+            document->SaveObjectColor(label, primitive.color);
+        }
+
+        return true;
+    } catch (const Standard_Failure&) {
+        AbortCommandNoThrow(transaction);
+        return false;
+    } catch (const std::exception&) {
+        AbortCommandNoThrow(transaction);
+        return false;
+    } catch (...) {
+        AbortCommandNoThrow(transaction);
+        return false;
+    }
+}
+
+bool PublishPreparedPrimitives(
+    const Handle(OcctDocument)& document,
+	const Handle(Core3DContext)& context,
+	const std::vector<PreparedPrimitive>& primitives,
+	Standard_Integer selectionMode) {
+	if (context.IsNull() || !StagePreparedPrimitives(document, primitives)) {
+		return false;
+	}
+
+	Standard_Boolean displayedAll = Standard_False;
+	try {
+		OCC_CATCH_SIGNALS
+		for (const PreparedPrimitive& primitive : primitives) {
+			context->Display(
+				primitive.presentation,
+				AIS_Shaded,
+				selectionMode,
+				Standard_False);
+		}
+		displayedAll = Standard_True;
+	} catch (...) {
+		displayedAll = Standard_False;
+	}
+
+	Handle(TDocStd_Document) transaction = document->ChangeDocument();
+	if (!displayedAll) {
+		for (const PreparedPrimitive& primitive : primitives) {
+			try {
+				context->Remove(primitive.presentation, Standard_False);
+			} catch (...) {
+			}
+		}
+		AbortCommandNoThrow(transaction);
+		return false;
+	}
+
+	Standard_Boolean committed = Standard_False;
+	try {
+		committed = !transaction.IsNull()
+			&& transaction->HasOpenCommand()
+			&& transaction->CommitCommand();
+	} catch (...) {
+		committed = Standard_False;
+	}
+	if (!committed) {
+		for (const PreparedPrimitive& primitive : primitives) {
+			try {
+				context->Remove(primitive.presentation, Standard_False);
+			} catch (...) {
+			}
+		}
+		AbortCommandNoThrow(transaction);
+		return false;
+	}
+
+	document->NotifyChanges();
+	return true;
+}
+
+AssetImportResult ImportResultForReaderStatus(PCDM_ReaderStatus status) {
+    switch (status) {
+        case PCDM_RS_OK:
+            return AssetImportResult::Success;
+        case PCDM_RS_NoDocument:
+        case PCDM_RS_FormatFailure:
+        case PCDM_RS_UnrecognizedFileFormat:
+        case PCDM_RS_NoModel:
+            return AssetImportResult::InvalidData;
+        case PCDM_RS_OpenError:
+        case PCDM_RS_WrongStreamMode:
+        case PCDM_RS_PermissionDenied:
+        case PCDM_RS_UnknownDocument:
+            return AssetImportResult::TemporaryFileFailure;
+        case PCDM_RS_AlreadyRetrievedAndModified:
+        case PCDM_RS_AlreadyRetrieved:
+            return AssetImportResult::Busy;
+        case PCDM_RS_UnknownFileDriver:
+        case PCDM_RS_NoVersion:
+        case PCDM_RS_TypeFailure:
+        case PCDM_RS_TypeNotFoundInSchema:
+        case PCDM_RS_NoDriver:
+        case PCDM_RS_NoSchema:
+            return AssetImportResult::UnsupportedVersion;
+        case PCDM_RS_MakeFailure:
+        case PCDM_RS_ReaderException:
+        case PCDM_RS_ExtensionFailure:
+        case PCDM_RS_DriverFailure:
+        case PCDM_RS_WrongResource:
+        case PCDM_RS_UserBreak:
+            return AssetImportResult::InternalFailure;
+    }
+}
+
+void CloseDocumentNoThrow(const Handle(TDocStd_Application)& app,
+                          Handle(TDocStd_Document)& document) noexcept {
+    if (app.IsNull() || document.IsNull()) {
+        return;
+    }
+
+    try {
+        if (document->HasOpenCommand()) {
+            document->AbortCommand();
+        }
+        app->Close(document);
+    } catch (...) {
+        // A failed cleanup must not replace the original load result or crash rollback.
+    }
+    document.Nullify();
+}
+
+bool ValidateShapeTree(const Handle(TDocStd_Document)& document) {
+    if (document.IsNull()) {
+        return false;
+    }
+
+    const Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    if (shapeTool.IsNull()) {
+        return false;
+    }
+
+    TDF_LabelSequence freeShapes;
+    shapeTool->GetFreeShapes(freeShapes);
+    for (TDF_LabelSequence::Iterator freeShape(freeShapes); freeShape.More(); freeShape.Next()) {
+        const TDF_Label& label = freeShape.Value();
+        if (!XCAFDoc_ShapeTool::IsShape(label)
+            || !IsTopologicallyValid(XCAFDoc_ShapeTool::GetShape(label))) {
+            return false;
+        }
+
+        if (!XCAFDoc_ShapeTool::IsAssembly(label)) {
+            continue;
+        }
+
+        TDF_LabelSequence components;
+        XCAFDoc_ShapeTool::GetComponents(label, components, Standard_True);
+        for (TDF_LabelSequence::Iterator component(components); component.More(); component.Next()) {
+            const TDF_Label& componentLabel = component.Value();
+            if (!XCAFDoc_ShapeTool::IsComponent(componentLabel)
+                || !IsTopologicallyValid(XCAFDoc_ShapeTool::GetShape(componentLabel))) {
+                return false;
+            }
+
+            TDF_Label referredLabel;
+            if (!XCAFDoc_ShapeTool::GetReferredShape(componentLabel, referredLabel)
+                || referredLabel.IsNull()
+                || !XCAFDoc_ShapeTool::IsShape(referredLabel)
+                || !IsTopologicallyValid(XCAFDoc_ShapeTool::GetShape(referredLabel))) {
+                return false;
+            }
+        }
+    }
+
+    // An empty document is valid: a user can intentionally save a blank scene.
+    return true;
+}
+
+} // namespace
+
 NSString* Core3DViewer::addTestPrimitives() {
 
     gp_Pnt lowerLeftCornerOfBox(-50.0,-50.0,0.0);
@@ -103,6 +419,25 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
     return result;
 }
 
+void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
+                                       ShapeSelectionMode theSelectionMode) {
+    const float scale = [[UIScreen mainScreen] scale];
+    const float pointsPerMillimeter = scale
+        * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163)
+        / 25.4;
+    const float manipulatorSide = 15 * pointsPerMillimeter;
+
+    _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, manipulatorSide);
+    _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
+
+    if (theSelectionMode != ShapeSelectionMode::WholeShape) {
+        _shapeInteractor->setSelectionMode(theSelectionMode);
+    }
+    if (theManipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
+        _objectInteractor->setManipulatorType(theManipulatorType);
+    }
+}
+
 std::shared_ptr<ObjectInteractor> Core3DViewer::getObjectInteractor() {
     return _objectInteractor;
 }
@@ -136,126 +471,240 @@ static Quantity_NameOfColor colorNameFromString(NSString* colorStr) {
 }
 
 void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
-    NSData* data = [json dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data) return;
-
-    NSError* error = nil;
-    NSDictionary* root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
-    if (error || !root) return;
-
-    NSArray* primitives = root[@"primitives"];
-    if (![primitives isKindOfClass:[NSArray class]]) return;
-
-    deselectAll();
-
-    for (NSDictionary* prim in primitives) {
-        NSString* type = prim[@"type"];
-        NSArray* pos = prim[@"position"];    // [x, y, z] — Z is up
-        NSArray* scl = prim[@"scale"];       // [sx, sy, sz]
-        NSArray* rot = prim[@"rotation"];    // [rx, ry, rz] degrees
-        NSString* color = prim[@"color"];
-
-        if (!type || !pos || !scl) continue;
-
-        double px = [pos[0] doubleValue];
-        double py = [pos[1] doubleValue];
-        double pz = [pos[2] doubleValue];
-        double sx = [scl[0] doubleValue];
-        double sy = [scl[1] doubleValue];
-        double sz = [scl[2] doubleValue];
-        double rx = rot ? [rot[0] doubleValue] : 0;
-        double ry = rot ? [rot[1] doubleValue] : 0;
-        double rz = rot ? [rot[2] doubleValue] : 0;
-
-        // No coordinate conversion — JSON uses Z-up matching OCCT natively.
-        // Create shapes with correct dimensions directly (no GTransform).
-        TopoDS_Shape shape;
-        if ([type isEqualToString:@"cube"]) {
-            gp_Pnt corner(-25.0 * sx, -25.0 * sy, 0.0);
-            BRepPrimAPI_MakeBox maker(corner, 50.0 * sx, 50.0 * sy, 50.0 * sz);
-            shape = maker.Shape();
-        } else if ([type isEqualToString:@"sphere"]) {
-            // Average scale for radius, then apply non-uniform via GTransform only if needed
-            double avgScale = (sx + sy + sz) / 3.0;
-            if (fabs(sx - sy) < 0.01 && fabs(sy - sz) < 0.01) {
-                // Uniform scale — create sphere with scaled radius directly
-                BRepPrimAPI_MakeSphere maker(25.0 * avgScale);
-                shape = maker.Shape();
-            } else {
-                // Non-uniform — use GTransform
-                BRepPrimAPI_MakeSphere maker(25.0);
-                gp_GTrsf gTrsf;
-                gTrsf.SetValue(1, 1, sx);
-                gTrsf.SetValue(2, 2, sy);
-                gTrsf.SetValue(3, 3, sz);
-                BRepBuilderAPI_GTransform scaler(maker.Shape(), gTrsf, true);
-                shape = scaler.Shape();
-            }
-        } else if ([type isEqualToString:@"cylinder"]) {
-            // Cylinder: radius from avg(sx,sy), height from sz
-            double radius = 25.0 * (sx + sy) / 2.0;
-            double height = 50.0 * sz;
-            BRepPrimAPI_MakeCylinder maker(radius, height);
-            shape = maker.Shape();
-        } else if ([type isEqualToString:@"cone"]) {
-            // Cone: base radius from avg(sx,sy), height from sz
-            double radius = 25.0 * (sx + sy) / 2.0;
-            double height = 50.0 * sz;
-            gp_Ax2 anAxis;
-            anAxis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
-            BRepPrimAPI_MakeCone maker(anAxis, radius, 0.0, height);
-            shape = maker.Shape();
-        } else if ([type isEqualToString:@"torus"]) {
-            gp_Ax2 anAxis;
-            anAxis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
-            double majorR = 25.0 * (sx + sy) / 2.0;
-            double minorR = 10.0 * sz;
-            BRepPrimAPI_MakeTorus maker(anAxis, majorR, minorR);
-            shape = maker.Shape();
-        } else {
-            continue;
-        }
-
-        // Apply rotation (degrees → radians) — X then Y then Z, no axis swapping
-        if (rx != 0 || ry != 0 || rz != 0) {
-            gp_Trsf rx_trsf, ry_trsf, rz_trsf;
-            if (rx != 0) rx_trsf.SetRotation(gp_Ax1(gp::Origin(), gp::DX()), rx * M_PI / 180.0);
-            if (ry != 0) ry_trsf.SetRotation(gp_Ax1(gp::Origin(), gp::DY()), ry * M_PI / 180.0);
-            if (rz != 0) rz_trsf.SetRotation(gp_Ax1(gp::Origin(), gp::DZ()), rz * M_PI / 180.0);
-            gp_Trsf rotTrsf = rz_trsf * ry_trsf * rx_trsf;
-            BRepBuilderAPI_Transform rotator(shape, rotTrsf, true);
-            shape = rotator.Shape();
-        }
-
-        // Apply translation — direct, no conversion
-        gp_Trsf transTrsf;
-        transTrsf.SetTranslation(gp_Vec(px, py, pz));
-        BRepBuilderAPI_Transform translator(shape, transTrsf, true);
-        shape = translator.Shape();
-
-        // Display with color
-        Handle(AIS_Shape) aShapePrs = new AIS_Shape(shape);
-        myContext->ApplyDefaultMaterial(aShapePrs);
-        myDoc->addSolidObject(shape);
-        myDoc->SaveObjectMaterial(aShapePrs, Graphic3d_NameOfMaterial_ShinyPlastified);
-
-        if (color) {
-            Quantity_NameOfColor qColor = colorNameFromString(color);
-            aShapePrs->SetColor(qColor);
-            myDoc->SaveObjectColor(aShapePrs, qColor);
-        } else {
-            Quantity_Color qc;
-            aShapePrs->Color(qc);
-            myDoc->SaveObjectColor(aShapePrs, qc.Name());
-        }
-
-        myContext->Display(aShapePrs, AIS_Shaded, (Standard_Integer)_shapeInteractor->getSelectionMode(), false);
+    if (![json isKindOfClass:[NSString class]]
+        || myDoc.IsNull()
+        || myContext.IsNull()
+        || _shapeInteractor == nullptr) {
+        return;
     }
 
-    // Fit all to show the full model
-    if (myView) {
-        myView->FitAll();
-        myView->Redraw();
+    NSData* data = [json dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) {
+        return;
+    }
+
+    NSError* error = nil;
+    id rootValue = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (error || ![rootValue isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+
+    NSDictionary* root = static_cast<NSDictionary*>(rootValue);
+    id primitivesValue = root[@"primitives"];
+    if (![primitivesValue isKindOfClass:[NSArray class]]) {
+        return;
+    }
+
+    NSArray* primitives = static_cast<NSArray*>(primitivesValue);
+    if (primitives.count == 0 || primitives.count > kMaximumPrimitiveCount) {
+        return;
+    }
+
+    std::vector<PreparedPrimitive> preparedPrimitives;
+    preparedPrimitives.reserve(primitives.count);
+
+    try {
+        OCC_CATCH_SIGNALS
+        for (id primitiveValue in primitives) {
+            if (![primitiveValue isKindOfClass:[NSDictionary class]]) {
+                return;
+            }
+
+            NSDictionary* primitive = static_cast<NSDictionary*>(primitiveValue);
+            id typeValue = primitive[@"type"];
+            id positionValue = primitive[@"position"];
+            id scaleValue = primitive[@"scale"];
+            id rotationValue = primitive[@"rotation"];
+            id colorValue = primitive[@"color"];
+
+            if (![typeValue isKindOfClass:[NSString class]]
+                || (colorValue != nil && ![colorValue isKindOfClass:[NSString class]])) {
+                return;
+            }
+
+            NSString* type = static_cast<NSString*>(typeValue);
+            NSString* color = colorValue == nil
+                ? nil
+                : static_cast<NSString*>(colorValue);
+
+            std::array<double, 3> position;
+            std::array<double, 3> scale;
+            std::array<double, 3> rotation = {0.0, 0.0, 0.0};
+            if (!ReadFiniteVector3(positionValue, position)
+                || !ReadFiniteVector3(scaleValue, scale)
+                || (rotationValue != nil && !ReadFiniteVector3(rotationValue, rotation))
+                || !IsBoundedMagnitude(position, kMaximumPositionMagnitude)
+                || !IsValidScale(scale)
+                || !IsBoundedMagnitude(rotation, kMaximumRotationMagnitude)) {
+                return;
+            }
+
+            const double px = position[0];
+            const double py = position[1];
+            const double pz = position[2];
+            const double sx = scale[0];
+            const double sy = scale[1];
+            const double sz = scale[2];
+            const double rx = rotation[0];
+            const double ry = rotation[1];
+            const double rz = rotation[2];
+
+            // No coordinate conversion — JSON uses Z-up matching OCCT natively.
+            // Create shapes with correct dimensions directly (no GTransform).
+            TopoDS_Shape shape;
+            if ([type isEqualToString:@"cube"]) {
+                const double width = 50.0 * sx;
+                const double depth = 50.0 * sy;
+                const double height = 50.0 * sz;
+                if (!IsValidDimension(width)
+                    || !IsValidDimension(depth)
+                    || !IsValidDimension(height)) {
+                    return;
+                }
+                gp_Pnt corner(-25.0 * sx, -25.0 * sy, 0.0);
+                BRepPrimAPI_MakeBox maker(corner, width, depth, height);
+                shape = maker.Shape();
+            } else if ([type isEqualToString:@"sphere"]) {
+                const double radiusX = 25.0 * sx;
+                const double radiusY = 25.0 * sy;
+                const double radiusZ = 25.0 * sz;
+                if (!IsValidDimension(radiusX)
+                    || !IsValidDimension(radiusY)
+                    || !IsValidDimension(radiusZ)) {
+                    return;
+                }
+
+                // Average scale for radius, then apply non-uniform via GTransform only if needed.
+                const double averageScale = (sx + sy + sz) / 3.0;
+                if (std::abs(sx - sy) < 0.01 && std::abs(sy - sz) < 0.01) {
+                    BRepPrimAPI_MakeSphere maker(25.0 * averageScale);
+                    shape = maker.Shape();
+                } else {
+                    BRepPrimAPI_MakeSphere maker(25.0);
+                    gp_GTrsf scaleTransform;
+                    scaleTransform.SetValue(1, 1, sx);
+                    scaleTransform.SetValue(2, 2, sy);
+                    scaleTransform.SetValue(3, 3, sz);
+                    BRepBuilderAPI_GTransform scaler(maker.Shape(), scaleTransform, true);
+                    shape = scaler.Shape();
+                }
+            } else if ([type isEqualToString:@"cylinder"]
+                       || [type isEqualToString:@"cone"]
+                       || [type isEqualToString:@"torus"]) {
+                const double radialScale = (sx + sy) / 2.0;
+                const double radius = 25.0 * radialScale;
+                const double height = 50.0 * sz;
+                if (!IsValidDimension(radius) || !IsValidDimension(height)) {
+                    return;
+                }
+
+                if ([type isEqualToString:@"cylinder"]) {
+                    BRepPrimAPI_MakeCylinder maker(radius, height);
+                    shape = maker.Shape();
+                } else if ([type isEqualToString:@"cone"]) {
+                    gp_Ax2 axis;
+                    axis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
+                    BRepPrimAPI_MakeCone maker(axis, radius, 0.0, height);
+                    shape = maker.Shape();
+                } else {
+                    const double minorRadius = 10.0 * sz;
+                    if (!IsValidDimension(minorRadius)) {
+                        return;
+                    }
+                    gp_Ax2 axis;
+                    axis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
+                    BRepPrimAPI_MakeTorus maker(axis, radius, minorRadius);
+                    shape = maker.Shape();
+                }
+            } else {
+                return;
+            }
+
+            if (!IsTopologicallyValid(shape)) {
+                return;
+            }
+
+            // Keep rotation/translation as the editable presentation transform, the
+            // same representation produced by the on-screen gizmo. Geometry remains
+            // stable in OCAF and the transform is persisted on its label.
+            gp_Trsf rotationTransform;
+            if (rx != 0.0 || ry != 0.0 || rz != 0.0) {
+                gp_Trsf xRotation;
+                gp_Trsf yRotation;
+                gp_Trsf zRotation;
+                if (rx != 0.0) {
+                    xRotation.SetRotation(
+                        gp_Ax1(gp::Origin(), gp::DX()),
+                        rx * M_PI / 180.0);
+                }
+                if (ry != 0.0) {
+                    yRotation.SetRotation(
+                        gp_Ax1(gp::Origin(), gp::DY()),
+                        ry * M_PI / 180.0);
+                }
+                if (rz != 0.0) {
+                    zRotation.SetRotation(
+                        gp_Ax1(gp::Origin(), gp::DZ()),
+                        rz * M_PI / 180.0);
+                }
+                rotationTransform = zRotation * yRotation * xRotation;
+            }
+
+            gp_Trsf translationTransform;
+            translationTransform.SetTranslation(gp_Vec(px, py, pz));
+            const gp_Trsf objectTransform = translationTransform * rotationTransform;
+
+            Handle(AIS_Shape) presentation = new AIS_Shape(shape);
+            presentation->SetLocalTransformation(objectTransform);
+            myContext->ApplyDefaultMaterial(presentation);
+            Quantity_NameOfColor shapeColor = Quantity_NOC_GRAY80;
+            if (color != nil) {
+                shapeColor = colorNameFromString(color);
+                presentation->SetColor(shapeColor);
+            }
+
+            if (presentation.IsNull()
+                || presentation->Shape().IsNull()
+                || !IsTopologicallyValid(presentation->Shape())) {
+                return;
+            }
+
+            preparedPrimitives.push_back({
+                presentation,
+                Graphic3d_NameOfMaterial_ShinyPlastified,
+                shapeColor,
+            });
+        }
+    } catch (const Standard_Failure&) {
+        return;
+    } catch (const std::exception&) {
+        return;
+    } catch (...) {
+        return;
+    }
+
+	// Clear outgoing selection/tool visuals before opening the batch command;
+	// deselection can itself finalize an explicitly pending chamfer.
+	deselectAll();
+
+	// Keep one command open through presentation staging so either side can be
+	// rolled back without consuming undo/redo history.
+	const Standard_Integer selectionMode =
+		static_cast<Standard_Integer>(_shapeInteractor->getSelectionMode());
+	if (!PublishPreparedPrimitives(
+		myDoc,
+		myContext,
+		preparedPrimitives,
+		selectionMode)) {
+        return;
+    }
+	try {
+		if (!myView.IsNull()) {
+			myView->FitAll();
+			myView->Redraw();
+		}
+	} catch (...) {
+		// Framing failure does not invalidate the fully displayed, durable batch.
     }
 }
 
@@ -307,18 +756,30 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 
     Handle(AIS_Shape) aShapePrs = new AIS_Shape (shape);
     myContext->ApplyDefaultMaterial(aShapePrs);
-    myDoc->addSolidObject(shape);
-    myDoc->SaveObjectMaterial(aShapePrs, Graphic3d_NameOfMaterial_ShinyPlastified);
     Quantity_Color qc;
     aShapePrs->Color(qc);
-    myDoc->SaveObjectColor(aShapePrs, qc.Name());
-    myContext->Display (aShapePrs, AIS_Shaded, (Standard_Integer) _shapeInteractor->getSelectionMode(), false);
+	if (!IsTopologicallyValid(shape)) {
+		return;
+	}
 	deselectAll();
+	const std::vector<PreparedPrimitive> primitive = {{
+		aShapePrs,
+		Graphic3d_NameOfMaterial_ShinyPlastified,
+		qc.Name(),
+	}};
+	if (!PublishPreparedPrimitives(
+		myDoc,
+		myContext,
+		primitive,
+		static_cast<Standard_Integer>(_shapeInteractor->getSelectionMode()))) {
+        return;
+    }
 	_objectInteractor->attachManipulatorToSelection();
     getObjectInteractor()->SelectAndAttachManipulator(aShapePrs);
 }
 
-bool Core3DViewer::traverseLabel (const TDF_Label& theLabel,
+bool Core3DViewer::traverseLabel (const Handle(TDocStd_Document)& theDoc,
+                                  const TDF_Label& theLabel,
                                   const TCollection_AsciiString& theNamePrefix,
                                   const TopLoc_Location& theLoc,
                                   MapOfPrsForShapes& theMapOfShapes)
@@ -344,8 +805,8 @@ bool Core3DViewer::traverseLabel (const TDF_Label& theLabel,
 
     TDF_Label aRefLabel = theLabel;
 
-    Handle(XCAFDoc_ShapeTool) theShapeTool = XCAFDoc_DocumentTool::ShapeTool (myDoc->Document()->Main());
-    Handle(XCAFDoc_ColorTool) theColorTool = XCAFDoc_DocumentTool::ColorTool (myDoc->Document()->Main());
+    Handle(XCAFDoc_ShapeTool) theShapeTool = XCAFDoc_DocumentTool::ShapeTool (theDoc->Main());
+    Handle(XCAFDoc_ColorTool) theColorTool = XCAFDoc_DocumentTool::ColorTool (theDoc->Main());
 
     theShapeTool->GetReferredShape (theLabel, aRefLabel);
     if (XCAFDoc_ShapeTool::IsAssembly (aRefLabel))
@@ -354,7 +815,7 @@ bool Core3DViewer::traverseLabel (const TDF_Label& theLabel,
         const TopLoc_Location aLoc = theLoc * XCAFDoc_ShapeTool::GetLocation (theLabel);
         for (TDF_ChildIterator aChildIter (aRefLabel); aChildIter.More(); aChildIter.Next())
         {
-            if (traverseLabel (aChildIter.Value(), aName, aLoc, theMapOfShapes) == 1)
+            if (traverseLabel (theDoc, aChildIter.Value(), aName, aLoc, theMapOfShapes) == 1)
             {
                 return true;
             }
@@ -379,7 +840,7 @@ bool Core3DViewer::traverseDocument (const Handle(TDocStd_Document)& theDoc)
     for (TDF_LabelSequence::Iterator aLabIter (aLabels); aLabIter.More(); aLabIter.Next())
     {
         const TDF_Label& aLabel = aLabIter.Value();
-        if (traverseLabel (aLabel, "", TopLoc_Location(), aMapOfShapes) == true)
+        if (traverseLabel (theDoc, aLabel, "", TopLoc_Location(), aMapOfShapes) == true)
         {
             return true;
         }
@@ -387,31 +848,177 @@ bool Core3DViewer::traverseDocument (const Handle(TDocStd_Document)& theDoc)
     return false;
 }
 
-bool Core3DViewer::ImportCbf(const std::string &theFilename) {
+AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     assert(!myContext.IsNull());
 
-    auto app =  Handle(TDocStd_Application)::DownCast(myDoc->Document()->Application());
-    app->Close(myDoc->Document());
-
-    PCDM_ReaderStatus status = app->Open(theFilename.c_str(),  myDoc->ChangeDocument());
-
-    if(status != PCDM_ReaderStatus::PCDM_RS_OK) {
-        return false;
+    Handle(TDocStd_Document) previous = myDoc->Document();
+    if (previous.IsNull()) {
+        return AssetImportResult::InternalFailure;
+    }
+    if (previous->HasOpenCommand()) {
+        return AssetImportResult::Busy;
     }
 
-    myDoc->ChangeDocument()->SetUndoLimit(40);
-    traverseDocument(myDoc->ChangeDocument());
+    const AssetImportResult validationResult = ValidateCbf(theFilename);
+    if (validationResult != AssetImportResult::Success) {
+        return validationResult;
+    }
 
-    myContext->UpdateCurrentViewer();
+    auto app = Handle(TDocStd_Application)::DownCast(previous->Application());
+    if (app.IsNull()) {
+        return AssetImportResult::InternalFailure;
+    }
 
-    myDoc->NotifyChanges();
+    const PrimitiveManipulatorType previousManipulatorType = _objectInteractor == nullptr
+        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+        : _objectInteractor->getManipulatorType();
+    const ShapeSelectionMode previousSelectionMode = _shapeInteractor == nullptr
+        ? ShapeSelectionMode::WholeShape
+        : _shapeInteractor->getSelectionMode();
+	AIS_ListOfInteractive previousPresentations;
+	myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
+	auto restorePreviousState = [&]() noexcept {
+		myDoc->ChangeDocument() = previous;
+		try {
+			clearContext();
+			traverseDocument(previous);
+			recreateInteractors(previousManipulatorType, previousSelectionMode);
+			myContext->UpdateCurrentViewer();
+			return;
+		} catch (...) {
+			// Reuse the exact pre-load AIS handles if rebuilding presentations
+			// from OCAF fails. RemoveAll() does not destroy these retained handles.
+		}
 
-    return true;
+		try {
+			clearContext();
+			for (AIS_ListIteratorOfListOfInteractive presentation(previousPresentations);
+				 presentation.More(); presentation.Next()) {
+				const Handle(AIS_InteractiveObject)& object = presentation.Value();
+				if (!Handle(AIS_Shape)::DownCast(object).IsNull()) {
+					myContext->Display(object, Standard_False);
+				}
+			}
+			recreateInteractors(previousManipulatorType, previousSelectionMode);
+			myContext->UpdateCurrentViewer();
+		} catch (...) {
+			// The persistent previous document remains authoritative even if the
+			// graphics driver itself can no longer restore a presentation.
+		}
+	};
+
+    Handle(TDocStd_Document) candidate;
+    try {
+        OCC_CATCH_SIGNALS
+        PCDM_ReaderStatus status = app->Open(theFilename.c_str(), candidate);
+        if (status != PCDM_RS_OK || candidate.IsNull()) {
+            AssetImportResult result = status == PCDM_RS_OK
+                ? AssetImportResult::InvalidData
+                : ImportResultForReaderStatus(status);
+            // Isolated validation already proved these bytes readable. A
+            // conflicting result from the live application is an engine/state
+            // failure, never evidence that the committed revision is corrupt.
+            if (result == AssetImportResult::InvalidData) {
+                result = AssetImportResult::InternalFailure;
+            }
+            CloseDocumentNoThrow(app, candidate);
+            return result;
+        }
+    } catch (const Standard_Failure& failure) {
+        std::cout << "Load CBF failure: " << failure.GetMessageString() << std::endl;
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    } catch (const std::exception& exception) {
+        std::cout << "Load CBF exception: " << exception.what() << std::endl;
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    } catch (...) {
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        candidate->SetUndoLimit(40);
+
+        // Keep the previous OCAF document alive until the candidate has been
+        // fully traversed and displayed. Only the presentation is temporary.
+        clearContext();
+        traverseDocument(candidate);
+        myContext->UpdateCurrentViewer();
+
+        myDoc->ChangeDocument() = candidate;
+        recreateInteractors(previousManipulatorType, previousSelectionMode);
+        myContext->UpdateCurrentViewer();
+    } catch (const Standard_Failure& failure) {
+        std::cout << "Display CBF failure: " << failure.GetMessageString() << std::endl;
+		restorePreviousState();
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    } catch (...) {
+		restorePreviousState();
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    }
+
+    CloseDocumentNoThrow(app, previous);
+    return AssetImportResult::Success;
+}
+
+AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) const {
+    if (theFilename.empty()) {
+        return AssetImportResult::InvalidData;
+    }
+
+    Handle(TDocStd_Application) validationApplication;
+    Handle(TDocStd_Document) candidate;
+    try {
+        OCC_CATCH_SIGNALS
+        validationApplication = new TDocStd_Application();
+        BinDrivers::DefineFormat(validationApplication);
+
+        const PCDM_ReaderStatus status =
+            validationApplication->Open(theFilename.c_str(), candidate);
+        if (status != PCDM_RS_OK || candidate.IsNull()) {
+            const AssetImportResult result = status == PCDM_RS_OK
+                ? AssetImportResult::InvalidData
+                : ImportResultForReaderStatus(status);
+            CloseDocumentNoThrow(validationApplication, candidate);
+            return result;
+        }
+
+        const bool isValid = ValidateShapeTree(candidate);
+        CloseDocumentNoThrow(validationApplication, candidate);
+        return isValid
+            ? AssetImportResult::Success
+            : AssetImportResult::InvalidData;
+    } catch (const Standard_Failure& failure) {
+        std::cout << "Validate CBF failure: " << failure.GetMessageString() << std::endl;
+        CloseDocumentNoThrow(validationApplication, candidate);
+        return AssetImportResult::InternalFailure;
+    } catch (const std::bad_alloc&) {
+        CloseDocumentNoThrow(validationApplication, candidate);
+        return AssetImportResult::InternalFailure;
+    } catch (const std::exception& exception) {
+        std::cout << "Validate CBF exception: " << exception.what() << std::endl;
+        CloseDocumentNoThrow(validationApplication, candidate);
+        return AssetImportResult::InternalFailure;
+    } catch (...) {
+        CloseDocumentNoThrow(validationApplication, candidate);
+        return AssetImportResult::InternalFailure;
+    }
 }
 
 void Core3DViewer::redrawDocument() {
+	const PrimitiveManipulatorType manipulatorType = _objectInteractor == nullptr
+		? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+		: _objectInteractor->getManipulatorType();
+	const ShapeSelectionMode selectionMode = _shapeInteractor == nullptr
+		? ShapeSelectionMode::WholeShape
+		: _shapeInteractor->getSelectionMode();
     clearContext();
     traverseDocument(myDoc->ChangeDocument());
+	recreateInteractors(manipulatorType, selectionMode);
     myContext->UpdateCurrentViewer();
 }
 
@@ -500,7 +1107,7 @@ void Core3DViewer::FinishInteraction(int theX, int theY) {
 
 void Core3DViewer::CancelInteraction(int theX, int theY) {
     if(_objectInteractor != nullptr) {
-        _objectInteractor->finishInteraction();
+		_objectInteractor->cancelInteraction();
     }
 }
 
@@ -569,6 +1176,9 @@ void Core3DViewer::Select(int theX, int theY) {
 
     void Core3DViewer::deselectAll() {
         if (myContext.IsNull()) { return; }
+		if (_objectInteractor != nullptr) {
+			_objectInteractor->cancelInteraction();
+		}
         myContext->SelectDetected(AIS_SelectionScheme::AIS_SelectionScheme_Remove);
         myContext->ClearSelected(Standard_True);
         if (_objectInteractor == nullptr) { return; }

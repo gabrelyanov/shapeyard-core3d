@@ -29,8 +29,46 @@
 #include "ConstructorManipulator.hpp"
 
 #include <gp_Quaternion.hxx>
+#include <cstring>
 
 using namespace core3d;
+
+namespace {
+
+constexpr char kCbfMagic[] = "BINFILE";
+
+BOOL HasCbfMagic(NSData *data) {
+    constexpr NSUInteger magicLength = sizeof(kCbfMagic) - 1;
+    return data != nil
+        && data.length >= magicLength
+        && std::memcmp(data.bytes, kCbfMagic, magicLength) == 0;
+}
+
+Core3DAssetLoadResult AssetLoadResultFromImportResult(AssetImportResult result) {
+    switch (result) {
+        case AssetImportResult::Success:
+            return Core3DAssetLoadResultSuccess;
+        case AssetImportResult::InvalidData:
+            return Core3DAssetLoadResultInvalidData;
+        case AssetImportResult::TemporaryFileFailure:
+            return Core3DAssetLoadResultTemporaryFileFailure;
+        case AssetImportResult::Busy:
+            return Core3DAssetLoadResultBusy;
+        case AssetImportResult::UnsupportedVersion:
+            return Core3DAssetLoadResultUnsupportedVersion;
+        case AssetImportResult::InternalFailure:
+            return Core3DAssetLoadResultInternalFailure;
+    }
+}
+
+void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
+                             Core3DAssetLoadResult result) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        completion(result);
+    });
+}
+
+} // namespace
 
 @implementation GLViewController {
     CGFloat _ns; // native screen scale
@@ -478,20 +516,50 @@ using namespace core3d;
 }
 
 - (void)undo {
-	if (_viewer->getDocument()->canUndo() && _viewer->getObjectInteractor() != nullptr)
-		_viewer->getObjectInteractor()->detachManipulator(false);
-    _viewer->getDocument()->undo();
-    _viewer->redrawDocument();
+	if (!_viewer->getDocument()->canUndo()) { return; }
+	PrimitiveGizmoType currentType = [self getGizmoType];
+	if (currentType == PrimitiveGizmoTypeSubtract) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+	} else if (currentType == PrimitiveGizmoTypeUnion) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+	} else if (currentType == PrimitiveGizmoTypeMirror) {
+		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	}
+	_viewer->getObjectInteractor()->detachManipulator(false);
+	if (_viewer->getDocument()->undo()) {
+		_viewer->redrawDocument();
+	}
 }
 
 - (void)redo {
-	if (_viewer->getDocument()->canRedo() && _viewer->getObjectInteractor() != nullptr)
-		_viewer->getObjectInteractor()->detachManipulator(false);
-    _viewer->getDocument()->redo();
-    _viewer->redrawDocument();
+	if (!_viewer->getDocument()->canRedo()) { return; }
+	PrimitiveGizmoType currentType = [self getGizmoType];
+	if (currentType == PrimitiveGizmoTypeSubtract) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+	} else if (currentType == PrimitiveGizmoTypeUnion) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+	} else if (currentType == PrimitiveGizmoTypeMirror) {
+		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	}
+	_viewer->getObjectInteractor()->detachManipulator(false);
+	if (_viewer->getDocument()->redo()) {
+		_viewer->redrawDocument();
+	}
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {
+	_viewer->getObjectInteractor()->cancelInteraction();
+	PrimitiveGizmoType currentType = [self getGizmoType];
+	if (currentType == PrimitiveGizmoTypeChamfer) {
+		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
+	} else if (currentType == PrimitiveGizmoTypeSubtract) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+	} else if (currentType == PrimitiveGizmoTypeUnion) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+	} else if (currentType == PrimitiveGizmoTypeMirror) {
+		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	}
+
     ShapeSelectionMode selectionMode;
     switch (type) {
         case PrimitiveSelectionTypeShape:
@@ -544,6 +612,22 @@ using namespace core3d;
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
+	const PrimitiveGizmoType previousType = [self getGizmoType];
+	if (previousType == type) { return; }
+
+	// Resolve the previous tool before changing manipulator mode or capturing
+	// selection for the next tool. Its AIS previews may refer to document labels
+	// that the resolution step replaces or removes.
+	if (previousType == PrimitiveGizmoTypeChamfer) {
+		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
+	} else if (previousType == PrimitiveGizmoTypeSubtract) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+	} else if (previousType == PrimitiveGizmoTypeUnion) {
+		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+	} else if (previousType == PrimitiveGizmoTypeMirror) {
+		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	}
+
     PrimitiveManipulatorType manipulatorType;
     switch (type) {
         case PrimitiveGizmoTypeMoveRotate:
@@ -577,16 +661,14 @@ using namespace core3d;
     _viewer->getObjectInteractor()->setManipulatorType(manipulatorType);
     if (type == PrimitiveGizmoTypeChamfer) {
         _viewer->getShapeInteractor()->saveSelectionEdges();
-    } else {
-        if (type == PrimitiveGizmoTypeSubtract || type == PrimitiveGizmoTypeUnion) {
-            Standard_Boolean forceActor = (type == PrimitiveGizmoTypeSubtract);
-            _viewer->getObjectInteractor()->fillSelectedState(forceActor,
-                                                                   (type == PrimitiveGizmoTypeSubtract)
-                                                                   ? BooleanAction::BooleanSubtract
-                                                                   : BooleanAction::BooleanUnion);
-            _viewer->redraw();
-        }
-        _viewer->getShapeInteractor()->resetWireframeTemplateShape();
+	} else if (type == PrimitiveGizmoTypeSubtract || type == PrimitiveGizmoTypeUnion) {
+		Standard_Boolean forceActor = (type == PrimitiveGizmoTypeSubtract);
+		_viewer->getObjectInteractor()->fillSelectedState(
+			forceActor,
+			type == PrimitiveGizmoTypeSubtract
+				? BooleanAction::BooleanSubtract
+				: BooleanAction::BooleanUnion);
+		_viewer->redraw();
     }
 }
 
@@ -631,6 +713,11 @@ using namespace core3d;
     //	std::cout << "incorrect chamfer value" << std::endl;
 }
 
+- (void)cancelChamfer {
+    _viewer->getShapeInteractor()->cancelChamfer();
+    _viewer->redraw();
+}
+
 - (void) applyMirror {
     assert([self getGizmoType] == PrimitiveGizmoTypeMirror);
 	_viewer->getObjectInteractor()->applyMirror();
@@ -664,6 +751,10 @@ using namespace core3d;
     return _viewer->getShapeInteractor()->isEmptyOfDisplayedObjects();
 }
 
+- (NSInteger)numberOfDisplayedShapes {
+    return _viewer->getShapeInteractor()->getNumberOfDisplayedShapes();
+}
+
 - (NSInteger)numberOfDetectedEdges {
     return _viewer->getShapeInteractor()->getNumberOfDetectedEdges();
 }
@@ -672,59 +763,111 @@ using namespace core3d;
     __weak typeof(self) weakSelf = self;
     dispatch_async(_assetDataQueue, ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        NSString *tmpFilename = [NSString stringWithFormat:@"%u.tmp", (int)NSDate.now.timeIntervalSince1970];
+        if (!strongSelf) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(nil);
+            });
+            return;
+        }
+
+        NSString *tmpFilename = [NSString stringWithFormat:@"%@.tmp", NSUUID.UUID.UUIDString];
         NSURL *tmpDirectory = [NSFileManager.defaultManager temporaryDirectory];
-        const std::string fn = [tmpDirectory URLByAppendingPathComponent:tmpFilename].path.UTF8String;
+        NSURL *baseURL = [tmpDirectory URLByAppendingPathComponent:tmpFilename];
+        NSString *expectedCbfPath = [baseURL.path stringByAppendingString:@".cbf"];
+        const std::string fn = baseURL.path.UTF8String;
+
+        __block std::string cbfFilePath;
         dispatch_sync(dispatch_get_main_queue(), ^{
-            const std::string cbfFilePath = strongSelf->_viewer->getDocument()->save(fn);
-
-            __auto_type dataPath = [NSString stringForStdString:cbfFilePath];
-
-            NSError *error = NULL;
-            NSData *data = [NSData dataWithContentsOfFile:dataPath options:kNilOptions error:&error];
-//            NSLog(@">>> GET assetData: %ld", data.length);
-            if (error) {
-//                NSLog(@"ERROR: get asset data: %@", error.localizedDescription);
-                completion(NULL);
-                return;
+            try {
+                if (strongSelf->_viewer != nullptr) {
+                    cbfFilePath = strongSelf->_viewer->getDocument()->save(fn);
+                    if (!cbfFilePath.empty()
+                        && strongSelf->_viewer->ValidateCbf(cbfFilePath)
+                            != AssetImportResult::Success) {
+                        cbfFilePath.clear();
+                    }
+                }
+            } catch (...) {
+                cbfFilePath.clear();
             }
-//            NSLog(@">>> GET assetData COMPLETION");
+        });
+
+        NSString *dataPath = cbfFilePath.empty()
+            ? nil
+            : [NSString stringForStdString:cbfFilePath];
+        NSError *error = nil;
+        NSData *data = dataPath == nil
+            ? nil
+            : [NSData dataWithContentsOfFile:dataPath options:kNilOptions error:&error];
+
+        NSFileManager *fileManager = NSFileManager.defaultManager;
+        [fileManager removeItemAtURL:baseURL error:nil];
+        [fileManager removeItemAtPath:expectedCbfPath error:nil];
+        if (dataPath != nil && ![dataPath isEqualToString:expectedCbfPath]) {
+            [fileManager removeItemAtPath:dataPath error:nil];
+        }
+
+        if (error != nil || !HasCbfMagic(data)) {
+            data = nil;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
             completion(data);
         });
     });
 }
 
-- (void)setAssetData:(NSData *)data completion:(void(^)(void))completion {
+- (void)setAssetData:(NSData *)data completion:(void(^)(Core3DAssetLoadResult result))completion {
     __weak typeof(self) weakSelf = self;
     dispatch_async(_assetDataQueue, ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        NSString *tmpFilename = [NSString stringWithFormat:@"%u.tmp.cbf", (int)NSDate.now.timeIntervalSince1970];
+        if (!strongSelf) {
+            CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultInternalFailure);
+            return;
+        }
+        if (!HasCbfMagic(data)) {
+            CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultInvalidData);
+            return;
+        }
+
+        NSString *tmpFilename = [NSString stringWithFormat:@"%@.tmp.cbf", NSUUID.UUID.UUIDString];
         NSURL *tmpUrl = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:tmpFilename];
-        NSError *error = NULL;
-        //        NSLog(@">>> SET AssetData: %ld", data.length);
+        NSError *error = nil;
         [data writeToURL:tmpUrl options:NSDataWritingAtomic error:&error];
+        if (error != nil) {
+            [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
+            CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultTemporaryFileFailure);
+            return;
+        }
+
         const std::string fn = tmpUrl.path.UTF8String;
-        //        NSLog(@">>> SET AssetData: %s", fn.c_str());
+        __block Core3DAssetLoadResult result = Core3DAssetLoadResultInternalFailure;
         dispatch_sync(dispatch_get_main_queue(), ^{
-            strongSelf->_viewer->ImportCbf(fn);
-            //            NSLog(@">>> SET AssetData: COMPLETION");
-            completion();
+            try {
+                if (strongSelf->_viewer != nullptr) {
+                    result = AssetLoadResultFromImportResult(strongSelf->_viewer->ImportCbf(fn));
+                }
+            } catch (...) {
+                result = Core3DAssetLoadResultInternalFailure;
+            }
         });
+        [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
+        CompleteAssetLoadOnMain(completion, result);
     });
 }
 
 - (NSData *)thumbData {
-    NSString *tmpSnapthotFilename = [NSString stringWithFormat:@"%u.tmp.png", (int)NSDate.now.timeIntervalSince1970];
+    NSString *tmpSnapthotFilename = [NSString stringWithFormat:@"%@.tmp.png", NSUUID.UUID.UUIDString];
     NSURL *tmpUrl = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:tmpSnapthotFilename];
-    const auto fn = TCollection_AsciiString(tmpUrl.path.UTF8String);
     NSLog(@"Snapshot: %@", tmpUrl);
     if (![self saveSnapshot:tmpUrl]) {
+        [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
         return NULL;
     }
-    NSError *error = NULL;
+    NSError *error = nil;
     __auto_type data = [NSData dataWithContentsOfURL:tmpUrl options:kNilOptions error:&error];
+
+    [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
 
     if (error) {
         NSLog(@"ERROR: with thumb: %@", error.localizedDescription);

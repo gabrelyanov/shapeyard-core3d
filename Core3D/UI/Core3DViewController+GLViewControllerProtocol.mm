@@ -20,6 +20,7 @@
     self.can_apply_material = (selections > 0);
     
     auto context = GLController.viewer->AisContext();
+    auto document = GLController.viewer->getDocument();
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
@@ -37,9 +38,20 @@
                                                         defaultColor:[self.materialController findColorWithName:ma.Color().Name()]];
         [materials addObject:m];
         
-        Quantity_Color qc;
-        shape->Color(qc);
-        auto name = qc.Name();
+        Quantity_NameOfColor name;
+        const TDF_Label label = document->ShapeLabel(selected);
+        if (!label.IsNull()) {
+            // OCAF is the source of truth for committed object styles. AIS can
+            // transiently report no explicit color immediately after a load.
+            name = document->ColorNameForLabel(label);
+        } else {
+            if (!shape->HasColor()) {
+                continue;
+            }
+            Quantity_Color qc;
+            shape->Color(qc);
+            name = qc.Name();
+        }
         Core3DColor* color = [self.materialController findColorWithName:name];
         if(color != nil) {
             [colors addObject:color];

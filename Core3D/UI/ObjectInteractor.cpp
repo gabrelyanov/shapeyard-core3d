@@ -10,14 +10,30 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <V3d_View.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <TDataStd_Real.hxx>
 #include <GP_Quaternion.hxx>
 #include <AIS_Shape.hxx>
+#include <Standard_Failure.hxx>
 
 namespace core3d {
+	namespace {
+		Standard_Boolean IsTopologicallyValid(const TopoDS_Shape& shape) {
+			if (shape.IsNull()) {
+				return Standard_False;
+			}
+			try {
+				BRepCheck_Analyzer analyzer(shape, Standard_True);
+				return analyzer.IsValid();
+			} catch (...) {
+				return Standard_False;
+			}
+		}
+	}
+
     ObjectInteractor::ObjectInteractor(Handle(Core3DContext) context
                                        , Handle(Core3DView) view
                                        , Handle(OcctDocument) doc
@@ -52,6 +68,9 @@ namespace core3d {
 
 	void ObjectInteractor::detachManipulator(Handle(AIS_InteractiveObject) fromObject) {
 		if (!_manipulator.IsNull()) {
+			if (_manipulator->HasActiveTransformation()) {
+				cancelInteraction();
+			}
 			_manipulator->Detach(fromObject);
 			myContext->UpdateCurrentViewer();
 		}
@@ -59,6 +78,9 @@ namespace core3d {
 
 	void ObjectInteractor::detachManipulator(bool updateViewer) {
 		if (!_manipulator.IsNull()) {
+			if (_manipulator->HasActiveTransformation()) {
+				cancelInteraction();
+			}
 			_manipulator->Detach();
 			if (updateViewer)
 				myContext->UpdateCurrentViewer();
@@ -66,6 +88,9 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::	selectAll() {
+		if (!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) {
+			cancelInteraction();
+		}
 		AIS_ListOfInteractive objects;
 		myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
 		AIS_ListIteratorOfListOfInteractive iobject(objects);
@@ -99,31 +124,50 @@ namespace core3d {
 	}
 
     void ObjectInteractor::deleteSelected() {
-        
         if (_manipulator.IsNull() || !_manipulator->IsAttached()) { return; }
-        
+		auto doc = myDoc->ChangeDocument();
+		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
+
         Handle(Core3DManipulatorObjectSequence) objects = _manipulator->Objects();
-        _manipulator->Detach();
-        
-        myDoc->Document()->NewCommand();
+		std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> removals;
         for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
-            
-            myDoc->RemoveShape(it.Value());
-            myContext->Remove(it.Value(), Standard_True);
+			const TDF_Label label = myDoc->ShapeLabel(it.Value());
+			if (label.IsNull()) { return; }
+			for (const auto& removal : removals) {
+				if (removal.second.IsEqual(label)) { return; }
+			}
+			removals.push_back({it.Value(), label});
         }
-        // commit undo command
-        myDoc->Document()->CommitCommand();
-        myDoc->NotifyChanges();
+		if (removals.empty()) { return; }
+
+		try {
+			doc->NewCommand();
+			for (const auto& removal : removals) {
+				if (!myDoc->RemoveShape(removal.second)) {
+					doc->AbortCommand();
+					return;
+				}
+			}
+			if (!doc->CommitCommand()) {
+				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+				return;
+			}
+		} catch (...) {
+			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+			return;
+		}
+
+		_manipulator->Detach();
+		for (const auto& removal : removals) {
+			myContext->Remove(removal.first, Standard_False);
+		}
+		myDoc->NotifyChanges();
         myContext->UpdateCurrentViewer();
     }
 
     void ObjectInteractor::duplicateSelected() {
-        
         auto doc = myDoc->ChangeDocument();
-        if(doc->HasOpenCommand()) {
-            doc->CommitCommand();
-        }
-        doc->NewCommand();
+		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
         
         Handle(AIS_InteractiveObject) selected;
         Bnd_Box overallBox;
@@ -147,8 +191,7 @@ namespace core3d {
             }
         }
 
-		if (overallBox.IsVoid()) //no selected
-			return;
+		if (overallBox.IsVoid()) { return; }
 		
         Standard_Real xmin, xmax, ymin, ymax, zmin, zmax;
         overallBox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
@@ -159,7 +202,6 @@ namespace core3d {
         
         minAxisDisplacement.SetTranslation((w>d)?(gp_Vec){0., d, 0.}:(gp_Vec){w, 0., 0.});
         
-        std::vector<Handle(AIS_InteractiveObject)> newInteractives;
         std::vector<Handle(AIS_InteractiveObject)> copyInteractives;
         
         for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
@@ -171,42 +213,64 @@ namespace core3d {
             copyInteractives.push_back(selected);
         }
         
-        for(auto item : copyInteractives) {
-            Handle(AIS_Shape) anAis = Handle(AIS_Shape)::DownCast(item);
-            
-            BRepBuilderAPI_Copy shapeCopy(anAis->Shape(), Standard_True, Standard_False);
-            Handle(AIS_Shape) objectCopy = new AIS_Shape(shapeCopy);
-            
-            newInteractives.push_back(objectCopy);
-            
-            objectCopy->SetLocalTransformation(anAis->LocalTransformation().Multiplied(minAxisDisplacement));
-            myDoc->AddShape(objectCopy);
-            
-            auto ais_mat_name = myDoc->MaterialNameForShape(anAis);
-            Quantity_Color qc;
-            anAis->Color(qc);
-            myDoc->SaveObjectMaterial(objectCopy, ais_mat_name);
-            myDoc->SaveObjectColor(objectCopy, qc.Name());
-            
-            objectCopy->SetMaterial(ais_mat_name);
-            objectCopy->SetColor(qc);
-            
-            myContext->Display(objectCopy, AIS_Shaded, (Standard_Integer)0, Standard_False);
-        }
-        
-        _manipulator->Detach();
-        myContext->ClearSelected(Standard_False);
-        for(auto anAis : newInteractives) {
-            myContext->AddSelect(anAis);
-			_manipulator->Attach(anAis);
-        }
+		struct DuplicateRecord {
+			Handle(AIS_Shape) presentation;
+			Graphic3d_NameOfMaterial material;
+			Quantity_NameOfColor color;
+		};
+		std::vector<DuplicateRecord> duplicates;
+		try {
+			for (const auto& item : copyInteractives) {
+				Handle(AIS_Shape) source = Handle(AIS_Shape)::DownCast(item);
+				BRepBuilderAPI_Copy shapeCopy;
+				shapeCopy.Perform(source->Shape(), Standard_True, Standard_False);
+				if (!shapeCopy.IsDone() || !IsTopologicallyValid(shapeCopy.Shape())) { return; }
+				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
+				copy->SetLocalTransformation(
+					source->LocalTransformation().Multiplied(minAxisDisplacement));
+				const Graphic3d_NameOfMaterial material = myDoc->MaterialNameForShape(source);
+				Quantity_Color color;
+				source->Color(color);
+				copy->SetMaterial(material);
+				copy->SetColor(color);
+				duplicates.push_back({copy, material, color.Name()});
+			}
+		} catch (...) {
+			return;
+		}
+		if (duplicates.empty()) { return; }
 
-        myContext->HilightSelected(Standard_True);
-        
-        doc->CommitCommand();
-        myDoc->NotifyChanges();
-        _manipulator->Redisplay();
-        myContext->UpdateCurrentViewer();
+		try {
+			doc->NewCommand();
+			for (const auto& duplicate : duplicates) {
+				const TDF_Label label = myDoc->AddShape(duplicate.presentation);
+				if (label.IsNull()) {
+					doc->AbortCommand();
+					return;
+				}
+				myDoc->SaveObjectMaterial(label, duplicate.material);
+				myDoc->SaveObjectColor(label, duplicate.color);
+			}
+			if (!doc->CommitCommand()) {
+				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+				return;
+			}
+		} catch (...) {
+			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+			return;
+		}
+
+		_manipulator->Detach();
+		myContext->ClearSelected(Standard_False);
+		for (const auto& duplicate : duplicates) {
+			myContext->Display(duplicate.presentation, AIS_Shaded, 0, Standard_False);
+			myContext->AddSelect(duplicate.presentation);
+			_manipulator->Attach(duplicate.presentation);
+		}
+		myContext->HilightSelected(Standard_True);
+		myDoc->NotifyChanges();
+		_manipulator->Redisplay();
+		myContext->UpdateCurrentViewer();
     }
 
     const bool ObjectInteractor::isSelected() const {
@@ -260,6 +324,9 @@ namespace core3d {
 	}
 
     void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
+		if (!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) {
+			cancelInteraction();
+		}
         _manipulatorType = type;
         createManipulatorIfNeeded();
         bool scale = type == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
@@ -321,32 +388,56 @@ namespace core3d {
 
     void ObjectInteractor::finishInteraction() {
         if(!_manipulator.IsNull() && _manipulator->IsAttached() && _manipulator->HasActiveMode()) {
-            
             Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myDoc->Document()->Main());
-
-            TDF_Label label;
-
             auto doc = myDoc->ChangeDocument();
-            if(doc->HasOpenCommand()) {
-                doc->AbortCommand();
-            }
-			
-			doc->NewCommand();
-			
-			const auto &cachedShapes = _manipulator->cachedShapes();
-			
-			for (const auto &shape : cachedShapes) {
-				if(shapeTool->FindShape(shape.second, label)) {
-					if(_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale) {
-						myDoc->ReplaceShape(label, Handle(AIS_Shape)::DownCast(shape.first));
-					}
-					myDoc->SaveObjectTransform(label, Handle(AIS_Shape)::DownCast(shape.first));
-				}
+			if (doc.IsNull() || doc->HasOpenCommand()) {
+				cancelInteraction();
+				return;
 			}
-			
-			doc->CommitCommand();
+
+			const auto &cachedShapes = _manipulator->cachedShapes();
+			std::vector<std::pair<Handle(AIS_Shape), TDF_Label>> changes;
+			for (const auto& cachedShape : cachedShapes) {
+				Handle(AIS_Shape) presentation = Handle(AIS_Shape)::DownCast(cachedShape.first);
+				TDF_Label label;
+				if (presentation.IsNull()
+					|| presentation->Shape().IsNull()
+					|| !shapeTool->FindShape(cachedShape.second, label)
+					|| label.IsNull()
+					|| (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+						&& !IsTopologicallyValid(presentation->Shape()))) {
+					cancelInteraction();
+					return;
+				}
+				changes.push_back({presentation, label});
+			}
+			if (changes.empty()) {
+				cancelInteraction();
+				return;
+			}
+
+			try {
+				doc->NewCommand();
+				for (const auto& change : changes) {
+					if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale) {
+						myDoc->ReplaceShape(change.second, change.first);
+					}
+					myDoc->SaveObjectTransform(change.second, change.first);
+				}
+				if (!doc->CommitCommand()) {
+					if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+					cancelInteraction();
+					return;
+				}
+			} catch (...) {
+				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+				cancelInteraction();
+				return;
+			}
+
+			_manipulator->StopTransform(Standard_True);
 			myDoc->NotifyChanges();
-			
+
 			if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror) {
 				if (_manipulator->ActiveMode() == AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg
 					|| _manipulator->ActiveMode() == AIS_ManipulatorMode::AIS_MM_MirroringPlanePos) {
@@ -364,7 +455,16 @@ namespace core3d {
 
     void ObjectInteractor::cancelInteraction() {
         if(!_manipulator.IsNull() && _manipulator->IsAttached()) {
+			_manipulator->StopTransform(Standard_False);
+			for (const auto& cachedShape : _manipulator->cachedShapes()) {
+				Handle(AIS_Shape) presentation = Handle(AIS_Shape)::DownCast(cachedShape.first);
+				if (!presentation.IsNull() && !cachedShape.second.IsNull()) {
+					presentation->SetShape(cachedShape.second);
+					myContext->Redisplay(presentation, Standard_False);
+				}
+			}
             _manipulator->DeactivateCurrentMode();
+			_manipulator->UpdateCachedShapes();
             _manipulator->Redisplay();
             myContext->UpdateCurrentViewer();
         }
@@ -490,19 +590,50 @@ namespace core3d {
 		_trialMirrorObjects.clear();
 	}
 
-    void ObjectInteractor::applyMirror() {
-		
-		auto doc = myDoc->ChangeDocument();
-		if(doc->HasOpenCommand()) {
-			doc->CommitCommand();
+	void ObjectInteractor::applyMirror() {
+		if (_trialMirrorObjects.empty()) {
+			return;
 		}
-		doc->NewCommand();
 
-		for (Handle(AIS_InteractiveObject) aShapePrs : _trialMirrorObjects) {
-			Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(aShapePrs);
-			myDoc->addSolidObject(shape->Shape());
+		auto doc = myDoc->ChangeDocument();
+		if (doc.IsNull() || doc->HasOpenCommand()) {
+			clearTrialMirrorObjects();
+			return;
 		}
-		
+		for (const auto& trial : _trialMirrorObjects) {
+			Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(trial);
+			if (shape.IsNull() || !IsTopologicallyValid(shape->Shape())) {
+				clearTrialMirrorObjects();
+				return;
+			}
+		}
+
+		try {
+			doc->NewCommand();
+			for (const auto& trial : _trialMirrorObjects) {
+				Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(trial);
+				const TDF_Label label = myDoc->AddShape(shape);
+				if (label.IsNull()) {
+					doc->AbortCommand();
+					clearTrialMirrorObjects();
+					return;
+				}
+				myDoc->SaveObjectMaterial(label, shape->Material());
+				Quantity_Color color;
+				shape->Color(color);
+				myDoc->SaveObjectColor(label, color.Name());
+			}
+			if (!doc->CommitCommand()) {
+				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+				clearTrialMirrorObjects();
+				return;
+			}
+		} catch (...) {
+			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+			clearTrialMirrorObjects();
+			return;
+		}
+		myDoc->NotifyChanges();
 		_trialMirrorObjects.clear();
-    }
+	}
 }

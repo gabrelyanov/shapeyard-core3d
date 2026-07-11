@@ -88,55 +88,51 @@
 
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
     auto context = GLController.viewer->AisContext();
-    
     auto doc = GLController.viewer->getDocument();
-    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (doc->Document()->Main());
-    TDF_Label label;
+	auto transaction = doc->ChangeDocument();
+	if (transaction.IsNull() || transaction->HasOpenCommand()) {
+		return;
+	}
 
-    if(doc->ChangeDocument()->HasOpenCommand()) {
-        doc->ChangeDocument()->CommitCommand();
-    }
-    
-    doc->ChangeDocument()->NewCommand();
-    
+	struct PendingStyle {
+		Handle(AIS_Shape) shape;
+		TDF_Label label;
+		Graphic3d_NameOfMaterial material;
+		Quantity_NameOfColor color;
+	};
+	std::vector<PendingStyle> pendingStyles;
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
 
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         auto selected = context->SelectedInteractive();
-        
         Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
-        if (shape.IsNull() || shape->Shape().IsNull())
+        if (shape.IsNull() || shape->Shape().IsNull()) {
             continue;
+        }
+		const TDF_Label label = doc->ShapeLabel(selected);
+		if (label.IsNull()) {
+			return;
+        }
 
-        if(material == nil && color == nil) {
-            if(shapeTool->FindShape(shape->Shape(), label)) {
-                shape->SetMaterial(Graphic3d_NameOfMaterial_ShinyPlastified);
-                shape->SetColor(Quantity_NOC_GRAY80);
-                doc->SaveObjectMaterial(label, Graphic3d_NameOfMaterial_ShinyPlastified);
-                doc->SaveObjectColor(label, Quantity_NOC_GRAY80);
-            }
+		Graphic3d_NameOfMaterial materialName = doc->MaterialNameForLabel(label);
+		Quantity_NameOfColor colorName = doc->ColorNameForLabel(label);
+		if (material == nil && color == nil) {
+			materialName = Graphic3d_NameOfMaterial_ShinyPlastified;
+			colorName = Quantity_NOC_GRAY80;
+		} else {
+			if (material != nil) {
+				materialName = (Graphic3d_NameOfMaterial)material.identity;
+				if (color == nil) {
+					Graphic3d_MaterialAspect materialAspect(materialName);
+					colorName = (Quantity_NameOfColor)materialAspect.Color().Name();
+				}
+			}
+			if (color != nil) {
+				colorName = (Quantity_NameOfColor)color.identity;
+			}
         }
-        
-        if(material != nil) {
-            if(shapeTool->FindShape(shape->Shape(), label)) {
-                Graphic3d_MaterialAspect materialAspect((Graphic3d_NameOfMaterial)material.identity);
-                shape->UnsetColor();
-                shape->SetMaterial(materialAspect);
-                doc->SaveObjectMaterial(label, (Graphic3d_NameOfMaterial)material.identity);
-                if(color == nil) {
-                    shape->SetColor(materialAspect.Color());
-                    doc->SaveObjectColor(label, (Quantity_NameOfColor)materialAspect.Color().Name());
-                }
-            }
-        }
-        
-        if(color != nil) {
-            if(shapeTool->FindShape(shape->Shape(), label))  {
-                shape->SetColor(Quantity_Color((Quantity_NameOfColor)color.identity));
-                doc->SaveObjectColor(label, (Quantity_NameOfColor)color.identity);
-            }
-        }
+		pendingStyles.push_back({shape, label, materialName, colorName});
 
         if(material != nil) {
             [materials addObject:material];
@@ -145,19 +141,49 @@
             [colors addObject:color];
         }
     }
-    
-    [self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
+	if (pendingStyles.empty()) {
+		return;
+	}
 
-    doc->ChangeDocument()->CommitCommand();
+	try {
+		transaction->NewCommand();
+		for (const PendingStyle& style : pendingStyles) {
+			doc->SaveObjectMaterial(style.label, style.material);
+			doc->SaveObjectColor(style.label, style.color);
+		}
+		if (!transaction->CommitCommand()) {
+			if (transaction->HasOpenCommand()) { transaction->AbortCommand(); }
+			return;
+		}
+	} catch (...) {
+		if (transaction->HasOpenCommand()) { transaction->AbortCommand(); }
+		return;
+	}
+
+	for (const PendingStyle& style : pendingStyles) {
+		style.shape->UnsetColor();
+		style.shape->SetMaterial(style.material);
+		style.shape->SetColor(style.color);
+	}
+	[self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
+	doc->NotifyChanges();
     context->UpdateCurrentViewer();
-    
     [self sendNotifyUIState: UIStateChangingApplyMaterial];
 }
 
 -(void) receiveOcctDocumentNotification:(NSNotification *) notification {
-    if ([[notification name] isEqualToString:@"OcctDocumentChanges"]) {
-        [self viewDidAssetModify];
+    if (![[notification name] isEqualToString:@"OcctDocumentChanges"]
+        || ![notification.object isKindOfClass:NSValue.class]) {
+        return;
     }
+
+    auto activeDocument = GLController.viewer->getDocument();
+    if (activeDocument.IsNull()
+        || [(NSValue *)notification.object pointerValue] != activeDocument.get()) {
+        return;
+    }
+
+    [self viewDidAssetModify];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -280,6 +306,12 @@
     }
 }
 
+- (void)viewDidFailToLoadFromBundle:(Core3DAssetLoadResult)result {
+    if (_delegate && [_delegate respondsToSelector:@selector(viewDidFailToLoadFromBundle:)]) {
+        [_delegate viewDidFailToLoadFromBundle:result];
+    }
+}
+
 - (void)viewDidAssetModify {}
 
 - (void)sendNotifyUIState:(UIStateChanging)state {
@@ -346,6 +378,7 @@
 
 - (void)loadFromBundle:(NSURL *)bundleUrl {
     if(bundleUrl == nil) {
+        [self viewDidFailToLoadFromBundle:Core3DAssetLoadResultInternalFailure];
         return;
     }
     
@@ -354,17 +387,22 @@
         _shouldLoadBundleUrl = bundleUrl;
         return;
     }
-    NSData *assetData = NULL;
+    NSData *assetData = nil;
+    BOOL foundAssetItem = NO;
+    Core3DAssetLoadResult readFailure = Core3DAssetLoadResultInvalidData;
     __auto_type bundleReader = [AssetBundle makeReaderWithUrl:bundleUrl];
     for (AssetBundleItem *item in bundleReader.items) {
         if (item.type == AssetBundleItemTypeAsset) {
-            NSError *error = NULL;
+            foundAssetItem = YES;
+            NSError *error = nil;
             assetData = [NSData dataWithContentsOfURL:item.url options:kNilOptions error:&error];
             if (error) {
                 NSLog(@"ERROR: load from bundle: %@", error.localizedDescription);
+                readFailure = Core3DAssetLoadResultTemporaryFileFailure;
             } else {
                 if (!assetData) {
                     NSLog(@"ERROR: load from bundle: %@, NULL DATA", error.localizedDescription);
+                    readFailure = Core3DAssetLoadResultTemporaryFileFailure;
                 }
             }
             break;
@@ -373,18 +411,25 @@
 
     if (assetData) {
         __weak typeof(self) weakSelf = self;
-        [GLController setAssetData:assetData completion:^{
+        [GLController setAssetData:assetData completion:^(Core3DAssetLoadResult result) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf) return;
+            strongSelf->_isLoading = false;
+            if (result != Core3DAssetLoadResultSuccess) {
+                [strongSelf viewDidFailToLoadFromBundle:result];
+                return;
+            }
             [(GLViewController *)strongSelf.glController fitAll];
             if ([strongSelf currentGizmoType] == PrimitiveGizmoTypeNone) {
                 [strongSelf setGizmoType:PrimitiveGizmoTypeMoveRotate];
             }
-            strongSelf->_isLoading = false;
             [strongSelf viewDidLoadFromBundle];
         }];
     } else {
         _isLoading = false;
+        [self viewDidFailToLoadFromBundle:foundAssetItem
+            ? readFailure
+            : Core3DAssetLoadResultInvalidData];
     }
 }
 
@@ -394,6 +439,10 @@
 
 - (BOOL)isEmptyOfDisplayedObjects {
     return [GLController isEmptyOfDisplayedObjects];
+}
+
+- (NSInteger)numberOfDisplayedShapes {
+    return [GLController numberOfDisplayedShapes];
 }
 
 @end

@@ -28,7 +28,7 @@ namespace core3d {
 
     class ObjectInteractor : public Interactor {
         
-        PrimitiveManipulatorType _manipulatorType;
+		PrimitiveManipulatorType _manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
         BooleanOperationController _booleanOpController;
         Handle(Core3DManipulator) _manipulator;
 //        std::vector<TopoDS_Shape> _beforeTransformObjects;

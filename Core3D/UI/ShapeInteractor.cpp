@@ -20,6 +20,7 @@
 #include <TopoDS_Compound.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -28,6 +29,10 @@
 #include <Prs3d_Drawer.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <algorithm>
+#include <cmath>
+#include <cfloat>
 #include <cstdio>
 
 #include "../Export/obj/vectornd.h"
@@ -36,6 +41,19 @@
 #include "../Export/obj/exportobj.h"
 
 namespace core3d {
+	namespace {
+		Standard_Boolean IsTopologicallyValid(const TopoDS_Shape& shape) {
+			if (shape.IsNull()) {
+				return Standard_False;
+			}
+			try {
+				BRepCheck_Analyzer analyzer(shape, Standard_True);
+				return analyzer.IsValid();
+			} catch (...) {
+				return Standard_False;
+			}
+		}
+	}
 
     ShapeInteractor::ShapeInteractor(Handle(Core3DContext) context, Handle(Core3DView) view, Handle(OcctDocument) doc)
     : Interactor(context, view, doc) {
@@ -51,133 +69,218 @@ namespace core3d {
 	}
 
 	Standard_Boolean ShapeInteractor::setChamferValueForSelection(const Standard_Real value) {
-		if (abs(abs(_chamferValue) - abs(value)) < 1e-1) //todo: temporal throttle
-			return true;
+		auto doc = myDoc->ChangeDocument();
+		if (doc.IsNull() || (doc->HasOpenCommand() && !_ownsChamferCommand)) {
+			return Standard_False;
+		}
+		const Standard_Real normalizedValue = value < 0
+			? std::fmax(value / 100.0, -20.0)
+			: std::fmin(value / 100.0, 20.0);
+		if (std::abs(_chamferValue - normalizedValue) < 1e-3) {
+			return Standard_True;
+		}
+		if (std::abs(normalizedValue) <= FLT_EPSILON) {
+			discardChamferPreview();
+			return Standard_True;
+		}
 
-		bool isChamfer = value < 0 && (abs(value) > FLT_EPSILON);
-		bool isFillet = value > 0 && (abs(value) > FLT_EPSILON);
+		const Standard_Boolean isChamfer = normalizedValue < 0;
 
-        if (isChamfer) {
-            _chamferValue = std::fmax(value / 100, -20);
-        } else {
-            _chamferValue = std::fmin(value / 100, 20);
-        }
+		struct ChamferResult {
+			Standard_Size selectionIndex;
+			Handle(AIS_Shape) presentation;
+		};
+		std::vector<ChamferResult> results;
+		results.reserve(_detectedEdges.size());
+		try {
+			OCC_CATCH_SIGNALS
+			for (Standard_Size index = 0; index < _detectedEdges.size(); ++index) {
+				const EdgesSelection& sel = _detectedEdges[index];
+				if (sel.detectedOwner.IsNull() || !sel.detectedOwner->HasSelectable()
+					|| sel.documentLabel.IsNull() || sel.edges.empty()) {
+					return Standard_False;
+				}
+				Handle(AIS_Shape) ownerShape =
+					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
+				if (ownerShape.IsNull() || ownerShape->Shape().IsNull()) {
+					return Standard_False;
+				}
 
-		bool correctResult = true;
-		for (EdgesSelection &sel : _detectedEdges) {
-			bool hasFails = false;
-			bool useTemplate = true;
-			if (!sel.detectedOwner.IsNull()) {
-				Handle(AIS_Shape) ownerShape = Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				
-				if (!ownerShape.IsNull() && sel.detectedOwner->IsSelected()) {
-//					copyMaterial(ownerShape, Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable()));
-					bool hasAffectedEdges = false;
-					myContext->Display (ownerShape, AIS_WireFrame, _topAbsSelMode, Standard_False);
-
-					BRepFilletAPI_MakeFillet  MF(useTemplate ? ownerShape->Shape() : sel.tempFilletShapePrs->Shape());
-					BRepFilletAPI_MakeChamfer MC(useTemplate ? ownerShape->Shape() : sel.tempFilletShapePrs->Shape());
-
-					useTemplate = false; //use template once
-
-					//proceed all affected edges
+				TopoDS_Shape resultShape;
+				if (isChamfer) {
+					BRepFilletAPI_MakeChamfer builder(ownerShape->Shape());
 					for (const TopoDS_Edge& edge : sel.edges) {
-						if (isChamfer) {
-							MC.Add(abs(_chamferValue), edge);
-							hasAffectedEdges = true;
-						} else if (isFillet) {
-							MF.Add(_chamferValue, edge);
-							hasAffectedEdges = true;
-						}
+						builder.Add(std::abs(normalizedValue), edge);
 					}
+					builder.Build();
+					if (!builder.IsDone()) { return Standard_False; }
+					resultShape = builder.Shape();
+				} else {
+					BRepFilletAPI_MakeFillet builder(ownerShape->Shape());
+					for (const TopoDS_Edge& edge : sel.edges) {
+						builder.Add(normalizedValue, edge);
+					}
+					builder.Build();
+					if (!builder.IsDone()) { return Standard_False; }
+					resultShape = builder.Shape();
+				}
+				if (!IsTopologicallyValid(resultShape)) { return Standard_False; }
 
-					if (isChamfer) {
-						try {
-							MC.Build();
-							if (!MC.IsDone())
-								hasFails = true;
-						} catch (Standard_Failure f) {
-							isChamfer = false;
-						}
-					} else if (isFillet) {
-						try {
-							MF.Build();
-							if (!MF.IsDone())
-								hasFails = true;
-						} catch (Standard_Failure f) {
-							isFillet = false;
-						}
-					}
+				Handle(AIS_Shape) result = new AIS_Shape(resultShape);
+				result->SetLocalTransformation(sel.transform);
+				result->SetMaterial(sel.materialName);
+				result->SetColor(sel.colorName);
+				results.push_back({index, result});
+			}
+		} catch (const Standard_Failure&) {
+			return Standard_False;
+		} catch (...) {
+			return Standard_False;
+		}
+		if (results.empty() || results.size() != _detectedEdges.size()) {
+			return Standard_False;
+		}
 
-					if (hasAffectedEdges && !hasFails) {
-						if (isChamfer)
-							sel.tempFilletShapePrs = new AIS_Shape(MC.Shape());
-						else if (isFillet) //fillet
-							sel.tempFilletShapePrs = new AIS_Shape(MF.Shape());
-						else
-							sel.tempFilletShapePrs = new AIS_Shape(ownerShape->Shape());
-					} else { //reset fillet or chamfer
-						sel.tempFilletShapePrs = new AIS_Shape(ownerShape->Shape());
-						if (hasFails)
-							correctResult = false;
-					}
-					copyMaterial(sel.tempFilletShapePrs, Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable()));
+		discardChamferPreview();
+		try {
+			OCC_CATCH_SIGNALS
+			doc->NewCommand();
+			if (!doc->HasOpenCommand()) {
+				return Standard_False;
+			}
+			_ownsChamferCommand = Standard_True;
+			for (const ChamferResult& result : results) {
+				const EdgesSelection& sel = _detectedEdges[result.selectionIndex];
+				const TDF_Label resultLabel = myDoc->AddShape(result.presentation);
+				if (resultLabel.IsNull()) {
+					throw Standard_Failure("Unable to add chamfer result");
+				}
+				myDoc->SaveObjectMaterial(resultLabel, sel.materialName);
+				myDoc->SaveObjectColor(resultLabel, sel.colorName);
+			}
+		} catch (...) {
+			if (_ownsChamferCommand && doc->HasOpenCommand()) {
+				doc->AbortCommand();
+			}
+			_ownsChamferCommand = Standard_False;
+			return Standard_False;
+		}
+
+		for (const ChamferResult& result : results) {
+			EdgesSelection& sel = _detectedEdges[result.selectionIndex];
+			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
+				Handle(AIS_Shape) ownerShape =
+					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
+				if (!ownerShape.IsNull()) {
+					myContext->Display(ownerShape, AIS_WireFrame, _topAbsSelMode, Standard_False);
+				}
+			}
+			sel.filletShapePrs = result.presentation;
+			myContext->Display(sel.filletShapePrs, AIS_Shaded, _topAbsSelMode, Standard_False);
+			setInteractiveObjectSelectionMode(sel.filletShapePrs);
+		}
+		_chamferValue = normalizedValue;
+		myContext->UpdateCurrentViewer();
+		return Standard_True;
+	}
+
+	void ShapeInteractor::discardChamferPreview() {
+		auto doc = myDoc->ChangeDocument();
+		if (_ownsChamferCommand && !doc.IsNull() && doc->HasOpenCommand()) {
+			doc->AbortCommand();
+		}
+		_ownsChamferCommand = Standard_False;
+		for (EdgesSelection& sel : _detectedEdges) {
+			if (!sel.tempFilletShapePrs.IsNull()) {
+				myContext->Remove(sel.tempFilletShapePrs, Standard_False);
+				sel.tempFilletShapePrs.Nullify();
+			}
+			if (!sel.filletShapePrs.IsNull()) {
+				myContext->Remove(sel.filletShapePrs, Standard_False);
+				sel.filletShapePrs.Nullify();
+			}
+			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
+				Handle(AIS_Shape) ownerShape =
+					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
+				if (!ownerShape.IsNull()) {
+					myContext->Display(ownerShape, AIS_Shaded, _topAbsSelMode, Standard_False);
+					setInteractiveObjectSelectionMode(ownerShape);
 				}
 			}
 		}
+		_chamferValue = 0;
+		myContext->UpdateCurrentViewer();
+	}
 
-        if (!correctResult) {
-            return false;
-        }
-
-		//update shape with new fillet
-        auto doc = myDoc->ChangeDocument();
-        if(doc->HasOpenCommand()) {
-            doc->AbortCommand();
-        }
-        doc->NewCommand();
-
-		for (EdgesSelection &sel : _detectedEdges) {
-			if (!sel.tempFilletShapePrs.IsNull()) {
-                if (!sel.filletShapePrs.IsNull()) {
-                    
-                    myDoc->RemoveShape(sel.filletShapePrs);
-                    myContext->Remove(sel.filletShapePrs, Standard_False);
-                }
-				sel.filletShapePrs = new AIS_Shape(sel.tempFilletShapePrs->Shape());
-				sel.filletShapePrs->SetLocalTransformation(sel.transform);
-				copyMaterial(sel.filletShapePrs, sel.tempFilletShapePrs);
-
-                // add to doc
-                myDoc->AddShape(sel.filletShapePrs);
-//                sel.filletShapePrs->SetMaterial(Graphic3d_NameOfMaterial_ShinyPlastified);
-//                sel.filletShapePrs->SetColor(Quantity_NOC_GRAY80);
-
-				sel.tempFilletShapePrs = Handle(AIS_Shape)(NULL);
-				myContext->Display (sel.filletShapePrs, AIS_Shaded, _topAbsSelMode, Standard_False);
-				setInteractiveObjectSelectionMode(sel.filletShapePrs);
-			}
+	void ShapeInteractor::cancelChamfer() {
+		discardChamferPreview();
+		for (EdgesSelection& sel : _detectedEdges) {
+			sel.edges.clear();
 		}
-        
-		return correctResult;
+		_detectedEdges.clear();
 	}
 
 	void ShapeInteractor::resetWireframeTemplateShape() {
-		for (EdgesSelection &sel : _detectedEdges) {
-			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
-				Handle(AIS_Shape) ownerShape = Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				if (!ownerShape.IsNull() && !sel.filletShapePrs.IsNull()) {
-                    myDoc->RemoveShape(ownerShape);
-					myContext->Remove(ownerShape, Standard_True);
-					ownerShape = Handle(AIS_Shape)(NULL);
+		auto doc = myDoc->ChangeDocument();
+		if (!_ownsChamferCommand || doc.IsNull() || !doc->HasOpenCommand()) {
+			cancelChamfer();
+			return;
+		}
+
+		for (const EdgesSelection& sel : _detectedEdges) {
+			if (sel.documentLabel.IsNull() || sel.filletShapePrs.IsNull()) {
+				cancelChamfer();
+				return;
+			}
+		}
+
+		Standard_Boolean removedAll = Standard_True;
+		try {
+			OCC_CATCH_SIGNALS
+			for (const EdgesSelection& sel : _detectedEdges) {
+				if (!myDoc->RemoveShape(sel.documentLabel)) {
+					removedAll = Standard_False;
+					break;
 				}
+			}
+		} catch (...) {
+			removedAll = Standard_False;
+		}
+		if (!removedAll) {
+			cancelChamfer();
+			return;
+		}
+
+		Standard_Boolean committed = Standard_False;
+		try {
+			committed = doc->CommitCommand();
+		} catch (...) {
+			committed = Standard_False;
+		}
+		if (!committed) {
+			cancelChamfer();
+			return;
+		}
+
+		_ownsChamferCommand = Standard_False;
+		for (EdgesSelection& sel : _detectedEdges) {
+			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
+				Handle(AIS_Shape) ownerShape =
+					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
+				if (!ownerShape.IsNull()) {
+					myContext->Remove(ownerShape, Standard_False);
+				}
+			}
+			if (!sel.filletShapePrs.IsNull()) {
+				myContext->Display(sel.filletShapePrs, AIS_Shaded, _topAbsSelMode, Standard_False);
+				setInteractiveObjectSelectionMode(sel.filletShapePrs);
 			}
 			sel.edges.clear();
 		}
-		//std::cout << "clear edges count=" << _detectedEdges.size() << std::endl;
 		_detectedEdges.clear();
-        myDoc->ChangeDocument()->CommitCommand();
-        myDoc->NotifyChanges();
+		_chamferValue = 0;
+		myDoc->NotifyChanges();
+		myContext->UpdateCurrentViewer();
 	}
 
     Standard_Size ShapeInteractor::saveSelectionEdges(bool preventRechamfer) {
@@ -187,56 +290,73 @@ namespace core3d {
         
         resetWireframeTemplateShape();
 
-        const auto &detEdges = _detectedEdges;
-        auto findOwner = [&detEdges](const TopoDS_Shape &theOther) -> Standard_Integer {
-            for (int i = 0; i < detEdges.size(); ++i) {
-                Handle(AIS_Shape) ownerShape = Handle(AIS_Shape)::DownCast(detEdges[i].detectedOwner->Selectable());
-                if (ownerShape->Shape().IsEqual(theOther))
-                    return i;
-            }
-            return -1;
-        };
-
         for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
             const Handle(SelectMgr_EntityOwner) detectedOwner = myContext->SelectedOwner();
+			if (detectedOwner.IsNull() || !detectedOwner->HasSelectable()) { continue; }
             Handle(AIS_Shape) ownerShape = Handle(AIS_Shape)::DownCast(detectedOwner->Selectable());
-            
+			if (ownerShape.IsNull() || ownerShape->Shape().IsNull()) { continue; }
             const Handle(StdSelect_BRepOwner) &aBRepOwnerOfSelection = Handle(StdSelect_BRepOwner)::DownCast(detectedOwner);
+			if (aBRepOwnerOfSelection.IsNull()) { continue; }
 
-            int found = findOwner(ownerShape->Shape());
-            if (found == -1) {
-                EdgesSelection sel;
-                sel.transform = ownerShape->LocalTransformation();
-                sel.detectedOwner = detectedOwner;
-                sel.tempFilletShapePrs = Handle(AIS_Shape)(NULL);
-                sel.filletShapePrs = Handle(AIS_Shape)(NULL);
-                _detectedEdges.push_back(sel);
-            }
+			Standard_Integer found = -1;
+			for (Standard_Size index = 0; index < _detectedEdges.size(); ++index) {
+				if (_detectedEdges[index].detectedOwner.IsNull()
+					|| !_detectedEdges[index].detectedOwner->HasSelectable()) { continue; }
+				Handle(AIS_Shape) existing = Handle(AIS_Shape)::DownCast(
+					_detectedEdges[index].detectedOwner->Selectable());
+				if (!existing.IsNull() && existing->Shape().IsSame(ownerShape->Shape())) {
+					found = static_cast<Standard_Integer>(index);
+					break;
+				}
+			}
+			const Standard_Boolean isNewSelection = found < 0;
+			if (isNewSelection) {
+				EdgesSelection sel;
+				sel.documentLabel = myDoc->ShapeLabel(ownerShape);
+				if (sel.documentLabel.IsNull()) { continue; }
+				sel.transform = ownerShape->LocalTransformation();
+				sel.materialName = myDoc->MaterialNameForLabel(sel.documentLabel);
+				sel.colorName = myDoc->ColorNameForLabel(sel.documentLabel);
+				sel.detectedOwner = detectedOwner;
+				_detectedEdges.push_back(sel);
+				found = static_cast<Standard_Integer>(_detectedEdges.size() - 1);
+			}
 
-            int i = 0;
+			EdgesSelection& selection = _detectedEdges[found];
+			const Standard_Size originalEdgeCount = selection.edges.size();
             auto selectedType = aBRepOwnerOfSelection->Shape().ShapeType();
             if (aBRepOwnerOfSelection->IsSelected() && (selectedType == _topAbsSelMode || (selectedType == TopAbs_SOLID && _topAbsSelMode == TopAbs_SHAPE))) {
-                for (TopExp_Explorer exp (aBRepOwnerOfSelection->Shape(), TopAbs_EDGE); exp.More(); exp.Next()) {
-                    if(exp.Current().ShapeType() == TopAbs_EDGE) {
-                        auto &edge = TopoDS::Edge(exp.Current());
-                        Standard_Real f, l; //first and last parameter
-                        Handle_Geom_Curve curve = BRep_Tool::Curve(edge, f, l);
-						if (!curve.IsNull()) {
-							GeomAbs_CurveType cType = GeomAdaptor_Curve(curve).GetType();
-							bool isChamfable = !curve.IsNull() && ((GeomAbs_Line == cType) || (GeomAbs_BSplineCurve == cType) || GeomAdaptor_Curve(curve).IsClosed());
-							if(isChamfable || !preventRechamfer) {
-								_detectedEdges.back().edges.push_back(edge);
-								++i;
-							}
-//							std::cout << "is chamfable edge-" << isChamfable << ", total=" << i << std::endl;
-						}
-                    }
-                }
+				auto addEdge = [&](const TopoDS_Edge& edge) {
+					Standard_Real first = 0;
+					Standard_Real last = 0;
+					Handle_Geom_Curve curve = BRep_Tool::Curve(edge, first, last);
+					if (curve.IsNull()) { return; }
+					GeomAdaptor_Curve adaptor(curve);
+					const GeomAbs_CurveType curveType = adaptor.GetType();
+					const Standard_Boolean isChamferable = curveType == GeomAbs_Line
+						|| curveType == GeomAbs_BSplineCurve || adaptor.IsClosed();
+					if (!isChamferable && preventRechamfer) { return; }
+					for (const TopoDS_Edge& existing : selection.edges) {
+						if (existing.IsSame(edge)) { return; }
+					}
+					selection.edges.push_back(edge);
+				};
+				const TopoDS_Shape selectedShape = aBRepOwnerOfSelection->Shape();
+				if (selectedShape.ShapeType() == TopAbs_EDGE) {
+					addEdge(TopoDS::Edge(selectedShape));
+				} else {
+					for (TopExp_Explorer exp(selectedShape, TopAbs_EDGE); exp.More(); exp.Next()) {
+						addEdge(TopoDS::Edge(exp.Current()));
+					}
+				}
             }
-            if (i > 64 || i == 0) //todo: debug limitiations
-                _detectedEdges.pop_back();
+			if (selection.edges.size() > 64) {
+				selection.edges.resize(originalEdgeCount);
+			}
+			if (isNewSelection && selection.edges.empty()) {
+				_detectedEdges.erase(_detectedEdges.begin() + found);
+			}
         }
-        // undo commit
         return _detectedEdges.size();
     }
 
@@ -311,6 +431,12 @@ namespace core3d {
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(objects);
         return objects.IsEmpty();
+    }
+
+    const Standard_Size ShapeInteractor::getNumberOfDisplayedShapes() const {
+        AIS_ListOfInteractive objects;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
+        return objects.Size();
     }
 
     void ShapeInteractor::exportShapes() {
