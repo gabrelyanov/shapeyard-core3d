@@ -287,6 +287,12 @@ public: //! @name Setters for parameters
   Standard_EXPORT Standard_Boolean CaptureIdleMoveRotateOverlay(
       core3d::scene::PresentationOverlayContent& theContent) const noexcept;
 
+  //! Deep-copy the exact cached center, axis-scaler cubes, and uniform-scaler
+  //! sphere into renderer-neutral values. No mutable OCCT handle escapes.
+  //! Returns false when the presentation cache is incomplete.
+  Standard_EXPORT Standard_Boolean CaptureIdleScaleOverlay(
+      core3d::scene::PresentationOverlayContent& theContent) const noexcept;
+
   //! Sets position of the manipulator object.
   Standard_EXPORT void SetPosition (const gp_Ax2& thePosition);
 

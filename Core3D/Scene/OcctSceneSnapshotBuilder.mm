@@ -1075,6 +1075,7 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
 }
 
 bool ValidatePresentationOverlayPayload(
+    const PresentationOverlayKind theKind,
     const std::vector<MeshSnapshot>& theMeshes,
     const std::vector<InstanceSnapshot>& theInstances,
     const std::vector<MaterialSnapshot>& theMaterials,
@@ -1087,13 +1088,25 @@ bool ValidatePresentationOverlayPayload(
     }
     const bool isEmpty = theMeshes.empty()
         && theInstances.empty() && theMaterials.empty();
-    if (isEmpty) {
-        return true;
-    }
-    if (theMeshes.size() != 7
-        || theInstances.size() != 7
-        || theMaterials.size() != 4) {
-        return false;
+    switch (theKind) {
+        case PresentationOverlayKind::None:
+            return isEmpty;
+        case PresentationOverlayKind::MoveRotateGizmo:
+            if (isEmpty || theMeshes.size() != 7
+                || theInstances.size() != 7
+                || theMaterials.size() != 4) {
+                return false;
+            }
+            break;
+        case PresentationOverlayKind::ScaleGizmo:
+            if (isEmpty || theMeshes.size() != 5
+                || theInstances.size() != 5
+                || theMaterials.size() != 4) {
+                return false;
+            }
+            break;
+        default:
+            return false;
     }
 
     std::unordered_set<std::string> aMaterialIdentifiers;
@@ -1238,6 +1251,7 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
     // Base compatibility is published and validated separately. This revision
     // identifies only immutable overlay content, so camera-only full captures
     // do not advance it when the gizmo itself is unchanged.
+    aHash.AddInteger(static_cast<std::uint8_t>(theOverlay.kind));
     aHash.AddInteger<std::uint64_t>(theOverlay.meshes.size());
     for (const MeshSnapshot& aMesh : theOverlay.meshes) {
         aHash.AddInteger(MeshFingerprint(aMesh, 0.0, 0.0));
@@ -1429,6 +1443,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
         if (aData.IsNull()
             || aData->Time() != myState->lastFullDocumentTime
             || !ValidatePresentationOverlayPayload(
+                theContent.kind,
                 theContent.meshes,
                 theContent.instances,
                 theContent.materials,
@@ -1438,9 +1453,10 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
 
         // Copy only bounded transient state. The committed definition cache can
         // contain hundreds of thousands of entries and must not be copied for
-        // a seven-item overlay publication.
+        // a bounded transform-overlay publication.
         State::OverlayState aNextOverlayState = myState->overlay;
         PresentationOverlaySnapshot anOverlay;
+        anOverlay.kind = theContent.kind;
         anOverlay.publicationSourceIdentifier =
             myState->publicationSourceIdentifier;
         anOverlay.baseSnapshotRevision =
@@ -1482,6 +1498,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
             aMesh.geometryRevision = aRevision.revision;
         }
         if (!ValidatePresentationOverlayPayload(
+                anOverlay.kind,
                 anOverlay.meshes,
                 anOverlay.instances,
                 anOverlay.materials,
@@ -2069,8 +2086,15 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 continue;
             }
             TopoDS_Shape aSelectedSubshape;
-            if (theContext->HasSelectedShape()) {
-                aSelectedSubshape = theContext->SelectedShape();
+            const Handle(StdSelect_BRepOwner) aSelectedOwner =
+                Handle(StdSelect_BRepOwner)::DownCast(
+                    theContext->SelectedOwner());
+            if (!aSelectedOwner.IsNull() && aSelectedOwner->HasShape()) {
+                // Keep topology identity in definition-local space. OCCT's
+                // SelectedShape() applies the interactive transformation as a
+                // TopLoc_Location, which deliberately rejects uniform scale.
+                // The immutable instance matrix already carries that transform.
+                aSelectedSubshape = aSelectedOwner->Shape();
             }
             for (const std::size_t anInstanceIndex :
                  *anInstanceIndices) {

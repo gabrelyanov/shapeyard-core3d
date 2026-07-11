@@ -68,6 +68,12 @@ typedef NS_ENUM(NSInteger, Core3DSceneRenderStyle) {
     Core3DSceneRenderStyleWireframe,
 };
 
+typedef NS_ENUM(NSInteger, Core3DScenePresentationOverlayKind) {
+    Core3DScenePresentationOverlayKindNone = 0,
+    Core3DScenePresentationOverlayKindMoveRotateGizmo,
+    Core3DScenePresentationOverlayKindScaleGizmo,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneElementKind) {
     Core3DSceneElementKindNone = 0,
     Core3DSceneElementKindObject,
@@ -274,6 +280,7 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DScenePresentationOverlaySnapshot : NSObject
 
 @property (nonatomic, assign, readonly) uint32_t schemaVersion;
+@property (nonatomic, assign, readonly) Core3DScenePresentationOverlayKind kind;
 @property (nonatomic, copy, readonly) NSString *publicationSourceIdentifier;
 @property (nonatomic, assign, readonly) uint64_t baseSnapshotRevision;
 @property (nonatomic, assign, readonly) uint64_t baseDocumentGeneration;

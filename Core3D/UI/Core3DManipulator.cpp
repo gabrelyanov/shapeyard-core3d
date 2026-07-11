@@ -231,6 +231,62 @@ core3d::scene::MaterialSnapshot GizmoMaterial(
     aMaterial.doubleSided = true;
     return aMaterial;
 }
+
+core3d::scene::Matrix4d GizmoWorldAnchor(const gp_Ax2& thePosition)
+{
+    const gp_Dir anX = thePosition.XDirection();
+    const gp_Dir aY = thePosition.YDirection();
+    const gp_Dir aZ = thePosition.Direction();
+    const gp_Pnt anAnchor = thePosition.Location();
+    core3d::scene::Matrix4d aWorldFromPixels;
+    aWorldFromPixels.values = {
+        anX.X(), anX.Y(), anX.Z(), 0.0,
+        aY.X(), aY.Y(), aY.Z(), 0.0,
+        aZ.X(), aZ.Y(), aZ.Z(), 0.0,
+        anAnchor.X(), anAnchor.Y(), anAnchor.Z(), 1.0,
+    };
+    return aWorldFromPixels;
+}
+
+bool AddGizmoComponent(
+    core3d::scene::PresentationOverlayContent& theContent,
+    const core3d::scene::Matrix4d& theWorldFromPixels,
+    const Handle(Graphic3d_ArrayOfTriangles)& theArray,
+    const std::string& theIdentifier,
+    const std::string& theName,
+    const std::uint32_t theMaterialIndex)
+{
+    core3d::scene::MeshSnapshot aMesh;
+    if (!CopyTriangleArray(theArray,
+                           theIdentifier + "/mesh",
+                           aMesh)) {
+        return false;
+    }
+    const std::uint32_t aMeshIndex =
+        static_cast<std::uint32_t>(theContent.meshes.size());
+    core3d::scene::InstanceSnapshot anInstance;
+    anInstance.entityIdentifier = theIdentifier;
+    anInstance.meshIndex = aMeshIndex;
+    anInstance.worldFromObject = theWorldFromPixels;
+    anInstance.reversesWinding = false;
+    anInstance.visible = true;
+    anInstance.selectable = false;
+    anInstance.selected = false;
+    anInstance.name = theName;
+    anInstance.role = core3d::scene::RenderRole::Gizmo;
+    anInstance.coordinateSpace =
+        core3d::scene::CoordinateSpace::WorldAnchorPixels;
+    anInstance.depthPolicy = core3d::scene::DepthPolicy::Topmost;
+    anInstance.renderStyle = core3d::scene::RenderStyle::Shaded;
+    anInstance.primitiveBindings.push_back({
+        theMaterialIndex,
+        0,
+        true,
+    });
+    theContent.meshes.push_back(std::move(aMesh));
+    theContent.instances.push_back(std::move(anInstance));
+    return true;
+}
 }
 
 //=======================================================================
@@ -299,6 +355,8 @@ Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
         }
 
         core3d::scene::PresentationOverlayContent aContent;
+        aContent.kind =
+            core3d::scene::PresentationOverlayKind::MoveRotateGizmo;
         aContent.meshes.reserve(7);
         aContent.instances.reserve(7);
         aContent.materials.reserve(4);
@@ -311,61 +369,15 @@ Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
         aContent.materials.push_back(GizmoMaterial(
             "gizmo/material/z", myAxes[2].Color()));
 
-        const gp_Dir anX = myPosition.XDirection();
-        const gp_Dir aY = myPosition.YDirection();
-        const gp_Dir aZ = myPosition.Direction();
-        const gp_Pnt anAnchor = myPosition.Location();
-        core3d::scene::Matrix4d aWorldFromPixels;
-        aWorldFromPixels.values = {
-            anX.X(), anX.Y(), anX.Z(), 0.0,
-            aY.X(), aY.Y(), aY.Z(), 0.0,
-            aZ.X(), aZ.Y(), aZ.Z(), 0.0,
-            anAnchor.X(), anAnchor.Y(), anAnchor.Z(), 1.0,
-        };
+        const core3d::scene::Matrix4d aWorldFromPixels =
+            GizmoWorldAnchor(myPosition);
 
-        const auto addComponent = [&aContent, &aWorldFromPixels](
-            const Handle(Graphic3d_ArrayOfTriangles)& theArray,
-            const char* theIdentifier,
-            const char* theName,
-            const std::uint32_t theMaterialIndex) {
-            core3d::scene::MeshSnapshot aMesh;
-            const std::string aDefinitionIdentifier =
-                std::string(theIdentifier) + "/mesh";
-            if (!CopyTriangleArray(theArray,
-                                   aDefinitionIdentifier,
-                                   aMesh)) {
-                return false;
-            }
-            const std::uint32_t aMeshIndex =
-                static_cast<std::uint32_t>(aContent.meshes.size());
-            core3d::scene::InstanceSnapshot anInstance;
-            anInstance.entityIdentifier = theIdentifier;
-            anInstance.meshIndex = aMeshIndex;
-            anInstance.worldFromObject = aWorldFromPixels;
-            anInstance.reversesWinding = false;
-            anInstance.visible = true;
-            anInstance.selectable = false;
-            anInstance.selected = false;
-            anInstance.name = theName;
-            anInstance.role = core3d::scene::RenderRole::Gizmo;
-            anInstance.coordinateSpace =
-                core3d::scene::CoordinateSpace::WorldAnchorPixels;
-            anInstance.depthPolicy = core3d::scene::DepthPolicy::Topmost;
-            anInstance.renderStyle = core3d::scene::RenderStyle::Shaded;
-            anInstance.primitiveBindings.push_back({
-                theMaterialIndex,
-                0,
-                true,
-            });
-            aContent.meshes.push_back(std::move(aMesh));
-            aContent.instances.push_back(std::move(anInstance));
-            return true;
-        };
-
-        if (!addComponent(myCenter.Array(),
-                          "gizmo/center",
-                          "Move/rotate center",
-                          0)) {
+        if (!AddGizmoComponent(aContent,
+                               aWorldFromPixels,
+                               myCenter.Array(),
+                               "gizmo/center",
+                               "Move/rotate center",
+                               0)) {
             return Standard_False;
         }
         static constexpr const char* kAxisNames[3] = {"x", "y", "z"};
@@ -375,25 +387,116 @@ Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
                 std::string("gizmo/translation/") + kAxisNames[anAxis];
             const std::string aTranslationName =
                 std::string(kAxisDisplayNames[anAxis]) + " translation";
-            if (!addComponent(myAxes[anAxis].TriangleArrayF(),
-                              aTranslationIdentifier.c_str(),
-                              aTranslationName.c_str(),
-                              static_cast<std::uint32_t>(anAxis + 1))) {
+            if (!AddGizmoComponent(
+                    aContent,
+                    aWorldFromPixels,
+                    myAxes[anAxis].TriangleArrayF(),
+                    aTranslationIdentifier,
+                    aTranslationName,
+                    static_cast<std::uint32_t>(anAxis + 1))) {
                 return Standard_False;
             }
             const std::string aRotationIdentifier =
                 std::string("gizmo/rotation/") + kAxisNames[anAxis];
             const std::string aRotationName =
                 std::string(kAxisDisplayNames[anAxis]) + " rotation";
-            if (!addComponent(myAxes[anAxis].RotatorDisk().Array(),
-                              aRotationIdentifier.c_str(),
-                              aRotationName.c_str(),
-                              static_cast<std::uint32_t>(anAxis + 1))) {
+            if (!AddGizmoComponent(
+                    aContent,
+                    aWorldFromPixels,
+                    myAxes[anAxis].RotatorDisk().Array(),
+                    aRotationIdentifier,
+                    aRotationName,
+                    static_cast<std::uint32_t>(anAxis + 1))) {
                 return Standard_False;
             }
         }
         if (aContent.meshes.size() != 7
             || aContent.instances.size() != 7
+            || aContent.materials.size() != 4) {
+            return Standard_False;
+        }
+        theContent = std::move(aContent);
+        return Standard_True;
+    } catch (const Standard_Failure&) {
+        return Standard_False;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean Core3DManipulator::CaptureIdleScaleOverlay(
+    core3d::scene::PresentationOverlayContent& theContent) const noexcept
+{
+    try {
+        if (!myHasCenter) {
+            return Standard_False;
+        }
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            if (!myAxes[anAxis].HasScaling()
+                || !myAxes[anAxis].HasScalingUniform()
+                || myAxes[anAxis].HasTranslation()
+                || myAxes[anAxis].HasRotation()
+                || myAxes[anAxis].HasDragging()
+                || myAxes[anAxis].HasMirroringPos()
+                || myAxes[anAxis].HasMirroringNeg()) {
+                return Standard_False;
+            }
+        }
+
+        core3d::scene::PresentationOverlayContent aContent;
+        aContent.kind = core3d::scene::PresentationOverlayKind::ScaleGizmo;
+        aContent.meshes.reserve(5);
+        aContent.instances.reserve(5);
+        aContent.materials.reserve(4);
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/center", Quantity_Color(Quantity_NOC_WHITE)));
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/x", myAxes[0].Color()));
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/y", myAxes[1].Color()));
+        aContent.materials.push_back(GizmoMaterial(
+            "gizmo/material/z", myAxes[2].Color()));
+
+        const core3d::scene::Matrix4d aWorldFromPixels =
+            GizmoWorldAnchor(myPosition);
+        if (!AddGizmoComponent(aContent,
+                               aWorldFromPixels,
+                               myCenter.Array(),
+                               "gizmo/center",
+                               "Scale center",
+                               0)) {
+            return Standard_False;
+        }
+
+        static constexpr const char* kAxisNames[3] = {"x", "y", "z"};
+        static constexpr const char* kAxisDisplayNames[3] = {"X", "Y", "Z"};
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            const std::string anIdentifier =
+                std::string("gizmo/scaling/") + kAxisNames[anAxis];
+            const std::string aName =
+                std::string(kAxisDisplayNames[anAxis]) + " scale";
+            if (!AddGizmoComponent(
+                    aContent,
+                    aWorldFromPixels,
+                    myAxes[anAxis].ScalerCube().Array(),
+                    anIdentifier,
+                    aName,
+                    static_cast<std::uint32_t>(anAxis + 1))) {
+                return Standard_False;
+            }
+        }
+        if (!AddGizmoComponent(
+                aContent,
+                aWorldFromPixels,
+                myAxes[1].ScalerSphereUniform().Array(),
+                "gizmo/scaling/uniform",
+                "Uniform scale",
+                2)) {
+            return Standard_False;
+        }
+
+        if (aContent.meshes.size() != 5
+            || aContent.instances.size() != 5
             || aContent.materials.size() != 4) {
             return Standard_False;
         }

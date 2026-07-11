@@ -12,6 +12,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <Precision.hxx>
 #include <V3d_View.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -19,6 +20,7 @@
 #include <GP_Quaternion.hxx>
 #include <AIS_Shape.hxx>
 #include <Standard_Failure.hxx>
+#include <cmath>
 
 namespace core3d {
 	namespace {
@@ -32,6 +34,20 @@ namespace core3d {
 			} catch (...) {
 				return Standard_False;
 			}
+		}
+
+		bool TransformDiffers(const gp_Trsf& theLeft,
+		                      const gp_Trsf& theRight) {
+			for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+				for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+					if (std::abs(theLeft.Value(aRow, aColumn)
+					             - theRight.Value(aRow, aColumn))
+					    > Precision::Confusion()) {
+						return true;
+					}
+				}
+			}
+			return false;
 		}
 	}
 
@@ -133,8 +149,11 @@ namespace core3d {
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
                 return PresentationOverlayCaptureStatus::Available;
             }
-            if (_manipulatorType
-                != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate) {
+            const bool isMoveRotate = _manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
+            const bool isScale = _manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
+            if (!isMoveRotate && !isScale) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             if (_manipulator.IsNull() || !_manipulator->IsAttached()) {
@@ -146,8 +165,14 @@ namespace core3d {
                 || !myContext->IsDisplayed(_manipulator)
                 || !_manipulator->ZoomPersistence()
                 || _manipulator->HasActiveMode()
-                || _manipulator->HasActiveTransformation()
-                || !_manipulator->CaptureIdleMoveRotateOverlay(theContent)) {
+                || _manipulator->HasActiveTransformation()) {
+                theContent = {};
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
+            const Standard_Boolean didCapture = isMoveRotate
+                ? _manipulator->CaptureIdleMoveRotateOverlay(theContent)
+                : _manipulator->CaptureIdleScaleOverlay(theContent);
+            if (!didCapture) {
                 theContent = {};
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
@@ -423,6 +448,66 @@ namespace core3d {
 
     void ObjectInteractor::finishInteraction() {
         if(!_manipulator.IsNull() && _manipulator->IsAttached() && _manipulator->HasActiveMode()) {
+			const AIS_ManipulatorMode activeMode = _manipulator->ActiveMode();
+			const bool isMirrorPlane = _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+				&& (activeMode
+						== AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg
+					|| activeMode
+						== AIS_ManipulatorMode::AIS_MM_MirroringPlanePos);
+			if (isMirrorPlane) {
+				// Mirror handles select an operation plane; they intentionally do
+				// not mutate the source presentation. Resolve the transient preview
+				// before the transform-only no-op guard below.
+				_manipulator->StopTransform(Standard_False);
+				tryMirror(
+					_manipulator->ActiveAxisIndex(),
+					activeMode
+						== AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg);
+				_manipulator->DeactivateCurrentMode();
+				myContext->ClearDetected(Standard_False);
+				_manipulator->Redisplay();
+				myContext->UpdateCurrentViewer();
+				return;
+			}
+
+			if (!_manipulator->HasActiveTransformation()) {
+				cancelInteraction();
+				return;
+			}
+			const auto &cachedShapes = _manipulator->cachedShapes();
+			Handle(Core3DManipulatorObjectSequence) objects =
+				_manipulator->Objects();
+			if (objects.IsNull()) {
+				cancelInteraction();
+				return;
+			}
+			bool didChange = false;
+			Standard_Integer objectIndex = 1;
+			for (Core3DManipulatorObjectSequence::Iterator object(*objects);
+			     object.More(); object.Next(), ++objectIndex) {
+				const Handle(AIS_InteractiveObject)& current = object.Value();
+				const auto cached = cachedShapes.find(current);
+				const Handle(AIS_Shape) presentation =
+					Handle(AIS_Shape)::DownCast(current);
+				if (cached == cachedShapes.end()
+				    || cached->second.IsNull()
+				    || presentation.IsNull()
+				    || presentation->Shape().IsNull()) {
+					cancelInteraction();
+					return;
+				}
+				didChange = didChange
+					|| TransformDiffers(
+						presentation->LocalTransformation(),
+						_manipulator->StartTransformation(objectIndex))
+					|| !presentation->Shape().IsEqual(cached->second);
+			}
+			if (!didChange) {
+				cancelInteraction();
+				return;
+			}
+
             Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myDoc->Document()->Main());
             auto doc = myDoc->ChangeDocument();
 			if (doc.IsNull() || doc->HasOpenCommand()) {
@@ -430,7 +515,6 @@ namespace core3d {
 				return;
 			}
 
-			const auto &cachedShapes = _manipulator->cachedShapes();
 			std::vector<std::pair<Handle(AIS_Shape), TDF_Label>> changes;
 			for (const auto& cachedShape : cachedShapes) {
 				Handle(AIS_Shape) presentation = Handle(AIS_Shape)::DownCast(cachedShape.first);
@@ -473,16 +557,14 @@ namespace core3d {
 			_manipulator->StopTransform(Standard_True);
 			myDoc->NotifyChanges();
 
-			if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror) {
-				if (_manipulator->ActiveMode() == AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg
-					|| _manipulator->ActiveMode() == AIS_ManipulatorMode::AIS_MM_MirroringPlanePos) {
-					tryMirror(_manipulator->ActiveAxisIndex(), _manipulator->ActiveMode() == AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg);
-				}
-			}
-			
 			_manipulator->UpdateCachedShapes();
             
             _manipulator->DeactivateCurrentMode();
+            // A touch release has no continuing pointer hover. OCCT otherwise
+            // retains the last detected handle and can immediately reactivate
+            // its mode during redisplay, leaving the idle presentation in an
+            // unsafe pseudo-active state after a successful transform.
+            myContext->ClearDetected(Standard_False);
             _manipulator->Redisplay();
             myContext->UpdateCurrentViewer();
         }
@@ -497,8 +579,9 @@ namespace core3d {
 					presentation->SetShape(cachedShape.second);
 					myContext->Redisplay(presentation, Standard_False);
 				}
-			}
+            }
             _manipulator->DeactivateCurrentMode();
+			myContext->ClearDetected(Standard_False);
 			_manipulator->UpdateCachedShapes();
             _manipulator->Redisplay();
             myContext->UpdateCurrentViewer();
@@ -507,6 +590,12 @@ namespace core3d {
 
     const bool ObjectInteractor::isManipulatorAttached() const {
         return !_manipulator.IsNull() && _manipulator->IsAttached();
+    }
+
+    const bool ObjectInteractor::isManipulatorInteractionActive() const {
+        return !_manipulator.IsNull()
+            && _manipulator->IsAttached()
+            && _manipulator->HasActiveMode();
     }
 
     void ObjectInteractor::SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject) {

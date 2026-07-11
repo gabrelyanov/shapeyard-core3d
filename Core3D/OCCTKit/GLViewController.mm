@@ -85,6 +85,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     BOOL _pinchRendering;
     BOOL _panRendering;
     CGPoint _pinchPreviousTouch[2];
+    UITapGestureRecognizer *_tapRecognizer;
+    BOOL _suppressTapSelectionForManipulatorInteraction;
 }
 
 - (void)dealloc {
@@ -328,6 +330,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		_cancelTouches = NO;
 		_rawTouchWasCancelled = NO;
 		_rawTouchRendering = YES;
+		_suppressTapSelectionForManipulatorInteraction = NO;
 		[[self viewportView] beginInteractiveRendering];
 	}
 
@@ -342,7 +345,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 willBeginPrimaryInteractionAtDrawablePoint:point
                                              drawableSize:self.drawableSize];
         }
+        _tapRecognizer.cancelsTouchesInView = YES;
         _viewer->StartRotation((int)point.x, (int)point.y);
+        const std::shared_ptr<ObjectInteractor> anInteractor =
+            _viewer->getObjectInteractor();
+        _suppressTapSelectionForManipulatorInteraction =
+            anInteractor != nullptr
+            && anInteractor->isManipulatorInteractionActive();
+        if (_suppressTapSelectionForManipulatorInteraction) {
+            // The raw touch-up resolves both transforms and operation handles
+            // such as mirror planes. Keep the recognizer from cancelling that
+            // lifecycle; tapHandler still suppresses ordinary selection.
+            _tapRecognizer.cancelsTouchesInView = NO;
+        }
         [self requestRender];
     }
 }
@@ -376,7 +391,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [self touchesCancelled:theTouches withEvent:theEvent];
         return;
     }
-    
+
     [super touchesMoved:theTouches withEvent:theEvent];
     
     UITouch *aTouch = [theTouches anyObject];
@@ -469,11 +484,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
     [[self view] addGestureRecognizer:aPanRecognizer];
 
-    UITapGestureRecognizer *aTapRecognizer = [[UITapGestureRecognizer alloc]
-                                              initWithTarget:self
-                                              action:@selector(tapHandler:)];
-
-    [[self view] addGestureRecognizer:aTapRecognizer];
+    _tapRecognizer = [[UITapGestureRecognizer alloc]
+                      initWithTarget:self
+                      action:@selector(tapHandler:)];
+    [[self view] addGestureRecognizer:_tapRecognizer];
 
 
     // add import buttons
@@ -626,6 +640,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 // =======================================================================
 - (void)tapHandler:(UITapGestureRecognizer *)tapRecognizer
 {
+    if (_suppressTapSelectionForManipulatorInteraction) {
+        _suppressTapSelectionForManipulatorInteraction = NO;
+        return;
+    }
     if (_isPreviewMode) {
         return;
     }

@@ -134,6 +134,7 @@ static_assert(sizeof(std::uint32_t) == 4,
 
 @interface Core3DScenePresentationOverlaySnapshot ()
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
+                                  kind:(Core3DScenePresentationOverlayKind)kind
            publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
                   baseSnapshotRevision:(uint64_t)baseSnapshotRevision
                 baseDocumentGeneration:(uint64_t)baseDocumentGeneration
@@ -416,6 +417,7 @@ static_assert(sizeof(std::uint32_t) == 4,
 @implementation Core3DScenePresentationOverlaySnapshot
 
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
+                                  kind:(Core3DScenePresentationOverlayKind)kind
            publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
                   baseSnapshotRevision:(uint64_t)baseSnapshotRevision
                 baseDocumentGeneration:(uint64_t)baseDocumentGeneration
@@ -428,6 +430,7 @@ static_assert(sizeof(std::uint32_t) == 4,
     self = [super init];
     if (self) {
         _schemaVersion = schemaVersion;
+        _kind = kind;
         _publicationSourceIdentifier = [publicationSourceIdentifier copy];
         _baseSnapshotRevision = baseSnapshotRevision;
         _baseDocumentGeneration = baseDocumentGeneration;
@@ -1084,14 +1087,25 @@ bool IsValidPresentationOverlaySnapshotImpl(
 
     const bool isEmpty = snapshot.meshes.empty()
         && snapshot.instances.empty() && snapshot.materials.empty();
-    if (isEmpty) {
-        return true;
-    }
-    // Schema 1 is deliberately the bounded idle move/rotate gizmo slice.
-    if (snapshot.meshes.size() != 7
-        || snapshot.instances.size() != 7
-        || snapshot.materials.size() != 4) {
-        return false;
+    switch (snapshot.kind) {
+        case PresentationOverlayKind::None:
+            return isEmpty;
+        case PresentationOverlayKind::MoveRotateGizmo:
+            if (isEmpty || snapshot.meshes.size() != 7
+                || snapshot.instances.size() != 7
+                || snapshot.materials.size() != 4) {
+                return false;
+            }
+            break;
+        case PresentationOverlayKind::ScaleGizmo:
+            if (isEmpty || snapshot.meshes.size() != 5
+                || snapshot.instances.size() != 5
+                || snapshot.materials.size() != 4) {
+                return false;
+            }
+            break;
+        default:
+            return false;
     }
 
     std::size_t stringBytes = snapshot.publicationSourceIdentifier.size();
@@ -1374,6 +1388,22 @@ Core3DSceneRenderStyle RenderStyleFromScene(RenderStyle value) {
     return Core3DSceneRenderStyleShaded;
 }
 
+Core3DScenePresentationOverlayKind PresentationOverlayKindFromScene(
+    PresentationOverlayKind value) {
+    switch (value) {
+        case PresentationOverlayKind::None:
+            return Core3DScenePresentationOverlayKindNone;
+        case PresentationOverlayKind::MoveRotateGizmo:
+            return Core3DScenePresentationOverlayKindMoveRotateGizmo;
+        case PresentationOverlayKind::ScaleGizmo:
+            return Core3DScenePresentationOverlayKindScaleGizmo;
+    }
+
+    NSCAssert(NO, @"Unknown presentation-overlay kind: %u",
+              static_cast<unsigned>(value));
+    return Core3DScenePresentationOverlayKindNone;
+}
+
 Core3DSceneElementKind ElementKindFromScene(ElementKind value) {
     switch (value) {
         case ElementKind::None:
@@ -1626,6 +1656,7 @@ Core3DCreateScenePresentationOverlaySnapshotDTO(
                 MaterialFromScene);
         return [[Core3DScenePresentationOverlaySnapshot alloc]
             initWithSchemaVersion:snapshot.schemaVersion
+            kind:PresentationOverlayKindFromScene(snapshot.kind)
             publicationSourceIdentifier:StringFromUTF8(
                 snapshot.publicationSourceIdentifier)
             baseSnapshotRevision:snapshot.baseSnapshotRevision

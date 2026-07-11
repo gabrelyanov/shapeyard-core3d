@@ -61,10 +61,11 @@ namespace core3d {
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         const bool isManipulatorAttached() const;
+        const bool isManipulatorInteractionActive() const;
         const PrimitiveManipulatorType getManipulatorType() const;
 
-        //! Capture only an idle move/rotate gizmo. Available with empty content
-        //! is an explicit clear; Unsafe means a renderer must retain OCCT.
+        //! Capture only a supported idle transform gizmo. Available with empty
+        //! content is an explicit clear; Unsafe means a renderer must retain OCCT.
         PresentationOverlayCaptureStatus captureIdlePresentationOverlay(
             scene::PresentationOverlayContent& theContent) const noexcept;
 

@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 1;
-inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 1;
+inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 2;
 
 struct Float2 {
     float x = 0.0f;
@@ -103,6 +103,12 @@ enum class DepthPolicy : std::uint8_t {
 enum class RenderStyle : std::uint8_t {
     Shaded = 0,
     Wireframe,
+};
+
+enum class PresentationOverlayKind : std::uint8_t {
+    None = 0,
+    MoveRotateGizmo,
+    ScaleGizmo,
 };
 
 enum class ElementKind : std::uint8_t {
@@ -239,6 +245,7 @@ struct FrameSnapshot {
 //! Renderer-neutral transient presentation values produced without traversing
 //! or mutating the committed OCAF document.
 struct PresentationOverlayContent {
+    PresentationOverlayKind kind = PresentationOverlayKind::None;
     std::vector<MeshSnapshot> meshes;
     std::vector<InstanceSnapshot> instances;
     std::vector<MaterialSnapshot> materials;
@@ -248,6 +255,7 @@ struct PresentationOverlayContent {
 //! publication has its own revision domain and never changes modelRevision.
 struct PresentationOverlaySnapshot {
     std::uint32_t schemaVersion = kPresentationOverlaySnapshotSchemaVersion;
+    PresentationOverlayKind kind = PresentationOverlayKind::None;
     std::string publicationSourceIdentifier;
     std::uint64_t baseSnapshotRevision = 0;
     std::uint64_t baseDocumentGeneration = 0;
