@@ -171,6 +171,9 @@
 		71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */; };
 		71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */; };
 		71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */; };
+		C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = C03D50030000000000000001 /* Core3DSceneSnapshot.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50040000000000000001 /* Core3DSceneSnapshot.mm */; };
+		C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -342,6 +345,12 @@
 		71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ConstructorManipulator.hpp; sourceTree = "<group>"; };
 		71F7ACEB2C09D29A00FDF2EA /* BooleanOperationController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BooleanOperationController.hpp; sourceTree = "<group>"; };
 		71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = BooleanOperationController.cpp; sourceTree = "<group>"; };
+		C03D50030000000000000001 /* Core3DSceneSnapshot.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DSceneSnapshot.h; sourceTree = "<group>"; };
+		C03D50040000000000000001 /* Core3DSceneSnapshot.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DSceneSnapshot.mm; sourceTree = "<group>"; };
+		C03D50050000000000000001 /* Core3DSceneSnapshotFactory.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DSceneSnapshotFactory.hpp; sourceTree = "<group>"; };
+		C03D50120000000000000001 /* SceneSnapshot.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SceneSnapshot.hpp; sourceTree = "<group>"; };
+		C03D50130000000000000001 /* OcctSceneSnapshotBuilder.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = OcctSceneSnapshotBuilder.hpp; sourceTree = "<group>"; };
+		C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = OcctSceneSnapshotBuilder.mm; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -463,6 +472,26 @@
 			path = Bundle;
 			sourceTree = "<group>";
 		};
+		C03D50060000000000000001 /* Viewport */ = {
+			isa = PBXGroup;
+			children = (
+				C03D50030000000000000001 /* Core3DSceneSnapshot.h */,
+				C03D50040000000000000001 /* Core3DSceneSnapshot.mm */,
+				C03D50050000000000000001 /* Core3DSceneSnapshotFactory.hpp */,
+			);
+			path = Viewport;
+			sourceTree = "<group>";
+		};
+		C03D50160000000000000001 /* Scene */ = {
+			isa = PBXGroup;
+			children = (
+				C03D50120000000000000001 /* SceneSnapshot.hpp */,
+				C03D50130000000000000001 /* OcctSceneSnapshotBuilder.hpp */,
+				C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */,
+			);
+			path = Scene;
+			sourceTree = "<group>";
+		};
 		3221603D2BB560CB00040E84 = {
 			isa = PBXGroup;
 			children = (
@@ -484,6 +513,8 @@
 		322160492BB560CB00040E84 /* Core3D */ = {
 			isa = PBXGroup;
 			children = (
+				C03D50160000000000000001 /* Scene */,
+				C03D50060000000000000001 /* Viewport */,
 				3240475C2C00D1FC009E4B86 /* Export */,
 				3201971A2BD7AED400F30E62 /* Bundle */,
 				325C83582BCE77AD000292E4 /* Common */,
@@ -689,6 +720,7 @@
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */,
 				181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */,
 				18665F032CA2DA8500141E05 /* ModelPart.h in Headers */,
 				32ECC7CC2BC9428900770594 /* PrimitiveSelectionType.h in Headers */,
@@ -834,6 +866,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */,
+				C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */,
 				18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */,
 				71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */,
 				322185782BB5CC1500040E84 /* CafShapePrs.mm in Sources */,

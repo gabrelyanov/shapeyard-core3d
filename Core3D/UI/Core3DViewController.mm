@@ -10,10 +10,15 @@
 #import "Core3DViewController+PrimitiveManager.h"
 #import "Core3DViewController+GLViewControllerProtocol.h"
 #import <Core3D/AssetBundle.h>
+#import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 
 #include "GLViewController+Trick.h"
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
 
 @interface Core3DViewController () {
     BOOL _isSetuped;
@@ -230,6 +235,38 @@
 
 - (Core3DViewportRenderingAPI)viewportRenderingAPI {
     return (Core3DViewportRenderingAPI)GLController.renderingAPIVersion;
+}
+
+- (Core3DSceneSnapshot *)captureSceneSnapshot {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return nil;
+    }
+
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
+        if (viewer == nullptr) {
+            return nil;
+        }
+
+        const CGSize drawableSize = GLController.drawableSize;
+        if (!std::isfinite(drawableSize.width)
+            || !std::isfinite(drawableSize.height)
+            || drawableSize.width < 1.0
+            || drawableSize.height < 1.0
+            || drawableSize.width > std::numeric_limits<std::uint32_t>::max()
+            || drawableSize.height > std::numeric_limits<std::uint32_t>::max()) {
+            return nil;
+        }
+
+        const auto snapshot = viewer->captureSceneSnapshot(
+            static_cast<std::uint32_t>(std::llround(drawableSize.width)),
+            static_cast<std::uint32_t>(std::llround(drawableSize.height)));
+        return snapshot == nullptr
+            ? nil
+            : Core3DCreateSceneSnapshotDTO(*snapshot);
+    } catch (...) {
+        return nil;
+    }
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {

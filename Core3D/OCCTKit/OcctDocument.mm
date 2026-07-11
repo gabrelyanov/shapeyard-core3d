@@ -28,6 +28,7 @@
 #include <Message_Messenger.hxx>
 
 #include <TCollection_AsciiString.hxx>
+#include <TDataStd_AsciiString.hxx>
 #include <TDataStd_Integer.hxx>
 #include <BinDrivers.hxx>
 
@@ -37,8 +38,105 @@
 #include <gp_Trsf.hxx>
 #include <GP_Quaternion.hxx>
 #include <TNaming.hxx>
+#include <Standard_GUID.hxx>
+#include <TDF_LabelMap.hxx>
+#include <XCAFPrs_DocumentExplorer.hxx>
+
+#include <set>
+#include <vector>
 
 IMPLEMENT_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
+
+namespace {
+
+// These GUIDs are persistent schema identifiers. They identify the attribute
+// role; the UUID string stored in each attribute identifies the document,
+// occurrence, or shared shape definition itself.
+const Standard_GUID& DocumentIdentifierAttributeID()
+{
+    static const Standard_GUID anId("74386E4E-F620-498F-8092-E6D883AF33A4");
+    return anId;
+}
+
+const Standard_GUID& EntityIdentifierAttributeID()
+{
+    static const Standard_GUID anId("0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+    return anId;
+}
+
+const Standard_GUID& DefinitionIdentifierAttributeID()
+{
+    static const Standard_GUID anId("3611F2B2-C694-4E12-AED8-A2A97A3D283B");
+    return anId;
+}
+
+std::string ReadIdentifier(const TDF_Label& theLabel,
+                           const Standard_GUID& theAttributeID)
+{
+    if (theLabel.IsNull()) {
+        return {};
+    }
+
+    Handle(TDataStd_AsciiString) anIdentifier;
+    if (!theLabel.FindAttribute(theAttributeID, anIdentifier)
+        || anIdentifier.IsNull()) {
+        return {};
+    }
+
+    const TCollection_AsciiString& aValue = anIdentifier->Get();
+    if (aValue.IsEmpty() || !Standard_GUID::CheckGUIDFormat(aValue.ToCString())) {
+        return {};
+    }
+    return aValue.ToCString();
+}
+
+std::string NewIdentifier()
+{
+    NSString* aValue = NSUUID.UUID.UUIDString;
+    return aValue == nil ? std::string() : std::string(aValue.UTF8String);
+}
+
+Standard_Boolean AssignNewIdentifier(
+    const TDF_Label& theLabel,
+    const Standard_GUID& theAttributeID)
+{
+    if (theLabel.IsNull()) {
+        return Standard_False;
+    }
+
+    const std::string anIdentifier = NewIdentifier();
+    if (anIdentifier.empty()) {
+        return Standard_False;
+    }
+    TDataStd_AsciiString::Set(
+        theLabel,
+        theAttributeID,
+        TCollection_AsciiString(anIdentifier.c_str()));
+    return Standard_True;
+}
+
+Standard_Boolean AssignIdentifierIfMissing(
+    const TDF_Label& theLabel,
+    const Standard_GUID& theAttributeID)
+{
+    return !ReadIdentifier(theLabel, theAttributeID).empty()
+        || AssignNewIdentifier(theLabel, theAttributeID);
+}
+
+void AbortCommandNoThrow(const Handle(TDocStd_Document)& theDocument) noexcept
+{
+    if (theDocument.IsNull()) {
+        return;
+    }
+    try {
+        if (theDocument->HasOpenCommand()) {
+            theDocument->AbortCommand();
+        }
+    } catch (...) {
+    }
+}
+
+} // namespace
 
 // =======================================================================
 // function : OcctViewer
@@ -92,18 +190,158 @@ void OcctDocument::InitDoc()
   myApp->NewDocument(TCollection_ExtendedString("BinOcaf"), myOcafDoc);
   BinDrivers::DefineFormat(myApp);
 
-  // set maximum number of available "undo" actions
+  // Install document infrastructure and identity before enabling normal undo
+  // history. These are schema attributes, not user-authored edits.
   if (!myOcafDoc.IsNull())
   {
-    myOcafDoc->SetUndoLimit(40);
-
 	// Create the persistent XCAF tools before the first undoable command. If the
 	// first shape command creates these infrastructure attributes, Undo removes
 	// them and a viewport redraw recreates them outside history; Redo then fails
 	// because the same labels already carry those attributes.
 	(void)XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
 	(void)XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
+	if (!AssignIdentifierIfMissing(
+	        myOcafDoc->Main(), DocumentIdentifierAttributeID())) {
+	  Message::SendFail("Unable to assign Core3D document identifier");
+	}
+	myOcafDoc->ClearUndos();
+	myOcafDoc->SetUndoLimit(40);
   }
+}
+
+std::string OcctDocument::DocumentIdentifier() const
+{
+    return myOcafDoc.IsNull()
+        ? std::string()
+        : ReadIdentifier(myOcafDoc->Main(), DocumentIdentifierAttributeID());
+}
+
+std::string OcctDocument::EntityIdentifierForLabel(const TDF_Label& label) const
+{
+    return ReadIdentifier(label, EntityIdentifierAttributeID());
+}
+
+std::string OcctDocument::DefinitionIdentifierForLabel(const TDF_Label& label) const
+{
+    return ReadIdentifier(label, DefinitionIdentifierAttributeID());
+}
+
+Standard_Boolean OcctDocument::MigrateLegacyIdentifiers()
+{
+    return MigrateLegacyIdentifiers(myOcafDoc);
+}
+
+Standard_Boolean OcctDocument::MigrateLegacyIdentifiers(
+    const Handle(TDocStd_Document)& document)
+{
+    if (document.IsNull() || document->HasOpenCommand()) {
+        return Standard_False;
+    }
+
+    TDF_LabelMap entityLabels;
+    TDF_LabelMap definitionLabels;
+    try {
+        OCC_CATCH_SIGNALS
+        XCAFPrs_DocumentExplorer anExplorer(
+            document,
+            XCAFPrs_DocumentExplorerFlags_None);
+        for (; anExplorer.More(); anExplorer.Next()) {
+            const XCAFPrs_DocumentNode& aNode = anExplorer.Current();
+            if (!aNode.Label.IsNull()) {
+                entityLabels.Add(aNode.Label);
+            }
+            const TDF_Label& aDefinitionLabel = aNode.RefLabel.IsNull()
+                ? aNode.Label
+                : aNode.RefLabel;
+            if (!aDefinitionLabel.IsNull()) {
+                definitionLabels.Add(aDefinitionLabel);
+            }
+        }
+    } catch (...) {
+        return Standard_False;
+    }
+
+    const Standard_Boolean needsDocumentIdentifier =
+        ReadIdentifier(document->Main(), DocumentIdentifierAttributeID()).empty();
+    std::vector<TDF_Label> entityIdentifiersNeedingAssignment;
+    std::vector<TDF_Label> definitionIdentifiersNeedingAssignment;
+    std::set<std::string> entityIdentifiers;
+    std::set<std::string> definitionIdentifiers;
+    for (TDF_MapIteratorOfLabelMap anEntity(entityLabels);
+         anEntity.More(); anEntity.Next()) {
+        const std::string anIdentifier = ReadIdentifier(
+            anEntity.Key(), EntityIdentifierAttributeID());
+        if (anIdentifier.empty()
+            || !entityIdentifiers.insert(anIdentifier).second) {
+            entityIdentifiersNeedingAssignment.push_back(anEntity.Key());
+        }
+    }
+    for (TDF_MapIteratorOfLabelMap aDefinition(definitionLabels);
+         aDefinition.More(); aDefinition.Next()) {
+        const std::string anIdentifier = ReadIdentifier(
+            aDefinition.Key(), DefinitionIdentifierAttributeID());
+        if (anIdentifier.empty()
+            || !definitionIdentifiers.insert(anIdentifier).second) {
+            definitionIdentifiersNeedingAssignment.push_back(aDefinition.Key());
+        }
+    }
+
+    if (!needsDocumentIdentifier
+        && entityIdentifiersNeedingAssignment.empty()
+        && definitionIdentifiersNeedingAssignment.empty()) {
+        return Standard_True;
+    }
+
+    // Identity migration is a schema operation and must never erase an active
+    // user's history. Callers run it immediately after import/open, before the
+    // document is published for editing.
+    if (document->GetAvailableUndos() != 0
+        || document->GetAvailableRedos() != 0) {
+        return Standard_False;
+    }
+
+    const Standard_Integer aPreviousUndoLimit = document->GetUndoLimit();
+    try {
+        OCC_CATCH_SIGNALS
+        document->SetUndoLimit(1);
+        document->NewCommand();
+        if (!document->HasOpenCommand()) {
+            document->SetUndoLimit(aPreviousUndoLimit);
+            return Standard_False;
+        }
+
+        if (needsDocumentIdentifier
+            && !AssignNewIdentifier(
+                document->Main(), DocumentIdentifierAttributeID())) {
+            throw Standard_Failure("Unable to migrate document identifier");
+        }
+        for (const TDF_Label& aLabel : entityIdentifiersNeedingAssignment) {
+            if (!AssignNewIdentifier(
+                    aLabel, EntityIdentifierAttributeID())) {
+                throw Standard_Failure("Unable to migrate entity identifier");
+            }
+        }
+        for (const TDF_Label& aLabel : definitionIdentifiersNeedingAssignment) {
+            if (!AssignNewIdentifier(
+                    aLabel, DefinitionIdentifierAttributeID())) {
+                throw Standard_Failure("Unable to migrate definition identifier");
+            }
+        }
+
+        if (!document->CommitCommand()) {
+            AbortCommandNoThrow(document);
+            document->SetUndoLimit(aPreviousUndoLimit);
+            return Standard_False;
+        }
+        document->ClearUndos();
+        document->SetUndoLimit(aPreviousUndoLimit);
+        return Standard_True;
+    } catch (...) {
+        AbortCommandNoThrow(document);
+        document->ClearUndos();
+        document->SetUndoLimit(aPreviousUndoLimit);
+        return Standard_False;
+    }
 }
 
 void OcctDocument::RemoveShape(Handle(AIS_InteractiveObject) object) {
@@ -162,15 +400,30 @@ TDF_Label OcctDocument::AddShape(Handle(AIS_InteractiveObject) object) {
 }
 
 TDF_Label OcctDocument::AddShape(Handle(AIS_Shape) aisShape) {
-    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
-    TDF_Label label = shapeTool->NewShape();
-    shapeTool->SetShape(label, aisShape->Shape());
-    SaveObjectTransform(label, aisShape);
-    return label;
+	if (myOcafDoc.IsNull()
+	    || !myOcafDoc->HasOpenCommand()
+	    || aisShape.IsNull()
+	    || aisShape->Shape().IsNull()) {
+	    return TDF_Label();
+	}
+	Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
+	if (shapeTool.IsNull()) {
+	    return TDF_Label();
+	}
+	TDF_Label label = shapeTool->NewShape();
+	shapeTool->SetShape(label, aisShape->Shape());
+	if (!AssignNewIdentifier(label, EntityIdentifierAttributeID())
+	    || !AssignNewIdentifier(label, DefinitionIdentifierAttributeID())) {
+	    return TDF_Label();
+	}
+	SaveObjectTransform(label, aisShape);
+	return label;
 }
 
 void OcctDocument::ReplaceShape(const TDF_Label& label, Handle(AIS_Shape) aisShape) {
-    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
+	// Stable entity and definition identifiers belong to the label, so replacing
+	// its geometry deliberately leaves both identity attributes untouched.
+	Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
     shapeTool->SetShape(label, aisShape->Shape());
     SaveObjectTransform(label, aisShape);
 }
@@ -227,23 +480,49 @@ Graphic3d_NameOfMaterial OcctDocument::MaterialNameForShape(Handle(AIS_Shape) ob
 }
 
 Graphic3d_NameOfMaterial OcctDocument::MaterialNameForLabel(const TDF_Label& label) const {
+    Graphic3d_NameOfMaterial material;
+    return TryMaterialNameForLabel(label, material)
+        ? material
+        : Graphic3d_NameOfMaterial_ShinyPlastified;
+}
+
+Standard_Boolean OcctDocument::TryMaterialNameForLabel(
+    const TDF_Label& label,
+    Graphic3d_NameOfMaterial& material) const {
     Handle(TDataStd_Integer) attribute;
-    if (!label.IsNull()
-        && label.FindChild(11).FindAttribute(TDataStd_Integer::GetID(), attribute)
+    const TDF_Label materialLabel = label.IsNull()
+        ? TDF_Label()
+        : label.FindChild(11, Standard_False);
+    if (!materialLabel.IsNull()
+        && materialLabel.FindAttribute(TDataStd_Integer::GetID(), attribute)
         && !attribute.IsNull()) {
-        return static_cast<Graphic3d_NameOfMaterial>(attribute->Get());
+        material = static_cast<Graphic3d_NameOfMaterial>(attribute->Get());
+        return Standard_True;
     }
-    return Graphic3d_NameOfMaterial_ShinyPlastified;
+    return Standard_False;
 }
 
 Quantity_NameOfColor OcctDocument::ColorNameForLabel(const TDF_Label& label) const {
+    Quantity_NameOfColor color;
+    return TryColorNameForLabel(label, color)
+        ? color
+        : Quantity_NOC_GRAY80;
+}
+
+Standard_Boolean OcctDocument::TryColorNameForLabel(
+    const TDF_Label& label,
+    Quantity_NameOfColor& color) const {
     Handle(TDataStd_Integer) attribute;
-    if (!label.IsNull()
-        && label.FindChild(12).FindAttribute(TDataStd_Integer::GetID(), attribute)
+    const TDF_Label colorLabel = label.IsNull()
+        ? TDF_Label()
+        : label.FindChild(12, Standard_False);
+    if (!colorLabel.IsNull()
+        && colorLabel.FindAttribute(TDataStd_Integer::GetID(), attribute)
         && !attribute.IsNull()) {
-        return static_cast<Quantity_NameOfColor>(attribute->Get());
+        color = static_cast<Quantity_NameOfColor>(attribute->Get());
+        return Standard_True;
     }
-    return Quantity_NOC_GRAY80;
+    return Standard_False;
 }
 
 void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
@@ -274,53 +553,36 @@ void OcctDocument::ApplyTransforms() {
     for (Standard_Integer aLabIter = 1; aLabIter <= aLabels.Length(); ++aLabIter)
     {
         const TDF_Label& aLabel = aLabels.Value (aLabIter);
-        const auto t = LabelTransform(aLabel);
+        const auto t = ObjectTransformForLabel(aLabel);
         TNaming::Displace(aLabel, TopLoc_Location(t));
     }
 }
 
-const gp_Trsf OcctDocument::LabelTransform(const TDF_Label& aRefLabel) {
-    Handle(TDataStd_Real) aCurrentReal;
-    Standard_Real x = 0.;
-    Standard_Real y = 0.;
-    Standard_Real z = 0.;
-    Standard_Real rx = 0.;
-    Standard_Real ry = 0.;
-    Standard_Real rz = 0.;
-    Standard_Real rw = 1.;
-    Standard_Real scale = 1.;
-    
-    aRefLabel.FindChild(1).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        x = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(2).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        y = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(3).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        z = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(4).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        rx = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(5).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        ry = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(6).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        rz = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(7).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        rw = aCurrentReal->Get();
-    
-    aRefLabel.FindChild(8).FindAttribute(TDataStd_Real::GetID(), aCurrentReal);
-    if(!aCurrentReal.IsNull())
-        scale = aCurrentReal->Get();
+gp_Trsf OcctDocument::ObjectTransformForLabel(const TDF_Label& aRefLabel) const {
+    const auto readReal = [&aRefLabel](const Standard_Integer theTag,
+                                      const Standard_Real theDefault) {
+        if (aRefLabel.IsNull()) {
+            return theDefault;
+        }
+        const TDF_Label aChild = aRefLabel.FindChild(theTag, Standard_False);
+        if (aChild.IsNull()) {
+            return theDefault;
+        }
+        Handle(TDataStd_Real) anAttribute;
+        return aChild.FindAttribute(TDataStd_Real::GetID(), anAttribute)
+            && !anAttribute.IsNull()
+            ? anAttribute->Get()
+            : theDefault;
+    };
+
+    const Standard_Real x = readReal(1, 0.0);
+    const Standard_Real y = readReal(2, 0.0);
+    const Standard_Real z = readReal(3, 0.0);
+    const Standard_Real rx = readReal(4, 0.0);
+    const Standard_Real ry = readReal(5, 0.0);
+    const Standard_Real rz = readReal(6, 0.0);
+    const Standard_Real rw = readReal(7, 1.0);
+    const Standard_Real scale = readReal(8, 1.0);
     
     gp_Trsf t = gp_Trsf();
     t.SetTranslation({x, y, z});
@@ -330,7 +592,7 @@ const gp_Trsf OcctDocument::LabelTransform(const TDF_Label& aRefLabel) {
 }
 
 void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(AIS_Shape) anAis) {
-    anAis->SetLocalTransformation(LabelTransform(aRefLabel));
+    anAis->SetLocalTransformation(ObjectTransformForLabel(aRefLabel));
 }
 
 Standard_Boolean OcctDocument::undo() {

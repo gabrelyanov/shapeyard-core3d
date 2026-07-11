@@ -17,6 +17,7 @@
 #include "ShapeInteractor.hpp"
 
 #include "OrthoProjectionType.h"
+#include "../Scene/OcctSceneSnapshotBuilder.hpp"
 
 namespace core3d {
     typedef unsigned char selection_t;
@@ -90,6 +91,12 @@ namespace core3d {
         }
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
+
+        //! Capture committed OCAF geometry and semantic camera state into
+        //! immutable renderer-neutral values. Main-thread only.
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(
+            std::uint32_t viewportWidth,
+            std::uint32_t viewportHeight) noexcept;
     private:
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);
@@ -106,6 +113,7 @@ namespace core3d {
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
         
         std::function<void(int,int)> _interactiveCallback;
+        scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
     };
 }
 

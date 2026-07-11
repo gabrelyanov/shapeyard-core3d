@@ -994,9 +994,16 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         return AssetImportResult::InternalFailure;
     }
 
-    try {
-        OCC_CATCH_SIGNALS
-        candidate->SetUndoLimit(40);
+	try {
+		OCC_CATCH_SIGNALS
+		// CBF files created before persistent scene identity need a one-time
+		// migration. Do this while the candidate is isolated, before it becomes
+		// the editable document and before normal undo history is enabled.
+		if (!myDoc->MigrateLegacyIdentifiers(candidate)) {
+			CloseDocumentNoThrow(app, candidate);
+			return AssetImportResult::InternalFailure;
+		}
+		candidate->SetUndoLimit(40);
 
         // Keep the previous OCAF document alive until the candidate has been
         // fully traversed and displayed. Only the presentation is temporary.
@@ -1092,7 +1099,7 @@ void Core3DViewer::showGrid(bool show) {
     myView->Redraw();
 }
 
-    void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
+void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
 
         V3d_TypeOfOrientation orientation = V3d_Yneg;
 
@@ -1140,6 +1147,17 @@ void Core3DViewer::StartRotation(int theX, int theY) {
     if(!_objectInteractor->startTransformManipulator(theX, theY)) {
         OcctViewer::StartRotation(theX, theY);
     }
+}
+
+scene::OcctSceneSnapshotBuilder::SnapshotPointer
+Core3DViewer::captureSceneSnapshot(
+    const std::uint32_t viewportWidth,
+    const std::uint32_t viewportHeight) noexcept {
+    return _sceneSnapshotBuilder.Build(
+        myDoc,
+        myContext,
+        myView,
+        scene::UInt2{viewportWidth, viewportHeight});
 }
 
 void Core3DViewer::Rotation(int theX, int theY) {

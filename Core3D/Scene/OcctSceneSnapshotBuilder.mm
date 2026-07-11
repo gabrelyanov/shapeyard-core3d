@@ -1,0 +1,1790 @@
+//
+//  OcctSceneSnapshotBuilder.mm
+//  Core3D
+//
+
+#import <Foundation/Foundation.h>
+
+#include "OcctSceneSnapshotBuilder.hpp"
+
+#include "../OCCTKit/OcctDocument.h"
+
+#include <AIS_InteractiveContext.hxx>
+#include <AIS_Shape.hxx>
+#include <BRep_Builder.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepTools.hxx>
+#include <Graphic3d_Camera.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
+#include <Graphic3d_PBRMaterial.hxx>
+#include <IMeshData_Status.hxx>
+#include <Precision.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <RWMesh_FaceIterator.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <Standard_Failure.hxx>
+#include <StdPrs_ToolTriangulatedShape.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <TDataStd_Name.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
+#include <XCAFPrs_DocumentExplorer.hxx>
+#include <V3d_View.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace core3d::scene {
+namespace {
+
+constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+constexpr double kPi = 3.141592653589793238462643383279502884;
+constexpr std::size_t kMaxFacesPerMesh = 250'000;
+constexpr std::size_t kMaxVerticesPerMesh = 1'000'000;
+constexpr std::size_t kMaxIndicesPerMesh = 3'000'000;
+constexpr std::size_t kMaxMeshNumericBytes = 96ULL * 1024ULL * 1024ULL;
+// These publication ceilings account for the peak where immutable C++ values
+// and their Objective-C DTO copies coexist. Larger documents remain editable
+// in the OCCT viewport and can use a future packed/streamed snapshot path.
+constexpr std::size_t kMaxVerticesPerSnapshot = 1'500'000;
+constexpr std::size_t kMaxIndicesPerSnapshot = 4'500'000;
+constexpr std::size_t kMaxSnapshotNumericBytes = 96ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxInstancesPerSnapshot = 50'000;
+constexpr std::size_t kMaxMaterialsPerSnapshot = 50'000;
+constexpr std::size_t kMaxPickElementsPerSnapshot = 250'001;
+constexpr std::size_t kMaxPrimitiveBindingsPerSnapshot = 250'000;
+constexpr std::size_t kMaxOccurrenceDepth = 1'024;
+constexpr std::size_t kMaxLabelInstanceMappings = 1'000'000;
+constexpr std::size_t kMaxSelectedElements = 50'000;
+constexpr std::size_t kMaxRetainedDefinitionRevisions = 250'000;
+
+class Fingerprint {
+public:
+    void AddByte(const std::uint8_t theValue)
+    {
+        myValue ^= theValue;
+        myValue *= kFnvPrime;
+    }
+
+    template <typename Integer>
+    void AddInteger(Integer theValue)
+    {
+        using Unsigned = std::make_unsigned_t<Integer>;
+        std::uint64_t aValue = static_cast<Unsigned>(theValue);
+        for (std::size_t anIndex = 0; anIndex < sizeof(Unsigned); ++anIndex) {
+            AddByte(static_cast<std::uint8_t>(aValue & 0xffU));
+            aValue >>= 8U;
+        }
+    }
+
+    void AddBool(const bool theValue) { AddByte(theValue ? 1U : 0U); }
+
+    void AddFloat(const float theValue)
+    {
+        std::uint32_t aBits = 0;
+        static_assert(sizeof(aBits) == sizeof(theValue));
+        std::memcpy(&aBits, &theValue, sizeof(aBits));
+        AddInteger(aBits);
+    }
+
+    void AddDouble(const double theValue)
+    {
+        std::uint64_t aBits = 0;
+        static_assert(sizeof(aBits) == sizeof(theValue));
+        std::memcpy(&aBits, &theValue, sizeof(aBits));
+        AddInteger(aBits);
+    }
+
+    void AddString(const std::string& theValue)
+    {
+        AddInteger<std::uint64_t>(theValue.size());
+        for (const char aCharacter : theValue) {
+            AddByte(static_cast<std::uint8_t>(
+                static_cast<unsigned char>(aCharacter)));
+        }
+    }
+
+    std::uint64_t Value() const { return myValue; }
+
+private:
+    std::uint64_t myValue = kFnvOffset;
+};
+
+std::string DeriveOccurrenceIdentifier(
+    const std::string& theDocumentIdentifier,
+    const std::vector<std::string>& theLabelIdentifiers)
+{
+    if (theLabelIdentifiers.size() == 1) {
+        return theLabelIdentifiers.front();
+    }
+    if (theDocumentIdentifier.empty() || theLabelIdentifiers.empty()) {
+        return {};
+    }
+
+    const auto hashPath = [&](const char* theDomain) {
+        Fingerprint aHash;
+        aHash.AddString(theDomain);
+        aHash.AddString(theDocumentIdentifier);
+        aHash.AddInteger<std::uint64_t>(theLabelIdentifiers.size());
+        for (const std::string& anIdentifier : theLabelIdentifiers) {
+            aHash.AddString(anIdentifier);
+        }
+        return aHash.Value();
+    };
+
+    const std::uint64_t aHigh = hashPath("shapeyard-occurrence-v8-high");
+    const std::uint64_t aLow = hashPath("shapeyard-occurrence-v8-low");
+    std::array<std::uint8_t, 16> aBytes;
+    for (std::size_t anIndex = 0; anIndex < 8; ++anIndex) {
+        const std::size_t aShift = (7U - anIndex) * 8U;
+        aBytes[anIndex] = static_cast<std::uint8_t>(aHigh >> aShift);
+        aBytes[anIndex + 8U] = static_cast<std::uint8_t>(aLow >> aShift);
+    }
+    // RFC 9562 UUID variant and application-defined version 8.
+    aBytes[6] = static_cast<std::uint8_t>((aBytes[6] & 0x0fU) | 0x80U);
+    aBytes[8] = static_cast<std::uint8_t>((aBytes[8] & 0x3fU) | 0x80U);
+
+    std::ostringstream aStream;
+    aStream << std::hex << std::setfill('0');
+    for (std::size_t anIndex = 0; anIndex < aBytes.size(); ++anIndex) {
+        if (anIndex == 4 || anIndex == 6 || anIndex == 8 || anIndex == 10) {
+            aStream << '-';
+        }
+        aStream << std::setw(2)
+                << static_cast<unsigned int>(aBytes[anIndex]);
+    }
+    return aStream.str();
+}
+
+bool IsFinite(const double theValue)
+{
+    return std::isfinite(theValue);
+}
+
+bool IsFinite(const float theValue)
+{
+    return std::isfinite(theValue);
+}
+
+bool FitsFloat(const double theValue)
+{
+    return IsFinite(theValue)
+        && std::abs(theValue) <= std::numeric_limits<float>::max();
+}
+
+bool FitsUInt32(const std::size_t theValue)
+{
+    return theValue <= std::numeric_limits<std::uint32_t>::max();
+}
+
+bool CheckedMultiply(const std::size_t theLeft,
+                     const std::size_t theRight,
+                     std::size_t& theResult)
+{
+    if (theLeft != 0
+        && theRight > std::numeric_limits<std::size_t>::max() / theLeft) {
+        return false;
+    }
+    theResult = theLeft * theRight;
+    return true;
+}
+
+bool CheckedAdd(const std::size_t theLeft,
+                const std::size_t theRight,
+                std::size_t& theResult)
+{
+    if (theRight > std::numeric_limits<std::size_t>::max() - theLeft) {
+        return false;
+    }
+    theResult = theLeft + theRight;
+    return true;
+}
+
+bool IncrementRevision(std::uint64_t& theRevision)
+{
+    if (theRevision == std::numeric_limits<std::uint64_t>::max()) {
+        return false;
+    }
+    ++theRevision;
+    return true;
+}
+
+void Extend(Bounds3d& theBounds, const double theX, const double theY, const double theZ)
+{
+    if (!theBounds.valid) {
+        theBounds.minimum = {theX, theY, theZ};
+        theBounds.maximum = theBounds.minimum;
+        theBounds.valid = true;
+        return;
+    }
+    theBounds.minimum.x = std::min(theBounds.minimum.x, theX);
+    theBounds.minimum.y = std::min(theBounds.minimum.y, theY);
+    theBounds.minimum.z = std::min(theBounds.minimum.z, theZ);
+    theBounds.maximum.x = std::max(theBounds.maximum.x, theX);
+    theBounds.maximum.y = std::max(theBounds.maximum.y, theY);
+    theBounds.maximum.z = std::max(theBounds.maximum.z, theZ);
+}
+
+bool IsValid(const Bounds3d& theBounds)
+{
+    return theBounds.valid
+        && IsFinite(theBounds.minimum.x)
+        && IsFinite(theBounds.minimum.y)
+        && IsFinite(theBounds.minimum.z)
+        && IsFinite(theBounds.maximum.x)
+        && IsFinite(theBounds.maximum.y)
+        && IsFinite(theBounds.maximum.z)
+        && theBounds.minimum.x <= theBounds.maximum.x
+        && theBounds.minimum.y <= theBounds.maximum.y
+        && theBounds.minimum.z <= theBounds.maximum.z;
+}
+
+Double3 Center(const Bounds3d& theBounds)
+{
+    return {
+        theBounds.minimum.x + (theBounds.maximum.x - theBounds.minimum.x) * 0.5,
+        theBounds.minimum.y + (theBounds.maximum.y - theBounds.minimum.y) * 0.5,
+        theBounds.minimum.z + (theBounds.maximum.z - theBounds.minimum.z) * 0.5,
+    };
+}
+
+bool MatrixFromTransform(const gp_Trsf& theTransform, Matrix4d& theMatrix)
+{
+    for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+        for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+            const double aValue = theTransform.Value(aRow, aColumn);
+            if (!IsFinite(aValue)) {
+                return false;
+            }
+            theMatrix.values[static_cast<std::size_t>(aColumn - 1) * 4
+                           + static_cast<std::size_t>(aRow - 1)] = aValue;
+        }
+    }
+    theMatrix.values[3] = 0.0;
+    theMatrix.values[7] = 0.0;
+    theMatrix.values[11] = 0.0;
+    theMatrix.values[15] = 1.0;
+    return true;
+}
+
+bool TransformPoint(const Matrix4d& theMatrix,
+                    const Double3& thePoint,
+                    Double3& theResult)
+{
+    theResult = {
+        theMatrix.values[0] * thePoint.x
+            + theMatrix.values[4] * thePoint.y
+            + theMatrix.values[8] * thePoint.z
+            + theMatrix.values[12],
+        theMatrix.values[1] * thePoint.x
+            + theMatrix.values[5] * thePoint.y
+            + theMatrix.values[9] * thePoint.z
+            + theMatrix.values[13],
+        theMatrix.values[2] * thePoint.x
+            + theMatrix.values[6] * thePoint.y
+            + theMatrix.values[10] * thePoint.z
+            + theMatrix.values[14],
+    };
+    return IsFinite(theResult.x) && IsFinite(theResult.y) && IsFinite(theResult.z);
+}
+
+std::string ReadName(const TDF_Label& theOccurrenceLabel,
+                     const TDF_Label& theDefinitionLabel)
+{
+    Handle(TDataStd_Name) aName;
+    if ((theOccurrenceLabel.IsNull()
+         || !theOccurrenceLabel.FindAttribute(TDataStd_Name::GetID(), aName)
+         || aName.IsNull())
+        && (!theDefinitionLabel.IsNull())) {
+        aName.Nullify();
+        theDefinitionLabel.FindAttribute(TDataStd_Name::GetID(), aName);
+    }
+    if (aName.IsNull() || aName->Get().IsEmpty()) {
+        return {};
+    }
+
+    const TCollection_ExtendedString& aValue = aName->Get();
+    NSString* aString = [[NSString alloc]
+        initWithCharacters:reinterpret_cast<const unichar*>(aValue.ToExtString())
+                   length:static_cast<NSUInteger>(aValue.Length())];
+    const char* aUtf8 = aString.UTF8String;
+    return aUtf8 == nullptr ? std::string() : std::string(aUtf8);
+}
+
+AlphaMode ConvertAlphaMode(const Graphic3d_AlphaMode theMode,
+                           const float theAlpha)
+{
+    switch (theMode) {
+        case Graphic3d_AlphaMode_Mask:
+            return AlphaMode::Mask;
+        case Graphic3d_AlphaMode_Blend:
+        case Graphic3d_AlphaMode_MaskBlend:
+            return AlphaMode::Blend;
+        case Graphic3d_AlphaMode_BlendAuto:
+            return theAlpha < 0.999f ? AlphaMode::Blend : AlphaMode::Opaque;
+        case Graphic3d_AlphaMode_Opaque:
+        default:
+            return AlphaMode::Opaque;
+    }
+}
+
+void SetColor(MaterialSnapshot& theMaterial, const Quantity_ColorRGBA& theColor)
+{
+    theMaterial.baseColor = {
+        static_cast<float>(theColor.GetRGB().Red()),
+        static_cast<float>(theColor.GetRGB().Green()),
+        static_cast<float>(theColor.GetRGB().Blue()),
+        theColor.Alpha(),
+    };
+}
+
+void SetColor(MaterialSnapshot& theMaterial,
+              const Quantity_Color& theColor,
+              const float theAlpha)
+{
+    theMaterial.baseColor = {
+        static_cast<float>(theColor.Red()),
+        static_cast<float>(theColor.Green()),
+        static_cast<float>(theColor.Blue()),
+        theAlpha,
+    };
+}
+
+bool ApplyPreset(MaterialSnapshot& theMaterial,
+                 const Graphic3d_NameOfMaterial theName,
+                 const bool theClosed)
+{
+    if (theName < Graphic3d_NameOfMaterial_Brass
+        || theName > Graphic3d_NameOfMaterial_Transparent) {
+        return false;
+    }
+    const Graphic3d_MaterialAspect anAspect(theName);
+    const Graphic3d_PBRMaterial& aPbr = anAspect.PBRMaterial();
+    SetColor(theMaterial, aPbr.Color());
+    const Graphic3d_Vec3 anEmission = aPbr.Emission();
+    theMaterial.emission = {anEmission.x(), anEmission.y(), anEmission.z()};
+    theMaterial.metallic = aPbr.Metallic();
+    theMaterial.roughness = aPbr.NormalizedRoughness();
+    theMaterial.indexOfRefraction = aPbr.IOR();
+    theMaterial.alphaCutoff = 0.5f;
+    theMaterial.alphaMode = aPbr.Alpha() < 0.999f
+        ? AlphaMode::Blend
+        : AlphaMode::Opaque;
+    theMaterial.doubleSided = !theClosed;
+    return true;
+}
+
+MaterialSnapshot DefaultMaterial(const bool theClosed)
+{
+    MaterialSnapshot aMaterial;
+    if (!ApplyPreset(aMaterial,
+                     Graphic3d_NameOfMaterial_ShinyPlastified,
+                     theClosed)) {
+        return aMaterial;
+    }
+    SetColor(aMaterial, Quantity_Color(Quantity_NOC_GRAY80), aMaterial.baseColor.w);
+    return aMaterial;
+}
+
+bool ValidateMaterial(MaterialSnapshot& theMaterial)
+{
+    const auto isUnit = [](const float theValue) {
+        return IsFinite(theValue) && theValue >= 0.0f && theValue <= 1.0f;
+    };
+    if (!isUnit(theMaterial.baseColor.x)
+        || !isUnit(theMaterial.baseColor.y)
+        || !isUnit(theMaterial.baseColor.z)
+        || !isUnit(theMaterial.baseColor.w)
+        || !isUnit(theMaterial.metallic)
+        || !isUnit(theMaterial.roughness)
+        || !IsFinite(theMaterial.indexOfRefraction)
+        || theMaterial.indexOfRefraction < 1.0f
+        || !isUnit(theMaterial.alphaCutoff)
+        || !IsFinite(theMaterial.emission.x)
+        || !IsFinite(theMaterial.emission.y)
+        || !IsFinite(theMaterial.emission.z)
+        || theMaterial.emission.x < 0.0f
+        || theMaterial.emission.y < 0.0f
+        || theMaterial.emission.z < 0.0f) {
+        return false;
+    }
+    if (theMaterial.baseColor.w < 0.999f
+        && theMaterial.alphaMode == AlphaMode::Opaque) {
+        theMaterial.alphaMode = AlphaMode::Blend;
+    }
+    return true;
+}
+
+bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
+                     const std::optional<Graphic3d_NameOfMaterial>& theMaterialOverride,
+                     const std::optional<Quantity_NameOfColor>& theColorOverride,
+                     const bool theClosed,
+                     MaterialSnapshot& theResult)
+{
+    theResult = DefaultMaterial(theClosed);
+    const XCAFPrs_Style& aStyle = theFace.FaceStyle();
+    const Handle(XCAFDoc_VisMaterial)& aVisualMaterial = aStyle.Material();
+    if (!aVisualMaterial.IsNull()) {
+        if (aVisualMaterial->HasPbrMaterial()) {
+            const XCAFDoc_VisMaterialPBR& aPbr = aVisualMaterial->PbrMaterial();
+            SetColor(theResult, aPbr.BaseColor);
+            theResult.emission = {
+                aPbr.EmissiveFactor.x(),
+                aPbr.EmissiveFactor.y(),
+                aPbr.EmissiveFactor.z(),
+            };
+            theResult.metallic = aPbr.Metallic;
+            theResult.roughness = aPbr.Roughness;
+            theResult.indexOfRefraction = aPbr.RefractionIndex;
+        } else if (aVisualMaterial->HasCommonMaterial()) {
+            const XCAFDoc_VisMaterialCommon& aCommon =
+                aVisualMaterial->CommonMaterial();
+            SetColor(theResult,
+                     aCommon.DiffuseColor,
+                     1.0f - aCommon.Transparency);
+            theResult.emission = {
+                static_cast<float>(aCommon.EmissiveColor.Red()),
+                static_cast<float>(aCommon.EmissiveColor.Green()),
+                static_cast<float>(aCommon.EmissiveColor.Blue()),
+            };
+            theResult.metallic = Graphic3d_PBRMaterial::MetallicFromSpecular(
+                aCommon.SpecularColor);
+            theResult.roughness = Graphic3d_PBRMaterial::RoughnessFromSpecular(
+                aCommon.SpecularColor,
+                aCommon.Shininess);
+        }
+        theResult.alphaMode = ConvertAlphaMode(aVisualMaterial->AlphaMode(),
+                                                theResult.baseColor.w);
+        theResult.alphaCutoff = aVisualMaterial->AlphaCutOff();
+        switch (aVisualMaterial->FaceCulling()) {
+            case Graphic3d_TypeOfBackfacingModel_DoubleSided:
+                theResult.doubleSided = true;
+                break;
+            case Graphic3d_TypeOfBackfacingModel_Auto:
+                theResult.doubleSided = !theClosed;
+                break;
+            case Graphic3d_TypeOfBackfacingModel_BackCulled:
+            case Graphic3d_TypeOfBackfacingModel_FrontCulled:
+                theResult.doubleSided = false;
+                break;
+        }
+    }
+
+    if (theFace.HasFaceColor()) {
+        SetColor(theResult, theFace.FaceColor());
+    } else if (aStyle.IsSetColorSurf()) {
+        SetColor(theResult, aStyle.GetColorSurfRGBA());
+    }
+
+    if (theMaterialOverride.has_value()
+        && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {
+        return false;
+    }
+    if (theColorOverride.has_value()) {
+        if (*theColorOverride < Quantity_NOC_BLACK
+            || *theColorOverride > Quantity_NOC_WHITE) {
+            return false;
+        }
+        SetColor(theResult,
+                 Quantity_Color(*theColorOverride),
+                 theResult.baseColor.w);
+    }
+    return ValidateMaterial(theResult);
+}
+
+bool MaterialValuesEqual(const MaterialSnapshot& theLeft,
+                         const MaterialSnapshot& theRight)
+{
+    return theLeft.baseColor.x == theRight.baseColor.x
+        && theLeft.baseColor.y == theRight.baseColor.y
+        && theLeft.baseColor.z == theRight.baseColor.z
+        && theLeft.baseColor.w == theRight.baseColor.w
+        && theLeft.emission.x == theRight.emission.x
+        && theLeft.emission.y == theRight.emission.y
+        && theLeft.emission.z == theRight.emission.z
+        && theLeft.metallic == theRight.metallic
+        && theLeft.roughness == theRight.roughness
+        && theLeft.indexOfRefraction == theRight.indexOfRefraction
+        && theLeft.alphaMode == theRight.alphaMode
+        && theLeft.alphaCutoff == theRight.alphaCutoff
+        && theLeft.doubleSided == theRight.doubleSided;
+}
+
+void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial)
+{
+    theHash.AddFloat(theMaterial.baseColor.x);
+    theHash.AddFloat(theMaterial.baseColor.y);
+    theHash.AddFloat(theMaterial.baseColor.z);
+    theHash.AddFloat(theMaterial.baseColor.w);
+    theHash.AddFloat(theMaterial.emission.x);
+    theHash.AddFloat(theMaterial.emission.y);
+    theHash.AddFloat(theMaterial.emission.z);
+    theHash.AddFloat(theMaterial.metallic);
+    theHash.AddFloat(theMaterial.roughness);
+    theHash.AddFloat(theMaterial.indexOfRefraction);
+    theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.alphaMode));
+    theHash.AddFloat(theMaterial.alphaCutoff);
+    theHash.AddBool(theMaterial.doubleSided);
+}
+
+std::string HexIdentifier(const char* thePrefix, const std::uint64_t theValue)
+{
+    std::ostringstream aStream;
+    aStream << thePrefix << std::hex << std::setw(16) << std::setfill('0') << theValue;
+    return aStream.str();
+}
+
+bool AddMaterial(SceneSnapshot& theScene,
+                 MaterialSnapshot theMaterial,
+                 std::uint32_t& theIndex)
+{
+    for (std::size_t anIndex = 0; anIndex < theScene.materials.size(); ++anIndex) {
+        if (MaterialValuesEqual(theScene.materials[anIndex], theMaterial)) {
+            theIndex = static_cast<std::uint32_t>(anIndex);
+            return true;
+        }
+    }
+    if (!FitsUInt32(theScene.materials.size())
+        || theScene.materials.size() >= kMaxMaterialsPerSnapshot) {
+        return false;
+    }
+    Fingerprint aHash;
+    AddMaterialValues(aHash, theMaterial);
+    const std::string aBaseIdentifier = HexIdentifier("material-", aHash.Value());
+    theMaterial.identifier = aBaseIdentifier;
+    std::uint32_t aCollision = 1;
+    const auto identifierExists = [&theScene](const std::string& theIdentifier) {
+        return std::any_of(theScene.materials.begin(),
+                           theScene.materials.end(),
+                           [&theIdentifier](const MaterialSnapshot& theExisting) {
+                               return theExisting.identifier == theIdentifier;
+                           });
+    };
+    while (identifierExists(theMaterial.identifier)) {
+        if (aCollision == std::numeric_limits<std::uint32_t>::max()) {
+            return false;
+        }
+        theMaterial.identifier = aBaseIdentifier + "-" + std::to_string(aCollision++);
+    }
+    theIndex = static_cast<std::uint32_t>(theScene.materials.size());
+    theScene.materials.push_back(std::move(theMaterial));
+    return true;
+}
+
+struct SourceVertex {
+    Double3 position;
+    Double3 normal;
+    double textureU = 0.0;
+    double textureV = 0.0;
+};
+
+struct OccurrenceData {
+    TDF_Label occurrenceLabel;
+    TDF_Label definitionLabel;
+    TopLoc_Location occurrenceLocation;
+    XCAFPrs_Style style;
+    std::vector<std::string> labelIdentifiers;
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+    std::string name;
+    bool visible = true;
+};
+
+struct DefinitionData {
+    TDF_Label label;
+    TopoDS_Shape shape;
+    TopTools_IndexedMapOfShape faces;
+    MeshSnapshot mesh;
+    Double3 sourceOrigin;
+    std::uint64_t fingerprint = 0;
+    bool closed = false;
+};
+
+std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
+                              const double theLinearDeflection,
+                              const double theAngularDeflection)
+{
+    Fingerprint aHash;
+    aHash.AddString(theMesh.definitionIdentifier);
+    aHash.AddDouble(theLinearDeflection);
+    aHash.AddDouble(theAngularDeflection);
+    aHash.AddInteger<std::uint64_t>(theMesh.vertices.size());
+    for (const Vertex& aVertex : theMesh.vertices) {
+        aHash.AddFloat(aVertex.positionX);
+        aHash.AddFloat(aVertex.positionY);
+        aHash.AddFloat(aVertex.positionZ);
+        aHash.AddFloat(aVertex.normalX);
+        aHash.AddFloat(aVertex.normalY);
+        aHash.AddFloat(aVertex.normalZ);
+        aHash.AddFloat(aVertex.textureU);
+        aHash.AddFloat(aVertex.textureV);
+    }
+    aHash.AddInteger<std::uint64_t>(theMesh.indices.size());
+    for (const std::uint32_t anIndex : theMesh.indices) {
+        aHash.AddInteger(anIndex);
+    }
+    aHash.AddInteger<std::uint64_t>(theMesh.primitives.size());
+    for (const MeshPrimitive& aPrimitive : theMesh.primitives) {
+        aHash.AddInteger(aPrimitive.firstIndex);
+        aHash.AddInteger(aPrimitive.indexCount);
+        aHash.AddInteger(aPrimitive.faceIndex);
+    }
+    return aHash.Value();
+}
+
+bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
+                               const std::string& theDefinitionIdentifier,
+                               const double theLinearDeflection,
+                               const double theAngularDeflection,
+                               DefinitionData& theDefinition)
+{
+    theDefinition.label = theDefinitionLabel;
+    theDefinition.shape = XCAFDoc_ShapeTool::GetShape(theDefinitionLabel);
+    if (theDefinition.shape.IsNull()) {
+        return false;
+    }
+    TopExp::MapShapes(theDefinition.shape, TopAbs_FACE, theDefinition.faces);
+    if (theDefinition.faces.IsEmpty()
+        || !FitsUInt32(static_cast<std::size_t>(theDefinition.faces.Extent()))
+        || static_cast<std::size_t>(theDefinition.faces.Extent()) > kMaxFacesPerMesh) {
+        return false;
+    }
+    theDefinition.closed = StdPrs_ToolTriangulatedShape::IsClosed(theDefinition.shape);
+
+    std::vector<SourceVertex> aSourceVertices;
+    std::vector<std::uint32_t> aSourceIndices;
+    std::vector<MeshPrimitive> aPrimitives;
+    std::vector<bool> aVisited(static_cast<std::size_t>(theDefinition.faces.Extent()), false);
+    Bounds3d aSourceBounds;
+
+    RWMesh_FaceIterator aFace(theDefinitionLabel, TopLoc_Location(), Standard_False);
+    for (; aFace.More(); aFace.Next()) {
+        if (aFace.NbNodes() <= 0 || aFace.NbTriangles() <= 0) {
+            return false;
+        }
+        const Standard_Integer aFaceMapIndex = theDefinition.faces.FindIndex(aFace.Face());
+        if (aFaceMapIndex <= 0 || aFaceMapIndex > theDefinition.faces.Extent()) {
+            return false;
+        }
+        const std::size_t aFaceOffset = static_cast<std::size_t>(aFaceMapIndex - 1);
+        if (aVisited[aFaceOffset]) {
+            return false;
+        }
+        aVisited[aFaceOffset] = true;
+
+        const std::size_t aNodeCount = static_cast<std::size_t>(aFace.NbNodes());
+        const std::size_t aTriangleCount = static_cast<std::size_t>(aFace.NbTriangles());
+        if (aNodeCount > kMaxVerticesPerMesh
+            || aTriangleCount > kMaxIndicesPerMesh / 3U
+            || aTriangleCount > std::numeric_limits<std::uint32_t>::max() / 3U
+            || aSourceVertices.size() > std::numeric_limits<std::uint32_t>::max() - aNodeCount
+            || aSourceIndices.size() > std::numeric_limits<std::uint32_t>::max()
+                                          - aTriangleCount * 3U
+            || aSourceVertices.size() > kMaxVerticesPerMesh - aNodeCount
+            || aSourceIndices.size() > kMaxIndicesPerMesh - aTriangleCount * 3U) {
+            return false;
+        }
+
+        const std::uint32_t aVertexBase =
+            static_cast<std::uint32_t>(aSourceVertices.size());
+        const bool hasNormals = aFace.HasNormals();
+        const bool hasTexCoords = aFace.HasTexCoords();
+        for (Standard_Integer aNode = aFace.NodeLower();
+             aNode <= aFace.NodeUpper(); ++aNode) {
+            const gp_Pnt aPoint = aFace.NodeTransformed(aNode);
+            if (!IsFinite(aPoint.X()) || !IsFinite(aPoint.Y()) || !IsFinite(aPoint.Z())) {
+                return false;
+            }
+            SourceVertex aVertex;
+            aVertex.position = {aPoint.X(), aPoint.Y(), aPoint.Z()};
+            Extend(aSourceBounds, aPoint.X(), aPoint.Y(), aPoint.Z());
+            if (hasNormals) {
+                const gp_Dir aNormal = aFace.NormalTransformed(aNode);
+                aVertex.normal = {aNormal.X(), aNormal.Y(), aNormal.Z()};
+            }
+            if (hasTexCoords) {
+                const gp_Pnt2d aTexCoord = aFace.NodeTexCoord(aNode);
+                if (!IsFinite(aTexCoord.X()) || !IsFinite(aTexCoord.Y())) {
+                    return false;
+                }
+                aVertex.textureU = aTexCoord.X();
+                aVertex.textureV = aTexCoord.Y();
+            }
+            aSourceVertices.push_back(aVertex);
+        }
+
+        const std::uint32_t aFirstIndex =
+            static_cast<std::uint32_t>(aSourceIndices.size());
+        for (Standard_Integer aTriangleIndex = aFace.ElemLower();
+             aTriangleIndex <= aFace.ElemUpper(); ++aTriangleIndex) {
+            const Poly_Triangle aTriangle = aFace.TriangleOriented(aTriangleIndex);
+            Standard_Integer aNodes[3] = {0, 0, 0};
+            aTriangle.Get(aNodes[0], aNodes[1], aNodes[2]);
+            for (const Standard_Integer aNode : aNodes) {
+                if (aNode < 1 || aNode > aFace.NbNodes()) {
+                    return false;
+                }
+            }
+            const std::uint32_t aLocal0 = static_cast<std::uint32_t>(aNodes[0] - 1);
+            const std::uint32_t aLocal1 = static_cast<std::uint32_t>(aNodes[1] - 1);
+            const std::uint32_t aLocal2 = static_cast<std::uint32_t>(aNodes[2] - 1);
+            if (aLocal0 == aLocal1 || aLocal1 == aLocal2 || aLocal2 == aLocal0) {
+                return false;
+            }
+            aSourceIndices.push_back(aVertexBase + aLocal0);
+            aSourceIndices.push_back(aVertexBase + aLocal1);
+            aSourceIndices.push_back(aVertexBase + aLocal2);
+
+            if (!hasNormals) {
+                const Double3& aP0 = aSourceVertices[aVertexBase + aLocal0].position;
+                const Double3& aP1 = aSourceVertices[aVertexBase + aLocal1].position;
+                const Double3& aP2 = aSourceVertices[aVertexBase + aLocal2].position;
+                const Double3 aU = {aP1.x - aP0.x, aP1.y - aP0.y, aP1.z - aP0.z};
+                const Double3 aV = {aP2.x - aP0.x, aP2.y - aP0.y, aP2.z - aP0.z};
+                const Double3 aCross = {
+                    aU.y * aV.z - aU.z * aV.y,
+                    aU.z * aV.x - aU.x * aV.z,
+                    aU.x * aV.y - aU.y * aV.x,
+                };
+                const double aLengthSquared = aCross.x * aCross.x
+                    + aCross.y * aCross.y + aCross.z * aCross.z;
+                if (!IsFinite(aLengthSquared) || aLengthSquared <= 0.0) {
+                    return false;
+                }
+                for (const std::uint32_t aLocal : {aLocal0, aLocal1, aLocal2}) {
+                    Double3& aNormal = aSourceVertices[aVertexBase + aLocal].normal;
+                    aNormal.x += aCross.x;
+                    aNormal.y += aCross.y;
+                    aNormal.z += aCross.z;
+                }
+            }
+        }
+
+        if (!hasNormals) {
+            for (std::size_t aNode = 0; aNode < aNodeCount; ++aNode) {
+                Double3& aNormal = aSourceVertices[aVertexBase + aNode].normal;
+                const double aLength = std::sqrt(aNormal.x * aNormal.x
+                    + aNormal.y * aNormal.y + aNormal.z * aNormal.z);
+                if (!IsFinite(aLength) || aLength <= Precision::Confusion()) {
+                    return false;
+                }
+                aNormal.x /= aLength;
+                aNormal.y /= aLength;
+                aNormal.z /= aLength;
+            }
+        }
+
+        const std::size_t anIndexCount = aSourceIndices.size() - aFirstIndex;
+        if (anIndexCount == 0 || !FitsUInt32(anIndexCount)) {
+            return false;
+        }
+        aPrimitives.push_back({
+            aFirstIndex,
+            static_cast<std::uint32_t>(anIndexCount),
+            static_cast<std::uint32_t>(aFaceMapIndex - 1),
+        });
+    }
+
+    if (!IsValid(aSourceBounds)
+        || std::find(aVisited.begin(), aVisited.end(), false) != aVisited.end()
+        || aPrimitives.size() != aVisited.size()
+        || aSourceVertices.size() > kMaxVerticesPerMesh
+        || aSourceIndices.size() > kMaxIndicesPerMesh) {
+        return false;
+    }
+
+    std::size_t aVertexBytes = 0;
+    std::size_t anIndexBytes = 0;
+    std::size_t aPrimitiveBytes = 0;
+    std::size_t aMeshBytes = 0;
+    if (!CheckedMultiply(aSourceVertices.size(), sizeof(Vertex), aVertexBytes)
+        || !CheckedMultiply(aSourceIndices.size(), sizeof(std::uint32_t), anIndexBytes)
+        || !CheckedMultiply(aPrimitives.size(), sizeof(MeshPrimitive), aPrimitiveBytes)
+        || !CheckedAdd(aVertexBytes, anIndexBytes, aMeshBytes)
+        || !CheckedAdd(aMeshBytes, aPrimitiveBytes, aMeshBytes)
+        || aMeshBytes > kMaxMeshNumericBytes) {
+        return false;
+    }
+
+    theDefinition.sourceOrigin = Center(aSourceBounds);
+    MeshSnapshot aMesh;
+    aMesh.definitionIdentifier = theDefinitionIdentifier;
+    aMesh.indices = std::move(aSourceIndices);
+    aMesh.primitives = std::move(aPrimitives);
+    aMesh.vertices.reserve(aSourceVertices.size());
+    for (const SourceVertex& aSource : aSourceVertices) {
+        const double aPositionX = aSource.position.x - theDefinition.sourceOrigin.x;
+        const double aPositionY = aSource.position.y - theDefinition.sourceOrigin.y;
+        const double aPositionZ = aSource.position.z - theDefinition.sourceOrigin.z;
+        if (!FitsFloat(aPositionX) || !FitsFloat(aPositionY) || !FitsFloat(aPositionZ)
+            || !FitsFloat(aSource.normal.x) || !FitsFloat(aSource.normal.y)
+            || !FitsFloat(aSource.normal.z) || !FitsFloat(aSource.textureU)
+            || !FitsFloat(aSource.textureV)) {
+            return false;
+        }
+        Vertex aVertex;
+        aVertex.positionX = static_cast<float>(aPositionX);
+        aVertex.positionY = static_cast<float>(aPositionY);
+        aVertex.positionZ = static_cast<float>(aPositionZ);
+        aVertex.normalX = static_cast<float>(aSource.normal.x);
+        aVertex.normalY = static_cast<float>(aSource.normal.y);
+        aVertex.normalZ = static_cast<float>(aSource.normal.z);
+        aVertex.textureU = static_cast<float>(aSource.textureU);
+        aVertex.textureV = static_cast<float>(aSource.textureV);
+        aMesh.vertices.push_back(aVertex);
+        Extend(aMesh.localBounds,
+               aVertex.positionX,
+               aVertex.positionY,
+               aVertex.positionZ);
+    }
+    if (!IsValid(aMesh.localBounds)) {
+        return false;
+    }
+    theDefinition.mesh = std::move(aMesh);
+    theDefinition.fingerprint = MeshFingerprint(theDefinition.mesh,
+                                                 theLinearDeflection,
+                                                 theAngularDeflection);
+    return true;
+}
+
+bool BuildCamera(const Handle(V3d_View)& theView,
+                 const UInt2& theViewportPixels,
+                 CameraSnapshot& theCamera)
+{
+    if (theView.IsNull() || theViewportPixels.x == 0 || theViewportPixels.y == 0) {
+        return false;
+    }
+    const Handle(Graphic3d_Camera)& aCamera = theView->Camera();
+    if (aCamera.IsNull()) {
+        return false;
+    }
+    const gp_Pnt anEye = aCamera->Eye();
+    const gp_Pnt aCenter = aCamera->Center();
+    const gp_Dir anUp = aCamera->OrthogonalizedUp();
+    theCamera.eye = {anEye.X(), anEye.Y(), anEye.Z()};
+    theCamera.center = {aCenter.X(), aCenter.Y(), aCenter.Z()};
+    theCamera.up = {anUp.X(), anUp.Y(), anUp.Z()};
+    theCamera.projection = aCamera->IsOrthographic()
+        ? Projection::Orthographic
+        : Projection::Perspective;
+    theCamera.verticalFovRadians = aCamera->FOVy() * kPi / 180.0;
+    theCamera.orthographicHeight = aCamera->Scale();
+    theCamera.nearPlane = aCamera->ZNear();
+    theCamera.farPlane = aCamera->ZFar();
+    theCamera.aspect = static_cast<double>(theViewportPixels.x)
+        / static_cast<double>(theViewportPixels.y);
+    theCamera.viewportPixels = theViewportPixels;
+
+    const double aViewDirectionSquared =
+        (aCenter.X() - anEye.X()) * (aCenter.X() - anEye.X())
+        + (aCenter.Y() - anEye.Y()) * (aCenter.Y() - anEye.Y())
+        + (aCenter.Z() - anEye.Z()) * (aCenter.Z() - anEye.Z());
+    const bool hasFiniteValues = IsFinite(theCamera.eye.x)
+        && IsFinite(theCamera.eye.y) && IsFinite(theCamera.eye.z)
+        && IsFinite(theCamera.center.x) && IsFinite(theCamera.center.y)
+        && IsFinite(theCamera.center.z) && IsFinite(theCamera.up.x)
+        && IsFinite(theCamera.up.y) && IsFinite(theCamera.up.z)
+        && IsFinite(theCamera.verticalFovRadians)
+        && IsFinite(theCamera.orthographicHeight)
+        && IsFinite(theCamera.nearPlane) && IsFinite(theCamera.farPlane)
+        && IsFinite(theCamera.aspect) && IsFinite(aViewDirectionSquared);
+    if (!hasFiniteValues || aViewDirectionSquared <= 0.0
+        || theCamera.nearPlane >= theCamera.farPlane
+        || theCamera.aspect <= 0.0
+        || theCamera.orthographicHeight <= 0.0) {
+        return false;
+    }
+    return theCamera.projection == Projection::Orthographic
+        || (theCamera.nearPlane > 0.0
+            && theCamera.verticalFovRadians > 0.0
+            && theCamera.verticalFovRadians < kPi);
+}
+
+std::uint64_t CameraFingerprint(const CameraSnapshot& theCamera)
+{
+    Fingerprint aHash;
+    aHash.AddInteger(static_cast<std::uint8_t>(theCamera.projection));
+    for (const double aValue : {
+             theCamera.eye.x, theCamera.eye.y, theCamera.eye.z,
+             theCamera.center.x, theCamera.center.y, theCamera.center.z,
+             theCamera.up.x, theCamera.up.y, theCamera.up.z,
+             theCamera.verticalFovRadians, theCamera.orthographicHeight,
+             theCamera.nearPlane, theCamera.farPlane, theCamera.aspect}) {
+        aHash.AddDouble(aValue);
+    }
+    aHash.AddInteger(theCamera.viewportPixels.x);
+    aHash.AddInteger(theCamera.viewportPixels.y);
+    return aHash.Value();
+}
+
+std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
+{
+    Fingerprint aHash;
+    aHash.AddInteger<std::uint64_t>(theScene.meshes.size());
+    for (const MeshSnapshot& aMesh : theScene.meshes) {
+        aHash.AddString(aMesh.definitionIdentifier);
+        aHash.AddInteger(aMesh.geometryRevision);
+    }
+    aHash.AddInteger<std::uint64_t>(theScene.instances.size());
+    for (const InstanceSnapshot& anInstance : theScene.instances) {
+        aHash.AddString(anInstance.entityIdentifier);
+        aHash.AddInteger(anInstance.meshIndex);
+        for (const double aValue : anInstance.worldFromObject.values) {
+            aHash.AddDouble(aValue);
+        }
+        aHash.AddBool(anInstance.reversesWinding);
+        aHash.AddString(anInstance.name);
+    }
+    return aHash.Value();
+}
+
+std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
+{
+    Fingerprint aHash;
+    aHash.AddInteger<std::uint64_t>(theScene.materials.size());
+    for (const MaterialSnapshot& aMaterial : theScene.materials) {
+        aHash.AddString(aMaterial.identifier);
+        AddMaterialValues(aHash, aMaterial);
+    }
+    aHash.AddInteger<std::uint64_t>(theScene.instances.size());
+    for (const InstanceSnapshot& anInstance : theScene.instances) {
+        aHash.AddString(anInstance.entityIdentifier);
+        aHash.AddBool(anInstance.visible);
+        aHash.AddBool(anInstance.selectable);
+        aHash.AddBool(anInstance.selected);
+        aHash.AddInteger(static_cast<std::uint8_t>(anInstance.role));
+        aHash.AddInteger<std::uint64_t>(anInstance.primitiveBindings.size());
+        for (const PrimitiveBinding& aBinding : anInstance.primitiveBindings) {
+            aHash.AddInteger(aBinding.materialIndex);
+            aHash.AddInteger(aBinding.pickToken);
+            aHash.AddBool(aBinding.visible);
+        }
+    }
+    aHash.AddInteger<std::uint64_t>(theScene.selection.selected.size());
+    for (const ElementIdentifier& anElement : theScene.selection.selected) {
+        aHash.AddString(anElement.entityIdentifier);
+        aHash.AddInteger(static_cast<std::uint8_t>(anElement.kind));
+        aHash.AddInteger(anElement.topologyIndex);
+        aHash.AddInteger(anElement.geometryRevision);
+    }
+    aHash.AddBool(theScene.selection.hovered.has_value());
+    if (theScene.selection.hovered.has_value()) {
+        const ElementIdentifier& anElement = *theScene.selection.hovered;
+        aHash.AddString(anElement.entityIdentifier);
+        aHash.AddInteger(static_cast<std::uint8_t>(anElement.kind));
+        aHash.AddInteger(anElement.topologyIndex);
+        aHash.AddInteger(anElement.geometryRevision);
+    }
+    return aHash.Value();
+}
+
+} // namespace
+
+struct OcctSceneSnapshotBuilder::State {
+    struct DefinitionRevision {
+        std::uint64_t fingerprint = 0;
+        std::uint64_t revision = 0;
+        std::uint64_t lastSeenSnapshot = 0;
+        bool hasFingerprint = false;
+    };
+
+    Handle(TDocStd_Document) documentObject;
+    std::string documentIdentifier;
+    std::uint64_t snapshotRevision = 0;
+    std::uint64_t documentGeneration = 0;
+    std::uint64_t modelRevision = 0;
+    std::uint64_t presentationRevision = 0;
+    std::uint64_t cameraRevision = 0;
+    std::optional<std::uint64_t> modelFingerprint;
+    std::optional<std::uint64_t> presentationFingerprint;
+    std::optional<std::uint64_t> cameraFingerprint;
+    std::unordered_map<std::string, DefinitionRevision> definitions;
+};
+
+OcctSceneSnapshotBuilder::OcctSceneSnapshotBuilder()
+: myState(std::make_unique<State>())
+{
+}
+
+OcctSceneSnapshotBuilder::~OcctSceneSnapshotBuilder() = default;
+
+OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
+    const Handle(OcctDocument)& theDocument,
+    const Handle(AIS_InteractiveContext)& theContext,
+    const Handle(V3d_View)& theView,
+    const UInt2& theViewportPixels) noexcept
+{
+    if (![NSThread isMainThread]
+        || theDocument.IsNull()
+        || theContext.IsNull()
+        || theView.IsNull()
+        || theViewportPixels.x == 0
+        || theViewportPixels.y == 0) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument = theDocument->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
+            return {};
+        }
+        const std::string aDocumentIdentifier =
+            theDocument->DocumentIdentifier();
+        if (aDocumentIdentifier.empty()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(aDocument->Main())) {
+            return {};
+        }
+
+        std::vector<OccurrenceData> anOccurrences;
+        std::unordered_set<std::string> anEntityIdentifiers;
+        std::unordered_map<std::string, TDF_Label> aPersistentEntityLabels;
+        std::unordered_map<std::string, std::size_t> aDefinitionIndices;
+        std::vector<DefinitionData> aDefinitions;
+        std::size_t aLabelInstanceMappingCount = 0;
+        double aMeshDeflection = 0.0;
+        double aMeshAngle = 0.0;
+
+        XCAFPrs_DocumentExplorer anExplorer(
+            aDocument,
+            XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes,
+            XCAFPrs_Style());
+        for (; anExplorer.More(); anExplorer.Next()) {
+            if (anOccurrences.size() >= kMaxInstancesPerSnapshot) {
+                return {};
+            }
+            const XCAFPrs_DocumentNode& aNode = anExplorer.Current();
+            const TDF_Label aDefinitionLabel = aNode.RefLabel.IsNull()
+                ? aNode.Label
+                : aNode.RefLabel;
+            if (aNode.Label.IsNull() || aDefinitionLabel.IsNull()) {
+                return {};
+            }
+            OccurrenceData anOccurrence;
+            anOccurrence.occurrenceLabel = aNode.Label;
+            anOccurrence.definitionLabel = aDefinitionLabel;
+            anOccurrence.occurrenceLocation = aNode.Location;
+            anOccurrence.style = aNode.Style;
+            anOccurrence.visible = aNode.Style.IsVisible();
+            const Standard_Integer aCurrentDepth = anExplorer.CurrentDepth();
+            if (aCurrentDepth < 0
+                || static_cast<std::size_t>(aCurrentDepth)
+                    >= kMaxOccurrenceDepth) {
+                return {};
+            }
+            anOccurrence.labelIdentifiers.reserve(
+                static_cast<std::size_t>(aCurrentDepth) + 1U);
+            for (Standard_Integer aDepth = 0;
+                 aDepth <= aCurrentDepth; ++aDepth) {
+                const TDF_Label& aPathLabel = anExplorer.Current(aDepth).Label;
+                if (aPathLabel.IsNull()) {
+                    return {};
+                }
+                std::string aLabelIdentifier =
+                    theDocument->EntityIdentifierForLabel(aPathLabel);
+                if (aLabelIdentifier.empty()) {
+                    return {};
+                }
+                const auto [aKnownIdentifier, wasInserted] =
+                    aPersistentEntityLabels.emplace(aLabelIdentifier,
+                                                    aPathLabel);
+                if (!wasInserted
+                    && !aKnownIdentifier->second.IsEqual(aPathLabel)) {
+                    return {};
+                }
+                anOccurrence.labelIdentifiers.push_back(
+                    std::move(aLabelIdentifier));
+            }
+            if (!CheckedAdd(aLabelInstanceMappingCount,
+                            anOccurrence.labelIdentifiers.size(),
+                            aLabelInstanceMappingCount)
+                || aLabelInstanceMappingCount > kMaxLabelInstanceMappings) {
+                return {};
+            }
+            anOccurrence.entityIdentifier = DeriveOccurrenceIdentifier(
+                aDocumentIdentifier,
+                anOccurrence.labelIdentifiers);
+            anOccurrence.definitionIdentifier =
+                theDocument->DefinitionIdentifierForLabel(aDefinitionLabel);
+            if (anOccurrence.entityIdentifier.empty()
+                || anOccurrence.definitionIdentifier.empty()
+                || !anEntityIdentifiers.insert(
+                        anOccurrence.entityIdentifier).second) {
+                return {};
+            }
+            anOccurrence.name = ReadName(aNode.Label, aDefinitionLabel);
+            if (anOccurrence.name.empty()) {
+                anOccurrence.name = anOccurrence.entityIdentifier;
+            }
+
+            const TopoDS_Shape aShape =
+                XCAFDoc_ShapeTool::GetShape(aDefinitionLabel);
+            if (aShape.IsNull()) {
+                return {};
+            }
+            const auto aKnownDefinition = aDefinitionIndices.find(
+                anOccurrence.definitionIdentifier);
+            if (aKnownDefinition == aDefinitionIndices.end()) {
+                DefinitionData aDefinition;
+                aDefinition.label = aDefinitionLabel;
+                aDefinition.shape = aShape;
+                aDefinitionIndices.emplace(anOccurrence.definitionIdentifier,
+                                           aDefinitions.size());
+                aDefinitions.push_back(std::move(aDefinition));
+            } else {
+                const DefinitionData& aKnown =
+                    aDefinitions[aKnownDefinition->second];
+                if (!aKnown.label.IsEqual(aDefinitionLabel)
+                    || !aKnown.shape.IsSame(aShape)) {
+                    // A persistent definition UUID must identify exactly one
+                    // product label, even when two labels share a TShape.
+                    return {};
+                }
+            }
+            anOccurrences.push_back(std::move(anOccurrence));
+        }
+
+        // Identity preflight is complete. Meshing below may update transient
+        // triangulation caches but never opens or commits an OCAF command.
+        if (!aDefinitions.empty()) {
+            TopoDS_Compound aCompound;
+            BRep_Builder aBuilder;
+            aBuilder.MakeCompound(aCompound);
+            for (const DefinitionData& aDefinition : aDefinitions) {
+                aBuilder.Add(aCompound, aDefinition.shape);
+            }
+
+            Handle(Prs3d_Drawer) aMeshDrawer = new Prs3d_Drawer();
+            aMeshDrawer->Link(theContext->DefaultDrawer());
+            const Standard_Real aDeflection =
+                StdPrs_ToolTriangulatedShape::GetDeflection(aCompound, aMeshDrawer);
+            const Standard_Real anAngle = aMeshDrawer->DeviationAngle();
+            if (!IsFinite(aDeflection)
+                || aDeflection < Precision::Confusion()
+                || !IsFinite(anAngle)
+                || anAngle < Precision::Angular()
+                || anAngle > kPi) {
+                return {};
+            }
+            aMeshDeflection = aDeflection;
+            aMeshAngle = anAngle;
+            // Run the incremental mesher with both quality dimensions. The
+            // cheaper BRepTools::Triangulation() predicate only checks linear
+            // deflection and can incorrectly reuse a mesh after Angle tightens.
+            BRepMesh_IncrementalMesh aMesher;
+            aMesher.ChangeParameters().Deflection = aDeflection;
+            aMesher.ChangeParameters().Angle = anAngle;
+            aMesher.ChangeParameters().InParallel = Standard_True;
+            aMesher.ChangeParameters().Relative = Standard_False;
+            aMesher.SetShape(aCompound);
+            aMesher.Perform();
+            if (!aMesher.IsDone()
+                || (aMesher.GetStatusFlags() & IMeshData_Failure) != 0
+                || !BRepTools::Triangulation(aCompound, aDeflection)) {
+                return {};
+            }
+
+            for (auto& [aDefinitionIdentifier, aDefinitionIndex] : aDefinitionIndices) {
+                if (!ExtractDefinitionGeometry(
+                        aDefinitions[aDefinitionIndex].label,
+                        aDefinitionIdentifier,
+                        aMeshDeflection,
+                        aMeshAngle,
+                        aDefinitions[aDefinitionIndex])) {
+                    return {};
+                }
+            }
+        }
+
+        State aNextState = *myState;
+        if (aNextState.documentObject.get() != aDocument.get()
+            || aNextState.documentIdentifier != aDocumentIdentifier) {
+            if (!IncrementRevision(aNextState.documentGeneration)) {
+                return {};
+            }
+            aNextState.documentObject = aDocument;
+            aNextState.documentIdentifier = aDocumentIdentifier;
+            aNextState.modelFingerprint.reset();
+            aNextState.presentationFingerprint.reset();
+            aNextState.cameraFingerprint.reset();
+            aNextState.definitions.clear();
+        }
+
+        SceneSnapshot aScene;
+        aScene.meshes.reserve(aDefinitions.size());
+        std::vector<std::string> aLiveRevisionKeys;
+        aLiveRevisionKeys.reserve(aDefinitions.size());
+        std::unordered_set<std::string> aLiveRevisionKeySet;
+        aLiveRevisionKeySet.reserve(aDefinitions.size());
+        std::size_t aNewRevisionCount = 0;
+        for (const DefinitionData& aDefinition : aDefinitions) {
+            std::string aRevisionKey = aDocumentIdentifier + "\n"
+                + aDefinition.mesh.definitionIdentifier;
+            if (!aLiveRevisionKeySet.insert(aRevisionKey).second) {
+                return {};
+            }
+            if (aNextState.definitions.find(aRevisionKey)
+                == aNextState.definitions.end()) {
+                ++aNewRevisionCount;
+            }
+            aLiveRevisionKeys.push_back(std::move(aRevisionKey));
+        }
+
+        std::size_t aRetainedRevisionCount = 0;
+        if (!CheckedAdd(aNextState.definitions.size(),
+                        aNewRevisionCount,
+                        aRetainedRevisionCount)) {
+            return {};
+        }
+        if (aRetainedRevisionCount > kMaxRetainedDefinitionRevisions) {
+            const std::size_t anEvictionCount = aRetainedRevisionCount
+                - kMaxRetainedDefinitionRevisions;
+            std::vector<std::pair<std::uint64_t, std::string>> aTombstones;
+            aTombstones.reserve(aNextState.definitions.size());
+            for (const auto& [aRevisionKey, aRevision] :
+                 aNextState.definitions) {
+                if (aLiveRevisionKeySet.find(aRevisionKey)
+                    == aLiveRevisionKeySet.end()) {
+                    aTombstones.emplace_back(aRevision.lastSeenSnapshot,
+                                             aRevisionKey);
+                }
+            }
+            if (aTombstones.size() < anEvictionCount) {
+                return {};
+            }
+            std::sort(aTombstones.begin(),
+                      aTombstones.end(),
+                      [](const auto& theLeft, const auto& theRight) {
+                          return theLeft.first != theRight.first
+                              ? theLeft.first < theRight.first
+                              : theLeft.second < theRight.second;
+                      });
+            for (std::size_t anIndex = 0;
+                 anIndex < anEvictionCount; ++anIndex) {
+                aNextState.definitions.erase(aTombstones[anIndex].second);
+            }
+        }
+
+        std::size_t aSnapshotNumericBytes = 0;
+        std::size_t aSnapshotVertexCount = 0;
+        std::size_t aSnapshotIndexCount = 0;
+        for (std::size_t aDefinitionIndex = 0;
+             aDefinitionIndex < aDefinitions.size(); ++aDefinitionIndex) {
+            DefinitionData& aDefinition = aDefinitions[aDefinitionIndex];
+            const std::string& aRevisionKey =
+                aLiveRevisionKeys[aDefinitionIndex];
+            auto aRevisionFound = aNextState.definitions.find(aRevisionKey);
+            if (aRevisionFound == aNextState.definitions.end()) {
+                if (aNextState.definitions.size()
+                    >= kMaxRetainedDefinitionRevisions) {
+                    return {};
+                }
+                aRevisionFound = aNextState.definitions.emplace(
+                    aRevisionKey,
+                    State::DefinitionRevision()).first;
+            }
+            State::DefinitionRevision& aRevision = aRevisionFound->second;
+            aRevision.lastSeenSnapshot = aNextState.snapshotRevision;
+            if (!aRevision.hasFingerprint
+                || aRevision.fingerprint != aDefinition.fingerprint) {
+                if (!IncrementRevision(aRevision.revision)) {
+                    return {};
+                }
+                aRevision.fingerprint = aDefinition.fingerprint;
+                aRevision.hasFingerprint = true;
+            }
+            aDefinition.mesh.geometryRevision = aRevision.revision;
+            std::size_t aVertexBytes = 0;
+            std::size_t anIndexBytes = 0;
+            std::size_t aPrimitiveBytes = 0;
+            std::size_t aMeshBytes = 0;
+            if (!CheckedMultiply(aDefinition.mesh.vertices.size(),
+                                 sizeof(Vertex),
+                                 aVertexBytes)
+                || !CheckedMultiply(aDefinition.mesh.indices.size(),
+                                    sizeof(std::uint32_t),
+                                    anIndexBytes)
+                || !CheckedMultiply(aDefinition.mesh.primitives.size(),
+                                    sizeof(MeshPrimitive),
+                                    aPrimitiveBytes)
+                || !CheckedAdd(aVertexBytes, anIndexBytes, aMeshBytes)
+                || !CheckedAdd(aMeshBytes, aPrimitiveBytes, aMeshBytes)
+                || !CheckedAdd(aSnapshotNumericBytes,
+                               aMeshBytes,
+                               aSnapshotNumericBytes)
+                || !CheckedAdd(aSnapshotVertexCount,
+                               aDefinition.mesh.vertices.size(),
+                               aSnapshotVertexCount)
+                || !CheckedAdd(aSnapshotIndexCount,
+                               aDefinition.mesh.indices.size(),
+                               aSnapshotIndexCount)
+                || aSnapshotNumericBytes > kMaxSnapshotNumericBytes
+                || aSnapshotVertexCount > kMaxVerticesPerSnapshot
+                || aSnapshotIndexCount > kMaxIndicesPerSnapshot) {
+                return {};
+            }
+            aScene.meshes.push_back(std::move(aDefinition.mesh));
+        }
+
+        std::unordered_map<std::string, std::vector<std::size_t>>
+            aLabelToInstances;
+        std::unordered_map<std::string, std::vector<std::size_t>>
+            aDefinitionToInstances;
+        std::size_t aBindingCount = 0;
+        aScene.instances.reserve(anOccurrences.size());
+        for (const OccurrenceData& anOccurrence : anOccurrences) {
+            const auto aDefinitionFound = aDefinitionIndices.find(
+                anOccurrence.definitionIdentifier);
+            if (aDefinitionFound == aDefinitionIndices.end()
+                || !FitsUInt32(aDefinitionFound->second)) {
+                return {};
+            }
+            const std::size_t aDefinitionIndex = aDefinitionFound->second;
+            const DefinitionData& aDefinition = aDefinitions[aDefinitionIndex];
+            const MeshSnapshot& aMesh = aScene.meshes[aDefinitionIndex];
+            if (!CheckedAdd(aBindingCount,
+                            aMesh.primitives.size(),
+                            aBindingCount)
+                || aBindingCount > kMaxPrimitiveBindingsPerSnapshot) {
+                return {};
+            }
+
+            gp_Trsf aWorldTransform =
+                theDocument->ObjectTransformForLabel(anOccurrence.definitionLabel)
+                    .Multiplied(anOccurrence.occurrenceLocation.Transformation());
+            gp_Trsf aMeshOrigin;
+            aMeshOrigin.SetTranslation(gp_Vec(aDefinition.sourceOrigin.x,
+                                               aDefinition.sourceOrigin.y,
+                                               aDefinition.sourceOrigin.z));
+            aWorldTransform.Multiply(aMeshOrigin);
+
+            InstanceSnapshot anInstance;
+            anInstance.entityIdentifier = anOccurrence.entityIdentifier;
+            anInstance.meshIndex = static_cast<std::uint32_t>(aDefinitionIndex);
+            if (!MatrixFromTransform(aWorldTransform, anInstance.worldFromObject)) {
+                return {};
+            }
+            anInstance.reversesWinding = aWorldTransform.IsNegative();
+            anInstance.visible = anOccurrence.visible;
+            anInstance.selectable = anOccurrence.visible;
+            anInstance.name = anOccurrence.name;
+            anInstance.role = RenderRole::Model;
+
+            Graphic3d_NameOfMaterial aMaterialName;
+            Quantity_NameOfColor aColorName;
+            const std::optional<Graphic3d_NameOfMaterial> aMaterialOverride =
+                theDocument->TryMaterialNameForLabel(
+                    anOccurrence.definitionLabel, aMaterialName)
+                ? std::optional<Graphic3d_NameOfMaterial>(aMaterialName)
+                : std::nullopt;
+            const std::optional<Quantity_NameOfColor> aColorOverride =
+                theDocument->TryColorNameForLabel(
+                    anOccurrence.definitionLabel, aColorName)
+                ? std::optional<Quantity_NameOfColor>(aColorName)
+                : std::nullopt;
+
+            std::vector<std::optional<MaterialSnapshot>> aFaceMaterials(
+                aMesh.primitives.size());
+            std::vector<bool> aFaceVisibility(aMesh.primitives.size(), true);
+            std::unordered_map<std::uint32_t, std::size_t> aPrimitiveByFace;
+            for (std::size_t aPrimitiveIndex = 0;
+                 aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
+                aPrimitiveByFace.emplace(aMesh.primitives[aPrimitiveIndex].faceIndex,
+                                         aPrimitiveIndex);
+            }
+            RWMesh_FaceIterator aFace(anOccurrence.definitionLabel,
+                                      TopLoc_Location(),
+                                      Standard_True,
+                                      anOccurrence.style);
+            for (; aFace.More(); aFace.Next()) {
+                const Standard_Integer aFaceMapIndex =
+                    aDefinition.faces.FindIndex(aFace.Face());
+                if (aFaceMapIndex <= 0) {
+                    return {};
+                }
+                const auto aPrimitiveFound = aPrimitiveByFace.find(
+                    static_cast<std::uint32_t>(aFaceMapIndex - 1));
+                if (aPrimitiveFound == aPrimitiveByFace.end()
+                    || aFaceMaterials[aPrimitiveFound->second].has_value()) {
+                    return {};
+                }
+                aFaceVisibility[aPrimitiveFound->second] =
+                    aFace.FaceStyle().IsVisible();
+                MaterialSnapshot aMaterial;
+                if (!ResolveMaterial(aFace,
+                                     aMaterialOverride,
+                                     aColorOverride,
+                                     aDefinition.closed,
+                                     aMaterial)) {
+                    return {};
+                }
+                aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);
+            }
+
+            anInstance.primitiveBindings.reserve(aMesh.primitives.size());
+            for (std::size_t aPrimitiveIndex = 0;
+                 aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
+                if (!aFaceMaterials[aPrimitiveIndex].has_value()) {
+                    return {};
+                }
+                std::uint32_t aMaterialIndex = 0;
+                if (!AddMaterial(aScene,
+                                 std::move(*aFaceMaterials[aPrimitiveIndex]),
+                                 aMaterialIndex)) {
+                    return {};
+                }
+                PrimitiveBinding aBinding;
+                aBinding.materialIndex = aMaterialIndex;
+                aBinding.visible = aFaceVisibility[aPrimitiveIndex];
+                if (anInstance.selectable && aBinding.visible) {
+                    if (!FitsUInt32(aScene.pickTable.size())
+                        || aScene.pickTable.size()
+                            == std::numeric_limits<std::uint32_t>::max()
+                        || aScene.pickTable.size() >= kMaxPickElementsPerSnapshot) {
+                        return {};
+                    }
+                    aBinding.pickToken =
+                        static_cast<std::uint32_t>(aScene.pickTable.size());
+                    aScene.pickTable.push_back({
+                        anInstance.entityIdentifier,
+                        ElementKind::Face,
+                        aMesh.primitives[aPrimitiveIndex].faceIndex,
+                        aMesh.geometryRevision,
+                    });
+                }
+                anInstance.primitiveBindings.push_back(aBinding);
+            }
+            const std::size_t anInstanceIndex = aScene.instances.size();
+            std::unordered_set<std::string> aMappedLabelIdentifiers;
+            for (const std::string& aLabelIdentifier :
+                 anOccurrence.labelIdentifiers) {
+                if (aMappedLabelIdentifiers.insert(aLabelIdentifier).second) {
+                    aLabelToInstances[aLabelIdentifier].push_back(
+                        anInstanceIndex);
+                }
+            }
+            aDefinitionToInstances[anOccurrence.definitionIdentifier]
+                .push_back(anInstanceIndex);
+            aScene.instances.push_back(std::move(anInstance));
+        }
+
+        std::size_t anInstanceBytes = 0;
+        std::size_t aBindingBytes = 0;
+        std::size_t aMaterialBytes = 0;
+        std::size_t aPickBytes = 0;
+        std::size_t anAuxiliaryBytes = 0;
+        if (!CheckedMultiply(aScene.instances.size(),
+                             sizeof(Matrix4d),
+                             anInstanceBytes)
+            || !CheckedMultiply(aBindingCount,
+                                sizeof(PrimitiveBinding),
+                                aBindingBytes)
+            || !CheckedMultiply(aScene.materials.size(),
+                                sizeof(MaterialSnapshot),
+                                aMaterialBytes)
+            || !CheckedMultiply(aScene.pickTable.size(),
+                                sizeof(ElementIdentifier),
+                                aPickBytes)
+            || !CheckedAdd(anInstanceBytes, aBindingBytes, anAuxiliaryBytes)
+            || !CheckedAdd(anAuxiliaryBytes, aMaterialBytes, anAuxiliaryBytes)
+            || !CheckedAdd(anAuxiliaryBytes, aPickBytes, anAuxiliaryBytes)
+            || !CheckedAdd(aSnapshotNumericBytes,
+                           anAuxiliaryBytes,
+                           aSnapshotNumericBytes)
+            || aSnapshotNumericBytes > kMaxSnapshotNumericBytes) {
+            return {};
+        }
+
+        // Selection is intentionally copied after committed instances exist.
+        // Unknown/transient AIS objects are ignored rather than leaked into the
+        // committed document snapshot.
+        std::unordered_set<std::string> aSelectedKeys;
+        const auto elementForInstance = [&](const std::size_t theInstanceIndex,
+                                            const TopoDS_Shape& theSubshape) {
+            const InstanceSnapshot& anInstance =
+                aScene.instances[theInstanceIndex];
+            const MeshSnapshot& aMesh = aScene.meshes[anInstance.meshIndex];
+            ElementIdentifier anElement;
+            anElement.entityIdentifier = anInstance.entityIdentifier;
+            anElement.kind = ElementKind::Object;
+            anElement.geometryRevision = aMesh.geometryRevision;
+            if (!theSubshape.IsNull()
+                && theSubshape.ShapeType() == TopAbs_FACE) {
+                const Standard_Integer aFaceIndex =
+                    aDefinitions[anInstance.meshIndex].faces.FindIndex(
+                        theSubshape);
+                if (aFaceIndex > 0) {
+                    anElement.kind = ElementKind::Face;
+                    anElement.topologyIndex =
+                        static_cast<std::uint32_t>(aFaceIndex - 1);
+                }
+            }
+            return anElement;
+        };
+        theContext->InitSelected();
+        for (; theContext->MoreSelected(); theContext->NextSelected()) {
+            const Handle(AIS_InteractiveObject) anInteractive =
+                theContext->SelectedInteractive();
+            if (anInteractive.IsNull()) {
+                continue;
+            }
+            const TDF_Label aLabel = theDocument->ShapeLabel(anInteractive);
+            const std::string aLabelIdentifier =
+                theDocument->EntityIdentifierForLabel(aLabel);
+            const auto anInstancesFound =
+                aLabelToInstances.find(aLabelIdentifier);
+            const std::vector<std::size_t>* anInstanceIndices =
+                anInstancesFound == aLabelToInstances.end()
+                ? nullptr
+                : &anInstancesFound->second;
+            if (anInstanceIndices == nullptr) {
+                const std::string aDefinitionIdentifier =
+                    theDocument->DefinitionIdentifierForLabel(aLabel);
+                const auto aDefinitionsFound =
+                    aDefinitionToInstances.find(aDefinitionIdentifier);
+                if (!aDefinitionIdentifier.empty()
+                    && aDefinitionsFound != aDefinitionToInstances.end()) {
+                    anInstanceIndices = &aDefinitionsFound->second;
+                }
+            }
+            if (anInstanceIndices == nullptr) {
+                continue;
+            }
+            TopoDS_Shape aSelectedSubshape;
+            if (theContext->HasSelectedShape()) {
+                aSelectedSubshape = theContext->SelectedShape();
+            }
+            for (const std::size_t anInstanceIndex :
+                 *anInstanceIndices) {
+                if (aScene.selection.selected.size()
+                    >= kMaxSelectedElements) {
+                    return {};
+                }
+                InstanceSnapshot& anInstance =
+                    aScene.instances[anInstanceIndex];
+                const ElementIdentifier anElement = elementForInstance(
+                    anInstanceIndex,
+                    aSelectedSubshape);
+                const std::string aSelectionKey =
+                    anElement.entityIdentifier + ":"
+                    + std::to_string(
+                        static_cast<unsigned int>(anElement.kind)) + ":"
+                    + std::to_string(anElement.topologyIndex);
+                if (aSelectedKeys.insert(aSelectionKey).second) {
+                    aScene.selection.selected.push_back(anElement);
+                }
+                anInstance.selected = true;
+            }
+        }
+        std::sort(aScene.selection.selected.begin(),
+                  aScene.selection.selected.end(),
+                  [](const ElementIdentifier& theLeft,
+                     const ElementIdentifier& theRight) {
+                      if (theLeft.entityIdentifier
+                          != theRight.entityIdentifier) {
+                          return theLeft.entityIdentifier
+                              < theRight.entityIdentifier;
+                      }
+                      if (theLeft.kind != theRight.kind) {
+                          return static_cast<std::uint8_t>(theLeft.kind)
+                              < static_cast<std::uint8_t>(theRight.kind);
+                      }
+                      if (theLeft.topologyIndex
+                          != theRight.topologyIndex) {
+                          return theLeft.topologyIndex
+                              < theRight.topologyIndex;
+                      }
+                      return theLeft.geometryRevision
+                          < theRight.geometryRevision;
+                  });
+
+        if (theContext->HasDetected()) {
+            const Handle(AIS_InteractiveObject) anInteractive =
+                theContext->DetectedInteractive();
+            if (!anInteractive.IsNull()) {
+                const TDF_Label aLabel = theDocument->ShapeLabel(anInteractive);
+                const std::string aLabelIdentifier =
+                    theDocument->EntityIdentifierForLabel(aLabel);
+                const auto anInstancesFound =
+                    aLabelToInstances.find(aLabelIdentifier);
+                const std::vector<std::size_t>* anInstanceIndices =
+                    anInstancesFound == aLabelToInstances.end()
+                    ? nullptr
+                    : &anInstancesFound->second;
+                if (anInstanceIndices == nullptr) {
+                    const std::string aDefinitionIdentifier =
+                        theDocument->DefinitionIdentifierForLabel(aLabel);
+                    const auto aDefinitionsFound =
+                        aDefinitionToInstances.find(aDefinitionIdentifier);
+                    if (!aDefinitionIdentifier.empty()
+                        && aDefinitionsFound != aDefinitionToInstances.end()) {
+                        anInstanceIndices = &aDefinitionsFound->second;
+                    }
+                }
+                if (anInstanceIndices != nullptr) {
+                    TopoDS_Shape aDetectedSubshape;
+                    const Handle(StdSelect_BRepOwner) anOwner =
+                        Handle(StdSelect_BRepOwner)::DownCast(
+                            theContext->DetectedOwner());
+                    if (!anOwner.IsNull() && anOwner->HasShape()) {
+                        aDetectedSubshape = anOwner->Shape();
+                    }
+
+                    std::optional<std::size_t> aDetectedInstance;
+                    if (!aDetectedSubshape.IsNull()
+                        && aDetectedSubshape.ShapeType() == TopAbs_FACE) {
+                        for (const std::size_t anInstanceIndex :
+                             *anInstanceIndices) {
+                            const InstanceSnapshot& anInstance =
+                                aScene.instances[anInstanceIndex];
+                            if (aDefinitions[anInstance.meshIndex]
+                                    .faces.FindIndex(aDetectedSubshape) > 0) {
+                                if (aDetectedInstance.has_value()) {
+                                    aDetectedInstance.reset();
+                                    break;
+                                }
+                                aDetectedInstance = anInstanceIndex;
+                            }
+                        }
+                    } else if (anInstanceIndices->size() == 1) {
+                        aDetectedInstance = anInstanceIndices->front();
+                    }
+                    if (aDetectedInstance.has_value()) {
+                        aScene.selection.hovered = elementForInstance(
+                            *aDetectedInstance,
+                            aDetectedSubshape);
+                    }
+                }
+            }
+        }
+
+        std::size_t aSelectionBytes = 0;
+        for (const ElementIdentifier& anElement :
+             aScene.selection.selected) {
+            if (!CheckedAdd(aSelectionBytes,
+                            sizeof(ElementIdentifier),
+                            aSelectionBytes)
+                || !CheckedAdd(aSelectionBytes,
+                               anElement.entityIdentifier.size(),
+                               aSelectionBytes)) {
+                return {};
+            }
+        }
+        if (aScene.selection.hovered.has_value()
+            && (!CheckedAdd(aSelectionBytes,
+                            sizeof(ElementIdentifier),
+                            aSelectionBytes)
+                || !CheckedAdd(
+                    aSelectionBytes,
+                    aScene.selection.hovered->entityIdentifier.size(),
+                    aSelectionBytes))) {
+            return {};
+        }
+        if (!CheckedAdd(aSnapshotNumericBytes,
+                        aSelectionBytes,
+                        aSnapshotNumericBytes)
+            || aSnapshotNumericBytes > kMaxSnapshotNumericBytes) {
+            return {};
+        }
+
+        if (!BuildCamera(theView, theViewportPixels, aScene.camera)) {
+            return {};
+        }
+
+        Bounds3d aWorldBounds;
+        for (const InstanceSnapshot& anInstance : aScene.instances) {
+            const Bounds3d& aBounds = aScene.meshes[anInstance.meshIndex].localBounds;
+            for (const double anX : {aBounds.minimum.x, aBounds.maximum.x}) {
+                for (const double aY : {aBounds.minimum.y, aBounds.maximum.y}) {
+                    for (const double aZ : {aBounds.minimum.z, aBounds.maximum.z}) {
+                        Double3 aWorldPoint;
+                        if (!TransformPoint(anInstance.worldFromObject,
+                                            {anX, aY, aZ},
+                                            aWorldPoint)) {
+                            return {};
+                        }
+                        Extend(aWorldBounds,
+                               aWorldPoint.x,
+                               aWorldPoint.y,
+                               aWorldPoint.z);
+                    }
+                }
+            }
+        }
+        aScene.renderOrigin = IsValid(aWorldBounds)
+            ? Center(aWorldBounds)
+            : aScene.camera.center;
+
+        const std::uint64_t aModelFingerprint = ModelFingerprint(aScene);
+        const std::uint64_t aPresentationFingerprint =
+            PresentationFingerprint(aScene);
+        const std::uint64_t aCameraFingerprint = CameraFingerprint(aScene.camera);
+        if (!aNextState.modelFingerprint.has_value()
+            || *aNextState.modelFingerprint != aModelFingerprint) {
+            if (!IncrementRevision(aNextState.modelRevision)) {
+                return {};
+            }
+            aNextState.modelFingerprint = aModelFingerprint;
+        }
+        if (!aNextState.presentationFingerprint.has_value()
+            || *aNextState.presentationFingerprint != aPresentationFingerprint) {
+            if (!IncrementRevision(aNextState.presentationRevision)) {
+                return {};
+            }
+            aNextState.presentationFingerprint = aPresentationFingerprint;
+        }
+        if (!aNextState.cameraFingerprint.has_value()
+            || *aNextState.cameraFingerprint != aCameraFingerprint) {
+            if (!IncrementRevision(aNextState.cameraRevision)) {
+                return {};
+            }
+            aNextState.cameraFingerprint = aCameraFingerprint;
+        }
+        if (!IncrementRevision(aNextState.snapshotRevision)) {
+            return {};
+        }
+
+        aScene.revisions.snapshot = aNextState.snapshotRevision;
+        aScene.revisions.documentGeneration = aNextState.documentGeneration;
+        aScene.revisions.model = aNextState.modelRevision;
+        aScene.revisions.presentation = aNextState.presentationRevision;
+        aScene.revisions.camera = aNextState.cameraRevision;
+
+        // Finish every potentially allocating operation before publishing
+        // state. A failed allocation must not consume any revision.
+        auto aCommittedState = std::make_unique<State>(std::move(aNextState));
+        SnapshotPointer aSnapshot =
+            std::make_shared<const SceneSnapshot>(std::move(aScene));
+        myState.swap(aCommittedState);
+        return aSnapshot;
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
+} // namespace core3d::scene

@@ -27,6 +27,8 @@
 #include <AIS_InteractiveObject.hxx>
 #include <AIS_Shape.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+
+#include <string>
 //! The document
 class OcctDocument : public Standard_Transient
 {
@@ -38,6 +40,23 @@ public:
   Standard_EXPORT virtual ~OcctDocument();
 
   Standard_EXPORT void InitDoc();
+
+  //! Return persistent identifiers without modifying the document. An empty
+  //! string means that the requested identifier has not been migrated yet.
+  Standard_EXPORT std::string DocumentIdentifier() const;
+  Standard_EXPORT std::string EntityIdentifierForLabel(const TDF_Label& label) const;
+  Standard_EXPORT std::string DefinitionIdentifierForLabel(const TDF_Label& label) const;
+  //! Return Shapeyard's persisted object-local translation/rotation/uniform
+  //! scale. This is independent of an XCAF assembly occurrence location.
+  Standard_EXPORT gp_Trsf ObjectTransformForLabel(const TDF_Label& label) const;
+
+  //! Assign identifiers to a legacy document before normal editing begins.
+  //! Migration is atomic, leaves no undo/redo entry, and refuses to run over
+  //! an open command or existing user history. Snapshot/read paths must never
+  //! call this method.
+  Standard_EXPORT Standard_Boolean MigrateLegacyIdentifiers();
+  Standard_EXPORT Standard_Boolean MigrateLegacyIdentifiers(
+      const Handle(TDocStd_Document)& document);
 
     Handle(TDocStd_Document)& ChangeDocument() {
         return myOcafDoc;
@@ -63,6 +82,12 @@ public:
     Graphic3d_NameOfMaterial MaterialNameForShape(Handle(AIS_Shape) object);
     Graphic3d_NameOfMaterial MaterialNameForLabel(const TDF_Label& label) const;
     Quantity_NameOfColor ColorNameForLabel(const TDF_Label& label) const;
+    Standard_Boolean TryMaterialNameForLabel(
+        const TDF_Label& label,
+        Graphic3d_NameOfMaterial& material) const;
+    Standard_Boolean TryColorNameForLabel(
+        const TDF_Label& label,
+        Quantity_NameOfColor& color) const;
 
     void ReplaceShape(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     
@@ -82,8 +107,6 @@ public:
 
     void NotifyChanges();
 
-private:
-    const gp_Trsf LabelTransform(const TDF_Label& aRefLabel);
 private:
     
   Handle(TDocStd_Application) myApp;

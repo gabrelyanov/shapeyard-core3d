@@ -61,6 +61,42 @@
 #include <TDataStd_Real.hxx>
 #include <GP_Quaternion.hxx>
 
+namespace {
+
+class ImportedDocumentHistoryGuard
+{
+public:
+    explicit ImportedDocumentHistoryGuard(
+        const Handle(TDocStd_Document)& theDocument)
+    : myDocument(theDocument)
+    {
+        if (!myDocument.IsNull()) {
+            myDocument->ClearUndos();
+            myDocument->SetUndoLimit(0);
+        }
+    }
+
+    ~ImportedDocumentHistoryGuard()
+    {
+        if (myDocument.IsNull()) {
+            return;
+        }
+        try {
+            if (myDocument->HasOpenCommand()) {
+                myDocument->AbortCommand();
+            }
+            myDocument->ClearUndos();
+            myDocument->SetUndoLimit(40);
+        } catch (...) {
+        }
+    }
+
+private:
+    Handle(TDocStd_Document) myDocument;
+};
+
+} // namespace
+
 // =======================================================================
 // function : OcctViewer
 // purpose  :
@@ -328,6 +364,7 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
 {
     // create a new document
     myDoc->InitDoc();
+    ImportedDocumentHistoryGuard aHistoryGuard(myDoc->ChangeDocument());
     
     STEPCAFControl_Reader aReader;
     Handle(XSControl_WorkSession) aSession = aReader.Reader().WS();
@@ -345,8 +382,16 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
             clearSession (aSession);
             return false;
         }
-        
-        clearSession(aSession);
+
+		// STEP creates XCAF labels without Core3D identity attributes. Migrate the
+		// isolated document before it is exposed to normal editing/undo history.
+		if (!myDoc->MigrateLegacyIdentifiers())
+		{
+			clearSession(aSession);
+			return false;
+		}
+
+		clearSession(aSession);
     }
     catch (const Standard_Failure& theFailure)
     {

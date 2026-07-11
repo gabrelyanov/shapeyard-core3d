@@ -16,6 +16,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class Core3DSceneSnapshot;
+
 typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
     Core3DAssetLoadResultSuccess = 0,
     Core3DAssetLoadResultInvalidData,
@@ -143,6 +145,11 @@ typedef struct {
 
 - (void)loadFromBundle:(NSURL *)bundleUrl;
 - (void)saveSnapshot;
+
+//! Deep-copy the committed model and semantic camera into renderer-neutral,
+//! immutable values. Returns nil while a model transaction is open or before
+//! the native viewer has finished setup. Main-thread only.
+- (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
 
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
