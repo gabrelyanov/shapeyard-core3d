@@ -17,6 +17,13 @@ public:
     Standard_EXPORT Core3DView(const Handle(V3d_Viewer)& theViewer,
                                const V3d_TypeOfView theType);
 
+    //! Onscreen rendering is owned by GLView's CADisplayLink. OCCT may request
+    //! redraws from many modeling APIs; these overrides convert those requests
+    //! into invalidation until RenderFrame() opens the one legal draw boundary.
+    Standard_EXPORT void Redraw() const Standard_OVERRIDE;
+    Standard_EXPORT void RedrawImmediate() const Standard_OVERRIDE;
+    Standard_EXPORT void RenderFrame() const;
+
     Standard_EXPORT void StartRotation(const Standard_Integer X,
                                        const Standard_Integer Y,
                                        const Standard_Real zRotationThreshold);
@@ -29,6 +36,8 @@ public:
     
 
 private:
+    void InvalidateAndRequestFrame() const;
+
     Graphic3d_Vec2 myPointStart;
     Standard_Boolean myZRotation = false;
     Standard_Integer sx = 0;
@@ -41,5 +50,6 @@ private:
     
     gp_Vec              myCamStartOpToCenter;
     gp_Vec              myCamStartOpToEye;
+    mutable Standard_Boolean myIsRenderingFrame = Standard_False;
 };
 #endif /* Core3dView_hpp */

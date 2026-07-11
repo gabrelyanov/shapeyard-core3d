@@ -6,11 +6,53 @@
 //
 
 #include "Core3DView.hpp"
+#include <Aspect_DisplayConnection.hxx>
 #include <GP_Quaternion.hxx>
 
 Core3DView::Core3DView(const Handle(V3d_Viewer)& theViewer, const V3d_TypeOfView theType)
 : V3d_View(theViewer, theType) {
     
+}
+
+void Core3DView::Redraw() const
+{
+    if (myIsRenderingFrame) {
+        V3d_View::Redraw();
+        return;
+    }
+    InvalidateAndRequestFrame();
+}
+
+void Core3DView::RedrawImmediate() const
+{
+    if (myIsRenderingFrame) {
+        V3d_View::RedrawImmediate();
+        return;
+    }
+    InvalidateAndRequestFrame();
+}
+
+void Core3DView::InvalidateAndRequestFrame() const
+{
+    Invalidate();
+    if (!Window().IsNull()) {
+        // Core3DCocoa_Window translates this renderer-neutral OCCT invalidation
+        // into GLView's main-thread display-link request. This keeps every
+        // OCCT redraw entry point inside the single scheduled draw boundary.
+        Window()->InvalidateContent(Handle(Aspect_DisplayConnection)());
+    }
+}
+
+void Core3DView::RenderFrame() const
+{
+    struct RenderingGuard {
+        Standard_Boolean& flag;
+        explicit RenderingGuard(Standard_Boolean& theFlag) : flag(theFlag) {
+            flag = Standard_True;
+        }
+        ~RenderingGuard() { flag = Standard_False; }
+    } aGuard(myIsRenderingFrame);
+    V3d_View::Redraw();
 }
 
 void Core3DView::StartRotation(const Standard_Integer X,

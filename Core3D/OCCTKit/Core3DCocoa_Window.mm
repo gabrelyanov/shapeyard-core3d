@@ -28,10 +28,50 @@
 #include <Image_AlienPixMap.hxx>
 #include <Aspect_WindowDefinitionError.hxx>
 
+#include <cmath>
+
 IMPLEMENT_STANDARD_RTTIEXT(Core3DCocoa_Window,Cocoa_Window)
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-//
+@protocol Core3DDrawableSizing <NSObject>
+@property (nonatomic, readonly) CGSize drawableSize;
+@end
+
+@protocol Core3DDrawableInvalidating <NSObject>
+- (void)requestRender;
+@end
+
+static CGFloat OcctDrawableScale(UIView *theView)
+{
+    const CGFloat aWindowScale = theView.window.screen.scale;
+    if (aWindowScale > 0.0) {
+        return aWindowScale;
+    }
+    if (theView.contentScaleFactor > 0.0) {
+        return theView.contentScaleFactor;
+    }
+    return UIScreen.mainScreen.scale;
+}
+
+static Standard_Integer OcctPixelCoordinate(CGFloat theValue, CGFloat theScale)
+{
+    return static_cast<Standard_Integer>(std::lround(theValue * theScale));
+}
+
+static CGSize OcctDrawableSize(UIView *theView)
+{
+    if ([theView respondsToSelector:@selector(drawableSize)]) {
+        const CGSize aDrawableSize = [(id<Core3DDrawableSizing>)theView drawableSize];
+        if (aDrawableSize.width > 0.0 && aDrawableSize.height > 0.0) {
+            return aDrawableSize;
+        }
+    }
+    const CGFloat aScale = OcctDrawableScale(theView);
+    const CGRect aBounds = theView.bounds;
+    return CGSizeMake(
+        OcctPixelCoordinate(aBounds.size.width, aScale),
+        OcctPixelCoordinate(aBounds.size.height, aScale));
+}
 #else
 
 #if !defined(MAC_OS_X_VERSION_10_12) || (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_12)
@@ -74,7 +114,11 @@ static Standard_Integer getScreenBottom()
 - (void )invalidateContentOcct: (id )theSender
 {
     (void )theSender;
-    [self setNeedsDisplay];
+    if ([self respondsToSelector:@selector(requestRender)]) {
+        [(id<Core3DDrawableInvalidating>)self requestRender];
+    } else {
+        [self setNeedsDisplay];
+    }
 }
 @end
 #else
@@ -203,17 +247,27 @@ Core3DCocoa_Window::~Core3DCocoa_Window()
         }
         
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-        CGRect aBounds = [myHView bounds];
+        const CGSize aDrawableSize = OcctDrawableSize(myHView);
+        const Standard_Integer aXLeft = 0;
+        const Standard_Integer aXRight = (Standard_Integer)aDrawableSize.width;
+        const Standard_Integer aYTop = 0;
+        const Standard_Integer aYBottom = (Standard_Integer)aDrawableSize.height;
 #else
         NSRect aBounds = [myHView bounds];
+        const Standard_Integer aXLeft = (Standard_Integer)aBounds.origin.x;
+        const Standard_Integer aXRight =
+            (Standard_Integer)(aBounds.origin.x + aBounds.size.width);
+        const Standard_Integer aYTop = (Standard_Integer)aBounds.origin.y;
+        const Standard_Integer aYBottom =
+            (Standard_Integer)(aBounds.origin.y + aBounds.size.height);
 #endif
         Standard_Integer aMask = 0;
         Aspect_TypeOfResize aMode = Aspect_TOR_UNKNOWN;
         
-        if (Abs ((Standard_Integer )aBounds.origin.x                         - myXLeft  ) > 2) aMask |= 1;
-        if (Abs ((Standard_Integer )(aBounds.origin.x + aBounds.size.width)  - myXRight ) > 2) aMask |= 2;
-        if (Abs ((Standard_Integer )aBounds.origin.y                         - myYTop   ) > 2) aMask |= 4;
-        if (Abs ((Standard_Integer )(aBounds.origin.y + aBounds.size.height) - myYBottom) > 2) aMask |= 8;
+        if (Abs(aXLeft - myXLeft) > 2) aMask |= 1;
+        if (Abs(aXRight - myXRight) > 2) aMask |= 2;
+        if (Abs(aYTop - myYTop) > 2) aMask |= 4;
+        if (Abs(aYBottom - myYBottom) > 2) aMask |= 8;
         switch (aMask)
         {
             case 0:  aMode = Aspect_TOR_NO_BORDER;               break;
@@ -228,11 +282,10 @@ Core3DCocoa_Window::~Core3DCocoa_Window()
             default: break;
         }
         
-        auto scale = [[UIScreen mainScreen] scale];
-        myXLeft   = (Standard_Integer )aBounds.origin.x * scale;
-        myXRight  = (Standard_Integer )(aBounds.origin.x + aBounds.size.width) * scale;
-        myYTop    = (Standard_Integer )aBounds.origin.y * scale;
-        myYBottom = (Standard_Integer )(aBounds.origin.y + aBounds.size.height) * scale;
+        myXLeft = aXLeft;
+        myXRight = aXRight;
+        myYTop = aYTop;
+        myYBottom = aYBottom;
         return aMode;
     }
     
@@ -253,12 +306,11 @@ Core3DCocoa_Window::~Core3DCocoa_Window()
                                        Standard_Integer& X2, Standard_Integer& Y2) const
     {
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-        auto scale = [[UIScreen mainScreen] scale];
-        CGRect aBounds = [myHView bounds];
+        const CGSize aDrawableSize = OcctDrawableSize(myHView);
         X1 = 0;
         Y1 = 0;
-        X2 = (Standard_Integer )aBounds.size.width * scale;
-        Y2 = (Standard_Integer )aBounds.size.height * scale;
+        X2 = (Standard_Integer)aDrawableSize.width;
+        Y2 = (Standard_Integer)aDrawableSize.height;
 #else
         NSWindow* aWindow = [myHView window];
         NSRect aWindowRect = [aWindow frame];
@@ -282,11 +334,32 @@ Core3DCocoa_Window::~Core3DCocoa_Window()
         }
         
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-        CGRect aBounds = [myHView bounds];
+        const CGSize aDrawableSize = OcctDrawableSize(myHView);
+        theWidth = (Standard_Integer)aDrawableSize.width;
+        theHeight = (Standard_Integer)aDrawableSize.height;
 #else
         NSRect aBounds = [myHView bounds];
+        theWidth = (Standard_Integer)aBounds.size.width;
+        theHeight = (Standard_Integer)aBounds.size.height;
 #endif
-        auto scale = [[UIScreen mainScreen] scale];
-        theWidth  = (Standard_Integer )aBounds.size.width * scale;
-        theHeight = (Standard_Integer )aBounds.size.height * scale;
+    }
+
+    // =======================================================================
+    // function : InvalidateContent
+    // purpose  : Wake the application-owned frame scheduler.
+    // =======================================================================
+    void Core3DCocoa_Window::InvalidateContent (
+        const Handle(Aspect_DisplayConnection)& theDisp)
+    {
+        (void )theDisp;
+        if (myHView == NULL) {
+            return;
+        }
+        if (NSThread.isMainThread) {
+            [myHView invalidateContentOcct:nil];
+        } else {
+            [myHView performSelectorOnMainThread:@selector(invalidateContentOcct:)
+                                      withObject:nil
+                                   waitUntilDone:NO];
+        }
     }

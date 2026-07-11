@@ -80,6 +80,10 @@ public:
     //! Returns The Window SIZE in PIXEL
     Standard_EXPORT virtual void Size (Standard_Integer& theWidth,
                                        Standard_Integer& theHeight) const Standard_OVERRIDE;
+
+    //! Wake the application-owned frame scheduler after OCCT invalidation.
+    Standard_EXPORT virtual void InvalidateContent (
+        const Handle(Aspect_DisplayConnection)& theDisp) Standard_OVERRIDE;
     
     
 protected:

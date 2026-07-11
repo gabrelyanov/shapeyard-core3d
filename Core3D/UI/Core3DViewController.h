@@ -25,6 +25,12 @@ typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
     Core3DAssetLoadResultInternalFailure,
 };
 
+typedef NS_ENUM(NSInteger, Core3DViewportRenderingAPI) {
+    Core3DViewportRenderingAPIUnavailable = 0,
+    Core3DViewportRenderingAPIOpenGLES2 = 2,
+    Core3DViewportRenderingAPIOpenGLES3 = 3,
+};
+
 typedef struct {
     double min;
     double max;
@@ -123,6 +129,10 @@ typedef struct {
 
 @property (nonatomic, assign, readonly) BOOL isEmptyOfDisplayedObjects;
 @property (nonatomic, assign, readonly) NSInteger numberOfDisplayedShapes;
+@property (nonatomic, assign, readonly) NSUInteger viewportRenderedFrameCount;
+@property (nonatomic, assign, readonly) CGSize viewportDrawableSize;
+@property (nonatomic, assign, readonly, getter=isViewportRenderLoopRunning) BOOL viewportRenderLoopRunning;
+@property (nonatomic, assign, readonly) Core3DViewportRenderingAPI viewportRenderingAPI;
 
 @property (nonatomic, weak, nullable) id<Core3DViewControllerProtocol> delegate;
 

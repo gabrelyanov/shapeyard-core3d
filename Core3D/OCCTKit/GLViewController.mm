@@ -70,15 +70,41 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 } // namespace
 
+@interface GLViewController () <UIGestureRecognizerDelegate>
+- (void)endActiveRenderingInteractions;
+@end
+
 @implementation GLViewController {
-    CGFloat _ns; // native screen scale
     dispatch_queue_t _assetDataQueue;
-    
     BOOL _cancelTouches;
+    BOOL _didSetupViewer;
+    BOOL _rawTouchRendering;
+    BOOL _pinchRendering;
+    BOOL _panRendering;
+    CGPoint _pinchPreviousTouch[2];
 }
 
 - (void)dealloc {
-    _viewer->release();
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if (_viewer != nullptr) {
+        GLView *view = self.isViewLoaded ? [self viewportView] : nil;
+        if (view != nil) {
+            const std::shared_ptr<Core3DViewer> viewer = _viewer;
+            const BOOL didRelease = [view performWithRenderingContext:^{
+                viewer->release();
+            }];
+            if (!didRelease) {
+                NSLog(@"Core3D rendering context unavailable during teardown; using safe fallback.");
+                EAGLContext *previousContext = EAGLContext.currentContext;
+                [EAGLContext setCurrentContext:nil];
+                viewer->release();
+                [EAGLContext setCurrentContext:previousContext];
+            }
+        } else {
+            // No GL view means InitViewer never created graphics resources.
+            _viewer->release();
+        }
+    }
     _viewer = nullptr;
     NSLog(@"~GLViewController");
 }
@@ -93,9 +119,18 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
     if (self) {
         _viewer = std::make_shared<Core3DViewer>();
-        _ns = [[UIScreen mainScreen] scale];
         _assetDataQueue = dispatch_queue_create("com.shapeyard.sync", NULL);
 		_isConstructorMode = false;
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+            selector:@selector(documentDidChange:)
+            name:@"OcctDocumentChanges"
+            object:nil];
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+            selector:@selector(applicationWillResignActive:)
+            name:UIApplicationWillResignActiveNotification
+            object:nil];
     }
 
     return self;
@@ -104,12 +139,117 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 -(std::shared_ptr<core3d::Core3DViewer>) viewer {
     return _viewer;
 }
+
+- (GLView *)viewportView
+{
+    return [self.view isKindOfClass:GLView.class] ? (GLView *)self.view : nil;
+}
+
+- (CGFloat)drawableScale
+{
+    GLView *view = [self viewportView];
+    if (view.bounds.size.width > 0.0 && view.drawableSize.width > 0.0) {
+        return view.drawableSize.width / view.bounds.size.width;
+    }
+    return self.view.window.screen.scale ?: UIScreen.mainScreen.scale;
+}
+
+- (CGPoint)drawablePointForPoint:(CGPoint)point
+{
+    const CGFloat scale = [self drawableScale];
+    return CGPointMake(lround(point.x * scale), lround(point.y * scale));
+}
+
+- (void)requestRender
+{
+    [[self viewportView] requestRender];
+}
+
+- (NSUInteger)renderedFrameCount
+{
+    return [self viewportView].renderedFrameCount;
+}
+
+- (CGSize)drawableSize
+{
+    return [self viewportView].drawableSize;
+}
+
+- (BOOL)isRenderLoopRunning
+{
+    return [self viewportView].isRenderLoopRunning;
+}
+
+- (NSInteger)renderingAPIVersion
+{
+    switch ([self viewportView].renderingAPI) {
+        case kEAGLRenderingAPIOpenGLES3:
+            return 3;
+        case kEAGLRenderingAPIOpenGLES2:
+            return 2;
+        default:
+            return 0;
+    }
+}
+
+- (void)documentDidChange:(NSNotification *)notification
+{
+    if ([notification.object isKindOfClass:NSValue.class]
+        && _viewer != nullptr
+        && !_viewer->getDocument().IsNull()
+        && [(NSValue *)notification.object pointerValue]
+            != _viewer->getDocument().get()) {
+        return;
+    }
+    [self requestRender];
+}
+
+- (void)applicationWillResignActive:(NSNotification *)notification
+{
+    (void)notification;
+    [self endActiveRenderingInteractions];
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+    [super viewWillDisappear:animated];
+    [self endActiveRenderingInteractions];
+}
+
+- (void)endActiveRenderingInteractions
+{
+    GLView *view = [self viewportView];
+    const BOOL hadActiveInteraction =
+        _rawTouchRendering || _pinchRendering || _panRendering;
+    if (hadActiveInteraction && _viewer != nullptr) {
+        _viewer->CancelInteraction(0, 0);
+    }
+    if (_rawTouchRendering) {
+        _rawTouchRendering = NO;
+        [view endInteractiveRendering];
+    }
+    if (_pinchRendering) {
+        _pinchRendering = NO;
+        [view endInteractiveRendering];
+    }
+    if (_panRendering) {
+        _panRendering = NO;
+        [view endInteractiveRendering];
+    }
+    if (hadActiveInteraction) {
+        [self requestRender];
+    }
+}
 // =======================================================================
 // function : Draw
 // purpose  :
 // =======================================================================
-- (void) Draw
+- (BOOL) Draw
 {
+    if (_didSetupViewer && _viewer != nullptr) {
+        return _viewer->RenderFrame();
+    }
+    return NO;
 }
 
 // =======================================================================
@@ -117,20 +257,28 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 // purpose  :
 // =======================================================================
 - (void) Setup {
+    if (_didSetupViewer) {
+        _viewer->Resize();
+        [self requestRender];
+        return;
+    }
+
     if (!_viewer->InitViewer(self.view)) {
         NSLog(@"Failed to init viewer");
+        return;
     }
-    else {
-        _viewer->showGrid(!_isPreviewMode);
-        if (_isPreviewMode) {
-            _viewer->setPreviewMode();
-        }
-        //    [self importScrew:nullptr];
-        if (_delegate && [_delegate respondsToSelector:@selector(didSetupViewer:)]) {
-            __weak typeof(self) weakSelf = self;
-            [_delegate didSetupViewer:weakSelf];
-        }
+
+    _didSetupViewer = YES;
+    _viewer->showGrid(!_isPreviewMode);
+    if (_isPreviewMode) {
+        _viewer->setPreviewMode();
     }
+    //    [self importScrew:nullptr];
+    if (_delegate && [_delegate respondsToSelector:@selector(didSetupViewer:)]) {
+        __weak typeof(self) weakSelf = self;
+        [_delegate didSetupViewer:weakSelf];
+    }
+    [self requestRender];
 }
 
 // =======================================================================
@@ -157,12 +305,21 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 {
     [super touchesBegan:theTouches withEvent:theEvent];
 
+    if (_isPreviewMode) {
+        return;
+    }
+
     _cancelTouches = NO;
+	if (!_rawTouchRendering) {
+		_rawTouchRendering = YES;
+		[[self viewportView] beginInteractiveRendering];
+	}
 
     UITouch *aTouch = [theTouches anyObject];
     if (aTouch != NULL) {
-        CGPoint aTouchPoint = [aTouch locationInView:self.view];
-        _viewer->StartRotation((int)aTouchPoint.x * _ns, (int)aTouchPoint.y * _ns);
+        const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
+        _viewer->StartRotation((int)point.x, (int)point.y);
+        [self requestRender];
     }
 }
 
@@ -172,6 +329,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 // =======================================================================
 - (void)touchesMoved:(NSSet *)theTouches withEvent:(UIEvent *)theEvent
 {
+	if (_isPreviewMode) {
+		return;
+	}
     if(_cancelTouches) {
         [self touchesCancelled:theTouches withEvent:theEvent];
         return;
@@ -181,8 +341,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     
     UITouch *aTouch = [theTouches anyObject];
     if ((aTouch != NULL) && theEvent.allTouches.count == 1) {
-        CGPoint aTouchPoint = [aTouch locationInView:self.view];
-        _viewer->Rotation((int)aTouchPoint.x * _ns, (int)aTouchPoint.y * _ns);
+        const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
+        _viewer->Rotation((int)point.x, (int)point.y);
+        [self requestRender];
 
 #ifdef DEBUG
         if (_delegate && [_delegate respondsToSelector:@selector(didChangeStatusString:)]) {
@@ -202,9 +363,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     [super touchesEnded:touches withEvent:event];
 
     UITouch *aTouch = [touches anyObject];
-    if (aTouch != NULL) {
-        CGPoint aTouchPoint = [aTouch locationInView:self.view];
-        _viewer->FinishInteraction((int)aTouchPoint.x * _ns, (int)aTouchPoint.y * _ns);
+    if (!_isPreviewMode && aTouch != NULL) {
+        const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
+        _viewer->FinishInteraction((int)point.x, (int)point.y);
+        [self requestRender];
 
 #ifdef DEBUG
         if (_delegate && [_delegate respondsToSelector:@selector(didChangeStatusString:)]) {
@@ -212,6 +374,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         }
 #endif
     }
+	if (_rawTouchRendering) {
+		_rawTouchRendering = NO;
+		[[self viewportView] endInteractiveRendering];
+	}
 
     return;
 }
@@ -220,9 +386,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     [super touchesCancelled:touches withEvent:event];
 
     UITouch *aTouch = [touches anyObject];
-    if (aTouch != NULL) {
-        CGPoint aTouchPoint = [aTouch locationInView:self.view];
-        _viewer->CancelInteraction((int)aTouchPoint.x * _ns, (int)aTouchPoint.y * _ns );
+    if (!_isPreviewMode && aTouch != NULL) {
+        const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
+        _viewer->CancelInteraction((int)point.x, (int)point.y);
+        [self requestRender];
 
 #ifdef DEBUG
         if (_delegate && [_delegate respondsToSelector:@selector(didChangeStatusString:)]) {
@@ -230,6 +397,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         }
 #endif
     }
+	if (_rawTouchRendering) {
+		_rawTouchRendering = NO;
+		[[self viewportView] endInteractiveRendering];
+	}
 
     return;
 }
@@ -240,10 +411,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 // =======================================================================
 -(void)viewDidLoad
 {
+    [super viewDidLoad];
+
     // add zoom recognizer
     UIPinchGestureRecognizer *aZoomRecognizer = [[UIPinchGestureRecognizer alloc]
                                                  initWithTarget:self
                                                  action:@selector(zoomHandler:)];
+    aZoomRecognizer.delegate = self;
 
     [[self view] addGestureRecognizer:aZoomRecognizer];
 
@@ -254,6 +428,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
     aPanRecognizer.maximumNumberOfTouches = 2;
     aPanRecognizer.minimumNumberOfTouches = 2;
+    aPanRecognizer.delegate = self;
 
     [[self view] addGestureRecognizer:aPanRecognizer];
 
@@ -294,44 +469,70 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     [self.navigationItem setRightBarButtonItem: displayAboutDlgBtn];
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+        shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer
+{
+    const BOOL isPinchPanPair =
+        ([gestureRecognizer isKindOfClass:UIPinchGestureRecognizer.class]
+         && [otherGestureRecognizer isKindOfClass:UIPanGestureRecognizer.class])
+        || ([gestureRecognizer isKindOfClass:UIPanGestureRecognizer.class]
+            && [otherGestureRecognizer isKindOfClass:UIPinchGestureRecognizer.class]);
+    return isPinchPanPair;
+}
+
 // =======================================================================
 // function : zoomHandler
 // purpose  :
 // =======================================================================
 - (void)zoomHandler:(UIPinchGestureRecognizer *)pinchRecognizer
 {
+    const UIGestureRecognizerState state = pinchRecognizer.state;
+    if (state == UIGestureRecognizerStateEnded
+        || state == UIGestureRecognizerStateCancelled
+        || state == UIGestureRecognizerStateFailed) {
+        if (_pinchRendering) {
+            _pinchRendering = NO;
+            [[self viewportView] endInteractiveRendering];
+        }
+        return;
+    }
+
     if (_isPreviewMode) {
         return;
     }
 
-    if ([pinchRecognizer numberOfTouches] > 1)
-    {
-        UIGestureRecognizerState aState = [pinchRecognizer state];
-        if (aState == UIGestureRecognizerStateBegan)
-        {
-            myFirstTouch[0] = [pinchRecognizer locationOfTouch:0 inView:self.view];
-            myFirstTouch[1] = [pinchRecognizer locationOfTouch:1 inView:self.view];
-        }
-        else if (aState == UIGestureRecognizerStateChanged) {
+    if (pinchRecognizer.numberOfTouches > 1) {
+        if (state == UIGestureRecognizerStateBegan) {
+            if (!_pinchRendering) {
+                _pinchRendering = YES;
+                [[self viewportView] beginInteractiveRendering];
+            }
+            _pinchPreviousTouch[0] = [pinchRecognizer locationOfTouch:0 inView:self.view];
+            _pinchPreviousTouch[1] = [pinchRecognizer locationOfTouch:1 inView:self.view];
+        } else if (state == UIGestureRecognizerStateChanged) {
             CGPoint aLastTouch[2] = {
                 [pinchRecognizer locationOfTouch:0 inView:self.view],
                 [pinchRecognizer locationOfTouch:1 inView:self.view]
             };
 
-            double aPinchCenterXStart = ( myFirstTouch[0].x + myFirstTouch[1].x ) / 2.0;
-            double aPinchCenterYStart = ( myFirstTouch[0].y + myFirstTouch[1].y ) / 2.0;
+            const CGFloat drawableScale = [self drawableScale];
+            double aPinchCenterXStart =
+                (_pinchPreviousTouch[0].x + _pinchPreviousTouch[1].x) * drawableScale / 2.0;
+            double aPinchCenterYStart =
+                (_pinchPreviousTouch[0].y + _pinchPreviousTouch[1].y) * drawableScale / 2.0;
 
-            double aStartDist = Sqrt( ( myFirstTouch[0].x - myFirstTouch[1].x ) * ( myFirstTouch[0].x - myFirstTouch[1].x ) +
-                                     ( myFirstTouch[0].y - myFirstTouch[1].y ) * ( myFirstTouch[0].y - myFirstTouch[1].y ) );
+            double aStartDist = Sqrt( ( _pinchPreviousTouch[0].x - _pinchPreviousTouch[1].x ) * ( _pinchPreviousTouch[0].x - _pinchPreviousTouch[1].x ) +
+                                     ( _pinchPreviousTouch[0].y - _pinchPreviousTouch[1].y ) * ( _pinchPreviousTouch[0].y - _pinchPreviousTouch[1].y ) );
             double anEndDist = Sqrt( ( aLastTouch[0].x - aLastTouch[1].x ) * ( aLastTouch[0].x - aLastTouch[1].x ) +
                                     ( aLastTouch[0].y - aLastTouch[1].y ) * ( aLastTouch[0].y - aLastTouch[1].y ) );
 
-            double aDeltaDist = anEndDist - aStartDist;
+            double aDeltaDist = (anEndDist - aStartDist) * drawableScale;
 
             _viewer->Zoom(aPinchCenterXStart, aPinchCenterYStart, aDeltaDist);
+            [self requestRender];
 
-            myFirstTouch[0] = aLastTouch[0];
-            myFirstTouch[1] = aLastTouch[1];
+            _pinchPreviousTouch[0] = aLastTouch[0];
+            _pinchPreviousTouch[1] = aLastTouch[1];
         }
     }
 }
@@ -342,37 +543,42 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 // =======================================================================
 - (void)panHandler:(UIPanGestureRecognizer *)panRecognizer
 {
+    const UIGestureRecognizerState state = panRecognizer.state;
+    if (state == UIGestureRecognizerStateEnded
+        || state == UIGestureRecognizerStateCancelled
+        || state == UIGestureRecognizerStateFailed) {
+        if (_panRendering) {
+            _panRendering = NO;
+            [[self viewportView] endInteractiveRendering];
+        }
+        return;
+    }
+
     if (_isPreviewMode) {
         return;
     }
 
-    if ([panRecognizer numberOfTouches] > 1)
-    {
-        UIGestureRecognizerState aState = [panRecognizer state];
-        if (aState == UIGestureRecognizerStateBegan)
-        {
-            myFirstTouch[0] = [panRecognizer locationOfTouch:0 inView:self.view];
-            myFirstTouch[1] = [panRecognizer locationOfTouch:1 inView:self.view];
-            
-            _viewer->Pan(0.0, 0.0, Standard_True);
+    if (panRecognizer.numberOfTouches > 1) {
+        if (state == UIGestureRecognizerStateBegan) {
+            if (!_panRendering) {
+                _panRendering = YES;
+                [[self viewportView] beginInteractiveRendering];
+            }
+            [panRecognizer setTranslation:CGPointZero inView:self.view];
 
-        }
-        else if (aState == UIGestureRecognizerStateChanged) {
-            CGPoint aLastTouch[2] = {
-                [panRecognizer locationOfTouch:0 inView:self.view],
-                [panRecognizer locationOfTouch:1 inView:self.view]
-            };
-
-            double aPinchCenterXStart = ( myFirstTouch[0].x + myFirstTouch[1].x ) * _ns / 2.0;
-            double aPinchCenterYStart = ( myFirstTouch[0].y + myFirstTouch[1].y ) * _ns / 2.0;
-
-            double aPinchCenterXEnd = ( aLastTouch[0].x + aLastTouch[1].x ) * _ns / 2.0;
-            double aPinchCenterYEnd = ( aLastTouch[0].y + aLastTouch[1].y ) * _ns / 2.0;
-
-            double aPinchCenterXDev = aPinchCenterXEnd - aPinchCenterXStart;
-            double aPinchCenterYDev = aPinchCenterYEnd - aPinchCenterYStart;
-
-            _viewer->Pan((int)aPinchCenterXDev, (int)-aPinchCenterYDev, Standard_False);
+        } else if (state == UIGestureRecognizerStateChanged) {
+            const CGFloat drawableScale = [self drawableScale];
+            const CGPoint translation = [panRecognizer translationInView:self.view];
+            [panRecognizer setTranslation:CGPointZero inView:self.view];
+            const int deltaX = (int)lround(translation.x * drawableScale);
+            const int deltaY = (int)lround(-translation.y * drawableScale);
+            if (deltaX != 0 || deltaY != 0) {
+                // Starting a fresh relative pan from the current camera for each
+                // incremental delta keeps panning composable with simultaneous
+                // pinch updates instead of repeatedly restoring an old camera.
+                _viewer->Pan(deltaX, deltaY, Standard_True);
+                [self requestRender];
+            }
         }
     }
 }
@@ -387,11 +593,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         return;
     }
 
-    CGPoint aTapPoint = [tapRecognizer locationInView:self.view];
+    const CGPoint aTapPoint =
+        [self drawablePointForPoint:[tapRecognizer locationInView:self.view]];
 	if (!_isConstructorMode)
-		_viewer->Select(aTapPoint.x * _ns, aTapPoint.y * _ns);
+		_viewer->Select((int)aTapPoint.x, (int)aTapPoint.y);
 
 	[self checkSelections];
+	[self requestRender];
 }
 
 -(void) checkSelections {
@@ -423,6 +631,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
     _viewer->ImportSTEP(aPath);
     _viewer->FitAll();
+    [self requestRender];
 }
 
 // =======================================================================
@@ -437,11 +646,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
     _viewer->ImportSTEP(aPath);
     _viewer->FitAll();
+    [self requestRender];
 }
 
 - (void)addCube:(UIBarButtonItem *)theSender {
     __auto_type stlFilename = _viewer->addTestPrimitives();
     _viewer->FitAll();
+    [self requestRender];
     [self shareFile:stlFilename];
 }
 
@@ -460,23 +671,27 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)addTestPrimitives {
     _viewer->addTestPrimitives();
     _viewer->FitAll();
+    [self requestRender];
 }
 
 - (void)addPrimitivesFromJSON:(NSString *)json {
     _viewer->addPrimitivesFromJSON(json);
+    [self requestRender];
 }
 
 - (void)addPrimitive:(PrimitiveType)primitiveType {
     _viewer->addPrimitive(primitiveType);
-    _viewer->redraw();
+    [self requestRender];
 }
 
 - (void)selectLastObject {
     _viewer->getObjectInteractor()->selectLastObject();
+    [self requestRender];
 }
 
 - (void)deleteSelected {
     _viewer->getObjectInteractor()->deleteSelected();
+    [self requestRender];
 }
 
 -(NSString*) statusString {
@@ -486,21 +701,23 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	rot.GetEulerAngles(gp_YawPitchRoll, rotX, rotY, rotZ);
 	NSString* status = [NSString stringWithFormat:@"Coord: x%.3f, y%.3f, z%.3f. Angle:x%.3f, y%.3f, z%.3f",
 			pos.X(), pos.Y(), pos.Z(), rotX / M_PI * 180, rotY / M_PI * 180, rotZ / M_PI * 180];
-	NSLog(@"%@", status);
 	return status;
 }
 
 - (void)selectAll {
 	_viewer->getObjectInteractor()->selectAll();
 	[self checkSelections];
+	[self requestRender];
 }
 
 - (void)duplicateSelected {
     _viewer->getObjectInteractor()->duplicateSelected();
+    [self requestRender];
 }
 
 - (void)deselectAll {
     _viewer->deselectAll();
+    [self requestRender];
 }
 
 - (BOOL)isSelected {
@@ -509,9 +726,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)fitAll {
     _viewer->FitAll();
+    [self requestRender];
 }
 
 - (void)setPreviewMode {
+    [self endActiveRenderingInteractions];
     _isPreviewMode = YES;
 }
 
@@ -528,6 +747,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->undo()) {
 		_viewer->redrawDocument();
+		[self requestRender];
 	}
 }
 
@@ -544,6 +764,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->redo()) {
 		_viewer->redrawDocument();
+		[self requestRender];
 	}
 }
 
@@ -579,6 +800,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
     }
     _viewer->getShapeInteractor()->setSelectionMode(selectionMode);
+    [self requestRender];
 }
 
 - (PrimitiveSelectionType)getSelectionType {
@@ -605,10 +827,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)setGizmo:(Handle(Core3DManipulator))manipulator {
 	_viewer->getObjectInteractor()->setManipulator(manipulator);
+	[self requestRender];
 }
 
 - (void)setPrimitiveTransparent:(Handle(AIS_InteractiveObject))primitive transparent:(bool)set {
 	_viewer->getObjectInteractor()->setObjectTransparent(primitive, set);
+	[self requestRender];
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
@@ -668,8 +892,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			type == PrimitiveGizmoTypeSubtract
 				? BooleanAction::BooleanSubtract
 				: BooleanAction::BooleanUnion);
-		_viewer->redraw();
     }
+	[self requestRender];
 }
 
 - (PrimitiveGizmoType)getGizmoType {
@@ -707,40 +931,46 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)setChamfer:(CGFloat)value {
     assert([self getGizmoType] == PrimitiveGizmoTypeChamfer);
-    Standard_Boolean result = _viewer->getShapeInteractor()->setChamferValueForSelection(value);
-    _viewer->redraw();
+    (void)_viewer->getShapeInteractor()->setChamferValueForSelection(value);
+    [self requestRender];
     //if (!result)
     //	std::cout << "incorrect chamfer value" << std::endl;
 }
 
 - (void)cancelChamfer {
     _viewer->getShapeInteractor()->cancelChamfer();
-    _viewer->redraw();
+    [self requestRender];
 }
 
 - (void) applyMirror {
     assert([self getGizmoType] == PrimitiveGizmoTypeMirror);
 	_viewer->getObjectInteractor()->applyMirror();
+	[self requestRender];
 }
 
 - (void) cancelMirror {
 	_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	[self requestRender];
 }
 
 - (void) applySubtract {
     _viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanSubtract);
+    [self requestRender];
 }
 
 - (void) cancelSubtract {
     _viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+    [self requestRender];
 }
 
 - (void) applyUnion {
     _viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanUnion);
+    [self requestRender];
 }
 
 - (void) cancelUnion {
     _viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+    [self requestRender];
 }
 
 - (BOOL) canApplyBoolean {
@@ -846,6 +1076,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             try {
                 if (strongSelf->_viewer != nullptr) {
                     result = AssetLoadResultFromImportResult(strongSelf->_viewer->ImportCbf(fn));
+                    if (result == Core3DAssetLoadResultSuccess) {
+                        [strongSelf requestRender];
+                    }
                 }
             } catch (...) {
                 result = Core3DAssetLoadResultInternalFailure;
@@ -949,6 +1182,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)setOrthoProjection:(OrthoProjectionType)orthoType {
     _viewer->setOrthoProjection(orthoType);
+    [self requestRender];
 }
 
 // =======================================================================

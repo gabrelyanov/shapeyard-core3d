@@ -37,6 +37,7 @@
 #include <TDF_LabelSequence.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBndLib.hxx>
 
 
 #include <BRepBuilderAPI_GTransform.hxx>
@@ -64,6 +65,35 @@ bool IsTopologicallyValid(const TopoDS_Shape& shape) {
         BRepCheck_Analyzer analyzer(shape, Standard_True);
         return analyzer.IsValid();
     } catch (...) {
+        return false;
+    }
+}
+
+bool TryCountDisplayedModelShapes(
+    const Handle(Core3DContext)& context,
+    Standard_Size& count) noexcept {
+    count = 0;
+    if (context.IsNull()) {
+        return false;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        AIS_ListOfInteractive displayedShapes;
+        context->DisplayedObjects(AIS_KOI_Shape, -1, displayedShapes);
+        for (AIS_ListIteratorOfListOfInteractive displayed(displayedShapes);
+             displayed.More(); displayed.Next()) {
+            const Handle(AIS_Shape) modelShape =
+                Handle(AIS_Shape)::DownCast(displayed.Value());
+            if (!modelShape.IsNull() && !modelShape->Shape().IsNull()) {
+                ++count;
+            }
+        }
+        return true;
+    } catch (...) {
+        // If the graphics context cannot provide a trustworthy count, preserve
+        // the user's camera instead of risking an unexpected reframe.
+        count = 0;
         return false;
     }
 }
@@ -357,6 +387,17 @@ bool ValidateShapeTree(const Handle(TDocStd_Document)& document) {
 }
 
 } // namespace
+
+void Core3DViewer::release() noexcept {
+    // Interactors retain the view, context, document, and manipulator graphics.
+    // GLViewController calls this while the viewport EAGL context is current,
+    // so release them before the base handles and before that context is
+    // restored. Repeated calls are intentionally harmless.
+    _interactiveCallback = {};
+    _shapeInteractor.reset();
+    _objectInteractor.reset();
+    OcctViewer::release();
+}
 
 NSString* Core3DViewer::addTestPrimitives() {
 
@@ -711,6 +752,10 @@ void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
 void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 
     TopoDS_Shape shape;
+	Standard_Size displayedModelShapeCount = 0;
+	const bool shouldFrameFirstPrimitive =
+		TryCountDisplayedModelShapes(myContext, displayedModelShapeCount)
+		&& displayedModelShapeCount == 0;
 
     switch (primitiveType) {
         case PrimitiveTypeCube:
@@ -774,6 +819,18 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 		static_cast<Standard_Integer>(_shapeInteractor->getSelectionMode()))) {
         return;
     }
+	if (shouldFrameFirstPrimitive && !myView.IsNull()) {
+		// Frame only the first real model object. The V3d construction grid is not
+		// an AIS shape, and the manipulator does not downcast to AIS_Shape, so
+		// neither affects the pre-insert count. Later inserts must preserve the
+		// camera the user established while modeling.
+		Bnd_Box aFrameBox;
+		BRepBndLib::Add(shape, aFrameBox);
+		if (!aFrameBox.IsVoid()) {
+			myView->FitAll(aFrameBox, 0.2, Standard_False);
+			myView->ZFitAll();
+		}
+	}
 	_objectInteractor->attachManipulatorToSelection();
     getObjectInteractor()->SelectAndAttachManipulator(aShapePrs);
 }

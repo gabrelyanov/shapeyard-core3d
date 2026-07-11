@@ -49,7 +49,7 @@ public:
     Standard_EXPORT virtual ~OcctViewer();
     
     //! Release the viewer.
-    Standard_EXPORT void release();
+    Standard_EXPORT void release() noexcept;
     
 public:
     
@@ -65,13 +65,21 @@ public:
     //! Invalidate active viewer.
     void Invalidate()
     {
-        myView->Invalidate();
+        if (!myView.IsNull()) {
+            myView->Redraw();
+        }
     }
     
 public:
     
     //! Perform OCCT Viewer (re)initialization.
     Standard_EXPORT bool InitViewer (UIView* theWin);
+
+    //! Resize the existing drawable without recreating the OCCT viewer.
+    Standard_EXPORT void Resize();
+
+    //! Render one frame into the currently bound application-owned framebuffer.
+    Standard_EXPORT bool RenderFrame();
     
     Standard_EXPORT void FitAll();
     Standard_EXPORT void FitBox(const Bnd_Box& box);

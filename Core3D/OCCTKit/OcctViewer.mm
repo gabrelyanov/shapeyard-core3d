@@ -23,6 +23,7 @@
 #include "OcctDocument.h"
 
 #include <OpenGl_GraphicDriver.hxx>
+#include <Standard_Failure.hxx>
 
 #include <AIS_ConnectedInteractive.hxx>
 #include <Aspect_DisplayConnection.hxx>
@@ -76,26 +77,50 @@ OcctViewer::OcctViewer()
 // =======================================================================
 OcctViewer::~OcctViewer()
 {
-    std::cout << "~OcctViewer" << std::endl;
+    release();
 }
 
 // =======================================================================
 // function : release
 // purpose  :
 // =======================================================================
-void OcctViewer::release()
+void OcctViewer::release() noexcept
 {
-    auto app =  Handle(TDocStd_Application)::DownCast(myDoc->Document()->Application());
-    app->Close(myDoc->Document());
+    if (!myDoc.IsNull() && !myDoc->Document().IsNull()) {
+        try {
+            const Handle(TDocStd_Document) document = myDoc->Document();
+            const Handle(TDocStd_Application) application =
+                Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!application.IsNull()) {
+                application->Close(document);
+            }
+        } catch (const Standard_Failure& failure) {
+            NSLog(@"OCCT document teardown failed: %s", failure.GetMessageString());
+        } catch (...) {
+            NSLog(@"OCCT document teardown failed with an unknown error");
+        }
+    }
 
     myContext.Nullify();
-    if (!myView.IsNull())
-    {
-        myView->Remove();
+    if (!myView.IsNull()) {
+        if (EAGLContext.currentContext != nil) {
+            try {
+                myView->Remove();
+            } catch (const Standard_Failure& failure) {
+                NSLog(@"OCCT view teardown failed: %s", failure.GetMessageString());
+            } catch (...) {
+                NSLog(@"OCCT view teardown failed with an unknown error");
+            }
+        } else {
+            // A controller-level context acquisition failure must not skip the
+            // rest of teardown. OCCT handles are still released below; explicit
+            // GPU removal is omitted because issuing GL calls without a current
+            // context is undefined.
+            NSLog(@"Releasing OCCT view without explicit GPU removal: no EAGL context");
+        }
     }
     myView.Nullify();
     myViewer.Nullify();
-    
     myDoc.Nullify();
 }
 
@@ -109,18 +134,20 @@ bool OcctViewer::InitViewer (UIView* theWin)
     if (theWin == NULL || aRendCtx   == NULL)
     {
         NSLog(@"Error: No active EAGL context!");
-        release();
         return false;
     }
     if (!myView.IsNull())
     {
-        myView->MustBeResized();
-        myView->Invalidate();
+        Resize();
         return true;
     }
     
     Handle(Aspect_DisplayConnection) aDisplayConnection = new Aspect_DisplayConnection();
-    Handle(Graphic3d_GraphicDriver) aGraphicDriver = new OpenGl_GraphicDriver (aDisplayConnection);
+    Handle(OpenGl_GraphicDriver) aGraphicDriver = new OpenGl_GraphicDriver (aDisplayConnection);
+    // GLView owns drawable presentation and CADisplayLink pacing. OCCT only
+    // renders into the framebuffer that GLView binds for the current frame.
+    aGraphicDriver->ChangeOptions().buffersNoSwap = Standard_True;
+    aGraphicDriver->SetVerticalSync(false);
     
     // Create Viewer
     myViewer = new V3d_Viewer (aGraphicDriver);
@@ -132,7 +159,22 @@ bool OcctViewer::InitViewer (UIView* theWin)
     myContext->SetDisplayMode ((int )AIS_DisplayMode::AIS_Shaded, false);
     
     myView = new Core3DView(myViewer, V3d_ORTHOGRAPHIC);
+    myView->SetImmediateUpdate(Standard_False);
     myView->TriedronDisplay (Aspect_TOTP_LEFT_LOWER, Quantity_NOC_WHITE, 0.20, V3d_ZBUFFER);
+
+    myView->SetBgGradientColors(
+        Quantity_Color(0.055, 0.065, 0.085, Quantity_TOC_sRGB),
+        Quantity_Color(0.012, 0.016, 0.024, Quantity_TOC_sRGB),
+        Aspect_GradientFillMethod_Vertical,
+        Standard_False);
+    Graphic3d_RenderingParams& renderingParams = myView->ChangeRenderingParams();
+    renderingParams.NbMsaaSamples = 0;
+    renderingParams.ToEnableDepthPrepass = Standard_True;
+    // Start with basic unordered alpha blending. The capability probe after
+    // SetWindow may enable weighted OIT only when OCCT reports the exact path
+    // (including the MSAA variant) as supported.
+    renderingParams.TransparencyMethod = Graphic3d_RTM_BLEND_UNORDERED;
+    renderingParams.ShadingModel = Graphic3d_TypeOfShadingModel_Phong;
     
     Handle(Core3DCocoa_Window) aCocoaWindow = new Core3DCocoa_Window (theWin);
     myView->SetWindow (aCocoaWindow, aRendCtx);
@@ -140,12 +182,48 @@ bool OcctViewer::InitViewer (UIView* theWin)
     {
         aCocoaWindow->Map();
     }
+
+    const Standard_Integer aMaxMsaa =
+        aGraphicDriver->InquireLimit(Graphic3d_TypeOfLimit_MaxMsaa);
+    renderingParams.NbMsaaSamples = aMaxMsaa >= 4 ? 4 : aMaxMsaa >= 2 ? 2 : 0;
+    const bool hasBlendedOit =
+        aGraphicDriver->InquireLimit(Graphic3d_TypeOfLimit_HasBlendedOit) != 0;
+    const bool hasBlendedOitMsaa =
+        aGraphicDriver->InquireLimit(Graphic3d_TypeOfLimit_HasBlendedOitMsaa) != 0;
+    if ((renderingParams.NbMsaaSamples == 0 && hasBlendedOit)
+        || (renderingParams.NbMsaaSamples > 0 && hasBlendedOitMsaa)) {
+        renderingParams.TransparencyMethod = Graphic3d_RTM_BLEND_OIT;
+    }
     
     myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
-    
-    myView->Redraw();
-    myView->MustBeResized();
+    Resize();
     return true;
+}
+
+void OcctViewer::Resize()
+{
+    if (myView.IsNull()) {
+        return;
+    }
+    myView->MustBeResized();
+    myView->Invalidate();
+}
+
+bool OcctViewer::RenderFrame()
+{
+    if (myView.IsNull()) {
+        return false;
+    }
+    try {
+        myView->RenderFrame();
+        return true;
+    } catch (const Standard_Failure& failure) {
+        std::cout << "Viewport render failure: "
+                  << failure.GetMessageString() << std::endl;
+        return false;
+    } catch (...) {
+        return false;
+    }
 }
 
 // =======================================================================

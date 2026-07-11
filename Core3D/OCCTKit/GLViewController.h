@@ -40,17 +40,21 @@ NS_ASSUME_NONNULL_BEGIN
 //! OpenGL view controller
 @interface GLViewController : UIViewController {
     std::shared_ptr<core3d::Core3DViewer> _viewer;
-    CGPoint myFirstTouch[2];
     BOOL _isPreviewMode;
 	BOOL _isConstructorMode;
 }
 
 @property (nonatomic, weak, nullable) id<GLViewControllerProtocol> delegate;
 @property (nonatomic, assign, readonly) BOOL isPreviewMode;
+@property (nonatomic, assign, readonly) NSUInteger renderedFrameCount;
+@property (nonatomic, assign, readonly) CGSize drawableSize;
+@property (nonatomic, assign, readonly, getter=isRenderLoopRunning) BOOL renderLoopRunning;
+@property (nonatomic, assign, readonly) NSInteger renderingAPIVersion;
 
 -(std::shared_ptr<core3d::Core3DViewer>) viewer;
--(void) Draw;
+-(BOOL) Draw;
 -(void) Setup;
+- (void)requestRender;
 
 - (void)addTestPrimitives;
 - (void)addPrimitive:(PrimitiveType)primitiveType;

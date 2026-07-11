@@ -31,6 +31,7 @@
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     _glController = nil;
     NSLog(@"~Core3DViewController");
 }
@@ -188,6 +189,7 @@
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [GLController requestRender];
     [self sendNotifyUIState: UIStateChangingGizmo
                             | UIStateChangingSelection
                             | UIStateChangingHistory
@@ -204,12 +206,30 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    [self addChildViewController:GLController];
     [self.view insertSubview:GLController.view atIndex:0];
     GLController.view.translatesAutoresizingMaskIntoConstraints = NO;
     [GLController.view.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:0.0].active = YES;
     [GLController.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:0.0].active = YES;
     [GLController.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:0.0].active = YES;
     [GLController.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:0.0].active = YES;
+    [GLController didMoveToParentViewController:self];
+}
+
+- (NSUInteger)viewportRenderedFrameCount {
+    return GLController.renderedFrameCount;
+}
+
+- (CGSize)viewportDrawableSize {
+    return GLController.drawableSize;
+}
+
+- (BOOL)isViewportRenderLoopRunning {
+    return GLController.isRenderLoopRunning;
+}
+
+- (Core3DViewportRenderingAPI)viewportRenderingAPI {
+    return (Core3DViewportRenderingAPI)GLController.renderingAPIVersion;
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {

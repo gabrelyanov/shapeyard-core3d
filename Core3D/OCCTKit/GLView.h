@@ -24,6 +24,7 @@
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <OpenGLES/EAGL.h>
 
 #include <OpenGLES/ES2/gl.h>
 #include <OpenGLES/ES2/glext.h>
@@ -44,6 +45,16 @@
   GLuint myRenderBuffer;
   GLuint myDepthBuffer;
 }
+
+@property (nonatomic, readonly) NSUInteger renderedFrameCount;
+@property (nonatomic, readonly) CGSize drawableSize;
+@property (nonatomic, readonly, getter=isRenderLoopRunning) BOOL renderLoopRunning;
+@property (nonatomic, readonly) EAGLRenderingAPI renderingAPI;
+
+- (void)requestRender;
+- (void)beginInteractiveRendering;
+- (void)endInteractiveRendering;
+- (BOOL)performWithRenderingContext:(void (^)(void))work;
 
 @end
 

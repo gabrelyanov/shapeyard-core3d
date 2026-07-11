@@ -36,6 +36,9 @@ namespace core3d {
         static constexpr selection_t kSelectionTypeManipulator = 1 << 0;
         static constexpr selection_t kSelectionTypeObject = 1 << 1;
 
+        //! Release derived interactors before the base OCCT graphics handles.
+        Standard_EXPORT void release() noexcept;
+
         Standard_EXPORT bool InitViewer (UIView* theWin);
         
         Standard_EXPORT NSString* addTestPrimitives();
