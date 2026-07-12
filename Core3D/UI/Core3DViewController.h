@@ -167,6 +167,14 @@ typedef struct {
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
+#ifdef DEBUG
+//! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
+//! preserving the authoritative mirror lifecycle and renderer invalidation.
+- (BOOL)debugTryMirrorAxis:(NSInteger)axis
+                  backward:(BOOL)backward
+    NS_SWIFT_NAME(debugTryMirror(axis:backward:));
+#endif
+
 - (void)addTestPrimitives;
 
 - (void)sendNotifyUIState:(UIStateChanging)state NS_REFINED_FOR_SWIFT;

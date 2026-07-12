@@ -13,7 +13,9 @@
 #include <AIS_Shape.hxx>
 #include "BooleanOperationController.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace core3d {
 
@@ -41,6 +43,7 @@ namespace core3d {
 //        std::vector<TopoDS_Shape> _beforeTransformObjects;
     public:
         static constexpr Standard_ShortReal kManipulatorGap = 100;
+        static constexpr std::size_t kMaxMirrorPreviewBodies = 8;
         
         ObjectInteractor() = delete;
         ObjectInteractor(Handle(Core3DContext), Handle(Core3DView), Handle(OcctDocument) doc, Standard_ShortReal manipulatorSide = 300);
@@ -64,10 +67,14 @@ namespace core3d {
         const bool isManipulatorInteractionActive() const;
         const PrimitiveManipulatorType getManipulatorType() const;
 
-        //! Capture only a supported idle transform gizmo. Available with empty
-        //! content is an explicit clear; Unsafe means a renderer must retain OCCT.
+        //! Capture only supported idle presentation. A valid mirror trial set
+        //! is returned as explicit owned AIS_Shape handles so the snapshot
+        //! builder never enumerates the interactive context. Available with
+        //! empty content is an explicit clear; Unsafe means a renderer must
+        //! retain OCCT.
         PresentationOverlayCaptureStatus captureIdlePresentationOverlay(
-            scene::PresentationOverlayContent& theContent) const noexcept;
+            scene::PresentationOverlayContent& theContent,
+            std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects) const noexcept;
 
         const bool isSelected() const;
 		
@@ -96,7 +103,7 @@ namespace core3d {
 		
     private:
 		Standard_ShortReal _manipulatorSide;
-		std::vector<Handle(AIS_InteractiveObject)> _trialMirrorObjects;
+		std::vector<Handle(AIS_Shape)> _trialMirrorObjects;
 		bool _trialMirrorObjectsValid = false;
     };
 }

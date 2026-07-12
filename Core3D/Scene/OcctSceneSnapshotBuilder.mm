@@ -12,6 +12,7 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
 #include <Graphic3d_Camera.hxx>
@@ -20,6 +21,8 @@
 #include <IMeshData_Status.hxx>
 #include <Precision.hxx>
 #include <Prs3d_Drawer.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Poly_Triangle.hxx>
 #include <RWMesh_FaceIterator.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -28,9 +31,11 @@
 #include <TDataStd_Name.hxx>
 #include <TDF_Data.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Face.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
@@ -83,10 +88,13 @@ constexpr std::size_t kMaxRetainedDefinitionRevisions = 250'000;
 constexpr std::size_t kMaxOverlayMeshes = 16;
 constexpr std::size_t kMaxRetainedOverlayDefinitions = 32;
 constexpr std::size_t kMaxOverlayInstances = 16;
-constexpr std::size_t kMaxOverlayMaterials = 8;
+constexpr std::size_t kMaxOverlayMaterials = 16;
 constexpr std::size_t kMaxOverlayVertices = 100'000;
 constexpr std::size_t kMaxOverlayIndices = 300'000;
+constexpr std::size_t kMaxOverlayPrimitives = 25'000;
+constexpr std::size_t kMaxOverlayPrimitiveBindings = 25'000;
 constexpr std::size_t kMaxOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxMirrorPreviewBodies = 8;
 constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
     "gizmo/mirroring/x/negative",
     "gizmo/mirroring/y/negative",
@@ -348,6 +356,51 @@ bool IsRigidWorldAnchorTransform(const Matrix4d& theMatrix)
         && std::abs(dot(anX, aZ)) <= aTolerance
         && std::abs(dot(aY, aZ)) <= aTolerance
         && std::abs(aDeterminant - 1.0) <= aTolerance;
+}
+
+bool IsTranslationOnlyWorldTransform(const Matrix4d& theMatrix)
+{
+    if (!IsRigidWorldAnchorTransform(theMatrix)) {
+        return false;
+    }
+    constexpr double aTolerance = 1.0e-6;
+    const std::array<double, 12> anExpected = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+    };
+    for (std::size_t anIndex = 0;
+         anIndex < anExpected.size(); ++anIndex) {
+        if (std::abs(theMatrix.values[anIndex]
+                     - anExpected[anIndex]) > aTolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsCenteredLocalBounds(const Bounds3d& theBounds)
+{
+    if (!IsValid(theBounds)) {
+        return false;
+    }
+    const double aScale = std::max({
+        1.0,
+        std::abs(theBounds.minimum.x),
+        std::abs(theBounds.minimum.y),
+        std::abs(theBounds.minimum.z),
+        std::abs(theBounds.maximum.x),
+        std::abs(theBounds.maximum.y),
+        std::abs(theBounds.maximum.z),
+    });
+    const double aTolerance = aScale
+        * 32.0 * std::numeric_limits<float>::epsilon();
+    return std::abs((theBounds.minimum.x + theBounds.maximum.x) * 0.5)
+            <= aTolerance
+        && std::abs((theBounds.minimum.y + theBounds.maximum.y) * 0.5)
+            <= aTolerance
+        && std::abs((theBounds.minimum.z + theBounds.maximum.z) * 0.5)
+            <= aTolerance;
 }
 
 Double3 Center(const Bounds3d& theBounds)
@@ -743,6 +796,324 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
     return aHash.Value();
 }
 
+struct MirrorPreviewItem {
+    MeshSnapshot mesh;
+    InstanceSnapshot instance;
+    MaterialSnapshot material;
+};
+
+//! Copy one explicitly owned AIS mirror trial using only triangulations that
+//! already exist on its BRep faces. No mesher is invoked: a cache miss fails
+//! closed so OCCT remains the authoritative renderer for that frame.
+bool ExtractMirrorPreviewItem(
+    const Handle(AIS_Shape)& thePresentation,
+    const std::size_t thePreviewIndex,
+    const std::size_t theMaxVertices,
+    const std::size_t theMaxIndices,
+    const std::size_t theMaxPrimitives,
+    MirrorPreviewItem& theItem)
+{
+    if (thePresentation.IsNull()
+        || thePreviewIndex >= kMaxMirrorPreviewBodies
+        || !thePresentation->HasColor()
+        || !thePresentation->HasMaterial()) {
+        return false;
+    }
+    const TopoDS_Shape& aShape = thePresentation->Shape();
+    if (aShape.IsNull()) {
+        return false;
+    }
+
+    std::vector<TopoDS_Face> aFaces;
+    aFaces.reserve(std::min<std::size_t>(theMaxPrimitives, 256));
+    for (TopExp_Explorer aFaceExplorer(aShape, TopAbs_FACE);
+         aFaceExplorer.More(); aFaceExplorer.Next()) {
+        if (aFaces.size() >= theMaxPrimitives
+            || aFaces.size() >= kMaxOverlayPrimitives) {
+            return false;
+        }
+        aFaces.push_back(TopoDS::Face(aFaceExplorer.Current()));
+    }
+    const std::size_t aFaceCount = aFaces.size();
+    if (aFaceCount == 0 || !FitsUInt32(aFaceCount)) {
+        return false;
+    }
+
+    std::vector<SourceVertex> aSourceVertices;
+    std::vector<std::uint32_t> aSourceIndices;
+    std::vector<MeshPrimitive> aPrimitives;
+    aPrimitives.reserve(aFaceCount);
+    Bounds3d aSourceBounds;
+    const gp_Trsf aPresentationTransform =
+        thePresentation->Transformation();
+
+    for (std::size_t aFaceIndex = 0;
+         aFaceIndex < aFaces.size(); ++aFaceIndex) {
+        const TopoDS_Face& aFace = aFaces[aFaceIndex];
+        if (aFace.Orientation() != TopAbs_FORWARD
+            && aFace.Orientation() != TopAbs_REVERSED) {
+            return false;
+        }
+        TopLoc_Location aFaceLocation;
+        const Handle(Poly_Triangulation)& aTriangulation =
+            BRep_Tool::Triangulation(aFace, aFaceLocation);
+        if (aTriangulation.IsNull()
+            || !aTriangulation->HasGeometry()
+            || aTriangulation->NbNodes() <= 0
+            || aTriangulation->NbTriangles() <= 0) {
+            return false;
+        }
+        const std::size_t aNodeCount =
+            static_cast<std::size_t>(aTriangulation->NbNodes());
+        const std::size_t aTriangleCount =
+            static_cast<std::size_t>(aTriangulation->NbTriangles());
+        if (aTriangleCount > std::numeric_limits<std::size_t>::max() / 3U
+            || aTriangleCount
+                > std::numeric_limits<std::uint32_t>::max() / 3U) {
+            return false;
+        }
+        const std::size_t aFaceIndexCount = aTriangleCount * 3U;
+        if (aNodeCount > theMaxVertices
+            || aSourceVertices.size() > theMaxVertices - aNodeCount
+            || aSourceVertices.size()
+                > std::numeric_limits<std::uint32_t>::max() - aNodeCount
+            || aFaceIndexCount > theMaxIndices
+            || aSourceIndices.size() > theMaxIndices - aFaceIndexCount
+            || aSourceIndices.size()
+                > std::numeric_limits<std::uint32_t>::max()
+                    - aFaceIndexCount) {
+            return false;
+        }
+
+        const std::uint32_t aVertexBase =
+            static_cast<std::uint32_t>(aSourceVertices.size());
+        const gp_Trsf aFaceTransform = aFaceLocation.Transformation();
+        const bool hasNormals = aTriangulation->HasNormals();
+        const bool isMirrored =
+            static_cast<bool>(aFaceTransform.IsNegative())
+            != static_cast<bool>(aPresentationTransform.IsNegative());
+        for (Standard_Integer aNode = 1;
+             aNode <= aTriangulation->NbNodes(); ++aNode) {
+            gp_Pnt aPoint = aTriangulation->Node(aNode);
+            aPoint.Transform(aFaceTransform);
+            aPoint.Transform(aPresentationTransform);
+            if (!IsFinite(aPoint.X()) || !IsFinite(aPoint.Y())
+                || !IsFinite(aPoint.Z())) {
+                return false;
+            }
+            SourceVertex aVertex;
+            aVertex.position = {aPoint.X(), aPoint.Y(), aPoint.Z()};
+            if (hasNormals) {
+                gp_Dir aNormal = aTriangulation->Normal(aNode);
+                aNormal.Transform(aFaceTransform);
+                aNormal.Transform(aPresentationTransform);
+                if (aFace.Orientation() == TopAbs_REVERSED) {
+                    aNormal.Reverse();
+                }
+                aVertex.normal = {
+                    aNormal.X(), aNormal.Y(), aNormal.Z()};
+            }
+            if (aTriangulation->HasUVNodes()) {
+                const gp_Pnt2d aUV = aTriangulation->UVNode(aNode);
+                if (!IsFinite(aUV.X()) || !IsFinite(aUV.Y())) {
+                    return false;
+                }
+                aVertex.textureU = aUV.X();
+                aVertex.textureV = aUV.Y();
+            }
+            aSourceVertices.push_back(aVertex);
+            Extend(aSourceBounds, aPoint.X(), aPoint.Y(), aPoint.Z());
+        }
+
+        const std::uint32_t aFirstIndex =
+            static_cast<std::uint32_t>(aSourceIndices.size());
+        const bool reversesFace =
+            (aFace.Orientation() == TopAbs_REVERSED) != isMirrored;
+        for (Standard_Integer aTriangleIndex = 1;
+             aTriangleIndex <= aTriangulation->NbTriangles();
+             ++aTriangleIndex) {
+            Standard_Integer aNodes[3] = {0, 0, 0};
+            aTriangulation->Triangle(aTriangleIndex).Get(
+                aNodes[0], aNodes[1], aNodes[2]);
+            if (reversesFace) {
+                std::swap(aNodes[1], aNodes[2]);
+            }
+            for (const Standard_Integer aNode : aNodes) {
+                if (aNode < 1 || aNode > aTriangulation->NbNodes()) {
+                    return false;
+                }
+            }
+            const std::uint32_t aLocal0 =
+                static_cast<std::uint32_t>(aNodes[0] - 1);
+            const std::uint32_t aLocal1 =
+                static_cast<std::uint32_t>(aNodes[1] - 1);
+            const std::uint32_t aLocal2 =
+                static_cast<std::uint32_t>(aNodes[2] - 1);
+            if (aLocal0 == aLocal1 || aLocal1 == aLocal2
+                || aLocal2 == aLocal0) {
+                return false;
+            }
+            aSourceIndices.push_back(aVertexBase + aLocal0);
+            aSourceIndices.push_back(aVertexBase + aLocal1);
+            aSourceIndices.push_back(aVertexBase + aLocal2);
+
+            if (!hasNormals) {
+                const Double3& aP0 =
+                    aSourceVertices[aVertexBase + aLocal0].position;
+                const Double3& aP1 =
+                    aSourceVertices[aVertexBase + aLocal1].position;
+                const Double3& aP2 =
+                    aSourceVertices[aVertexBase + aLocal2].position;
+                const Double3 aU = {
+                    aP1.x - aP0.x, aP1.y - aP0.y, aP1.z - aP0.z};
+                const Double3 aV = {
+                    aP2.x - aP0.x, aP2.y - aP0.y, aP2.z - aP0.z};
+                const Double3 aCross = {
+                    aU.y * aV.z - aU.z * aV.y,
+                    aU.z * aV.x - aU.x * aV.z,
+                    aU.x * aV.y - aU.y * aV.x,
+                };
+                const double aLengthSquared = aCross.x * aCross.x
+                    + aCross.y * aCross.y + aCross.z * aCross.z;
+                if (!IsFinite(aLengthSquared)
+                    || aLengthSquared <= 0.0) {
+                    return false;
+                }
+                for (const std::uint32_t aLocal : {
+                         aLocal0, aLocal1, aLocal2}) {
+                    Double3& aNormal =
+                        aSourceVertices[aVertexBase + aLocal].normal;
+                    aNormal.x += aCross.x;
+                    aNormal.y += aCross.y;
+                    aNormal.z += aCross.z;
+                }
+            }
+        }
+
+        if (!hasNormals) {
+            for (std::size_t aNode = 0; aNode < aNodeCount; ++aNode) {
+                Double3& aNormal =
+                    aSourceVertices[aVertexBase + aNode].normal;
+                const double aLength = std::sqrt(
+                    aNormal.x * aNormal.x
+                    + aNormal.y * aNormal.y
+                    + aNormal.z * aNormal.z);
+                if (!IsFinite(aLength)
+                    || aLength <= Precision::Confusion()) {
+                    return false;
+                }
+                aNormal.x /= aLength;
+                aNormal.y /= aLength;
+                aNormal.z /= aLength;
+            }
+        }
+        aPrimitives.push_back({
+            aFirstIndex,
+            static_cast<std::uint32_t>(aFaceIndexCount),
+            static_cast<std::uint32_t>(aFaceIndex),
+        });
+    }
+
+    if (!IsValid(aSourceBounds)
+        || aSourceVertices.empty() || aSourceIndices.empty()
+        || aPrimitives.size() != aFaceCount) {
+        return false;
+    }
+
+    const std::string anIdentifier =
+        "mirror/preview/" + std::to_string(thePreviewIndex);
+    MeshSnapshot aMesh;
+    aMesh.definitionIdentifier = anIdentifier + "/mesh";
+    aMesh.indices = std::move(aSourceIndices);
+    aMesh.primitives = std::move(aPrimitives);
+    const Double3 aSourceOrigin = Center(aSourceBounds);
+    aMesh.vertices.reserve(aSourceVertices.size());
+    for (const SourceVertex& aSource : aSourceVertices) {
+        const double aPositionX = aSource.position.x - aSourceOrigin.x;
+        const double aPositionY = aSource.position.y - aSourceOrigin.y;
+        const double aPositionZ = aSource.position.z - aSourceOrigin.z;
+        if (!FitsFloat(aPositionX) || !FitsFloat(aPositionY)
+            || !FitsFloat(aPositionZ) || !FitsFloat(aSource.normal.x)
+            || !FitsFloat(aSource.normal.y)
+            || !FitsFloat(aSource.normal.z)
+            || !FitsFloat(aSource.textureU)
+            || !FitsFloat(aSource.textureV)) {
+            return false;
+        }
+        Vertex aVertex;
+        aVertex.positionX = static_cast<float>(aPositionX);
+        aVertex.positionY = static_cast<float>(aPositionY);
+        aVertex.positionZ = static_cast<float>(aPositionZ);
+        aVertex.normalX = static_cast<float>(aSource.normal.x);
+        aVertex.normalY = static_cast<float>(aSource.normal.y);
+        aVertex.normalZ = static_cast<float>(aSource.normal.z);
+        aVertex.textureU = static_cast<float>(aSource.textureU);
+        aVertex.textureV = static_cast<float>(aSource.textureV);
+        aMesh.vertices.push_back(aVertex);
+        Extend(aMesh.localBounds,
+               aVertex.positionX,
+               aVertex.positionY,
+               aVertex.positionZ);
+    }
+    if (!IsValid(aMesh.localBounds)) {
+        return false;
+    }
+
+    const bool isClosed =
+        StdPrs_ToolTriangulatedShape::IsClosed(aShape);
+    MaterialSnapshot aMaterial = DefaultMaterial(isClosed);
+    if (!ApplyPreset(aMaterial,
+                     thePresentation->Material(),
+                     isClosed)) {
+        return false;
+    }
+    Quantity_Color aColor;
+    thePresentation->Color(aColor);
+    const double aTransparency = thePresentation->Transparency();
+    if (!IsFinite(aTransparency)
+        || aTransparency < 0.0 || aTransparency > 1.0
+        || aTransparency > 1.0e-6) {
+        return false;
+    }
+    SetColor(aMaterial,
+             aColor,
+             static_cast<float>(1.0 - aTransparency));
+    aMaterial.alphaMode = AlphaMode::Opaque;
+    aMaterial.identifier = anIdentifier + "/material";
+    if (!ValidateMaterial(aMaterial)) {
+        return false;
+    }
+
+    InstanceSnapshot anInstance;
+    anInstance.entityIdentifier = anIdentifier;
+    anInstance.meshIndex = static_cast<std::uint32_t>(6 + thePreviewIndex);
+    anInstance.worldFromObject.values[12] = aSourceOrigin.x;
+    anInstance.worldFromObject.values[13] = aSourceOrigin.y;
+    anInstance.worldFromObject.values[14] = aSourceOrigin.z;
+    anInstance.visible = true;
+    anInstance.selectable = false;
+    anInstance.selected = false;
+    anInstance.name = "Mirror preview " + std::to_string(thePreviewIndex);
+    anInstance.role = RenderRole::MirrorPreview;
+    anInstance.coordinateSpace = CoordinateSpace::World;
+    anInstance.depthPolicy = DepthPolicy::Scene;
+    anInstance.renderStyle = RenderStyle::Shaded;
+    anInstance.primitiveBindings.reserve(aMesh.primitives.size());
+    for (std::size_t aPrimitiveIndex = 0;
+         aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
+        anInstance.primitiveBindings.push_back({
+            static_cast<std::uint32_t>(6 + thePreviewIndex),
+            0,
+            true,
+        });
+    }
+
+    theItem.mesh = std::move(aMesh);
+    theItem.instance = std::move(anInstance);
+    theItem.material = std::move(aMaterial);
+    return true;
+}
+
 bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
                                const std::string& theDefinitionIdentifier,
                                const double theLinearDeflection,
@@ -1121,6 +1492,8 @@ bool ValidatePresentationOverlayPayload(
     }
     const bool isEmpty = theMeshes.empty()
         && theInstances.empty() && theMaterials.empty();
+    bool hasMirrorPlanePrefix = false;
+    std::size_t aMirrorPreviewCount = 0;
     switch (theKind) {
         case PresentationOverlayKind::None:
             return isEmpty;
@@ -1144,6 +1517,20 @@ bool ValidatePresentationOverlayPayload(
                 || theMaterials.size() != 6) {
                 return false;
             }
+            hasMirrorPlanePrefix = true;
+            break;
+        case PresentationOverlayKind::MirrorPreview:
+            if (theMeshes.size() <= 6
+                || theMeshes.size() != theInstances.size()
+                || theMeshes.size() != theMaterials.size()) {
+                return false;
+            }
+            aMirrorPreviewCount = theMeshes.size() - 6;
+            if (aMirrorPreviewCount == 0
+                || aMirrorPreviewCount > kMaxMirrorPreviewBodies) {
+                return false;
+            }
+            hasMirrorPlanePrefix = true;
             break;
         default:
             return false;
@@ -1157,17 +1544,36 @@ bool ValidatePresentationOverlayPayload(
         const auto isUnit = [](const float theValue) {
             return IsFinite(theValue) && theValue >= 0.0f && theValue <= 1.0f;
         };
-        const bool expectsBlendedMirrorPlane =
-            theKind == PresentationOverlayKind::MirrorGizmo
-            && aMaterialIndex >= 3;
-        const bool hasExpectedAlpha = expectsBlendedMirrorPlane
-            ? aMaterial.alphaMode == AlphaMode::Blend
-                && std::abs(aMaterial.baseColor.w - 0.75f) <= 1.0e-6f
-            : aMaterial.alphaMode == AlphaMode::Opaque
+        const bool isMirrorPlane =
+            hasMirrorPlanePrefix && aMaterialIndex < 6;
+        const bool isMirrorPreview =
+            theKind == PresentationOverlayKind::MirrorPreview
+            && aMaterialIndex >= 6;
+        bool hasExpectedIdentifier = true;
+        bool hasExpectedAlpha = true;
+        if (isMirrorPlane) {
+            hasExpectedIdentifier = aMaterial.identifier
+                == kMirrorMaterialIdentifiers[aMaterialIndex];
+            const bool expectsBlend = aMaterialIndex >= 3;
+            hasExpectedAlpha = expectsBlend
+                ? aMaterial.alphaMode == AlphaMode::Blend
+                    && std::abs(aMaterial.baseColor.w - 0.75f)
+                        <= 1.0e-6f
+                : aMaterial.alphaMode == AlphaMode::Opaque
+                    && aMaterial.baseColor.w == 1.0f;
+        } else if (isMirrorPreview) {
+            hasExpectedIdentifier = aMaterial.identifier
+                == "mirror/preview/"
+                    + std::to_string(aMaterialIndex - 6)
+                    + "/material";
+            hasExpectedAlpha = aMaterial.baseColor.w == 1.0f
+                && (aMaterial.alphaMode == AlphaMode::Opaque
+                    || aMaterial.alphaMode == AlphaMode::Mask);
+        } else {
+            hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
-        if ((theKind == PresentationOverlayKind::MirrorGizmo
-                && aMaterial.identifier
-                    != kMirrorMaterialIdentifiers[aMaterialIndex])
+        }
+        if (!hasExpectedIdentifier
             || !IsValidIdentifier(aMaterial.identifier)
             || !aMaterialIdentifiers.insert(aMaterial.identifier).second
             || !isUnit(aMaterial.baseColor.x)
@@ -1191,15 +1597,26 @@ bool ValidatePresentationOverlayPayload(
 
     std::size_t aVertexCount = 0;
     std::size_t anIndexCount = 0;
+    std::size_t aPrimitiveCount = 0;
     std::size_t aNumericByteCount = 0;
     std::unordered_set<std::string> aDefinitionIdentifiers;
     aDefinitionIdentifiers.reserve(theMeshes.size());
     for (std::size_t aMeshIndex = 0;
          aMeshIndex < theMeshes.size(); ++aMeshIndex) {
         const MeshSnapshot& aMesh = theMeshes[aMeshIndex];
-        if ((theKind == PresentationOverlayKind::MirrorGizmo
+        const bool isMirrorPlane = hasMirrorPlanePrefix && aMeshIndex < 6;
+        const bool isMirrorPreview =
+            theKind == PresentationOverlayKind::MirrorPreview
+            && aMeshIndex >= 6;
+        const std::string anExpectedPreviewIdentifier = isMirrorPreview
+            ? "mirror/preview/" + std::to_string(aMeshIndex - 6) + "/mesh"
+            : std::string();
+        if ((isMirrorPlane
                 && aMesh.definitionIdentifier
                     != kMirrorMeshIdentifiers[aMeshIndex])
+            || (isMirrorPreview
+                && aMesh.definitionIdentifier
+                    != anExpectedPreviewIdentifier)
             || !IsValidIdentifier(aMesh.definitionIdentifier)
             || !aDefinitionIdentifiers.insert(
                 aMesh.definitionIdentifier).second
@@ -1207,13 +1624,15 @@ bool ValidatePresentationOverlayPayload(
                     ? aMesh.geometryRevision == 0
                     : aMesh.geometryRevision != 0)
             || !IsValid(aMesh.localBounds)
+            || (isMirrorPreview
+                && !IsCenteredLocalBounds(aMesh.localBounds))
             || aMesh.vertices.empty() || aMesh.indices.empty()
-            || aMesh.primitives.size() != 1
-            || aMesh.primitives.front().firstIndex != 0
-            || aMesh.primitives.front().indexCount != aMesh.indices.size()
-            || aMesh.primitives.front().indexCount == 0
-            || aMesh.primitives.front().indexCount % 3 != 0
-            || aMesh.primitives.front().faceIndex != 0
+            || aMesh.primitives.empty()
+            || (!isMirrorPreview && aMesh.primitives.size() != 1)
+            || !CheckedAdd(aPrimitiveCount,
+                           aMesh.primitives.size(),
+                           aPrimitiveCount)
+            || aPrimitiveCount > kMaxOverlayPrimitives
             || !CheckedAdd(aVertexCount,
                            aMesh.vertices.size(),
                            aVertexCount)
@@ -1222,6 +1641,29 @@ bool ValidatePresentationOverlayPayload(
                            aMesh.indices.size(),
                            anIndexCount)
             || anIndexCount > kMaxOverlayIndices) {
+            return false;
+        }
+        std::size_t anExpectedFirstIndex = 0;
+        for (std::size_t aPrimitiveIndex = 0;
+             aPrimitiveIndex < aMesh.primitives.size();
+             ++aPrimitiveIndex) {
+            const MeshPrimitive& aPrimitive =
+                aMesh.primitives[aPrimitiveIndex];
+            std::size_t anIndexEnd = 0;
+            if (aPrimitive.firstIndex != anExpectedFirstIndex
+                || aPrimitive.indexCount == 0
+                || aPrimitive.indexCount % 3 != 0
+                || aPrimitive.faceIndex != aPrimitiveIndex
+                || !CheckedAdd(
+                    static_cast<std::size_t>(aPrimitive.firstIndex),
+                    static_cast<std::size_t>(aPrimitive.indexCount),
+                    anIndexEnd)
+                || anIndexEnd > aMesh.indices.size()) {
+                return false;
+            }
+            anExpectedFirstIndex = anIndexEnd;
+        }
+        if (anExpectedFirstIndex != aMesh.indices.size()) {
             return false;
         }
         std::size_t aVertexBytes = 0;
@@ -1264,14 +1706,45 @@ bool ValidatePresentationOverlayPayload(
     std::unordered_set<std::string> anEntityIdentifiers;
     anEntityIdentifiers.reserve(theInstances.size());
     std::optional<std::array<double, 16>> aMirrorWorldAnchor;
+    std::size_t aPrimitiveBindingCount = 0;
     for (std::size_t anInstanceIndex = 0;
          anInstanceIndex < theInstances.size(); ++anInstanceIndex) {
         const InstanceSnapshot& anInstance = theInstances[anInstanceIndex];
-        if ((theKind == PresentationOverlayKind::MirrorGizmo
-                && (anInstance.entityIdentifier
-                        != kMirrorEntityIdentifiers[anInstanceIndex]
-                    || anInstance.name != kMirrorNames[anInstanceIndex]
-                    || anInstance.meshIndex != anInstanceIndex))
+        const bool isMirrorPlane =
+            hasMirrorPlanePrefix && anInstanceIndex < 6;
+        const bool isMirrorPreview =
+            theKind == PresentationOverlayKind::MirrorPreview
+            && anInstanceIndex >= 6;
+        const std::size_t aPreviewIndex = isMirrorPreview
+            ? anInstanceIndex - 6
+            : 0;
+        const std::string anExpectedPreviewIdentifier = isMirrorPreview
+            ? "mirror/preview/" + std::to_string(aPreviewIndex)
+            : std::string();
+        const bool hasExpectedIdentity = isMirrorPlane
+            ? anInstance.entityIdentifier
+                    == kMirrorEntityIdentifiers[anInstanceIndex]
+                && anInstance.name == kMirrorNames[anInstanceIndex]
+                && anInstance.meshIndex == anInstanceIndex
+            : isMirrorPreview
+                ? anInstance.entityIdentifier
+                        == anExpectedPreviewIdentifier
+                    && anInstance.name
+                        == "Mirror preview " + std::to_string(aPreviewIndex)
+                    && anInstance.meshIndex == anInstanceIndex
+                : true;
+        const bool hasExpectedSemantics = isMirrorPreview
+            ? anInstance.role == RenderRole::MirrorPreview
+                && anInstance.coordinateSpace == CoordinateSpace::World
+                && anInstance.depthPolicy == DepthPolicy::Scene
+            : anInstance.role == RenderRole::Gizmo
+                && anInstance.coordinateSpace
+                    == CoordinateSpace::WorldAnchorPixels
+                && anInstance.depthPolicy == DepthPolicy::Topmost;
+        const std::size_t anExpectedBindingCount = isMirrorPreview
+            ? theMeshes[anInstanceIndex].primitives.size()
+            : 1;
+        if (!hasExpectedIdentity
             || !IsValidIdentifier(anInstance.entityIdentifier)
             || !anEntityIdentifiers.insert(
                 anInstance.entityIdentifier).second
@@ -1279,27 +1752,36 @@ bool ValidatePresentationOverlayPayload(
             || anInstance.meshIndex >= theMeshes.size()
             || anInstance.reversesWinding || !anInstance.visible
             || anInstance.selectable || anInstance.selected
-            || anInstance.role != RenderRole::Gizmo
-            || anInstance.coordinateSpace
-                != CoordinateSpace::WorldAnchorPixels
-            || anInstance.depthPolicy != DepthPolicy::Topmost
+            || !hasExpectedSemantics
             || anInstance.renderStyle != RenderStyle::Shaded
-            || !IsRigidWorldAnchorTransform(anInstance.worldFromObject)
-            || anInstance.primitiveBindings.size() != 1) {
+            || (isMirrorPreview
+                ? !IsTranslationOnlyWorldTransform(
+                    anInstance.worldFromObject)
+                : !IsRigidWorldAnchorTransform(
+                    anInstance.worldFromObject))
+            || anInstance.primitiveBindings.size()
+                != anExpectedBindingCount
+            || !CheckedAdd(aPrimitiveBindingCount,
+                           anInstance.primitiveBindings.size(),
+                           aPrimitiveBindingCount)
+            || aPrimitiveBindingCount
+                > kMaxOverlayPrimitiveBindings) {
             return false;
         }
         if (++aMeshReferences[anInstance.meshIndex] != 1) {
             return false;
         }
-        const PrimitiveBinding& aBinding =
-            anInstance.primitiveBindings.front();
-        if ((theKind == PresentationOverlayKind::MirrorGizmo
-                && aBinding.materialIndex != anInstanceIndex)
-            || aBinding.materialIndex >= theMaterials.size()
-            || aBinding.pickToken != 0 || !aBinding.visible) {
-            return false;
+        for (const PrimitiveBinding& aBinding :
+             anInstance.primitiveBindings) {
+            if (((isMirrorPlane || isMirrorPreview)
+                    && aBinding.materialIndex != anInstanceIndex)
+                || aBinding.materialIndex >= theMaterials.size()
+                || aBinding.pickToken != 0 || !aBinding.visible) {
+                return false;
+            }
+            aMaterialReferences[aBinding.materialIndex] = 1;
         }
-        if (theKind == PresentationOverlayKind::MirrorGizmo) {
+        if (isMirrorPlane) {
             if (!aMirrorWorldAnchor.has_value()) {
                 aMirrorWorldAnchor = anInstance.worldFromObject.values;
             } else if (*aMirrorWorldAnchor
@@ -1307,7 +1789,6 @@ bool ValidatePresentationOverlayPayload(
                 return false;
             }
         }
-        aMaterialReferences[aBinding.materialIndex] = 1;
     }
     return std::all_of(aMeshReferences.begin(), aMeshReferences.end(),
                        [](const std::uint8_t theCount) {
@@ -1493,8 +1974,22 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
     const Handle(OcctDocument)& theDocument,
     PresentationOverlayContent&& theContent) noexcept
 {
+    return PublishPresentationOverlayImpl(
+        theDocument,
+        std::move(theContent),
+        false);
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
+    const Handle(OcctDocument)& theDocument,
+    PresentationOverlayContent&& theContent,
+    const bool theAllowsMirrorPreview) noexcept
+{
     if (![NSThread isMainThread]
         || theDocument.IsNull()
+        || (theContent.kind == PresentationOverlayKind::MirrorPreview
+            && !theAllowsMirrorPreview)
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
         || myState->documentObject.IsNull()
@@ -1603,6 +2098,168 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
         // only mutation and cannot expose a partially advanced revision.
         myState->overlay.Swap(aNextOverlayState);
         return aSnapshot;
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
+    const Handle(OcctDocument)& theDocument,
+    PresentationOverlayContent&& theMirrorGizmoContent,
+    const std::vector<Handle(AIS_Shape)>& thePreviewShapes) noexcept
+{
+    if (![NSThread isMainThread]
+        || theMirrorGizmoContent.kind
+            != PresentationOverlayKind::MirrorPreview
+        || thePreviewShapes.empty()
+        || thePreviewShapes.size() > kMaxMirrorPreviewBodies) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        // The interactor changes only the semantic kind after capturing the
+        // manipulator. Validate the six immutable plane slots in isolation
+        // before appending any trial geometry.
+        theMirrorGizmoContent.kind =
+            PresentationOverlayKind::MirrorGizmo;
+        if (!ValidatePresentationOverlayPayload(
+                theMirrorGizmoContent.kind,
+                theMirrorGizmoContent.meshes,
+                theMirrorGizmoContent.instances,
+                theMirrorGizmoContent.materials,
+                false)) {
+            return {};
+        }
+        theMirrorGizmoContent.kind =
+            PresentationOverlayKind::MirrorPreview;
+
+        std::size_t aVertexCount = 0;
+        std::size_t anIndexCount = 0;
+        std::size_t aPrimitiveCount = 0;
+        std::size_t aBindingCount = 0;
+        std::size_t aNumericByteCount = 0;
+        for (const MeshSnapshot& aMesh : theMirrorGizmoContent.meshes) {
+            std::size_t aVertexBytes = 0;
+            std::size_t anIndexBytes = 0;
+            if (!CheckedAdd(aVertexCount,
+                            aMesh.vertices.size(),
+                            aVertexCount)
+                || !CheckedAdd(anIndexCount,
+                               aMesh.indices.size(),
+                               anIndexCount)
+                || !CheckedAdd(aPrimitiveCount,
+                               aMesh.primitives.size(),
+                               aPrimitiveCount)
+                || !CheckedMultiply(aMesh.vertices.size(),
+                                    sizeof(Vertex),
+                                    aVertexBytes)
+                || !CheckedMultiply(aMesh.indices.size(),
+                                    sizeof(std::uint32_t),
+                                    anIndexBytes)
+                || !CheckedAdd(aNumericByteCount,
+                               aVertexBytes,
+                               aNumericByteCount)
+                || !CheckedAdd(aNumericByteCount,
+                               anIndexBytes,
+                               aNumericByteCount)) {
+                return {};
+            }
+        }
+        for (const InstanceSnapshot& anInstance :
+             theMirrorGizmoContent.instances) {
+            if (!CheckedAdd(aBindingCount,
+                            anInstance.primitiveBindings.size(),
+                            aBindingCount)) {
+                return {};
+            }
+        }
+
+        std::unordered_set<const AIS_Shape*> aSeenPresentations;
+        aSeenPresentations.reserve(thePreviewShapes.size());
+        for (std::size_t aPreviewIndex = 0;
+             aPreviewIndex < thePreviewShapes.size();
+             ++aPreviewIndex) {
+            const Handle(AIS_Shape)& aPresentation =
+                thePreviewShapes[aPreviewIndex];
+            if (aPresentation.IsNull()
+                || !aSeenPresentations.insert(aPresentation.get()).second
+                || aVertexCount >= kMaxOverlayVertices
+                || anIndexCount >= kMaxOverlayIndices
+                || aPrimitiveCount >= kMaxOverlayPrimitives
+                || aBindingCount >= kMaxOverlayPrimitiveBindings) {
+                return {};
+            }
+
+            MirrorPreviewItem anItem;
+            if (!ExtractMirrorPreviewItem(
+                    aPresentation,
+                    aPreviewIndex,
+                    kMaxOverlayVertices - aVertexCount,
+                    kMaxOverlayIndices - anIndexCount,
+                    std::min(kMaxOverlayPrimitives - aPrimitiveCount,
+                             kMaxOverlayPrimitiveBindings - aBindingCount),
+                    anItem)) {
+                return {};
+            }
+
+            std::size_t aVertexBytes = 0;
+            std::size_t anIndexBytes = 0;
+            if (!CheckedAdd(aVertexCount,
+                            anItem.mesh.vertices.size(),
+                            aVertexCount)
+                || aVertexCount > kMaxOverlayVertices
+                || !CheckedAdd(anIndexCount,
+                               anItem.mesh.indices.size(),
+                               anIndexCount)
+                || anIndexCount > kMaxOverlayIndices
+                || !CheckedAdd(aPrimitiveCount,
+                               anItem.mesh.primitives.size(),
+                               aPrimitiveCount)
+                || aPrimitiveCount > kMaxOverlayPrimitives
+                || !CheckedAdd(aBindingCount,
+                               anItem.instance.primitiveBindings.size(),
+                               aBindingCount)
+                || aBindingCount > kMaxOverlayPrimitiveBindings
+                || !CheckedMultiply(anItem.mesh.vertices.size(),
+                                    sizeof(Vertex),
+                                    aVertexBytes)
+                || !CheckedMultiply(anItem.mesh.indices.size(),
+                                    sizeof(std::uint32_t),
+                                    anIndexBytes)
+                || !CheckedAdd(aNumericByteCount,
+                               aVertexBytes,
+                               aNumericByteCount)
+                || !CheckedAdd(aNumericByteCount,
+                               anIndexBytes,
+                               aNumericByteCount)
+                || aNumericByteCount > kMaxOverlayNumericBytes) {
+                return {};
+            }
+            theMirrorGizmoContent.meshes.push_back(
+                std::move(anItem.mesh));
+            theMirrorGizmoContent.instances.push_back(
+                std::move(anItem.instance));
+            theMirrorGizmoContent.materials.push_back(
+                std::move(anItem.material));
+        }
+
+        if (theMirrorGizmoContent.meshes.size()
+                > kMaxOverlayMeshes
+            || theMirrorGizmoContent.instances.size()
+                > kMaxOverlayInstances
+            || theMirrorGizmoContent.materials.size()
+                > kMaxOverlayMaterials) {
+            return {};
+        }
+        return PublishPresentationOverlayImpl(
+            theDocument,
+            std::move(theMirrorGizmoContent),
+            true);
     } catch (const Standard_Failure&) {
         return {};
     } catch (...) {

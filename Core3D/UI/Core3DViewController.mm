@@ -320,6 +320,36 @@
     }
 }
 
+#ifdef DEBUG
+- (BOOL)debugTryMirrorAxis:(NSInteger)axis backward:(BOOL)backward {
+    if (![NSThread isMainThread]
+        || !_isSetuped
+        || _currentGizmoType != PrimitiveGizmoTypeMirror
+        || axis < 0 || axis > 2) {
+        return NO;
+    }
+
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr
+            || viewer->getObjectInteractor() == nullptr) {
+            return NO;
+        }
+        viewer->getObjectInteractor()->tryMirror(
+            static_cast<Standard_Integer>(axis),
+            backward);
+        [GLController requestRender];
+        // Reuse the same finalized lifecycle path as an authoritative touch
+        // release so Apply state and alternate-renderer capture stay aligned.
+        [self viewDidEndPrimaryInteractionCancelled:NO];
+        return viewer->getObjectInteractor()->hasTrialMirrorObjects();
+    } catch (...) {
+        return NO;
+    }
+}
+#endif
+
 - (void)viewDidInvalidateSceneSnapshot {
     // Renderer-neutral extension point. The OpenGL backend owns invalidation;
     // clients may coalesce immutable snapshot publication for another renderer.
@@ -353,6 +383,11 @@
     // clears that body through the same renderer-neutral callback.
     if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
         self.can_apply = [GLController hasTrialMirrorObjects];
+        // Lifecycle cancellation can clear an idle trial without an active
+        // raw touch. Publish the finalized mirror presentation state here so
+        // alternate renderers recapture the overlay instead of reusing the
+        // last camera/frame publication with stale preview geometry.
+        [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];
     }
 }

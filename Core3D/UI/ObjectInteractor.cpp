@@ -142,18 +142,24 @@ namespace core3d {
 
     PresentationOverlayCaptureStatus
     ObjectInteractor::captureIdlePresentationOverlay(
-        scene::PresentationOverlayContent& theContent) const noexcept {
+        scene::PresentationOverlayContent& theContent,
+        std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects) const noexcept {
         try {
             theContent = {};
-            // Any tracked mirror presentation is either a valid OCCT preview
-            // or a cleanup residue. Neither may be omitted from an alternate
-            // renderer publication.
-            if (!_trialMirrorObjects.empty()) {
+            theMirrorPreviewObjects.clear();
+            const bool hasMirrorPreview = !_trialMirrorObjects.empty();
+            // Cleanup residue is deliberately not publishable. Retaining OCCT
+            // prevents an unresolved presentation from being omitted.
+            if (hasMirrorPreview
+                && (!_trialMirrorObjectsValid
+                    || _trialMirrorObjects.size() > kMaxMirrorPreviewBodies)) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             if (_manipulatorType
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
-                return PresentationOverlayCaptureStatus::Available;
+                return hasMirrorPreview
+                    ? PresentationOverlayCaptureStatus::Unsafe
+                    : PresentationOverlayCaptureStatus::Available;
             }
             const bool isMoveRotate = _manipulatorType
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
@@ -165,7 +171,9 @@ namespace core3d {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             if (_manipulator.IsNull() || !_manipulator->IsAttached()) {
-                return PresentationOverlayCaptureStatus::Available;
+                return hasMirrorPreview
+                    ? PresentationOverlayCaptureStatus::Unsafe
+                    : PresentationOverlayCaptureStatus::Available;
             }
             if (myContext.IsNull()
                 || !_manipulator->IsInstance(
@@ -186,9 +194,26 @@ namespace core3d {
                 theContent = {};
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
+            if (hasMirrorPreview) {
+                if (!isMirror) {
+                    theContent = {};
+                    return PresentationOverlayCaptureStatus::Unsafe;
+                }
+                for (const Handle(AIS_Shape)& aShape : _trialMirrorObjects) {
+                    if (aShape.IsNull() || aShape->Shape().IsNull()
+                        || !myContext->IsDisplayed(aShape)) {
+                        theContent = {};
+                        return PresentationOverlayCaptureStatus::Unsafe;
+                    }
+                }
+                theContent.kind =
+                    scene::PresentationOverlayKind::MirrorPreview;
+                theMirrorPreviewObjects = _trialMirrorObjects;
+            }
             return PresentationOverlayCaptureStatus::Available;
         } catch (...) {
             theContent = {};
+            theMirrorPreviewObjects.clear();
             return PresentationOverlayCaptureStatus::Unsafe;
         }
     }
@@ -677,11 +702,13 @@ namespace core3d {
 		Standard_ShortReal sign = backward ? -1.0f : 1.0f;
 		
 		Handle(Core3DManipulatorObjectSequence) anObjects = _manipulator->Objects();
-		if (anObjects.IsNull() || anObjects->Size() == 0) {
+		if (anObjects.IsNull() || anObjects->Size() == 0
+			|| static_cast<std::size_t>(anObjects->Size())
+				> kMaxMirrorPreviewBodies) {
 			return;
 		}
 		Core3DManipulatorObjectSequence::Iterator anObjIter (*anObjects);
-		std::vector<Handle(AIS_InteractiveObject)> replacementObjects;
+		std::vector<Handle(AIS_Shape)> replacementObjects;
 		replacementObjects.reserve(
 			static_cast<std::size_t>(anObjects->Size()));
 		
@@ -735,8 +762,16 @@ namespace core3d {
 			gp_Trsf aTrsfMirror;
 			aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
 			
-			BRepBuilderAPI_Transform aBRepTrsf(shape->Shape(), aTrsfSelected * aTrsfMirror);
-			Handle(AIS_InteractiveObject) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
+			// OCCT's negative-transform mesh-copy path corrupts allocator state
+			// when mirror previews are replaced repeatedly. Keep mesh copying
+			// disabled; AIS Display below triangulates the owned trial before
+			// renderer-neutral capture reads that cache.
+			BRepBuilderAPI_Transform aBRepTrsf(
+				shape->Shape(),
+				aTrsfSelected * aTrsfMirror,
+				Standard_False,
+				Standard_False);
+			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
             aShapePrs->SetMaterial(myDoc->MaterialNameForShape(Handle(AIS_Shape)::DownCast(selected)));
             Quantity_Color color;
             selected->Color(color);
@@ -749,9 +784,9 @@ namespace core3d {
 		// displayed before mutating OCCT. Until the full swap succeeds the set
 		// is deliberately non-applicable, and cleanup retains any handle whose
 		// erase operation fails so no presentation can become orphaned.
-		const std::vector<Handle(AIS_InteractiveObject)> previousObjects =
+		const std::vector<Handle(AIS_Shape)> previousObjects =
 			_trialMirrorObjects;
-		std::vector<Handle(AIS_InteractiveObject)> transitionObjects =
+		std::vector<Handle(AIS_Shape)> transitionObjects =
 			previousObjects;
 		transitionObjects.insert(
 			transitionObjects.end(),
@@ -760,14 +795,18 @@ namespace core3d {
 		_trialMirrorObjects = std::move(transitionObjects);
 		_trialMirrorObjectsValid = false;
 
-		for (const Handle(AIS_InteractiveObject)& aShapePrs : replacementObjects) {
+		for (const Handle(AIS_Shape)& aShapePrs : replacementObjects) {
 			myContext->Display(
 				aShapePrs,
 				AIS_Shaded,
 				(Standard_Integer)0,
 				Standard_False);
+			// Mirror trials are explicit presentation only. Keep the OCCT
+			// fallback behavior aligned with the renderer-neutral nonselectable
+			// contract while the operation is pending.
+			myContext->Deactivate(aShapePrs);
 		}
-		for (const Handle(AIS_InteractiveObject)& aShapePrs
+		for (const Handle(AIS_Shape)& aShapePrs
 			 : previousObjects) {
 			myContext->Erase(aShapePrs, Standard_False);
 		}
@@ -778,13 +817,13 @@ namespace core3d {
 
 	void ObjectInteractor::clearTrialMirrorObjects() noexcept {
 		_trialMirrorObjectsValid = false;
-		std::vector<Handle(AIS_InteractiveObject)> unresolvedObjects;
+		std::vector<Handle(AIS_Shape)> unresolvedObjects;
 		try {
 			unresolvedObjects.reserve(_trialMirrorObjects.size());
 		} catch (...) {
 			return;
 		}
-		for (const Handle(AIS_InteractiveObject)& aShapePrs
+		for (const Handle(AIS_Shape)& aShapePrs
 			 : _trialMirrorObjects) {
 			try {
 				myContext->Erase(aShapePrs, Standard_False);
@@ -821,8 +860,7 @@ namespace core3d {
 			clearTrialMirrorObjects();
 			return;
 		}
-		for (const auto& trial : _trialMirrorObjects) {
-			Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(trial);
+		for (const Handle(AIS_Shape)& shape : _trialMirrorObjects) {
 			if (shape.IsNull() || !IsTopologicallyValid(shape->Shape())) {
 				clearTrialMirrorObjects();
 				return;
@@ -831,8 +869,7 @@ namespace core3d {
 
 		try {
 			doc->NewCommand();
-			for (const auto& trial : _trialMirrorObjects) {
-				Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(trial);
+			for (const Handle(AIS_Shape)& shape : _trialMirrorObjects) {
 				const TDF_Label label = myDoc->AddShape(shape);
 				if (label.IsNull()) {
 					doc->AbortCommand();

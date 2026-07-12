@@ -1176,9 +1176,18 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
         return {};
     }
     scene::PresentationOverlayContent aContent;
-    if (_objectInteractor->captureIdlePresentationOverlay(aContent)
+    std::vector<Handle(AIS_Shape)> aMirrorPreviewObjects;
+    if (_objectInteractor->captureIdlePresentationOverlay(
+            aContent,
+            aMirrorPreviewObjects)
         != PresentationOverlayCaptureStatus::Available) {
         return {};
+    }
+    if (!aMirrorPreviewObjects.empty()) {
+        return _sceneSnapshotBuilder.PublishMirrorPreviewOverlay(
+            myDoc,
+            std::move(aContent),
+            aMirrorPreviewObjects);
     }
     return _sceneSnapshotBuilder.PublishPresentationOverlay(
         myDoc,

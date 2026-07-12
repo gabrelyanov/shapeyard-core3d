@@ -15,8 +15,10 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 class AIS_InteractiveContext;
+class AIS_Shape;
 class OcctDocument;
 class V3d_View;
 
@@ -63,7 +65,21 @@ public:
         const Handle(OcctDocument)& theDocument,
         PresentationOverlayContent&& theContent) noexcept;
 
+    //! Append renderer-neutral world-space geometry from one explicitly owned
+    //! valid mirror trial set, then publish it with the exact six-plane mirror
+    //! gizmo prefix. This reads only existing face triangulations and never
+    //! enumerates AIS context or remeshes either transient or committed shapes.
+    OverlayPointer PublishMirrorPreviewOverlay(
+        const Handle(OcctDocument)& theDocument,
+        PresentationOverlayContent&& theMirrorGizmoContent,
+        const std::vector<Handle(AIS_Shape)>& thePreviewShapes) noexcept;
+
 private:
+    OverlayPointer PublishPresentationOverlayImpl(
+        const Handle(OcctDocument)& theDocument,
+        PresentationOverlayContent&& theContent,
+        bool theAllowsMirrorPreview) noexcept;
+
     struct State;
     std::unique_ptr<State> myState;
 };
