@@ -2950,6 +2950,13 @@ void Core3DAddDebugOrphanVisualMaterial(
             Handle(XCAFDoc_VisMaterial) material =
                 new XCAFDoc_VisMaterial();
             material->SetPbrMaterial(pbr);
+            // A masked material makes the fixture prove dynamically that the
+            // emissive image's alpha channel never controls draw/pick coverage.
+            // Base alpha remains one, so only an incorrect emissive-alpha
+            // dependency could discard the low-alpha test texels.
+            material->SetAlphaMode(
+                Graphic3d_AlphaMode_Mask,
+                0.75f);
             const TDF_Label materialLabel = materialTool->AddMaterial(
                 material,
                 TCollection_AsciiString("Imported emissive fixture"));
