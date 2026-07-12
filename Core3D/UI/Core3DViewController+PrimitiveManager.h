@@ -19,6 +19,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (Boundaries)getChamferBoundaries;
 - (void)applyChamfer;
 - (void)cancelChamfer;
+- (void)setExtrusion:(CGFloat)value;
+- (Boundaries)getExtrusionBoundaries;
+- (BOOL)applyExtrusion;
+- (BOOL)cancelExtrusion;
 - (void)undo;
 - (void)redo;
 - (void)completeOperationInteraction;

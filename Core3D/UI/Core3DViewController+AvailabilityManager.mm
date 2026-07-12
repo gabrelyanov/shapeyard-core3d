@@ -26,10 +26,16 @@
 }
 
 - (BOOL)canUndo {
-    return self.can_undo;
+    const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
+    return viewer != nullptr
+        && !viewer->getDocument().IsNull()
+        && viewer->getDocument()->canUndo();
 }
 - (BOOL)canRedo {
-    return self.can_redo;
+    const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
+    return viewer != nullptr
+        && !viewer->getDocument().IsNull()
+        && viewer->getDocument()->canRedo();
 }
 
 - (BOOL)canApply {

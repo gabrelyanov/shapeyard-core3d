@@ -21,6 +21,9 @@
 #include "XCAFDoc_VisMaterialTool.hxx"
 #include "Image_Texture.hxx"
 #include "BRepPrimAPI_MakeBox.hxx"
+#include "BRepPrimAPI_MakePrism.hxx"
+#include "BRepBuilderAPI_MakePolygon.hxx"
+#include "BRepBuilderAPI_MakeFace.hxx"
 #include "BRep_Builder.hxx"
 #include "TopoDS_Compound.hxx"
 #include "NCollection_Buffer.hxx"
@@ -1462,6 +1465,83 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     return YES;
 }
 
+- (NSData *_Nullable)debugStyledSubshapeBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"styled-subshape-extrusion-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const Handle(XCAFDoc_ColorTool) colorTool =
+                XCAFDoc_DocumentTool::ColorTool(document->Main());
+            if (shapeTool.IsNull() || colorTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create styled subshape fixture tools");
+            }
+            const TopoDS_Shape box =
+                BRepPrimAPI_MakeBox(50.0, 50.0, 50.0).Shape();
+            const TDF_Label definition = shapeTool->AddShape(
+                box, Standard_False, Standard_True);
+            TopExp_Explorer face(box, TopAbs_FACE);
+            if (definition.IsNull() || !face.More()) {
+                throw Standard_Failure(
+                    "Unable to create styled subshape fixture geometry");
+            }
+            const TDF_Label faceLabel = shapeTool->AddSubShape(
+                definition, face.Current());
+            if (faceLabel.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to label styled fixture face");
+            }
+            colorTool->SetColor(
+                faceLabel,
+                Quantity_Color(Quantity_NOC_BLUE1),
+                XCAFDoc_ColorSurf);
+        });
+}
+
+- (NSData *_Nullable)debugOversizedExtrusionSolidBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"oversized-extrusion-solid-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            constexpr Standard_Integer sideCount = 300;
+            constexpr Standard_Real pi =
+                3.141592653589793238462643383279502884;
+            BRepBuilderAPI_MakePolygon polygon;
+            for (Standard_Integer index = 0;
+                 index < sideCount;
+                 ++index) {
+                const Standard_Real angle =
+                    2.0 * pi * static_cast<Standard_Real>(index)
+                    / static_cast<Standard_Real>(sideCount);
+                polygon.Add(gp_Pnt(
+                    50.0 * std::cos(angle),
+                    50.0 * std::sin(angle),
+                    0.0));
+            }
+            polygon.Close();
+            if (!polygon.IsDone()) {
+                throw Standard_Failure(
+                    "Unable to create oversized fixture wire");
+            }
+            BRepBuilderAPI_MakeFace face(polygon.Wire());
+            if (!face.IsDone()) {
+                throw Standard_Failure(
+                    "Unable to create oversized fixture face");
+            }
+            const TopoDS_Shape solid = BRepPrimAPI_MakePrism(
+                face.Face(), gp_Vec(0.0, 0.0, 20.0)).Shape();
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (solid.IsNull() || solid.ShapeType() != TopAbs_SOLID
+                || shapeTool.IsNull()
+                || shapeTool->AddShape(
+                    solid, Standard_False, Standard_True).IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create oversized extrusion fixture solid");
+            }
+        });
+}
+
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData {
     Handle(TDocStd_Application) application;
     Handle(TDocStd_Document) document;
@@ -1989,6 +2069,57 @@ NSData* Core3DCreateDebugBinXCAFFixture(
         return NO;
     }
 }
+
+- (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
+                              faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0
+        || entityIdentifier.UTF8String == nullptr) {
+        return NO;
+	}
+	try {
+		const std::shared_ptr<core3d::Core3DViewer> viewer =
+			GLController.viewer;
+		const BOOL didBegin = viewer != nullptr
+            && viewer->debugBeginExtrusionSelection(
+				std::string(entityIdentifier.UTF8String),
+				static_cast<Standard_Size>(faceTopologyIndex));
+		if (didBegin && viewer->getObjectInteractor() != nullptr) {
+			viewer->getObjectInteractor()->setManipulatorType(
+				core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude);
+		}
+		_currentGizmoType = [GLController getGizmoType];
+        self.can_apply = NO;
+        [GLController debugRequestRender];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+        return didBegin;
+    } catch (...) {
+        self.can_apply = NO;
+        [self sendNotifyUIState:UIStateChangingApply];
+        return NO;
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugExtrusionState];
+}
+
+- (void)debugSetExtrusionCommitMode:(NSInteger)mode {
+    [GLController debugSetExtrusionCommitMode:mode];
+}
+
+- (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count {
+    [GLController debugSetExtrusionAbortFailureCount:count];
+}
+
+- (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count {
+    [GLController debugSetExtrusionPostCommitInspectFailureCount:count];
+}
 #endif
 
 - (void)viewDidInvalidateSceneSnapshot {
@@ -2056,7 +2187,6 @@ NSData* Core3DCreateDebugBinXCAFFixture(
                 _can_duplicate = [GLController isSelected];
                 break;
             case PrimitiveSelectionTypeEdge:
-            case PrimitiveSelectionTypeFace:
             {
                 BOOL isEmptyOfDisplayedObjects = [GLController isEmptyOfDisplayedObjects];
                 BOOL isSelected = [GLController isSelected];
@@ -2071,6 +2201,23 @@ NSData* Core3DCreateDebugBinXCAFFixture(
                 // ^^ in this case setGizmoType may not be called, because gizmoType doesn't change
                 //    when the selection type is changed [PrimitiveGizmoTypeChamfer -> PrimitiveGizmoTypeChamfer],
                 //    so we notify ui state manually
+                break;
+            case PrimitiveSelectionTypeFace:
+            {
+                BOOL isEmptyOfDisplayedObjects =
+                    [GLController isEmptyOfDisplayedObjects];
+                BOOL isSelected = [GLController isSelected];
+                if (!isEmptyOfDisplayedObjects && isSelected) {
+                    _availableGizmoTypes = @[
+                        @(PrimitiveGizmoTypeChamfer),
+                        @(PrimitiveGizmoTypeExtrude)
+                    ];
+                }
+                [GLController deselectAll];
+            }
+                _can_delete = NO;
+                _can_duplicate = NO;
+                [self setGizmoType:PrimitiveGizmoTypeNone];
                 break;
 
             default:
@@ -2092,7 +2239,7 @@ NSData* Core3DCreateDebugBinXCAFFixture(
 - (void)setGizmoType:(PrimitiveGizmoType)type {
     if (_currentGizmoType != type) {
         [GLController setGizmoType:type];
-        _currentGizmoType = type;
+		_currentGizmoType = [GLController getGizmoType];
         switch (_currentGizmoType) {
             case PrimitiveGizmoTypeChamfer:
                 self.can_apply = [_glController isSelected];
@@ -2103,6 +2250,9 @@ NSData* Core3DCreateDebugBinXCAFFixture(
                 break;
             case PrimitiveGizmoTypeMirror:
                 self.can_apply = NO;
+                break;
+            case PrimitiveGizmoTypeExtrude:
+                self.can_apply = [GLController canApplyExtrusion];
                 break;
             default:
                 break;

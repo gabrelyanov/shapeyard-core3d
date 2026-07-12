@@ -442,6 +442,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     const PrimitiveGizmoType booleanGizmoType = hadBooleanOperation
         ? [self getGizmoType]
         : PrimitiveGizmoTypeNone;
+    const BOOL hadExtrusion =
+        _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->hasActiveExtrusion();
     if (hadActiveInteraction && _viewer != nullptr) {
         _viewer->CancelInteraction(0, 0);
     }
@@ -463,6 +467,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             }
         }
     }
+    if (hadExtrusion) {
+        _viewer->getShapeInteractor()->cancelExtrusion();
+    }
     if (_rawTouchRendering) {
         _rawTouchRendering = NO;
         [view endInteractiveRendering];
@@ -477,16 +484,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [view endInteractiveRendering];
     }
     if (hadActiveInteraction || hadUnresolvedMirrorObjects
-        || hadBooleanOperation) {
+        || hadBooleanOperation || hadExtrusion) {
         [self requestRender];
     }
-    if (hadBooleanOperation) {
+    if (hadBooleanOperation || hadExtrusion) {
         // Selection notification is also the renderer-neutral presentation
         // invalidation and Apply-state refresh for lifecycle cancellation.
         [self checkSelections];
     }
     if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects
-         || hadBooleanOperation)
+         || hadBooleanOperation || hadExtrusion)
         && _delegate
         && [_delegate respondsToSelector:
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -1023,6 +1030,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)deselectAll {
+    if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr
+        && !_viewer->getShapeInteractor()->cancelExtrusion()) {
+        [self requestRender];
+        return;
+    }
     _viewer->deselectAll();
     [self requestRender];
 }
@@ -1042,8 +1054,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)undo {
-	if (!_viewer->getDocument()->canUndo()) { return; }
 	PrimitiveGizmoType currentType = [self getGizmoType];
+	const std::shared_ptr<ShapeInteractor> shapeInteractor =
+		_viewer->getShapeInteractor();
+	if (shapeInteractor != nullptr
+		&& (currentType == PrimitiveGizmoTypeExtrude
+			|| shapeInteractor->hasActiveExtrusion())) {
+		if (shapeInteractor->cancelExtrusion()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
+		[self requestRender];
+		return;
+	}
 	if (currentType == PrimitiveGizmoTypeSubtract) {
 		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
 	} else if (currentType == PrimitiveGizmoTypeUnion) {
@@ -1052,6 +1075,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
+	if (!_viewer->getDocument()->canUndo()) {
+		[self checkSelections];
+		[self requestRender];
+		return;
+	}
 	if (_viewer->getDocument()->undo()) {
 		_viewer->redrawDocument();
 		[self checkSelections];
@@ -1060,8 +1088,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)redo {
-	if (!_viewer->getDocument()->canRedo()) { return; }
 	PrimitiveGizmoType currentType = [self getGizmoType];
+	const std::shared_ptr<ShapeInteractor> shapeInteractor =
+		_viewer->getShapeInteractor();
+	if (shapeInteractor != nullptr
+		&& (currentType == PrimitiveGizmoTypeExtrude
+			|| shapeInteractor->hasActiveExtrusion())) {
+		if (shapeInteractor->cancelExtrusion()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
+		[self requestRender];
+		return;
+	}
 	if (currentType == PrimitiveGizmoTypeSubtract) {
 		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
 	} else if (currentType == PrimitiveGizmoTypeUnion) {
@@ -1070,6 +1109,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
+	if (!_viewer->getDocument()->canRedo()) {
+		[self checkSelections];
+		[self requestRender];
+		return;
+	}
 	if (_viewer->getDocument()->redo()) {
 		_viewer->redrawDocument();
 		[self checkSelections];
@@ -1088,6 +1132,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	} else if (currentType == PrimitiveGizmoTypeExtrude) {
+		if (!_viewer->getShapeInteractor()->cancelExtrusion()) {
+			[self requestRender];
+			return;
+		}
 	}
 
     ShapeSelectionMode selectionMode;
@@ -1146,7 +1195,18 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
 	const PrimitiveGizmoType previousType = [self getGizmoType];
-	if (previousType == type) { return; }
+	if (previousType == type) {
+		if (type == PrimitiveGizmoTypeExtrude
+			&& _viewer != nullptr
+			&& _viewer->getShapeInteractor() != nullptr
+			&& !_viewer->getShapeInteractor()->hasActiveExtrusion()
+			&& !_viewer->getShapeInteractor()->beginExtrusionSelection()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
+		[self requestRender];
+		return;
+	}
 
 	// Resolve the previous tool before changing manipulator mode or capturing
 	// selection for the next tool. Its AIS previews may refer to document labels
@@ -1159,6 +1219,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
 	} else if (previousType == PrimitiveGizmoTypeMirror) {
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+	} else if (previousType == PrimitiveGizmoTypeExtrude) {
+		if (!_viewer->getShapeInteractor()->cancelExtrusion()) {
+			[self requestRender];
+			return;
+		}
 	}
 
     PrimitiveManipulatorType manipulatorType;
@@ -1187,6 +1252,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         case PrimitiveGizmoTypeMaterial:
             manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial;
             break;
+        case PrimitiveGizmoTypeExtrude:
+            manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude;
+            break;
         default:
             assert(false);
             break;
@@ -1204,6 +1272,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 					forceActor,
 					action);
 			}
+	} else if (type == PrimitiveGizmoTypeExtrude) {
+		if (!_viewer->getShapeInteractor()->beginExtrusionSelection()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
 	}
 	[self requestRender];
 }
@@ -1235,6 +1308,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
             type = PrimitiveGizmoTypeMaterial;
             break;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+            type = PrimitiveGizmoTypeExtrude;
+            break;
         default:
             break;
     }
@@ -1252,6 +1328,50 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)cancelChamfer {
     _viewer->getShapeInteractor()->cancelChamfer();
     [self requestRender];
+}
+
+- (BOOL)setExtrusion:(CGFloat)value {
+    if ([self getGizmoType] != PrimitiveGizmoTypeExtrude
+        || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL result = _viewer->getShapeInteractor()
+        ->setExtrusionValueForSelection(
+            static_cast<Standard_Real>(value));
+    [self requestRender];
+    return result;
+}
+
+- (BOOL)applyExtrusion {
+    if ([self getGizmoType] != PrimitiveGizmoTypeExtrude
+        || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL applied =
+        _viewer->getShapeInteractor()->applyExtrusion();
+    if (applied) {
+        _viewer->redrawDocument();
+    }
+    [self requestRender];
+    return applied;
+}
+
+- (BOOL)cancelExtrusion {
+    const BOOL cancelled = _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr
+        || _viewer->getShapeInteractor()->cancelExtrusion();
+    [self requestRender];
+    return cancelled;
+}
+
+- (BOOL)canApplyExtrusion {
+    return _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && (_viewer->getShapeInteractor()->canApplyExtrusion()
+            || _viewer->getShapeInteractor()
+                ->canRetryExtrusionResolution());
 }
 
 - (void) applyMirror {
@@ -1357,6 +1477,69 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     return _viewer == nullptr ? 0 : _viewer->selectedCount();
 }
 
+- (void)debugSetExtrusionCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr) {
+        _viewer->getShapeInteractor()->debugSetExtrusionCommitMode(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr) {
+        _viewer->getShapeInteractor()->debugSetExtrusionAbortFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr) {
+        _viewer->getShapeInteractor()
+            ->debugSetExtrusionPostCommitInspectFailureCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState {
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return @{};
+    }
+    const ExtrusionDebugState state =
+        _viewer->getShapeInteractor()->debugExtrusionState();
+    return @{
+        @"selectionReady": @(state.selectionReady != Standard_False),
+        @"previewActive": @(state.previewActive != Standard_False),
+        @"canApply": @(state.canApply != Standard_False),
+        @"resolutionRetryable": @(
+            state.resolutionRetryable != Standard_False),
+        @"commandOpen": @(state.commandOpen != Standard_False),
+        @"lastApplySucceeded": @(
+            state.lastApplySucceeded != Standard_False),
+        @"distance": @(state.distance),
+        @"sourceSubshapeCount": @(state.sourceSubshapeCount),
+        @"profileEdgeCount": @(state.profileEdgeCount),
+        @"candidateSubshapeCount": @(state.candidateSubshapeCount),
+        @"candidateSolidCount": @(state.candidateSolidCount),
+        @"lastFailureStage": @(state.lastFailureStage),
+        @"lastFeatureStatus": @(state.lastFeatureStatus),
+        @"lastCandidateShapeType": @(state.lastCandidateShapeType),
+        @"rawDirectChildCount": @(state.rawDirectChildCount),
+        @"rawDirectChildShapeType": @(state.rawDirectChildShapeType),
+        @"historyHasModified": @(
+            state.historyHasModified != Standard_False),
+        @"historyHasGenerated": @(
+            state.historyHasGenerated != Standard_False),
+        @"historyFaceDeleted": @(
+            state.historyFaceDeleted != Standard_False),
+        @"candidateVolume": @(state.candidateVolume),
+        @"candidateMinX": @(state.candidateMinX),
+        @"candidateMinY": @(state.candidateMinY),
+        @"candidateMinZ": @(state.candidateMinZ),
+        @"candidateMaxX": @(state.candidateMaxX),
+        @"candidateMaxY": @(state.candidateMaxY),
+        @"candidateMaxZ": @(state.candidateMaxZ),
+    };
+}
+
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates {
     if (_viewer == nullptr || _viewer->AisContext().IsNull()
@@ -1375,9 +1558,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         if (shape.IsNull() || shape->Shape().IsNull()) {
             continue;
         }
-        const gp_XYZ translation =
-            shape->LocalTransformation().TranslationPart();
-        gp_Trsf aWorldTransform = shape->LocalTransformation();
+        const gp_Trsf aLocalTransform = shape->LocalTransformation();
+        const gp_XYZ translation = aLocalTransform.TranslationPart();
+        const gp_Quaternion rotation = aLocalTransform.GetRotation();
+        gp_Trsf aWorldTransform = aLocalTransform;
         aWorldTransform.Multiply(
             shape->Shape().Location().Transformation());
         const gp_XYZ aWorldTranslation =
@@ -1464,6 +1648,23 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             @"translationX": @(translation.X()),
             @"translationY": @(translation.Y()),
             @"translationZ": @(translation.Z()),
+            @"rotationX": @(rotation.X()),
+            @"rotationY": @(rotation.Y()),
+            @"rotationZ": @(rotation.Z()),
+            @"rotationW": @(rotation.W()),
+            @"scaleFactor": @(aLocalTransform.ScaleFactor()),
+            @"transform11": @(aLocalTransform.Value(1, 1)),
+            @"transform12": @(aLocalTransform.Value(1, 2)),
+            @"transform13": @(aLocalTransform.Value(1, 3)),
+            @"transform14": @(aLocalTransform.Value(1, 4)),
+            @"transform21": @(aLocalTransform.Value(2, 1)),
+            @"transform22": @(aLocalTransform.Value(2, 2)),
+            @"transform23": @(aLocalTransform.Value(2, 3)),
+            @"transform24": @(aLocalTransform.Value(2, 4)),
+            @"transform31": @(aLocalTransform.Value(3, 1)),
+            @"transform32": @(aLocalTransform.Value(3, 2)),
+            @"transform33": @(aLocalTransform.Value(3, 3)),
+            @"transform34": @(aLocalTransform.Value(3, 4)),
             @"worldTranslationX": @(aWorldTranslation.X()),
             @"worldTranslationY": @(aWorldTranslation.Y()),
             @"worldTranslationZ": @(aWorldTranslation.Z()),

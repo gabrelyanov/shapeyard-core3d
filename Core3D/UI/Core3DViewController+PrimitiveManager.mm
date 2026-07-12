@@ -85,7 +85,8 @@
     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
     [GLController duplicateSelected];
     self.can_apply_material = YES;
-    [self sendNotifyUIState:UIStateChangingApplyMaterial];
+    [self sendNotifyUIState:UIStateChangingApplyMaterial
+                            | UIStateChangingHistory];
 }
 
 - (void)setChamfer:(CGFloat)value {
@@ -95,6 +96,46 @@
 
 - (Boundaries)getChamferBoundaries {
     return {.min = -15, .max = 15};
+}
+
+- (void)setExtrusion:(CGFloat)value {
+    if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
+        self.can_apply = NO;
+        [self sendNotifyUIState:UIStateChangingApply];
+        return;
+    }
+    (void)[GLController setExtrusion:value * 100.0];
+    self.can_apply = [GLController canApplyExtrusion];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
+}
+
+- (Boundaries)getExtrusionBoundaries {
+    return {.min = -1.0, .max = 1.0};
+}
+
+- (BOOL)applyExtrusion {
+    const BOOL applied = [GLController applyExtrusion];
+    if (applied) {
+        [self completeOperationInteraction];
+    } else {
+        self.can_apply = [GLController canApplyExtrusion];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
+    return applied;
+}
+
+- (BOOL)cancelExtrusion {
+    const BOOL cancelled = [GLController cancelExtrusion];
+    if (cancelled) {
+        [self completeOperationInteraction];
+    } else {
+        self.can_apply = [GLController canApplyExtrusion];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
+    return cancelled;
 }
 
 - (void)applyChamfer {
@@ -123,7 +164,8 @@
     [self sendNotifyUIState:UIStateChangingGizmo
                              | UIStateChangingDuplicate
                              | UIStateChangingDelete
-                             | UIStateChangingApply];
+                             | UIStateChangingApply
+                             | UIStateChangingHistory];
 }
 
 - (void)applyMirror {
@@ -157,12 +199,30 @@
 }
 
 - (void)undo {
+    const BOOL wasExtrusion =
+        _currentGizmoType == PrimitiveGizmoTypeExtrude;
     [GLController undo];
+    if (wasExtrusion) {
+        _currentGizmoType = [GLController getGizmoType];
+        if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = [GLController canApplyExtrusion];
+            [self viewDidChangeViewportPresentationState];
+        }
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
-        || _currentGizmoType == PrimitiveGizmoTypeUnion) {
+        || _currentGizmoType == PrimitiveGizmoTypeUnion
+        || _currentGizmoType == PrimitiveGizmoTypeExtrude) {
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
             ? [GLController hasTrialMirrorObjects]
+            : _currentGizmoType == PrimitiveGizmoTypeExtrude
+                ? [GLController canApplyExtrusion]
             : [GLController canApplyBoolean];
         [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];
@@ -170,12 +230,30 @@
 }
 
 - (void)redo {
+    const BOOL wasExtrusion =
+        _currentGizmoType == PrimitiveGizmoTypeExtrude;
     [GLController redo];
+    if (wasExtrusion) {
+        _currentGizmoType = [GLController getGizmoType];
+        if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = [GLController canApplyExtrusion];
+            [self viewDidChangeViewportPresentationState];
+        }
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
-        || _currentGizmoType == PrimitiveGizmoTypeUnion) {
+        || _currentGizmoType == PrimitiveGizmoTypeUnion
+        || _currentGizmoType == PrimitiveGizmoTypeExtrude) {
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
             ? [GLController hasTrialMirrorObjects]
+            : _currentGizmoType == PrimitiveGizmoTypeExtrude
+                ? [GLController canApplyExtrusion]
             : [GLController canApplyBoolean];
         [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];

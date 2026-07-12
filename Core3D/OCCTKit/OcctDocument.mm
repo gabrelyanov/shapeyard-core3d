@@ -1178,12 +1178,78 @@ TDF_Label OcctDocument::AddShape(Handle(AIS_Shape) aisShape) {
 	return label;
 }
 
-void OcctDocument::ReplaceShape(const TDF_Label& label, Handle(AIS_Shape) aisShape) {
+Standard_Boolean OcctDocument::ReplaceShape(
+    const TDF_Label& label,
+    Handle(AIS_Shape) aisShape) {
 	// Stable entity and definition identifiers belong to the label, so replacing
 	// its geometry deliberately leaves both identity attributes untouched.
-	Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
-    shapeTool->SetShape(label, aisShape->Shape());
-    SaveObjectTransform(label, aisShape);
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull() || label.Data() != myOcafDoc->GetData()
+        || aisShape.IsNull() || aisShape->Shape().IsNull()) {
+        return Standard_False;
+    }
+	Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    if (shapeTool.IsNull() || !shapeTool->IsShape(label)
+        || !XCAFDoc_ShapeTool::IsFree(label)
+        || !XCAFDoc_ShapeTool::IsSimpleShape(label)
+        || XCAFDoc_ShapeTool::IsReference(label)
+        || XCAFDoc_ShapeTool::IsComponent(label)
+        || XCAFDoc_ShapeTool::IsAssembly(label)
+        || XCAFDoc_ShapeTool::IsSubShape(label)) {
+        return Standard_False;
+    }
+    const TopoDS_Shape previousShape = XCAFDoc_ShapeTool::GetShape(label);
+    if (previousShape.IsNull()) {
+        return Standard_False;
+    }
+    struct SavedRealAttribute {
+        Standard_Boolean wasPresent = Standard_False;
+        Standard_Real value = 0.0;
+    };
+    SavedRealAttribute previousTransform[8];
+    for (Standard_Integer tag = 1; tag <= 8; ++tag) {
+        const TDF_Label child = label.FindChild(tag, Standard_False);
+        Handle(TDataStd_Real) attribute;
+        if (!child.IsNull()
+            && child.FindAttribute(TDataStd_Real::GetID(), attribute)
+            && !attribute.IsNull()) {
+            previousTransform[tag - 1].wasPresent = Standard_True;
+            previousTransform[tag - 1].value = attribute->Get();
+        }
+    }
+    const auto restorePrevious = [&]() noexcept {
+        try {
+            shapeTool->SetShape(label, previousShape);
+            for (Standard_Integer tag = 1; tag <= 8; ++tag) {
+                const SavedRealAttribute& saved =
+                    previousTransform[tag - 1];
+                if (saved.wasPresent) {
+                    TDataStd_Real::Set(label.FindChild(tag), saved.value);
+                } else {
+                    const TDF_Label child =
+                        label.FindChild(tag, Standard_False);
+                    if (!child.IsNull()) {
+                        child.ForgetAttribute(TDataStd_Real::GetID());
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    };
+    try {
+        shapeTool->SetShape(label, aisShape->Shape());
+        const TopoDS_Shape stored = XCAFDoc_ShapeTool::GetShape(label);
+        if (stored.IsNull() || !stored.IsEqual(aisShape->Shape())) {
+            restorePrevious();
+            return Standard_False;
+        }
+        SaveObjectTransform(label, aisShape);
+        return Standard_True;
+    } catch (...) {
+        restorePrevious();
+        return Standard_False;
+    }
 }
 
 void OcctDocument::SaveObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis) {

@@ -122,6 +122,7 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
     switch (_currentGizmoType) {
         case PrimitiveGizmoTypeSubtract:
         case PrimitiveGizmoTypeUnion:
+        case PrimitiveGizmoTypeExtrude:
             self.can_delete = false;
             self.can_duplicate = false;
             break;
@@ -137,8 +138,13 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
         _currentSelectionType = [GLController getSelectionType];
         switch (_currentSelectionType) {
             case PrimitiveSelectionTypeEdge:
-            case PrimitiveSelectionTypeFace:
                 _availableGizmoTypes = @[@(PrimitiveGizmoTypeChamfer)];
+                break;
+            case PrimitiveSelectionTypeFace:
+                _availableGizmoTypes = @[
+                    @(PrimitiveGizmoTypeChamfer),
+                    @(PrimitiveGizmoTypeExtrude)
+                ];
                 break;
             case PrimitiveSelectionTypeShape:
                 _availableGizmoTypes = @[@(PrimitiveGizmoTypeMoveRotate),
@@ -161,6 +167,9 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
                 self.can_apply = [GLController canApplyBoolean];
+                break;
+            case PrimitiveGizmoTypeExtrude:
+                self.can_apply = [GLController canApplyExtrusion];
                 break;
             default:
                 break;
@@ -193,6 +202,7 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
+            case PrimitiveGizmoTypeExtrude:
                 self.can_apply = false;
                 break;
             case PrimitiveGizmoTypeChamfer:

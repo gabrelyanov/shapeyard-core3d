@@ -52,6 +52,10 @@ typedef struct {
 - (Boundaries)getChamferBoundaries;
 - (void)applyChamfer;
 - (void)cancelChamfer;
+- (void)setExtrusion:(CGFloat)value;
+- (Boundaries)getExtrusionBoundaries;
+- (BOOL)applyExtrusion;
+- (BOOL)cancelExtrusion;
 - (void)applyMirror;
 - (void)cancelMirror;
 - (void)applySubtract;
@@ -202,6 +206,20 @@ typedef struct {
 //! Test-only recompute seam for the active Boolean trial. This exercises the
 //! same replacement/ownership path used after an interactive adjustment.
 - (BOOL)debugRecomputeBooleanPreview;
+//! Deterministically capture a planar face by stable entity identifier and
+//! zero-based TopExp face index, using the production extrusion admission.
+- (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
+                              faceTopologyIndex:(NSUInteger)faceTopologyIndex
+    NS_SWIFT_NAME(debugBeginExtrusion(entityIdentifier:faceTopologyIndex:));
+//! Bounded native extrusion preview/result counters and command state.
+- (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
+//! Inject CommitCommand reporting/throw behavior after a real close: 0 normal,
+//! 1 false-after-close, 2 throw-after-close.
+- (void)debugSetExtrusionCommitMode:(NSInteger)mode;
+//! Make the next N extrusion abort attempts fail before touching the command.
+- (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
+//! Make the next N post-Commit label inspections report unavailable.
+- (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;
 //! Build a standalone pre-schema BinOcaf fixture with geometry and legacy
 //! child-11/12 appearance, but no identity or visual-material infrastructure.
 - (NSData *_Nullable)debugLegacyBinOcafFixtureData;
@@ -243,6 +261,11 @@ typedef struct {
 //! Shared occurrences whose imported PBR definition also carries a legacy
 //! app-authored preset/color override for precedence testing.
 - (NSData *_Nullable)debugAuthoredLegacyAssemblyBinXCAFFixtureData;
+//! Free cube with an explicitly styled face label; topology-changing tools
+//! must reject it instead of silently discarding subshape appearance.
+- (NSData *_Nullable)debugStyledSubshapeBinXCAFFixtureData;
+//! Single 300-sided prism exceeding extrusion's synchronous v1 topology cap.
+- (NSData *_Nullable)debugOversizedExtrusionSolidBinXCAFFixtureData;
 //! Lower the display traversal ceiling for bounded aggregate-budget tests.
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
 //! Lower the leaf-presentation ceiling for all-or-nothing admission tests.

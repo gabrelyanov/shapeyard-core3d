@@ -84,6 +84,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setChamfer:(CGFloat)value;
 - (void)cancelChamfer;
+- (BOOL)setExtrusion:(CGFloat)value;
+- (BOOL)applyExtrusion;
+- (BOOL)cancelExtrusion;
+- (BOOL)canApplyExtrusion;
 - (void) applyMirror;
 - (void) cancelMirror;
 - (void) applySubtract;
@@ -101,6 +105,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSUInteger)debugBoundedProjectTopologyValidationCount;
 - (NSUInteger)debugGeometricBRepValidationCount;
 - (NSInteger)debugSelectedShapeCount;
+- (void)debugSetExtrusionCommitMode:(NSInteger)mode;
+- (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
+- (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;
+- (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
 #endif

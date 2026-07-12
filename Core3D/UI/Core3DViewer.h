@@ -113,6 +113,9 @@ namespace core3d {
             BooleanAction action,
             const std::vector<std::string>& actorEntityIdentifiers,
             const std::vector<std::string>& subjectEntityIdentifiers) noexcept;
+        Standard_Boolean debugBeginExtrusionSelection(
+            const std::string& entityIdentifier,
+            Standard_Size faceTopologyIndex) noexcept;
         //! Test-only admission ceiling for the bounded project-load topology
         //! walk. Production uses the fixed mobile-safe aggregate ceiling.
         void SetDebugMaximumProjectTopologyValidationNodes(

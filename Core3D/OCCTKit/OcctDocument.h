@@ -143,7 +143,12 @@ public:
     Standard_Boolean SupportsScalarPBRMaterialEditingForLabel(
         const TDF_Label& label) const;
 
-    void ReplaceShape(const TDF_Label& label, Handle(AIS_Shape) aisShape);
+    //! Replace geometry on an existing editable free definition. The caller
+    //! must own an open command on this exact document; identifiers and
+    //! appearance remain attached to the stable label.
+    Standard_Boolean ReplaceShape(
+        const TDF_Label& label,
+        Handle(AIS_Shape) aisShape);
     
     void RemoveShape(TopoDS_Shape object);
     void RemoveShape(Handle(AIS_Shape) object);

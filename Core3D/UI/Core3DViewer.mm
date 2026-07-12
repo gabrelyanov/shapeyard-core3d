@@ -1935,6 +1935,59 @@ Standard_Boolean Core3DViewer::debugBeginBooleanSelection(
         return Standard_False;
     }
 }
+
+Standard_Boolean Core3DViewer::debugBeginExtrusionSelection(
+    const std::string& theEntityIdentifier,
+    const Standard_Size theFaceTopologyIndex) noexcept {
+    if (_shapeInteractor == nullptr || myContext.IsNull() || myDoc.IsNull()
+        || theEntityIdentifier.empty()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        if (!_shapeInteractor->cancelExtrusion()) {
+            return Standard_False;
+        }
+        Handle(AIS_Shape) aPresentation;
+        AIS_ListOfInteractive aDisplayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
+        for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
+             anObject.More(); anObject.Next()) {
+            const Handle(AIS_InteractiveObject)& anInteractive =
+                anObject.Value();
+            const TDF_Label aLabel = myDoc->ShapeLabel(anInteractive);
+            if (aLabel.IsNull()
+                || myDoc->EntityIdentifierForLabel(aLabel)
+                    != theEntityIdentifier) {
+                continue;
+            }
+            const Handle(AIS_Shape) aCandidate =
+                Handle(AIS_Shape)::DownCast(anInteractive);
+            if (!aPresentation.IsNull() || aCandidate.IsNull()
+                || !myDoc->IsPresentationEditable(aCandidate)) {
+                return Standard_False;
+            }
+            aPresentation = aCandidate;
+        }
+        if (aPresentation.IsNull() || aPresentation->Shape().IsNull()) {
+            return Standard_False;
+        }
+        Standard_Size aFaceIndex = 0;
+        for (TopExp_Explorer aFace(
+                 aPresentation->Shape(), TopAbs_FACE);
+             aFace.More(); aFace.Next(), ++aFaceIndex) {
+            if (aFaceIndex == theFaceTopologyIndex) {
+                return _shapeInteractor->debugBeginExtrusionSelection(
+                    aPresentation,
+                    TopoDS::Face(aFace.Current()));
+            }
+        }
+        return Standard_False;
+    } catch (...) {
+        _shapeInteractor->cancelExtrusion();
+        return Standard_False;
+    }
+}
 #endif
 
 void Core3DViewer::Rotation(int theX, int theY) {
@@ -1977,6 +2030,9 @@ void Core3DViewer::Select(int theX, int theY) {
         return;
     }
     if (_objectInteractor->isBooleanSelectionFrozen()) {
+        return;
+    }
+    if (_shapeInteractor->hasActiveExtrusion()) {
         return;
     }
 
@@ -2029,8 +2085,12 @@ void Core3DViewer::Select(int theX, int theY) {
     redraw();
 }
 
-    void Core3DViewer::deselectAll() {
-        if (myContext.IsNull()) { return; }
+	void Core3DViewer::deselectAll() {
+		if (myContext.IsNull()) { return; }
+		if (_shapeInteractor != nullptr
+			&& !_shapeInteractor->cancelExtrusion()) {
+			return;
+		}
 		if (_objectInteractor != nullptr) {
 			_objectInteractor->cancelInteraction();
 		}

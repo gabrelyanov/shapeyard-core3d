@@ -517,6 +517,7 @@ namespace core3d {
                 _manipulator->Detach();
             }
             if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
+				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude
                 && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
 				_manipulator->Attach(objects);
             }
@@ -649,7 +650,10 @@ namespace core3d {
 				doc->NewCommand();
 				for (const auto& change : changes) {
 					if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale) {
-						myDoc->ReplaceShape(change.second, change.first);
+						if (!myDoc->ReplaceShape(change.second, change.first)) {
+							throw Standard_Failure(
+								"Unable to replace scaled geometry");
+						}
 					}
 					myDoc->SaveObjectTransform(change.second, change.first);
 				}
