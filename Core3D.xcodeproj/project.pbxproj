@@ -179,9 +179,11 @@
 		C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = C03D50030000000000000001 /* Core3DSceneSnapshot.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50040000000000000001 /* Core3DSceneSnapshot.mm */; };
 		C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */; };
+		C3D0F1032F30000100000003 /* ThirdPartyNotices in Resources */ = {isa = PBXBuildFile; fileRef = C3D0F1022F30000100000002 /* ThirdPartyNotices */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C3D0F1022F30000100000002 /* ThirdPartyNotices */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ThirdPartyNotices; sourceTree = "<group>"; };
 		1804F28B2C51140A0045084A /* CylinderDriver.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CylinderDriver.cpp; sourceTree = "<group>"; };
 		1804F28C2C51140A0045084A /* CylinderDriver.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = CylinderDriver.hpp; sourceTree = "<group>"; };
 		1804F28F2C5114A80045084A /* BaseDriver.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = BaseDriver.cpp; sourceTree = "<group>"; };
@@ -508,6 +510,7 @@
 		3221603D2BB560CB00040E84 = {
 			isa = PBXGroup;
 			children = (
+				C3D0F1022F30000100000002 /* ThirdPartyNotices */,
 				1808B2992CC7B864007BD76E /* Resources */,
 				322160492BB560CB00040E84 /* Core3D */,
 				322160482BB560CB00040E84 /* Products */,
@@ -813,6 +816,7 @@
 			buildConfigurationList = 3221604E2BB560CB00040E84 /* Build configuration list for PBXNativeTarget "Core3D" */;
 			buildPhases = (
 				322160422BB560CB00040E84 /* Headers */,
+				C3D0F1002F30000100000001 /* Verify TKDEGLTF Binary Pair */,
 				322160432BB560CB00040E84 /* Sources */,
 				322160442BB560CB00040E84 /* Frameworks */,
 				322160452BB560CB00040E84 /* Resources */,
@@ -863,6 +867,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C3D0F1032F30000100000003 /* ThirdPartyNotices in Resources */,
 				1808B29A2CC7B864007BD76E /* Ionized.png in Resources */,
 				1808B29B2CC7B864007BD76E /* Plastified.png in Resources */,
 				1808B29C2CC7B864007BD76E /* Stone.png in Resources */,
@@ -890,6 +895,29 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		C3D0F1002F30000100000001 /* Verify TKDEGLTF Binary Pair */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/verify_occt_gltf_binary_pair.sh",
+				"$(SRCROOT)/Core3D/occt/TKDEGLTF_BUILD_MANIFEST.txt",
+				"$(SRCROOT)/Core3D/occt/lib/libTKDEGLTF.a",
+				"$(SRCROOT)/Core3D/occt/lib_sim/libTKDEGLTF.a",
+			);
+			name = "Verify TKDEGLTF Binary Pair";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"${SRCROOT}/Scripts/verify_occt_gltf_binary_pair.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		322160432BB560CB00040E84 /* Sources */ = {

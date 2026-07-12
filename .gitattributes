@@ -1,0 +1,4 @@
+# Preserve upstream license texts byte-for-byte, including their original
+# trailing whitespace, without treating that legal-text fidelity as an error.
+ThirdPartyNotices/OpenCASCADE/*.txt -whitespace
+ThirdPartyNotices/RapidJSON/*.txt -whitespace
