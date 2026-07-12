@@ -2539,6 +2539,124 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
     }
 }
 
+Standard_Integer OcctDocument::SupportedGeometryExportFormats() const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || !ValidateGeometryRepresentations()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return 0;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (aShapeTool.IsNull()) {
+            return 0;
+        }
+        TDF_LabelSequence aLabels;
+        aShapeTool->GetShapes(aLabels);
+        if (static_cast<Standard_Size>(aLabels.Length())
+            > kMaximumGeometryDocumentLabels) {
+            return 0;
+        }
+        Standard_Integer aFormats =
+            static_cast<Standard_Integer>(OcctGeometryExportFormat::Obj)
+            | static_cast<Standard_Integer>(OcctGeometryExportFormat::Stl)
+            | static_cast<Standard_Integer>(OcctGeometryExportFormat::Gltf)
+            | static_cast<Standard_Integer>(OcctGeometryExportFormat::Step);
+        Standard_Size aDefinitionCount = 0;
+        for (Standard_Integer anIndex = 1;
+             anIndex <= aLabels.Length(); ++anIndex) {
+            const TDF_Label& aLabel = aLabels.Value(anIndex);
+            if (aLabel.IsNull()
+                || aLabel.Data() != myOcafDoc->GetData()
+                || !aShapeTool->IsShape(aLabel)) {
+                return 0;
+            }
+            if (!IsGeometryDefinitionLabel(
+                    myOcafDoc, aShapeTool, aLabel)) {
+                continue;
+            }
+            if (aDefinitionCount
+                >= kMaximumGeometryDefinitionLabels) {
+                return 0;
+            }
+            ++aDefinitionCount;
+            const OcctGeometryRepresentation aRepresentation =
+                GeometryRepresentationForLabel(aLabel);
+            if (aRepresentation
+                == OcctGeometryRepresentation::TriangleMesh) {
+                aFormats &= ~static_cast<Standard_Integer>(
+                    OcctGeometryExportFormat::Step);
+            } else if (aRepresentation
+                    != OcctGeometryRepresentation::LegacyUnknown
+                && aRepresentation
+                    != OcctGeometryRepresentation::BRep) {
+                return 0;
+            }
+        }
+        return aDefinitionCount > 0 ? aFormats : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+Standard_Boolean OcctDocument::CanExportGeometry(
+    const OcctGeometryExportFormat format) const
+{
+    const Standard_Integer aRequested =
+        static_cast<Standard_Integer>(format);
+    const Standard_Integer aKnown =
+        static_cast<Standard_Integer>(OcctGeometryExportFormat::Obj)
+        | static_cast<Standard_Integer>(OcctGeometryExportFormat::Stl)
+        | static_cast<Standard_Integer>(OcctGeometryExportFormat::Gltf)
+        | static_cast<Standard_Integer>(OcctGeometryExportFormat::Step);
+    return aRequested != 0 && (aRequested & ~aKnown) == 0
+        && (SupportedGeometryExportFormats() & aRequested)
+            == aRequested;
+}
+
+Standard_Boolean OcctDocument::IsGeometryDocumentEmpty() const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || !ValidateGeometryRepresentations()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (aShapeTool.IsNull()) {
+            return Standard_False;
+        }
+        TDF_LabelSequence aLabels;
+        aShapeTool->GetShapes(aLabels);
+        if (static_cast<Standard_Size>(aLabels.Length())
+            > kMaximumGeometryDocumentLabels) {
+            return Standard_False;
+        }
+        for (Standard_Integer anIndex = 1;
+             anIndex <= aLabels.Length(); ++anIndex) {
+            const TDF_Label& aLabel = aLabels.Value(anIndex);
+            if (aLabel.IsNull()
+                || aLabel.Data() != myOcafDoc->GetData()
+                || !aShapeTool->IsShape(aLabel)) {
+                return Standard_False;
+            }
+            if (IsGeometryDefinitionLabel(
+                    myOcafDoc, aShapeTool, aLabel)) {
+                return Standard_False;
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::SetGeometryRepresentationForLabel(
     const TDF_Label& label,
     const OcctGeometryRepresentation representation)

@@ -1231,6 +1231,18 @@ NativeExportResult RunNativeExport(
                 Core3DNativeExportErrorInvalidState,
                 "The private export document is incomplete.");
         }
+		const OcctGeometryExportFormat geometryExportFormat =
+			state->exportType == ExportTypeObj
+				? OcctGeometryExportFormat::Obj
+				: state->exportType == ExportTypeStl
+					? OcctGeometryExportFormat::Stl
+					: OcctGeometryExportFormat::Step;
+		if (!document->CanExportGeometry(geometryExportFormat)
+			&& !document->IsGeometryDocumentEmpty()) {
+			throw NativeExportFailure(
+				Core3DNativeExportErrorInvalidState,
+				"The geometry representation cannot be exported in this format.");
+		}
         ocafDocument->SetUndoLimit(1);
         ocafDocument->NewCommand();
         if (!ocafDocument->HasOpenCommand()) {

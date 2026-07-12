@@ -26,6 +26,185 @@
 
 namespace core3d {
 	namespace {
+		bool IsBRepModelingRepresentation(
+			const OcctGeometryRepresentation theRepresentation) noexcept {
+			return theRepresentation
+					== OcctGeometryRepresentation::LegacyUnknown
+				|| theRepresentation == OcctGeometryRepresentation::BRep;
+		}
+
+		bool IsObjectModelingRepresentation(
+			const OcctGeometryRepresentation theRepresentation) noexcept {
+			return IsBRepModelingRepresentation(theRepresentation)
+				|| theRepresentation
+					== OcctGeometryRepresentation::TriangleMesh;
+		}
+
+		bool SelectionSupportsBRepModeling(
+			const Handle(Core3DContext)& theContext,
+			const Handle(OcctDocument)& theDocument) noexcept {
+			if (theContext.IsNull() || theDocument.IsNull()) {
+				return false;
+			}
+			try {
+				bool hasSelection = false;
+				for (theContext->InitSelected(); theContext->MoreSelected();
+					 theContext->NextSelected()) {
+					const Handle(AIS_InteractiveObject) aSelected =
+						theContext->SelectedInteractive();
+					const TDF_Label aLabel =
+						theDocument->ShapeLabel(aSelected);
+					if (aSelected.IsNull()
+						|| !theDocument->IsPresentationEditable(aSelected)
+						|| aLabel.IsNull()
+						|| !theDocument
+							->IsEditableFreeSimpleDefinitionLabel(aLabel)
+						|| !IsBRepModelingRepresentation(
+							theDocument->GeometryRepresentationForLabel(
+								aLabel))) {
+						return false;
+					}
+					hasSelection = true;
+				}
+				return hasSelection;
+			} catch (...) {
+				return false;
+			}
+		}
+
+		bool ManipulatorRequiresBRepModeling(
+			const PrimitiveManipulatorType theType) noexcept {
+			switch (theType) {
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeScale:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+					return true;
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeNone:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
+					return false;
+			}
+			return true;
+		}
+
+		bool ManipulatorAllowsEmptySelection(
+			const PrimitiveManipulatorType theType) noexcept {
+			switch (theType) {
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+					// These modes acquire and validate their BRep source after
+					// the tool is entered.  Empty selection is therefore a valid
+					// idle state, while an existing mesh/unsafe selection must
+					// still fail closed.
+					return true;
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeNone:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeScale:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
+					return false;
+			}
+			return false;
+		}
+
+		bool SelectionIsEmpty(
+			const Handle(Core3DContext)& theContext) noexcept {
+			if (theContext.IsNull()) {
+				return false;
+			}
+			try {
+				theContext->InitSelected();
+				return !theContext->MoreSelected();
+			} catch (...) {
+				return false;
+			}
+		}
+
+		bool ManipulatorObjectsSupportBRepModeling(
+			const Handle(Core3DManipulator)& theManipulator,
+			const Handle(OcctDocument)& theDocument,
+			const PrimitiveManipulatorType theManipulatorType,
+			const std::unordered_map<
+				const AIS_InteractiveObject*, TDF_Label>&
+				theSourceLabels) noexcept {
+			if (theManipulator.IsNull() || theDocument.IsNull()
+				|| !theManipulator->IsAttached()) {
+				return false;
+			}
+			try {
+				const Handle(TDocStd_Document) aDocument =
+					theDocument->Document();
+				const Handle(Core3DManipulatorObjectSequence) anObjects =
+					theManipulator->Objects();
+				const auto& aCachedShapes =
+					theManipulator->cachedShapes();
+				if (aDocument.IsNull()
+					|| anObjects.IsNull() || anObjects->Size() == 0) {
+					return false;
+				}
+				for (Core3DManipulatorObjectSequence::Iterator anObject(
+						*anObjects);
+					 anObject.More(); anObject.Next()) {
+					const Handle(AIS_InteractiveObject)& aPresentation =
+						anObject.Value();
+					const auto aCached = aCachedShapes.find(aPresentation);
+					const auto aSourceLabel = theSourceLabels.find(
+						aPresentation.get());
+					const TDF_Label aLabel =
+						aSourceLabel == theSourceLabels.end()
+						? TDF_Label()
+						: aSourceLabel->second;
+					const TopoDS_Shape aStoredShape =
+						aLabel.IsNull()
+						? TopoDS_Shape()
+						: XCAFDoc_ShapeTool::GetShape(aLabel);
+					const bool hasCachedShape =
+						aCached != aCachedShapes.end()
+						&& !aCached->second.IsNull();
+					const Handle(AIS_Shape) aPresentationShape =
+						Handle(AIS_Shape)::DownCast(aPresentation);
+					const bool isSourceShapeCurrent = hasCachedShape
+						&& !aPresentationShape.IsNull()
+						&& !aPresentationShape->Shape().IsNull()
+						&& aPresentationShape->Shape().IsEqual(
+							aCached->second);
+					const bool mayOwnScaledPreview =
+						theManipulatorType
+							== PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+						&& theManipulator->HasActiveTransformation();
+					const TDF_Label aCurrentLabel =
+						theDocument->ShapeLabel(aPresentation);
+					if (aPresentation.IsNull()
+						|| !theDocument->IsPresentationEditable(aPresentation)
+						|| aCached == aCachedShapes.end()
+						|| aCached->second.IsNull()
+						|| aLabel.IsNull()
+						|| aLabel.Data() != aDocument->GetData()
+						|| aStoredShape.IsNull()
+						|| !aStoredShape.IsEqual(aCached->second)
+						|| (!isSourceShapeCurrent && !mayOwnScaledPreview)
+						|| (!aCurrentLabel.IsNull()
+							&& !aCurrentLabel.IsEqual(aLabel))
+						|| (aCurrentLabel.IsNull() && isSourceShapeCurrent)
+						|| !theDocument
+							->IsEditableFreeSimpleDefinitionLabel(aLabel)
+						|| !IsBRepModelingRepresentation(
+							theDocument->GeometryRepresentationForLabel(
+								aLabel))) {
+						return false;
+					}
+				}
+				return true;
+			} catch (...) {
+				return false;
+			}
+		}
+
 		Standard_Boolean IsTopologicallyValid(const TopoDS_Shape& shape) {
 			if (shape.IsNull()) {
 				return Standard_False;
@@ -91,13 +270,22 @@ namespace core3d {
     }
 
     void ObjectInteractor::attachManipulator(Handle(AIS_InteractiveObject) toObject) {
+        const TDF_Label aLabel = myDoc->ShapeLabel(toObject);
+		const OcctGeometryRepresentation aRepresentation =
+			myDoc->GeometryRepresentationForLabel(aLabel);
         if (toObject.IsNull()
             || !myDoc->IsPresentationEditable(toObject)
-            || myDoc->ShapeLabel(toObject).IsNull()) {
+			|| aLabel.IsNull()
+			|| !myDoc->IsEditableFreeSimpleDefinitionLabel(aLabel)
+			|| !IsObjectModelingRepresentation(aRepresentation)
+			|| (ManipulatorRequiresBRepModeling(_manipulatorType)
+				&& !IsBRepModelingRepresentation(
+					aRepresentation))) {
             return;
         }
         createManipulatorIfNeeded();
         _manipulator->Attach(toObject);
+		_manipulatorSourceLabels[toObject.get()] = aLabel;
         myContext->UpdateCurrentViewer();
     }
 
@@ -107,6 +295,7 @@ namespace core3d {
 				cancelInteraction();
 			}
 			_manipulator->Detach(fromObject);
+			_manipulatorSourceLabels.erase(fromObject.get());
 			myContext->UpdateCurrentViewer();
 		}
 	}
@@ -117,6 +306,7 @@ namespace core3d {
 				cancelInteraction();
 			}
 			_manipulator->Detach();
+			_manipulatorSourceLabels.clear();
 			if (updateViewer)
 				myContext->UpdateCurrentViewer();
 		}
@@ -143,16 +333,45 @@ namespace core3d {
 			myContext->UpdateCurrentViewer();
 			return;
 		}
-		if (!editableObjects.empty()) {
-			createManipulatorIfNeeded();
-			for (const Handle(AIS_InteractiveObject)& object
-				 : editableObjects) {
-				myContext->AddSelect(object);
-				myContext->HilightSelected(Standard_False);
-				_manipulator->Attach(object);
+		std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>>
+			attachableObjects;
+		attachableObjects.reserve(editableObjects.size());
+		bool canAttachAll = true;
+		for (const Handle(AIS_InteractiveObject)& object : editableObjects) {
+			myContext->AddSelect(object);
+			myContext->HilightSelected(Standard_False);
+			const TDF_Label label = myDoc->ShapeLabel(object);
+			const OcctGeometryRepresentation representation =
+				myDoc->GeometryRepresentationForLabel(label);
+			if (label.IsNull()
+				|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+				|| representation == OcctGeometryRepresentation::Invalid
+				|| (ManipulatorRequiresBRepModeling(_manipulatorType)
+					&& !IsBRepModelingRepresentation(representation))) {
+				canAttachAll = false;
+				continue;
 			}
-			myContext->UpdateCurrentViewer();
+			attachableObjects.push_back({object, label});
 		}
+		if (!canAttachAll
+			|| attachableObjects.size() != editableObjects.size()) {
+			detachManipulator(false);
+			myContext->UpdateCurrentViewer();
+			return;
+		}
+		createManipulatorIfNeeded();
+		Handle(Core3DManipulatorObjectSequence) sequence =
+			new Core3DManipulatorObjectSequence();
+		for (const auto& object : attachableObjects) {
+			sequence->Append(object.first);
+		}
+		_manipulator->Attach(sequence);
+		_manipulatorSourceLabels.clear();
+		for (const auto& object : attachableObjects) {
+			_manipulatorSourceLabels.emplace(
+				object.first.get(), object.second);
+		}
+		myContext->UpdateCurrentViewer();
 	}
 
 	Handle(TopLoc_Datum3D) ObjectInteractor::manipulatorTransform() {
@@ -289,7 +508,13 @@ namespace core3d {
 		std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> removals;
         for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
 			const TDF_Label label = myDoc->ShapeLabel(it.Value());
-			if (label.IsNull()) { return; }
+			if (label.IsNull()
+				|| !myDoc->IsPresentationEditable(it.Value())
+				|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+				|| myDoc->GeometryRepresentationForLabel(label)
+					== OcctGeometryRepresentation::Invalid) {
+				return;
+			}
 			for (const auto& removal : removals) {
 				if (removal.second.IsEqual(label)) { return; }
 			}
@@ -314,7 +539,7 @@ namespace core3d {
 			return;
 		}
 
-		_manipulator->Detach();
+		detachManipulator(false);
 		for (const auto& removal : removals) {
 			myContext->Remove(removal.first, Standard_False);
 		}
@@ -326,21 +551,55 @@ namespace core3d {
         auto doc = myDoc->ChangeDocument();
 		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
         
-        Handle(AIS_InteractiveObject) selected;
-        Bnd_Box overallBox;
-        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
-            selected = myContext->SelectedInteractive();
-            
-            Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
-            if (shape.IsNull() || shape->Shape().IsNull())
-                continue;
-
-            Bnd_Box b;
-            shape->BoundingBox(b);
-            
-            if(b.IsVoid()) {
-                continue;
+        struct DuplicateSource {
+            Handle(AIS_Shape) presentation;
+            TDF_Label label;
+        };
+        std::vector<DuplicateSource> sources;
+        for (myContext->InitSelected(); myContext->MoreSelected();
+             myContext->NextSelected()) {
+            const Handle(AIS_InteractiveObject) selected =
+                myContext->SelectedInteractive();
+            const Handle(AIS_Shape) shape =
+                Handle(AIS_Shape)::DownCast(selected);
+            const TDF_Label label = myDoc->ShapeLabel(selected);
+            const OcctGeometryRepresentation representation =
+                myDoc->GeometryRepresentationForLabel(label);
+            const TopoDS_Shape storedShape = label.IsNull()
+                ? TopoDS_Shape()
+                : XCAFDoc_ShapeTool::GetShape(label);
+            if (selected.IsNull() || shape.IsNull()
+                || shape->Shape().IsNull()
+                || !myDoc->IsPresentationEditable(selected)
+                || label.IsNull()
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                || !IsBRepModelingRepresentation(representation)
+                || storedShape.IsNull()
+                || !storedShape.IsEqual(shape->Shape())) {
+                // Triangle-only duplication remains disabled until the copy
+                // path preserves Poly_Triangulation data explicitly. Reject
+                // every unsupported source before bounding or copying any
+                // geometry.
+                return;
             }
+            bool isDuplicateLabel = false;
+            for (const DuplicateSource& source : sources) {
+                if (source.label.IsEqual(label)) {
+                    isDuplicateLabel = true;
+                    break;
+                }
+            }
+            if (!isDuplicateLabel) {
+                sources.push_back({shape, label});
+            }
+        }
+        if (sources.empty()) { return; }
+
+        Bnd_Box overallBox;
+        for (const DuplicateSource& source : sources) {
+            Bnd_Box b;
+            source.presentation->BoundingBox(b);
+            if (b.IsVoid()) { return; }
             if(overallBox.IsVoid()) {
                 overallBox = b;
             } else {
@@ -359,48 +618,30 @@ namespace core3d {
         
         minAxisDisplacement.SetTranslation((w>d)?(gp_Vec){0., d, 0.}:(gp_Vec){w, 0., 0.});
         
-        std::vector<Handle(AIS_InteractiveObject)> copyInteractives;
-        
-        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
-            selected = myContext->SelectedInteractive();
-            Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
-			if (shape.IsNull() || shape->Shape().IsNull())
-				continue;
-			
-            copyInteractives.push_back(selected);
-        }
-        
 		struct DuplicateRecord {
 			Handle(AIS_Shape) presentation;
 			TDF_Label sourceLabel;
+			TDF_Label resultLabel;
 			OcctGeometryRepresentation representation;
 		};
 		std::vector<DuplicateRecord> duplicates;
 		try {
-			for (const auto& item : copyInteractives) {
-				Handle(AIS_Shape) source = Handle(AIS_Shape)::DownCast(item);
-				const TDF_Label sourceLabel = myDoc->ShapeLabel(item);
-				const OcctGeometryRepresentation sourceRepresentation =
-					myDoc->GeometryRepresentationForLabel(sourceLabel);
-				if (sourceLabel.IsNull()
-					|| (sourceRepresentation
-						!= OcctGeometryRepresentation::LegacyUnknown
-						&& sourceRepresentation
-							!= OcctGeometryRepresentation::BRep)) {
-					// Triangle-only duplication remains disabled until the copy
-					// path preserves Poly_Triangulation data explicitly.
-					return;
-				}
+			for (const DuplicateSource& source : sources) {
 				BRepBuilderAPI_Copy shapeCopy;
-				shapeCopy.Perform(source->Shape(), Standard_True, Standard_False);
+				shapeCopy.Perform(
+					source.presentation->Shape(),
+					Standard_True,
+					Standard_False);
 				if (!shapeCopy.IsDone() || !IsTopologicallyValid(shapeCopy.Shape())) { return; }
 				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
 				copy->SetLocalTransformation(
-					source->LocalTransformation().Multiplied(minAxisDisplacement));
-				myDoc->LoadObjectMeterial(sourceLabel, copy);
+					source.presentation->LocalTransformation().Multiplied(
+						minAxisDisplacement));
+				myDoc->LoadObjectMeterial(source.label, copy);
 				duplicates.push_back({
 					copy,
-					sourceLabel,
+					source.label,
+					TDF_Label(),
 					OcctGeometryRepresentation::BRep});
 			}
 		} catch (...) {
@@ -410,7 +651,7 @@ namespace core3d {
 
 		try {
 			doc->NewCommand();
-			for (const auto& duplicate : duplicates) {
+			for (auto& duplicate : duplicates) {
 				const TDF_Label label = myDoc->AddShape(
 					duplicate.presentation,
 					duplicate.representation);
@@ -425,6 +666,7 @@ namespace core3d {
 					doc->AbortCommand();
 					return;
 				}
+				duplicate.resultLabel = label;
 				myDoc->LoadObjectMeterial(label, duplicate.presentation);
 			}
 			if (!doc->CommitCommand()) {
@@ -436,12 +678,14 @@ namespace core3d {
 			return;
 		}
 
-		_manipulator->Detach();
+		detachManipulator(false);
 		myContext->ClearSelected(Standard_False);
 		for (const auto& duplicate : duplicates) {
 			myContext->Display(duplicate.presentation, AIS_Shaded, 0, Standard_False);
 			myContext->AddSelect(duplicate.presentation);
 			_manipulator->Attach(duplicate.presentation);
+			_manipulatorSourceLabels[duplicate.presentation.get()] =
+				duplicate.resultLabel;
 		}
 		myContext->HilightSelected(Standard_True);
 		myDoc->NotifyChanges();
@@ -456,6 +700,11 @@ namespace core3d {
 
     void ObjectInteractor::attachManipulatorToSelection(bool detach) {
         if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { return; }
+		if (ManipulatorRequiresBRepModeling(_manipulatorType)
+			&& !SelectionSupportsBRepModeling(myContext, myDoc)) {
+			detachManipulator(false);
+			return;
+		}
 
 		if (detach) {
 			myContext->InitDetected();
@@ -491,7 +740,7 @@ namespace core3d {
         
         if(selected.IsNull()) {
             if(!_manipulator.IsNull()) {
-                _manipulator->Detach();
+                detachManipulator(false);
                 myContext->UpdateCurrentViewer();
             }
             return;
@@ -516,6 +765,12 @@ namespace core3d {
 		if (!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) {
 			cancelInteraction();
 		}
+		if (ManipulatorRequiresBRepModeling(type)
+			&& !SelectionSupportsBRepModeling(myContext, myDoc)
+			&& (!ManipulatorAllowsEmptySelection(type)
+				|| !SelectionIsEmpty(myContext))) {
+			type = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+		}
         _manipulatorType = type;
         createManipulatorIfNeeded();
         bool scale = type == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
@@ -533,13 +788,55 @@ namespace core3d {
         
         auto objects = _manipulator->Objects();
 		if(!objects.IsNull() && objects->Size() > 0) {
+			std::vector<std::pair<
+				Handle(AIS_InteractiveObject), TDF_Label>> sources;
+			sources.reserve(static_cast<std::size_t>(objects->Size()));
+			bool canReattach = true;
+			const auto& cachedShapes = _manipulator->cachedShapes();
+			for (Core3DManipulatorObjectSequence::Iterator object(*objects);
+				 object.More(); object.Next()) {
+				const Handle(AIS_InteractiveObject)& presentation =
+					object.Value();
+				const TDF_Label label = myDoc->ShapeLabel(presentation);
+				const auto cached = cachedShapes.find(presentation);
+				const TopoDS_Shape stored = label.IsNull()
+					? TopoDS_Shape()
+					: XCAFDoc_ShapeTool::GetShape(label);
+				const OcctGeometryRepresentation representation =
+					myDoc->GeometryRepresentationForLabel(label);
+				if (presentation.IsNull()
+					|| !myDoc->IsPresentationEditable(presentation)
+					|| label.IsNull()
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+					|| cached == cachedShapes.end()
+					|| cached->second.IsNull()
+					|| stored.IsNull()
+					|| !stored.IsEqual(cached->second)
+					|| representation
+						== OcctGeometryRepresentation::Invalid
+					|| (ManipulatorRequiresBRepModeling(_manipulatorType)
+						&& !IsBRepModelingRepresentation(
+							representation))) {
+					canReattach = false;
+					break;
+				}
+				sources.push_back({presentation, label});
+			}
             if (_manipulator->IsAttached()) {
                 _manipulator->Detach();
             }
+			_manipulatorSourceLabels.clear();
             if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude
-                && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
+				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+				&& canReattach
+				&& sources.size()
+					== static_cast<std::size_t>(objects->Size())) {
 				_manipulator->Attach(objects);
+				for (const auto& source : sources) {
+					_manipulatorSourceLabels.emplace(
+						source.first.get(), source.second);
+				}
             }
         }
 
@@ -554,6 +851,15 @@ namespace core3d {
     }
 
     bool ObjectInteractor::transformManipulator(const int theX, const int theY) {
+		if (ManipulatorRequiresBRepModeling(_manipulatorType)
+			&& !ManipulatorObjectsSupportBRepModeling(
+				_manipulator,
+				myDoc,
+				_manipulatorType,
+				_manipulatorSourceLabels)) {
+			cancelInteraction();
+			return false;
+		}
         if(!_manipulator.IsNull() && _manipulator->IsAttached()) {
             if(_manipulator->HasActiveMode()) {
                 _manipulator->Transform(theX, theY, myView, myContext);
@@ -565,6 +871,15 @@ namespace core3d {
     }
 
     bool ObjectInteractor::startTransformManipulator(const int theX, const int theY) {
+		if (ManipulatorRequiresBRepModeling(_manipulatorType)
+			&& !ManipulatorObjectsSupportBRepModeling(
+				_manipulator,
+				myDoc,
+				_manipulatorType,
+				_manipulatorSourceLabels)) {
+			cancelInteraction();
+			return false;
+		}
         if(!_manipulator.IsNull() && _manipulator->IsAttached()) {
             myContext->MoveTo(theX, theY, myView, Standard_False);
             myContext->UpdateCurrentViewer();
@@ -577,6 +892,15 @@ namespace core3d {
     }
 
     void ObjectInteractor::finishInteraction() {
+		if (ManipulatorRequiresBRepModeling(_manipulatorType)
+			&& !ManipulatorObjectsSupportBRepModeling(
+				_manipulator,
+				myDoc,
+				_manipulatorType,
+				_manipulatorSourceLabels)) {
+			cancelInteraction();
+			return;
+		}
         if(!_manipulator.IsNull() && _manipulator->IsAttached() && _manipulator->HasActiveMode()) {
 			const AIS_ManipulatorMode activeMode = _manipulator->ActiveMode();
 			const bool isMirrorPlane = _manipulatorType
@@ -638,7 +962,6 @@ namespace core3d {
 				return;
 			}
 
-            Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myDoc->Document()->Main());
             auto doc = myDoc->ChangeDocument();
 			if (doc.IsNull() || doc->HasOpenCommand()) {
 				cancelInteraction();
@@ -648,12 +971,42 @@ namespace core3d {
 			std::vector<std::pair<Handle(AIS_Shape), TDF_Label>> changes;
 			for (const auto& cachedShape : cachedShapes) {
 				Handle(AIS_Shape) presentation = Handle(AIS_Shape)::DownCast(cachedShape.first);
-				TDF_Label label;
+				const auto sourceLabel = _manipulatorSourceLabels.find(
+					cachedShape.first.get());
+				const TDF_Label label =
+					sourceLabel == _manipulatorSourceLabels.end()
+					? TDF_Label()
+					: sourceLabel->second;
+				const TopoDS_Shape storedShape = label.IsNull()
+					? TopoDS_Shape()
+					: XCAFDoc_ShapeTool::GetShape(label);
+				const OcctGeometryRepresentation representation =
+					myDoc->GeometryRepresentationForLabel(label);
+				const bool isSourceShapeCurrent =
+					!presentation.IsNull()
+					&& !presentation->Shape().IsNull()
+					&& presentation->Shape().IsEqual(cachedShape.second);
+				const TDF_Label currentLabel =
+					myDoc->ShapeLabel(presentation);
 				if (presentation.IsNull()
 					|| presentation->Shape().IsNull()
 					|| !myDoc->IsPresentationEditable(presentation)
-					|| !shapeTool->FindShape(cachedShape.second, label)
 					|| label.IsNull()
+					|| label.Data() != doc->GetData()
+					|| storedShape.IsNull()
+					|| !storedShape.IsEqual(cachedShape.second)
+					|| (!isSourceShapeCurrent
+						&& _manipulatorType
+							!= PrimitiveManipulatorType::PrimitiveGizmoTypeScale)
+					|| (!currentLabel.IsNull()
+						&& !currentLabel.IsEqual(label))
+					|| (currentLabel.IsNull() && isSourceShapeCurrent)
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+					|| !IsObjectModelingRepresentation(representation)
+					|| (_manipulatorType
+							== PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+						&& !IsBRepModelingRepresentation(
+							representation))
 					|| (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale
 						&& !IsTopologicallyValid(presentation->Shape()))) {
 					cancelInteraction();
@@ -994,6 +1347,14 @@ namespace core3d {
 		replacementSourceLabels.reserve(
 			static_cast<std::size_t>(anObjects->Size()));
 		
+		if (!ManipulatorObjectsSupportBRepModeling(
+				_manipulator,
+				myDoc,
+				PrimitiveManipulatorType::PrimitiveGizmoTypeMirror,
+				_manipulatorSourceLabels)) {
+			return;
+		}
+
 		Bnd_Box aBox, aBoxSum;
 	
 		for (auto &obj : *anObjects) { //calculate summary bounding box
@@ -1010,7 +1371,12 @@ namespace core3d {
 			if (shape.IsNull() || shape->Shape().IsNull()) {
 				return;
 			}
-			const TDF_Label sourceLabel = myDoc->ShapeLabel(selected);
+			const auto source = _manipulatorSourceLabels.find(
+				selected.get());
+			const TDF_Label sourceLabel =
+				source == _manipulatorSourceLabels.end()
+				? TDF_Label()
+				: source->second;
 			const OcctGeometryRepresentation sourceRepresentation =
 				myDoc->GeometryRepresentationForLabel(sourceLabel);
 			if (sourceLabel.IsNull()
@@ -1171,6 +1537,15 @@ namespace core3d {
 				return;
 			}
 		}
+		for (const auto& source : _trialMirrorSourceLabels) {
+			if (!IsBRepModelingRepresentation(
+					myDoc->GeometryRepresentationForLabel(source.second))
+				|| !myDoc->IsEditableFreeSimpleDefinitionLabel(
+					source.second)) {
+				clearTrialMirrorObjects();
+				return;
+			}
+		}
 
 		try {
 			doc->NewCommand();
@@ -1185,6 +1560,12 @@ namespace core3d {
 				const TDF_Label label = myDoc->AddShape(
 					shape, OcctGeometryRepresentation::BRep);
 				if (label.IsNull()) {
+					doc->AbortCommand();
+					clearTrialMirrorObjects();
+					return;
+				}
+				if (myDoc->GeometryRepresentationForLabel(label)
+					!= OcctGeometryRepresentation::BRep) {
 					doc->AbortCommand();
 					clearTrialMirrorObjects();
 					return;

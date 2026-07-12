@@ -1121,6 +1121,8 @@ struct DefinitionData {
     TopTools_IndexedMapOfShape faces;
     MeshSnapshot mesh;
     Double3 sourceOrigin;
+    OcctGeometryRepresentation representation =
+        OcctGeometryRepresentation::Invalid;
     std::uint64_t fingerprint = 0;
     bool closed = false;
 };
@@ -3218,6 +3220,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 DefinitionData aDefinition;
                 aDefinition.label = aDefinitionLabel;
                 aDefinition.shape = aShape;
+                aDefinition.representation =
+                    theDocument->GeometryRepresentationForLabel(
+                        aDefinitionLabel);
+                if (aDefinition.representation
+                    == OcctGeometryRepresentation::Invalid) {
+                    return {};
+                }
                 aDefinitionIndices.emplace(anOccurrence.definitionIdentifier,
                                            aDefinitions.size());
                 aDefinitions.push_back(std::move(aDefinition));
@@ -3522,6 +3531,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             }
 
             anInstance.primitiveBindings.reserve(aMesh.primitives.size());
+            std::optional<std::uint32_t> anObjectPickToken;
             for (std::size_t aPrimitiveIndex = 0;
                  aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
                 if (!aFaceMaterials[aPrimitiveIndex].has_value()) {
@@ -3537,20 +3547,38 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 aBinding.materialIndex = aMaterialIndex;
                 aBinding.visible = aFaceVisibility[aPrimitiveIndex];
                 if (anInstance.selectable && aBinding.visible) {
-                    if (!FitsUInt32(aScene.pickTable.size())
-                        || aScene.pickTable.size()
-                            == std::numeric_limits<std::uint32_t>::max()
-                        || aScene.pickTable.size() >= kMaxPickElementsPerSnapshot) {
-                        return {};
+                    const bool isTriangleMesh =
+                        aDefinition.representation
+                        == OcctGeometryRepresentation::TriangleMesh;
+                    if (!isTriangleMesh || !anObjectPickToken.has_value()) {
+                        if (!FitsUInt32(aScene.pickTable.size())
+                            || aScene.pickTable.size()
+                                == std::numeric_limits<std::uint32_t>::max()
+                            || aScene.pickTable.size()
+                                >= kMaxPickElementsPerSnapshot) {
+                            return {};
+                        }
+                        const std::uint32_t aPickToken =
+                            static_cast<std::uint32_t>(
+                                aScene.pickTable.size());
+                        aScene.pickTable.push_back({
+                            anInstance.entityIdentifier,
+                            isTriangleMesh
+                                ? ElementKind::Object
+                                : ElementKind::Face,
+                            isTriangleMesh
+                                ? 0U
+                                : aMesh.primitives[aPrimitiveIndex].faceIndex,
+                            aMesh.geometryRevision,
+                        });
+                        if (isTriangleMesh) {
+                            anObjectPickToken = aPickToken;
+                        }
                     }
-                    aBinding.pickToken =
-                        static_cast<std::uint32_t>(aScene.pickTable.size());
-                    aScene.pickTable.push_back({
-                        anInstance.entityIdentifier,
-                        ElementKind::Face,
-                        aMesh.primitives[aPrimitiveIndex].faceIndex,
-                        aMesh.geometryRevision,
-                    });
+                    aBinding.pickToken = anObjectPickToken.has_value()
+                        ? *anObjectPickToken
+                        : static_cast<std::uint32_t>(
+                            aScene.pickTable.size() - 1U);
                 }
                 anInstance.primitiveBindings.push_back(aBinding);
             }
@@ -3615,7 +3643,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             anElement.entityIdentifier = anInstance.entityIdentifier;
             anElement.kind = ElementKind::Object;
             anElement.geometryRevision = aMesh.geometryRevision;
-            if (!theSubshape.IsNull()
+            if (aDefinitions[anInstance.meshIndex].representation
+                    != OcctGeometryRepresentation::TriangleMesh
+                && !theSubshape.IsNull()
                 && theSubshape.ShapeType() == TopAbs_FACE) {
                 const Standard_Integer aFaceIndex =
                     aDefinitions[anInstance.meshIndex].faces.FindIndex(
@@ -3745,12 +3775,23 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     }
 
                     std::optional<std::size_t> aDetectedInstance;
-                    if (!aDetectedSubshape.IsNull()
+                    if (anInstanceIndices->size() == 1
+                        && aDefinitions[
+                            aScene.instances[anInstanceIndices->front()]
+                                .meshIndex].representation
+                            == OcctGeometryRepresentation::TriangleMesh) {
+                        aDetectedInstance = anInstanceIndices->front();
+                    } else if (!aDetectedSubshape.IsNull()
                         && aDetectedSubshape.ShapeType() == TopAbs_FACE) {
                         for (const std::size_t anInstanceIndex :
                              *anInstanceIndices) {
                             const InstanceSnapshot& anInstance =
                                 aScene.instances[anInstanceIndex];
+                            if (aDefinitions[anInstance.meshIndex]
+                                    .representation
+                                == OcctGeometryRepresentation::TriangleMesh) {
+                                continue;
+                            }
                             if (aDefinitions[anInstance.meshIndex]
                                     .faces.FindIndex(aDetectedSubshape) > 0) {
                                 if (aDetectedInstance.has_value()) {

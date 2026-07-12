@@ -522,6 +522,10 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
+    if ((self.selectedModelCapabilities
+            & Core3DModelCapabilityMaterial) == 0) {
+        return;
+    }
     auto context = GLController.viewer->AisContext();
     auto doc = GLController.viewer->getDocument();
 	auto transaction = doc->ChangeDocument();
@@ -636,6 +640,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (material == nil || !material.supportsScalarEditing) {
         return;
     }
+	if ((self.selectedModelCapabilities
+			& Core3DModelCapabilityMaterial) == 0) {
+		return;
+	}
 
     auto context = GLController.viewer->AisContext();
     auto doc = GLController.viewer->getDocument();
@@ -771,8 +779,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 -(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
-                                      mediaType:(NSString*)mediaType
-                                          error:(NSError* _Nullable * _Nullable)error {
+                                     mediaType:(NSString*)mediaType
+                                         error:(NSError* _Nullable * _Nullable)error {
     if (error != nullptr) {
         *error = nil;
     }
@@ -805,6 +813,12 @@ void Core3DAddDebugOrphanVisualMaterial(
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"The material editor is not ready.");
+    }
+    if ((self.selectedModelCapabilities
+            & Core3DModelCapabilityMaterial) == 0) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnsupportedSelection,
+            @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
     if (transaction.IsNull() || transaction->HasOpenCommand()) {
@@ -991,6 +1005,12 @@ void Core3DAddDebugOrphanVisualMaterial(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"The material editor is not ready.");
     }
+    if ((self.selectedModelCapabilities
+            & Core3DModelCapabilityMaterial) == 0) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnsupportedSelection,
+            @"Select only editable model objects before editing a texture.");
+    }
     auto transaction = doc->ChangeDocument();
     if (transaction.IsNull() || transaction->HasOpenCommand()) {
         return Core3DTextureAuthoringFailure(
@@ -1140,8 +1160,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 -(BOOL)updateSelectionWithEmissiveTextureData:(NSData*)textureData
-                                    mediaType:(NSString*)mediaType
-                                        error:(NSError* _Nullable * _Nullable)error {
+                                     mediaType:(NSString*)mediaType
+                                         error:(NSError* _Nullable * _Nullable)error {
     if (error != nullptr) {
         *error = nil;
     }
@@ -1174,6 +1194,12 @@ void Core3DAddDebugOrphanVisualMaterial(
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"The material editor is not ready.");
+    }
+    if ((self.selectedModelCapabilities
+            & Core3DModelCapabilityMaterial) == 0) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnsupportedSelection,
+            @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
     if (transaction.IsNull() || transaction->HasOpenCommand()) {
@@ -1389,6 +1415,12 @@ void Core3DAddDebugOrphanVisualMaterial(
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"The material editor is not ready.");
+    }
+    if ((self.selectedModelCapabilities
+            & Core3DModelCapabilityMaterial) == 0) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnsupportedSelection,
+            @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
     if (transaction.IsNull() || transaction->HasOpenCommand()) {

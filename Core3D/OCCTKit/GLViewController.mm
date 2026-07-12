@@ -1344,6 +1344,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
     }
     _viewer->getObjectInteractor()->setManipulatorType(manipulatorType);
+	if (_viewer->getObjectInteractor()->getManipulatorType()
+		!= manipulatorType) {
+		[self requestRender];
+		return;
+	}
     if (type == PrimitiveGizmoTypeChamfer) {
         _viewer->getShapeInteractor()->saveSelectionEdges();
 	} else if (type == PrimitiveGizmoTypeSubtract || type == PrimitiveGizmoTypeUnion) {
@@ -2504,7 +2509,25 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         ? Handle(TDocStd_Document)()
         : document->ChangeDocument();
     const auto objectInteractor = _viewer->getObjectInteractor();
+    OcctGeometryExportFormat geometryExportFormat;
+    switch (exportType) {
+        case ExportTypeObj:
+            geometryExportFormat = OcctGeometryExportFormat::Obj;
+            break;
+        case ExportTypeStl:
+            geometryExportFormat = OcctGeometryExportFormat::Stl;
+            break;
+        case ExportTypeGltf:
+            geometryExportFormat = OcctGeometryExportFormat::Gltf;
+            break;
+        case ExportTypeStep:
+            geometryExportFormat = OcctGeometryExportFormat::Step;
+            break;
+        default:
+            return nil;
+    }
     if (transaction.IsNull() || transaction->HasOpenCommand()
+        || !document->CanExportGeometry(geometryExportFormat)
         || objectInteractor == nullptr
         || objectInteractor->hasActiveBoolean()
         || objectInteractor->hasUnresolvedBoolean()

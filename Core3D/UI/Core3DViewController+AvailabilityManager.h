@@ -18,6 +18,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)canRedo;
 - (NSArray<NSNumber *> *_Nonnull)availableGizmoTypes;
 - (BOOL)canApplyMaterial;
+//! Export support is document-wide rather than selection-based. In
+//! particular, STEP is unavailable while any TriangleMesh definition remains.
+- (BOOL)canExportType:(ExportType)exportType
+    NS_SWIFT_NAME(canExport(type:));
+- (NSArray<NSNumber *> *_Nonnull)availableExportTypes;
 
 @end
 

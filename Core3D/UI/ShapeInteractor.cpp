@@ -62,6 +62,22 @@ namespace core3d {
 		constexpr Standard_Size kMaximumExtrusionProfileEdges = 64;
 		constexpr Standard_Real kMaximumExtrusionDistance = 100.0;
 
+		Standard_Boolean IsBRepModelingLabel(
+			const Handle(OcctDocument)& document,
+			const TDF_Label& label) noexcept {
+			if (document.IsNull() || label.IsNull()) {
+				return Standard_False;
+			}
+			if (!document->IsEditableFreeSimpleDefinitionLabel(label)) {
+				return Standard_False;
+			}
+			const OcctGeometryRepresentation representation =
+				document->GeometryRepresentationForLabel(label);
+			return representation
+					== OcctGeometryRepresentation::LegacyUnknown
+				|| representation == OcctGeometryRepresentation::BRep;
+		}
+
 		enum class ExtrusionDocumentState {
 			Unavailable,
 			OpenCommand,
@@ -226,6 +242,7 @@ namespace core3d {
 			Standard_Size& profileEdgeCount) {
 			if (document.IsNull() || presentation.IsNull()
 				|| presentation->Shape().IsNull() || label.IsNull()
+				|| !IsBRepModelingLabel(document, label)
 				|| document->Document().IsNull()
 				|| label.Data() != document->Document()->GetData()
 				|| !document->IsPresentationEditable(presentation)
@@ -423,12 +440,14 @@ namespace core3d {
 
 		bool CanExportCommittedDocument(
 			const Handle(OcctDocument)& document,
-			const std::string& filename) {
+			const std::string& filename,
+			const OcctGeometryExportFormat format) {
 			const Handle(TDocStd_Document) transaction = document.IsNull()
 				? Handle(TDocStd_Document)()
 				: document->ChangeDocument();
 			if (filename.empty() || transaction.IsNull()
-				|| transaction->HasOpenCommand()) {
+				|| transaction->HasOpenCommand()
+				|| !document->CanExportGeometry(format)) {
 				if (!filename.empty()) {
 					std::remove(filename.c_str());
 				}
@@ -551,6 +570,9 @@ namespace core3d {
 				return Standard_False;
 			}
 			const TDF_Label label = myDoc->ShapeLabel(presentation);
+			if (!IsBRepModelingLabel(myDoc, label)) {
+				return Standard_False;
+			}
 			Standard_Size sourceSubshapeCount = 0;
 			Standard_Size profileEdgeCount = 0;
 			if (!IsEditableFreeSolidDefinition(
@@ -713,6 +735,7 @@ namespace core3d {
 			if (document.IsNull() || document->HasOpenCommand()
 				|| document->GetUndoLimit() == 0
 				|| _extrusion.label.Data() != document->GetData()
+				|| !IsBRepModelingLabel(myDoc, _extrusion.label)
 				|| currentLabel.IsNull()
 				|| !currentLabel.IsEqual(_extrusion.label)
 				|| !XCAFDoc_ShapeTool::GetShape(_extrusion.label)
@@ -779,6 +802,11 @@ namespace core3d {
 			if (!myDoc->ReplaceShape(_extrusion.label, candidate)) {
 				throw Standard_Failure(
 					"Unable to replace extrusion preview geometry");
+			}
+			if (myDoc->GeometryRepresentationForLabel(_extrusion.label)
+				!= OcctGeometryRepresentation::BRep) {
+				throw Standard_Failure(
+					"Extrusion result is not persisted as BRep");
 			}
 
 			myContext->ClearSelected(Standard_False);
@@ -847,6 +875,8 @@ namespace core3d {
 				&& document->GetUndoLimit() != 0
 				&& document->HasOpenCommand()
 				&& _extrusion.label.Data() == document->GetData()
+				&& myDoc->GeometryRepresentationForLabel(
+					_extrusion.label) == OcctGeometryRepresentation::BRep
 				&& myDoc->IsPresentationEditable(
 					_extrusion.candidatePresentation)
 				&& myDoc->ShapeLabel(_extrusion.candidatePresentation)
@@ -937,7 +967,9 @@ namespace core3d {
 			// appended. A prior call may have closed successfully and then thrown
 			// or reported false, so reconcile the authoritative label first.
 			if (_extrusion.ownsCommand
-				&& state == ExtrusionDocumentState::CandidateShape) {
+				&& state == ExtrusionDocumentState::CandidateShape
+				&& myDoc->GeometryRepresentationForLabel(
+					_extrusion.label) == OcctGeometryRepresentation::BRep) {
 				finishCommitted();
 				return Standard_True;
 			}
@@ -985,7 +1017,9 @@ namespace core3d {
 					_extrusion.originalShape,
 					candidateShape);
 			}
-			if (state == ExtrusionDocumentState::CandidateShape) {
+			if (state == ExtrusionDocumentState::CandidateShape
+				&& myDoc->GeometryRepresentationForLabel(
+					_extrusion.label) == OcctGeometryRepresentation::BRep) {
 				finishCommitted();
 				return Standard_True;
 			}
@@ -1111,12 +1145,17 @@ namespace core3d {
 			for (Standard_Size index = 0; index < _detectedEdges.size(); ++index) {
 				const EdgesSelection& sel = _detectedEdges[index];
 				if (sel.detectedOwner.IsNull() || !sel.detectedOwner->HasSelectable()
-					|| sel.documentLabel.IsNull() || sel.edges.empty()) {
+					|| sel.documentLabel.IsNull() || sel.edges.empty()
+					|| !IsBRepModelingLabel(
+						myDoc, sel.documentLabel)) {
 					return Standard_False;
 				}
 				Handle(AIS_Shape) ownerShape =
 					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				if (ownerShape.IsNull() || ownerShape->Shape().IsNull()) {
+				if (ownerShape.IsNull() || ownerShape->Shape().IsNull()
+					|| !myDoc->IsPresentationEditable(ownerShape)
+					|| !myDoc->ShapeLabel(ownerShape).IsEqual(
+						sel.documentLabel)) {
 					return Standard_False;
 				}
 
@@ -1164,9 +1203,16 @@ namespace core3d {
 			_ownsChamferCommand = Standard_True;
 			for (const ChamferResult& result : results) {
 				const EdgesSelection& sel = _detectedEdges[result.selectionIndex];
-				const TDF_Label resultLabel = myDoc->AddShape(result.presentation);
+				const TDF_Label resultLabel = myDoc->AddShape(
+					result.presentation,
+					OcctGeometryRepresentation::BRep);
 				if (resultLabel.IsNull()) {
 					throw Standard_Failure("Unable to add chamfer result");
+				}
+				if (myDoc->GeometryRepresentationForLabel(resultLabel)
+					!= OcctGeometryRepresentation::BRep) {
+					throw Standard_Failure(
+						"Chamfer result is not persisted as BRep");
 				}
 				if (!myDoc->CopyObjectAppearance(
 						sel.documentLabel, resultLabel)) {
@@ -1243,11 +1289,29 @@ namespace core3d {
 			return;
 		}
 
+		std::vector<TDF_Label> resultLabels;
+		resultLabels.reserve(_detectedEdges.size());
 		for (const EdgesSelection& sel : _detectedEdges) {
-			if (sel.documentLabel.IsNull() || sel.filletShapePrs.IsNull()) {
+			if (sel.documentLabel.IsNull() || sel.filletShapePrs.IsNull()
+				|| !IsBRepModelingLabel(myDoc, sel.documentLabel)) {
 				cancelChamfer();
 				return;
 			}
+			const TDF_Label resultLabel =
+				myDoc->ShapeLabel(sel.filletShapePrs);
+			if (resultLabel.IsNull()
+				|| myDoc->GeometryRepresentationForLabel(resultLabel)
+					!= OcctGeometryRepresentation::BRep) {
+				cancelChamfer();
+				return;
+			}
+			for (const TDF_Label& existing : resultLabels) {
+				if (existing.IsEqual(resultLabel)) {
+					cancelChamfer();
+					return;
+				}
+			}
+			resultLabels.push_back(resultLabel);
 		}
 
 		Standard_Boolean removedAll = Standard_True;
@@ -1329,7 +1393,11 @@ namespace core3d {
 			if (isNewSelection) {
 				EdgesSelection sel;
 				sel.documentLabel = myDoc->ShapeLabel(ownerShape);
-				if (sel.documentLabel.IsNull()) { continue; }
+				if (sel.documentLabel.IsNull()
+					|| !IsBRepModelingLabel(
+						myDoc, sel.documentLabel)) {
+					continue;
+				}
 				sel.transform = ownerShape->LocalTransformation();
 				sel.materialName = myDoc->MaterialNameForLabel(sel.documentLabel);
 				sel.colorName = myDoc->ColorNameForLabel(sel.documentLabel);
@@ -1439,6 +1507,24 @@ namespace core3d {
 			}
 			return;
 		}
+		const TDF_Label aLabel = myDoc->ShapeLabel(aio);
+		const OcctGeometryRepresentation aRepresentation =
+			myDoc->GeometryRepresentationForLabel(aLabel);
+		if (aRepresentation == OcctGeometryRepresentation::Invalid) {
+			myContext->Deactivate(aio);
+			return;
+		}
+		if (aRepresentation == OcctGeometryRepresentation::TriangleMesh) {
+			// Triangle-only geometry has no editable BRep topology. Preserve the
+			// global mode for BRep objects in mixed documents, but expose this
+			// presentation only as one object-level selection target.
+			myContext->Deactivate(aio);
+			myContext->Activate(
+				aio,
+				AIS_Shape::SelectionMode(TopAbs_SHAPE),
+				Standard_True);
+			return;
+		}
 		myContext->Deactivate(aio, aio->GlobalSelectionMode());//(Standard_Integer)_previousSelectionMode);
 		myContext->Activate(aio, (Standard_Integer)_previousSelectionMode,  Standard_True);
 		myContext->SetSelectionModeActive (aio, AIS_Shape::SelectionMode (_topAbsSelMode), true, AIS_SelectionModesConcurrency::AIS_SelectionModesConcurrency_Single);
@@ -1501,7 +1587,8 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToStl(const std::string &filename, const Standard_Boolean isASCII/* = Standard_True*/) {
-        if (!CanExportCommittedDocument(myDoc, filename)) {
+        if (!CanExportCommittedDocument(
+				myDoc, filename, OcctGeometryExportFormat::Stl)) {
             return;
         }
         AIS_ListOfInteractive objects;
@@ -1527,7 +1614,8 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToObj(const std::string &filename) {
-        if (!CanExportCommittedDocument(myDoc, filename)) {
+        if (!CanExportCommittedDocument(
+				myDoc, filename, OcctGeometryExportFormat::Obj)) {
             return;
         }
 //#define converter2obj
@@ -1625,7 +1713,8 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToGltf(const std::string &filename) {
-        if (!CanExportCommittedDocument(myDoc, filename)) {
+        if (!CanExportCommittedDocument(
+				myDoc, filename, OcctGeometryExportFormat::Gltf)) {
             return;
         }
         bool exportSucceeded = false;
@@ -1690,7 +1779,8 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToStep(const std::string &filename) {
-        if (!CanExportCommittedDocument(myDoc, filename)) {
+        if (!CanExportCommittedDocument(
+				myDoc, filename, OcctGeometryExportFormat::Step)) {
             return;
         }
         AIS_ListOfInteractive objects;

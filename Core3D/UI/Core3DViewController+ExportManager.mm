@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #import "GLViewController.h"
 #import "../Export/Core3DNativeExportOperation+Private.h"
+#import <Core3D/Core3DViewController+AvailabilityManager.h>
 #import <Core3D/Core3DViewController+ExportManager.h>
 
 #include "GLViewController+Trick.h"
@@ -39,6 +40,9 @@ bool CanCaptureCommittedExport(
 @implementation Core3DViewController (ExportManager)
 
 - (NSURL *)exportWithType:(ExportType)exportType {
+    if (![self canExportType:exportType]) {
+        return nil;
+    }
     return [GLController exportWithType:exportType];
 }
 
@@ -57,7 +61,13 @@ bool CanCaptureCommittedExport(
     try {
         const std::shared_ptr<core3d::Core3DViewer> viewer =
             GLController.viewer;
-        if (!CanCaptureCommittedExport(viewer)) {
+        const Handle(OcctDocument) document = viewer == nullptr
+            ? Handle(OcctDocument)()
+            : viewer->getDocument();
+        if (!CanCaptureCommittedExport(viewer)
+            || document.IsNull()
+            || (![self canExportType:exportType]
+                && !document->IsGeometryDocumentEmpty())) {
             return nil;
         }
 
@@ -199,7 +209,13 @@ bool CanCaptureCommittedExport(
     try {
         const std::shared_ptr<core3d::Core3DViewer> viewer =
             GLController.viewer;
-        if (!CanCaptureCommittedExport(viewer)) {
+        const Handle(OcctDocument) document = viewer == nullptr
+            ? Handle(OcctDocument)()
+            : viewer->getDocument();
+        if (!CanCaptureCommittedExport(viewer)
+            || document.IsNull()
+            || (![self canExportType:ExportTypeGltf]
+                && !document->IsGeometryDocumentEmpty())) {
             return nil;
         }
 

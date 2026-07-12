@@ -49,6 +49,16 @@ enum class OcctGeometryRepresentation : Standard_Integer
     TriangleMesh = 2,
 };
 
+//! Export formats supported directly by the persisted geometry contract.
+//! Values are bit flags returned by SupportedGeometryExportFormats().
+enum class OcctGeometryExportFormat : Standard_Integer
+{
+    Obj = 1 << 0,
+    Stl = 1 << 1,
+    Gltf = 1 << 2,
+    Step = 1 << 3,
+};
+
 //! Validate/canonicalize the narrow texture representation produced by the
 //! mobile material editor. Only complete, single-frame PNG/JPEG images within
 //! the shared project/snapshot safety budgets are accepted. The returned
@@ -158,6 +168,15 @@ public:
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations() const;
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations(
       const Handle(TDocStd_Document)& document) const;
+  //! Return the document-wide intersection of safe export formats. Invalid or
+  //! empty documents return zero; any TriangleMesh definition removes STEP.
+  Standard_EXPORT Standard_Integer SupportedGeometryExportFormats() const;
+  Standard_EXPORT Standard_Boolean CanExportGeometry(
+      OcctGeometryExportFormat format) const;
+  //! Distinguish a valid committed empty document from an invalid document.
+  //! Empty export handoffs remain constructible so the format writer can
+  //! preserve its established no-artifact/error contract.
+  Standard_EXPORT Standard_Boolean IsGeometryDocumentEmpty() const;
   //! Set/copy a definition marker inside the caller's existing OCAF command.
   //! These methods never open, commit, or abort a command. Copy resolves a
   //! valid LegacyUnknown source to an explicit BRep destination marker.

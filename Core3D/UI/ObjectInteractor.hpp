@@ -123,7 +123,10 @@ namespace core3d {
 		const bool hasTrialMirrorObjects() const;
 		const bool hasUnresolvedMirrorObjects() const;
 		
-		void setManipulator(Handle(Core3DManipulator) manipulator) { _manipulator = manipulator; }
+		void setManipulator(Handle(Core3DManipulator) manipulator) {
+			_manipulator = manipulator;
+			_manipulatorSourceLabels.clear();
+		}
 		void setObjectTransparent(Handle(AIS_InteractiveObject) selected, const bool on);
 		void detachManipulator(bool updateViewer);
 
@@ -137,6 +140,8 @@ namespace core3d {
 		
     private:
 		Standard_ShortReal _manipulatorSide;
+		std::unordered_map<const AIS_InteractiveObject*, TDF_Label>
+			_manipulatorSourceLabels;
 		std::vector<Handle(AIS_Shape)> _trialMirrorObjects;
 		std::unordered_map<const AIS_Shape*, TDF_Label>
 			_trialMirrorSourceLabels;

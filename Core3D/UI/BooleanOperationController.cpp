@@ -68,6 +68,44 @@ namespace {
 constexpr Standard_Real kFuzzyValue = 1.0e-3;
 std::atomic<std::uint64_t> gBooleanControllerEpoch{0};
 
+Standard_Boolean IsBRepModelingLabel(
+    const Handle(OcctDocument)& theDocument,
+    const TDF_Label& theLabel) noexcept
+{
+    if (theDocument.IsNull() || theLabel.IsNull()) {
+        return Standard_False;
+    }
+	if (!theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)) {
+		return Standard_False;
+	}
+    const OcctGeometryRepresentation aRepresentation =
+        theDocument->GeometryRepresentationForLabel(theLabel);
+    return aRepresentation == OcctGeometryRepresentation::LegacyUnknown
+        || aRepresentation == OcctGeometryRepresentation::BRep;
+}
+
+Standard_Boolean IsCurrentBRepSelection(
+    const Handle(OcctDocument)& theDocument,
+    const TemporalBooleanObject& theSelection) noexcept
+{
+    if (!IsBRepModelingLabel(
+            theDocument, theSelection.documentLabel)
+        || theSelection.original.IsNull()
+        || !theDocument->IsPresentationEditable(
+            theSelection.original)) {
+        return Standard_False;
+    }
+    try {
+        const Handle(AIS_Shape) aShape =
+            Handle(AIS_Shape)::DownCast(theSelection.original);
+        return !aShape.IsNull() && !aShape->Shape().IsNull()
+            && theDocument->ShapeLabel(theSelection.original)
+                .IsEqual(theSelection.documentLabel);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 dispatch_queue_t BooleanWorkerQueue()
 {
     static dispatch_queue_t aQueue = []() {
@@ -981,7 +1019,14 @@ void BooleanOperationController::updateDetectedState(
                 return;
             }
             aState.documentLabel = myDoc->ShapeLabel(theDetected);
-            if (aState.documentLabel.IsNull()) {
+            const OcctGeometryRepresentation aRepresentation =
+                myDoc->GeometryRepresentationForLabel(
+                    aState.documentLabel);
+            if (aState.documentLabel.IsNull()
+                || (aRepresentation
+                        != OcctGeometryRepresentation::LegacyUnknown
+                    && aRepresentation
+                        != OcctGeometryRepresentation::BRep)) {
                 return;
             }
             for (const auto& aSelection : _selectionMap) {
@@ -1063,8 +1108,13 @@ Standard_Boolean BooleanOperationController::setSelectionState(
         const Handle(AIS_Shape) aShape =
             Handle(AIS_Shape)::DownCast(theObject);
         const TDF_Label aLabel = myDoc->ShapeLabel(theObject);
+        const OcctGeometryRepresentation aRepresentation =
+            myDoc->GeometryRepresentationForLabel(aLabel);
         if (aShape.IsNull() || aShape->Shape().IsNull()
-            || aLabel.IsNull()) {
+            || aLabel.IsNull()
+            || (aRepresentation
+                    != OcctGeometryRepresentation::LegacyUnknown
+                && aRepresentation != OcctGeometryRepresentation::BRep)) {
             return Standard_False;
         }
         for (const auto& aSelection : _selectionMap) {
@@ -1591,6 +1641,8 @@ Standard_Boolean BooleanOperationController::visualApply(
                 Handle(AIS_Shape)::DownCast(
                     aSelection.second.original);
             if (aSource.IsNull() || aSource->Shape().IsNull()
+                || !IsCurrentBRepSelection(
+                    myDoc, aSelection.second)
                 || !AccumulateBoundedTopology(
                     aSource->Shape(),
                     aPerSourceLimit,
@@ -1668,6 +1720,13 @@ void BooleanOperationController::acceptWorkerResult(
     Standard_Boolean hasCompleteFingerprint = Standard_False;
     const std::string aCurrentFingerprint = currentSelectionFingerprint(
         theResult.action, hasCompleteFingerprint);
+    bool hasCurrentBRepSources = !_selectionMap.empty();
+    for (const auto& aSelection : _selectionMap) {
+        if (!IsCurrentBRepSelection(myDoc, aSelection.second)) {
+            hasCurrentBRepSources = false;
+            break;
+        }
+    }
     if (pthread_main_np() == 0
         || !_activeAction.has_value()
         || *_activeAction != theResult.action
@@ -1675,7 +1734,8 @@ void BooleanOperationController::acceptWorkerResult(
         || theResult.generation != _previewGeneration
         || theResult.fingerprint != _requestedFingerprint
         || !hasCompleteFingerprint
-        || aCurrentFingerprint != theResult.fingerprint) {
+        || aCurrentFingerprint != theResult.fingerprint
+        || !hasCurrentBRepSources) {
 #ifdef DEBUG
         ++_debugStaleSuppressionCount;
 #endif
@@ -1946,6 +2006,11 @@ Standard_Boolean BooleanOperationController::capturePreview(
             || aLabels.size() > kMaxSourceOperands) {
             return Standard_False;
         }
+		for (const auto& aSelection : _selectionMap) {
+			if (!IsCurrentBRepSelection(myDoc, aSelection.second)) {
+				return Standard_False;
+			}
+		}
 
         BooleanPreviewCapture aCapture;
         aCapture.action = *_activeAction;
@@ -2142,6 +2207,11 @@ BooleanApplyResult BooleanOperationController::apply(
         || aSourceLabels.size() > kMaxSourceOperands) {
         return failWithoutMutation();
     }
+	for (const auto& aSelection : _selectionMap) {
+		if (!IsCurrentBRepSelection(myDoc, aSelection.second)) {
+			return failWithoutMutation();
+		}
+	}
 
     Handle(TDocStd_Document) aDocument;
     try {
@@ -2203,11 +2273,17 @@ BooleanApplyResult BooleanOperationController::apply(
         // removing a source first clears the XCAF material relationship that
         // the result must inherit.
         for (const auto& aResult : aResults) {
-            const TDF_Label aResultLabel = myDoc->AddShape(aResult.first);
+            const TDF_Label aResultLabel = myDoc->AddShape(
+                aResult.first, OcctGeometryRepresentation::BRep);
             if (aResultLabel.IsNull()) {
                 rollbackFailedTransaction(aDocument);
                 return BooleanApplyResult::NoChange;
             }
+			if (myDoc->GeometryRepresentationForLabel(aResultLabel)
+				!= OcctGeometryRepresentation::BRep) {
+				rollbackFailedTransaction(aDocument);
+				return BooleanApplyResult::NoChange;
+			}
             persistStyle(aResultLabel, aResult.second);
         }
         for (const TDF_Label& aLabel : aSourceLabels) {
