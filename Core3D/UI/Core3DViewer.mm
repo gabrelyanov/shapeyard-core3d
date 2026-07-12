@@ -642,6 +642,12 @@ const Standard_GUID& LocalPBRMaterialValidationAttributeID() {
     return id;
 }
 
+const Standard_GUID& AutoPromotedEmissiveFactorValidationAttributeID() {
+    static const Standard_GUID id(
+        "1DA4580F-1B19-46DA-ABD4-BBCE9FBADE44");
+    return id;
+}
+
 bool IsFiniteUnit(const Standard_Real value) {
     return std::isfinite(value) && value >= 0.0 && value <= 1.0;
 }
@@ -821,8 +827,15 @@ bool ValidateVisualMaterials(
         }
 
         Handle(TDataStd_Integer) marker;
+        Handle(TDataStd_Integer) autoPromotedEmissiveFactor;
+        const bool hasAutoPromotedEmissiveFactor = label.FindAttribute(
+            AutoPromotedEmissiveFactorValidationAttributeID(),
+            autoPromotedEmissiveFactor);
         if (!label.FindAttribute(
                 LocalPBRMaterialValidationAttributeID(), marker)) {
+            if (hasAutoPromotedEmissiveFactor) {
+                return false;
+            }
             continue;
         }
         if (marker.IsNull() || marker->Get() != 1
@@ -830,6 +843,24 @@ bool ValidateVisualMaterials(
             || materialTool.IsNull()
             || assignedMaterialLabel.IsNull()) {
             return false;
+        }
+        if (hasAutoPromotedEmissiveFactor) {
+            const Handle(XCAFDoc_VisMaterial) material =
+                XCAFDoc_VisMaterialTool::GetMaterial(
+                    assignedMaterialLabel);
+            if (autoPromotedEmissiveFactor.IsNull()
+                || autoPromotedEmissiveFactor->Get() != 1
+                || material.IsNull() || !material->HasPbrMaterial()) {
+                return false;
+            }
+            const XCAFDoc_VisMaterialPBR& pbr =
+                material->PbrMaterial();
+            if (pbr.EmissiveTexture.IsNull()
+                || pbr.EmissiveFactor.x() != 1.0f
+                || pbr.EmissiveFactor.y() != 1.0f
+                || pbr.EmissiveFactor.z() != 1.0f) {
+                return false;
+            }
         }
         if (!validatedLocalMaterialLabels.Contains(
                 assignedMaterialLabel)) {
@@ -841,7 +872,6 @@ bool ValidateVisualMaterials(
             }
             const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
             if (!pbr.MetallicRoughnessTexture.IsNull()
-                || !pbr.EmissiveTexture.IsNull()
                 || !pbr.OcclusionTexture.IsNull()
                 || !pbr.NormalTexture.IsNull()) {
                 return false;
@@ -855,19 +885,23 @@ bool ValidateVisualMaterials(
                 return false;
             }
             if (!pbrBase.IsNull()) {
-                if (!pbrBase->TextureId().IsEqual(
-                        commonBase->TextureId())) {
+                if (!Core3DTexturesMatch(pbrBase, commonBase)) {
                     // Exact same-ID byte equality has already been established
                     // by TextureValidationState while walking the bounded
                     // material table above.
                     return false;
                 }
+            }
+            for (const Handle(Image_Texture)& texture : {
+                     pbrBase, pbr.EmissiveTexture}) {
+                if (texture.IsNull()) {
+                    continue;
+                }
                 const std::string textureID(
-                    pbrBase->TextureId().ToCString());
+                    texture->TextureId().ToCString());
                 if (textureID.empty()
                     || (validatedCanonicalTextureIDs.insert(textureID).second
-                        && !Core3DValidateAuthoredBaseColorTexture(
-                            pbrBase))) {
+                        && !Core3DValidateAuthoredTexture(texture))) {
                     return false;
                 }
             }

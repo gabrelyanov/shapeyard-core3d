@@ -874,10 +874,12 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      const std::optional<WholeObjectPBRMaterial>& thePbrOverride,
                      const bool theClosed,
                      MaterialSnapshot& theResult,
-                     Handle(Image_Texture)& theBaseColorTexture)
+                     Handle(Image_Texture)& theBaseColorTexture,
+                     Handle(Image_Texture)& theEmissiveTexture)
 {
     theResult = DefaultMaterial(theClosed);
     theBaseColorTexture.Nullify();
+    theEmissiveTexture.Nullify();
     const XCAFPrs_Style& aStyle = theFace.FaceStyle();
     const Handle(XCAFDoc_VisMaterial)& aVisualMaterial = aStyle.Material();
     if (!aVisualMaterial.IsNull()) {
@@ -940,7 +942,6 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
         const XCAFDoc_VisMaterialPBR& aPbr = anOverride.pbr;
         if (!aPbr.IsDefined
             || !aPbr.MetallicRoughnessTexture.IsNull()
-            || !aPbr.EmissiveTexture.IsNull()
             || !aPbr.OcclusionTexture.IsNull()
             || !aPbr.NormalTexture.IsNull()) {
             return false;
@@ -973,6 +974,7 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                 break;
         }
         theBaseColorTexture = aPbr.BaseColorTexture;
+        theEmissiveTexture = aPbr.EmissiveTexture;
     } else {
         if (theMaterialOverride.has_value()
             && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {
@@ -995,14 +997,14 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
             && aVisualMaterial->HasPbrMaterial()) {
             const XCAFDoc_VisMaterialPBR& aPbr =
                 aVisualMaterial->PbrMaterial();
-            // Schema v3 represents only base color. Preserve rendering
+            // Schema v4 represents base color and emissive. Preserve rendering
             // fidelity by keeping OCCT active whenever another map matters.
             if (!aPbr.MetallicRoughnessTexture.IsNull()
-                || !aPbr.EmissiveTexture.IsNull()
                 || !aPbr.OcclusionTexture.IsNull()
                 || !aPbr.NormalTexture.IsNull()) {
                 return false;
             }
+            theEmissiveTexture = aPbr.EmissiveTexture;
         }
         theBaseColorTexture = aStyle.BaseColorTexture();
     }
@@ -1026,7 +1028,9 @@ bool MaterialValuesEqual(const MaterialSnapshot& theLeft,
         && theLeft.alphaCutoff == theRight.alphaCutoff
         && theLeft.cullMode == theRight.cullMode
         && theLeft.baseColorTextureIndex
-            == theRight.baseColorTextureIndex;
+            == theRight.baseColorTextureIndex
+        && theLeft.emissiveTextureIndex
+            == theRight.emissiveTextureIndex;
 }
 
 void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial)
@@ -1045,6 +1049,7 @@ void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial
     theHash.AddFloat(theMaterial.alphaCutoff);
     theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.cullMode));
     theHash.AddInteger(theMaterial.baseColorTextureIndex);
+    theHash.AddInteger(theMaterial.emissiveTextureIndex);
 }
 
 std::string HexIdentifier(const char* thePrefix, const std::uint64_t theValue)
@@ -3492,18 +3497,25 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     aFace.FaceStyle().IsVisible();
                 MaterialSnapshot aMaterial;
                 Handle(Image_Texture) aBaseColorTexture;
+                Handle(Image_Texture) anEmissiveTexture;
                 if (!ResolveMaterial(aFace,
                                      aMaterialOverride,
                                      aColorOverride,
                                      aPbrOverride,
                                      aDefinition.closed,
                                      aMaterial,
-                                     aBaseColorTexture)
+                                     aBaseColorTexture,
+                                     anEmissiveTexture)
                     || !AddTextureResource(
                         aScene,
                         aTextureTable,
                         aBaseColorTexture,
-                        aMaterial.baseColorTextureIndex)) {
+                        aMaterial.baseColorTextureIndex)
+                    || !AddTextureResource(
+                        aScene,
+                        aTextureTable,
+                        anEmissiveTexture,
+                        aMaterial.emissiveTextureIndex)) {
                     return {};
                 }
                 aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);

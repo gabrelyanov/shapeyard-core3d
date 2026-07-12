@@ -19,7 +19,7 @@
 
 namespace core3d::scene {
 
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 3;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 4;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 5;
 
 struct Float2 {
@@ -178,8 +178,9 @@ struct MaterialSnapshot {
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = 0.5f;
     CullMode cullMode = CullMode::None;
-    //! Index into SceneSnapshot::textures, or -1 when the material is scalar.
+    //! Indices into SceneSnapshot::textures, or -1 when that map is absent.
     std::int32_t baseColorTextureIndex = -1;
+    std::int32_t emissiveTextureIndex = -1;
 };
 
 //! Immutable app-owned encoded raster copied from an embedded XCAF texture.

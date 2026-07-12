@@ -186,6 +186,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 //! Index into Core3DSceneSnapshot.textures, or -1 for a scalar material.
 @property (nonatomic, assign, readonly) NSInteger baseColorTextureIndex;
 @property (nonatomic, assign, readonly) BOOL hasBaseColorTexture;
+@property (nonatomic, assign, readonly) NSInteger emissiveTextureIndex;
+@property (nonatomic, assign, readonly) BOOL hasEmissiveTexture;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

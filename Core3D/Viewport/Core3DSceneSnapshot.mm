@@ -87,7 +87,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                           alphaMode:(Core3DSceneAlphaMode)alphaMode
                         alphaCutoff:(float)alphaCutoff
                            cullMode:(Core3DSceneCullMode)cullMode
-              baseColorTextureIndex:(NSInteger)baseColorTextureIndex;
+              baseColorTextureIndex:(NSInteger)baseColorTextureIndex
+               emissiveTextureIndex:(NSInteger)emissiveTextureIndex;
 @end
 
 @interface Core3DSceneFacePrimitiveSnapshot ()
@@ -280,7 +281,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                           alphaMode:(Core3DSceneAlphaMode)alphaMode
                         alphaCutoff:(float)alphaCutoff
                            cullMode:(Core3DSceneCullMode)cullMode
-              baseColorTextureIndex:(NSInteger)baseColorTextureIndex {
+              baseColorTextureIndex:(NSInteger)baseColorTextureIndex
+               emissiveTextureIndex:(NSInteger)emissiveTextureIndex {
     self = [super init];
     if (self) {
         _identifier = [identifier copy];
@@ -295,6 +297,8 @@ static_assert(sizeof(std::uint32_t) == 4,
         _doubleSided = cullMode == Core3DSceneCullModeNone;
         _baseColorTextureIndex = baseColorTextureIndex;
         _hasBaseColorTexture = baseColorTextureIndex >= 0;
+        _emissiveTextureIndex = emissiveTextureIndex;
+        _hasEmissiveTexture = emissiveTextureIndex >= 0;
     }
     return self;
 }
@@ -1010,6 +1014,7 @@ bool IsValid(const MaterialSnapshot& value) noexcept {
         && value.indexOfRefraction > 0.0f
         && value.alphaCutoff >= 0.0f && value.alphaCutoff <= 1.0f
         && value.baseColorTextureIndex >= -1
+        && value.emissiveTextureIndex >= -1
         && IsValid(value.alphaMode)
         && IsValid(value.cullMode);
 }
@@ -1097,6 +1102,14 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         if (material.baseColorTextureIndex >= 0) {
             const std::size_t textureIndex = static_cast<std::size_t>(
                 material.baseColorTextureIndex);
+            if (textureIndex >= snapshot.textures.size()) {
+                return false;
+            }
+            referencedTextures[textureIndex] = 1;
+        }
+        if (material.emissiveTextureIndex >= 0) {
+            const std::size_t textureIndex = static_cast<std::size_t>(
+                material.emissiveTextureIndex);
             if (textureIndex >= snapshot.textures.size()) {
                 return false;
             }
@@ -1603,6 +1616,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         if (!hasExpectedIdentifier || !hasExpectedColor
             || !IsValid(material)
             || material.baseColorTextureIndex != -1
+            || material.emissiveTextureIndex != -1
             || !hasExpectedAlpha
             || !isUnit(material.baseColor.x)
             || !isUnit(material.baseColor.y)
@@ -2115,7 +2129,8 @@ Core3DSceneMaterialSnapshot *MaterialFromScene(const MaterialSnapshot& value) {
                   alphaMode:AlphaModeFromScene(value.alphaMode)
                 alphaCutoff:value.alphaCutoff
                    cullMode:CullModeFromScene(value.cullMode)
-      baseColorTextureIndex:value.baseColorTextureIndex];
+      baseColorTextureIndex:value.baseColorTextureIndex
+       emissiveTextureIndex:value.emissiveTextureIndex];
 }
 
 Core3DSceneTextureSnapshot *TextureFromScene(

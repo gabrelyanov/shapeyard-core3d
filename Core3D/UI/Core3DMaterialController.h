@@ -46,9 +46,14 @@ NS_ASSUME_NONNULL_BEGIN
 //! True when the selected label can safely accept or remove a base-color
 //! texture without discarding another texture-map representation.
 @property (nonatomic, assign, readonly) BOOL supportsBaseColorTextureEditing;
-//! True for scalar materials and for Shapeyard-owned base-color-only textured
-//! materials. Imported texture-backed materials remain scalar read-only until
-//! the user explicitly authors/replaces their base-color texture.
+//! True when the effective material owns an embedded emissive texture.
+@property (nonatomic, assign, readonly) BOOL hasEmissiveTexture;
+//! True when the selected label can safely accept or remove an emissive
+//! texture without discarding another texture-map representation.
+@property (nonatomic, assign, readonly) BOOL supportsEmissiveTextureEditing;
+//! True for scalar materials and for Shapeyard-owned base-color/emissive
+//! textured materials. Imported texture-backed materials remain scalar
+//! read-only until the user explicitly authors the relevant texture slot.
 @property (nonatomic, assign, readonly) BOOL supportsScalarEditing;
 
 -(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
@@ -64,6 +69,14 @@ NS_ASSUME_NONNULL_BEGIN
                     supportsScalarEditing:(BOOL)supportsScalarEditing
                       hasBaseColorTexture:(BOOL)hasBaseColorTexture
           supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing;
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                 metallic:(CGFloat)metallic
+                                roughness:(CGFloat)roughness
+                    supportsScalarEditing:(BOOL)supportsScalarEditing
+                      hasBaseColorTexture:(BOOL)hasBaseColorTexture
+          supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing
+                      hasEmissiveTexture:(BOOL)hasEmissiveTexture
+          supportsEmissiveTextureEditing:(BOOL)supportsEmissiveTextureEditing;
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other;
 
 @end
@@ -86,6 +99,10 @@ NS_ASSUME_NONNULL_BEGIN
                                       mediaType:(NSString*)mediaType
                                           error:(NSError* _Nullable * _Nullable)error;
 -(BOOL)clearSelectionBaseColorTextureWithError:(NSError* _Nullable * _Nullable)error;
+-(BOOL)updateSelectionWithEmissiveTextureData:(NSData*)textureData
+                                    mediaType:(NSString*)mediaType
+                                        error:(NSError* _Nullable * _Nullable)error;
+-(BOOL)clearSelectionEmissiveTextureWithError:(NSError* _Nullable * _Nullable)error;
 
 @end
 
@@ -106,6 +123,10 @@ NS_ASSUME_NONNULL_BEGIN
                                       mediaType:(NSString*)mediaType
                                           error:(NSError* _Nullable * _Nullable)error;
 -(BOOL)clearSelectionBaseColorTextureWithError:(NSError* _Nullable * _Nullable)error;
+-(BOOL)updateSelectionWithEmissiveTextureData:(NSData*)textureData
+                                    mediaType:(NSString*)mediaType
+                                        error:(NSError* _Nullable * _Nullable)error;
+-(BOOL)clearSelectionEmissiveTextureWithError:(NSError* _Nullable * _Nullable)error;
 -(void) didChangeSelectionWithMaterials:(NSArray<Core3DMaterial*>*)materials
                                  colors:(NSArray<Core3DColor*>*) colors;
 -(void) didChangeSelectionWithPBRMaterials:(NSArray<Core3DPBRMaterial*>*)materials;

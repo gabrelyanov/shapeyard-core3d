@@ -1918,18 +1918,32 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         std::array<Standard_Integer, 16> textureDecodedQuadrants;
         textureDecodedQuadrants.fill(-1);
         Standard_Boolean documentHasBaseColorTexture = Standard_False;
+        Standard_Boolean documentHasEmissiveTexture = Standard_False;
         Standard_Boolean textureSourceMatchesDocument = Standard_False;
+        Standard_Boolean textureSetHasBaseColorUnit = Standard_False;
+        Standard_Boolean textureSetHasEmissiveUnit = Standard_False;
+        Standard_Boolean baseColorTextureSourceMatchesDocument =
+            Standard_False;
+        Standard_Boolean emissiveTextureSourceMatchesDocument =
+            Standard_False;
         Handle(Image_Texture) documentBaseColorTexture;
+        Handle(Image_Texture) documentEmissiveTexture;
         const TDF_Label presentationLabel =
             _viewer->getDocument()->ShapeLabel(shape);
         XCAFDoc_VisMaterialPBR effectivePresentationMaterial;
         if (!presentationLabel.IsNull()
             && _viewer->getDocument()->TryEffectivePBRMaterialForLabel(
-                presentationLabel, effectivePresentationMaterial)
-            && !effectivePresentationMaterial.BaseColorTexture.IsNull()) {
-            documentHasBaseColorTexture = Standard_True;
-            documentBaseColorTexture =
-                effectivePresentationMaterial.BaseColorTexture;
+                presentationLabel, effectivePresentationMaterial)) {
+            if (!effectivePresentationMaterial.BaseColorTexture.IsNull()) {
+                documentHasBaseColorTexture = Standard_True;
+                documentBaseColorTexture =
+                    effectivePresentationMaterial.BaseColorTexture;
+            }
+            if (!effectivePresentationMaterial.EmissiveTexture.IsNull()) {
+                documentHasEmissiveTexture = Standard_True;
+                documentEmissiveTexture =
+                    effectivePresentationMaterial.EmissiveTexture;
+            }
         }
         const Handle(Prs3d_Drawer)& drawer = shape->Attributes();
         if (!drawer.IsNull() && !drawer->ShadingAspect().IsNull()) {
@@ -2030,6 +2044,37 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                                 Core3DBaseColorTexturesMatch(
                                     source,
                                     documentBaseColorTexture);
+                        }
+                    }
+                    for (Standard_Integer aTextureIndex = textureSet->Lower();
+                         aTextureIndex <= textureSet->Upper();
+                         ++aTextureIndex) {
+                        const Handle(XCAFPrs_Texture) aTexture =
+                            Handle(XCAFPrs_Texture)::DownCast(
+                                textureSet->Value(aTextureIndex));
+                        if (aTexture.IsNull()
+                            || aTexture->GetParams().IsNull()) {
+                            continue;
+                        }
+                        const Graphic3d_TextureUnit aUnit =
+                            aTexture->GetParams()->TextureUnit();
+                        const Handle(Image_Texture)& aSource =
+                            aTexture->GetImageSource();
+                        if (aUnit == Graphic3d_TextureUnit_BaseColor) {
+                            textureSetHasBaseColorUnit = Standard_True;
+                            if (!documentBaseColorTexture.IsNull()) {
+                                baseColorTextureSourceMatchesDocument =
+                                    Core3DTexturesMatch(
+                                        aSource, documentBaseColorTexture);
+                            }
+                        } else if (aUnit
+                                   == Graphic3d_TextureUnit_Emissive) {
+                            textureSetHasEmissiveUnit = Standard_True;
+                            if (!documentEmissiveTexture.IsNull()) {
+                                emissiveTextureSourceMatchesDocument =
+                                    Core3DTexturesMatch(
+                                        aSource, documentEmissiveTexture);
+                            }
                         }
                     }
                 }
@@ -2203,8 +2248,18 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 textureDecodedQuadrants[15]),
             @"documentHasBaseColorTexture": @(
                 documentHasBaseColorTexture != Standard_False),
+            @"documentHasEmissiveTexture": @(
+                documentHasEmissiveTexture != Standard_False),
             @"textureSourceMatchesDocument": @(
                 textureSourceMatchesDocument != Standard_False),
+            @"textureSetHasBaseColorUnit": @(
+                textureSetHasBaseColorUnit != Standard_False),
+            @"textureSetHasEmissiveUnit": @(
+                textureSetHasEmissiveUnit != Standard_False),
+            @"baseColorTextureSourceMatchesDocument": @(
+                baseColorTextureSourceMatchesDocument != Standard_False),
+            @"emissiveTextureSourceMatchesDocument": @(
+                emissiveTextureSourceMatchesDocument != Standard_False),
             @"defaultStyleHasMaterial": @(defaultStyleHasMaterial),
             @"defaultStyleRed": @(defaultStyleRed),
             @"defaultStyleGreen": @(defaultStyleGreen),

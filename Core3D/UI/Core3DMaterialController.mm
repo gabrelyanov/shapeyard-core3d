@@ -41,7 +41,9 @@
                          roughness:roughness
              supportsScalarEditing:YES
                hasBaseColorTexture:NO
-   supportsBaseColorTextureEditing:YES];
+   supportsBaseColorTextureEditing:YES
+               hasEmissiveTexture:NO
+   supportsEmissiveTextureEditing:YES];
 }
 
 -(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
@@ -53,7 +55,9 @@
                          roughness:roughness
              supportsScalarEditing:supportsScalarEditing
                hasBaseColorTexture:NO
-   supportsBaseColorTextureEditing:supportsScalarEditing];
+   supportsBaseColorTextureEditing:supportsScalarEditing
+               hasEmissiveTexture:NO
+   supportsEmissiveTextureEditing:supportsScalarEditing];
 }
 
 -(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
@@ -62,6 +66,24 @@
                      supportsScalarEditing:(BOOL)supportsScalarEditing
                        hasBaseColorTexture:(BOOL)hasBaseColorTexture
            supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing {
+    return [self initWithBaseColor:baseColor
+                          metallic:metallic
+                         roughness:roughness
+             supportsScalarEditing:supportsScalarEditing
+               hasBaseColorTexture:hasBaseColorTexture
+   supportsBaseColorTextureEditing:supportsBaseColorTextureEditing
+               hasEmissiveTexture:NO
+   supportsEmissiveTextureEditing:supportsScalarEditing];
+}
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                  metallic:(CGFloat)metallic
+                                 roughness:(CGFloat)roughness
+                     supportsScalarEditing:(BOOL)supportsScalarEditing
+                       hasBaseColorTexture:(BOOL)hasBaseColorTexture
+           supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing
+                       hasEmissiveTexture:(BOOL)hasEmissiveTexture
+           supportsEmissiveTextureEditing:(BOOL)supportsEmissiveTextureEditing {
     if(baseColor == nil || !std::isfinite(metallic) || !std::isfinite(roughness)
        || metallic < 0.0 || metallic > 1.0
        || roughness < 0.0 || roughness > 1.0) {
@@ -75,6 +97,9 @@
         _hasBaseColorTexture = hasBaseColorTexture;
         _supportsBaseColorTextureEditing =
             supportsBaseColorTextureEditing;
+        _hasEmissiveTexture = hasEmissiveTexture;
+        _supportsEmissiveTextureEditing =
+            supportsEmissiveTextureEditing;
     }
     return self;
 }
@@ -86,7 +111,9 @@
                 roughness:self.roughness
     supportsScalarEditing:self.supportsScalarEditing
       hasBaseColorTexture:self.hasBaseColorTexture
-supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing];
+supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing
+      hasEmissiveTexture:self.hasEmissiveTexture
+supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing];
 }
 
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other {
@@ -97,7 +124,10 @@ supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing];
         && self.supportsScalarEditing == other.supportsScalarEditing
         && self.hasBaseColorTexture == other.hasBaseColorTexture
         && self.supportsBaseColorTextureEditing
-            == other.supportsBaseColorTextureEditing;
+            == other.supportsBaseColorTextureEditing
+        && self.hasEmissiveTexture == other.hasEmissiveTexture
+        && self.supportsEmissiveTextureEditing
+            == other.supportsEmissiveTextureEditing;
 }
 
 -(BOOL)isEqual:(id)object {
@@ -112,7 +142,9 @@ supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing];
         ^ @((double)self.roughness).hash
         ^ @(self.supportsScalarEditing).hash
         ^ @(self.hasBaseColorTexture).hash
-        ^ @(self.supportsBaseColorTextureEditing).hash;
+        ^ @(self.supportsBaseColorTextureEditing).hash
+        ^ @(self.hasEmissiveTexture).hash
+        ^ @(self.supportsEmissiveTextureEditing).hash;
 }
 
 @end
@@ -233,6 +265,54 @@ supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing];
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey:
                                          @"The base color texture could not be removed."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)updateSelectionWithEmissiveTextureData:(NSData*)textureData
+                                    mediaType:(NSString*)mediaType
+                                        error:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(updateSelectionWithEmissiveTextureData:mediaType:error:)]) {
+        const BOOL succeeded = [_pass
+            updateSelectionWithEmissiveTextureData:textureData
+            mediaType:mediaType
+            error:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The emissive texture could not be applied."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)clearSelectionEmissiveTextureWithError:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(clearSelectionEmissiveTextureWithError:)]) {
+        const BOOL succeeded = [_pass
+            clearSelectionEmissiveTextureWithError:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The emissive texture could not be removed."}];
         }
         return succeeded;
     }

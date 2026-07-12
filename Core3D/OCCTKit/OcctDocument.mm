@@ -1259,6 +1259,15 @@ const Standard_GUID& LocalPBRMaterialAttributeID()
     return anId;
 }
 
+//! Records that Shapeyard promoted the default black emissive factor to white
+//! solely to make the first authored emissive texture visible. This lives on
+//! the shape label so it follows OCAF history and appearance-copy operations.
+const Standard_GUID& AutoPromotedEmissiveFactorAttributeID()
+{
+    static const Standard_GUID anId("1DA4580F-1B19-46DA-ABD4-BBCE9FBADE44");
+    return anId;
+}
+
 //! Marks immutable table entries created by Shapeyard. Imported material
 //! libraries must never be garbage-collected by local authoring operations.
 const Standard_GUID& OwnedPBRMaterialDefinitionAttributeID()
@@ -1512,7 +1521,7 @@ Standard_Boolean Core3DAccumulateEmbeddedTextureBudget(
     return Standard_True;
 }
 
-Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
+Standard_Boolean Core3DCreateAuthoredTexture(
     const Standard_Byte* bytes,
     const Standard_Size size,
     const std::string& mediaType,
@@ -1541,7 +1550,7 @@ Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
 #ifdef DEBUG
     // Keep the constructor's OCCT-added texturebuf:// spelling aligned with
     // the standalone validator used by persistence and scalar edits.
-    if (!Core3DValidateAuthoredBaseColorTexture(texture)) {
+    if (!Core3DValidateAuthoredTexture(texture)) {
         texture.Nullify();
         return Standard_False;
     }
@@ -1549,7 +1558,7 @@ Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
     return Standard_True;
 }
 
-Standard_Boolean Core3DValidateAuthoredBaseColorTexture(
+Standard_Boolean Core3DValidateAuthoredTexture(
     const Handle(Image_Texture)& texture)
 {
     if (texture.IsNull() || !texture->FilePath().IsEmpty()) {
@@ -1569,7 +1578,7 @@ Standard_Boolean Core3DValidateAuthoredBaseColorTexture(
         && storedIdentifier == identifier;
 }
 
-Standard_Boolean Core3DBaseColorTexturesMatch(
+Standard_Boolean Core3DTexturesMatch(
     const Handle(Image_Texture)& first,
     const Handle(Image_Texture)& second)
 {
@@ -1586,6 +1595,29 @@ Standard_Boolean Core3DBaseColorTexturesMatch(
         && firstBuffer->Size() == secondBuffer->Size()
         && std::memcmp(firstBuffer->Data(), secondBuffer->Data(),
                        firstBuffer->Size()) == 0;
+}
+
+Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
+    const Standard_Byte* bytes,
+    const Standard_Size size,
+    const std::string& mediaType,
+    Handle(Image_Texture)& texture)
+{
+    return Core3DCreateAuthoredTexture(
+        bytes, size, mediaType, texture);
+}
+
+Standard_Boolean Core3DValidateAuthoredBaseColorTexture(
+    const Handle(Image_Texture)& texture)
+{
+    return Core3DValidateAuthoredTexture(texture);
+}
+
+Standard_Boolean Core3DBaseColorTexturesMatch(
+    const Handle(Image_Texture)& first,
+    const Handle(Image_Texture)& second)
+{
+    return Core3DTexturesMatch(first, second);
 }
 
 void Core3DBeginSafeBinaryRead()
@@ -2123,7 +2155,7 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
     const TDF_Label& label,
     const XCAFDoc_VisMaterialPBR& material) {
     return SaveObjectPBRMaterials({{
-        label, material, Handle(Image_Texture)()}});
+        label, material, Handle(Image_Texture)(), Handle(Image_Texture)()}});
 }
 
 Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
@@ -2131,7 +2163,18 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
     const XCAFDoc_VisMaterialPBR& material,
     const Handle(Image_Texture)& prevalidatedBaseColorTexture) {
     return SaveObjectPBRMaterials({{
-        label, material, prevalidatedBaseColorTexture}});
+        label, material, prevalidatedBaseColorTexture,
+        Handle(Image_Texture)()}});
+}
+
+Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
+    const TDF_Label& label,
+    const XCAFDoc_VisMaterialPBR& material,
+    const Handle(Image_Texture)& prevalidatedBaseColorTexture,
+    const Handle(Image_Texture)& prevalidatedEmissiveTexture) {
+    return SaveObjectPBRMaterials({{
+        label, material, prevalidatedBaseColorTexture,
+        prevalidatedEmissiveTexture}});
 }
 
 void OcctDocument::SetMaximumSerializedTextureOccurrenceBytesForTesting(
@@ -2427,6 +2470,21 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
     const auto isFiniteNonNegative = [](const Standard_Real theValue) {
         return std::isfinite(theValue) && theValue >= 0.0;
     };
+    std::unordered_set<const Image_Texture*> validatedAuthoredTextures;
+    const auto validateAuthoredTextureBinding =
+        [&validatedAuthoredTextures](
+            const Handle(Image_Texture)& texture,
+            const Handle(Image_Texture)& prevalidatedTexture) {
+            if (texture.IsNull()) {
+                return prevalidatedTexture.IsNull();
+            }
+            if (!prevalidatedTexture.IsNull()
+                && texture.get() != prevalidatedTexture.get()) {
+                return false;
+            }
+            return !validatedAuthoredTextures.insert(texture.get()).second
+                || Core3DValidateAuthoredTexture(texture);
+        };
     for (const OcctPBRMaterialUpdate& update : updates) {
         const XCAFDoc_VisMaterialPBR& material = update.material;
         const Quantity_Color& aBaseColor = material.BaseColor.GetRGB();
@@ -2444,17 +2502,14 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
             || material.EmissiveFactor.y() > kMaximumEmissionFactor
             || material.EmissiveFactor.z() > kMaximumEmissionFactor
             || !material.MetallicRoughnessTexture.IsNull()
-            || !material.EmissiveTexture.IsNull()
             || !material.OcclusionTexture.IsNull()
             || !material.NormalTexture.IsNull()
-            || (!update.prevalidatedBaseColorTexture.IsNull()
-                && (material.BaseColorTexture.IsNull()
-                    || material.BaseColorTexture.get()
-                        != update.prevalidatedBaseColorTexture.get()))
-            || (!material.BaseColorTexture.IsNull()
-                && update.prevalidatedBaseColorTexture.IsNull()
-                && !Core3DValidateAuthoredBaseColorTexture(
-                    material.BaseColorTexture))
+            || !validateAuthoredTextureBinding(
+                material.BaseColorTexture,
+                update.prevalidatedBaseColorTexture)
+            || !validateAuthoredTextureBinding(
+                material.EmissiveTexture,
+                update.prevalidatedEmissiveTexture)
             || !std::isfinite(material.RefractionIndex)
             || material.RefractionIndex < 1.0f
             || material.RefractionIndex > 3.0f) {
@@ -2588,6 +2643,7 @@ Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
         }
     }
     label.ForgetAttribute(LocalPBRMaterialAttributeID());
+    label.ForgetAttribute(AutoPromotedEmissiveFactorAttributeID());
     return Standard_True;
 }
 
@@ -2605,6 +2661,8 @@ Standard_Boolean OcctDocument::CopyObjectAppearance(
             LocalPBRMaterialAttributeID(), aLocalPBRMarker)
         && !aLocalPBRMarker.IsNull()
         && aLocalPBRMarker->Get() == 1;
+    const Standard_Boolean hasAutoPromotedEmissiveFactor =
+        IsEmissiveTextureFactorAutoPromotedForLabel(source);
     Graphic3d_NameOfMaterial aLegacyMaterial;
     Quantity_NameOfColor aLegacyColor;
     const Standard_Boolean hasLegacyMaterial =
@@ -2648,6 +2706,15 @@ Standard_Boolean OcctDocument::CopyObjectAppearance(
                 destination, LocalPBRMaterialAttributeID(), 1);
         } else {
             destination.ForgetAttribute(LocalPBRMaterialAttributeID());
+        }
+        if (hasLocalPBR && hasAutoPromotedEmissiveFactor) {
+            TDataStd_Integer::Set(
+                destination,
+                AutoPromotedEmissiveFactorAttributeID(),
+                1);
+        } else {
+            destination.ForgetAttribute(
+                AutoPromotedEmissiveFactorAttributeID());
         }
         if (hasLocalPBR) {
             return Standard_True;
@@ -2817,7 +2884,6 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
         if (!pbr.MetallicRoughnessTexture.IsNull()
-            || !pbr.EmissiveTexture.IsNull()
             || !pbr.OcclusionTexture.IsNull()
             || !pbr.NormalTexture.IsNull()) {
             return Standard_False;
@@ -2826,20 +2892,11 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
         const Handle(Image_Texture) common = material->HasCommonMaterial()
             ? material->CommonMaterial().DiffuseTexture
             : Handle(Image_Texture)();
-        if (!base.IsNull()) {
-            const Handle(NCollection_Buffer)& baseBuffer =
-                base->DataBuffer();
-            const Handle(NCollection_Buffer)& commonBuffer =
-                common.IsNull()
-                    ? Handle(NCollection_Buffer)()
-                    : common->DataBuffer();
+        if (!base.IsNull() || !pbr.EmissiveTexture.IsNull()) {
             return hasLocalPBR
-                && !common.IsNull()
-                && base->FilePath().IsEmpty()
-                && common->FilePath().IsEmpty()
-                && base->TextureId().IsEqual(common->TextureId())
-                && !baseBuffer.IsNull() && !commonBuffer.IsNull()
-                && baseBuffer->Size() == commonBuffer->Size();
+                && base.IsNull() == common.IsNull()
+                && (base.IsNull()
+                    || Core3DTexturesMatch(base, common));
         }
         return common.IsNull();
     }
@@ -2863,32 +2920,123 @@ Standard_Boolean OcctDocument::SupportsBaseColorTextureEditingForLabel(
     }
 
     Handle(Image_Texture) pbrBase;
+    Handle(Image_Texture) emissive;
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
         if (!pbr.MetallicRoughnessTexture.IsNull()
-            || !pbr.EmissiveTexture.IsNull()
             || !pbr.OcclusionTexture.IsNull()
             || !pbr.NormalTexture.IsNull()) {
             return Standard_False;
         }
         pbrBase = pbr.BaseColorTexture;
+        emissive = pbr.EmissiveTexture;
     }
 
     const Handle(Image_Texture) commonBase = material->HasCommonMaterial()
         ? material->CommonMaterial().DiffuseTexture
         : Handle(Image_Texture)();
     if (!pbrBase.IsNull() && !commonBase.IsNull()) {
-        const Handle(NCollection_Buffer)& pbrBuffer =
-            pbrBase->DataBuffer();
-        const Handle(NCollection_Buffer)& commonBuffer =
-            commonBase->DataBuffer();
-        if (!pbrBase->FilePath().IsEmpty()
-            || !commonBase->FilePath().IsEmpty()
-            || !pbrBase->TextureId().IsEqual(commonBase->TextureId())
-            || pbrBuffer.IsNull() || commonBuffer.IsNull()
-            || pbrBuffer->Size() != commonBuffer->Size()) {
+        if (!Core3DTexturesMatch(pbrBase, commonBase)) {
             return Standard_False;
         }
+    }
+    if (!emissive.IsNull()) {
+        Handle(TDataStd_Integer) marker;
+        const Standard_Boolean hasLocalPBR =
+            label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
+            && !marker.IsNull() && marker->Get() == 1;
+        if (!hasLocalPBR) {
+            // Base-color edits preserve emissive. Never silently take ownership
+            // of an imported emissive map as a side effect of editing base.
+            return Standard_False;
+        }
+    }
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::SupportsEmissiveTextureEditingForLabel(
+    const TDF_Label& label) const {
+    if (label.IsNull()) {
+        return Standard_False;
+    }
+    const Handle(XCAFDoc_VisMaterial) material =
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+    if (material.IsNull()) {
+        return Standard_True;
+    }
+    if (!material->HasPbrMaterial()
+        && !material->HasCommonMaterial()) {
+        return Standard_False;
+    }
+
+    Handle(Image_Texture) pbrBase;
+    if (material->HasPbrMaterial()) {
+        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
+        if (!pbr.MetallicRoughnessTexture.IsNull()
+            || !pbr.OcclusionTexture.IsNull()
+            || !pbr.NormalTexture.IsNull()) {
+            return Standard_False;
+        }
+        pbrBase = pbr.BaseColorTexture;
+    }
+    const Handle(Image_Texture) commonBase = material->HasCommonMaterial()
+        ? material->CommonMaterial().DiffuseTexture
+        : Handle(Image_Texture)();
+    if (pbrBase.IsNull() && commonBase.IsNull()) {
+        return Standard_True;
+    }
+
+    Handle(TDataStd_Integer) marker;
+    const Standard_Boolean hasLocalPBR =
+        label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
+        && !marker.IsNull() && marker->Get() == 1;
+    return hasLocalPBR
+        && !pbrBase.IsNull() && !commonBase.IsNull()
+        && Core3DTexturesMatch(pbrBase, commonBase);
+}
+
+Standard_Boolean
+OcctDocument::IsEmissiveTextureFactorAutoPromotedForLabel(
+    const TDF_Label& label) const {
+    if (label.IsNull()) {
+        return Standard_False;
+    }
+    Handle(TDataStd_Integer) marker;
+    return label.FindAttribute(
+            AutoPromotedEmissiveFactorAttributeID(), marker)
+        && !marker.IsNull() && marker->Get() == 1;
+}
+
+Standard_Boolean
+OcctDocument::SetEmissiveTextureFactorAutoPromotedForLabel(
+    const TDF_Label& label,
+    const Standard_Boolean isAutoPromoted) {
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull()) {
+        return Standard_False;
+    }
+    if (isAutoPromoted) {
+        Handle(TDataStd_Integer) localMarker;
+        const Handle(XCAFDoc_VisMaterial) material =
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if (!label.FindAttribute(
+                LocalPBRMaterialAttributeID(), localMarker)
+            || localMarker.IsNull() || localMarker->Get() != 1
+            || material.IsNull() || !material->HasPbrMaterial()) {
+            return Standard_False;
+        }
+        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
+        if (pbr.EmissiveTexture.IsNull()
+            || pbr.EmissiveFactor.x() != 1.0f
+            || pbr.EmissiveFactor.y() != 1.0f
+            || pbr.EmissiveFactor.z() != 1.0f) {
+            return Standard_False;
+        }
+        TDataStd_Integer::Set(
+            label, AutoPromotedEmissiveFactorAttributeID(), 1);
+    } else {
+        label.ForgetAttribute(
+            AutoPromotedEmissiveFactorAttributeID());
     }
     return Standard_True;
 }

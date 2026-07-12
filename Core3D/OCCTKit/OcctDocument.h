@@ -41,17 +41,33 @@ class Message_ProgressRange;
 //! mobile material editor. Only complete, single-frame PNG/JPEG images within
 //! the shared project/snapshot safety budgets are accepted. The returned
 //! texture owns an exact byte copy and uses a content-addressed SHA-256 ID.
-Standard_EXPORT Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
+//! Texture semantics (base color, emissive, and future supported slots) live
+//! on the material binding rather than in this exact-byte resource.
+Standard_EXPORT Standard_Boolean Core3DCreateAuthoredTexture(
     const Standard_Byte* bytes,
     Standard_Size size,
     const std::string& mediaType,
     Handle(Image_Texture)& texture);
 //! Validate an already embedded app-authored texture, including its canonical
 //! `texture-sha256-...` identifier.
+Standard_EXPORT Standard_Boolean Core3DValidateAuthoredTexture(
+    const Handle(Image_Texture)& texture);
+//! Exact ID-and-byte equality without relying on Image_Texture handle
+//! identity. Base-color authoring uses this to enforce synchronized PBR/Common
+//! representations; PBR-only slots use it for no-op detection and deduping.
+Standard_EXPORT Standard_Boolean Core3DTexturesMatch(
+    const Handle(Image_Texture)& first,
+    const Handle(Image_Texture)& second);
+
+//! Source-compatible spellings retained for existing native clients. New code
+//! should use the semantic-neutral helpers above.
+Standard_EXPORT Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
+    const Standard_Byte* bytes,
+    Standard_Size size,
+    const std::string& mediaType,
+    Handle(Image_Texture)& texture);
 Standard_EXPORT Standard_Boolean Core3DValidateAuthoredBaseColorTexture(
     const Handle(Image_Texture)& texture);
-//! Exact ID-and-byte equality used to enforce synchronized PBR/Common
-//! representations without relying on Image_Texture handle identity.
 Standard_EXPORT Standard_Boolean Core3DBaseColorTexturesMatch(
     const Handle(Image_Texture)& first,
     const Handle(Image_Texture)& second);
@@ -82,6 +98,7 @@ struct OcctPBRMaterialUpdate
     TDF_Label label;
     XCAFDoc_VisMaterialPBR material;
     Handle(Image_Texture) prevalidatedBaseColorTexture;
+    Handle(Image_Texture) prevalidatedEmissiveTexture;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
@@ -147,13 +164,22 @@ public:
     Standard_Boolean SaveObjectPBRMaterial(
         const TDF_Label& label,
         const XCAFDoc_VisMaterialPBR& material);
-    //! Save using a texture handle already validated by the current bounded
+    //! Save using a base-color handle already validated by the current bounded
     //! authoring operation. The exact handle must equal material's base-color
-    //! texture; other maps and every scalar/document invariant remain checked.
+    //! texture; the supported emissive slot and every scalar/document invariant
+    //! remain checked independently.
     Standard_Boolean SaveObjectPBRMaterial(
         const TDF_Label& label,
         const XCAFDoc_VisMaterialPBR& material,
         const Handle(Image_Texture)& prevalidatedBaseColorTexture);
+    //! Save using base-color and emissive handles already validated by the
+    //! current bounded authoring operation. Each nonnull handle must be the
+    //! exact handle stored in its corresponding PBR slot.
+    Standard_Boolean SaveObjectPBRMaterial(
+        const TDF_Label& label,
+        const XCAFDoc_VisMaterialPBR& material,
+        const Handle(Image_Texture)& prevalidatedBaseColorTexture,
+        const Handle(Image_Texture)& prevalidatedEmissiveTexture);
     //! Validate and persist a complete authoring batch. The final material
     //! definition set is checked against the safe reader's per-serialized-slot
     //! texture-byte budget before any table entry is added, removed, or linked.
@@ -225,6 +251,18 @@ public:
     //! without discarding unsupported PBR/Common texture maps.
     Standard_Boolean SupportsBaseColorTextureEditingForLabel(
         const TDF_Label& label) const;
+    //! True when emissive texture assignment/removal can be represented without
+    //! discarding unsupported maps or a non-authored base/Common resource.
+    Standard_Boolean SupportsEmissiveTextureEditingForLabel(
+        const TDF_Label& label) const;
+    //! Persistent, undoable provenance for the editor's zero-to-white
+    //! emissive-factor promotion. The marker lets texture removal restore zero
+    //! without destroying a pre-existing nonzero factor.
+    Standard_Boolean IsEmissiveTextureFactorAutoPromotedForLabel(
+        const TDF_Label& label) const;
+    Standard_Boolean SetEmissiveTextureFactorAutoPromotedForLabel(
+        const TDF_Label& label,
+        Standard_Boolean isAutoPromoted);
 
     //! Replace geometry on an existing editable free definition. The caller
     //! must own an open command on this exact document; identifiers and

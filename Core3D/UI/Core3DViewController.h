@@ -335,9 +335,14 @@ typedef struct {
 //! Valid imported PBR material whose Common fallback owns an embedded PNG.
 //! Scalar authoring must remain read-only until that texture is app-owned.
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;
-//! Valid XCAF material with a normal map that schema v3 cannot represent.
+//! Valid XCAF material with a normal map that schema v4 cannot represent.
 //! Snapshot publication must fail closed so OCCT remains authoritative.
 - (NSData *_Nullable)debugUnsupportedPBRTextureBinXCAFFixtureData;
+//! Same fail-closed fixture shape with a metallic-roughness map.
+- (NSData *_Nullable)debugUnsupportedMetallicRoughnessTextureBinXCAFFixtureData;
+//! Supported imported emissive map with a nonzero factor. Clearing the map
+//! must preserve that factor because it was not auto-promoted by Shapeyard.
+- (NSData *_Nullable)debugImportedEmissiveTextureBinXCAFFixtureData;
 //! Valid imported untextured PBR material with non-default alpha and culling.
 - (NSData *_Nullable)debugMaskedDoubleSidedPBRBinXCAFFixtureData;
 //! Valid imported PBR material proving that explicit opaque alpha and

@@ -20,7 +20,8 @@ namespace {
 Core3DPBRMaterial* Core3DSelectionPBRMaterial(
     const XCAFDoc_VisMaterialPBR& material,
     const BOOL supportsScalarEditing,
-    const BOOL supportsBaseColorTextureEditing) {
+    const BOOL supportsBaseColorTextureEditing,
+    const BOOL supportsEmissiveTextureEditing) {
     if (!material.IsDefined || !std::isfinite(material.Metallic)
         || !std::isfinite(material.Roughness)) {
         return nil;
@@ -40,7 +41,9 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
                 roughness:material.Roughness
     supportsScalarEditing:supportsScalarEditing
       hasBaseColorTexture:!material.BaseColorTexture.IsNull()
-supportsBaseColorTextureEditing:supportsBaseColorTextureEditing];
+supportsBaseColorTextureEditing:supportsBaseColorTextureEditing
+      hasEmissiveTexture:!material.EmissiveTexture.IsNull()
+supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 }
 
 } // namespace
@@ -73,7 +76,8 @@ supportsBaseColorTextureEditing:supportsBaseColorTextureEditing];
             Core3DPBRMaterial* pbr = Core3DSelectionPBRMaterial(
                 nativePBR,
                 document->SupportsScalarPBRMaterialEditingForLabel(label),
-                document->SupportsBaseColorTextureEditingForLabel(label));
+                document->SupportsBaseColorTextureEditingForLabel(label),
+                document->SupportsEmissiveTextureEditingForLabel(label));
             if (pbr != nil) {
                 [pbrMaterials addObject:pbr];
             }
@@ -114,7 +118,7 @@ supportsBaseColorTextureEditing:supportsBaseColorTextureEditing];
         editablePBR.Roughness = legacyPBR.NormalizedRoughness();
         editablePBR.RefractionIndex = legacyPBR.IOR();
         Core3DPBRMaterial* pbr = Core3DSelectionPBRMaterial(
-            editablePBR, YES, YES);
+            editablePBR, YES, YES, YES);
         if (pbr != nil) {
             [pbrMaterials addObject:pbr];
         }
