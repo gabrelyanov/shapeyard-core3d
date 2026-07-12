@@ -29,11 +29,18 @@
 
 #include "ConstructorManipulator.hpp"
 #include "CafShapePrs.h"
+#include "OcctDocument.h"
 
+#include <Graphic3d_TextureParams.hxx>
+#include <Image_PixMap.hxx>
+#include <Image_SupportedFormats.hxx>
 #include <gp_Quaternion.hxx>
 #include <TColStd_ListOfInteger.hxx>
+#include <XCAFPrs_Texture.hxx>
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1540,6 +1547,94 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     };
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
+    GLView *view = self.isViewLoaded ? [self viewportView] : nil;
+    constexpr NSUInteger width = 96;
+    constexpr NSUInteger height = 96;
+    NSData *frame = _viewer == nullptr || view == nil
+        ? nil
+        : [view debugDrawAndReadCenteredRGBAWithWidth:width
+                                               height:height];
+    if (frame == nil || frame.length != width * height * 4) {
+        return @{};
+    }
+
+    const Standard_Byte *pixels =
+        static_cast<const Standard_Byte *>(frame.bytes);
+    Standard_Size nearBlackCount = 0;
+    Standard_Size chromaticCount = 0;
+    Standard_Size redDominantCount = 0;
+    Standard_Size greenDominantCount = 0;
+    Standard_Size blueDominantCount = 0;
+    Standard_Size brightNeutralCount = 0;
+    Standard_Integer minimumRed = 255;
+    Standard_Integer minimumGreen = 255;
+    Standard_Integer minimumBlue = 255;
+    Standard_Integer maximumRed = 0;
+    Standard_Integer maximumGreen = 0;
+    Standard_Integer maximumBlue = 0;
+    for (NSUInteger pixelIndex = 0;
+         pixelIndex < width * height;
+         ++pixelIndex) {
+        const Standard_Integer red = pixels[pixelIndex * 4];
+        const Standard_Integer green = pixels[pixelIndex * 4 + 1];
+        const Standard_Integer blue = pixels[pixelIndex * 4 + 2];
+        minimumRed = std::min(minimumRed, red);
+        minimumGreen = std::min(minimumGreen, green);
+        minimumBlue = std::min(minimumBlue, blue);
+        maximumRed = std::max(maximumRed, red);
+        maximumGreen = std::max(maximumGreen, green);
+        maximumBlue = std::max(maximumBlue, blue);
+        const Standard_Integer maximum = std::max({red, green, blue});
+        const Standard_Integer minimum = std::min({red, green, blue});
+        if (maximum <= 12) {
+            ++nearBlackCount;
+        }
+        if (maximum >= 32 && maximum - minimum >= 24) {
+            ++chromaticCount;
+        }
+        if (red >= green + 24 && red >= blue + 24) {
+            ++redDominantCount;
+        }
+        if (green >= red + 24 && green >= blue + 24) {
+            ++greenDominantCount;
+        }
+        if (blue >= red + 24 && blue >= green + 24) {
+            ++blueDominantCount;
+        }
+        if (minimum >= 96 && maximum - minimum < 24) {
+            ++brightNeutralCount;
+        }
+    }
+    const Standard_Size pixelCount = width * height;
+    return @{
+        @"captured": @YES,
+        @"depthCaptured": @NO,
+        @"width": @(width),
+        @"height": @(height),
+        @"pixelCount": @(pixelCount),
+        @"nearBlackCount": @(nearBlackCount),
+        @"chromaticCount": @(chromaticCount),
+        @"redDominantCount": @(redDominantCount),
+        @"greenDominantCount": @(greenDominantCount),
+        @"blueDominantCount": @(blueDominantCount),
+        @"brightNeutralCount": @(brightNeutralCount),
+        @"modelPixelCount": @(pixelCount),
+        @"modelNearBlackCount": @(nearBlackCount),
+        @"modelChromaticCount": @(chromaticCount),
+        @"modelRedDominantCount": @(redDominantCount),
+        @"modelGreenDominantCount": @(greenDominantCount),
+        @"modelBlueDominantCount": @(blueDominantCount),
+        @"modelBrightNeutralCount": @(brightNeutralCount),
+        @"minimumRed": @(minimumRed),
+        @"minimumGreen": @(minimumGreen),
+        @"minimumBlue": @(minimumBlue),
+        @"maximumRed": @(maximumRed),
+        @"maximumGreen": @(maximumGreen),
+        @"maximumBlue": @(maximumBlue),
+    };
+}
+
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates {
     if (_viewer == nullptr || _viewer->AisContext().IsNull()
@@ -1576,12 +1671,138 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         color.Values(red, green, blue, Quantity_TOC_sRGB);
         Standard_Real metallic = -1.0;
         Standard_Real roughness = -1.0;
+        Standard_Integer alphaMode = 999;
+        Standard_Real alphaCutoff = -1.0;
+        Standard_Integer faceCulling = 999;
+        Standard_Boolean textureMapOn = Standard_False;
+        Standard_Integer textureSetSize = 0;
+        Standard_Boolean textureIsXCAFBridge = Standard_False;
+        Standard_Integer textureUnit = -1;
+        Standard_Size textureSourceByteCount = 0;
+        Standard_Boolean textureDecodedImageAvailable = Standard_False;
+        Standard_Integer textureDecodedWidth = 0;
+        Standard_Integer textureDecodedHeight = 0;
+        Standard_Integer textureDecodedFormat = -1;
+        Standard_Boolean textureDecodedTopDown = Standard_False;
+        std::array<Standard_Integer, 16> textureDecodedQuadrants;
+        textureDecodedQuadrants.fill(-1);
+        Standard_Boolean documentHasBaseColorTexture = Standard_False;
+        Standard_Boolean textureSourceMatchesDocument = Standard_False;
+        Handle(Image_Texture) documentBaseColorTexture;
+        const TDF_Label presentationLabel =
+            _viewer->getDocument()->ShapeLabel(shape);
+        XCAFDoc_VisMaterialPBR effectivePresentationMaterial;
+        if (!presentationLabel.IsNull()
+            && _viewer->getDocument()->TryEffectivePBRMaterialForLabel(
+                presentationLabel, effectivePresentationMaterial)
+            && !effectivePresentationMaterial.BaseColorTexture.IsNull()) {
+            documentHasBaseColorTexture = Standard_True;
+            documentBaseColorTexture =
+                effectivePresentationMaterial.BaseColorTexture;
+        }
         const Handle(Prs3d_Drawer)& drawer = shape->Attributes();
         if (!drawer.IsNull() && !drawer->ShadingAspect().IsNull()) {
             const Graphic3d_PBRMaterial& pbrMaterial =
                 drawer->ShadingAspect()->Material().PBRMaterial();
             metallic = pbrMaterial.Metallic();
             roughness = pbrMaterial.NormalizedRoughness();
+            const Handle(Graphic3d_AspectFillArea3d)& fillAspect =
+                drawer->ShadingAspect()->Aspect();
+            if (!fillAspect.IsNull()) {
+                alphaMode = static_cast<Standard_Integer>(
+                    fillAspect->AlphaMode());
+                alphaCutoff = fillAspect->AlphaCutoff();
+                faceCulling = static_cast<Standard_Integer>(
+                    fillAspect->FaceCulling());
+                textureMapOn = fillAspect->ToMapTexture();
+                const Handle(Graphic3d_TextureSet)& textureSet =
+                    fillAspect->TextureSet();
+                textureSetSize = textureSet.IsNull()
+                    ? 0
+                    : textureSet->Size();
+                if (!textureSet.IsNull() && !textureSet->IsEmpty()) {
+                    const Handle(XCAFPrs_Texture) texture =
+                        Handle(XCAFPrs_Texture)::DownCast(
+                            textureSet->First());
+                    if (!texture.IsNull()) {
+                        textureIsXCAFBridge = Standard_True;
+                        if (!texture->GetParams().IsNull()) {
+                            textureUnit = static_cast<Standard_Integer>(
+                                texture->GetParams()->TextureUnit());
+                        }
+                        const Handle(Image_Texture)& source =
+                            texture->GetImageSource();
+                        if (!source.IsNull()
+                            && !source->DataBuffer().IsNull()) {
+                            textureSourceByteCount =
+                                source->DataBuffer()->Size();
+                            // Exercise the authoritative source decoder
+                            // directly. TextureSet/source-handle state alone
+                            // cannot prove that OpenGL received any texels.
+                            const Handle(Image_PixMap) decoded =
+                                source->ReadImage(
+                                    Handle(Image_SupportedFormats)());
+                            if (!decoded.IsNull()
+                                && !decoded->IsEmpty()) {
+                                textureDecodedImageAvailable =
+                                    Standard_True;
+                                textureDecodedWidth =
+                                    static_cast<Standard_Integer>(
+                                        decoded->SizeX());
+                                textureDecodedHeight =
+                                    static_cast<Standard_Integer>(
+                                        decoded->SizeY());
+                                textureDecodedFormat =
+                                    static_cast<Standard_Integer>(
+                                        decoded->Format());
+                                textureDecodedTopDown =
+                                    decoded->IsTopDown();
+                                if (decoded->Format()
+                                        == Image_Format_RGBA) {
+                                    const Standard_Size aQuarterX =
+                                        decoded->SizeX() / 4;
+                                    const Standard_Size aQuarterY =
+                                        decoded->SizeY() / 4;
+                                    const Standard_Size threeQuarterX =
+                                        decoded->SizeX() * 3 / 4;
+                                    const Standard_Size threeQuarterY =
+                                        decoded->SizeY() * 3 / 4;
+                                    const std::array<
+                                        std::array<Standard_Size, 2>,
+                                        4> coordinates = {{
+                                            {{aQuarterX, aQuarterY}},
+                                            {{threeQuarterX, aQuarterY}},
+                                            {{aQuarterX, threeQuarterY}},
+                                            {{threeQuarterX,
+                                              threeQuarterY}},
+                                        }};
+                                    for (Standard_Integer aSample = 0;
+                                         aSample < 4;
+                                         ++aSample) {
+                                        const Standard_Byte* aPixel =
+                                            decoded->RawValueXY(
+                                                coordinates[aSample][0],
+                                                coordinates[aSample][1]);
+                                        for (Standard_Integer aChannel = 0;
+                                             aChannel < 4;
+                                             ++aChannel) {
+                                            textureDecodedQuadrants[
+                                                aSample * 4 + aChannel] =
+                                                aPixel[aChannel];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!documentBaseColorTexture.IsNull()) {
+                            textureSourceMatchesDocument =
+                                Core3DBaseColorTexturesMatch(
+                                    source,
+                                    documentBaseColorTexture);
+                        }
+                    }
+                }
+            }
         }
         const Handle(CafShapePrs) cafShape =
             Handle(CafShapePrs)::DownCast(shape);
@@ -1627,6 +1848,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 shape->Shape(), rootCustomAspects);
         Standard_Integer customMaterialOverrideCount = 0;
         Standard_Integer customColorOverrideCount = 0;
+        Standard_Integer customTextureMapOnCount = 0;
+        Standard_Integer customNonDefaultAlphaCount = 0;
+        Standard_Integer customNonAutoFaceCullingCount = 0;
         if (!cafShape.IsNull()) {
             for (CafDataMapOfShapeColor::Iterator anOverride(
                      cafShape->ShapeColors());
@@ -1638,6 +1862,25 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 }
                 if (!drawer.IsNull() && drawer->HasOwnColor()) {
                     ++customColorOverrideCount;
+                }
+                if (!drawer.IsNull() && drawer->HasOwnShadingAspect()
+                    && !drawer->ShadingAspect().IsNull()
+                    && !drawer->ShadingAspect()->Aspect().IsNull()) {
+                    const Handle(Graphic3d_AspectFillArea3d)& aspect =
+                        drawer->ShadingAspect()->Aspect();
+                    if (aspect->ToMapTexture()) {
+                        ++customTextureMapOnCount;
+                    }
+                    if (aspect->AlphaMode()
+                            != Graphic3d_AlphaMode_BlendAuto
+                        || std::abs(aspect->AlphaCutoff() - 0.5f)
+                            > 1.0e-6f) {
+                        ++customNonDefaultAlphaCount;
+                    }
+                    if (aspect->FaceCulling()
+                            != Graphic3d_TypeOfBackfacingModel_Auto) {
+                        ++customNonAutoFaceCullingCount;
+                    }
                 }
             }
         }
@@ -1674,6 +1917,63 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             @"blue": @(blue),
             @"metallic": @(metallic),
             @"roughness": @(roughness),
+            @"alphaMode": @(alphaMode),
+            @"alphaCutoff": @(alphaCutoff),
+            @"faceCulling": @(faceCulling),
+            @"isCafPresentation": @(!cafShape.IsNull()),
+            @"textureMapOn": @(textureMapOn != Standard_False),
+            @"textureSetSize": @(textureSetSize),
+            @"textureIsXCAFBridge": @(
+                textureIsXCAFBridge != Standard_False),
+            @"textureUnit": @(textureUnit),
+            @"textureSourceByteCount": @(textureSourceByteCount),
+            @"textureDecodedImageAvailable": @(
+                textureDecodedImageAvailable != Standard_False),
+            @"textureDecodedWidth": @(textureDecodedWidth),
+            @"textureDecodedHeight": @(textureDecodedHeight),
+            @"textureDecodedFormat": @(textureDecodedFormat),
+            @"textureDecodedIsRGBA": @(
+                textureDecodedFormat
+                    == static_cast<Standard_Integer>(
+                        Image_Format_RGBA)),
+            @"textureDecodedTopDown": @(
+                textureDecodedTopDown != Standard_False),
+            @"textureDecodedTopLeftRed": @(
+                textureDecodedQuadrants[0]),
+            @"textureDecodedTopLeftGreen": @(
+                textureDecodedQuadrants[1]),
+            @"textureDecodedTopLeftBlue": @(
+                textureDecodedQuadrants[2]),
+            @"textureDecodedTopLeftAlpha": @(
+                textureDecodedQuadrants[3]),
+            @"textureDecodedTopRightRed": @(
+                textureDecodedQuadrants[4]),
+            @"textureDecodedTopRightGreen": @(
+                textureDecodedQuadrants[5]),
+            @"textureDecodedTopRightBlue": @(
+                textureDecodedQuadrants[6]),
+            @"textureDecodedTopRightAlpha": @(
+                textureDecodedQuadrants[7]),
+            @"textureDecodedBottomLeftRed": @(
+                textureDecodedQuadrants[8]),
+            @"textureDecodedBottomLeftGreen": @(
+                textureDecodedQuadrants[9]),
+            @"textureDecodedBottomLeftBlue": @(
+                textureDecodedQuadrants[10]),
+            @"textureDecodedBottomLeftAlpha": @(
+                textureDecodedQuadrants[11]),
+            @"textureDecodedBottomRightRed": @(
+                textureDecodedQuadrants[12]),
+            @"textureDecodedBottomRightGreen": @(
+                textureDecodedQuadrants[13]),
+            @"textureDecodedBottomRightBlue": @(
+                textureDecodedQuadrants[14]),
+            @"textureDecodedBottomRightAlpha": @(
+                textureDecodedQuadrants[15]),
+            @"documentHasBaseColorTexture": @(
+                documentHasBaseColorTexture != Standard_False),
+            @"textureSourceMatchesDocument": @(
+                textureSourceMatchesDocument != Standard_False),
             @"defaultStyleHasMaterial": @(defaultStyleHasMaterial),
             @"defaultStyleRed": @(defaultStyleRed),
             @"defaultStyleGreen": @(defaultStyleGreen),
@@ -1690,6 +1990,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 customMaterialOverrideCount),
             @"customColorOverrideCount": @(
                 customColorOverrideCount),
+            @"customTextureMapOnCount": @(
+                customTextureMapOnCount),
+            @"customNonDefaultAlphaCount": @(
+                customNonDefaultAlphaCount),
+            @"customNonAutoFaceCullingCount": @(
+                customNonAutoFaceCullingCount),
             @"activeSelectionModeCount": @(
                 activeSelectionModes.Extent()),
         }];

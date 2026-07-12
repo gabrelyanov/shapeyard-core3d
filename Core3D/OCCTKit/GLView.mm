@@ -46,6 +46,22 @@ private:
     __strong EAGLContext *myPreviousContext;
 };
 
+class BooleanFlagReset final {
+public:
+    explicit BooleanFlagReset(BOOL *theFlag)
+    : myFlag(theFlag) {}
+
+    ~BooleanFlagReset() noexcept
+    {
+        if (myFlag != nullptr) {
+            *myFlag = NO;
+        }
+    }
+
+private:
+    BOOL *myFlag;
+};
+
 } // namespace
 
 @interface GLViewDisplayLinkProxy : NSObject
@@ -335,6 +351,63 @@ private:
     _isDrawing = NO;
     return didPresent;
 }
+
+#ifdef DEBUG
+- (NSData *_Nullable)debugDrawAndReadCenteredRGBAWithWidth:(NSUInteger)width
+                                                   height:(NSUInteger)height
+{
+    NSAssert(NSThread.isMainThread, @"The viewport renderer is main-thread owned.");
+    if (!_hasDrawable || _isDrawing || myController == nil
+        || width == 0 || height == 0
+        || width > 256 || height > 256
+        || width > static_cast<NSUInteger>(myBackingWidth)
+        || height > static_cast<NSUInteger>(myBackingHeight)) {
+        return nil;
+    }
+
+    __block NSData *result = nil;
+    const BOOL hadContext = [self performWithRenderingContext:^{
+        self->_isDrawing = YES;
+        BooleanFlagReset resetDrawing(&self->_isDrawing);
+        glBindFramebuffer(GL_FRAMEBUFFER, self->myFrameBuffer);
+        glViewport(0, 0, self->myBackingWidth, self->myBackingHeight);
+        if ([self->myController Draw]) {
+            const NSUInteger byteCount = width * height * 4;
+            NSMutableData *pixels = [NSMutableData dataWithLength:byteCount];
+            if (pixels != nil && pixels.length == byteCount) {
+                for (NSUInteger index = 0;
+                     index < 8 && glGetError() != GL_NO_ERROR;
+                     ++index) {
+                }
+                GLint previousPackAlignment = 4;
+                glGetIntegerv(GL_PACK_ALIGNMENT, &previousPackAlignment);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                const GLint x = (self->myBackingWidth
+                    - static_cast<GLint>(width)) / 2;
+                const GLint y = (self->myBackingHeight
+                    - static_cast<GLint>(height)) / 2;
+                glReadPixels(
+                    x, y,
+                    static_cast<GLsizei>(width),
+                    static_cast<GLsizei>(height),
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    pixels.mutableBytes);
+                const GLenum readError = glGetError();
+                glPixelStorei(GL_PACK_ALIGNMENT, previousPackAlignment);
+                if (readError == GL_NO_ERROR) {
+                    result = [pixels copy];
+                }
+            }
+            glBindRenderbuffer(GL_RENDERBUFFER, self->myRenderBuffer);
+            if ([self->myGLContext presentRenderbuffer:GL_RENDERBUFFER]) {
+                ++self->_renderedFrameCount;
+            }
+        }
+    }];
+    return hadContext ? result : nil;
+}
+#endif
 
 // =======================================================================
 // function : layoutSubviews

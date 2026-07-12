@@ -39,13 +39,29 @@
     return [self initWithBaseColor:baseColor
                           metallic:metallic
                          roughness:roughness
-             supportsScalarEditing:YES];
+             supportsScalarEditing:YES
+               hasBaseColorTexture:NO
+   supportsBaseColorTextureEditing:YES];
 }
 
 -(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
                                   metallic:(CGFloat)metallic
                                  roughness:(CGFloat)roughness
                      supportsScalarEditing:(BOOL)supportsScalarEditing {
+    return [self initWithBaseColor:baseColor
+                          metallic:metallic
+                         roughness:roughness
+             supportsScalarEditing:supportsScalarEditing
+               hasBaseColorTexture:NO
+   supportsBaseColorTextureEditing:supportsScalarEditing];
+}
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                  metallic:(CGFloat)metallic
+                                 roughness:(CGFloat)roughness
+                     supportsScalarEditing:(BOOL)supportsScalarEditing
+                       hasBaseColorTexture:(BOOL)hasBaseColorTexture
+           supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing {
     if(baseColor == nil || !std::isfinite(metallic) || !std::isfinite(roughness)
        || metallic < 0.0 || metallic > 1.0
        || roughness < 0.0 || roughness > 1.0) {
@@ -56,6 +72,9 @@
         _metallic = metallic;
         _roughness = roughness;
         _supportsScalarEditing = supportsScalarEditing;
+        _hasBaseColorTexture = hasBaseColorTexture;
+        _supportsBaseColorTextureEditing =
+            supportsBaseColorTextureEditing;
     }
     return self;
 }
@@ -65,7 +84,9 @@
         initWithBaseColor:self.baseColor
                  metallic:self.metallic
                 roughness:self.roughness
-    supportsScalarEditing:self.supportsScalarEditing];
+    supportsScalarEditing:self.supportsScalarEditing
+      hasBaseColorTexture:self.hasBaseColorTexture
+supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing];
 }
 
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other {
@@ -73,7 +94,10 @@
         && [self.baseColor isEqual:other.baseColor]
         && self.metallic == other.metallic
         && self.roughness == other.roughness
-        && self.supportsScalarEditing == other.supportsScalarEditing;
+        && self.supportsScalarEditing == other.supportsScalarEditing
+        && self.hasBaseColorTexture == other.hasBaseColorTexture
+        && self.supportsBaseColorTextureEditing
+            == other.supportsBaseColorTextureEditing;
 }
 
 -(BOOL)isEqual:(id)object {
@@ -86,7 +110,9 @@
     return self.baseColor.hash
         ^ @((double)self.metallic).hash
         ^ @((double)self.roughness).hash
-        ^ @(self.supportsScalarEditing).hash;
+        ^ @(self.supportsScalarEditing).hash
+        ^ @(self.hasBaseColorTexture).hash
+        ^ @(self.supportsBaseColorTextureEditing).hash;
 }
 
 @end
@@ -169,6 +195,54 @@
     if(_pass && [_pass respondsToSelector:@selector(updateSelectionWithPBRMaterial:)]) {
         [_pass updateSelectionWithPBRMaterial:material];
     }
+}
+
+-(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
+                                      mediaType:(NSString*)mediaType
+                                          error:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(updateSelectionWithBaseColorTextureData:mediaType:error:)]) {
+        const BOOL succeeded = [_pass
+            updateSelectionWithBaseColorTextureData:textureData
+            mediaType:mediaType
+            error:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The base color texture could not be applied."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)clearSelectionBaseColorTextureWithError:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(clearSelectionBaseColorTextureWithError:)]) {
+        const BOOL succeeded = [_pass
+            clearSelectionBaseColorTextureWithError:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The base color texture could not be removed."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
 }
 
 -(void) didChangeSelectionWithMaterials:(NSArray<Core3DMaterial*>*)materials

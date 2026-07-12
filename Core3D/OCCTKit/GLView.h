@@ -55,6 +55,12 @@
 - (void)beginInteractiveRendering;
 - (void)endInteractiveRendering;
 - (BOOL)performWithRenderingContext:(void (^)(void))work;
+#ifdef DEBUG
+//! Draw the existing viewport once and read a bounded center crop before the
+//! non-retained renderbuffer is presented. Test-only renderer truth.
+- (NSData *_Nullable)debugDrawAndReadCenteredRGBAWithWidth:(NSUInteger)width
+                                                   height:(NSUInteger)height;
+#endif
 
 @end
 

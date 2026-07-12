@@ -241,9 +241,31 @@ typedef struct {
 - (NSInteger)debugDocumentUndoCount;
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
+//! Lower the selected-object admission cap for aggregate texture-authoring
+//! budget tests. Values above the production cap reset to that cap.
+- (void)debugSetMaximumTextureAuthoringObjects:(NSUInteger)limit;
+//! Lower the projected serialized texture-occurrence byte ceiling so budget
+//! regressions can use small valid images. Values above 128 MiB reset to the
+//! production ceiling.
+- (void)debugSetMaximumSerializedTextureOccurrenceBytes:(NSUInteger)limit;
+//! Lower the aggregate decoded unique-resource ceiling for writer tests.
+- (void)debugSetMaximumDecodedTextureResourceBytes:(NSUInteger)limit;
+//! Lower the immutable visual-material definition cap for batch replacement
+//! tests. Values above 2048 reset to the production cap.
+- (void)debugSetMaximumVisualMaterialDefinitions:(NSUInteger)limit;
+//! Remove cached face triangulations without remeshing. Texture assignment
+//! must fail closed while texture removal remains available.
+- (BOOL)debugClearSelectedCachedTriangulationsForTextureTest;
 //! Standalone malformed BinXCAF fixture used to prove that loading rejects
 //! external texture paths and preserves the active document on failure.
 - (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData;
+//! BinXCAF fixture containing a visual-material attribute outside the material
+//! tool table. Raw persistence sees it, so project validation must reject it.
+- (NSData *_Nullable)debugOrphanVisualMaterialBinXCAFFixtureData;
+//! Orphan material attributes on document Main and the TDF data root.
+- (NSData *_Nullable)debugMainOrphanVisualMaterialBinXCAFFixtureData;
+- (NSData *_Nullable)debugDataRootOrphanVisualMaterialBinXCAFFixtureData;
+- (NSData *_Nullable)debugDataRootSiblingOrphanVisualMaterialBinXCAFFixtureData;
 //! Standalone BinXCAF whose embedded texture declares INT32_MAX bytes. The
 //! bounded retrieval driver must reject it before allocating the payload.
 - (NSData *_Nullable)debugOversizedTextureLengthBinXCAFFixtureData;
@@ -290,6 +312,8 @@ typedef struct {
 //! occurrence-local transforms and resolved fallback colors.
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
+//! Bounded color evidence from the current OpenGL view after an actual redraw.
+- (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
 //! Current OpenGL selection size. Assembly occurrences are expected to remain
 //! zero after select-all because definition-addressed edits are unsafe.
 - (NSInteger)debugSelectedShapeCount;

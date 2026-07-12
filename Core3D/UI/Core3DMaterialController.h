@@ -41,8 +41,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, readonly) UIColor* baseColor;
 @property (nonatomic, assign, readonly) CGFloat metallic;
 @property (nonatomic, assign, readonly) CGFloat roughness;
-//! False for texture-backed imported materials until project-owned texture
-//! resources are part of the editable material contract.
+//! True when the effective material owns an embedded base-color texture.
+@property (nonatomic, assign, readonly) BOOL hasBaseColorTexture;
+//! True when the selected label can safely accept or remove a base-color
+//! texture without discarding another texture-map representation.
+@property (nonatomic, assign, readonly) BOOL supportsBaseColorTextureEditing;
+//! True for scalar materials and for Shapeyard-owned base-color-only textured
+//! materials. Imported texture-backed materials remain scalar read-only until
+//! the user explicitly authors/replaces their base-color texture.
 @property (nonatomic, assign, readonly) BOOL supportsScalarEditing;
 
 -(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
@@ -52,6 +58,12 @@ NS_ASSUME_NONNULL_BEGIN
                                  metallic:(CGFloat)metallic
                                 roughness:(CGFloat)roughness
                     supportsScalarEditing:(BOOL)supportsScalarEditing;
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                 metallic:(CGFloat)metallic
+                                roughness:(CGFloat)roughness
+                    supportsScalarEditing:(BOOL)supportsScalarEditing
+                      hasBaseColorTexture:(BOOL)hasBaseColorTexture
+          supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing;
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other;
 
 @end
@@ -70,6 +82,10 @@ NS_ASSUME_NONNULL_BEGIN
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material
                            color:(Core3DColor*)color;
 -(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material;
+-(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
+                                      mediaType:(NSString*)mediaType
+                                          error:(NSError* _Nullable * _Nullable)error;
+-(BOOL)clearSelectionBaseColorTextureWithError:(NSError* _Nullable * _Nullable)error;
 
 @end
 
@@ -86,6 +102,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 -(void) updateSelectionWithMaterial:(Core3DMaterial* _Nullable)material color:(Core3DColor* _Nullable)color;
 -(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material;
+-(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
+                                      mediaType:(NSString*)mediaType
+                                          error:(NSError* _Nullable * _Nullable)error;
+-(BOOL)clearSelectionBaseColorTextureWithError:(NSError* _Nullable * _Nullable)error;
 -(void) didChangeSelectionWithMaterials:(NSArray<Core3DMaterial*>*)materials
                                  colors:(NSArray<Core3DColor*>*) colors;
 -(void) didChangeSelectionWithPBRMaterials:(NSArray<Core3DPBRMaterial*>*)materials;

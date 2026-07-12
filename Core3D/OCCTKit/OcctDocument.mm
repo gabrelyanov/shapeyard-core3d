@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE
 
 #import <Foundation/Foundation.h>
+#import <ImageIO/ImageIO.h>
+#import <CommonCrypto/CommonDigest.h>
 
 #include "OcctDocument.h"
 #include "CafShapePrs.h"
@@ -62,31 +64,110 @@
 #include <XCAFDoc_VisMaterialTool.hxx>
 #include <TDataStd_Real.hxx>
 #include <TDataStd_TreeNode.hxx>
+#include <TDF_ChildIterator.hxx>
 #include <gp_Trsf.hxx>
 #include <GP_Quaternion.hxx>
 #include <TNaming.hxx>
 #include <Standard_GUID.hxx>
 #include <TDF_LabelMap.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
+#include <Graphic3d_TextureSet.hxx>
+#include <Image_PixMap.hxx>
 #include <Image_Texture.hxx>
 #include <NCollection_Buffer.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Prs3d_ShadingAspect.hxx>
+#include <algorithm>
 #include <cmath>
+#include <array>
+#include <cstring>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 IMPLEMENT_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
 
 namespace {
 
+Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
+    const Handle(Prs3d_Drawer)& theDrawer)
+{
+    if (theDrawer.IsNull()) {
+        return {};
+    }
+    theDrawer->SetupOwnShadingAspect();
+    const Handle(Prs3d_ShadingAspect)& aShading =
+        theDrawer->ShadingAspect();
+    if (aShading.IsNull() || aShading->Aspect().IsNull()) {
+        return {};
+    }
+    // XCAFDoc_VisMaterial::FillAspect() deliberately does not clear an
+    // existing texture set when the new material has no maps. Reset both the
+    // enable bit and the owning handle before every full material transition.
+    aShading->Aspect()->SetTextureMapOff();
+    aShading->Aspect()->SetTextureSet(
+        Handle(Graphic3d_TextureSet)());
+    return aShading->Aspect();
+}
+
+void ResetDrawerForLegacyMaterial(
+    const Handle(Prs3d_Drawer)& theDrawer)
+{
+    const Handle(Graphic3d_AspectFillArea3d) anAspect =
+        ClearDrawerTextureMapping(theDrawer);
+    if (anAspect.IsNull()) {
+        return;
+    }
+    // Graphic3d_Aspects and XCAFDoc_VisMaterial define this as the legacy
+    // compatibility contract. BlendAuto resolves an opaque preset to opaque
+    // and a transparent preset to blending, while Auto culls only closed,
+    // opaque groups. This is the same resolution used by the Metal snapshot.
+    anAspect->SetAlphaMode(Graphic3d_AlphaMode_BlendAuto, 0.5f);
+    anAspect->SetFaceCulling(
+        Graphic3d_TypeOfBackfacingModel_Auto);
+}
+
+void ApplyVisualMaterialToPlainPresentation(
+    const Handle(XCAFDoc_VisMaterial)& theMaterial,
+    const Handle(AIS_Shape)& thePresentation)
+{
+    if (theMaterial.IsNull() || thePresentation.IsNull()) {
+        return;
+    }
+    Graphic3d_MaterialAspect anAspect;
+    theMaterial->FillMaterialAspect(anAspect);
+    // Keep AIS' own-material and own-color state intact for selection,
+    // duplication, and legacy callers, while installing the renderer-facing
+    // texture set through OCCT's native Image_Texture bridge.
+    thePresentation->SetMaterial(anAspect);
+    thePresentation->SetColor(theMaterial->BaseColor().GetRGB());
+    const Handle(Graphic3d_AspectFillArea3d) aFillAspect =
+        ClearDrawerTextureMapping(thePresentation->Attributes());
+    if (aFillAspect.IsNull()) {
+        thePresentation->SynchronizeAspects();
+        return;
+    }
+    theMaterial->FillAspect(aFillAspect);
+    thePresentation->SynchronizeAspects();
+}
+
 constexpr Standard_Integer kMaximumVisualMaterialDefinitions = 2048;
+constexpr Standard_Size kMaximumDocumentLabels = 100000;
 constexpr Standard_Real kDefaultMetersPerUnit = 0.001;
 constexpr Standard_Real kMaximumEmissionFactor = 65504.0;
 constexpr Standard_Size kMaximumEmbeddedTextureBytes =
     32ull * 1024ull * 1024ull;
 constexpr Standard_Size kMaximumAggregateTextureBytes =
+    128ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMaximumTextureDimension = 8192;
+constexpr std::uint64_t kMaximumTexturePixels = 4096ull * 4096ull;
+constexpr Standard_Size kMaximumDecodedTextureBytes =
     128ull * 1024ull * 1024ull;
 constexpr Standard_Integer kMaximumPersistentTextureIdentifierBytes = 256;
 constexpr Standard_Integer kMaximumPersistentNameCharacters = 4096;
@@ -94,6 +175,10 @@ constexpr Standard_Integer kPersistentRecordHeaderBytes =
     3 * static_cast<Standard_Integer>(sizeof(Standard_Integer));
 constexpr const char* kBufferTexturePrefix = "texturebuf://";
 thread_local bool gSafeBinaryReadRejected = false;
+
+Handle(Image_Texture) MakeRendererDecodableTexture(
+    const Handle(NCollection_Buffer)& theBuffer,
+    const TCollection_AsciiString& theIdentifier);
 
 void RejectSafeBinaryRead() noexcept
 {
@@ -278,9 +363,526 @@ bool NormalizeEmbeddedTexture(Handle(Image_Texture)& theTexture)
     if (!StripBufferTexturePrefixes(anIdentifier)) {
         return false;
     }
-    theTexture = new Image_Texture(
+    theTexture = MakeRendererDecodableTexture(
         aBuffer, TCollection_AsciiString(anIdentifier.c_str()));
     return true;
+}
+
+bool IsPNGSignature(const Standard_Byte* theBytes,
+                    const Standard_Size theSize)
+{
+    return theBytes != nullptr && theSize >= 8
+        && std::memcmp(theBytes, "\x89PNG\r\n\x1A\n", 8) == 0;
+}
+
+bool IsJPEGSignature(const Standard_Byte* theBytes,
+                     const Standard_Size theSize)
+{
+    return theBytes != nullptr && theSize >= 3
+        && theBytes[0] == 0xFF && theBytes[1] == 0xD8
+        && theBytes[2] == 0xFF;
+}
+
+bool HasSupportedRasterSignature(const Standard_Byte* theBytes,
+                                 const Standard_Size theSize)
+{
+    if (theBytes == nullptr) {
+        return false;
+    }
+    return IsPNGSignature(theBytes, theSize)
+        || IsJPEGSignature(theBytes, theSize)
+        || (theSize >= 6
+            && (std::memcmp(theBytes, "GIF87a", 6) == 0
+                || std::memcmp(theBytes, "GIF89a", 6) == 0))
+        || (theSize >= 4
+            && (std::memcmp(theBytes, "II\x2A\x00", 4) == 0
+                || std::memcmp(theBytes, "MM\x00\x2A", 4) == 0))
+        || (theSize >= 2 && std::memcmp(theBytes, "BM", 2) == 0)
+        || (theSize >= 12
+            && std::memcmp(theBytes, "RIFF", 4) == 0
+            && std::memcmp(theBytes + 8, "WEBP", 4) == 0);
+}
+
+bool TryRendererTextureDimensions(
+    const std::uint64_t theSourceWidth,
+    const std::uint64_t theSourceHeight,
+    std::uint64_t& theRendererWidth,
+    std::uint64_t& theRendererHeight)
+{
+    theRendererWidth = 0;
+    theRendererHeight = 0;
+    if (theSourceWidth == 0 || theSourceHeight == 0
+        || theSourceWidth > kMaximumTextureDimension
+        || theSourceHeight > kMaximumTextureDimension
+        || theSourceWidth > kMaximumTexturePixels / theSourceHeight) {
+        return false;
+    }
+    const auto previousPowerOfTwo = [](const std::uint64_t theValue) {
+        std::uint64_t aResult = 1;
+        while (aResult <= theValue / 2) {
+            aResult *= 2;
+        }
+        return aResult;
+    };
+    const std::uint64_t aPreviousWidth =
+        previousPowerOfTwo(theSourceWidth);
+    const std::uint64_t aPreviousHeight =
+        previousPowerOfTwo(theSourceHeight);
+    const std::uint64_t aNextWidth = aPreviousWidth == theSourceWidth
+        ? theSourceWidth : aPreviousWidth * 2;
+    const std::uint64_t aNextHeight = aPreviousHeight == theSourceHeight
+        ? theSourceHeight : aPreviousHeight * 2;
+    const std::uint64_t aMaximumDecodedPixels =
+        static_cast<std::uint64_t>(kMaximumDecodedTextureBytes) / 4;
+    const bool canUseNextPowerOfTwo =
+        aNextWidth <= kMaximumTextureDimension
+        && aNextHeight <= kMaximumTextureDimension
+        && aNextWidth <= kMaximumTexturePixels / aNextHeight
+        && aNextWidth <= aMaximumDecodedPixels / aNextHeight;
+    theRendererWidth = canUseNextPowerOfTwo
+        ? aNextWidth : aPreviousWidth;
+    theRendererHeight = canUseNextPowerOfTwo
+        ? aNextHeight : aPreviousHeight;
+    return theRendererWidth > 0 && theRendererHeight > 0
+        && theRendererWidth <= kMaximumTexturePixels / theRendererHeight
+        && theRendererWidth <= aMaximumDecodedPixels / theRendererHeight;
+}
+
+bool TryTextureDecodedBytes(
+    const Handle(NCollection_Buffer)& theBuffer,
+    Standard_Size& theDecodedBytes)
+{
+    theDecodedBytes = 0;
+    if (theBuffer.IsNull() || theBuffer->Data() == nullptr
+        || theBuffer->Size() == 0
+        || !HasSupportedRasterSignature(
+            theBuffer->Data(), theBuffer->Size())) {
+        return false;
+    }
+    CFDataRef data = CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(theBuffer->Data()),
+        static_cast<CFIndex>(theBuffer->Size()),
+        kCFAllocatorNull);
+    if (data == nullptr) {
+        return false;
+    }
+    const void* optionKeys[] = {kCGImageSourceShouldCache};
+    const void* optionValues[] = {kCFBooleanFalse};
+    CFDictionaryRef options = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        optionKeys,
+        optionValues,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageSourceRef source = CGImageSourceCreateWithData(data, options);
+    if (options != nullptr) {
+        CFRelease(options);
+    }
+    CFRelease(data);
+    if (source == nullptr || CGImageSourceGetType(source) == nullptr
+        || CGImageSourceGetCount(source) != 1
+        || CGImageSourceGetStatus(source) != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(source, 0)
+            != kCGImageStatusComplete) {
+        if (source != nullptr) {
+            CFRelease(source);
+        }
+        return false;
+    }
+
+    CFDictionaryRef properties =
+        CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (properties == nullptr) {
+        return false;
+    }
+    const CFTypeRef widthValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelWidth);
+    const CFTypeRef heightValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelHeight);
+    std::int64_t width = 0;
+    std::int64_t height = 0;
+    std::uint64_t rendererWidth = 0;
+    std::uint64_t rendererHeight = 0;
+    const bool isValid = widthValue != nullptr
+        && heightValue != nullptr
+        && CFGetTypeID(widthValue) == CFNumberGetTypeID()
+        && CFGetTypeID(heightValue) == CFNumberGetTypeID()
+        && CFNumberGetValue(
+            static_cast<CFNumberRef>(widthValue),
+            kCFNumberSInt64Type, &width)
+        && CFNumberGetValue(
+            static_cast<CFNumberRef>(heightValue),
+            kCFNumberSInt64Type, &height)
+        && width > 0 && height > 0
+        && TryRendererTextureDimensions(
+            static_cast<std::uint64_t>(width),
+            static_cast<std::uint64_t>(height),
+            rendererWidth, rendererHeight);
+    if (isValid) {
+        const std::uint64_t pixels =
+            rendererWidth * rendererHeight;
+        if (pixels
+            <= std::numeric_limits<Standard_Size>::max() / 4) {
+            theDecodedBytes =
+                static_cast<Standard_Size>(pixels * 4);
+        }
+    }
+    CFRelease(properties);
+    return isValid && theDecodedBytes > 0
+        && theDecodedBytes <= kMaximumDecodedTextureBytes;
+}
+
+Handle(Image_PixMap) DecodeRendererTextureWithImageIO(
+    const Handle(NCollection_Buffer)& theBuffer)
+{
+    Standard_Size aPreflightDecodedBytes = 0;
+    if (!TryTextureDecodedBytes(
+            theBuffer, aPreflightDecodedBytes)
+        || theBuffer.IsNull() || theBuffer->Data() == nullptr) {
+        return {};
+    }
+
+    CFDataRef aData = CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(theBuffer->Data()),
+        static_cast<CFIndex>(theBuffer->Size()),
+        kCFAllocatorNull);
+    if (aData == nullptr) {
+        return {};
+    }
+    const void* aSourceKeys[] = {
+        kCGImageSourceShouldCache,
+    };
+    const void* aSourceValues[] = {
+        kCFBooleanFalse,
+    };
+    CFDictionaryRef aSourceOptions = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        aSourceKeys,
+        aSourceValues,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageSourceRef aSource =
+        CGImageSourceCreateWithData(aData, aSourceOptions);
+    if (aSourceOptions != nullptr) {
+        CFRelease(aSourceOptions);
+    }
+    CFRelease(aData);
+    if (aSource == nullptr
+        || CGImageSourceGetCount(aSource) != 1
+        || CGImageSourceGetStatus(aSource)
+            != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(aSource, 0)
+            != kCGImageStatusComplete) {
+        if (aSource != nullptr) {
+            CFRelease(aSource);
+        }
+        return {};
+    }
+
+    // Thumbnail creation at the already-validated maximum dimension is the
+    // ImageIO API that applies EXIF orientation without ever allocating an
+    // unbounded intermediate. Valid sources remain at their native size.
+    std::int64_t aMaximumDimension =
+        static_cast<std::int64_t>(kMaximumTextureDimension);
+    CFNumberRef aMaximumDimensionNumber = CFNumberCreate(
+        kCFAllocatorDefault,
+        kCFNumberSInt64Type,
+        &aMaximumDimension);
+    if (aMaximumDimensionNumber == nullptr) {
+        CFRelease(aSource);
+        return {};
+    }
+    const void* aDecodeKeys[] = {
+        kCGImageSourceCreateThumbnailFromImageAlways,
+        kCGImageSourceCreateThumbnailWithTransform,
+        kCGImageSourceThumbnailMaxPixelSize,
+        kCGImageSourceShouldCacheImmediately,
+    };
+    const void* aDecodeValues[] = {
+        kCFBooleanTrue,
+        kCFBooleanTrue,
+        aMaximumDimensionNumber,
+        kCFBooleanTrue,
+    };
+    CFDictionaryRef aDecodeOptions = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        aDecodeKeys,
+        aDecodeValues,
+        4,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageRef anImage = aDecodeOptions == nullptr
+        ? nullptr
+        : CGImageSourceCreateThumbnailAtIndex(
+            aSource, 0, aDecodeOptions);
+    if (aDecodeOptions != nullptr) {
+        CFRelease(aDecodeOptions);
+    }
+    CFRelease(aMaximumDimensionNumber);
+    CFRelease(aSource);
+    if (anImage == nullptr) {
+        return {};
+    }
+
+    const std::uint64_t aSourceWidth = CGImageGetWidth(anImage);
+    const std::uint64_t aSourceHeight = CGImageGetHeight(anImage);
+    std::uint64_t aWidth = 0;
+    std::uint64_t aHeight = 0;
+    if (!TryRendererTextureDimensions(
+            aSourceWidth, aSourceHeight,
+            aWidth, aHeight)) {
+        CGImageRelease(anImage);
+        return {};
+    }
+
+    Handle(Image_PixMap) aPixMap = new Image_PixMap();
+    if (aPixMap.IsNull()
+        || !aPixMap->InitTrash(
+            Image_Format_RGBA,
+            static_cast<Standard_Size>(aWidth),
+            static_cast<Standard_Size>(aHeight),
+            static_cast<Standard_Size>(aWidth * 4))) {
+        CGImageRelease(anImage);
+        return {};
+    }
+    // CGBitmapContext writes the first scanline as the visual top row for a
+    // CGImage draw. OCCT uses this flag to apply the matching OpenGL V flip.
+    aPixMap->SetTopDown(true);
+
+    CGColorSpaceRef aColorSpace =
+        CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    const CGBitmapInfo aBitmapInfo = static_cast<CGBitmapInfo>(
+        kCGImageAlphaPremultipliedLast
+        | kCGBitmapByteOrder32Big);
+    CGContextRef aContext = aColorSpace == nullptr
+        ? nullptr
+        : CGBitmapContextCreate(
+            aPixMap->ChangeData(),
+            static_cast<size_t>(aWidth),
+            static_cast<size_t>(aHeight),
+            8,
+            aPixMap->SizeRowBytes(),
+            aColorSpace,
+            aBitmapInfo);
+    if (aColorSpace != nullptr) {
+        CGColorSpaceRelease(aColorSpace);
+    }
+    if (aContext == nullptr) {
+        CGImageRelease(anImage);
+        return {};
+    }
+    CGContextSetBlendMode(aContext, kCGBlendModeCopy);
+    CGContextSetInterpolationQuality(aContext, kCGInterpolationHigh);
+    // OCCT's OpenGL ES 2 texture wrapper unconditionally requests mipmaps.
+    // Resampling only NPOT axes into a bounded POT backing avoids an
+    // incomplete/black GPU texture while keeping the entire source image in
+    // the same normalized UV domain. Already-POT dimensions remain unchanged.
+    CGContextDrawImage(
+        aContext,
+        CGRectMake(
+            0.0, 0.0,
+            static_cast<CGFloat>(aWidth),
+            static_cast<CGFloat>(aHeight)),
+        anImage);
+    CGContextFlush(aContext);
+    CGContextRelease(aContext);
+    CGImageRelease(anImage);
+
+    // CoreGraphics' supported RGBA bitmap layout is premultiplied. OCCT's
+    // base-color texture contract is straight alpha, so undo the premultiply
+    // explicitly; otherwise translucent texels are darkened a second time by
+    // the PBR shader. Fully transparent RGB is canonicalized to zero.
+    for (Standard_Size aRow = 0; aRow < aPixMap->SizeY(); ++aRow) {
+        Standard_Byte* aPixel = aPixMap->ChangeRow(aRow);
+        for (Standard_Size aColumn = 0;
+             aColumn < aPixMap->SizeX();
+             ++aColumn, aPixel += 4) {
+            const unsigned int anAlpha = aPixel[3];
+            if (anAlpha == 0) {
+                aPixel[0] = 0;
+                aPixel[1] = 0;
+                aPixel[2] = 0;
+                continue;
+            }
+            if (anAlpha == 255) {
+                continue;
+            }
+            for (Standard_Integer aChannel = 0;
+                 aChannel < 3;
+                 ++aChannel) {
+                const unsigned int aStraight =
+                    (static_cast<unsigned int>(aPixel[aChannel])
+                        * 255u + anAlpha / 2u) / anAlpha;
+                aPixel[aChannel] = static_cast<Standard_Byte>(
+                    std::min(aStraight, 255u));
+            }
+        }
+    }
+    return aPixMap;
+}
+
+class Core3DImageIOTexture final : public Image_Texture {
+    DEFINE_STANDARD_RTTI_INLINE(
+        Core3DImageIOTexture,
+        Image_Texture)
+
+public:
+    Core3DImageIOTexture(
+        const Handle(NCollection_Buffer)& theBuffer,
+        const TCollection_AsciiString& theIdentifier)
+    : Image_Texture(theBuffer, theIdentifier) {
+    }
+
+    Handle(Image_PixMap) ReadImage(
+        const Handle(Image_SupportedFormats)&) const override
+    {
+        return DecodeRendererTextureWithImageIO(DataBuffer());
+    }
+};
+
+Handle(Image_Texture) MakeRendererDecodableTexture(
+    const Handle(NCollection_Buffer)& theBuffer,
+    const TCollection_AsciiString& theIdentifier)
+{
+    if (theBuffer.IsNull() || theBuffer->Data() == nullptr
+        || theBuffer->Size() == 0 || theIdentifier.IsEmpty()) {
+        return {};
+    }
+    // Both authored textures and safe-loaded/import-artifact textures pass
+    // through this factory before their first presentation. A binary update
+    // also recreates the GL context, so an old failed GPU-resource cache can
+    // never outlive the source upgrade performed here.
+    return new Core3DImageIOTexture(theBuffer, theIdentifier);
+}
+
+bool ValidateAuthoredRasterBytes(const Standard_Byte* theBytes,
+                                 const Standard_Size theSize,
+                                 const std::string* theMediaType)
+{
+    if (theBytes == nullptr || theSize == 0
+        || theSize > kMaximumEmbeddedTextureBytes) {
+        return false;
+    }
+    const bool isPNG = IsPNGSignature(theBytes, theSize);
+    const bool isJPEG = IsJPEGSignature(theBytes, theSize);
+    if (!isPNG && !isJPEG) {
+        return false;
+    }
+    if (theMediaType != nullptr
+        && !((*theMediaType == "image/png" && isPNG)
+             || (*theMediaType == "image/jpeg" && isJPEG))) {
+        return false;
+    }
+
+    CFDataRef data = CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(theBytes),
+        static_cast<CFIndex>(theSize),
+        kCFAllocatorNull);
+    if (data == nullptr) {
+        return false;
+    }
+    const void* optionKeys[] = {kCGImageSourceShouldCache};
+    const void* optionValues[] = {kCFBooleanFalse};
+    CFDictionaryRef options = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        optionKeys,
+        optionValues,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageSourceRef source = CGImageSourceCreateWithData(data, options);
+    if (options != nullptr) {
+        CFRelease(options);
+    }
+    CFRelease(data);
+    if (source == nullptr || CGImageSourceGetType(source) == nullptr
+        || CGImageSourceGetCount(source) != 1
+        || CGImageSourceGetStatus(source) != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(source, 0)
+            != kCGImageStatusComplete) {
+        if (source != nullptr) {
+            CFRelease(source);
+        }
+        return false;
+    }
+
+    CFDictionaryRef properties =
+        CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (properties == nullptr) {
+        return false;
+    }
+    const CFTypeRef widthValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelWidth);
+    const CFTypeRef heightValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelHeight);
+    const CFTypeRef depthValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyDepth);
+    std::int64_t width = 0;
+    std::int64_t height = 0;
+    std::int64_t depth = 8;
+    const bool hasValidDepth = depthValue == nullptr
+        || (CFGetTypeID(depthValue) == CFNumberGetTypeID()
+            && CFNumberGetValue(
+                static_cast<CFNumberRef>(depthValue),
+                kCFNumberSInt64Type,
+                &depth));
+    const bool isValid = widthValue != nullptr
+        && heightValue != nullptr
+        && CFGetTypeID(widthValue) == CFNumberGetTypeID()
+        && CFGetTypeID(heightValue) == CFNumberGetTypeID()
+        && CFNumberGetValue(
+            static_cast<CFNumberRef>(widthValue),
+            kCFNumberSInt64Type,
+            &width)
+        && CFNumberGetValue(
+            static_cast<CFNumberRef>(heightValue),
+            kCFNumberSInt64Type,
+            &height)
+        && hasValidDepth && depth > 0 && depth <= 8
+        && width > 0 && height > 0
+        && static_cast<std::uint64_t>(width)
+            <= kMaximumTextureDimension
+        && static_cast<std::uint64_t>(height)
+            <= kMaximumTextureDimension
+        && static_cast<std::uint64_t>(width)
+            <= kMaximumTexturePixels
+                / static_cast<std::uint64_t>(height);
+    bool isWithinDecodedBudget = false;
+    if (isValid) {
+        const std::uint64_t pixels = static_cast<std::uint64_t>(width)
+            * static_cast<std::uint64_t>(height);
+        isWithinDecodedBudget = pixels
+            <= static_cast<std::uint64_t>(kMaximumDecodedTextureBytes) / 4;
+    }
+    CFRelease(properties);
+    return isValid && isWithinDecodedBudget;
+}
+
+std::string AuthoredTextureIdentifier(const Standard_Byte* theBytes,
+                                      const Standard_Size theSize)
+{
+    if (theBytes == nullptr || theSize == 0
+        || theSize > std::numeric_limits<CC_LONG>::max()) {
+        return {};
+    }
+    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest = {};
+    if (CC_SHA256(theBytes, static_cast<CC_LONG>(theSize), digest.data())
+        == nullptr) {
+        return {};
+    }
+    std::ostringstream stream;
+    stream << "texture-sha256-" << std::hex << std::setfill('0');
+    for (const unsigned char byte : digest) {
+        stream << std::setw(2) << static_cast<unsigned int>(byte);
+    }
+    return stream.str();
 }
 
 template <typename Driver>
@@ -687,29 +1289,93 @@ void RemoveUnreferencedOwnedMaterial(
     theTool->RemoveMaterial(theMaterialLabel);
 }
 
-Standard_Boolean IsExclusivelyReferencedOwnedMaterial(
-    const TDF_Label& theMaterialLabel,
-    const TDF_Label& theShapeLabel)
+Standard_Boolean IsOwnedMaterialDefinition(
+    const TDF_Label& theMaterialLabel)
 {
-    if (theMaterialLabel.IsNull() || theShapeLabel.IsNull()) {
+    if (theMaterialLabel.IsNull()) {
         return Standard_False;
     }
     Handle(TDataStd_Integer) anOwnedMarker;
-    if (!theMaterialLabel.FindAttribute(
+    return theMaterialLabel.FindAttribute(
             OwnedPBRMaterialDefinitionAttributeID(), anOwnedMarker)
-        || anOwnedMarker.IsNull() || anOwnedMarker->Get() != 1) {
-        return Standard_False;
+        && !anOwnedMarker.IsNull() && anOwnedMarker->Get() == 1;
+}
+
+Handle(XCAFDoc_VisMaterial) CreatePersistedPBRMaterial(
+    const XCAFDoc_VisMaterialPBR& thePBR,
+    const Handle(XCAFDoc_VisMaterial)& thePreviousMaterial)
+{
+    Graphic3d_AlphaMode anAlphaMode =
+        thePBR.BaseColor.Alpha() < 0.999f
+            ? Graphic3d_AlphaMode_Blend
+            : Graphic3d_AlphaMode_Opaque;
+    Standard_ShortReal anAlphaCutoff = 0.5f;
+    Graphic3d_TypeOfBackfacingModel aFaceCulling =
+        Graphic3d_TypeOfBackfacingModel_Auto;
+    if (!thePreviousMaterial.IsNull()) {
+        anAlphaMode = thePreviousMaterial->AlphaMode();
+        anAlphaCutoff = thePreviousMaterial->AlphaCutOff();
+        aFaceCulling = thePreviousMaterial->FaceCulling();
     }
-    Handle(TDataStd_TreeNode) aReferenceRoot;
-    if (!theMaterialLabel.FindAttribute(
-            XCAFDoc::VisMaterialRefGUID(), aReferenceRoot)
-        || aReferenceRoot.IsNull() || !aReferenceRoot->HasFirst()) {
-        return Standard_False;
+
+    Handle(XCAFDoc_VisMaterial) aMaterial =
+        new XCAFDoc_VisMaterial();
+    aMaterial->SetPbrMaterial(thePBR);
+    // The ES2/OpenGL Common fallback and authoritative PBR definition are
+    // intentionally serialized as two slots. The safe binary reader charges
+    // each occurrence, even when both reference identical bytes.
+    XCAFDoc_VisMaterialCommon aCommon =
+        aMaterial->ConvertToCommonMaterial();
+    aCommon.DiffuseTexture = thePBR.BaseColorTexture;
+    aMaterial->SetCommonMaterial(aCommon);
+    aMaterial->SetAlphaMode(anAlphaMode, anAlphaCutoff);
+    aMaterial->SetFaceCulling(aFaceCulling);
+    return aMaterial;
+}
+
+bool AccumulateSerializedMaterialTextureOccurrences(
+    const Handle(XCAFDoc_VisMaterial)& theMaterial,
+    Core3DEmbeddedTextureBudgetState& theBudget,
+    const Standard_Size theMaximumSerializedBytes,
+    const Standard_Size theMaximumDecodedBytes)
+{
+    if (theMaterial.IsNull()) {
+        return false;
     }
-    const Handle(TDataStd_TreeNode) aFirst = aReferenceRoot->First();
-    return !aFirst.IsNull()
-        && !aFirst->HasNext()
-        && aFirst->Label().IsEqual(theShapeLabel);
+    if (theMaterial->HasPbrMaterial()) {
+        const XCAFDoc_VisMaterialPBR& aPBR =
+            theMaterial->PbrMaterial();
+        if (!Core3DAccumulateEmbeddedTextureBudget(
+                aPBR.BaseColorTexture,
+                theBudget, theMaximumSerializedBytes,
+                theMaximumDecodedBytes)
+            || !Core3DAccumulateEmbeddedTextureBudget(
+                aPBR.MetallicRoughnessTexture,
+                theBudget, theMaximumSerializedBytes,
+                theMaximumDecodedBytes)
+            || !Core3DAccumulateEmbeddedTextureBudget(
+                aPBR.EmissiveTexture,
+                theBudget, theMaximumSerializedBytes,
+                theMaximumDecodedBytes)
+            || !Core3DAccumulateEmbeddedTextureBudget(
+                aPBR.OcclusionTexture,
+                theBudget, theMaximumSerializedBytes,
+                theMaximumDecodedBytes)
+            || !Core3DAccumulateEmbeddedTextureBudget(
+                aPBR.NormalTexture,
+                theBudget, theMaximumSerializedBytes,
+                theMaximumDecodedBytes)) {
+            return false;
+        }
+    }
+    if (theMaterial->HasCommonMaterial()
+        && !Core3DAccumulateEmbeddedTextureBudget(
+            theMaterial->CommonMaterial().DiffuseTexture,
+            theBudget, theMaximumSerializedBytes,
+            theMaximumDecodedBytes)) {
+        return false;
+    }
+    return true;
 }
 
 std::string ReadIdentifier(const TDF_Label& theLabel,
@@ -780,6 +1446,148 @@ void AbortCommandNoThrow(const Handle(TDocStd_Document)& theDocument) noexcept
 
 } // namespace
 
+Standard_Boolean Core3DAccumulateEmbeddedTextureBudget(
+    const Handle(Image_Texture)& texture,
+    Core3DEmbeddedTextureBudgetState& state,
+    const Standard_Size maximumSerializedOccurrenceBytes,
+    const Standard_Size maximumDecodedResourceBytes)
+{
+    if (texture.IsNull()) {
+        return Standard_True;
+    }
+    const std::string storedIdentifier(
+        texture->TextureId().ToCString());
+    std::string canonicalIdentifier = storedIdentifier;
+    if (!texture->FilePath().IsEmpty()
+        || storedIdentifier.empty()
+        || storedIdentifier.size()
+            > static_cast<std::size_t>(
+                kMaximumPersistentTextureIdentifierBytes)
+        || !StripBufferTexturePrefixes(canonicalIdentifier)) {
+        return Standard_False;
+    }
+    const Handle(NCollection_Buffer)& buffer =
+        texture->DataBuffer();
+    if (buffer.IsNull() || buffer->Data() == nullptr
+        || buffer->Size() == 0
+        || buffer->Size() > kMaximumEmbeddedTextureBytes) {
+        return Standard_False;
+    }
+
+    const Standard_Size serializedLimit = std::min(
+        maximumSerializedOccurrenceBytes,
+        kMaximumAggregateTextureBytes);
+    if (state.serializedOccurrenceBytes > serializedLimit
+        || buffer->Size()
+            > serializedLimit - state.serializedOccurrenceBytes) {
+        return Standard_False;
+    }
+    state.serializedOccurrenceBytes += buffer->Size();
+
+    const auto existing =
+        state.resourcesByIdentifier.find(canonicalIdentifier);
+    if (existing != state.resourcesByIdentifier.end()) {
+        const Handle(NCollection_Buffer)& existingBuffer =
+            existing->second;
+        return !existingBuffer.IsNull()
+            && existingBuffer->Data() != nullptr
+            && existingBuffer->Size() == buffer->Size()
+            && std::memcmp(existingBuffer->Data(), buffer->Data(),
+                           buffer->Size()) == 0;
+    }
+
+    Standard_Size decodedBytes = 0;
+    const Standard_Size decodedLimit = std::min(
+        maximumDecodedResourceBytes,
+        kMaximumDecodedTextureBytes);
+    if (!TryTextureDecodedBytes(buffer, decodedBytes)
+        || state.decodedResourceBytes > decodedLimit
+        || decodedBytes
+            > decodedLimit - state.decodedResourceBytes) {
+        return Standard_False;
+    }
+    state.decodedResourceBytes += decodedBytes;
+    state.resourcesByIdentifier.emplace(
+        canonicalIdentifier, buffer);
+    return Standard_True;
+}
+
+Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
+    const Standard_Byte* bytes,
+    const Standard_Size size,
+    const std::string& mediaType,
+    Handle(Image_Texture)& texture)
+{
+    texture.Nullify();
+    if (!ValidateAuthoredRasterBytes(bytes, size, &mediaType)) {
+        return Standard_False;
+    }
+    const std::string identifier = AuthoredTextureIdentifier(bytes, size);
+    if (identifier.size() != 15 + CC_SHA256_DIGEST_LENGTH * 2) {
+        return Standard_False;
+    }
+    Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+        NCollection_BaseAllocator::CommonBaseAllocator(), size);
+    if (buffer.IsNull() || buffer->ChangeData() == nullptr
+        || buffer->Size() != size) {
+        return Standard_False;
+    }
+    std::memcpy(buffer->ChangeData(), bytes, size);
+    texture = MakeRendererDecodableTexture(
+        buffer, TCollection_AsciiString(identifier.c_str()));
+    if (texture.IsNull()) {
+        return Standard_False;
+    }
+#ifdef DEBUG
+    // Keep the constructor's OCCT-added texturebuf:// spelling aligned with
+    // the standalone validator used by persistence and scalar edits.
+    if (!Core3DValidateAuthoredBaseColorTexture(texture)) {
+        texture.Nullify();
+        return Standard_False;
+    }
+#endif
+    return Standard_True;
+}
+
+Standard_Boolean Core3DValidateAuthoredBaseColorTexture(
+    const Handle(Image_Texture)& texture)
+{
+    if (texture.IsNull() || !texture->FilePath().IsEmpty()) {
+        return Standard_False;
+    }
+    const Handle(NCollection_Buffer)& buffer = texture->DataBuffer();
+    if (buffer.IsNull() || buffer->Data() == nullptr
+        || !ValidateAuthoredRasterBytes(
+            buffer->Data(), buffer->Size(), nullptr)) {
+        return Standard_False;
+    }
+    const std::string identifier = AuthoredTextureIdentifier(
+        buffer->Data(), buffer->Size());
+    std::string storedIdentifier(texture->TextureId().ToCString());
+    return !identifier.empty()
+        && StripBufferTexturePrefixes(storedIdentifier)
+        && storedIdentifier == identifier;
+}
+
+Standard_Boolean Core3DBaseColorTexturesMatch(
+    const Handle(Image_Texture)& first,
+    const Handle(Image_Texture)& second)
+{
+    if (first.IsNull() || second.IsNull()
+        || !first->FilePath().IsEmpty()
+        || !second->FilePath().IsEmpty()
+        || !first->TextureId().IsEqual(second->TextureId())) {
+        return Standard_False;
+    }
+    const Handle(NCollection_Buffer)& firstBuffer = first->DataBuffer();
+    const Handle(NCollection_Buffer)& secondBuffer = second->DataBuffer();
+    return !firstBuffer.IsNull() && !secondBuffer.IsNull()
+        && firstBuffer->Data() != nullptr && secondBuffer->Data() != nullptr
+        && firstBuffer->Size() == secondBuffer->Size()
+        && std::memcmp(firstBuffer->Data(), secondBuffer->Data(),
+                       firstBuffer->Size()) == 0;
+}
+
 void Core3DBeginSafeBinaryRead()
 {
     gSafeBinaryReadRejected = false;
@@ -815,6 +1623,12 @@ void Core3DDefineSafeBinXCAFFormat(
 // purpose  :
 // =======================================================================
 OcctDocument::OcctDocument()
+: myMaximumSerializedTextureOccurrenceBytes(
+      kMaximumAggregateTextureBytes),
+  myMaximumDecodedTextureResourceBytes(
+      kMaximumDecodedTextureBytes),
+  myMaximumVisualMaterialDefinitions(
+      kMaximumVisualMaterialDefinitions)
 {
   try
   {
@@ -1128,6 +1942,23 @@ Standard_Boolean OcctDocument::IsPresentationEditable(
         || aCafPresentation->IsEditablePresentation();
 }
 
+Standard_Boolean OcctDocument::IsEditableFreeSimpleDefinitionLabel(
+    const TDF_Label& label) const {
+    if (myOcafDoc.IsNull() || label.IsNull()
+        || label.Data() != myOcafDoc->GetData()) {
+        return Standard_False;
+    }
+    const Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    return !shapeTool.IsNull() && shapeTool->IsShape(label)
+        && XCAFDoc_ShapeTool::IsFree(label)
+        && XCAFDoc_ShapeTool::IsSimpleShape(label)
+        && !XCAFDoc_ShapeTool::IsReference(label)
+        && !XCAFDoc_ShapeTool::IsComponent(label)
+        && !XCAFDoc_ShapeTool::IsAssembly(label)
+        && !XCAFDoc_ShapeTool::IsSubShape(label);
+}
+
 Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
     if (myOcafDoc.IsNull() || label.IsNull()) {
         return Standard_False;
@@ -1190,13 +2021,7 @@ Standard_Boolean OcctDocument::ReplaceShape(
     }
 	Handle(XCAFDoc_ShapeTool) shapeTool =
         XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
-    if (shapeTool.IsNull() || !shapeTool->IsShape(label)
-        || !XCAFDoc_ShapeTool::IsFree(label)
-        || !XCAFDoc_ShapeTool::IsSimpleShape(label)
-        || XCAFDoc_ShapeTool::IsReference(label)
-        || XCAFDoc_ShapeTool::IsComponent(label)
-        || XCAFDoc_ShapeTool::IsAssembly(label)
-        || XCAFDoc_ShapeTool::IsSubShape(label)) {
+    if (!IsEditableFreeSimpleDefinitionLabel(label)) {
         return Standard_False;
     }
     const TopoDS_Shape previousShape = XCAFDoc_ShapeTool::GetShape(label);
@@ -1297,7 +2122,304 @@ void OcctDocument::SaveObjectColor(const TDF_Label& label, const Quantity_NameOf
 Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
     const TDF_Label& label,
     const XCAFDoc_VisMaterialPBR& material) {
-    const Quantity_Color& aBaseColor = material.BaseColor.GetRGB();
+    return SaveObjectPBRMaterials({{
+        label, material, Handle(Image_Texture)()}});
+}
+
+Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
+    const TDF_Label& label,
+    const XCAFDoc_VisMaterialPBR& material,
+    const Handle(Image_Texture)& prevalidatedBaseColorTexture) {
+    return SaveObjectPBRMaterials({{
+        label, material, prevalidatedBaseColorTexture}});
+}
+
+void OcctDocument::SetMaximumSerializedTextureOccurrenceBytesForTesting(
+    const Standard_Size maximumBytes)
+{
+    myMaximumSerializedTextureOccurrenceBytes = std::min(
+        maximumBytes, kMaximumAggregateTextureBytes);
+}
+
+void OcctDocument::SetMaximumDecodedTextureResourceBytesForTesting(
+    const Standard_Size maximumBytes)
+{
+    myMaximumDecodedTextureResourceBytes = std::min(
+        maximumBytes, kMaximumDecodedTextureBytes);
+}
+
+void OcctDocument::SetMaximumVisualMaterialDefinitionsForTesting(
+    const Standard_Size maximumDefinitions)
+{
+    myMaximumVisualMaterialDefinitions = std::min(
+        maximumDefinitions,
+        static_cast<Standard_Size>(
+            kMaximumVisualMaterialDefinitions));
+}
+
+Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
+    const std::vector<OcctPBRMaterialUpdate>& updates,
+    std::vector<TDF_Label>* reclaimMaterialLabels) const
+{
+    if (reclaimMaterialLabels != nullptr) {
+        reclaimMaterialLabels->clear();
+    }
+    if (myOcafDoc.IsNull() || updates.empty()
+        || updates.size()
+            > static_cast<std::size_t>(
+                kMaximumVisualMaterialDefinitions)
+        || !XCAFDoc_DocumentTool::CheckVisMaterialTool(
+            myOcafDoc->Main())) {
+        return Standard_False;
+    }
+    const Handle(XCAFDoc_VisMaterialTool) aTool =
+        XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
+    if (aTool.IsNull()) {
+        return Standard_False;
+    }
+    const Standard_Size aMaximumDefinitions = std::min(
+        myMaximumVisualMaterialDefinitions,
+        static_cast<Standard_Size>(
+            kMaximumVisualMaterialDefinitions));
+
+    struct ExistingDefinition {
+        TDF_Label label;
+        Handle(XCAFDoc_VisMaterial) material;
+        bool reclaim = false;
+    };
+    TDF_LabelSequence existingLabels;
+    aTool->GetMaterials(existingLabels);
+    if (existingLabels.Length() < 0
+        || existingLabels.Length()
+            > kMaximumVisualMaterialDefinitions) {
+        return Standard_False;
+    }
+    std::vector<ExistingDefinition> existingDefinitions;
+    TDF_LabelMap tableMaterialLabels;
+    existingDefinitions.reserve(
+        static_cast<std::size_t>(existingLabels.Length()));
+    for (Standard_Integer index = 1;
+         index <= existingLabels.Length(); ++index) {
+        const TDF_Label& aLabel = existingLabels.Value(index);
+        const Handle(XCAFDoc_VisMaterial) aMaterial =
+            XCAFDoc_VisMaterialTool::GetMaterial(aLabel);
+        if (aLabel.IsNull() || aMaterial.IsNull()) {
+            return Standard_False;
+        }
+        tableMaterialLabels.Add(aLabel);
+        existingDefinitions.push_back({aLabel, aMaterial, false});
+    }
+    const Handle(TDF_Data)& documentData = myOcafDoc->GetData();
+    if (documentData.IsNull()) {
+        return Standard_False;
+    }
+    const auto hasUnregisteredDirectMaterial =
+        [&](const TDF_Label& label) {
+            Handle(XCAFDoc_VisMaterial) directMaterial;
+            return !label.IsNull()
+                && label.FindAttribute(
+                    XCAFDoc_VisMaterial::GetID(), directMaterial)
+                && (directMaterial.IsNull()
+                    || !tableMaterialLabels.Contains(label));
+        };
+    if (hasUnregisteredDirectMaterial(documentData->Root())) {
+        return Standard_False;
+    }
+    Standard_Size labelCount = 0;
+    for (TDF_ChildIterator iterator(
+             documentData->Root(), Standard_True);
+         iterator.More(); iterator.Next()) {
+        if (++labelCount > kMaximumDocumentLabels
+            || hasUnregisteredDirectMaterial(iterator.Value())) {
+            return Standard_False;
+        }
+    }
+
+    struct ProjectedUpdate {
+        TDF_Label label;
+        Handle(XCAFDoc_VisMaterial) material;
+        Standard_Integer previousExisting = -1;
+        Standard_Integer targetExisting = -1;
+    };
+    std::vector<ProjectedUpdate> projectedUpdates;
+    projectedUpdates.reserve(updates.size());
+    std::vector<Handle(XCAFDoc_VisMaterial)> newDefinitions;
+
+    const auto existingIndexForLabel = [&](const TDF_Label& label) {
+        for (std::size_t index = 0;
+             index < existingDefinitions.size(); ++index) {
+            if (existingDefinitions[index].label.IsEqual(label)) {
+                return static_cast<Standard_Integer>(index);
+            }
+        }
+        return Standard_Integer(-1);
+    };
+    for (const OcctPBRMaterialUpdate& update : updates) {
+        if (update.label.IsNull()) {
+            return Standard_False;
+        }
+        for (const ProjectedUpdate& projected : projectedUpdates) {
+            if (projected.label.IsEqual(update.label)) {
+                return Standard_False;
+            }
+        }
+
+        TDF_Label aPreviousLabel;
+        const Handle(XCAFDoc_VisMaterial) aPreviousMaterial =
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(update.label);
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(
+            update.label, aPreviousLabel);
+        const Handle(XCAFDoc_VisMaterial) aCandidate =
+            CreatePersistedPBRMaterial(
+                update.material, aPreviousMaterial);
+        if (aCandidate.IsNull()) {
+            return Standard_False;
+        }
+
+        Standard_Integer aTargetExisting = -1;
+        for (std::size_t index = 0;
+             index < existingDefinitions.size(); ++index) {
+            if (existingDefinitions[index].material->IsEqual(
+                    aCandidate)) {
+                aTargetExisting =
+                    static_cast<Standard_Integer>(index);
+                break;
+            }
+        }
+        if (aTargetExisting < 0) {
+            bool isAlreadyProjected = false;
+            for (const Handle(XCAFDoc_VisMaterial)& projected :
+                 newDefinitions) {
+                if (!projected.IsNull()
+                    && projected->IsEqual(aCandidate)) {
+                    isAlreadyProjected = true;
+                    break;
+                }
+            }
+            if (!isAlreadyProjected) {
+                newDefinitions.push_back(aCandidate);
+            }
+        }
+        projectedUpdates.push_back({
+            update.label,
+            aCandidate,
+            existingIndexForLabel(aPreviousLabel),
+            aTargetExisting});
+    }
+
+    const auto updateForLabel = [&](const TDF_Label& label)
+        -> const ProjectedUpdate* {
+        for (const ProjectedUpdate& update : projectedUpdates) {
+            if (update.label.IsEqual(label)) {
+                return &update;
+            }
+        }
+        return nullptr;
+    };
+    for (std::size_t index = 0;
+         index < existingDefinitions.size(); ++index) {
+        ExistingDefinition& existing = existingDefinitions[index];
+        bool wasPreviousDefinition = false;
+        bool hasFinalReference = false;
+        for (const ProjectedUpdate& update : projectedUpdates) {
+            wasPreviousDefinition = wasPreviousDefinition
+                || update.previousExisting
+                    == static_cast<Standard_Integer>(index);
+            hasFinalReference = hasFinalReference
+                || update.targetExisting
+                    == static_cast<Standard_Integer>(index);
+        }
+        if (!wasPreviousDefinition
+            || !IsOwnedMaterialDefinition(existing.label)) {
+            continue;
+        }
+
+        Handle(TDataStd_TreeNode) aReferenceRoot;
+        if (existing.label.FindAttribute(
+                XCAFDoc::VisMaterialRefGUID(), aReferenceRoot)
+            && !aReferenceRoot.IsNull()) {
+            for (Handle(TDataStd_TreeNode) aReference =
+                     aReferenceRoot->First();
+                 !aReference.IsNull();
+                 aReference = aReference->Next()) {
+                const ProjectedUpdate* update =
+                    updateForLabel(aReference->Label());
+                if (update == nullptr
+                    || update->previousExisting
+                        != static_cast<Standard_Integer>(index)
+                    || update->targetExisting
+                        == static_cast<Standard_Integer>(index)) {
+                    hasFinalReference = true;
+                    break;
+                }
+            }
+        }
+        // Remove from the projected definition set only when every extant
+        // reference is part of this batch and moves elsewhere. Imported or
+        // orphaned/unrelated definitions remain charged exactly as saved.
+        existing.reclaim = !hasFinalReference;
+    }
+
+    Standard_Size finalDefinitionCount =
+        static_cast<Standard_Size>(newDefinitions.size());
+    if (finalDefinitionCount > aMaximumDefinitions) {
+        return Standard_False;
+    }
+    for (const ExistingDefinition& existing : existingDefinitions) {
+        if (!existing.reclaim) {
+            if (finalDefinitionCount
+                >= aMaximumDefinitions) {
+                return Standard_False;
+            }
+            ++finalDefinitionCount;
+        }
+    }
+
+    const Standard_Size aMaximumSerializedBytes = std::min(
+        myMaximumSerializedTextureOccurrenceBytes,
+        kMaximumAggregateTextureBytes);
+    const Standard_Size aMaximumDecodedBytes = std::min(
+        myMaximumDecodedTextureResourceBytes,
+        kMaximumDecodedTextureBytes);
+    Core3DEmbeddedTextureBudgetState aTextureBudget;
+    for (const ExistingDefinition& existing : existingDefinitions) {
+        if (!existing.reclaim
+            && !AccumulateSerializedMaterialTextureOccurrences(
+                existing.material,
+                aTextureBudget,
+                aMaximumSerializedBytes,
+                aMaximumDecodedBytes)) {
+            return Standard_False;
+        }
+    }
+    for (const Handle(XCAFDoc_VisMaterial)& material :
+         newDefinitions) {
+        if (!AccumulateSerializedMaterialTextureOccurrences(
+                material,
+                aTextureBudget,
+                aMaximumSerializedBytes,
+                aMaximumDecodedBytes)) {
+            return Standard_False;
+        }
+    }
+    if (reclaimMaterialLabels != nullptr) {
+        reclaimMaterialLabels->reserve(existingDefinitions.size());
+        for (const ExistingDefinition& existing : existingDefinitions) {
+            if (existing.reclaim) {
+                reclaimMaterialLabels->push_back(existing.label);
+            }
+        }
+    }
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
+    const std::vector<OcctPBRMaterialUpdate>& updates)
+{
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || updates.empty()) {
+        return Standard_False;
+    }
     const auto isFiniteUnit = [](const Standard_Real theValue) {
         return std::isfinite(theValue)
             && theValue >= 0.0 && theValue <= 1.0;
@@ -1305,131 +2427,144 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterial(
     const auto isFiniteNonNegative = [](const Standard_Real theValue) {
         return std::isfinite(theValue) && theValue >= 0.0;
     };
-    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
-        || label.IsNull() || !material.IsDefined
-        || !isFiniteUnit(aBaseColor.Red())
-        || !isFiniteUnit(aBaseColor.Green())
-        || !isFiniteUnit(aBaseColor.Blue())
-        || !isFiniteUnit(material.BaseColor.Alpha())
-        || !isFiniteUnit(material.Metallic)
-        || !isFiniteUnit(material.Roughness)
-        || !isFiniteNonNegative(material.EmissiveFactor.x())
-        || !isFiniteNonNegative(material.EmissiveFactor.y())
-        || !isFiniteNonNegative(material.EmissiveFactor.z())
-        || material.EmissiveFactor.x() > kMaximumEmissionFactor
-        || material.EmissiveFactor.y() > kMaximumEmissionFactor
-        || material.EmissiveFactor.z() > kMaximumEmissionFactor
-        || !material.BaseColorTexture.IsNull()
-        || !material.MetallicRoughnessTexture.IsNull()
-        || !material.EmissiveTexture.IsNull()
-        || !material.OcclusionTexture.IsNull()
-        || !material.NormalTexture.IsNull()
-        || !std::isfinite(material.RefractionIndex)
-        || material.RefractionIndex < 1.0f
-        || material.RefractionIndex > 3.0f) {
+    for (const OcctPBRMaterialUpdate& update : updates) {
+        const XCAFDoc_VisMaterialPBR& material = update.material;
+        const Quantity_Color& aBaseColor = material.BaseColor.GetRGB();
+        if (update.label.IsNull() || !material.IsDefined
+            || !isFiniteUnit(aBaseColor.Red())
+            || !isFiniteUnit(aBaseColor.Green())
+            || !isFiniteUnit(aBaseColor.Blue())
+            || !isFiniteUnit(material.BaseColor.Alpha())
+            || !isFiniteUnit(material.Metallic)
+            || !isFiniteUnit(material.Roughness)
+            || !isFiniteNonNegative(material.EmissiveFactor.x())
+            || !isFiniteNonNegative(material.EmissiveFactor.y())
+            || !isFiniteNonNegative(material.EmissiveFactor.z())
+            || material.EmissiveFactor.x() > kMaximumEmissionFactor
+            || material.EmissiveFactor.y() > kMaximumEmissionFactor
+            || material.EmissiveFactor.z() > kMaximumEmissionFactor
+            || !material.MetallicRoughnessTexture.IsNull()
+            || !material.EmissiveTexture.IsNull()
+            || !material.OcclusionTexture.IsNull()
+            || !material.NormalTexture.IsNull()
+            || (!update.prevalidatedBaseColorTexture.IsNull()
+                && (material.BaseColorTexture.IsNull()
+                    || material.BaseColorTexture.get()
+                        != update.prevalidatedBaseColorTexture.get()))
+            || (!material.BaseColorTexture.IsNull()
+                && update.prevalidatedBaseColorTexture.IsNull()
+                && !Core3DValidateAuthoredBaseColorTexture(
+                    material.BaseColorTexture))
+            || !std::isfinite(material.RefractionIndex)
+            || material.RefractionIndex < 1.0f
+            || material.RefractionIndex > 3.0f) {
+            return Standard_False;
+        }
+    }
+    std::vector<TDF_Label> reclaimMaterialLabels;
+    if (!CanSaveObjectPBRMaterials(
+            updates, &reclaimMaterialLabels)) {
         return Standard_False;
     }
-
-    Handle(XCAFDoc_VisMaterialTool) aTool =
+    const Handle(XCAFDoc_VisMaterialTool) aTool =
         XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
     if (aTool.IsNull()) {
         return Standard_False;
     }
+    const Standard_Size aMaximumDefinitions = std::min(
+        myMaximumVisualMaterialDefinitions,
+        static_cast<Standard_Size>(
+            kMaximumVisualMaterialDefinitions));
 
-    Graphic3d_AlphaMode anAlphaMode =
-        material.BaseColor.Alpha() < 0.999f
-            ? Graphic3d_AlphaMode_Blend
-            : Graphic3d_AlphaMode_Opaque;
-    Standard_ShortReal anAlphaCutoff = 0.5f;
-    Graphic3d_TypeOfBackfacingModel aFaceCulling =
-        Graphic3d_TypeOfBackfacingModel_Auto;
-    Handle(TDataStd_Integer) aLocalMarker;
-    const Standard_Boolean hasLocalPBR =
-        label.FindAttribute(LocalPBRMaterialAttributeID(), aLocalMarker)
-        && !aLocalMarker.IsNull() && aLocalMarker->Get() == 1;
-    Graphic3d_NameOfMaterial aLegacyMaterial;
-    const Standard_Boolean hasLegacyMaterial =
-        TryMaterialNameForLabel(label, aLegacyMaterial);
-    const Handle(XCAFDoc_VisMaterial) aPreviousMaterial =
-        XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
-    TDF_Label aPreviousMaterialLabel;
-    XCAFDoc_VisMaterialTool::GetShapeMaterial(
-        label, aPreviousMaterialLabel);
-    if (!aPreviousMaterial.IsNull()
-        && (hasLocalPBR || !hasLegacyMaterial)) {
-        anAlphaMode = aPreviousMaterial->AlphaMode();
-        anAlphaCutoff = aPreviousMaterial->AlphaCutOff();
-        aFaceCulling = aPreviousMaterial->FaceCulling();
+    struct PreparedUpdate {
+        TDF_Label label;
+        TDF_Label previousMaterialLabel;
+        Handle(XCAFDoc_VisMaterial) material;
+    };
+    std::vector<PreparedUpdate> preparedUpdates;
+    preparedUpdates.reserve(updates.size());
+    for (const OcctPBRMaterialUpdate& update : updates) {
+        TDF_Label aPreviousMaterialLabel;
+        const Handle(XCAFDoc_VisMaterial) aPreviousMaterial =
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(update.label);
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(
+            update.label, aPreviousMaterialLabel);
+        const Handle(XCAFDoc_VisMaterial) aMaterial =
+            CreatePersistedPBRMaterial(
+                update.material, aPreviousMaterial);
+        if (aMaterial.IsNull()) {
+            return Standard_False;
+        }
+        preparedUpdates.push_back({
+            update.label, aPreviousMaterialLabel, aMaterial});
     }
 
-    Handle(XCAFDoc_VisMaterial) aMaterial = new XCAFDoc_VisMaterial();
-    aMaterial->SetPbrMaterial(material);
-    // ES2/OpenGL compatibility consumes the common approximation while Metal
-    // and glTF consume the authoritative PBR definition.
-    aMaterial->SetCommonMaterial(aMaterial->ConvertToCommonMaterial());
-    aMaterial->SetAlphaMode(anAlphaMode, anAlphaCutoff);
-    aMaterial->SetFaceCulling(aFaceCulling);
-
-    TDF_Label aMaterialLabel;
-    TDF_LabelSequence existingLabels;
-    aTool->GetMaterials(existingLabels);
-    for (Standard_Integer index = 1;
-         index <= existingLabels.Length(); ++index) {
-        const Handle(XCAFDoc_VisMaterial) existing =
-            XCAFDoc_VisMaterialTool::GetMaterial(existingLabels.Value(index));
-        if (!existing.IsNull() && existing->IsEqual(aMaterial)) {
-            aMaterialLabel = existingLabels.Value(index);
-            break;
-        }
+    // Detach the whole batch first. This makes final-state reclaim realizable
+    // even when several selected labels share one old definition and the table
+    // is already at its cap. Candidate handles above preserve each label's
+    // alpha/cutoff/culling before those links are removed.
+    for (const PreparedUpdate& update : preparedUpdates) {
+        aTool->UnSetShapeMaterial(update.label);
     }
-    if (aMaterialLabel.IsNull()) {
-        if (existingLabels.Length()
-            >= kMaximumVisualMaterialDefinitions) {
-            // A net-zero immutable replacement must remain possible at the
-            // table limit. Unlink and reclaim only an exclusively referenced
-            // Shapeyard-owned definition; aborting the surrounding command
-            // restores both links if allocation below fails.
-            if (!IsExclusivelyReferencedOwnedMaterial(
-                    aPreviousMaterialLabel, label)) {
-                return Standard_False;
-            }
-            aTool->UnSetShapeMaterial(label);
-            RemoveUnreferencedOwnedMaterial(
-                aTool, aPreviousMaterialLabel);
-            TDF_LabelSequence remainingLabels;
-            aTool->GetMaterials(remainingLabels);
-            if (remainingLabels.Length()
-                >= kMaximumVisualMaterialDefinitions) {
-                return Standard_False;
+    for (const TDF_Label& reclaimLabel : reclaimMaterialLabels) {
+        RemoveUnreferencedOwnedMaterial(aTool, reclaimLabel);
+    }
+
+    for (const PreparedUpdate& update : preparedUpdates) {
+        TDF_Label aMaterialLabel;
+        bool didAddMaterial = false;
+        TDF_LabelSequence existingLabels;
+        aTool->GetMaterials(existingLabels);
+        for (Standard_Integer index = 1;
+             index <= existingLabels.Length(); ++index) {
+            const Handle(XCAFDoc_VisMaterial) existing =
+                XCAFDoc_VisMaterialTool::GetMaterial(
+                    existingLabels.Value(index));
+            if (!existing.IsNull()
+                && existing->IsEqual(update.material)) {
+                aMaterialLabel = existingLabels.Value(index);
+                break;
             }
         }
-        aMaterialLabel = aTool->AddMaterial(
-            aMaterial,
-            TCollection_AsciiString("Shapeyard PBR"));
-        if (!aMaterialLabel.IsNull()) {
+        if (aMaterialLabel.IsNull()) {
+            if (existingLabels.Length() < 0
+                || static_cast<Standard_Size>(
+                    existingLabels.Length())
+                    >= aMaximumDefinitions) {
+                return Standard_False;
+            }
+            aMaterialLabel = aTool->AddMaterial(
+                update.material,
+                TCollection_AsciiString("Shapeyard PBR"));
+            didAddMaterial = !aMaterialLabel.IsNull();
+        }
+        if (didAddMaterial) {
             TDataStd_Integer::Set(
                 aMaterialLabel,
                 OwnedPBRMaterialDefinitionAttributeID(),
                 1);
         }
-    }
-    if (aMaterialLabel.IsNull()) {
-        return Standard_False;
-    }
-    aTool->SetShapeMaterial(label, aMaterialLabel);
-    TDataStd_Integer::Set(label, LocalPBRMaterialAttributeID(), 1);
+        if (aMaterialLabel.IsNull()) {
+            return Standard_False;
+        }
+        aTool->SetShapeMaterial(update.label, aMaterialLabel);
+        TDataStd_Integer::Set(
+            update.label, LocalPBRMaterialAttributeID(), 1);
 
-    // Canonical PBR and legacy preset tags must never compete for precedence.
-    for (const Standard_Integer aTag : {11, 12}) {
-        const TDF_Label aLegacyLabel = label.FindChild(aTag, Standard_False);
-        if (!aLegacyLabel.IsNull()) {
-            aLegacyLabel.ForgetAttribute(TDataStd_Integer::GetID());
+        // Canonical PBR and legacy preset tags must never compete for
+        // precedence.
+        for (const Standard_Integer aTag : {11, 12}) {
+            const TDF_Label aLegacyLabel =
+                update.label.FindChild(aTag, Standard_False);
+            if (!aLegacyLabel.IsNull()) {
+                aLegacyLabel.ForgetAttribute(
+                    TDataStd_Integer::GetID());
+            }
         }
     }
-    if (!aPreviousMaterialLabel.IsNull()
-        && !aPreviousMaterialLabel.IsEqual(aMaterialLabel)) {
+    for (const PreparedUpdate& update : preparedUpdates) {
         RemoveUnreferencedOwnedMaterial(
-            aTool, aPreviousMaterialLabel);
+            aTool, update.previousMaterialLabel);
     }
     return Standard_True;
 }
@@ -1647,6 +2782,17 @@ Standard_Boolean OcctDocument::TryEffectivePBRMaterialForLabel(
     } else {
         return Standard_False;
     }
+    // Imported assets may place their sole base-color map in the Common
+    // compatibility representation while keeping authoritative PBR scalars.
+    // Surface that as one effective base texture for selection/replacement;
+    // SupportsBaseColorTextureEditingForLabel() separately rejects a genuine
+    // PBR/Common conflict when both representations provide different maps.
+    if (material.BaseColorTexture.IsNull()
+        && aVisualMaterial->HasCommonMaterial()
+        && !aVisualMaterial->CommonMaterial().DiffuseTexture.IsNull()) {
+        material.BaseColorTexture =
+            aVisualMaterial->CommonMaterial().DiffuseTexture;
+    }
     if (!hasLocalPBR && hasLegacyColor) {
         material.BaseColor = Quantity_ColorRGBA(
             Quantity_Color(aLegacyColor), material.BaseColor.Alpha());
@@ -1664,18 +2810,87 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
     if (material.IsNull()) {
         return Standard_True;
     }
+    Handle(TDataStd_Integer) marker;
+    const Standard_Boolean hasLocalPBR =
+        label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
+        && !marker.IsNull() && marker->Get() == 1;
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-        if (!pbr.BaseColorTexture.IsNull()
-            || !pbr.MetallicRoughnessTexture.IsNull()
+        if (!pbr.MetallicRoughnessTexture.IsNull()
             || !pbr.EmissiveTexture.IsNull()
             || !pbr.OcclusionTexture.IsNull()
             || !pbr.NormalTexture.IsNull()) {
             return Standard_False;
         }
+        const Handle(Image_Texture)& base = pbr.BaseColorTexture;
+        const Handle(Image_Texture) common = material->HasCommonMaterial()
+            ? material->CommonMaterial().DiffuseTexture
+            : Handle(Image_Texture)();
+        if (!base.IsNull()) {
+            const Handle(NCollection_Buffer)& baseBuffer =
+                base->DataBuffer();
+            const Handle(NCollection_Buffer)& commonBuffer =
+                common.IsNull()
+                    ? Handle(NCollection_Buffer)()
+                    : common->DataBuffer();
+            return hasLocalPBR
+                && !common.IsNull()
+                && base->FilePath().IsEmpty()
+                && common->FilePath().IsEmpty()
+                && base->TextureId().IsEqual(common->TextureId())
+                && !baseBuffer.IsNull() && !commonBuffer.IsNull()
+                && baseBuffer->Size() == commonBuffer->Size();
+        }
+        return common.IsNull();
     }
     return !material->HasCommonMaterial()
         || material->CommonMaterial().DiffuseTexture.IsNull();
+}
+
+Standard_Boolean OcctDocument::SupportsBaseColorTextureEditingForLabel(
+    const TDF_Label& label) const {
+    if (label.IsNull()) {
+        return Standard_False;
+    }
+    const Handle(XCAFDoc_VisMaterial) material =
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+    if (material.IsNull()) {
+        return Standard_True;
+    }
+    if (!material->HasPbrMaterial()
+        && !material->HasCommonMaterial()) {
+        return Standard_False;
+    }
+
+    Handle(Image_Texture) pbrBase;
+    if (material->HasPbrMaterial()) {
+        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
+        if (!pbr.MetallicRoughnessTexture.IsNull()
+            || !pbr.EmissiveTexture.IsNull()
+            || !pbr.OcclusionTexture.IsNull()
+            || !pbr.NormalTexture.IsNull()) {
+            return Standard_False;
+        }
+        pbrBase = pbr.BaseColorTexture;
+    }
+
+    const Handle(Image_Texture) commonBase = material->HasCommonMaterial()
+        ? material->CommonMaterial().DiffuseTexture
+        : Handle(Image_Texture)();
+    if (!pbrBase.IsNull() && !commonBase.IsNull()) {
+        const Handle(NCollection_Buffer)& pbrBuffer =
+            pbrBase->DataBuffer();
+        const Handle(NCollection_Buffer)& commonBuffer =
+            commonBase->DataBuffer();
+        if (!pbrBase->FilePath().IsEmpty()
+            || !commonBase->FilePath().IsEmpty()
+            || !pbrBase->TextureId().IsEqual(commonBase->TextureId())
+            || pbrBuffer.IsNull() || commonBuffer.IsNull()
+            || pbrBuffer->Size() != commonBuffer->Size()) {
+            return Standard_False;
+        }
+    }
+    return Standard_True;
 }
 
 void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
@@ -1706,14 +2921,20 @@ void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_S
                 aCafPresentation->ApplyAuthoredVisualMaterial(
                     aVisualMaterial);
             } else {
-                anAis->SetMaterial(anAspect);
-                anAis->SetColor(
-                    aVisualMaterial->BaseColor().GetRGB());
+                ApplyVisualMaterialToPlainPresentation(
+                    aVisualMaterial, anAis);
             }
             return;
         }
-        anAis->SetMaterial(anAspect);
-        anAis->SetColor(aVisualMaterial->BaseColor().GetRGB());
+        if (!aCafPresentation.IsNull()) {
+            // CafShapePrs' default-style path already uses FillAspect() and
+            // retains imported face/occurrence precedence.
+            anAis->SetMaterial(anAspect);
+            anAis->SetColor(aVisualMaterial->BaseColor().GetRGB());
+        } else {
+            ApplyVisualMaterialToPlainPresentation(
+                aVisualMaterial, anAis);
+        }
     }
     const Graphic3d_MaterialAspect aLegacyAspect = hasLegacyMaterial
         ? Graphic3d_MaterialAspect(aLegacyMaterial)
@@ -1730,10 +2951,19 @@ void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_S
             aLegacyQuantity);
     } else {
         if (hasLegacyMaterial) {
+            ResetDrawerForLegacyMaterial(anAis->Attributes());
+        } else if (aVisualMaterial.IsNull()) {
+            ClearDrawerTextureMapping(anAis->Attributes());
+        }
+        if (hasLegacyMaterial) {
             anAis->SetMaterial(aLegacyAspect);
         }
         if (hasLegacyColor) {
             anAis->SetColor(aLegacyQuantity);
+        }
+        if (hasLegacyMaterial || hasLegacyColor
+            || aVisualMaterial.IsNull()) {
+            anAis->SynchronizeAspects();
         }
     }
 
@@ -1764,9 +2994,8 @@ void OcctDocument::LoadObjectAuthoredMaterialOverrides(
                 aCafPresentation->ApplyAuthoredVisualMaterial(
                     aVisualMaterial);
             } else {
-                anAis->SetMaterial(anAspect);
-                anAis->SetColor(
-                    aVisualMaterial->BaseColor().GetRGB());
+                ApplyVisualMaterialToPlainPresentation(
+                    aVisualMaterial, anAis);
             }
             return;
         }
@@ -1795,10 +3024,16 @@ void OcctDocument::LoadObjectAuthoredMaterialOverrides(
             aLegacyQuantity);
     } else {
         if (hasLegacyMaterial) {
+            ResetDrawerForLegacyMaterial(anAis->Attributes());
+        }
+        if (hasLegacyMaterial) {
             anAis->SetMaterial(aLegacyAspect);
         }
         if (hasLegacyColor) {
             anAis->SetColor(aLegacyQuantity);
+        }
+        if (hasLegacyMaterial || hasLegacyColor) {
+            anAis->SynchronizeAspects();
         }
     }
 }

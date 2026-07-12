@@ -938,7 +938,11 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
     if (thePbrOverride.has_value()) {
         const WholeObjectPBRMaterial& anOverride = *thePbrOverride;
         const XCAFDoc_VisMaterialPBR& aPbr = anOverride.pbr;
-        if (!aPbr.IsDefined) {
+        if (!aPbr.IsDefined
+            || !aPbr.MetallicRoughnessTexture.IsNull()
+            || !aPbr.EmissiveTexture.IsNull()
+            || !aPbr.OcclusionTexture.IsNull()
+            || !aPbr.NormalTexture.IsNull()) {
             return false;
         }
         SetColor(theResult, aPbr.BaseColor);
@@ -968,6 +972,7 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                 theResult.cullMode = CullMode::Front;
                 break;
         }
+        theBaseColorTexture = aPbr.BaseColorTexture;
     } else {
         if (theMaterialOverride.has_value()
             && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {

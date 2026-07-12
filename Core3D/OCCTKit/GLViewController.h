@@ -111,6 +111,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
+- (NSDictionary<NSString *, NSNumber *> *)
+    debugFramebufferStatistics;
 #endif
 
 - (void) setConstructorMode;

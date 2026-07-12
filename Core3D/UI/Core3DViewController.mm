@@ -20,12 +20,17 @@
 #include "XCAFDoc_VisMaterial.hxx"
 #include "XCAFDoc_VisMaterialTool.hxx"
 #include "Image_Texture.hxx"
+#include "BRep_Tool.hxx"
+#include "BRepTools.hxx"
 #include "BRepPrimAPI_MakeBox.hxx"
 #include "BRepPrimAPI_MakePrism.hxx"
 #include "BRepBuilderAPI_MakePolygon.hxx"
 #include "BRepBuilderAPI_MakeFace.hxx"
 #include "BRep_Builder.hxx"
 #include "TopoDS_Compound.hxx"
+#include "TopoDS.hxx"
+#include "TopoDS_Face.hxx"
+#include "Poly_Triangulation.hxx"
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
 #include "gp_Ax2.hxx"
@@ -41,6 +46,8 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -55,8 +62,132 @@ void Core3DAbortCommandNoThrow(
     }
 }
 
+NSString* const Core3DTextureAuthoringErrorDomain =
+    @"Core3DTextureAuthoringError";
+
+typedef NS_ENUM(NSInteger, Core3DTextureAuthoringErrorCode) {
+    Core3DTextureAuthoringErrorInvalidInput = 1,
+    Core3DTextureAuthoringErrorUnavailable,
+    Core3DTextureAuthoringErrorNoSelection,
+    Core3DTextureAuthoringErrorUnsupportedSelection,
+    Core3DTextureAuthoringErrorMissingTextureCoordinates,
+    Core3DTextureAuthoringErrorTransactionFailed,
+};
+
+BOOL Core3DTextureAuthoringFailure(
+    NSError* _Nullable * _Nullable error,
+    const Core3DTextureAuthoringErrorCode code,
+    NSString* description) {
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:Core3DTextureAuthoringErrorDomain
+                                     code:code
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     description ?: @"The texture edit failed."}];
+    }
+    return NO;
+}
+
+constexpr Standard_Size kMaximumTextureAuthoringFaces = 4096;
+constexpr Standard_Size kMaximumTextureAuthoringNodes = 1000000;
+// Matches the immutable snapshot's 3,000,000-index per-mesh ceiling.
+constexpr Standard_Size kMaximumTextureAuthoringTriangles = 1000000;
+constexpr Standard_Size kMaximumTextureAuthoringObjects = 256;
+constexpr Standard_Real kMaximumTextureCoordinateMagnitude = 1.0e9;
+
+struct Core3DTextureAuthoringBudget {
+    Standard_Size maximumObjects = kMaximumTextureAuthoringObjects;
+    Standard_Size objects = 0;
+    Standard_Size faces = 0;
+    Standard_Size nodes = 0;
+    Standard_Size triangles = 0;
+};
+
+bool Core3DHasCompleteCachedTextureCoordinates(
+    const TopoDS_Shape& shape,
+    Core3DTextureAuthoringBudget& budget) {
+    if (shape.IsNull() || budget.maximumObjects == 0
+        || budget.maximumObjects > kMaximumTextureAuthoringObjects
+        || budget.objects >= budget.maximumObjects) {
+        return false;
+    }
+    ++budget.objects;
+    Standard_Size objectFaceCount = 0;
+    for (TopExp_Explorer faces(shape, TopAbs_FACE);
+         faces.More(); faces.Next()) {
+        if (++objectFaceCount > kMaximumTextureAuthoringFaces
+            || budget.faces >= kMaximumTextureAuthoringFaces) {
+            return false;
+        }
+        ++budget.faces;
+        const TopoDS_Face face = TopoDS::Face(faces.Current());
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation)& triangulation =
+            BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull() || !triangulation->HasGeometry()
+            || !triangulation->HasUVNodes()
+            || triangulation->NbNodes() <= 0
+            || triangulation->NbTriangles() <= 0) {
+            // Deliberately do not invoke a mesher here. Texture assignment is
+            // a presentation edit and must never hide an unbounded geometry
+            // rebuild on the main thread.
+            return false;
+        }
+        const Standard_Size nodes =
+            static_cast<Standard_Size>(triangulation->NbNodes());
+        const Standard_Size triangles =
+            static_cast<Standard_Size>(triangulation->NbTriangles());
+        if (budget.nodes > kMaximumTextureAuthoringNodes
+            || nodes > kMaximumTextureAuthoringNodes - budget.nodes
+            || budget.triangles > kMaximumTextureAuthoringTriangles
+            || triangles
+                > kMaximumTextureAuthoringTriangles - budget.triangles) {
+            return false;
+        }
+        budget.nodes += nodes;
+        budget.triangles += triangles;
+        for (Standard_Integer node = 1;
+             node <= triangulation->NbNodes(); ++node) {
+            const gp_Pnt2d uv = triangulation->UVNode(node);
+            if (!std::isfinite(uv.X()) || !std::isfinite(uv.Y())
+                || std::abs(uv.X()) > kMaximumTextureCoordinateMagnitude
+                || std::abs(uv.Y()) > kMaximumTextureCoordinateMagnitude) {
+                return false;
+            }
+        }
+        bool hasUsableUVArea = false;
+        for (Standard_Integer triangle = 1;
+             triangle <= triangulation->NbTriangles(); ++triangle) {
+            Standard_Integer indices[3] = {0, 0, 0};
+            triangulation->Triangle(triangle).Get(
+                indices[0], indices[1], indices[2]);
+            for (const Standard_Integer index : indices) {
+                if (index < 1 || index > triangulation->NbNodes()) {
+                    return false;
+                }
+            }
+            const gp_Pnt2d uv0 = triangulation->UVNode(indices[0]);
+            const gp_Pnt2d uv1 = triangulation->UVNode(indices[1]);
+            const gp_Pnt2d uv2 = triangulation->UVNode(indices[2]);
+            const Standard_Real twiceArea =
+                (uv1.X() - uv0.X()) * (uv2.Y() - uv0.Y())
+                - (uv1.Y() - uv0.Y()) * (uv2.X() - uv0.X());
+            if (!std::isfinite(twiceArea)) {
+                return false;
+            }
+            hasUsableUVArea = hasUsableUVArea
+                || std::abs(twiceArea) > 0.0;
+        }
+        if (!hasUsableUVArea) {
+            return false;
+        }
+    }
+    return objectFaceCount > 0;
+}
+
 Core3DPBRMaterial* Core3DMakePBRMaterial(
-    const XCAFDoc_VisMaterialPBR& material) {
+    const XCAFDoc_VisMaterialPBR& material,
+    const BOOL supportsScalarEditing,
+    const BOOL supportsBaseColorTextureEditing) {
     if (!material.IsDefined) {
         return nil;
     }
@@ -73,17 +204,13 @@ Core3DPBRMaterial* Core3DMakePBRMaterial(
                                      green:green
                                       blue:blue
                                      alpha:material.BaseColor.Alpha()];
-    const BOOL supportsScalarEditing =
-        material.BaseColorTexture.IsNull()
-        && material.MetallicRoughnessTexture.IsNull()
-        && material.EmissiveTexture.IsNull()
-        && material.OcclusionTexture.IsNull()
-        && material.NormalTexture.IsNull();
     return [[Core3DPBRMaterial alloc]
         initWithBaseColor:color
                  metallic:material.Metallic
                 roughness:material.Roughness
-    supportsScalarEditing:supportsScalarEditing];
+    supportsScalarEditing:supportsScalarEditing
+      hasBaseColorTexture:!material.BaseColorTexture.IsNull()
+supportsBaseColorTextureEditing:supportsBaseColorTextureEditing];
 }
 
 bool Core3DApplyNativePBRScalars(Core3DPBRMaterial* source,
@@ -185,6 +312,41 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     return result;
 }
 
+void Core3DAddDebugOrphanVisualMaterial(
+    const TDF_Label& label,
+    const char* identifier) {
+    NSData* png = [[NSData alloc] initWithBase64EncodedString:
+        @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg=="
+        options:0];
+    Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+        NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
+    if (label.IsNull() || identifier == nullptr || *identifier == '\0'
+        || png.length == 0 || buffer.IsNull()
+        || buffer->ChangeData() == nullptr) {
+        throw Standard_Failure(
+            "Unable to create orphan visual material resource");
+    }
+    std::memcpy(buffer->ChangeData(), png.bytes, png.length);
+    const Handle(Image_Texture) texture = new Image_Texture(
+        buffer, TCollection_AsciiString(identifier));
+    XCAFDoc_VisMaterialPBR pbr;
+    pbr.BaseColor = Quantity_ColorRGBA(
+        Quantity_Color(0.28, 0.52, 0.74, Quantity_TOC_sRGB),
+        1.0f);
+    pbr.Metallic = 0.3f;
+    pbr.Roughness = 0.7f;
+    pbr.BaseColorTexture = texture;
+    pbr.IsDefined = Standard_True;
+    Handle(XCAFDoc_VisMaterial) material =
+        new XCAFDoc_VisMaterial();
+    material->SetPbrMaterial(pbr);
+    XCAFDoc_VisMaterialCommon common =
+        material->ConvertToCommonMaterial();
+    common.DiffuseTexture = texture;
+    material->SetCommonMaterial(common);
+    label.AddAttribute(material);
+}
+
 } // namespace
 
 @interface Core3DViewController () {
@@ -194,6 +356,9 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     unsigned long long _shouldLoadAssetByteCount;
     NSString *_shouldLoadAssetSHA256;
     std::atomic_bool _isLoading;
+#ifdef DEBUG
+    NSUInteger _debugMaximumTextureAuthoringObjects;
+#endif
 }
 
 @end
@@ -254,6 +419,10 @@ NSData* Core3DCreateDebugBinXCAFFixture(
         _can_duplicate = NO;
 
         _availableGizmoTypes = @[];
+#ifdef DEBUG
+        _debugMaximumTextureAuthoringObjects =
+            kMaximumTextureAuthoringObjects;
+#endif
         
         [[NSNotificationCenter defaultCenter] addObserver:self
             selector:@selector(receiveOcctDocumentNotification:)
@@ -361,7 +530,8 @@ NSData* Core3DCreateDebugBinXCAFFixture(
 		editable.Metallic = preset.Metallic();
 		editable.Roughness = preset.NormalizedRoughness();
 		editable.RefractionIndex = preset.IOR();
-		Core3DPBRMaterial* pbr = Core3DMakePBRMaterial(editable);
+		Core3DPBRMaterial* pbr = Core3DMakePBRMaterial(
+            editable, YES, YES);
 		if (pbr != nil) {
 			[selectedPBR addObject:pbr];
 		}
@@ -388,8 +558,10 @@ NSData* Core3DCreateDebugBinXCAFFixture(
         Handle(AIS_Shape) shape;
         TDF_Label label;
         XCAFDoc_VisMaterialPBR material;
+        Handle(Image_Texture) prevalidatedBaseColorTexture;
     };
     std::vector<PendingPBRStyle> pendingStyles;
+    std::unordered_set<std::string> validatedTextureIdentifiers;
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         const Handle(AIS_InteractiveObject) selected =
             context->SelectedInteractive();
@@ -411,8 +583,7 @@ NSData* Core3DCreateDebugBinXCAFFixture(
                 doc->MaterialNameForLabel(label),
                 doc->ColorNameForLabel(label));
         }
-        if (!nativeMaterial.BaseColorTexture.IsNull()
-            || !nativeMaterial.MetallicRoughnessTexture.IsNull()
+        if (!nativeMaterial.MetallicRoughnessTexture.IsNull()
             || !nativeMaterial.EmissiveTexture.IsNull()
             || !nativeMaterial.OcclusionTexture.IsNull()
             || !nativeMaterial.NormalTexture.IsNull()
@@ -420,7 +591,22 @@ NSData* Core3DCreateDebugBinXCAFFixture(
                 material, nativeMaterial)) {
             return;
         }
-        pendingStyles.push_back({shape, label, nativeMaterial});
+        Handle(Image_Texture) validatedBaseColorTexture;
+        if (!nativeMaterial.BaseColorTexture.IsNull()) {
+            const std::string identifier(
+                nativeMaterial.BaseColorTexture->TextureId().ToCString());
+            if (identifier.empty()) {
+                return;
+            }
+            if (validatedTextureIdentifiers.insert(identifier).second
+                && !Core3DValidateAuthoredBaseColorTexture(
+                    nativeMaterial.BaseColorTexture)) {
+                return;
+            }
+            validatedBaseColorTexture = nativeMaterial.BaseColorTexture;
+        }
+        pendingStyles.push_back({
+            shape, label, nativeMaterial, validatedBaseColorTexture});
     }
     if (pendingStyles.empty()) {
         return;
@@ -431,12 +617,17 @@ NSData* Core3DCreateDebugBinXCAFFixture(
         if (!transaction->HasOpenCommand()) {
             return;
         }
+        std::vector<OcctPBRMaterialUpdate> materialUpdates;
+        materialUpdates.reserve(pendingStyles.size());
         for (const PendingPBRStyle& style : pendingStyles) {
-            if (!doc->SaveObjectPBRMaterial(
-                    style.label, style.material)) {
-                Core3DAbortCommandNoThrow(transaction);
-                return;
-            }
+            materialUpdates.push_back({
+                style.label,
+                style.material,
+                style.prevalidatedBaseColorTexture});
+        }
+        if (!doc->SaveObjectPBRMaterials(materialUpdates)) {
+            Core3DAbortCommandNoThrow(transaction);
+            return;
         }
         if (!transaction->CommitCommand()) {
             Core3DAbortCommandNoThrow(transaction);
@@ -457,7 +648,10 @@ NSData* Core3DCreateDebugBinXCAFFixture(
         [NSMutableArray arrayWithCapacity:pendingStyles.size()];
     for (const PendingPBRStyle& style : pendingStyles) {
         Core3DPBRMaterial* publishedMaterial =
-            Core3DMakePBRMaterial(style.material);
+            Core3DMakePBRMaterial(
+                style.material,
+                doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
+                doc->SupportsBaseColorTextureEditingForLabel(style.label));
         if (publishedMaterial != nil) {
             [selectedPBR addObject:publishedMaterial];
         }
@@ -467,6 +661,345 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     context->UpdateCurrentViewer();
     [self sendNotifyUIState:UIStateChangingApplyMaterial
                            | UIStateChangingHistory];
+}
+
+-(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
+                                      mediaType:(NSString*)mediaType
+                                          error:(NSError* _Nullable * _Nullable)error {
+    if (error != nullptr) {
+        *error = nil;
+    }
+    if (![NSThread isMainThread] || textureData == nil
+        || mediaType == nil || textureData.length == 0
+        || textureData.bytes == nullptr || mediaType.UTF8String == nullptr) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorInvalidInput,
+            @"Choose a valid PNG or JPEG image.");
+    }
+
+    Handle(Image_Texture) authoredTexture;
+    if (!Core3DCreateAuthoredBaseColorTexture(
+            static_cast<const Standard_Byte*>(textureData.bytes),
+            static_cast<Standard_Size>(textureData.length),
+            std::string(mediaType.UTF8String), authoredTexture)) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorInvalidInput,
+            @"The image is invalid or exceeds the texture safety limits.");
+    }
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"The material editor is not ready.");
+    }
+
+    auto context = GLController.viewer->AisContext();
+    auto doc = GLController.viewer->getDocument();
+    if (context.IsNull() || doc.IsNull()) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"The material editor is not ready.");
+    }
+    auto transaction = doc->ChangeDocument();
+    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"Finish the current modeling operation before editing a texture.");
+    }
+
+    struct PendingTextureStyle {
+        Handle(AIS_Shape) shape;
+        TDF_Label label;
+        XCAFDoc_VisMaterialPBR material;
+        bool changed = false;
+    };
+    std::vector<PendingTextureStyle> pendingStyles;
+    Core3DTextureAuthoringBudget authoringBudget;
+    std::unordered_map<std::string, bool>
+        identicalExistingTextureByIdentifier;
+#ifdef DEBUG
+    authoringBudget.maximumObjects =
+        static_cast<Standard_Size>(_debugMaximumTextureAuthoringObjects);
+#endif
+    bool hasChanges = false;
+    for (context->InitSelected(); context->MoreSelected();
+         context->NextSelected()) {
+        const Handle(AIS_InteractiveObject) selected =
+            context->SelectedInteractive();
+        const Handle(AIS_Shape) shape =
+            Handle(AIS_Shape)::DownCast(selected);
+        if (shape.IsNull() || shape->Shape().IsNull()
+            || !doc->IsPresentationEditable(selected)) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorUnsupportedSelection,
+                @"Textures can be edited only on whole editable objects.");
+        }
+        const TDF_Label label = doc->ShapeLabel(selected);
+        if (label.IsNull()
+            || !doc->IsEditableFreeSimpleDefinitionLabel(label)
+            || !doc->SupportsBaseColorTextureEditingForLabel(label)) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorUnsupportedSelection,
+                @"This material contains texture maps that cannot be edited safely.");
+        }
+        if (!Core3DHasCompleteCachedTextureCoordinates(
+                shape->Shape(), authoringBudget)) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorMissingTextureCoordinates,
+                @"Every selected face needs existing usable texture coordinates.");
+        }
+
+        XCAFDoc_VisMaterialPBR nativeMaterial;
+        if (!doc->TryEffectivePBRMaterialForLabel(
+                label, nativeMaterial)) {
+            nativeMaterial = Core3DLegacyPBRMaterial(
+                doc->MaterialNameForLabel(label),
+                doc->ColorNameForLabel(label));
+        }
+        bool hasIdenticalTexture = false;
+        if (!nativeMaterial.BaseColorTexture.IsNull()) {
+            const std::string existingIdentifier(
+                nativeMaterial.BaseColorTexture->TextureId().ToCString());
+            const auto cached = identicalExistingTextureByIdentifier.find(
+                existingIdentifier);
+            if (cached != identicalExistingTextureByIdentifier.end()) {
+                hasIdenticalTexture = cached->second;
+            } else {
+                hasIdenticalTexture = Core3DBaseColorTexturesMatch(
+                    nativeMaterial.BaseColorTexture, authoredTexture);
+                identicalExistingTextureByIdentifier.emplace(
+                    existingIdentifier, hasIdenticalTexture);
+            }
+        }
+        const bool isOwnedIdenticalTexture = hasIdenticalTexture
+            && doc->SupportsScalarPBRMaterialEditingForLabel(label);
+        nativeMaterial.BaseColorTexture = authoredTexture;
+        const bool changed = !isOwnedIdenticalTexture;
+        pendingStyles.push_back({shape, label, nativeMaterial, changed});
+        hasChanges = hasChanges || changed;
+    }
+    if (pendingStyles.empty()) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorNoSelection,
+            @"Select at least one editable object.");
+    }
+    if (!hasChanges) {
+        return YES;
+    }
+
+    try {
+        transaction->NewCommand();
+        if (!transaction->HasOpenCommand()) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorTransactionFailed,
+                @"The texture edit could not be started.");
+        }
+        std::vector<OcctPBRMaterialUpdate> materialUpdates;
+        materialUpdates.reserve(pendingStyles.size());
+        for (const PendingTextureStyle& style : pendingStyles) {
+            if (style.changed) {
+                materialUpdates.push_back({
+                    style.label, style.material, authoredTexture});
+            }
+        }
+        if (materialUpdates.empty()
+            || !doc->SaveObjectPBRMaterials(materialUpdates)) {
+            Core3DAbortCommandNoThrow(transaction);
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorTransactionFailed,
+                @"The texture edit could not be saved.");
+        }
+        if (!transaction->CommitCommand()) {
+            Core3DAbortCommandNoThrow(transaction);
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorTransactionFailed,
+                @"The texture edit could not be committed.");
+        }
+    } catch (...) {
+        Core3DAbortCommandNoThrow(transaction);
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorTransactionFailed,
+            @"The texture edit could not be committed.");
+    }
+
+    doc->NotifyChanges();
+    NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
+        [NSMutableArray arrayWithCapacity:pendingStyles.size()];
+    for (const PendingTextureStyle& style : pendingStyles) {
+        if (style.changed) {
+            style.shape->UnsetColor();
+            doc->LoadObjectMeterial(style.label, style.shape);
+            style.shape->SetToUpdate();
+            context->Redisplay(style.shape, Standard_False);
+        }
+        Core3DPBRMaterial* published = Core3DMakePBRMaterial(
+            style.material,
+            doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
+            doc->SupportsBaseColorTextureEditingForLabel(style.label));
+        if (published != nil) {
+            [selectedPBR addObject:published];
+        }
+    }
+    [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
+    [self.materialController didChangeSelectionWithPBRMaterials:selectedPBR];
+    context->UpdateCurrentViewer();
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApplyMaterial
+                           | UIStateChangingHistory];
+    return YES;
+}
+
+-(BOOL)clearSelectionBaseColorTextureWithError:(NSError* _Nullable * _Nullable)error {
+    if (error != nullptr) {
+        *error = nil;
+    }
+    if (![NSThread isMainThread]) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"Texture edits must run on the main thread.");
+    }
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"The material editor is not ready.");
+    }
+    auto context = GLController.viewer->AisContext();
+    auto doc = GLController.viewer->getDocument();
+    if (context.IsNull() || doc.IsNull()) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"The material editor is not ready.");
+    }
+    auto transaction = doc->ChangeDocument();
+    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorUnavailable,
+            @"Finish the current modeling operation before editing a texture.");
+    }
+
+    struct PendingTextureStyle {
+        Handle(AIS_Shape) shape;
+        TDF_Label label;
+        XCAFDoc_VisMaterialPBR material;
+        bool changed = false;
+    };
+    std::vector<PendingTextureStyle> pendingStyles;
+    Core3DTextureAuthoringBudget authoringBudget;
+#ifdef DEBUG
+    authoringBudget.maximumObjects =
+        static_cast<Standard_Size>(_debugMaximumTextureAuthoringObjects);
+#endif
+    bool hasChanges = false;
+    for (context->InitSelected(); context->MoreSelected();
+         context->NextSelected()) {
+        const Handle(AIS_InteractiveObject) selected =
+            context->SelectedInteractive();
+        const Handle(AIS_Shape) shape =
+            Handle(AIS_Shape)::DownCast(selected);
+        if (shape.IsNull() || shape->Shape().IsNull()
+            || !doc->IsPresentationEditable(selected)) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorUnsupportedSelection,
+                @"Textures can be edited only on whole editable objects.");
+        }
+        const TDF_Label label = doc->ShapeLabel(selected);
+        if (label.IsNull()
+            || !doc->IsEditableFreeSimpleDefinitionLabel(label)
+            || !doc->SupportsBaseColorTextureEditingForLabel(label)) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorUnsupportedSelection,
+                @"This material contains texture maps that cannot be edited safely.");
+        }
+        if (authoringBudget.maximumObjects == 0
+            || authoringBudget.objects
+                >= authoringBudget.maximumObjects) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorUnsupportedSelection,
+                @"Too many objects are selected for one texture edit.");
+        }
+        ++authoringBudget.objects;
+        XCAFDoc_VisMaterialPBR nativeMaterial;
+        if (!doc->TryEffectivePBRMaterialForLabel(
+                label, nativeMaterial)) {
+            nativeMaterial = Core3DLegacyPBRMaterial(
+                doc->MaterialNameForLabel(label),
+                doc->ColorNameForLabel(label));
+        }
+        const bool changed = !nativeMaterial.BaseColorTexture.IsNull();
+        nativeMaterial.BaseColorTexture.Nullify();
+        pendingStyles.push_back({shape, label, nativeMaterial, changed});
+        hasChanges = hasChanges || changed;
+    }
+    if (pendingStyles.empty()) {
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorNoSelection,
+            @"Select at least one editable object.");
+    }
+    if (!hasChanges) {
+        return YES;
+    }
+
+    try {
+        transaction->NewCommand();
+        if (!transaction->HasOpenCommand()) {
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorTransactionFailed,
+                @"The texture edit could not be started.");
+        }
+        std::vector<OcctPBRMaterialUpdate> materialUpdates;
+        materialUpdates.reserve(pendingStyles.size());
+        for (const PendingTextureStyle& style : pendingStyles) {
+            if (style.changed) {
+                materialUpdates.push_back({
+                    style.label,
+                    style.material,
+                    Handle(Image_Texture)()});
+            }
+        }
+        if (materialUpdates.empty()
+            || !doc->SaveObjectPBRMaterials(materialUpdates)) {
+            Core3DAbortCommandNoThrow(transaction);
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorTransactionFailed,
+                @"The texture edit could not be saved.");
+        }
+        if (!transaction->CommitCommand()) {
+            Core3DAbortCommandNoThrow(transaction);
+            return Core3DTextureAuthoringFailure(
+                error, Core3DTextureAuthoringErrorTransactionFailed,
+                @"The texture edit could not be committed.");
+        }
+    } catch (...) {
+        Core3DAbortCommandNoThrow(transaction);
+        return Core3DTextureAuthoringFailure(
+            error, Core3DTextureAuthoringErrorTransactionFailed,
+            @"The texture edit could not be committed.");
+    }
+
+    doc->NotifyChanges();
+    NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
+        [NSMutableArray arrayWithCapacity:pendingStyles.size()];
+    for (const PendingTextureStyle& style : pendingStyles) {
+        if (style.changed) {
+            style.shape->UnsetColor();
+            doc->LoadObjectMeterial(style.label, style.shape);
+            style.shape->SetToUpdate();
+            context->Redisplay(style.shape, Standard_False);
+        }
+        Core3DPBRMaterial* published = Core3DMakePBRMaterial(
+            style.material,
+            doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
+            doc->SupportsBaseColorTextureEditingForLabel(style.label));
+        if (published != nil) {
+            [selectedPBR addObject:published];
+        }
+    }
+    [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
+    [self.materialController didChangeSelectionWithPBRMaterials:selectedPBR];
+    context->UpdateCurrentViewer();
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApplyMaterial
+                           | UIStateChangingHistory];
+    return YES;
 }
 
 -(void) receiveOcctDocumentNotification:(NSNotification *) notification {
@@ -745,6 +1278,71 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     return static_cast<NSInteger>(labels.Length());
 }
 
+- (void)debugSetMaximumTextureAuthoringObjects:(NSUInteger)limit {
+    _debugMaximumTextureAuthoringObjects = std::min<NSUInteger>(
+        limit, static_cast<NSUInteger>(kMaximumTextureAuthoringObjects));
+}
+
+- (void)debugSetMaximumSerializedTextureOccurrenceBytes:(NSUInteger)limit {
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    if (!document.IsNull()) {
+        document->SetMaximumSerializedTextureOccurrenceBytesForTesting(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumDecodedTextureResourceBytes:(NSUInteger)limit {
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    if (!document.IsNull()) {
+        document->SetMaximumDecodedTextureResourceBytesForTesting(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumVisualMaterialDefinitions:(NSUInteger)limit {
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    if (!document.IsNull()) {
+        document->SetMaximumVisualMaterialDefinitionsForTesting(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (BOOL)debugClearSelectedCachedTriangulationsForTextureTest {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) {
+        return NO;
+    }
+    const Handle(AIS_InteractiveContext) context =
+        GLController.viewer->AisContext();
+    if (context.IsNull()) {
+        return NO;
+    }
+    Standard_Size cleaned = 0;
+    for (context->InitSelected(); context->MoreSelected();
+         context->NextSelected()) {
+        const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(
+            context->SelectedInteractive());
+        if (shape.IsNull() || shape->Shape().IsNull()) {
+            return NO;
+        }
+        BRepTools::Clean(shape->Shape(), Standard_True);
+        ++cleaned;
+    }
+    return cleaned > 0;
+}
+
 - (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData {
     Handle(TDocStd_Application) application;
     Handle(TDocStd_Document) document;
@@ -814,6 +1412,104 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
     [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
     return result;
+}
+
+- (NSData *_Nullable)debugOrphanVisualMaterialBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"orphan-visual-material-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const Handle(XCAFDoc_VisMaterialTool) materialTool =
+                XCAFDoc_DocumentTool::VisMaterialTool(
+                    document->Main());
+            if (shapeTool.IsNull() || materialTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create orphan material fixture tools");
+            }
+            const TDF_Label shapeLabel = shapeTool->AddShape(
+                BRepPrimAPI_MakeBox(
+                    gp_Pnt(-10.0, -10.0, 0.0),
+                    20.0, 20.0, 20.0).Shape(),
+                Standard_False,
+                Standard_True);
+            if (shapeLabel.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create orphan material fixture shape");
+            }
+            const TDF_Label orphanLabel =
+                shapeLabel.FindChild(97, Standard_True);
+            if (orphanLabel.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create orphan material fixture label");
+            }
+            Core3DAddDebugOrphanVisualMaterial(
+                orphanLabel, "orphan-child-texture");
+        });
+}
+
+- (NSData *_Nullable)debugMainOrphanVisualMaterialBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"main-orphan-visual-material-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            (void)XCAFDoc_DocumentTool::VisMaterialTool(
+                document->Main());
+            if (shapeTool.IsNull()
+                || shapeTool->AddShape(
+                    BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape(),
+                    Standard_False, Standard_True).IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create Main orphan fixture shape");
+            }
+            Core3DAddDebugOrphanVisualMaterial(
+                document->Main(), "orphan-main-texture");
+        });
+}
+
+- (NSData *_Nullable)debugDataRootOrphanVisualMaterialBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"data-root-orphan-visual-material-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            (void)XCAFDoc_DocumentTool::VisMaterialTool(
+                document->Main());
+            const Handle(TDF_Data)& data = document->GetData();
+            if (shapeTool.IsNull() || data.IsNull()
+                || shapeTool->AddShape(
+                    BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape(),
+                    Standard_False, Standard_True).IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create data-root orphan fixture shape");
+            }
+            Core3DAddDebugOrphanVisualMaterial(
+                data->Root(), "orphan-data-root-texture");
+        });
+}
+
+- (NSData *_Nullable)debugDataRootSiblingOrphanVisualMaterialBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"data-root-sibling-orphan-visual-material-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            (void)XCAFDoc_DocumentTool::VisMaterialTool(
+                document->Main());
+            const Handle(TDF_Data)& data = document->GetData();
+            if (shapeTool.IsNull() || data.IsNull()
+                || shapeTool->AddShape(
+                    BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape(),
+                    Standard_False, Standard_True).IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create root-sibling orphan fixture shape");
+            }
+            const TDF_Label sibling =
+                data->Root().FindChild(97, Standard_True);
+            Core3DAddDebugOrphanVisualMaterial(
+                sibling, "orphan-data-root-sibling-texture");
+        });
 }
 
 - (NSData *_Nullable)debugOversizedTextureLengthBinXCAFFixtureData {
@@ -1363,6 +2059,10 @@ NSData* Core3DCreateDebugBinXCAFFixture(
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates {
     return [GLController debugDisplayedShapePresentationStates];
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
+    return [GLController debugFramebufferStatistics];
 }
 
 - (NSInteger)debugSelectedShapeCount {

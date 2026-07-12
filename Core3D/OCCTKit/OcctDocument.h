@@ -28,10 +28,61 @@
 #include <AIS_Shape.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialPBR.hxx>
+#include <Image_Texture.hxx>
+#include <NCollection_Buffer.hxx>
 
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 class Message_ProgressRange;
+
+//! Validate/canonicalize the narrow texture representation produced by the
+//! mobile material editor. Only complete, single-frame PNG/JPEG images within
+//! the shared project/snapshot safety budgets are accepted. The returned
+//! texture owns an exact byte copy and uses a content-addressed SHA-256 ID.
+Standard_EXPORT Standard_Boolean Core3DCreateAuthoredBaseColorTexture(
+    const Standard_Byte* bytes,
+    Standard_Size size,
+    const std::string& mediaType,
+    Handle(Image_Texture)& texture);
+//! Validate an already embedded app-authored texture, including its canonical
+//! `texture-sha256-...` identifier.
+Standard_EXPORT Standard_Boolean Core3DValidateAuthoredBaseColorTexture(
+    const Handle(Image_Texture)& texture);
+//! Exact ID-and-byte equality used to enforce synchronized PBR/Common
+//! representations without relying on Image_Texture handle identity.
+Standard_EXPORT Standard_Boolean Core3DBaseColorTexturesMatch(
+    const Handle(Image_Texture)& first,
+    const Handle(Image_Texture)& second);
+
+//! Serialization-stable texture budgets shared by writer projection and
+//! post-load validation. Encoded bytes are charged for every material slot;
+//! decoded bytes are charged once per exact identifier-and-byte resource.
+struct Core3DEmbeddedTextureBudgetState
+{
+    Standard_Size serializedOccurrenceBytes = 0;
+    Standard_Size decodedResourceBytes = 0;
+    std::unordered_map<
+        std::string, Handle(NCollection_Buffer)> resourcesByIdentifier;
+};
+
+Standard_EXPORT Standard_Boolean
+Core3DAccumulateEmbeddedTextureBudget(
+    const Handle(Image_Texture)& texture,
+    Core3DEmbeddedTextureBudgetState& state,
+    Standard_Size maximumSerializedOccurrenceBytes,
+    Standard_Size maximumDecodedResourceBytes);
+
+//! One whole-object PBR material update. Batch persistence uses the complete
+//! set to prove the final serialized texture-occurrence budget before it
+//! mutates the immutable visual-material table.
+struct OcctPBRMaterialUpdate
+{
+    TDF_Label label;
+    XCAFDoc_VisMaterialPBR material;
+    Handle(Image_Texture) prevalidatedBaseColorTexture;
+};
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
 //! fail-closed attribute schema and bounded visual-material/string readers.
@@ -96,6 +147,30 @@ public:
     Standard_Boolean SaveObjectPBRMaterial(
         const TDF_Label& label,
         const XCAFDoc_VisMaterialPBR& material);
+    //! Save using a texture handle already validated by the current bounded
+    //! authoring operation. The exact handle must equal material's base-color
+    //! texture; other maps and every scalar/document invariant remain checked.
+    Standard_Boolean SaveObjectPBRMaterial(
+        const TDF_Label& label,
+        const XCAFDoc_VisMaterialPBR& material,
+        const Handle(Image_Texture)& prevalidatedBaseColorTexture);
+    //! Validate and persist a complete authoring batch. The final material
+    //! definition set is checked against the safe reader's per-serialized-slot
+    //! texture-byte budget before any table entry is added, removed, or linked.
+    Standard_Boolean SaveObjectPBRMaterials(
+        const std::vector<OcctPBRMaterialUpdate>& updates);
+    //! DEBUG seam for exercising aggregate occurrence limits with small valid
+    //! images. Values above the production 128 MiB ceiling reset to the
+    //! production ceiling.
+    void SetMaximumSerializedTextureOccurrenceBytesForTesting(
+        Standard_Size maximumBytes);
+    //! DEBUG seam for unique decoded-resource aggregate budget tests.
+    void SetMaximumDecodedTextureResourceBytesForTesting(
+        Standard_Size maximumBytes);
+    //! DEBUG seam for proving batch replacement at a full immutable material
+    //! table without allocating thousands of definitions.
+    void SetMaximumVisualMaterialDefinitionsForTesting(
+        Standard_Size maximumDefinitions);
     //! Remove a canonical XCAF material assignment before applying a legacy
     //! preset/color. Existing legacy projects continue to load unchanged.
     Standard_Boolean ClearObjectVisualMaterial(const TDF_Label& label);
@@ -118,6 +193,10 @@ public:
     //! represented safely by the current definition-owned editing model.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;
+    //! True only for a free, simple, whole XCAF definition label. Material
+    //! authoring uses this stricter gate in addition to AIS editability.
+    Standard_Boolean IsEditableFreeSimpleDefinitionLabel(
+        const TDF_Label& label) const;
     TDF_Label ShapeLabel(Handle(AIS_InteractiveObject) object) const;
     
     Graphic3d_NameOfMaterial MaterialNameForShape(Handle(AIS_Shape) object);
@@ -141,6 +220,10 @@ public:
     //! False when scalar authoring would discard any texture owned by either
     //! the PBR or Common representation of the assigned visual material.
     Standard_Boolean SupportsScalarPBRMaterialEditingForLabel(
+        const TDF_Label& label) const;
+    //! True when base-color texture assignment/removal can be represented
+    //! without discarding unsupported PBR/Common texture maps.
+    Standard_Boolean SupportsBaseColorTextureEditingForLabel(
         const TDF_Label& label) const;
 
     //! Replace geometry on an existing editable free definition. The caller
@@ -184,9 +267,15 @@ public:
     void NotifyChanges();
 
 private:
+    Standard_Boolean CanSaveObjectPBRMaterials(
+        const std::vector<OcctPBRMaterialUpdate>& updates,
+        std::vector<TDF_Label>* reclaimMaterialLabels) const;
     
   Handle(TDocStd_Application) myApp;
   Handle(TDocStd_Document) myOcafDoc;
+  Standard_Size myMaximumSerializedTextureOccurrenceBytes;
+  Standard_Size myMaximumDecodedTextureResourceBytes;
+  Standard_Size myMaximumVisualMaterialDefinitions;
 };
 
 #endif // OcctDocument_h

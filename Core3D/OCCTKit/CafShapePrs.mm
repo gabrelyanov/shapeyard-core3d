@@ -15,6 +15,81 @@
 
 #import <Foundation/Foundation.h>
 
+#include <Graphic3d_TextureSet.hxx>
+#include <Prs3d_ShadingAspect.hxx>
+
+namespace {
+
+Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
+    const Handle(Prs3d_Drawer)& theDrawer)
+{
+  if (theDrawer.IsNull())
+  {
+    return {};
+  }
+  theDrawer->SetupOwnShadingAspect();
+  const Handle(Prs3d_ShadingAspect)& aShading =
+      theDrawer->ShadingAspect();
+  if (aShading.IsNull() || aShading->Aspect().IsNull())
+  {
+    return {};
+  }
+  aShading->Aspect()->SetTextureMapOff();
+  aShading->Aspect()->SetTextureSet(
+      Handle(Graphic3d_TextureSet)());
+  return aShading->Aspect();
+}
+
+void ResetDrawerForLegacyMaterial(
+    const Handle(Prs3d_Drawer)& theDrawer)
+{
+  const Handle(Graphic3d_AspectFillArea3d) anAspect =
+      ClearDrawerTextureMapping(theDrawer);
+  if (anAspect.IsNull())
+  {
+    return;
+  }
+  // These are the documented Graphic3d/XCAF legacy defaults. BlendAuto
+  // follows preset transparency and Auto follows the closed-group flag,
+  // matching the Metal snapshot's preset resolution.
+  anAspect->SetAlphaMode(Graphic3d_AlphaMode_BlendAuto, 0.5f);
+  anAspect->SetFaceCulling(
+      Graphic3d_TypeOfBackfacingModel_Auto);
+}
+
+void CopyDrawerTextureMapping(
+    const Handle(Prs3d_Drawer)& theSource,
+    const Handle(Prs3d_Drawer)& theDestination)
+{
+  if (theSource.IsNull() || theDestination.IsNull()
+      || !theDestination->HasOwnShadingAspect()
+      || theSource->ShadingAspect().IsNull()
+      || theSource->ShadingAspect()->Aspect().IsNull())
+  {
+    return;
+  }
+  const Handle(Graphic3d_AspectFillArea3d)& aSourceAspect =
+      theSource->ShadingAspect()->Aspect();
+  const Handle(Graphic3d_AspectFillArea3d) aDestinationAspect =
+      ClearDrawerTextureMapping(theDestination);
+  if (aDestinationAspect.IsNull())
+  {
+    return;
+  }
+  if (aSourceAspect->ToMapTexture()
+      && !aSourceAspect->TextureSet().IsNull()
+      && !aSourceAspect->TextureSet()->IsEmpty())
+  {
+    // Custom XCAF drawers remain separate so visibility, transparency, and
+    // line width survive whole-object authoring. Share only the immutable
+    // renderer texture set produced for the authoritative root material.
+    aDestinationAspect->SetTextureSet(aSourceAspect->TextureSet());
+    aDestinationAspect->SetTextureMapOn();
+  }
+}
+
+} // namespace
+
 IMPLEMENT_STANDARD_RTTIEXT(CafShapePrs, XCAFPrs_AISObject)
 
 // =======================================================================
@@ -84,6 +159,25 @@ void CafShapePrs::ApplyAuthoredVisualMaterial(
   theMaterial->FillMaterialAspect(anAspect);
   SetMaterial(anAspect);
   SetColor(aBaseColor.GetRGB());
+
+  // XCAFDoc_VisMaterial::FillAspect() leaves an old texture untouched when
+  // the replacement has no maps. Reset first, then apply the complete native
+  // aspect so assign, replace, and clear share one renderer path.
+  const Handle(Graphic3d_AspectFillArea3d) aRootAspect =
+      ClearDrawerTextureMapping(Attributes());
+  if (aRootAspect.IsNull())
+  {
+    SynchronizeAspects();
+    return;
+  }
+  theMaterial->FillAspect(aRootAspect);
+  for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
+       anOverride.More(); anOverride.Next())
+  {
+    CopyDrawerTextureMapping(
+        Attributes(), anOverride.Value());
+  }
+  SynchronizeAspects();
 }
 
 // =======================================================================
@@ -101,6 +195,27 @@ void CafShapePrs::ApplyAuthoredLegacyAppearance(
     return;
   }
 
+  // Clear presentation-only imported overrides before SetMaterial/SetColor so
+  // XCAFPrs propagates the authoritative values into every retained drawer.
+  clearImportedSubshapeAppearanceOverrides(
+      theHasMaterial, theHasColor);
+  removeDefinitionRootCustomAspects();
+  if (theHasMaterial)
+  {
+    ResetDrawerForLegacyMaterial(Attributes());
+    for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
+         anOverride.More(); anOverride.Next())
+    {
+      const Handle(AIS_ColoredDrawer)& aDrawer = anOverride.Value();
+      if (!aDrawer.IsNull() && aDrawer->HasOwnShadingAspect())
+      {
+        // Keep visibility, transparency, line width, and the drawer itself;
+        // only renderer material state is superseded by the legacy preset.
+        ResetDrawerForLegacyMaterial(aDrawer);
+      }
+    }
+  }
+
   if (theHasMaterial)
   {
     // The preset lives in the AIS drawer rather than the XCAF material table.
@@ -114,9 +229,7 @@ void CafShapePrs::ApplyAuthoredLegacyAppearance(
     myDefStyle.SetColorCurv(theColor);
     SetColor(theColor);
   }
-  clearImportedSubshapeAppearanceOverrides(
-      theHasMaterial, theHasColor);
-  removeDefinitionRootCustomAspects();
+  SynchronizeAspects();
 }
 
 // =======================================================================
@@ -138,6 +251,10 @@ void CafShapePrs::clearImportedSubshapeAppearanceOverrides(
     if (theClearMaterial)
     {
       aDrawer->UnsetOwnMaterial();
+      if (aDrawer->HasOwnShadingAspect())
+      {
+        ClearDrawerTextureMapping(aDrawer);
+      }
     }
     if (theClearColor)
     {

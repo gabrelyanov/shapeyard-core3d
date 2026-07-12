@@ -66,7 +66,6 @@
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreImage/CIFilter.h>
-#import <ImageIO/ImageIO.h>
 
 namespace core3d {
 
@@ -129,8 +128,6 @@ constexpr NSUInteger kMaximumPrimitiveCount = 1024;
 constexpr std::uint64_t kMaximumProjectDocumentBytes =
     256ull * 1024ull * 1024ull;
 constexpr Standard_Integer kMaximumVisualMaterialDefinitions = 2048;
-constexpr Standard_Size kMaximumEmbeddedTextureBytes =
-    32ull * 1024ull * 1024ull;
 constexpr Standard_Size kMaximumAggregateTextureBytes =
     128ull * 1024ull * 1024ull;
 constexpr Standard_Real kMaximumEmissionFactor = 65504.0;
@@ -139,8 +136,6 @@ constexpr Standard_Size kMaximumAssemblyTraversalNodes = 32768;
 constexpr Standard_Size kMaximumShapeDefinitions = 4096;
 constexpr Standard_Size kMaximumSubshapesPerDefinition = 250000;
 constexpr Standard_Size kMaximumDocumentLabels = 100000;
-constexpr std::uint64_t kMaximumTextureDimension = 8192;
-constexpr std::uint64_t kMaximumTexturePixels = 4096ull * 4096ull;
 constexpr Standard_Size kMaximumDecodedTextureBytes =
     128ull * 1024ull * 1024ull;
 constexpr double kMinimumPrimitiveScale = 1.0e-4;
@@ -657,167 +652,14 @@ bool ValidateColor(const Quantity_Color& color) {
         && IsFiniteUnit(color.Blue());
 }
 
-struct TextureValidationState {
-    Standard_Size aggregateBytes = 0;
-    Standard_Size aggregateDecodedBytes = 0;
-    std::unordered_set<const NCollection_Buffer*> countedBuffers;
-    std::unordered_map<std::string, const NCollection_Buffer*> buffersByID;
-};
-
-bool HasSupportedRasterSignature(const Standard_Byte* bytes,
-                                 const Standard_Size size) {
-    if (bytes == nullptr) {
-        return false;
-    }
-    return (size >= 8
-            && std::memcmp(bytes, "\x89PNG\r\n\x1A\n", 8) == 0)
-        || (size >= 3
-            && bytes[0] == 0xFF && bytes[1] == 0xD8
-            && bytes[2] == 0xFF)
-        || (size >= 6
-            && (std::memcmp(bytes, "GIF87a", 6) == 0
-                || std::memcmp(bytes, "GIF89a", 6) == 0))
-        || (size >= 4
-            && (std::memcmp(bytes, "II\x2A\x00", 4) == 0
-                || std::memcmp(bytes, "MM\x00\x2A", 4) == 0))
-        || (size >= 2 && std::memcmp(bytes, "BM", 2) == 0)
-        || (size >= 12
-            && std::memcmp(bytes, "RIFF", 4) == 0
-            && std::memcmp(bytes + 8, "WEBP", 4) == 0);
-}
-
-bool ValidateTextureImageMetadata(
-    const Handle(NCollection_Buffer)& buffer,
-    Standard_Size& decodedBytes) {
-    decodedBytes = 0;
-    if (buffer.IsNull() || buffer->Size() == 0
-        || !HasSupportedRasterSignature(
-            buffer->Data(), buffer->Size())) {
-        return false;
-    }
-
-    CFDataRef data = CFDataCreateWithBytesNoCopy(
-        kCFAllocatorDefault,
-        reinterpret_cast<const UInt8*>(buffer->Data()),
-        static_cast<CFIndex>(buffer->Size()),
-        kCFAllocatorNull);
-    if (data == nullptr) {
-        return false;
-    }
-    const void* optionKeys[] = {kCGImageSourceShouldCache};
-    const void* optionValues[] = {kCFBooleanFalse};
-    CFDictionaryRef options = CFDictionaryCreate(
-        kCFAllocatorDefault,
-        optionKeys,
-        optionValues,
-        1,
-        &kCFTypeDictionaryKeyCallBacks,
-        &kCFTypeDictionaryValueCallBacks);
-    CGImageSourceRef source = CGImageSourceCreateWithData(data, options);
-    if (options != nullptr) {
-        CFRelease(options);
-    }
-    CFRelease(data);
-    if (source == nullptr || CGImageSourceGetType(source) == nullptr
-        || CGImageSourceGetCount(source) != 1
-        || CGImageSourceGetStatus(source) != kCGImageStatusComplete
-        || CGImageSourceGetStatusAtIndex(source, 0)
-            != kCGImageStatusComplete) {
-        if (source != nullptr) {
-            CFRelease(source);
-        }
-        return false;
-    }
-
-    CFDictionaryRef properties =
-        CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
-    CFRelease(source);
-    if (properties == nullptr) {
-        return false;
-    }
-    const CFTypeRef widthValue = CFDictionaryGetValue(
-        properties, kCGImagePropertyPixelWidth);
-    const CFTypeRef heightValue = CFDictionaryGetValue(
-        properties, kCGImagePropertyPixelHeight);
-    std::int64_t width = 0;
-    std::int64_t height = 0;
-    const bool isValid = widthValue != nullptr
-        && heightValue != nullptr
-        && CFGetTypeID(widthValue) == CFNumberGetTypeID()
-        && CFGetTypeID(heightValue) == CFNumberGetTypeID()
-        && CFNumberGetValue(
-            static_cast<CFNumberRef>(widthValue),
-            kCFNumberSInt64Type,
-            &width)
-        && CFNumberGetValue(
-            static_cast<CFNumberRef>(heightValue),
-            kCFNumberSInt64Type,
-            &height)
-        && width > 0 && height > 0
-        && static_cast<std::uint64_t>(width)
-            <= kMaximumTextureDimension
-        && static_cast<std::uint64_t>(height)
-            <= kMaximumTextureDimension
-        && static_cast<std::uint64_t>(width)
-            <= kMaximumTexturePixels
-                / static_cast<std::uint64_t>(height);
-    if (isValid) {
-        const std::uint64_t pixels = static_cast<std::uint64_t>(width)
-            * static_cast<std::uint64_t>(height);
-        if (pixels <= std::numeric_limits<Standard_Size>::max() / 4) {
-            decodedBytes = static_cast<Standard_Size>(pixels * 4);
-        }
-    }
-    CFRelease(properties);
-    return isValid && decodedBytes > 0
-        && decodedBytes <= kMaximumDecodedTextureBytes;
-}
+using TextureValidationState = Core3DEmbeddedTextureBudgetState;
 
 bool ValidateEmbeddedTexture(const Handle(Image_Texture)& texture,
                              TextureValidationState& state) {
-    if (texture.IsNull()) {
-        return true;
-    }
-    if (!texture->FilePath().IsEmpty()
-        || texture->TextureId().IsEmpty()
-        || texture->TextureId().Length() > 256) {
-        return false;
-    }
-    const Handle(NCollection_Buffer)& buffer = texture->DataBuffer();
-    if (buffer.IsNull() || buffer->Size() == 0
-        || buffer->Size() > kMaximumEmbeddedTextureBytes) {
-        return false;
-    }
-
-    const std::string textureID(texture->TextureId().ToCString());
-    const auto existing = state.buffersByID.find(textureID);
-    if (existing != state.buffersByID.end()
-        && existing->second != buffer.get()) {
-        const NCollection_Buffer* existingBuffer = existing->second;
-        if (existingBuffer == nullptr
-            || existingBuffer->Size() != buffer->Size()
-            || std::memcmp(existingBuffer->Data(),
-                           buffer->Data(),
-                           buffer->Size()) != 0) {
-            return false;
-        }
-    }
-    state.buffersByID.emplace(textureID, buffer.get());
-    if (state.countedBuffers.insert(buffer.get()).second) {
-        Standard_Size decodedBytes = 0;
-        if (!ValidateTextureImageMetadata(buffer, decodedBytes)
-            || buffer->Size() > kMaximumAggregateTextureBytes
-            || state.aggregateBytes
-                > kMaximumAggregateTextureBytes - buffer->Size()
-            || decodedBytes > kMaximumDecodedTextureBytes
-            || state.aggregateDecodedBytes
-                > kMaximumDecodedTextureBytes - decodedBytes) {
-            return false;
-        }
-        state.aggregateBytes += buffer->Size();
-        state.aggregateDecodedBytes += decodedBytes;
-    }
-    return true;
+    return Core3DAccumulateEmbeddedTextureBudget(
+        texture, state,
+        kMaximumAggregateTextureBytes,
+        kMaximumDecodedTextureBytes);
 }
 
 bool ValidatePBRMaterial(const XCAFDoc_VisMaterialPBR& material,
@@ -877,6 +719,7 @@ bool ValidateVisualMaterials(
     }
 
     TextureValidationState textureState;
+    TDF_LabelMap tableMaterialLabels;
     if (!materialTool.IsNull()) {
         TDF_LabelSequence materialLabels;
         materialTool->GetMaterials(materialLabels);
@@ -886,6 +729,7 @@ bool ValidateVisualMaterials(
         }
         for (TDF_LabelSequence::Iterator iterator(materialLabels);
              iterator.More(); iterator.Next()) {
+            tableMaterialLabels.Add(iterator.Value());
             const Handle(XCAFDoc_VisMaterial) material =
                 XCAFDoc_VisMaterialTool::GetMaterial(iterator.Value());
             if (material.IsNull()
@@ -932,13 +776,41 @@ bool ValidateVisualMaterials(
         }
     }
 
+    TDF_LabelMap validatedLocalMaterialLabels;
+    std::unordered_set<std::string> validatedCanonicalTextureIDs;
+    const auto hasUnregisteredDirectMaterial =
+        [&](const TDF_Label& label) {
+            Handle(XCAFDoc_VisMaterial) directMaterial;
+            return !label.IsNull()
+                && label.FindAttribute(
+                    XCAFDoc_VisMaterial::GetID(), directMaterial)
+                && (directMaterial.IsNull()
+                    || !tableMaterialLabels.Contains(label));
+        };
+    const Handle(TDF_Data)& documentData = document->GetData();
+    if (documentData.IsNull()
+        || hasUnregisteredDirectMaterial(documentData->Root())
+        || hasUnregisteredDirectMaterial(document->Main())) {
+        return false;
+    }
     Standard_Size labelCount = 0;
-    for (TDF_ChildIterator iterator(document->Main(), Standard_True);
+    for (TDF_ChildIterator iterator(
+             documentData->Root(), Standard_True);
          iterator.More(); iterator.Next()) {
         if (++labelCount > kMaximumDocumentLabels) {
             return false;
         }
         const TDF_Label& label = iterator.Value();
+        Handle(XCAFDoc_VisMaterial) directMaterial;
+        if (label.FindAttribute(
+                XCAFDoc_VisMaterial::GetID(), directMaterial)
+            && (directMaterial.IsNull() || materialTool.IsNull()
+                || !tableMaterialLabels.Contains(label))) {
+            // Raw BinXCAF preflight charges every material attribute. Keeping
+            // orphans outside the material-tool table would let a writer scan
+            // omit serialized texture occurrences and exceed the reopen cap.
+            return false;
+        }
         TDF_Label assignedMaterialLabel;
         if (XCAFDoc_VisMaterialTool::GetShapeMaterial(
                 label, assignedMaterialLabel)
@@ -959,23 +831,47 @@ bool ValidateVisualMaterials(
             || assignedMaterialLabel.IsNull()) {
             return false;
         }
-        const Handle(XCAFDoc_VisMaterial) material =
-            XCAFDoc_VisMaterialTool::GetMaterial(
-                assignedMaterialLabel);
-        if (material.IsNull() || !material->HasPbrMaterial()) {
-            return false;
-        }
-        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-        if (!pbr.BaseColorTexture.IsNull()
-            || !pbr.MetallicRoughnessTexture.IsNull()
-            || !pbr.EmissiveTexture.IsNull()
-            || !pbr.OcclusionTexture.IsNull()
-            || !pbr.NormalTexture.IsNull()) {
-            return false;
-        }
-        if (material->HasCommonMaterial()
-            && !material->CommonMaterial().DiffuseTexture.IsNull()) {
-            return false;
+        if (!validatedLocalMaterialLabels.Contains(
+                assignedMaterialLabel)) {
+            const Handle(XCAFDoc_VisMaterial) material =
+                XCAFDoc_VisMaterialTool::GetMaterial(
+                    assignedMaterialLabel);
+            if (material.IsNull() || !material->HasPbrMaterial()) {
+                return false;
+            }
+            const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
+            if (!pbr.MetallicRoughnessTexture.IsNull()
+                || !pbr.EmissiveTexture.IsNull()
+                || !pbr.OcclusionTexture.IsNull()
+                || !pbr.NormalTexture.IsNull()) {
+                return false;
+            }
+            const Handle(Image_Texture)& pbrBase = pbr.BaseColorTexture;
+            const Handle(Image_Texture) commonBase =
+                material->HasCommonMaterial()
+                    ? material->CommonMaterial().DiffuseTexture
+                    : Handle(Image_Texture)();
+            if (pbrBase.IsNull() != commonBase.IsNull()) {
+                return false;
+            }
+            if (!pbrBase.IsNull()) {
+                if (!pbrBase->TextureId().IsEqual(
+                        commonBase->TextureId())) {
+                    // Exact same-ID byte equality has already been established
+                    // by TextureValidationState while walking the bounded
+                    // material table above.
+                    return false;
+                }
+                const std::string textureID(
+                    pbrBase->TextureId().ToCString());
+                if (textureID.empty()
+                    || (validatedCanonicalTextureIDs.insert(textureID).second
+                        && !Core3DValidateAuthoredBaseColorTexture(
+                            pbrBase))) {
+                    return false;
+                }
+            }
+            validatedLocalMaterialLabels.Add(assignedMaterialLabel);
         }
         for (const Standard_Integer tag : {11, 12}) {
             const TDF_Label legacy = label.FindChild(tag, Standard_False);
