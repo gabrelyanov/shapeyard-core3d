@@ -45,7 +45,7 @@ bool CanCaptureCommittedExport(
 - (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
     (ExportType)exportType {
     if (![NSThread isMainThread]
-        || exportType != ExportTypeObj
+        || (exportType != ExportTypeObj && exportType != ExportTypeStl)
         || GLController == nil) {
         return nil;
     }
@@ -162,6 +162,7 @@ bool CanCaptureCommittedExport(
                 snapshotCleanupURL:inputRoot
                 packageRootURL:packageRoot
                 cleanupURL:cleanupRoot
+                exportType:exportType
                 deflectionType:static_cast<NSInteger>(deflectionType)
                 deviationCoefficient:deviationCoefficient
                 deviationAngle:deviationAngle

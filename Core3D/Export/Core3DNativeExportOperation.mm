@@ -3,29 +3,40 @@
 #include "../OCCTKit/OcctDocument.h"
 
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
 #include <Image_Texture.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Message_ProgressScope.hxx>
 #include <NCollection_Map.hxx>
+#include <OSD_Path.hxx>
+#include <Poly_Triangulation.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <RWMesh_FaceIterator.hxx>
 #include <RWObj_CafWriter.hxx>
+#include <RWStl.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
 #include <atomic>
+#include <array>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -33,6 +44,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 NSErrorDomain const Core3DNativeExportErrorDomain =
@@ -40,12 +52,18 @@ NSErrorDomain const Core3DNativeExportErrorDomain =
 
 namespace {
 
+constexpr std::int64_t kMaximumSTLNodes = 1'500'000;
+constexpr std::int64_t kMaximumSTLTriangles = 1'500'000;
+constexpr std::uint64_t kMaximumSTLArtifactBytes =
+    96ULL * 1024ULL * 1024ULL;
+
 struct NativeExportState {
     std::string snapshotPath;
     std::string snapshotCleanupPath;
     std::string packageRootPath;
     std::string cleanupPath;
     std::string primaryPath;
+    ExportType exportType = ExportTypeObj;
     Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
     Standard_Real deviationCoefficient = 0.001;
     Standard_Real deviationAngle = 20.0 * M_PI / 180.0;
@@ -53,6 +71,8 @@ struct NativeExportState {
     std::atomic_bool cancelled{false};
 #ifdef DEBUG
     std::atomic_bool debugOmitTextureReferences{false};
+    std::atomic_bool debugCorruptSTLTriangleCount{false};
+    std::atomic_bool debugExceedSTLResourceLimit{false};
 #endif
     std::mutex lifecycleMutex;
     bool started = false;
@@ -409,7 +429,254 @@ bool ValidateOBJArtifact(
             == static_cast<std::size_t>(expectedTextureCount);
 }
 
-NativeExportResult RunOBJExport(
+Handle(Poly_Triangulation) BuildBinarySTLMesh(
+    const TopoDS_Shape& shape,
+    const std::shared_ptr<NativeExportState>& state,
+    const Message_ProgressRange& progress) {
+    Message_ProgressScope buildScope(progress, "Flatten STL mesh", 2);
+    std::int64_t nodeCount = 0;
+    std::int64_t triangleCount = 0;
+#ifdef DEBUG
+    const bool useTestResourceLimit =
+        state->debugExceedSTLResourceLimit.load(
+            std::memory_order_acquire);
+    const std::int64_t maximumNodes = useTestResourceLimit
+        ? 1
+        : kMaximumSTLNodes;
+    const std::int64_t maximumTriangles = useTestResourceLimit
+        ? 1
+        : kMaximumSTLTriangles;
+#else
+    const std::int64_t maximumNodes = kMaximumSTLNodes;
+    const std::int64_t maximumTriangles = kMaximumSTLTriangles;
+#endif
+    for (TopExp_Explorer faceExplorer(shape, TopAbs_FACE);
+         faceExplorer.More();
+         faceExplorer.Next()) {
+        ThrowIfCancelled(state);
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation) triangulation =
+            BRep_Tool::Triangulation(
+                TopoDS::Face(faceExplorer.Current()),
+                location);
+        if (triangulation.IsNull()
+            || triangulation->NbNodes() <= 0
+            || triangulation->NbTriangles() <= 0) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorMeshingFailed,
+                "A committed face has no exportable triangulation.");
+        }
+        nodeCount += triangulation->NbNodes();
+        triangleCount += triangulation->NbTriangles();
+        const std::uint64_t artifactBytes =
+            84ULL + 50ULL * static_cast<std::uint64_t>(triangleCount);
+        if (nodeCount > maximumNodes
+            || triangleCount > maximumTriangles
+            || artifactBytes > kMaximumSTLArtifactBytes
+            || nodeCount > std::numeric_limits<Standard_Integer>::max()
+            || triangleCount
+                > std::numeric_limits<Standard_Integer>::max()) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorMeshingFailed,
+                "The STL mesh exceeds the supported mobile export size.");
+        }
+    }
+    buildScope.Next(1).Close();
+    if (nodeCount <= 0 || triangleCount <= 0) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorNoGeometry,
+            "There are no triangles to export.");
+    }
+
+    Handle(Poly_Triangulation) mesh = new Poly_Triangulation(
+        static_cast<Standard_Integer>(nodeCount),
+        static_cast<Standard_Integer>(triangleCount),
+        Standard_False);
+    Standard_Integer nodeOffset = 0;
+    Standard_Integer triangleOffset = 0;
+    for (TopExp_Explorer faceExplorer(shape, TopAbs_FACE);
+         faceExplorer.More();
+         faceExplorer.Next()) {
+        ThrowIfCancelled(state);
+        const TopoDS_Face face = TopoDS::Face(faceExplorer.Current());
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation) triangulation =
+            BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorMeshingFailed,
+                "The STL triangulation changed during export.");
+        }
+        const gp_Trsf transform = location.Transformation();
+        const bool reversesWinding =
+            (face.Orientation() == TopAbs_REVERSED)
+            != static_cast<bool>(transform.IsNegative());
+        for (Standard_Integer nodeIndex = 1;
+             nodeIndex <= triangulation->NbNodes();
+             ++nodeIndex) {
+            if ((nodeIndex & 4095) == 0) {
+                ThrowIfCancelled(state);
+            }
+            gp_Pnt point = triangulation->Node(nodeIndex);
+            point.Transform(transform);
+            if (!std::isfinite(point.X())
+                || !std::isfinite(point.Y())
+                || !std::isfinite(point.Z())) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorMeshingFailed,
+                    "The STL mesh contains a non-finite vertex.");
+            }
+            mesh->SetNode(nodeOffset + nodeIndex, point);
+        }
+        for (Standard_Integer triangleIndex = 1;
+             triangleIndex <= triangulation->NbTriangles();
+             ++triangleIndex) {
+            if ((triangleIndex & 4095) == 0) {
+                ThrowIfCancelled(state);
+            }
+            Standard_Integer first = 0;
+            Standard_Integer second = 0;
+            Standard_Integer third = 0;
+            triangulation->Triangle(triangleIndex).Get(
+                first,
+                second,
+                third);
+            if (first < 1 || first > triangulation->NbNodes()
+                || second < 1 || second > triangulation->NbNodes()
+                || third < 1 || third > triangulation->NbNodes()) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorMeshingFailed,
+                    "The STL mesh contains an invalid triangle index.");
+            }
+            if (reversesWinding) {
+                std::swap(second, third);
+            }
+            mesh->SetTriangle(
+                triangleOffset + triangleIndex,
+                Poly_Triangle(
+                    nodeOffset + first,
+                    nodeOffset + second,
+                    nodeOffset + third));
+        }
+        nodeOffset += triangulation->NbNodes();
+        triangleOffset += triangulation->NbTriangles();
+    }
+    buildScope.Next(1).Close();
+    ThrowIfCancelled(state);
+    return mesh;
+}
+
+std::uint32_t ReadUInt32LittleEndian(const unsigned char *bytes) {
+    return static_cast<std::uint32_t>(bytes[0])
+        | (static_cast<std::uint32_t>(bytes[1]) << 8U)
+        | (static_cast<std::uint32_t>(bytes[2]) << 16U)
+        | (static_cast<std::uint32_t>(bytes[3]) << 24U);
+}
+
+#ifdef DEBUG
+bool CorruptSTLTriangleCountForDebug(
+    const std::shared_ptr<NativeExportState>& state) {
+    std::fstream output(
+        state->primaryPath,
+        std::ios::binary | std::ios::in | std::ios::out);
+    if (!output.is_open()) {
+        return false;
+    }
+    const std::array<unsigned char, 4> invalidTriangleCount = {};
+    output.seekp(80, std::ios::beg);
+    output.write(
+        reinterpret_cast<const char *>(invalidTriangleCount.data()),
+        static_cast<std::streamsize>(invalidTriangleCount.size()));
+    output.flush();
+    return output.good();
+}
+#endif
+
+bool ValidateBinarySTLArtifact(
+    const std::shared_ptr<NativeExportState>& state,
+    const Standard_Integer expectedTriangleCount) {
+    ThrowIfCancelled(state);
+    struct stat info = {};
+    if (::stat(state->primaryPath.c_str(), &info) != 0
+        || !S_ISREG(info.st_mode)
+        || info.st_size < 84) {
+        return false;
+    }
+
+    const std::filesystem::path packageRoot(state->packageRootPath);
+    const std::filesystem::path primaryPath(state->primaryPath);
+    std::error_code error;
+    std::size_t artifactCount = 0;
+    for (std::filesystem::directory_iterator iterator(packageRoot, error), end;
+         !error && iterator != end;
+         iterator.increment(error)) {
+        ThrowIfCancelled(state);
+        const std::filesystem::file_status status =
+            iterator->symlink_status(error);
+        if (error
+            || std::filesystem::is_symlink(status)
+            || !std::filesystem::is_regular_file(status)
+            || iterator->path().lexically_normal()
+                != primaryPath.lexically_normal()) {
+            return false;
+        }
+        ++artifactCount;
+    }
+    if (error || artifactCount != 1) {
+        return false;
+    }
+
+    std::ifstream input(state->primaryPath, std::ios::binary);
+    if (!input.is_open()) {
+        return false;
+    }
+    std::array<unsigned char, 84> header = {};
+    input.read(
+        reinterpret_cast<char *>(header.data()),
+        static_cast<std::streamsize>(header.size()));
+    if (input.gcount() != static_cast<std::streamsize>(header.size())) {
+        return false;
+    }
+    const std::uint32_t triangleCount =
+        ReadUInt32LittleEndian(header.data() + 80);
+    const std::uint64_t expectedByteCount =
+        84ULL + 50ULL * static_cast<std::uint64_t>(triangleCount);
+    if (expectedTriangleCount <= 0
+        || triangleCount
+            != static_cast<std::uint32_t>(expectedTriangleCount)
+        || static_cast<std::uint64_t>(info.st_size) != expectedByteCount) {
+        return false;
+    }
+
+    std::array<unsigned char, 50> triangle = {};
+    for (std::uint32_t triangleIndex = 0;
+         triangleIndex < triangleCount;
+         ++triangleIndex) {
+        if ((triangleIndex & 1023U) == 0U) {
+            ThrowIfCancelled(state);
+        }
+        input.read(
+            reinterpret_cast<char *>(triangle.data()),
+            static_cast<std::streamsize>(triangle.size()));
+        if (input.gcount()
+            != static_cast<std::streamsize>(triangle.size())) {
+            return false;
+        }
+        for (std::size_t offset = 0; offset < 48; offset += 4) {
+            const std::uint32_t bits =
+                ReadUInt32LittleEndian(triangle.data() + offset);
+            float value = 0.0f;
+            std::memcpy(&value, &bits, sizeof(value));
+            if (!std::isfinite(value)) {
+                return false;
+            }
+        }
+    }
+    return input.peek() == std::char_traits<char>::eof()
+        && !input.bad();
+}
+
+NativeExportResult RunNativeExport(
     const std::shared_ptr<NativeExportState>& state) noexcept {
     NativeExportResult result;
     Handle(OcctDocument) document;
@@ -432,7 +699,9 @@ NativeExportResult RunOBJExport(
             new NativeExportProgress(&state->cancelled);
         Message_ProgressScope whole(
             progress->Start(),
-            "OBJ export",
+            state->exportType == ExportTypeStl
+                ? "STL export"
+                : "OBJ export",
             11);
 
         document = new OcctDocument();
@@ -536,37 +805,84 @@ NativeExportResult RunOBJExport(
         }
         ThrowIfCancelled(state);
 
-        TColStd_IndexedDataMapOfStringString fileInfo;
-        fileInfo.Add("Author", "Shapeyard 3D");
-        ValidatedOBJWriter writer(
-            TCollection_AsciiString(state->primaryPath.c_str()));
-        const bool writerSucceeded = writer.Perform(
-            ocafDocument,
-            rootLabels,
-            nullptr,
-            fileInfo,
-            whole.Next(5));
-        ThrowIfCancelled(state);
-        if (!writerSucceeded) {
-            throw NativeExportFailure(
-                Core3DNativeExportErrorWriterFailed,
-                "The OBJ writer reported a failure.");
-        }
+        if (state->exportType == ExportTypeStl) {
+            Message_ProgressScope stlScope(
+                whole.Next(5),
+                "Binary STL export",
+                2);
+            const Handle(Poly_Triangulation) stlMesh =
+                BuildBinarySTLMesh(
+                    compound,
+                    state,
+                    stlScope.Next(1));
+            const OSD_Path outputPath(
+                TCollection_AsciiString(state->primaryPath.c_str()));
+            const bool writerSucceeded = RWStl::WriteBinary(
+                stlMesh,
+                outputPath,
+                stlScope.Next(1));
+            ThrowIfCancelled(state);
+            if (!writerSucceeded) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorWriterFailed,
+                    "The STL writer reported a failure.");
+            }
 #ifdef DEBUG
-        if (state->debugOmitTextureReferences.load(
-                std::memory_order_acquire)
-            && !OmitTextureReferencesForDebug(state)) {
-            throw NativeExportFailure(
-                Core3DNativeExportErrorInternalFailure,
-                "The texture-omission test seam could not be applied.");
-        }
+            if (state->debugCorruptSTLTriangleCount.load(
+                    std::memory_order_acquire)
+                && !CorruptSTLTriangleCountForDebug(state)) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorInternalFailure,
+                    "The STL corruption test seam could not be applied.");
+            }
 #endif
-        if (!ValidateOBJArtifact(state, writer.ExpectedTextureCount())) {
+            if (!ValidateBinarySTLArtifact(
+                    state,
+                    stlMesh->NbTriangles())) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorInvalidArtifact,
+                    "The STL writer produced an invalid binary artifact.");
+            }
+        } else if (state->exportType == ExportTypeObj) {
+            TColStd_IndexedDataMapOfStringString fileInfo;
+            fileInfo.Add("Author", "Shapeyard 3D");
+            ValidatedOBJWriter writer(
+                TCollection_AsciiString(state->primaryPath.c_str()));
+            const bool writerSucceeded = writer.Perform(
+                ocafDocument,
+                rootLabels,
+                nullptr,
+                fileInfo,
+                whole.Next(5));
+            ThrowIfCancelled(state);
+            if (!writerSucceeded) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorWriterFailed,
+                    "The OBJ writer reported a failure.");
+            }
+#ifdef DEBUG
+            if (state->debugOmitTextureReferences.load(
+                    std::memory_order_acquire)
+                && !OmitTextureReferencesForDebug(state)) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorInternalFailure,
+                    "The texture-omission test seam could not be applied.");
+            }
+#endif
+            if (!ValidateOBJArtifact(
+                    state,
+                    writer.ExpectedTextureCount())) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorInvalidArtifact,
+                    "The OBJ writer produced an incomplete artifact bundle.");
+            }
+        } else {
             throw NativeExportFailure(
-                Core3DNativeExportErrorInvalidArtifact,
-                "The OBJ writer produced an incomplete artifact bundle.");
+                Core3DNativeExportErrorInvalidState,
+                "The native export format is unsupported.");
         }
 
+        ThrowIfCancelled(state);
         result.succeeded = true;
     } catch (const NativeExportFailure& failure) {
         result.errorCode = failure.Code();
@@ -651,6 +967,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
                  snapshotCleanupURL:(NSURL *)snapshotCleanupURL
                       packageRootURL:(NSURL *)packageRootURL
                           cleanupURL:(NSURL *)cleanupURL
+                          exportType:(ExportType)exportType
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle
@@ -663,6 +980,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
         || !snapshotCleanupURL.isFileURL
         || !packageRootURL.isFileURL
         || !cleanupURL.isFileURL
+        || (exportType != ExportTypeObj && exportType != ExportTypeStl)
         || (deflectionType != Aspect_TOD_ABSOLUTE
             && deflectionType != Aspect_TOD_RELATIVE)
         || !std::isfinite(deviationCoefficient)
@@ -690,8 +1008,10 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->snapshotCleanupPath = snapshotCleanupPath;
     _state->packageRootPath = packageRootPath;
     _state->cleanupPath = cleanupPath;
+    _state->exportType = exportType;
     _state->primaryPath = (
-        std::filesystem::path(packageRootPath) / "model.obj"
+        std::filesystem::path(packageRootPath)
+        / (exportType == ExportTypeStl ? "model.stl" : "model.obj")
     ).string();
     _state->deflectionType =
         static_cast<Aspect_TypeOfDeflection>(deflectionType);
@@ -767,7 +1087,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     Core3DNativeExportCompletion completionCopy = [completion copy];
     dispatch_async(NativeExportQueue(), ^{
         WaitForDebugWorkerBarrier(state);
-        const NativeExportResult result = RunOBJExport(state);
+        const NativeExportResult result = RunNativeExport(state);
         {
             std::lock_guard<std::mutex> lock(state->lifecycleMutex);
             state->finished = true;
@@ -842,6 +1162,32 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     std::lock_guard<std::mutex> lock(state->lifecycleMutex);
     if (!state->started) {
         state->debugOmitTextureReferences.store(
+            true,
+            std::memory_order_release);
+    }
+}
+
+- (void)debugSimulateSTLTriangleCountCorruption {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (!state->started && state->exportType == ExportTypeStl) {
+        state->debugCorruptSTLTriangleCount.store(
+            true,
+            std::memory_order_release);
+    }
+}
+
+- (void)debugSimulateSTLResourceLimitExceeded {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (!state->started && state->exportType == ExportTypeStl) {
+        state->debugExceedSTLResourceLimit.store(
             true,
             std::memory_order_release);
     }

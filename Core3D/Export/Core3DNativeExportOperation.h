@@ -59,6 +59,14 @@ NS_SWIFT_SENDABLE
 //! This proves that source texture expectations fail closed during validation.
 - (void)debugSimulateTextureReferenceOmission
     NS_SWIFT_NAME(debugSimulateTextureReferenceOmission());
+//! Corrupts the binary STL triangle-count header after writing so XCTest can
+//! prove that artifact validation fails closed and removes every private file.
+- (void)debugSimulateSTLTriangleCountCorruption
+    NS_SWIFT_NAME(debugSimulateSTLTriangleCountCorruption());
+//! Lowers the STL resource ceiling below one cube so XCTest can prove that an
+//! oversized flattened mesh fails before its duplicate allocation.
+- (void)debugSimulateSTLResourceLimitExceeded
+    NS_SWIFT_NAME(debugSimulateSTLResourceLimitExceeded());
 #endif
 
 @end

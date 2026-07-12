@@ -94,8 +94,8 @@ typedef struct {
 
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;
 //! Freeze the committed document into a private handoff and return a worker
-//! operation. The initial OBJ implementation keeps only the bounded XBF save
-//! on the main thread; meshing, writing, and cleanup run off-main.
+//! operation. OBJ and binary STL keep only the bounded XBF save on the main
+//! thread; meshing, writing, validation, and cleanup run off-main.
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
@@ -201,6 +201,9 @@ typedef struct {
 //! Standalone BinXCAF fixture whose XCAF document length unit is exactly one
 //! meter per model unit. Used to prove unit metadata persistence end to end.
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
+//! Standalone BinXCAF fixture whose sole box has a negative-determinant root
+//! location. Used to prove mesh exporters preserve outward winding.
+- (NSData *_Nullable)debugNegativeLocationBinXCAFFixtureData;
 //! Malformed BinXCAF fixture with a present negative document length unit.
 - (NSData *_Nullable)debugInvalidLengthUnitBinXCAFFixtureData;
 //! Explicit current XCAF length unit, or nil for a legacy unitless document.

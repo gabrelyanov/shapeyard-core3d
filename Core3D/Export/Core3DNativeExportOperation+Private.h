@@ -1,4 +1,5 @@
 #import "Core3DNativeExportOperation.h"
+#import "ExportType.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -8,6 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
                  snapshotCleanupURL:(NSURL *)snapshotCleanupURL
                       packageRootURL:(NSURL *)packageRootURL
                           cleanupURL:(NSURL *)cleanupURL
+                          exportType:(ExportType)exportType
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle

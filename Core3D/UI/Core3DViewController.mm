@@ -23,6 +23,9 @@
 #include "TopoDS_Compound.hxx"
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
+#include "gp_Ax2.hxx"
+#include "gp_Trsf.hxx"
+#include "TopLoc_Location.hxx"
 
 #include <algorithm>
 #include <cmath>
@@ -469,6 +472,65 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
                 document, baseURL.path.UTF8String) != PCDM_SS_OK) {
             throw Standard_Failure(
                 "Unable to save meter length-unit fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugNegativeLocationBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.negative-location-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool = document.IsNull()
+            ? Handle(XCAFDoc_ShapeTool)()
+            : XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create negative-location fixture document");
+        }
+        XCAFDoc_DocumentTool::SetLengthUnit(document, 0.001);
+        TopoDS_Shape box = BRepPrimAPI_MakeBox(
+            gp_Pnt(10.0, 0.0, 0.0),
+            10.0,
+            20.0,
+            30.0).Shape();
+        gp_Trsf mirror;
+        mirror.SetMirror(gp_Ax2(
+            gp_Pnt(0.0, 0.0, 0.0),
+            gp_Dir(1.0, 0.0, 0.0)));
+        if (!mirror.IsNegative()) {
+            throw Standard_Failure(
+                "Negative-location fixture transform is not mirrored");
+        }
+        box.Location(TopLoc_Location(mirror), Standard_False);
+        if (shapeTool->AddShape(
+                box,
+                Standard_False,
+                Standard_True).IsNull()
+            || application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save negative-location fixture");
         }
         result = [NSData dataWithContentsOfFile:xbfPath];
     } catch (...) {
