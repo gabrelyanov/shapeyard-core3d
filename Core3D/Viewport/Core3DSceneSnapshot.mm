@@ -6,11 +6,13 @@
 
 #import "Core3DSceneSnapshot.h"
 #import "Core3DSceneSnapshotFactory.hpp"
+#import <ImageIO/ImageIO.h>
 
 #include "../Scene/SceneSnapshot.hpp"
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -18,6 +20,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -66,6 +69,14 @@ static_assert(sizeof(std::uint32_t) == 4,
          viewportSizePixels:(simd_uint2)viewportSizePixels;
 @end
 
+@interface Core3DSceneTextureSnapshot ()
+- (instancetype)initWithIdentifier:(NSString *)identifier
+                           encoding:(Core3DSceneTextureEncoding)encoding
+                         pixelWidth:(uint32_t)pixelWidth
+                        pixelHeight:(uint32_t)pixelHeight
+                        encodedData:(NSData *)encodedData;
+@end
+
 @interface Core3DSceneMaterialSnapshot ()
 - (instancetype)initWithIdentifier:(NSString *)identifier
                 linearBaseColorRGBA:(simd_float4)linearBaseColorRGBA
@@ -75,13 +86,15 @@ static_assert(sizeof(std::uint32_t) == 4,
                   indexOfRefraction:(float)indexOfRefraction
                           alphaMode:(Core3DSceneAlphaMode)alphaMode
                         alphaCutoff:(float)alphaCutoff
-                           cullMode:(Core3DSceneCullMode)cullMode;
+                           cullMode:(Core3DSceneCullMode)cullMode
+              baseColorTextureIndex:(NSInteger)baseColorTextureIndex;
 @end
 
 @interface Core3DSceneFacePrimitiveSnapshot ()
 - (instancetype)initWithFirstIndex:(uint32_t)firstIndex
                          indexCount:(uint32_t)indexCount
-                          faceIndex:(uint32_t)faceIndex;
+                          faceIndex:(uint32_t)faceIndex
+              hasTextureCoordinates:(BOOL)hasTextureCoordinates;
 @end
 
 @interface Core3DScenePrimitiveBindingSnapshot ()
@@ -154,10 +167,12 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
            publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
                              revisions:(Core3DSceneRevisionVector *)revisions
+                         metersPerUnit:(double)metersPerUnit
                           renderOrigin:(simd_double3)renderOrigin
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
                            renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
                              materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials
+                              textures:(NSArray<Core3DSceneTextureSnapshot *> *)textures
                              pickTable:(NSArray<Core3DSceneElementIdentifier *> *)pickTable
                                 camera:(Core3DSceneCameraSnapshot *)camera
                              selection:(Core3DSceneSelectionSnapshot *)selection;
@@ -233,6 +248,27 @@ static_assert(sizeof(std::uint32_t) == 4,
 @end
 
 
+@implementation Core3DSceneTextureSnapshot
+
+- (instancetype)initWithIdentifier:(NSString *)identifier
+                           encoding:(Core3DSceneTextureEncoding)encoding
+                         pixelWidth:(uint32_t)pixelWidth
+                        pixelHeight:(uint32_t)pixelHeight
+                        encodedData:(NSData *)encodedData {
+    self = [super init];
+    if (self) {
+        _identifier = [identifier copy];
+        _encoding = encoding;
+        _pixelWidth = pixelWidth;
+        _pixelHeight = pixelHeight;
+        _encodedData = [encodedData copy];
+    }
+    return self;
+}
+
+@end
+
+
 @implementation Core3DSceneMaterialSnapshot
 
 - (instancetype)initWithIdentifier:(NSString *)identifier
@@ -243,7 +279,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                   indexOfRefraction:(float)indexOfRefraction
                           alphaMode:(Core3DSceneAlphaMode)alphaMode
                         alphaCutoff:(float)alphaCutoff
-                           cullMode:(Core3DSceneCullMode)cullMode {
+                           cullMode:(Core3DSceneCullMode)cullMode
+              baseColorTextureIndex:(NSInteger)baseColorTextureIndex {
     self = [super init];
     if (self) {
         _identifier = [identifier copy];
@@ -256,6 +293,8 @@ static_assert(sizeof(std::uint32_t) == 4,
         _alphaCutoff = alphaCutoff;
         _cullMode = cullMode;
         _doubleSided = cullMode == Core3DSceneCullModeNone;
+        _baseColorTextureIndex = baseColorTextureIndex;
+        _hasBaseColorTexture = baseColorTextureIndex >= 0;
     }
     return self;
 }
@@ -267,12 +306,14 @@ static_assert(sizeof(std::uint32_t) == 4,
 
 - (instancetype)initWithFirstIndex:(uint32_t)firstIndex
                          indexCount:(uint32_t)indexCount
-                          faceIndex:(uint32_t)faceIndex {
+                          faceIndex:(uint32_t)faceIndex
+              hasTextureCoordinates:(BOOL)hasTextureCoordinates {
     self = [super init];
     if (self) {
         _firstIndex = firstIndex;
         _indexCount = indexCount;
         _faceIndex = faceIndex;
+        _hasTextureCoordinates = hasTextureCoordinates;
     }
     return self;
 }
@@ -459,10 +500,12 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithSchemaVersion:(uint32_t)schemaVersion
            publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
                              revisions:(Core3DSceneRevisionVector *)revisions
+                         metersPerUnit:(double)metersPerUnit
                           renderOrigin:(simd_double3)renderOrigin
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
                            renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
                              materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials
+                              textures:(NSArray<Core3DSceneTextureSnapshot *> *)textures
                              pickTable:(NSArray<Core3DSceneElementIdentifier *> *)pickTable
                                 camera:(Core3DSceneCameraSnapshot *)camera
                              selection:(Core3DSceneSelectionSnapshot *)selection {
@@ -471,10 +514,12 @@ static_assert(sizeof(std::uint32_t) == 4,
         _schemaVersion = schemaVersion;
         _publicationSourceIdentifier = [publicationSourceIdentifier copy];
         _revisions = revisions;
+        _metersPerUnit = metersPerUnit;
         _renderOrigin = renderOrigin;
         _meshes = [meshes copy];
         _renderItems = [renderItems copy];
         _materials = [materials copy];
+        _textures = [textures copy];
         _pickTable = [pickTable copy];
         _camera = camera;
         _selection = selection;
@@ -494,6 +539,7 @@ namespace {
 constexpr std::size_t kMaximumDTOMeshes = 50'000;
 constexpr std::size_t kMaximumDTOInstances = 50'000;
 constexpr std::size_t kMaximumDTOMaterials = 50'000;
+constexpr std::size_t kMaximumDTOTextures = 256;
 constexpr std::size_t kMaximumDTOPrimitives = 250'000;
 constexpr std::size_t kMaximumDTOBindings = 250'000;
 constexpr std::size_t kMaximumDTOPickEntries = 250'001;
@@ -501,6 +547,12 @@ constexpr std::size_t kMaximumDTOSelectedElements = 50'000;
 constexpr std::size_t kMaximumDTOVertices = 1'500'000;
 constexpr std::size_t kMaximumDTOIndices = 4'500'000;
 constexpr std::size_t kMaximumDTONumericBytes = 96ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaximumDTOTextureBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaximumDTOPerTextureBytes = 32ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaximumDTODecodedTextureBytes =
+    128ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaximumDTOTextureDimension = 8192;
+constexpr std::uint64_t kMaximumDTOTexturePixels = 4096ULL * 4096ULL;
 constexpr std::size_t kMaximumDTOStringBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumIdentifierBytes = 128;
 constexpr std::size_t kMaximumNameBytes = 4'096;
@@ -703,6 +755,140 @@ bool IsValid(const CullMode value) noexcept {
     return false;
 }
 
+bool IsValid(const TextureEncoding value) noexcept {
+    switch (value) {
+        case TextureEncoding::PNG:
+        case TextureEncoding::JPEG:
+        case TextureEncoding::GIF:
+        case TextureEncoding::TIFF:
+        case TextureEncoding::BMP:
+        case TextureEncoding::WebP:
+            return true;
+    }
+    return false;
+}
+
+bool HasExpectedSignature(const TextureResourceSnapshot& value) noexcept {
+    const std::vector<std::uint8_t>& bytes = value.encodedBytes;
+    switch (value.encoding) {
+        case TextureEncoding::PNG:
+            return bytes.size() >= 8
+                && bytes[0] == 0x89U && bytes[1] == 0x50U
+                && bytes[2] == 0x4eU && bytes[3] == 0x47U
+                && bytes[4] == 0x0dU && bytes[5] == 0x0aU
+                && bytes[6] == 0x1aU && bytes[7] == 0x0aU;
+        case TextureEncoding::JPEG:
+            return bytes.size() >= 3
+                && bytes[0] == 0xffU && bytes[1] == 0xd8U
+                && bytes[2] == 0xffU;
+        case TextureEncoding::GIF:
+            return bytes.size() >= 6 && bytes[0] == 'G' && bytes[1] == 'I'
+                && bytes[2] == 'F' && bytes[3] == '8'
+                && (bytes[4] == '7' || bytes[4] == '9')
+                && bytes[5] == 'a';
+        case TextureEncoding::TIFF:
+            return bytes.size() >= 4
+                && ((bytes[0] == 'I' && bytes[1] == 'I'
+                        && bytes[2] == 0x2aU && bytes[3] == 0x00U)
+                    || (bytes[0] == 'M' && bytes[1] == 'M'
+                        && bytes[2] == 0x00U && bytes[3] == 0x2aU));
+        case TextureEncoding::BMP:
+            return bytes.size() >= 2 && bytes[0] == 'B' && bytes[1] == 'M';
+        case TextureEncoding::WebP:
+            return bytes.size() >= 12
+                && bytes[0] == 'R' && bytes[1] == 'I'
+                && bytes[2] == 'F' && bytes[3] == 'F'
+                && bytes[8] == 'W' && bytes[9] == 'E'
+                && bytes[10] == 'B' && bytes[11] == 'P';
+    }
+    return false;
+}
+
+bool HasValidImageMetadata(const TextureResourceSnapshot& value) noexcept {
+    if (value.encodedBytes.empty()) {
+        return false;
+    }
+    CFDataRef data = CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(value.encodedBytes.data()),
+        static_cast<CFIndex>(value.encodedBytes.size()),
+        kCFAllocatorNull);
+    if (data == nullptr) {
+        return false;
+    }
+    const void* optionKeys[] = {kCGImageSourceShouldCache};
+    const void* optionValues[] = {kCFBooleanFalse};
+    CFDictionaryRef options = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        optionKeys,
+        optionValues,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageSourceRef source = CGImageSourceCreateWithData(data, options);
+    if (options != nullptr) {
+        CFRelease(options);
+    }
+    CFRelease(data);
+    if (source == nullptr || CGImageSourceGetType(source) == nullptr
+        || CGImageSourceGetCount(source) != 1
+        || CGImageSourceGetStatus(source) != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(source, 0)
+            != kCGImageStatusComplete) {
+        if (source != nullptr) {
+            CFRelease(source);
+        }
+        return false;
+    }
+    CFDictionaryRef properties =
+        CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (properties == nullptr) {
+        return false;
+    }
+    const CFTypeRef widthValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelWidth);
+    const CFTypeRef heightValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelHeight);
+    const CFTypeRef depthValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyDepth);
+    std::int64_t width = 0;
+    std::int64_t height = 0;
+    std::int64_t depth = 0;
+    const bool isValid = widthValue != nullptr && heightValue != nullptr
+        && depthValue != nullptr
+        && CFGetTypeID(widthValue) == CFNumberGetTypeID()
+        && CFGetTypeID(heightValue) == CFNumberGetTypeID()
+        && CFGetTypeID(depthValue) == CFNumberGetTypeID()
+        && CFNumberGetValue(static_cast<CFNumberRef>(widthValue),
+                            kCFNumberSInt64Type,
+                            &width)
+        && CFNumberGetValue(static_cast<CFNumberRef>(heightValue),
+                            kCFNumberSInt64Type,
+                            &height)
+        && CFNumberGetValue(static_cast<CFNumberRef>(depthValue),
+                            kCFNumberSInt64Type,
+                            &depth)
+        && width == value.pixelWidth
+        && height == value.pixelHeight
+        && depth > 0 && depth <= 8;
+    CFRelease(properties);
+    return isValid;
+}
+
+bool HasContentAddressedIdentifier(const std::string& value) noexcept {
+    static constexpr std::string_view prefix = "texture-sha256-";
+    if (value.size() != prefix.size() + 64
+        || value.compare(0, prefix.size(), prefix) != 0) {
+        return false;
+    }
+    return std::all_of(value.begin() + prefix.size(), value.end(),
+                       [](const char character) {
+        return (character >= '0' && character <= '9')
+            || (character >= 'a' && character <= 'f');
+    });
+}
+
 bool IsValid(const RenderRole value) noexcept {
     switch (value) {
         case RenderRole::Model:
@@ -823,6 +1009,7 @@ bool IsValid(const MaterialSnapshot& value) noexcept {
         && value.roughness >= 0.0f && value.roughness <= 1.0f
         && value.indexOfRefraction > 0.0f
         && value.alphaCutoff >= 0.0f && value.alphaCutoff <= 1.0f
+        && value.baseColorTextureIndex >= -1
         && IsValid(value.alphaMode)
         && IsValid(value.cullMode);
 }
@@ -836,11 +1023,14 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         || snapshot.revisions.model == 0
         || snapshot.revisions.presentation == 0
         || snapshot.revisions.camera == 0
+        || !IsFinite(snapshot.metersPerUnit)
+        || snapshot.metersPerUnit <= 0.0
         || !IsFinite(snapshot.renderOrigin)
         || !IsValid(snapshot.camera)
         || snapshot.meshes.size() > kMaximumDTOMeshes
         || snapshot.instances.size() > kMaximumDTOInstances
         || snapshot.materials.size() > kMaximumDTOMaterials
+        || snapshot.textures.size() > kMaximumDTOTextures
         || snapshot.pickTable.empty()
         || snapshot.pickTable.size() > kMaximumDTOPickEntries
         || snapshot.selection.selected.size()
@@ -861,6 +1051,42 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         return false;
     }
 
+    std::size_t totalEncodedTextureBytes = 0;
+    std::size_t totalDecodedTextureBytes = 0;
+    std::unordered_set<std::string> textureIdentifiers;
+    textureIdentifiers.reserve(snapshot.textures.size());
+    for (const TextureResourceSnapshot& texture : snapshot.textures) {
+        const std::uint64_t width = texture.pixelWidth;
+        const std::uint64_t height = texture.pixelHeight;
+        const std::uint64_t pixelCount = width * height;
+        const std::uint64_t decodedByteCount = pixelCount * 4ULL;
+        if (!IsValidIdentifier(texture.identifier)
+            || !HasContentAddressedIdentifier(texture.identifier)
+            || !accountString(texture.identifier)
+            || !textureIdentifiers.insert(texture.identifier).second
+            || !IsValid(texture.encoding)
+            || !HasExpectedSignature(texture)
+            || !HasValidImageMetadata(texture)
+            || width == 0 || height == 0
+            || width > kMaximumDTOTextureDimension
+            || height > kMaximumDTOTextureDimension
+            || pixelCount > kMaximumDTOTexturePixels
+            || texture.encodedBytes.empty()
+            || texture.encodedBytes.size() > kMaximumDTOPerTextureBytes
+            || !CheckedAdd(totalEncodedTextureBytes,
+                           texture.encodedBytes.size(),
+                           totalEncodedTextureBytes)
+            || totalEncodedTextureBytes > kMaximumDTOTextureBytes
+            || decodedByteCount > kMaximumDTODecodedTextureBytes
+            || !CheckedAdd(totalDecodedTextureBytes,
+                           static_cast<std::size_t>(decodedByteCount),
+                           totalDecodedTextureBytes)
+            || totalDecodedTextureBytes > kMaximumDTODecodedTextureBytes) {
+            return false;
+        }
+    }
+
+    std::vector<std::uint8_t> referencedTextures(snapshot.textures.size(), 0);
     std::unordered_set<std::string> materialIdentifiers;
     materialIdentifiers.reserve(snapshot.materials.size());
     for (const MaterialSnapshot& material : snapshot.materials) {
@@ -868,6 +1094,20 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !materialIdentifiers.insert(material.identifier).second) {
             return false;
         }
+        if (material.baseColorTextureIndex >= 0) {
+            const std::size_t textureIndex = static_cast<std::size_t>(
+                material.baseColorTextureIndex);
+            if (textureIndex >= snapshot.textures.size()) {
+                return false;
+            }
+            referencedTextures[textureIndex] = 1;
+        }
+    }
+    if (!std::all_of(referencedTextures.begin(), referencedTextures.end(),
+                     [](const std::uint8_t referenced) {
+                         return referenced != 0;
+                     })) {
+        return false;
     }
 
     std::size_t totalVertices = 0;
@@ -1362,6 +1602,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         }
         if (!hasExpectedIdentifier || !hasExpectedColor
             || !IsValid(material)
+            || material.baseColorTextureIndex != -1
             || !hasExpectedAlpha
             || !isUnit(material.baseColor.x)
             || !isUnit(material.baseColor.y)
@@ -1705,6 +1946,27 @@ Core3DSceneCullMode CullModeFromScene(CullMode value) {
     return Core3DSceneCullModeBack;
 }
 
+Core3DSceneTextureEncoding TextureEncodingFromScene(TextureEncoding value) {
+    switch (value) {
+        case TextureEncoding::PNG:
+            return Core3DSceneTextureEncodingPNG;
+        case TextureEncoding::JPEG:
+            return Core3DSceneTextureEncodingJPEG;
+        case TextureEncoding::GIF:
+            return Core3DSceneTextureEncodingGIF;
+        case TextureEncoding::TIFF:
+            return Core3DSceneTextureEncodingTIFF;
+        case TextureEncoding::BMP:
+            return Core3DSceneTextureEncodingBMP;
+        case TextureEncoding::WebP:
+            return Core3DSceneTextureEncodingWebP;
+    }
+
+    NSCAssert(NO, @"Unknown scene texture encoding: %u",
+              static_cast<unsigned>(value));
+    return Core3DSceneTextureEncodingPNG;
+}
+
 Core3DSceneRenderRole RenderRoleFromScene(RenderRole value) {
     switch (value) {
         case RenderRole::Model:
@@ -1852,14 +2114,30 @@ Core3DSceneMaterialSnapshot *MaterialFromScene(const MaterialSnapshot& value) {
           indexOfRefraction:value.indexOfRefraction
                   alphaMode:AlphaModeFromScene(value.alphaMode)
                 alphaCutoff:value.alphaCutoff
-                   cullMode:CullModeFromScene(value.cullMode)];
+                   cullMode:CullModeFromScene(value.cullMode)
+      baseColorTextureIndex:value.baseColorTextureIndex];
+}
+
+Core3DSceneTextureSnapshot *TextureFromScene(
+    const TextureResourceSnapshot& value) {
+    NSData *encodedData = value.encodedBytes.empty()
+        ? NSData.data
+        : [NSData dataWithBytes:value.encodedBytes.data()
+                         length:value.encodedBytes.size()];
+    return [[Core3DSceneTextureSnapshot alloc]
+        initWithIdentifier:StringFromUTF8(value.identifier)
+                   encoding:TextureEncodingFromScene(value.encoding)
+                 pixelWidth:value.pixelWidth
+                pixelHeight:value.pixelHeight
+                encodedData:encodedData];
 }
 
 Core3DSceneFacePrimitiveSnapshot *FacePrimitiveFromScene(const MeshPrimitive& value) {
     return [[Core3DSceneFacePrimitiveSnapshot alloc]
         initWithFirstIndex:value.firstIndex
                 indexCount:value.indexCount
-                 faceIndex:value.faceIndex];
+                 faceIndex:value.faceIndex
+     hasTextureCoordinates:value.hasTextureCoordinates];
 }
 
 Core3DScenePrimitiveBindingSnapshot *PrimitiveBindingFromScene(
@@ -1974,6 +2252,11 @@ Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
             ObjectArrayFromVector<MaterialSnapshot, Core3DSceneMaterialSnapshot>(
                 snapshot.materials,
                 MaterialFromScene);
+        NSArray<Core3DSceneTextureSnapshot *> *textures =
+            ObjectArrayFromVector<TextureResourceSnapshot,
+                                  Core3DSceneTextureSnapshot>(
+                snapshot.textures,
+                TextureFromScene);
         NSArray<Core3DSceneElementIdentifier *> *pickTable =
             ObjectArrayFromVector<ElementIdentifier, Core3DSceneElementIdentifier>(
                 snapshot.pickTable,
@@ -1984,10 +2267,12 @@ Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
             publicationSourceIdentifier:StringFromUTF8(
                 snapshot.publicationSourceIdentifier)
                         revisions:RevisionVectorFromScene(snapshot.revisions)
+                    metersPerUnit:snapshot.metersPerUnit
                      renderOrigin:Double3FromScene(snapshot.renderOrigin)
                            meshes:meshes
                       renderItems:renderItems
                         materials:materials
+                         textures:textures
                         pickTable:pickTable
                            camera:CameraFromScene(snapshot.camera)
                         selection:SelectionFromScene(snapshot.selection)];

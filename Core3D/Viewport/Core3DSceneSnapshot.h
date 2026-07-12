@@ -47,6 +47,15 @@ typedef NS_ENUM(NSInteger, Core3DSceneCullMode) {
     Core3DSceneCullModeFront = 2,
 };
 
+typedef NS_ENUM(NSInteger, Core3DSceneTextureEncoding) {
+    Core3DSceneTextureEncodingPNG = 0,
+    Core3DSceneTextureEncodingJPEG,
+    Core3DSceneTextureEncodingGIF,
+    Core3DSceneTextureEncodingTIFF,
+    Core3DSceneTextureEncodingBMP,
+    Core3DSceneTextureEncodingWebP,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneRenderRole) {
     Core3DSceneRenderRoleModel = 0,
     Core3DSceneRenderRoleSelectionHighlight,
@@ -146,6 +155,21 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @end
 
 CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
+@interface Core3DSceneTextureSnapshot : NSObject
+
+@property (nonatomic, copy, readonly) NSString *identifier;
+@property (nonatomic, assign, readonly) Core3DSceneTextureEncoding encoding;
+@property (nonatomic, assign, readonly) uint32_t pixelWidth;
+@property (nonatomic, assign, readonly) uint32_t pixelHeight;
+@property (nonatomic, copy, readonly) NSData *encodedData;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@end
+
+
+CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneMaterialSnapshot : NSObject
 
 @property (nonatomic, copy, readonly) NSString *identifier;
@@ -159,6 +183,9 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) Core3DSceneCullMode cullMode;
 //! Compatibility view of cullMode; true exactly when no faces are culled.
 @property (nonatomic, assign, readonly, getter=isDoubleSided) BOOL doubleSided;
+//! Index into Core3DSceneSnapshot.textures, or -1 for a scalar material.
+@property (nonatomic, assign, readonly) NSInteger baseColorTextureIndex;
+@property (nonatomic, assign, readonly) BOOL hasBaseColorTexture;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -173,6 +200,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) uint32_t firstIndex;
 @property (nonatomic, assign, readonly) uint32_t indexCount;
 @property (nonatomic, assign, readonly) uint32_t faceIndex;
+//! True only when this primitive has usable UVs for every published vertex.
+@property (nonatomic, assign, readonly) BOOL hasTextureCoordinates;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -318,11 +347,14 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, strong, readonly) Core3DSceneRevisionVector *revisions;
 //! Convenience alias for revisions.snapshotRevision.
 @property (nonatomic, assign, readonly) uint64_t snapshotRevision;
+//! Real-world length of one scene coordinate unit.
+@property (nonatomic, assign, readonly) double metersPerUnit;
 //! World-space origin subtracted before float vertex publication.
 @property (nonatomic, assign, readonly) simd_double3 renderOrigin;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneMeshSnapshot *> *meshes;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneRenderItemSnapshot *> *renderItems;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneMaterialSnapshot *> *materials;
+@property (nonatomic, copy, readonly) NSArray<Core3DSceneTextureSnapshot *> *textures;
 //! GPU pick token to semantic element mapping. Index zero is no hit.
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneElementIdentifier *> *pickTable;
 @property (nonatomic, strong, readonly) Core3DSceneCameraSnapshot *camera;

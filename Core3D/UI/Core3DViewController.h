@@ -186,6 +186,13 @@ typedef struct {
 //! Build a standalone pre-schema BinOcaf fixture with geometry and legacy
 //! child-11/12 appearance, but no identity or visual-material infrastructure.
 - (NSData *_Nullable)debugLegacyBinOcafFixtureData;
+//! Standalone BinXCAF fixture whose XCAF document length unit is exactly one
+//! meter per model unit. Used to prove unit metadata persistence end to end.
+- (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
+//! Malformed BinXCAF fixture with a present negative document length unit.
+- (NSData *_Nullable)debugInvalidLengthUnitBinXCAFFixtureData;
+//! Explicit current XCAF length unit, or nil for a legacy unitless document.
+- (NSNumber *_Nullable)debugDocumentMetersPerUnit;
 //! Authoritative OCAF history depth for migration/transaction assertions.
 - (NSInteger)debugDocumentUndoCount;
 //! Current XCAF visual-material table size for ownership/GC regressions.
@@ -201,6 +208,9 @@ typedef struct {
 //! Valid imported PBR material whose Common fallback owns an embedded PNG.
 //! Scalar authoring must remain read-only until that texture is app-owned.
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;
+//! Valid XCAF material with a normal map that schema v3 cannot represent.
+//! Snapshot publication must fail closed so OCCT remains authoritative.
+- (NSData *_Nullable)debugUnsupportedPBRTextureBinXCAFFixtureData;
 //! Valid imported untextured PBR material with non-default alpha and culling.
 - (NSData *_Nullable)debugMaskedDoubleSidedPBRBinXCAFFixtureData;
 //! Valid imported PBR material proving that explicit opaque alpha and

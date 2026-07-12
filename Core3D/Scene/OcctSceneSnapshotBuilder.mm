@@ -4,6 +4,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <ImageIO/ImageIO.h>
 
 #include "OcctSceneSnapshotBuilder.hpp"
 
@@ -18,12 +19,14 @@
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_PBRMaterial.hxx>
+#include <Image_Texture.hxx>
 #include <IMeshData_Status.hxx>
 #include <Precision.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Poly_Triangle.hxx>
 #include <RWMesh_FaceIterator.hxx>
+#include <NCollection_Buffer.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
@@ -45,6 +48,8 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+
+#include <CommonCrypto/CommonDigest.h>
 
 #include <algorithm>
 #include <array>
@@ -82,6 +87,15 @@ constexpr std::size_t kMaxInstancesPerSnapshot = 50'000;
 constexpr std::size_t kMaxMaterialsPerSnapshot = 50'000;
 constexpr std::size_t kMaxPickElementsPerSnapshot = 250'001;
 constexpr std::size_t kMaxPrimitiveBindingsPerSnapshot = 250'000;
+constexpr std::size_t kMaxTexturesPerSnapshot = 256;
+constexpr std::size_t kMaxEncodedTextureBytes = 32ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxAggregateEncodedTextureBytes =
+    64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxAggregateDecodedTextureBytes =
+    128ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaxTextureDimension = 8192;
+constexpr std::uint64_t kMaxTexturePixels = 4096ULL * 4096ULL;
+constexpr double kLegacyMetersPerUnit = 0.001;
 constexpr std::size_t kMaxOccurrenceDepth = 1'024;
 constexpr std::size_t kMaxLabelInstanceMappings = 1'000'000;
 constexpr std::size_t kMaxSelectedElements = 50'000;
@@ -477,6 +491,280 @@ std::string ReadName(const TDF_Label& theOccurrenceLabel,
     return aUtf8 == nullptr ? std::string() : std::string(aUtf8);
 }
 
+bool DetectTextureEncoding(const Standard_Byte* theBytes,
+                           const Standard_Size theSize,
+                           TextureEncoding& theEncoding)
+{
+    if (theBytes == nullptr) {
+        return false;
+    }
+    if (theSize >= 8
+        && std::memcmp(theBytes, "\x89PNG\r\n\x1A\n", 8) == 0) {
+        theEncoding = TextureEncoding::PNG;
+        return true;
+    }
+    if (theSize >= 3 && theBytes[0] == 0xffU
+        && theBytes[1] == 0xd8U && theBytes[2] == 0xffU) {
+        theEncoding = TextureEncoding::JPEG;
+        return true;
+    }
+    if (theSize >= 6
+        && (std::memcmp(theBytes, "GIF87a", 6) == 0
+            || std::memcmp(theBytes, "GIF89a", 6) == 0)) {
+        theEncoding = TextureEncoding::GIF;
+        return true;
+    }
+    if (theSize >= 4
+        && (std::memcmp(theBytes, "II\x2A\x00", 4) == 0
+            || std::memcmp(theBytes, "MM\x00\x2A", 4) == 0)) {
+        theEncoding = TextureEncoding::TIFF;
+        return true;
+    }
+    if (theSize >= 2 && std::memcmp(theBytes, "BM", 2) == 0) {
+        theEncoding = TextureEncoding::BMP;
+        return true;
+    }
+    if (theSize >= 12 && std::memcmp(theBytes, "RIFF", 4) == 0
+        && std::memcmp(theBytes + 8, "WEBP", 4) == 0) {
+        theEncoding = TextureEncoding::WebP;
+        return true;
+    }
+    return false;
+}
+
+bool ReadTextureMetadata(const Handle(NCollection_Buffer)& theBuffer,
+                         TextureEncoding& theEncoding,
+                         std::uint32_t& thePixelWidth,
+                         std::uint32_t& thePixelHeight,
+                         std::size_t& theDecodedBytes)
+{
+    thePixelWidth = 0;
+    thePixelHeight = 0;
+    theDecodedBytes = 0;
+    if (theBuffer.IsNull() || theBuffer->Size() == 0
+        || theBuffer->Size() > kMaxEncodedTextureBytes
+        || !DetectTextureEncoding(theBuffer->Data(),
+                                  theBuffer->Size(),
+                                  theEncoding)) {
+        return false;
+    }
+
+    CFDataRef aData = CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(theBuffer->Data()),
+        static_cast<CFIndex>(theBuffer->Size()),
+        kCFAllocatorNull);
+    if (aData == nullptr) {
+        return false;
+    }
+    const void* anOptionKeys[] = {kCGImageSourceShouldCache};
+    const void* anOptionValues[] = {kCFBooleanFalse};
+    CFDictionaryRef anOptions = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        anOptionKeys,
+        anOptionValues,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageSourceRef aSource = CGImageSourceCreateWithData(aData, anOptions);
+    if (anOptions != nullptr) {
+        CFRelease(anOptions);
+    }
+    CFRelease(aData);
+    if (aSource == nullptr || CGImageSourceGetType(aSource) == nullptr
+        || CGImageSourceGetCount(aSource) != 1
+        || CGImageSourceGetStatus(aSource) != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(aSource, 0)
+            != kCGImageStatusComplete) {
+        if (aSource != nullptr) {
+            CFRelease(aSource);
+        }
+        return false;
+    }
+
+    CFDictionaryRef aProperties =
+        CGImageSourceCopyPropertiesAtIndex(aSource, 0, nullptr);
+    CFRelease(aSource);
+    if (aProperties == nullptr) {
+        return false;
+    }
+    const CFTypeRef aWidthValue = CFDictionaryGetValue(
+        aProperties, kCGImagePropertyPixelWidth);
+    const CFTypeRef aHeightValue = CFDictionaryGetValue(
+        aProperties, kCGImagePropertyPixelHeight);
+    const CFTypeRef aDepthValue = CFDictionaryGetValue(
+        aProperties, kCGImagePropertyDepth);
+    std::int64_t aWidth = 0;
+    std::int64_t aHeight = 0;
+    std::int64_t aDepth = 0;
+    const bool isValid = aWidthValue != nullptr && aHeightValue != nullptr
+        && aDepthValue != nullptr
+        && CFGetTypeID(aWidthValue) == CFNumberGetTypeID()
+        && CFGetTypeID(aHeightValue) == CFNumberGetTypeID()
+        && CFGetTypeID(aDepthValue) == CFNumberGetTypeID()
+        && CFNumberGetValue(static_cast<CFNumberRef>(aWidthValue),
+                            kCFNumberSInt64Type,
+                            &aWidth)
+        && CFNumberGetValue(static_cast<CFNumberRef>(aHeightValue),
+                            kCFNumberSInt64Type,
+                            &aHeight)
+        && CFNumberGetValue(static_cast<CFNumberRef>(aDepthValue),
+                            kCFNumberSInt64Type,
+                            &aDepth)
+        && aWidth > 0 && aHeight > 0
+        // The Metal contract is normalized 8-bit sRGB. Higher precision
+        // images remain valid OCCT content and deliberately use that renderer.
+        && aDepth > 0 && aDepth <= 8
+        && static_cast<std::uint64_t>(aWidth) <= kMaxTextureDimension
+        && static_cast<std::uint64_t>(aHeight) <= kMaxTextureDimension
+        && static_cast<std::uint64_t>(aWidth)
+            <= kMaxTexturePixels / static_cast<std::uint64_t>(aHeight);
+    if (isValid) {
+        const std::uint64_t aPixels = static_cast<std::uint64_t>(aWidth)
+            * static_cast<std::uint64_t>(aHeight);
+        const std::uint64_t aDecodedBytes = aPixels * 4ULL;
+        if (aDecodedBytes <= kMaxAggregateDecodedTextureBytes) {
+            thePixelWidth = static_cast<std::uint32_t>(aWidth);
+            thePixelHeight = static_cast<std::uint32_t>(aHeight);
+            theDecodedBytes = static_cast<std::size_t>(aDecodedBytes);
+        }
+    }
+    CFRelease(aProperties);
+    return isValid && thePixelWidth > 0 && thePixelHeight > 0
+        && theDecodedBytes > 0;
+}
+
+std::string SHA256Identifier(const Standard_Byte* theBytes,
+                             const Standard_Size theSize)
+{
+    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> aDigest;
+    if (CC_SHA256(theBytes, static_cast<CC_LONG>(theSize), aDigest.data())
+        == nullptr) {
+        return {};
+    }
+    std::ostringstream aStream;
+    aStream << "texture-sha256-" << std::hex << std::setfill('0');
+    for (const unsigned char aByte : aDigest) {
+        aStream << std::setw(2) << static_cast<unsigned int>(aByte);
+    }
+    return aStream.str();
+}
+
+struct TextureTableState {
+    std::size_t aggregateEncodedBytes = 0;
+    std::size_t aggregateDecodedBytes = 0;
+    std::unordered_map<std::string, std::vector<std::size_t>> resourcesByDigest;
+    std::unordered_map<std::string, std::size_t> resourcesBySourceIdentifier;
+};
+
+bool AddTextureResource(SceneSnapshot& theScene,
+                        TextureTableState& theState,
+                        const Handle(Image_Texture)& theTexture,
+                        std::int32_t& theTextureIndex)
+{
+    theTextureIndex = -1;
+    if (theTexture.IsNull()) {
+        return true;
+    }
+    if (!theTexture->FilePath().IsEmpty()
+        || theTexture->TextureId().IsEmpty()
+        || theTexture->TextureId().Length() > 256) {
+        return false;
+    }
+    const Handle(NCollection_Buffer)& aBuffer = theTexture->DataBuffer();
+    if (aBuffer.IsNull() || aBuffer->Data() == nullptr
+        || aBuffer->Size() == 0
+        || aBuffer->Size() > kMaxEncodedTextureBytes) {
+        return false;
+    }
+
+    const std::string aSourceIdentifier(
+        theTexture->TextureId().ToCString(),
+        static_cast<std::size_t>(theTexture->TextureId().Length()));
+    const auto aSourceFound =
+        theState.resourcesBySourceIdentifier.find(aSourceIdentifier);
+    if (aSourceFound != theState.resourcesBySourceIdentifier.end()) {
+        const std::size_t anExistingIndex = aSourceFound->second;
+        if (anExistingIndex >= theScene.textures.size()
+            || theScene.textures[anExistingIndex].encodedBytes.size()
+                != aBuffer->Size()
+            || std::memcmp(theScene.textures[anExistingIndex]
+                               .encodedBytes.data(),
+                           aBuffer->Data(),
+                           aBuffer->Size()) != 0) {
+            return false;
+        }
+        theTextureIndex = static_cast<std::int32_t>(anExistingIndex);
+        return true;
+    }
+
+    const std::string aDigest = SHA256Identifier(aBuffer->Data(),
+                                                 aBuffer->Size());
+    if (aDigest.empty()) {
+        return false;
+    }
+    const auto aDigestFound = theState.resourcesByDigest.find(aDigest);
+    if (aDigestFound != theState.resourcesByDigest.end()) {
+        for (const std::size_t anExistingIndex : aDigestFound->second) {
+            const TextureResourceSnapshot& anExisting =
+                theScene.textures[anExistingIndex];
+            if (anExisting.encodedBytes.size() == aBuffer->Size()
+                && std::memcmp(anExisting.encodedBytes.data(),
+                               aBuffer->Data(),
+                               aBuffer->Size()) == 0) {
+                theState.resourcesBySourceIdentifier.emplace(
+                    aSourceIdentifier, anExistingIndex);
+                theTextureIndex = static_cast<std::int32_t>(anExistingIndex);
+                return true;
+            }
+        }
+        // A content identifier is an exact cache and revision invariant. A
+        // cryptographic collision cannot be represented safely; fail closed.
+        return false;
+    }
+
+    TextureEncoding anEncoding = TextureEncoding::PNG;
+    std::uint32_t aWidth = 0;
+    std::uint32_t aHeight = 0;
+    std::size_t aDecodedBytes = 0;
+    if (!ReadTextureMetadata(aBuffer,
+                             anEncoding,
+                             aWidth,
+                             aHeight,
+                             aDecodedBytes)) {
+        return false;
+    }
+
+    if (theScene.textures.size() >= kMaxTexturesPerSnapshot
+        || theScene.textures.size()
+            > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())
+        || aBuffer->Size() > kMaxAggregateEncodedTextureBytes
+        || theState.aggregateEncodedBytes
+            > kMaxAggregateEncodedTextureBytes - aBuffer->Size()
+        || aDecodedBytes > kMaxAggregateDecodedTextureBytes
+        || theState.aggregateDecodedBytes
+            > kMaxAggregateDecodedTextureBytes - aDecodedBytes) {
+        return false;
+    }
+
+    TextureResourceSnapshot aResource;
+    aResource.identifier = aDigest;
+    aResource.encoding = anEncoding;
+    aResource.pixelWidth = aWidth;
+    aResource.pixelHeight = aHeight;
+    aResource.encodedBytes.assign(aBuffer->Data(),
+                                  aBuffer->Data() + aBuffer->Size());
+    const std::size_t aResourceIndex = theScene.textures.size();
+    theScene.textures.push_back(std::move(aResource));
+    theState.resourcesByDigest[aDigest].push_back(aResourceIndex);
+    theState.resourcesBySourceIdentifier.emplace(aSourceIdentifier,
+                                                 aResourceIndex);
+    theState.aggregateEncodedBytes += aBuffer->Size();
+    theState.aggregateDecodedBytes += aDecodedBytes;
+    theTextureIndex = static_cast<std::int32_t>(aResourceIndex);
+    return true;
+}
+
 AlphaMode ConvertAlphaMode(const Graphic3d_AlphaMode theMode,
                            const float theAlpha)
 {
@@ -590,9 +878,11 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      const std::optional<Quantity_NameOfColor>& theColorOverride,
                      const std::optional<WholeObjectPBRMaterial>& thePbrOverride,
                      const bool theClosed,
-                     MaterialSnapshot& theResult)
+                     MaterialSnapshot& theResult,
+                     Handle(Image_Texture)& theBaseColorTexture)
 {
     theResult = DefaultMaterial(theClosed);
+    theBaseColorTexture.Nullify();
     const XCAFPrs_Style& aStyle = theFace.FaceStyle();
     const Handle(XCAFDoc_VisMaterial)& aVisualMaterial = aStyle.Material();
     if (!aVisualMaterial.IsNull()) {
@@ -698,6 +988,24 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      theResult.baseColor.w);
         }
     }
+    // Authored whole-object materials replace imported appearance, while a
+    // color-only override remains a scalar tint over the embedded texture.
+    if (!thePbrOverride.has_value() && !theMaterialOverride.has_value()) {
+        if (!aVisualMaterial.IsNull()
+            && aVisualMaterial->HasPbrMaterial()) {
+            const XCAFDoc_VisMaterialPBR& aPbr =
+                aVisualMaterial->PbrMaterial();
+            // Schema v3 represents only base color. Preserve rendering
+            // fidelity by keeping OCCT active whenever another map matters.
+            if (!aPbr.MetallicRoughnessTexture.IsNull()
+                || !aPbr.EmissiveTexture.IsNull()
+                || !aPbr.OcclusionTexture.IsNull()
+                || !aPbr.NormalTexture.IsNull()) {
+                return false;
+            }
+        }
+        theBaseColorTexture = aStyle.BaseColorTexture();
+    }
     return ValidateMaterial(theResult);
 }
 
@@ -716,7 +1024,9 @@ bool MaterialValuesEqual(const MaterialSnapshot& theLeft,
         && theLeft.indexOfRefraction == theRight.indexOfRefraction
         && theLeft.alphaMode == theRight.alphaMode
         && theLeft.alphaCutoff == theRight.alphaCutoff
-        && theLeft.cullMode == theRight.cullMode;
+        && theLeft.cullMode == theRight.cullMode
+        && theLeft.baseColorTextureIndex
+            == theRight.baseColorTextureIndex;
 }
 
 void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial)
@@ -734,6 +1044,7 @@ void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial
     theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.alphaMode));
     theHash.AddFloat(theMaterial.alphaCutoff);
     theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.cullMode));
+    theHash.AddInteger(theMaterial.baseColorTextureIndex);
 }
 
 std::string HexIdentifier(const char* thePrefix, const std::uint64_t theValue)
@@ -837,6 +1148,7 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
         aHash.AddInteger(aPrimitive.firstIndex);
         aHash.AddInteger(aPrimitive.indexCount);
         aHash.AddInteger(aPrimitive.faceIndex);
+        aHash.AddBool(aPrimitive.hasTextureCoordinates);
     }
     return aHash.Value();
 }
@@ -1063,6 +1375,7 @@ bool ExtractWorldPreviewItem(
             aFirstIndex,
             static_cast<std::uint32_t>(aFaceIndexCount),
             static_cast<std::uint32_t>(aFaceIndex),
+            aTriangulation->HasUVNodes(),
         });
     }
 
@@ -1318,6 +1631,7 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
             aFirstIndex,
             static_cast<std::uint32_t>(anIndexCount),
             static_cast<std::uint32_t>(aFaceMapIndex - 1),
+            hasTexCoords,
         });
     }
 
@@ -1468,6 +1782,7 @@ std::uint64_t CameraFingerprint(const CameraSnapshot& theCamera)
 std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
 {
     Fingerprint aHash;
+    aHash.AddDouble(theScene.metersPerUnit);
     aHash.AddInteger<std::uint64_t>(theScene.meshes.size());
     for (const MeshSnapshot& aMesh : theScene.meshes) {
         aHash.AddString(aMesh.definitionIdentifier);
@@ -1489,6 +1804,16 @@ std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
 std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
 {
     Fingerprint aHash;
+    aHash.AddInteger<std::uint64_t>(theScene.textures.size());
+    for (const TextureResourceSnapshot& aTexture : theScene.textures) {
+        // The identifier is a SHA-256 of the exact payload, so hashing it plus
+        // validated metadata avoids rescanning large immutable byte vectors.
+        aHash.AddString(aTexture.identifier);
+        aHash.AddInteger(static_cast<std::uint8_t>(aTexture.encoding));
+        aHash.AddInteger(aTexture.pixelWidth);
+        aHash.AddInteger(aTexture.pixelHeight);
+        aHash.AddInteger<std::uint64_t>(aTexture.encodedBytes.size());
+    }
     aHash.AddInteger<std::uint64_t>(theScene.materials.size());
     for (const MaterialSnapshot& aMaterial : theScene.materials) {
         aHash.AddString(aMaterial.identifier);
@@ -2716,6 +3041,16 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             || !XCAFDoc_DocumentTool::CheckShapeTool(aDocument->Main())) {
             return {};
         }
+        Standard_Real aMetersPerUnit = kLegacyMetersPerUnit;
+        const bool hasDocumentLengthUnit =
+            XCAFDoc_DocumentTool::GetLengthUnit(aDocument, aMetersPerUnit);
+        if ((hasDocumentLengthUnit
+                && (!IsFinite(aMetersPerUnit)
+                    || aMetersPerUnit <= 0.0))
+            || (!hasDocumentLengthUnit
+                && aMetersPerUnit != kLegacyMetersPerUnit)) {
+            return {};
+        }
 
         std::vector<OccurrenceData> anOccurrences;
         std::unordered_set<std::string> anEntityIdentifiers;
@@ -2900,6 +3235,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         SceneSnapshot aScene;
         aScene.publicationSourceIdentifier =
             aNextState.publicationSourceIdentifier;
+        aScene.metersPerUnit = aMetersPerUnit;
+        TextureTableState aTextureTable;
         aScene.meshes.reserve(aDefinitions.size());
         std::vector<std::string> aLiveRevisionKeys;
         aLiveRevisionKeys.reserve(aDefinitions.size());
@@ -3118,12 +3455,19 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 aFaceVisibility[aPrimitiveFound->second] =
                     aFace.FaceStyle().IsVisible();
                 MaterialSnapshot aMaterial;
+                Handle(Image_Texture) aBaseColorTexture;
                 if (!ResolveMaterial(aFace,
                                      aMaterialOverride,
                                      aColorOverride,
                                      aPbrOverride,
                                      aDefinition.closed,
-                                     aMaterial)) {
+                                     aMaterial,
+                                     aBaseColorTexture)
+                    || !AddTextureResource(
+                        aScene,
+                        aTextureTable,
+                        aBaseColorTexture,
+                        aMaterial.baseColorTextureIndex)) {
                     return {};
                 }
                 aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);
@@ -3179,6 +3523,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         std::size_t anInstanceBytes = 0;
         std::size_t aBindingBytes = 0;
         std::size_t aMaterialBytes = 0;
+        std::size_t aTextureMetadataBytes = 0;
         std::size_t aPickBytes = 0;
         std::size_t anAuxiliaryBytes = 0;
         if (!CheckedMultiply(aScene.instances.size(),
@@ -3190,11 +3535,17 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             || !CheckedMultiply(aScene.materials.size(),
                                 sizeof(MaterialSnapshot),
                                 aMaterialBytes)
+            || !CheckedMultiply(aScene.textures.size(),
+                                sizeof(TextureResourceSnapshot),
+                                aTextureMetadataBytes)
             || !CheckedMultiply(aScene.pickTable.size(),
                                 sizeof(ElementIdentifier),
                                 aPickBytes)
             || !CheckedAdd(anInstanceBytes, aBindingBytes, anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes, aMaterialBytes, anAuxiliaryBytes)
+            || !CheckedAdd(anAuxiliaryBytes,
+                           aTextureMetadataBytes,
+                           anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes, aPickBytes, anAuxiliaryBytes)
             || !CheckedAdd(aSnapshotNumericBytes,
                            anAuxiliaryBytes,

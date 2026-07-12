@@ -19,7 +19,7 @@
 
 namespace core3d::scene {
 
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 2;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 3;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 5;
 
 struct Float2 {
@@ -82,6 +82,15 @@ enum class CullMode : std::uint8_t {
     None = 0,
     Back = 1,
     Front = 2,
+};
+
+enum class TextureEncoding : std::uint8_t {
+    PNG = 0,
+    JPEG,
+    GIF,
+    TIFF,
+    BMP,
+    WebP,
 };
 
 enum class RenderRole : std::uint8_t {
@@ -169,12 +178,28 @@ struct MaterialSnapshot {
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = 0.5f;
     CullMode cullMode = CullMode::None;
+    //! Index into SceneSnapshot::textures, or -1 when the material is scalar.
+    std::int32_t baseColorTextureIndex = -1;
+};
+
+//! Immutable app-owned encoded raster copied from an embedded XCAF texture.
+//! Renderers decode this single-frame payload within the published dimensions
+//! and aggregate budgets; no document-owned pointer or external path escapes.
+struct TextureResourceSnapshot {
+    std::string identifier;
+    TextureEncoding encoding = TextureEncoding::PNG;
+    std::uint32_t pixelWidth = 0;
+    std::uint32_t pixelHeight = 0;
+    std::vector<std::uint8_t> encodedBytes;
 };
 
 struct MeshPrimitive {
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;
     std::uint32_t faceIndex = 0;
+    //! True only when every vertex in this primitive owns authored/generated UVs.
+    //! Zero-filled fallback coordinates are not texture coordinates.
+    bool hasTextureCoordinates = false;
 };
 
 struct PrimitiveBinding {
@@ -233,10 +258,14 @@ struct SceneSnapshot {
     //! sits outside RevisionVector because it is an identity, not a revision.
     std::string publicationSourceIdentifier;
     RevisionVector revisions;
+    //! Real-world length of one scene coordinate unit. Shapeyard-authored
+    //! documents use millimetres, so their value is 0.001.
+    double metersPerUnit = 0.001;
     Double3 renderOrigin;
     std::vector<MeshSnapshot> meshes;
     std::vector<InstanceSnapshot> instances;
     std::vector<MaterialSnapshot> materials;
+    std::vector<TextureResourceSnapshot> textures;
     //! Index zero is always reserved for "no hit".
     std::vector<ElementIdentifier> pickTable = {ElementIdentifier()};
     CameraSnapshot camera;

@@ -425,6 +425,19 @@ struct ShapeTraversalFrame {
     bool leaving = false;
 };
 
+bool HasValidOptionalLengthUnit(
+    const Handle(TDocStd_Document)& document) {
+    if (document.IsNull()) {
+        return false;
+    }
+
+    Standard_Real metersPerUnit = 0.0;
+    const bool hasLengthUnit =
+        XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit);
+    return !hasLengthUnit
+        || (std::isfinite(metersPerUnit) && metersPerUnit > 0.0);
+}
+
 bool ValidateShapeTree(const Handle(TDocStd_Document)& document,
                        TDF_LabelMap& activeDefinitionLabels) {
     activeDefinitionLabels.Clear();
@@ -1571,7 +1584,8 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 	try {
 		OCC_CATCH_SIGNALS
 		TDF_LabelMap candidateDefinitions;
-		if (!ValidateShapeTree(candidate, candidateDefinitions)
+		if (!HasValidOptionalLengthUnit(candidate)
+			|| !ValidateShapeTree(candidate, candidateDefinitions)
 			|| !ValidateVisualMaterials(candidate, candidateDefinitions)) {
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InvalidData;
@@ -1643,7 +1657,8 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
         }
 
         TDF_LabelMap activeDefinitionLabels;
-        const bool isValid = ValidateShapeTree(
+        const bool isValid = HasValidOptionalLengthUnit(candidate)
+            && ValidateShapeTree(
                 candidate, activeDefinitionLabels)
             && ValidateVisualMaterials(
                 candidate, activeDefinitionLabels);

@@ -79,6 +79,7 @@ IMPLEMENT_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
 namespace {
 
 constexpr Standard_Integer kMaximumVisualMaterialDefinitions = 2048;
+constexpr Standard_Real kDefaultMetersPerUnit = 0.001;
 constexpr Standard_Real kMaximumEmissionFactor = 65504.0;
 constexpr Standard_Size kMaximumEmbeddedTextureBytes =
     32ull * 1024ull * 1024ull;
@@ -870,6 +871,8 @@ void OcctDocument::InitDoc()
 	(void)XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
 	(void)XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
 	(void)XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
+	XCAFDoc_DocumentTool::SetLengthUnit(
+	    myOcafDoc, kDefaultMetersPerUnit);
 	if (!AssignIdentifierIfMissing(
 	        myOcafDoc->Main(), DocumentIdentifierAttributeID())) {
 	  Message::SendFail("Unable to assign Core3D document identifier");

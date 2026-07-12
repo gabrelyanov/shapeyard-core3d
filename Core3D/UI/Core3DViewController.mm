@@ -433,6 +433,103 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
 }
 
 #ifdef DEBUG
+- (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.meter-length-unit-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        if (document.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create meter length-unit fixture document");
+        }
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapeTool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create meter length-unit fixture shape tool");
+        }
+        XCAFDoc_DocumentTool::SetLengthUnit(document, 1.0);
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(),
+            Standard_False,
+            Standard_True);
+        if (shapeLabel.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create meter length-unit fixture shape");
+        }
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save meter length-unit fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugInvalidLengthUnitBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.invalid-length-unit-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool = document.IsNull()
+            ? Handle(XCAFDoc_ShapeTool)()
+            : XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create invalid length-unit fixture");
+        }
+        XCAFDoc_DocumentTool::SetLengthUnit(document, -1.0);
+        if (shapeTool->AddShape(
+                BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(),
+                Standard_False,
+                Standard_True).IsNull()
+            || application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save invalid length-unit fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
 - (NSData *_Nullable)debugLegacyBinOcafFixtureData {
     Handle(TDocStd_Application) application;
     Handle(TDocStd_Document) document;
@@ -490,6 +587,16 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
     return document.IsNull()
         ? 0
         : static_cast<NSInteger>(document->GetAvailableUndos());
+}
+
+- (NSNumber *_Nullable)debugDocumentMetersPerUnit {
+    auto document = GLController.viewer->getDocument()->ChangeDocument();
+    Standard_Real metersPerUnit = 0.0;
+    if (document.IsNull()
+        || !XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit)) {
+        return nil;
+    }
+    return @(metersPerUnit);
 }
 
 - (NSInteger)debugVisualMaterialDefinitionCount {
@@ -606,7 +713,7 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
             Standard_False,
             Standard_True);
         NSData* png = [[NSData alloc] initWithBase64EncodedString:
-            @"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg=="
             options:0];
         Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
             NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
@@ -745,7 +852,7 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
             Standard_False,
             Standard_True);
         NSData* png = [[NSData alloc] initWithBase64EncodedString:
-            @"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg=="
             options:0];
         Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
             NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
@@ -779,6 +886,81 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
         if (application->SaveAs(
                 document, baseURL.path.UTF8String) != PCDM_SS_OK) {
             throw Standard_Failure("Unable to save Common texture fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugUnsupportedPBRTextureBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.unsupported-pbr-texture-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool = document.IsNull()
+            ? Handle(XCAFDoc_ShapeTool)()
+            : XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) materialTool = document.IsNull()
+            ? Handle(XCAFDoc_VisMaterialTool)()
+            : XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (shapeTool.IsNull() || materialTool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create unsupported PBR texture fixture");
+        }
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(),
+            Standard_False,
+            Standard_True);
+        NSData* png = [[NSData alloc] initWithBase64EncodedString:
+            @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg=="
+            options:0];
+        Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+            NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
+        if (shapeLabel.IsNull() || png.length == 0 || buffer.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create unsupported PBR texture buffer");
+        }
+        std::memcpy(buffer->ChangeData(), png.bytes, png.length);
+        XCAFDoc_VisMaterialPBR pbr;
+        pbr.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(0.6, 0.6, 0.6, Quantity_TOC_sRGB), 1.0f);
+        pbr.Metallic = 0.2f;
+        pbr.Roughness = 0.7f;
+        pbr.NormalTexture = new Image_Texture(
+            buffer, TCollection_AsciiString("shapeyard-normal-map"));
+        Handle(XCAFDoc_VisMaterial) material =
+            new XCAFDoc_VisMaterial();
+        material->SetPbrMaterial(pbr);
+        const TDF_Label materialLabel = materialTool->AddMaterial(
+            material,
+            TCollection_AsciiString("Unsupported normal-map fixture"));
+        if (materialLabel.IsNull()) {
+            throw Standard_Failure(
+                "Unable to add unsupported PBR texture material");
+        }
+        materialTool->SetShapeMaterial(shapeLabel, materialLabel);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save unsupported PBR texture fixture");
         }
         result = [NSData dataWithContentsOfFile:xbfPath];
     } catch (...) {
