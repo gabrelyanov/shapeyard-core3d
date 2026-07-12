@@ -36,6 +36,26 @@ typedef NS_ENUM(NSInteger, Core3DViewportRenderingAPI) {
     Core3DViewportRenderingAPIOpenGLES3 = 3,
 };
 
+#ifdef DEBUG
+//! Bounded standalone BinXCAF documents used to exercise the persistent
+//! definition-owned geometry representation contract through production load.
+typedef NS_ENUM(NSInteger, Core3DDebugGeometryFixtureMode) {
+    Core3DDebugGeometryFixtureEmpty = 0,
+    Core3DDebugGeometryFixtureLegacyUnmarkedBRep,
+    Core3DDebugGeometryFixtureMarkedBRep,
+    Core3DDebugGeometryFixtureMarkedTriangleMesh,
+    Core3DDebugGeometryFixtureValidBRepAndTriangleMeshRoots,
+    Core3DDebugGeometryFixtureUnmarkedTriangleMesh,
+    Core3DDebugGeometryFixtureUnmarkedMixedDefinition,
+    Core3DDebugGeometryFixtureBRepMarkerOnTriangleMesh,
+    Core3DDebugGeometryFixtureTriangleMeshMarkerOnBRep,
+    Core3DDebugGeometryFixtureBRepMarkerOnMixedDefinition,
+    Core3DDebugGeometryFixtureTriangleMeshMarkerOnMixedDefinition,
+    Core3DDebugGeometryFixtureUnknownMarkerOnBRep,
+    Core3DDebugGeometryFixtureOrphanMarker,
+};
+#endif
+
 typedef struct {
     double min;
     double max;
@@ -191,6 +211,18 @@ typedef struct {
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
 #ifdef DEBUG
+//! Actual native enum values backing the persistent representation schema.
++ (NSDictionary<NSString *, NSNumber *> *)
+    debugGeometryRepresentationSchemaValues;
+//! Create one deterministic XBF representation fixture. Malformed modes are
+//! intentionally writable but must be rejected by the production load gate.
+- (NSData *_Nullable)debugGeometryRepresentationFixtureDataWithMode:
+    (Core3DDebugGeometryFixtureMode)mode
+    NS_SWIFT_NAME(debugGeometryRepresentationFixtureData(mode:));
+//! One read-only state per active XCAF definition. `storedRawValue` is omitted
+//! when the valid legacy definition has no marker.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
+    debugGeometryRepresentationStates;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis

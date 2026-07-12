@@ -1666,6 +1666,9 @@ ImportedDocumentValidation ValidateImportedDocument(
     if (editorCompatibility != BoundedProjectValidation::Valid) {
         return ImportedDocumentValidation::Invalid;
     }
+    if (!document->ValidateGeometryRepresentations()) {
+        return ImportedDocumentValidation::Invalid;
+    }
     TDF_LabelSequence roots;
     shapeTool->GetFreeShapes(roots);
     if (roots.IsEmpty()) {
@@ -1949,6 +1952,11 @@ void ImportSTEP(
         throw NativeImportFailure(
             Core3DNativeImportErrorMigrationFailed,
             "The imported model could not be prepared for editing.");
+    }
+    if (!document->MarkImportedBRepDefinitions()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorMigrationFailed,
+            "The imported model geometry could not be prepared for editing.");
     }
     std::size_t migratedLeafCount = 0;
     const ImportedDocumentValidation migratedValidation =

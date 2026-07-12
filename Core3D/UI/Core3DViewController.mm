@@ -13,6 +13,7 @@
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 
 #include "GLViewController+Trick.h"
+#include "../OCCTKit/OcctDocument.h"
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
 #include "XCAFDoc_ColorTool.hxx"
@@ -30,10 +31,15 @@
 #include "TopoDS_Compound.hxx"
 #include "TopoDS.hxx"
 #include "TopoDS_Face.hxx"
+#include "Poly_Triangle.hxx"
 #include "Poly_Triangulation.hxx"
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
+#include "TDF_LabelSequence.hxx"
+#include "Standard_GUID.hxx"
 #include "gp_Ax2.hxx"
+#include "gp_Dir.hxx"
+#include "gp_Pnt2d.hxx"
 #include "gp_Trsf.hxx"
 #include "TopLoc_Location.hxx"
 #include "TopExp_Explorer.hxx"
@@ -314,6 +320,87 @@ NSData* Core3DCreateDebugBinXCAFFixture(
     [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
     return result;
 }
+
+#ifdef DEBUG
+const Standard_GUID& Core3DDebugGeometryRepresentationAttributeID() {
+    // This duplicate is deliberate test evidence for the persistent schema:
+    // valid fixtures stop loading if production ever changes the GUID.
+    static const Standard_GUID identifier(
+        "67E669F4-00C0-4C45-BC55-9CC5DA22A2B5");
+    return identifier;
+}
+
+TopoDS_Face Core3DMakeDebugTriangleMeshFace(
+    const Standard_Real translationX = 0.0) {
+    Handle(Poly_Triangulation) triangulation =
+        new Poly_Triangulation(3, 1, Standard_True, Standard_True);
+    if (triangulation.IsNull()) {
+        throw Standard_Failure("Unable to allocate triangle fixture");
+    }
+    triangulation->SetNode(
+        1, gp_Pnt(translationX - 10.0, -10.0, 0.0));
+    triangulation->SetNode(
+        2, gp_Pnt(translationX + 10.0, -10.0, 0.0));
+    triangulation->SetNode(
+        3, gp_Pnt(translationX, 10.0, 0.0));
+    triangulation->SetUVNode(1, gp_Pnt2d(0.0, 0.0));
+    triangulation->SetUVNode(2, gp_Pnt2d(1.0, 0.0));
+    triangulation->SetUVNode(3, gp_Pnt2d(0.5, 1.0));
+    for (Standard_Integer node = 1; node <= 3; ++node) {
+        triangulation->SetNormal(node, gp_Dir(0.0, 0.0, 1.0));
+    }
+    triangulation->SetTriangle(1, Poly_Triangle(1, 2, 3));
+    triangulation->Deflection(0.1);
+
+    BRep_Builder builder;
+    TopoDS_Face face;
+    builder.MakeFace(face, triangulation);
+    if (face.IsNull() || !BRep_Tool::Surface(face).IsNull()) {
+        throw Standard_Failure(
+            "Triangle fixture unexpectedly owns an analytic surface");
+    }
+    return face;
+}
+
+TopoDS_Compound Core3DMakeDebugMixedGeometryDefinition() {
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    builder.Add(
+        compound,
+        BRepPrimAPI_MakeBox(
+            gp_Pnt(-35.0, -10.0, -10.0), 20.0, 20.0, 20.0)
+            .Shape());
+    builder.Add(compound, Core3DMakeDebugTriangleMeshFace(25.0));
+    return compound;
+}
+
+TDF_Label Core3DAddDebugGeometryDefinition(
+    const Handle(XCAFDoc_ShapeTool)& shapeTool,
+    const TopoDS_Shape& shape) {
+    if (shapeTool.IsNull() || shape.IsNull()) {
+        throw Standard_Failure("Invalid geometry fixture definition");
+    }
+    const TDF_Label label = shapeTool->AddShape(
+        shape, Standard_False, Standard_True);
+    if (label.IsNull()) {
+        throw Standard_Failure("Unable to add geometry fixture definition");
+    }
+    return label;
+}
+
+void Core3DSetDebugGeometryRepresentation(
+    const TDF_Label& label,
+    const Standard_Integer rawValue) {
+    if (label.IsNull()
+        || TDataStd_Integer::Set(
+            label,
+            Core3DDebugGeometryRepresentationAttributeID(),
+            rawValue).IsNull()) {
+        throw Standard_Failure("Unable to mark geometry fixture definition");
+    }
+}
+#endif
 
 void Core3DAddDebugOrphanVisualMaterial(
     const TDF_Label& label,
@@ -1485,6 +1572,244 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 #ifdef DEBUG
++ (NSDictionary<NSString *, NSNumber *> *)
+    debugGeometryRepresentationSchemaValues {
+    return @{
+        @"invalid": @(
+            static_cast<Standard_Integer>(
+                OcctGeometryRepresentation::Invalid)),
+        @"legacyUnknown": @(
+            static_cast<Standard_Integer>(
+                OcctGeometryRepresentation::LegacyUnknown)),
+        @"bRep": @(
+            static_cast<Standard_Integer>(
+                OcctGeometryRepresentation::BRep)),
+        @"triangleMesh": @(
+            static_cast<Standard_Integer>(
+                OcctGeometryRepresentation::TriangleMesh)),
+    };
+}
+
+- (NSData *_Nullable)debugGeometryRepresentationFixtureDataWithMode:
+    (Core3DDebugGeometryFixtureMode)mode {
+    NSString* suffix = nil;
+    switch (mode) {
+        case Core3DDebugGeometryFixtureEmpty:
+            suffix = @"empty-geometry-representation";
+            break;
+        case Core3DDebugGeometryFixtureLegacyUnmarkedBRep:
+            suffix = @"legacy-unmarked-brep";
+            break;
+        case Core3DDebugGeometryFixtureMarkedBRep:
+            suffix = @"marked-brep";
+            break;
+        case Core3DDebugGeometryFixtureMarkedTriangleMesh:
+            suffix = @"marked-triangle-mesh";
+            break;
+        case Core3DDebugGeometryFixtureValidBRepAndTriangleMeshRoots:
+            suffix = @"valid-brep-and-triangle-mesh-roots";
+            break;
+        case Core3DDebugGeometryFixtureUnmarkedTriangleMesh:
+            suffix = @"unmarked-triangle-mesh";
+            break;
+        case Core3DDebugGeometryFixtureUnmarkedMixedDefinition:
+            suffix = @"unmarked-mixed-definition";
+            break;
+        case Core3DDebugGeometryFixtureBRepMarkerOnTriangleMesh:
+            suffix = @"brep-marker-on-triangle-mesh";
+            break;
+        case Core3DDebugGeometryFixtureTriangleMeshMarkerOnBRep:
+            suffix = @"triangle-mesh-marker-on-brep";
+            break;
+        case Core3DDebugGeometryFixtureBRepMarkerOnMixedDefinition:
+            suffix = @"brep-marker-on-mixed-definition";
+            break;
+        case Core3DDebugGeometryFixtureTriangleMeshMarkerOnMixedDefinition:
+            suffix = @"triangle-mesh-marker-on-mixed-definition";
+            break;
+        case Core3DDebugGeometryFixtureUnknownMarkerOnBRep:
+            suffix = @"unknown-marker-on-brep";
+            break;
+        case Core3DDebugGeometryFixtureOrphanMarker:
+            suffix = @"orphan-geometry-representation-marker";
+            break;
+    }
+    if (suffix == nil) {
+        return nil;
+    }
+
+    return Core3DCreateDebugBinXCAFFixture(
+        suffix,
+        [mode](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapeTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create geometry fixture shape tool");
+            }
+            const Standard_Integer bRep =
+                static_cast<Standard_Integer>(
+                    OcctGeometryRepresentation::BRep);
+            const Standard_Integer triangleMesh =
+                static_cast<Standard_Integer>(
+                    OcctGeometryRepresentation::TriangleMesh);
+            const auto addBRep = [&]() {
+                return Core3DAddDebugGeometryDefinition(
+                    shapeTool,
+                    BRepPrimAPI_MakeBox(
+                        gp_Pnt(-35.0, -10.0, -10.0),
+                        20.0, 20.0, 20.0).Shape());
+            };
+            const auto addTriangleMesh = [&]() {
+                return Core3DAddDebugGeometryDefinition(
+                    shapeTool,
+                    Core3DMakeDebugTriangleMeshFace(25.0));
+            };
+            const auto addMixed = [&]() {
+                return Core3DAddDebugGeometryDefinition(
+                    shapeTool,
+                    Core3DMakeDebugMixedGeometryDefinition());
+            };
+
+            switch (mode) {
+                case Core3DDebugGeometryFixtureEmpty:
+                    return;
+                case Core3DDebugGeometryFixtureLegacyUnmarkedBRep:
+                    (void)addBRep();
+                    return;
+                case Core3DDebugGeometryFixtureMarkedBRep:
+                    Core3DSetDebugGeometryRepresentation(addBRep(), bRep);
+                    return;
+                case Core3DDebugGeometryFixtureMarkedTriangleMesh:
+                    Core3DSetDebugGeometryRepresentation(
+                        addTriangleMesh(), triangleMesh);
+                    return;
+                case Core3DDebugGeometryFixtureValidBRepAndTriangleMeshRoots:
+                    Core3DSetDebugGeometryRepresentation(addBRep(), bRep);
+                    Core3DSetDebugGeometryRepresentation(
+                        addTriangleMesh(), triangleMesh);
+                    return;
+                case Core3DDebugGeometryFixtureUnmarkedTriangleMesh:
+                    (void)addTriangleMesh();
+                    return;
+                case Core3DDebugGeometryFixtureUnmarkedMixedDefinition:
+                    (void)addMixed();
+                    return;
+                case Core3DDebugGeometryFixtureBRepMarkerOnTriangleMesh:
+                    Core3DSetDebugGeometryRepresentation(
+                        addTriangleMesh(), bRep);
+                    return;
+                case Core3DDebugGeometryFixtureTriangleMeshMarkerOnBRep:
+                    Core3DSetDebugGeometryRepresentation(
+                        addBRep(), triangleMesh);
+                    return;
+                case Core3DDebugGeometryFixtureBRepMarkerOnMixedDefinition:
+                    Core3DSetDebugGeometryRepresentation(addMixed(), bRep);
+                    return;
+                case Core3DDebugGeometryFixtureTriangleMeshMarkerOnMixedDefinition:
+                    Core3DSetDebugGeometryRepresentation(
+                        addMixed(), triangleMesh);
+                    return;
+                case Core3DDebugGeometryFixtureUnknownMarkerOnBRep:
+                    Core3DSetDebugGeometryRepresentation(addBRep(), 99);
+                    return;
+                case Core3DDebugGeometryFixtureOrphanMarker: {
+                    Core3DSetDebugGeometryRepresentation(addBRep(), bRep);
+                    const TDF_Label orphan =
+                        document->Main().FindChild(97, Standard_True);
+                    Core3DSetDebugGeometryRepresentation(orphan, bRep);
+                    return;
+                }
+            }
+        });
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
+    debugGeometryRepresentationStates {
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return @[];
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)()
+        : document->ChangeDocument();
+    if (document.IsNull() || ocaf.IsNull()
+        || !XCAFDoc_DocumentTool::CheckShapeTool(ocaf->Main())) {
+        return @[];
+    }
+    const Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(ocaf->Main());
+    if (shapeTool.IsNull()) {
+        return @[];
+    }
+
+    NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *states =
+        [NSMutableArray array];
+    try {
+        TDF_LabelSequence labels;
+        shapeTool->GetShapes(labels);
+        for (Standard_Integer index = 1;
+             index <= labels.Length(); ++index) {
+            const TDF_Label& label = labels.Value(index);
+            if (label.IsNull()
+                || !shapeTool->IsShape(label)
+                || XCAFDoc_ShapeTool::IsReference(label)
+                || XCAFDoc_ShapeTool::IsComponent(label)
+                || XCAFDoc_ShapeTool::IsSubShape(label)) {
+                continue;
+            }
+
+            Standard_Integer analyticFaceCount = 0;
+            Standard_Integer triangleOnlyFaceCount = 0;
+            Standard_Integer invalidFaceCount = 0;
+            const TopoDS_Shape shape =
+                XCAFDoc_ShapeTool::GetShape(label);
+            for (TopExp_Explorer faces(shape, TopAbs_FACE);
+                 faces.More(); faces.Next()) {
+                const TopoDS_Face face =
+                    TopoDS::Face(faces.Current());
+                if (!BRep_Tool::Surface(face).IsNull()) {
+                    ++analyticFaceCount;
+                    continue;
+                }
+                ++triangleOnlyFaceCount;
+                TopLoc_Location location;
+                const Handle(Poly_Triangulation)& triangulation =
+                    BRep_Tool::Triangulation(face, location);
+                if (triangulation.IsNull()
+                    || !triangulation->HasGeometry()
+                    || triangulation->NbNodes() <= 0
+                    || triangulation->NbTriangles() <= 0) {
+                    ++invalidFaceCount;
+                }
+            }
+
+            const OcctGeometryRepresentation resolved =
+                document->GeometryRepresentationForLabel(label);
+            Handle(TDataStd_Integer) marker;
+            const bool markerPresent = label.FindAttribute(
+                Core3DDebugGeometryRepresentationAttributeID(), marker);
+            NSMutableDictionary<NSString *, NSNumber *> *state =
+                [@{
+                    @"resolvedRawValue": @(
+                        static_cast<Standard_Integer>(resolved)),
+                    @"markerPresent": @(markerPresent),
+                    @"analyticFaceCount": @(analyticFaceCount),
+                    @"triangleOnlyFaceCount": @(triangleOnlyFaceCount),
+                    @"invalidFaceCount": @(invalidFaceCount),
+                } mutableCopy];
+            if (markerPresent && !marker.IsNull()) {
+                state[@"storedRawValue"] = @(marker->Get());
+            }
+            [states addObject:state];
+        }
+    } catch (...) {
+        return @[];
+    }
+    return states;
+}
+
 - (BOOL)debugImportSTEPAtURL:(NSURL *)url {
     if (![NSThread isMainThread]
         || !url.isFileURL

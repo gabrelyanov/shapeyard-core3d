@@ -373,21 +373,35 @@ namespace core3d {
 		struct DuplicateRecord {
 			Handle(AIS_Shape) presentation;
 			TDF_Label sourceLabel;
+			OcctGeometryRepresentation representation;
 		};
 		std::vector<DuplicateRecord> duplicates;
 		try {
 			for (const auto& item : copyInteractives) {
 				Handle(AIS_Shape) source = Handle(AIS_Shape)::DownCast(item);
+				const TDF_Label sourceLabel = myDoc->ShapeLabel(item);
+				const OcctGeometryRepresentation sourceRepresentation =
+					myDoc->GeometryRepresentationForLabel(sourceLabel);
+				if (sourceLabel.IsNull()
+					|| (sourceRepresentation
+						!= OcctGeometryRepresentation::LegacyUnknown
+						&& sourceRepresentation
+							!= OcctGeometryRepresentation::BRep)) {
+					// Triangle-only duplication remains disabled until the copy
+					// path preserves Poly_Triangulation data explicitly.
+					return;
+				}
 				BRepBuilderAPI_Copy shapeCopy;
 				shapeCopy.Perform(source->Shape(), Standard_True, Standard_False);
 				if (!shapeCopy.IsDone() || !IsTopologicallyValid(shapeCopy.Shape())) { return; }
 				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
 				copy->SetLocalTransformation(
 					source->LocalTransformation().Multiplied(minAxisDisplacement));
-				const TDF_Label sourceLabel = myDoc->ShapeLabel(item);
-				if (sourceLabel.IsNull()) { return; }
 				myDoc->LoadObjectMeterial(sourceLabel, copy);
-				duplicates.push_back({copy, sourceLabel});
+				duplicates.push_back({
+					copy,
+					sourceLabel,
+					OcctGeometryRepresentation::BRep});
 			}
 		} catch (...) {
 			return;
@@ -397,12 +411,16 @@ namespace core3d {
 		try {
 			doc->NewCommand();
 			for (const auto& duplicate : duplicates) {
-				const TDF_Label label = myDoc->AddShape(duplicate.presentation);
+				const TDF_Label label = myDoc->AddShape(
+					duplicate.presentation,
+					duplicate.representation);
 				if (label.IsNull()) {
 					doc->AbortCommand();
 					return;
 				}
-				if (!myDoc->CopyObjectAppearance(
+				if (!myDoc->CopyGeometryRepresentation(
+						duplicate.sourceLabel, label)
+					|| !myDoc->CopyObjectAppearance(
 						duplicate.sourceLabel, label)) {
 					doc->AbortCommand();
 					return;
@@ -992,6 +1010,18 @@ namespace core3d {
 			if (shape.IsNull() || shape->Shape().IsNull()) {
 				return;
 			}
+			const TDF_Label sourceLabel = myDoc->ShapeLabel(selected);
+			const OcctGeometryRepresentation sourceRepresentation =
+				myDoc->GeometryRepresentationForLabel(sourceLabel);
+			if (sourceLabel.IsNull()
+				|| (sourceRepresentation
+					!= OcctGeometryRepresentation::LegacyUnknown
+					&& sourceRepresentation
+						!= OcctGeometryRepresentation::BRep)) {
+				// The current negative-transform path deliberately drops mesh
+				// data, so triangle-only definitions cannot enter a preview.
+				return;
+			}
 			
 			gp_Trsf aTrsfSelected = selected->Transformation();
 			gp_Pnt max = aBoxSum.CornerMax();
@@ -1036,10 +1066,6 @@ namespace core3d {
 				Standard_False,
 				Standard_False);
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
-			const TDF_Label sourceLabel = myDoc->ShapeLabel(selected);
-			if (sourceLabel.IsNull()) {
-				return;
-			}
 			myDoc->LoadObjectMeterial(sourceLabel, aShapePrs);
 			replacementObjects.push_back(aShapePrs);
 			replacementSourceLabels.push_back(sourceLabel);
@@ -1156,13 +1182,16 @@ namespace core3d {
 					clearTrialMirrorObjects();
 					return;
 				}
-				const TDF_Label label = myDoc->AddShape(shape);
+				const TDF_Label label = myDoc->AddShape(
+					shape, OcctGeometryRepresentation::BRep);
 				if (label.IsNull()) {
 					doc->AbortCommand();
 					clearTrialMirrorObjects();
 					return;
 				}
-				if (!myDoc->CopyObjectAppearance(source->second, label)) {
+				if (!myDoc->CopyGeometryRepresentation(
+						source->second, label)
+					|| !myDoc->CopyObjectAppearance(source->second, label)) {
 					doc->AbortCommand();
 					clearTrialMirrorObjects();
 					return;

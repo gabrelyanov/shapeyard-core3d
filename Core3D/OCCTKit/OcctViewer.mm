@@ -459,6 +459,11 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
 				clearSession(aSession);
 				return false;
 			}
+			if (!myDoc->MarkImportedBRepDefinitions())
+			{
+				clearSession(aSession);
+				return false;
+			}
 
 			clearSession(aSession);
         }

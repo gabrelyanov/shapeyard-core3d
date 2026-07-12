@@ -1575,7 +1575,8 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
                 candidate,
                 candidateDefinitions,
                 myMaximumProjectTopologyValidationNodes)
-			|| !ValidateVisualMaterials(candidate, candidateDefinitions)) {
+			|| !ValidateVisualMaterials(candidate, candidateDefinitions)
+            || !myDoc->ValidateGeometryRepresentations(candidate)) {
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InvalidData;
 		}
@@ -1652,7 +1653,8 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
                 activeDefinitionLabels,
                 myMaximumProjectTopologyValidationNodes)
             && ValidateVisualMaterials(
-                candidate, activeDefinitionLabels);
+                candidate, activeDefinitionLabels)
+            && myDoc->ValidateGeometryRepresentations(candidate);
         CloseDocumentNoThrow(validationApplication, candidate);
         return isValid
             ? AssetImportResult::Success

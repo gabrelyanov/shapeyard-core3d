@@ -65,11 +65,22 @@
 #include <TDataStd_Real.hxx>
 #include <TDataStd_TreeNode.hxx>
 #include <TDF_ChildIterator.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_Triangulation.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <GP_Quaternion.hxx>
 #include <TNaming.hxx>
+#include <TNaming_NamedShape.hxx>
 #include <Standard_GUID.hxx>
 #include <TDF_LabelMap.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <Graphic3d_TextureSet.hxx>
 #include <Image_PixMap.hxx>
@@ -1250,6 +1261,478 @@ const Standard_GUID& DefinitionIdentifierAttributeID()
     return anId;
 }
 
+//! Definition-owned discriminator between editable BRep and imported
+//! triangle-only geometry. This GUID and the non-negative enum values in the
+//! public header are persistent schema identifiers.
+const Standard_GUID& GeometryRepresentationAttributeID()
+{
+    static const Standard_GUID anId("67E669F4-00C0-4C45-BC55-9CC5DA22A2B5");
+    return anId;
+}
+
+constexpr Standard_Size kMaximumGeometryDefinitionLabels = 4'096;
+constexpr Standard_Size kMaximumGeometryDocumentLabels = 100'000;
+constexpr Standard_Size kMaximumSubshapesPerDefinition = 8'192;
+constexpr Standard_Size kMaximumSubshapesPerDocument = 131'072;
+constexpr Standard_Size kMaximumTopologyDepth = 128;
+constexpr Standard_Size kMaximumMeshVerticesPerDefinition = 1'000'000;
+constexpr Standard_Size kMaximumMeshVerticesPerDocument = 1'500'000;
+constexpr Standard_Size kMaximumMeshIndicesPerDefinition = 3'000'000;
+constexpr Standard_Size kMaximumMeshIndicesPerDocument = 4'500'000;
+constexpr Standard_Real kMaximumMeshCoordinateMagnitude = 1.0e6;
+static_assert(
+    static_cast<Standard_Integer>(
+        OcctGeometryRepresentation::LegacyUnknown) == 0);
+static_assert(
+    static_cast<Standard_Integer>(
+        OcctGeometryRepresentation::BRep) == 1);
+static_assert(
+    static_cast<Standard_Integer>(
+        OcctGeometryRepresentation::TriangleMesh) == 2);
+
+enum class DefinitionGeometryClass
+{
+    Invalid,
+    BRep,
+    TriangleMesh,
+};
+
+struct GeometryValidationBudget
+{
+    Standard_Size subshapes = 0;
+    Standard_Size meshVertices = 0;
+    Standard_Size meshIndices = 0;
+};
+
+bool IsFiniteBoundedMeshCoordinate(const Standard_Real theValue) noexcept
+{
+    return std::isfinite(theValue)
+        && std::abs(theValue) <= kMaximumMeshCoordinateMagnitude;
+}
+
+bool AddWithinLimit(Standard_Size& theAggregate,
+                    const Standard_Size theValue,
+                    const Standard_Size theMaximum) noexcept
+{
+    if (theAggregate > theMaximum
+        || theValue > theMaximum - theAggregate) {
+        return false;
+    }
+    theAggregate += theValue;
+    return true;
+}
+
+bool IsGeometryDefinitionLabel(
+    const Handle(TDocStd_Document)& theDocument,
+    const Handle(XCAFDoc_ShapeTool)& theShapeTool,
+    const TDF_Label& theLabel)
+{
+    return !theDocument.IsNull() && !theShapeTool.IsNull()
+        && !theLabel.IsNull()
+        && theLabel.Data() == theDocument->GetData()
+        && theShapeTool->IsShape(theLabel)
+        && XCAFDoc_ShapeTool::IsSimpleShape(theLabel)
+        && !XCAFDoc_ShapeTool::IsAssembly(theLabel)
+        && !XCAFDoc_ShapeTool::IsReference(theLabel)
+        && !XCAFDoc_ShapeTool::IsComponent(theLabel)
+        && !XCAFDoc_ShapeTool::IsSubShape(theLabel);
+}
+
+bool ReadGeometryRepresentation(
+    const TDF_Label& theLabel,
+    bool& theHasMarker,
+    OcctGeometryRepresentation& theRepresentation)
+{
+    theHasMarker = false;
+    theRepresentation = OcctGeometryRepresentation::LegacyUnknown;
+    if (theLabel.IsNull()) {
+        theRepresentation = OcctGeometryRepresentation::Invalid;
+        return false;
+    }
+    Handle(TDataStd_Integer) anAttribute;
+    if (!theLabel.FindAttribute(
+            GeometryRepresentationAttributeID(), anAttribute)) {
+        return true;
+    }
+    theHasMarker = true;
+    if (anAttribute.IsNull()) {
+        theRepresentation = OcctGeometryRepresentation::Invalid;
+        return false;
+    }
+    switch (anAttribute->Get()) {
+        case static_cast<Standard_Integer>(
+            OcctGeometryRepresentation::LegacyUnknown):
+            theRepresentation =
+                OcctGeometryRepresentation::LegacyUnknown;
+            return true;
+        case static_cast<Standard_Integer>(
+            OcctGeometryRepresentation::BRep):
+            theRepresentation = OcctGeometryRepresentation::BRep;
+            return true;
+        case static_cast<Standard_Integer>(
+            OcctGeometryRepresentation::TriangleMesh):
+            theRepresentation =
+                OcctGeometryRepresentation::TriangleMesh;
+            return true;
+        default:
+            theRepresentation = OcctGeometryRepresentation::Invalid;
+            return false;
+    }
+}
+
+bool WriteGeometryRepresentationMarker(
+    const TDF_Label& theLabel,
+    const OcctGeometryRepresentation theRepresentation)
+{
+    if (theLabel.IsNull()
+        || theRepresentation == OcctGeometryRepresentation::Invalid) {
+        return false;
+    }
+    TDataStd_Integer::Set(
+        theLabel,
+        GeometryRepresentationAttributeID(),
+        static_cast<Standard_Integer>(theRepresentation));
+    Handle(TDataStd_Integer) aStoredRepresentation;
+    return theLabel.FindAttribute(
+               GeometryRepresentationAttributeID(),
+               aStoredRepresentation)
+        && !aStoredRepresentation.IsNull()
+        && aStoredRepresentation->Get()
+            == static_cast<Standard_Integer>(theRepresentation);
+}
+
+bool IsValidMeshFace(
+    const TopoDS_Face& theFace,
+    Standard_Size& theDefinitionVertices,
+    Standard_Size& theDefinitionIndices)
+{
+    if (theFace.IsNull()
+        || (theFace.Orientation() != TopAbs_FORWARD
+            && theFace.Orientation() != TopAbs_REVERSED)) {
+        return false;
+    }
+    TopLoc_Location aLocation;
+    const Handle(Poly_Triangulation)& aTriangulation =
+        BRep_Tool::Triangulation(theFace, aLocation);
+    if (aTriangulation.IsNull()
+        || aTriangulation->HasDeferredData()
+        || !aTriangulation->HasGeometry()
+        || aTriangulation->NbNodes() <= 0
+        || aTriangulation->NbTriangles() <= 0) {
+        return false;
+    }
+
+    const Standard_Size aNodeCount =
+        static_cast<Standard_Size>(aTriangulation->NbNodes());
+    const Standard_Size aTriangleCount =
+        static_cast<Standard_Size>(aTriangulation->NbTriangles());
+    if (aTriangleCount
+            > kMaximumMeshIndicesPerDefinition / 3U
+        || !AddWithinLimit(
+            theDefinitionVertices,
+            aNodeCount,
+            kMaximumMeshVerticesPerDefinition)
+        || !AddWithinLimit(
+            theDefinitionIndices,
+            aTriangleCount * 3U,
+            kMaximumMeshIndicesPerDefinition)) {
+        return false;
+    }
+
+    const gp_Trsf aTransform = aLocation.Transformation();
+    for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+        for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+            if (!std::isfinite(aTransform.Value(aRow, aColumn))) {
+                return false;
+            }
+        }
+    }
+    for (Standard_Integer aNode = 1;
+         aNode <= aTriangulation->NbNodes(); ++aNode) {
+        const gp_Pnt& aStoredPoint = aTriangulation->Node(aNode);
+        if (!IsFiniteBoundedMeshCoordinate(aStoredPoint.X())
+            || !IsFiniteBoundedMeshCoordinate(aStoredPoint.Y())
+            || !IsFiniteBoundedMeshCoordinate(aStoredPoint.Z())) {
+            return false;
+        }
+        gp_Pnt aPoint = aStoredPoint;
+        aPoint.Transform(aTransform);
+        if (!IsFiniteBoundedMeshCoordinate(aPoint.X())
+            || !IsFiniteBoundedMeshCoordinate(aPoint.Y())
+            || !IsFiniteBoundedMeshCoordinate(aPoint.Z())) {
+            return false;
+        }
+        if (aTriangulation->HasNormals()) {
+            const gp_Dir aNormal = aTriangulation->Normal(aNode);
+            const Standard_Real aSquaredLength =
+                aNormal.X() * aNormal.X()
+                + aNormal.Y() * aNormal.Y()
+                + aNormal.Z() * aNormal.Z();
+            if (!std::isfinite(aNormal.X())
+                || !std::isfinite(aNormal.Y())
+                || !std::isfinite(aNormal.Z())
+                || !std::isfinite(aSquaredLength)
+                || std::abs(aSquaredLength - 1.0) > 1.0e-3) {
+                return false;
+            }
+        }
+        if (aTriangulation->HasUVNodes()) {
+            const gp_Pnt2d aUV = aTriangulation->UVNode(aNode);
+            if (!std::isfinite(aUV.X()) || !std::isfinite(aUV.Y())) {
+                return false;
+            }
+        }
+    }
+
+    for (Standard_Integer aTriangle = 1;
+         aTriangle <= aTriangulation->NbTriangles(); ++aTriangle) {
+        Standard_Integer aNodes[3] = {0, 0, 0};
+        aTriangulation->Triangle(aTriangle).Get(
+            aNodes[0], aNodes[1], aNodes[2]);
+        for (const Standard_Integer aNode : aNodes) {
+            if (aNode < 1 || aNode > aTriangulation->NbNodes()) {
+                return false;
+            }
+        }
+        if (aNodes[0] == aNodes[1]
+            || aNodes[1] == aNodes[2]
+            || aNodes[2] == aNodes[0]) {
+            return false;
+        }
+        gp_Pnt aP0 = aTriangulation->Node(aNodes[0]);
+        gp_Pnt aP1 = aTriangulation->Node(aNodes[1]);
+        gp_Pnt aP2 = aTriangulation->Node(aNodes[2]);
+        aP0.Transform(aTransform);
+        aP1.Transform(aTransform);
+        aP2.Transform(aTransform);
+        const Standard_Real aUX = aP1.X() - aP0.X();
+        const Standard_Real aUY = aP1.Y() - aP0.Y();
+        const Standard_Real aUZ = aP1.Z() - aP0.Z();
+        const Standard_Real aVX = aP2.X() - aP0.X();
+        const Standard_Real aVY = aP2.Y() - aP0.Y();
+        const Standard_Real aVZ = aP2.Z() - aP0.Z();
+        const Standard_Real aCrossX = aUY * aVZ - aUZ * aVY;
+        const Standard_Real aCrossY = aUZ * aVX - aUX * aVZ;
+        const Standard_Real aCrossZ = aUX * aVY - aUY * aVX;
+        const Standard_Real aSquaredArea =
+            aCrossX * aCrossX
+            + aCrossY * aCrossY
+            + aCrossZ * aCrossZ;
+        if (!std::isfinite(aSquaredArea) || aSquaredArea <= 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsValidGeometryTopologyOrientation(
+    const TopAbs_Orientation theOrientation) noexcept
+{
+    switch (theOrientation) {
+        case TopAbs_FORWARD:
+        case TopAbs_REVERSED:
+        case TopAbs_INTERNAL:
+        case TopAbs_EXTERNAL:
+            return true;
+    }
+    return false;
+}
+
+bool IsAllowedGeometryTopologyChild(
+    const TopAbs_ShapeEnum theParent,
+    const TopAbs_ShapeEnum theChild) noexcept
+{
+    switch (theParent) {
+        case TopAbs_COMPOUND:
+            return theChild >= TopAbs_COMPOUND
+                && theChild < TopAbs_SHAPE;
+        case TopAbs_COMPSOLID:
+            return theChild == TopAbs_SOLID;
+        case TopAbs_SOLID:
+            return theChild == TopAbs_SHELL;
+        case TopAbs_SHELL:
+            return theChild == TopAbs_FACE;
+        case TopAbs_FACE:
+            return theChild == TopAbs_WIRE;
+        case TopAbs_WIRE:
+            return theChild == TopAbs_EDGE;
+        case TopAbs_EDGE:
+            return theChild == TopAbs_VERTEX;
+        case TopAbs_VERTEX:
+        case TopAbs_SHAPE:
+            return false;
+    }
+    return false;
+}
+
+DefinitionGeometryClass ClassifyDefinitionGeometry(
+    const TopoDS_Shape& theShape,
+    GeometryValidationBudget* theBudget)
+{
+    if (theShape.IsNull()) {
+        return DefinitionGeometryClass::Invalid;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        struct TopologyFrame {
+            TopoDS_Shape shape;
+            Standard_Size depth = 0;
+            bool leaving = false;
+        };
+        std::vector<TopologyFrame> aStack = {{theShape, 0, false}};
+        TopTools_MapOfShape aVisited;
+        TopTools_MapOfShape anActivePath;
+        Standard_Size aSubshapeCount = 0;
+        Standard_Size aVertexCount = 0;
+        Standard_Size anIndexCount = 0;
+        bool hasBRepFace = false;
+        bool hasMeshFace = false;
+
+        while (!aStack.empty()) {
+            const TopologyFrame aFrame = aStack.back();
+            aStack.pop_back();
+            if (aFrame.shape.IsNull()) {
+                return DefinitionGeometryClass::Invalid;
+            }
+            if (aFrame.leaving) {
+                anActivePath.Remove(aFrame.shape);
+                aVisited.Add(aFrame.shape);
+                continue;
+            }
+            if (aVisited.Contains(aFrame.shape)) {
+                continue;
+            }
+            if (anActivePath.Contains(aFrame.shape)
+                || aFrame.shape.ShapeType() == TopAbs_SHAPE
+                || !IsValidGeometryTopologyOrientation(
+                    aFrame.shape.Orientation())
+                || aFrame.depth > kMaximumTopologyDepth
+                || aSubshapeCount
+                    >= kMaximumSubshapesPerDefinition) {
+                return DefinitionGeometryClass::Invalid;
+            }
+            anActivePath.Add(aFrame.shape);
+            ++aSubshapeCount;
+
+            if (aFrame.shape.ShapeType() == TopAbs_FACE) {
+                const TopoDS_Face aFace =
+                    TopoDS::Face(aFrame.shape);
+                if (!BRep_Tool::Surface(aFace).IsNull()) {
+                    hasBRepFace = true;
+                    if (hasMeshFace) {
+                        return DefinitionGeometryClass::Invalid;
+                    }
+                } else {
+                    hasMeshFace = true;
+                    if (hasBRepFace
+                        || !IsValidMeshFace(
+                            aFace, aVertexCount, anIndexCount)) {
+                        return DefinitionGeometryClass::Invalid;
+                    }
+                }
+            }
+
+            if (aStack.size()
+                >= static_cast<std::size_t>(
+                    kMaximumSubshapesPerDefinition) * 2U) {
+                return DefinitionGeometryClass::Invalid;
+            }
+            aStack.push_back({
+                aFrame.shape, aFrame.depth, true});
+            const TopAbs_ShapeEnum aParentType =
+                aFrame.shape.ShapeType();
+            for (TopoDS_Iterator aChild(
+                     aFrame.shape, Standard_True, Standard_True);
+                 aChild.More(); aChild.Next()) {
+                const TopoDS_Shape& aChildShape = aChild.Value();
+                if (aChildShape.IsNull()
+                    || !IsAllowedGeometryTopologyChild(
+                        aParentType, aChildShape.ShapeType())
+                    || !IsValidGeometryTopologyOrientation(
+                        aChildShape.Orientation())
+                    || aFrame.depth >= kMaximumTopologyDepth
+                    || aStack.size()
+                        >= static_cast<std::size_t>(
+                            kMaximumSubshapesPerDefinition) * 2U) {
+                    return DefinitionGeometryClass::Invalid;
+                }
+                aStack.push_back({
+                    aChildShape, aFrame.depth + 1U, false});
+            }
+        }
+
+        if (theBudget != nullptr
+            && (!AddWithinLimit(
+                    theBudget->subshapes,
+                    aSubshapeCount,
+                    kMaximumSubshapesPerDocument)
+                || (hasMeshFace
+                    && (!AddWithinLimit(
+                            theBudget->meshVertices,
+                            aVertexCount,
+                            kMaximumMeshVerticesPerDocument)
+                        || !AddWithinLimit(
+                            theBudget->meshIndices,
+                            anIndexCount,
+                            kMaximumMeshIndicesPerDocument))))) {
+            return DefinitionGeometryClass::Invalid;
+        }
+        if (hasMeshFace) {
+            return DefinitionGeometryClass::TriangleMesh;
+        }
+        // Legacy definitions made solely from edges, wires, vertices, or an
+        // empty compound remain BRep-compatible. Every existing face has
+        // proved to own a geometric surface in the bounded walk above.
+        return DefinitionGeometryClass::BRep;
+    } catch (...) {
+        return DefinitionGeometryClass::Invalid;
+    }
+}
+
+bool GeometryClassMatchesRepresentation(
+    const DefinitionGeometryClass theGeometryClass,
+    const OcctGeometryRepresentation theRepresentation) noexcept
+{
+    switch (theRepresentation) {
+        case OcctGeometryRepresentation::LegacyUnknown:
+        case OcctGeometryRepresentation::BRep:
+            return theGeometryClass == DefinitionGeometryClass::BRep;
+        case OcctGeometryRepresentation::TriangleMesh:
+            return theGeometryClass
+                == DefinitionGeometryClass::TriangleMesh;
+        case OcctGeometryRepresentation::Invalid:
+            return false;
+    }
+    return false;
+}
+
+OcctGeometryRepresentation ValidatedGeometryRepresentation(
+    const Handle(TDocStd_Document)& theDocument,
+    const Handle(XCAFDoc_ShapeTool)& theShapeTool,
+    const TDF_Label& theLabel,
+    GeometryValidationBudget* theBudget = nullptr)
+{
+    if (!IsGeometryDefinitionLabel(
+            theDocument, theShapeTool, theLabel)) {
+        return OcctGeometryRepresentation::Invalid;
+    }
+    bool hasMarker = false;
+    OcctGeometryRepresentation aRepresentation =
+        OcctGeometryRepresentation::Invalid;
+    if (!ReadGeometryRepresentation(
+            theLabel, hasMarker, aRepresentation)) {
+        return OcctGeometryRepresentation::Invalid;
+    }
+    (void)hasMarker;
+    const DefinitionGeometryClass aGeometryClass =
+        ClassifyDefinitionGeometry(
+            XCAFDoc_ShapeTool::GetShape(theLabel), theBudget);
+    return GeometryClassMatchesRepresentation(
+               aGeometryClass, aRepresentation)
+        ? aRepresentation
+        : OcctGeometryRepresentation::Invalid;
+}
+
 //! Marks XCAF visualization material assignments authored by Shapeyard's PBR
 //! editor. Imported XCAF styles remain untouched and legacy child-11/12 style
 //! overrides retain their historical precedence until the user authors PBR.
@@ -1748,6 +2231,567 @@ std::string OcctDocument::DefinitionIdentifierForLabel(const TDF_Label& label) c
     return ReadIdentifier(label, DefinitionIdentifierAttributeID());
 }
 
+OcctGeometryRepresentation OcctDocument::GeometryRepresentationForLabel(
+    const TDF_Label& label) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return OcctGeometryRepresentation::Invalid;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        return ValidatedGeometryRepresentation(
+            myOcafDoc, aShapeTool, label);
+    } catch (...) {
+        return OcctGeometryRepresentation::Invalid;
+    }
+}
+
+Standard_Boolean OcctDocument::ValidateGeometryRepresentationForLabel(
+    const TDF_Label& label) const
+{
+    return GeometryRepresentationForLabel(label)
+        != OcctGeometryRepresentation::Invalid;
+}
+
+Standard_Boolean OcctDocument::ValidateGeometryRepresentations() const
+{
+    return ValidateGeometryRepresentations(myOcafDoc);
+}
+
+Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
+    const Handle(TDocStd_Document)& document) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (document.IsNull() || document->GetData().IsNull()) {
+            return Standard_False;
+        }
+        const TDF_Label aRoot = document->GetData()->Root();
+        Handle(TDataStd_Integer) aRootMarker;
+        Handle(TNaming_NamedShape) aRootShape;
+        if (aRoot.FindAttribute(
+                GeometryRepresentationAttributeID(), aRootMarker)
+            || aRoot.FindAttribute(
+                TNaming_NamedShape::GetID(), aRootShape)) {
+            return Standard_False;
+        }
+
+        if (!XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
+            Standard_Size aLabelCount = 0;
+            for (TDF_ChildIterator aLabel(aRoot, Standard_True);
+                 aLabel.More(); aLabel.Next()) {
+                if (++aLabelCount > kMaximumGeometryDocumentLabels) {
+                    return Standard_False;
+                }
+                Handle(TDataStd_Integer) aMarker;
+                Handle(TNaming_NamedShape) aNamedShape;
+                if (aLabel.Value().FindAttribute(
+                        GeometryRepresentationAttributeID(), aMarker)
+                    || aLabel.Value().FindAttribute(
+                        TNaming_NamedShape::GetID(), aNamedShape)) {
+                    return Standard_False;
+                }
+            }
+            return Standard_True;
+        }
+
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (aShapeTool.IsNull()) {
+            return Standard_False;
+        }
+        TDF_LabelSequence anAllTopLevelLabels;
+        aShapeTool->GetShapes(anAllTopLevelLabels);
+        if (static_cast<Standard_Size>(
+                anAllTopLevelLabels.Length())
+            > kMaximumGeometryDocumentLabels) {
+            return Standard_False;
+        }
+        TDF_LabelMap anAllTopLevelLabelSet;
+        for (Standard_Integer anIndex = 1;
+             anIndex <= anAllTopLevelLabels.Length(); ++anIndex) {
+            const TDF_Label& aLabel =
+                anAllTopLevelLabels.Value(anIndex);
+            if (aLabel.IsNull()
+                || aLabel.Data() != document->GetData()
+                || !aShapeTool->IsShape(aLabel)
+                || !aShapeTool->IsTopLevel(aLabel)
+                || XCAFDoc_ShapeTool::IsComponent(aLabel)
+                || XCAFDoc_ShapeTool::IsSubShape(aLabel)
+                || !anAllTopLevelLabelSet.Add(aLabel)) {
+                return Standard_False;
+            }
+        }
+        TDF_LabelSequence aFreeRootLabels;
+        aShapeTool->GetFreeShapes(aFreeRootLabels);
+        if (static_cast<Standard_Size>(aFreeRootLabels.Length())
+            > kMaximumGeometryDocumentLabels) {
+            return Standard_False;
+        }
+
+        struct AssemblyFrame {
+            TDF_Label label;
+            Standard_Size depth = 0;
+            bool leaving = false;
+        };
+        TDF_LabelMap aVisitedGraphLabels;
+        TDF_LabelMap aDefinitionLabels;
+        GeometryValidationBudget aBudget;
+        Standard_Size aDefinitionCount = 0;
+        Standard_Size anAggregateGraphVisitCount = 0;
+        for (Standard_Integer aRootIndex = 1;
+             aRootIndex <= aFreeRootLabels.Length(); ++aRootIndex) {
+            const TDF_Label& aRootLabel =
+                aFreeRootLabels.Value(aRootIndex);
+            if (aRootLabel.IsNull()
+                || aRootLabel.Data() != document->GetData()
+                || !aShapeTool->IsShape(aRootLabel)
+                || !aShapeTool->IsTopLevel(aRootLabel)
+                || !anAllTopLevelLabelSet.Contains(aRootLabel)
+                || XCAFDoc_ShapeTool::IsComponent(aRootLabel)
+                || XCAFDoc_ShapeTool::IsSubShape(aRootLabel)) {
+                return Standard_False;
+            }
+            // Depth is path-relative. Revisit shared DAG nodes through every
+            // occurrence branch so a shallow first path cannot memoize away
+            // an over-depth later path. Definition geometry is still
+            // classified once through aDefinitionLabels below.
+            TDF_LabelMap anActivePathForRoot;
+            std::vector<AssemblyFrame> aStack = {{
+                aRootLabel, 0, false}};
+            while (!aStack.empty()) {
+                const AssemblyFrame aFrame = aStack.back();
+                aStack.pop_back();
+                const TDF_Label& aLabel = aFrame.label;
+                if (aLabel.IsNull()
+                    || aLabel.Data() != document->GetData()) {
+                    return Standard_False;
+                }
+                if (aFrame.leaving) {
+                    anActivePathForRoot.Remove(aLabel);
+                    aVisitedGraphLabels.Add(aLabel);
+                    continue;
+                }
+                if (anActivePathForRoot.Contains(aLabel)
+                    || aFrame.depth > kMaximumTopologyDepth
+                    || anAggregateGraphVisitCount
+                        >= kMaximumGeometryDocumentLabels
+                    || !aShapeTool->IsShape(aLabel)) {
+                    return Standard_False;
+                }
+                anActivePathForRoot.Add(aLabel);
+                ++anAggregateGraphVisitCount;
+                if (aStack.size()
+                    >= static_cast<std::size_t>(
+                        kMaximumGeometryDocumentLabels)) {
+                    return Standard_False;
+                }
+                aStack.push_back({
+                    aLabel, aFrame.depth, true});
+
+                if (XCAFDoc_ShapeTool::IsReference(aLabel)
+                    || XCAFDoc_ShapeTool::IsComponent(aLabel)) {
+                    TDF_Label aReferredLabel;
+                    if (!XCAFDoc_ShapeTool::GetReferredShape(
+                            aLabel, aReferredLabel)
+                        || aReferredLabel.IsNull()
+                        || aReferredLabel.Data()
+                            != document->GetData()
+                        || aFrame.depth >= kMaximumTopologyDepth
+                        || aStack.size()
+                            >= static_cast<std::size_t>(
+                                kMaximumGeometryDocumentLabels)) {
+                        return Standard_False;
+                    }
+                    aStack.push_back({
+                        aReferredLabel, aFrame.depth + 1U, false});
+                    continue;
+                }
+                if (XCAFDoc_ShapeTool::IsAssembly(aLabel)) {
+                    TDF_LabelSequence aComponents;
+                    if (!XCAFDoc_ShapeTool::GetComponents(
+                            aLabel, aComponents, Standard_False)
+                        || aComponents.IsEmpty()
+                        || static_cast<Standard_Size>(
+                               aComponents.Length())
+                            > kMaximumGeometryDocumentLabels
+                        || aFrame.depth >= kMaximumTopologyDepth) {
+                        return Standard_False;
+                    }
+                    for (Standard_Integer aComponentIndex = 1;
+                         aComponentIndex <= aComponents.Length();
+                         ++aComponentIndex) {
+                        const TDF_Label& aComponent =
+                            aComponents.Value(aComponentIndex);
+                        if (aComponent.IsNull()
+                            || aComponent.Data()
+                                != document->GetData()
+                            || !XCAFDoc_ShapeTool::IsComponent(
+                                aComponent)
+                            || aStack.size()
+                                >= static_cast<std::size_t>(
+                                    kMaximumGeometryDocumentLabels)) {
+                            return Standard_False;
+                        }
+                        aStack.push_back({
+                            aComponent,
+                            aFrame.depth + 1U,
+                            false});
+                    }
+                    continue;
+                }
+                if (!IsGeometryDefinitionLabel(
+                        document, aShapeTool, aLabel)) {
+                    return Standard_False;
+                }
+                if (!aDefinitionLabels.Contains(aLabel)) {
+                    if (aDefinitionCount
+                            >= kMaximumGeometryDefinitionLabels
+                        || !aDefinitionLabels.Add(aLabel)
+                        || ValidatedGeometryRepresentation(
+                               document, aShapeTool, aLabel, &aBudget)
+                            == OcctGeometryRepresentation::Invalid) {
+                        return Standard_False;
+                    }
+                    ++aDefinitionCount;
+                }
+            }
+            if (!anActivePathForRoot.IsEmpty()) {
+                return Standard_False;
+            }
+        }
+        for (TDF_MapIteratorOfLabelMap aTopLevel(
+                 anAllTopLevelLabelSet);
+             aTopLevel.More(); aTopLevel.Next()) {
+            if (!aVisitedGraphLabels.Contains(aTopLevel.Key())) {
+                // Non-free top-level labels must be reachable from some free
+                // root. This rejects rootless assembly cycles and orphaned
+                // reference islands even if their individual labels look
+                // structurally plausible.
+                return Standard_False;
+            }
+        }
+
+        TDF_LabelMap aValidatedSubshapeLabels;
+        Standard_Size aSubshapeLabelCount = 0;
+        for (TDF_MapIteratorOfLabelMap aDefinition(
+                 aDefinitionLabels);
+             aDefinition.More(); aDefinition.Next()) {
+            TDF_LabelSequence aSubshapes;
+            if (!XCAFDoc_ShapeTool::GetSubShapes(
+                    aDefinition.Key(), aSubshapes)) {
+                continue;
+            }
+            if (static_cast<Standard_Size>(aSubshapes.Length())
+                > kMaximumGeometryDocumentLabels) {
+                return Standard_False;
+            }
+            for (Standard_Integer aSubshapeIndex = 1;
+                 aSubshapeIndex <= aSubshapes.Length();
+                 ++aSubshapeIndex) {
+                const TDF_Label& aSubshape =
+                    aSubshapes.Value(aSubshapeIndex);
+                if (aSubshape.IsNull()
+                    || aSubshape.Data() != document->GetData()
+                    || !aShapeTool->IsShape(aSubshape)
+                    || !XCAFDoc_ShapeTool::IsSubShape(aSubshape)) {
+                    return Standard_False;
+                }
+                if (!aValidatedSubshapeLabels.Contains(aSubshape)) {
+                    if (aSubshapeLabelCount
+                            >= kMaximumGeometryDocumentLabels
+                        || !aValidatedSubshapeLabels.Add(aSubshape)) {
+                        return Standard_False;
+                    }
+                    ++aSubshapeLabelCount;
+                }
+            }
+        }
+
+        Standard_Size aLabelCount = 0;
+        for (TDF_ChildIterator aLabel(aRoot, Standard_True);
+             aLabel.More(); aLabel.Next()) {
+            if (++aLabelCount > kMaximumGeometryDocumentLabels) {
+                return Standard_False;
+            }
+            Handle(TDataStd_Integer) aMarker;
+            Handle(TNaming_NamedShape) aNamedShape;
+            if (aLabel.Value().FindAttribute(
+                    GeometryRepresentationAttributeID(), aMarker)
+                && !aDefinitionLabels.Contains(aLabel.Value())) {
+                return Standard_False;
+            }
+            if (aLabel.Value().FindAttribute(
+                    TNaming_NamedShape::GetID(), aNamedShape)
+                && !aVisitedGraphLabels.Contains(aLabel.Value())
+                && !aValidatedSubshapeLabels.Contains(
+                    aLabel.Value())) {
+                return Standard_False;
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::SetGeometryRepresentationForLabel(
+    const TDF_Label& label,
+    const OcctGeometryRepresentation representation)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || representation == OcctGeometryRepresentation::Invalid
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (!IsGeometryDefinitionLabel(
+                myOcafDoc, aShapeTool, label)) {
+            return Standard_False;
+        }
+        bool hasMarker = false;
+        OcctGeometryRepresentation anExistingRepresentation =
+            OcctGeometryRepresentation::Invalid;
+        if (!ReadGeometryRepresentation(
+                label, hasMarker, anExistingRepresentation)) {
+            return Standard_False;
+        }
+        const DefinitionGeometryClass aGeometryClass =
+            ClassifyDefinitionGeometry(
+                XCAFDoc_ShapeTool::GetShape(label), nullptr);
+        if ((hasMarker
+                && !GeometryClassMatchesRepresentation(
+                    aGeometryClass, anExistingRepresentation))
+            || !GeometryClassMatchesRepresentation(
+                aGeometryClass, representation)) {
+            return Standard_False;
+        }
+        return WriteGeometryRepresentationMarker(
+            label, representation);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean
+OcctDocument::EnsureGeometryRepresentationForMutation(
+    const TDF_Label& label)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (!IsGeometryDefinitionLabel(
+                myOcafDoc, aShapeTool, label)) {
+            return Standard_False;
+        }
+        bool hasMarker = false;
+        OcctGeometryRepresentation aRepresentation =
+            OcctGeometryRepresentation::Invalid;
+        if (!ReadGeometryRepresentation(
+                label, hasMarker, aRepresentation)) {
+            return Standard_False;
+        }
+        if (hasMarker
+            && (aRepresentation == OcctGeometryRepresentation::BRep
+                || aRepresentation
+                    == OcctGeometryRepresentation::TriangleMesh)) {
+            // Candidate documents and every geometry replacement validate the
+            // explicit marker once. Ordinary scalar/transform mutations must
+            // not rescan up to a million mesh vertices on the main thread.
+            return Standard_True;
+        }
+        if (aRepresentation
+                != OcctGeometryRepresentation::LegacyUnknown
+            || ClassifyDefinitionGeometry(
+                   XCAFDoc_ShapeTool::GetShape(label), nullptr)
+                != DefinitionGeometryClass::BRep) {
+            return Standard_False;
+        }
+        return WriteGeometryRepresentationMarker(
+            label, OcctGeometryRepresentation::BRep);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::CopyGeometryRepresentation(
+    const TDF_Label& source,
+    const TDF_Label& destination)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        OcctGeometryRepresentation aSourceRepresentation =
+            ValidatedGeometryRepresentation(
+                myOcafDoc, aShapeTool, source);
+        if (aSourceRepresentation
+            == OcctGeometryRepresentation::LegacyUnknown) {
+            aSourceRepresentation = OcctGeometryRepresentation::BRep;
+        }
+        if (aSourceRepresentation
+                == OcctGeometryRepresentation::Invalid
+            || !IsGeometryDefinitionLabel(
+                myOcafDoc, aShapeTool, destination)) {
+            return Standard_False;
+        }
+        bool hasDestinationMarker = false;
+        OcctGeometryRepresentation aDestinationRepresentation =
+            OcctGeometryRepresentation::Invalid;
+        if (!ReadGeometryRepresentation(
+                destination,
+                hasDestinationMarker,
+                aDestinationRepresentation)) {
+            return Standard_False;
+        }
+        const DefinitionGeometryClass aDestinationClass =
+            ClassifyDefinitionGeometry(
+                XCAFDoc_ShapeTool::GetShape(destination), nullptr);
+        if ((hasDestinationMarker
+                && !GeometryClassMatchesRepresentation(
+                    aDestinationClass, aDestinationRepresentation))
+            || !GeometryClassMatchesRepresentation(
+                aDestinationClass, aSourceRepresentation)) {
+            return Standard_False;
+        }
+        return WriteGeometryRepresentationMarker(
+            destination, aSourceRepresentation);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::MarkImportedBRepDefinitions()
+{
+    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        || myOcafDoc->GetAvailableUndos() != 0
+        || myOcafDoc->GetAvailableRedos() != 0
+        || !ValidateGeometryRepresentations()
+        || !XCAFDoc_DocumentTool::CheckShapeTool(
+            myOcafDoc->Main())) {
+        return Standard_False;
+    }
+
+    const Handle(XCAFDoc_ShapeTool) aShapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    if (aShapeTool.IsNull()) {
+        return Standard_False;
+    }
+    TDF_LabelSequence aShapeLabels;
+    aShapeTool->GetShapes(aShapeLabels);
+    std::vector<TDF_Label> aLegacyDefinitions;
+    TDF_LabelMap aVisitedDefinitions;
+    try {
+        OCC_CATCH_SIGNALS
+        aLegacyDefinitions.reserve(
+            static_cast<std::size_t>(aShapeLabels.Length()));
+        for (Standard_Integer anIndex = 1;
+             anIndex <= aShapeLabels.Length(); ++anIndex) {
+            const TDF_Label& aTopLevelLabel =
+                aShapeLabels.Value(anIndex);
+            if (XCAFDoc_ShapeTool::IsAssembly(aTopLevelLabel)) {
+                continue;
+            }
+            TDF_Label aLabel = aTopLevelLabel;
+            if (XCAFDoc_ShapeTool::IsReference(aTopLevelLabel)) {
+                if (!XCAFDoc_ShapeTool::GetReferredShape(
+                        aTopLevelLabel, aLabel)
+                    || aLabel.IsNull()) {
+                    return Standard_False;
+                }
+                if (XCAFDoc_ShapeTool::IsAssembly(aLabel)) {
+                    continue;
+                }
+            }
+            if (!IsGeometryDefinitionLabel(
+                    myOcafDoc, aShapeTool, aLabel)) {
+                return Standard_False;
+            }
+            if (aVisitedDefinitions.Contains(aLabel)) {
+                continue;
+            }
+            if (!aVisitedDefinitions.Add(aLabel)) {
+                return Standard_False;
+            }
+            bool hasMarker = false;
+            OcctGeometryRepresentation aRepresentation =
+                OcctGeometryRepresentation::Invalid;
+            if (!ReadGeometryRepresentation(
+                    aLabel, hasMarker, aRepresentation)) {
+                return Standard_False;
+            }
+            (void)hasMarker;
+            if (aRepresentation
+                    == OcctGeometryRepresentation::LegacyUnknown) {
+                aLegacyDefinitions.push_back(aLabel);
+            } else if (aRepresentation
+                    != OcctGeometryRepresentation::BRep) {
+                return Standard_False;
+            }
+        }
+        if (aLegacyDefinitions.empty()) {
+            return Standard_True;
+        }
+
+        const Standard_Integer aPreviousUndoLimit =
+            myOcafDoc->GetUndoLimit();
+        myOcafDoc->SetUndoLimit(1);
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) {
+            myOcafDoc->SetUndoLimit(aPreviousUndoLimit);
+            return Standard_False;
+        }
+        try {
+            for (const TDF_Label& aLabel : aLegacyDefinitions) {
+                if (!WriteGeometryRepresentationMarker(
+                        aLabel, OcctGeometryRepresentation::BRep)) {
+                    throw Standard_Failure(
+                        "Unable to mark imported BRep definition");
+                }
+            }
+            if (!myOcafDoc->CommitCommand()) {
+                throw Standard_Failure(
+                    "Unable to commit imported BRep markers");
+            }
+            myOcafDoc->ClearUndos();
+            myOcafDoc->SetUndoLimit(aPreviousUndoLimit);
+        } catch (...) {
+            AbortCommandNoThrow(myOcafDoc);
+            try {
+                myOcafDoc->ClearUndos();
+            } catch (...) {
+            }
+            try {
+                myOcafDoc->SetUndoLimit(aPreviousUndoLimit);
+            } catch (...) {
+            }
+            return Standard_False;
+        }
+        return ValidateGeometryRepresentations();
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::MigrateLegacyIdentifiers()
 {
     return MigrateLegacyIdentifiers(myOcafDoc);
@@ -2016,15 +3060,32 @@ Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
 }
 
 TDF_Label OcctDocument::AddShape(Handle(AIS_InteractiveObject) object) {
+    return AddShape(
+        object, OcctGeometryRepresentation::BRep);
+}
+
+TDF_Label OcctDocument::AddShape(
+    Handle(AIS_InteractiveObject) object,
+    const OcctGeometryRepresentation representation) {
     Handle(AIS_Shape) aisShape = Handle(AIS_Shape)::DownCast(object);
-    return AddShape(aisShape);
+    return AddShape(aisShape, representation);
 }
 
 TDF_Label OcctDocument::AddShape(Handle(AIS_Shape) aisShape) {
+	return AddShape(
+	    aisShape, OcctGeometryRepresentation::BRep);
+}
+
+TDF_Label OcctDocument::AddShape(
+    Handle(AIS_Shape) aisShape,
+    const OcctGeometryRepresentation representation) {
 	if (myOcafDoc.IsNull()
 	    || !myOcafDoc->HasOpenCommand()
 	    || aisShape.IsNull()
-	    || aisShape->Shape().IsNull()) {
+	    || aisShape->Shape().IsNull()
+	    || (representation != OcctGeometryRepresentation::BRep
+	        && representation
+	            != OcctGeometryRepresentation::TriangleMesh)) {
 	    return TDF_Label();
 	}
 	Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
@@ -2034,7 +3095,9 @@ TDF_Label OcctDocument::AddShape(Handle(AIS_Shape) aisShape) {
 	TDF_Label label = shapeTool->NewShape();
 	shapeTool->SetShape(label, aisShape->Shape());
 	if (!AssignNewIdentifier(label, EntityIdentifierAttributeID())
-	    || !AssignNewIdentifier(label, DefinitionIdentifierAttributeID())) {
+	    || !AssignNewIdentifier(label, DefinitionIdentifierAttributeID())
+	    || !SetGeometryRepresentationForLabel(
+	        label, representation)) {
 	    return TDF_Label();
 	}
 	SaveObjectTransform(label, aisShape);
@@ -2060,6 +3123,28 @@ Standard_Boolean OcctDocument::ReplaceShape(
     if (previousShape.IsNull()) {
         return Standard_False;
     }
+    const OcctGeometryRepresentation previousRepresentation =
+        GeometryRepresentationForLabel(label);
+    if (previousRepresentation == OcctGeometryRepresentation::Invalid) {
+        return Standard_False;
+    }
+    const OcctGeometryRepresentation resolvedRepresentation =
+        previousRepresentation
+            == OcctGeometryRepresentation::LegacyUnknown
+        ? OcctGeometryRepresentation::BRep
+        : previousRepresentation;
+    if (!GeometryClassMatchesRepresentation(
+            ClassifyDefinitionGeometry(aisShape->Shape(), nullptr),
+            resolvedRepresentation)) {
+        return Standard_False;
+    }
+    bool hadRepresentationMarker = false;
+    OcctGeometryRepresentation storedRepresentation =
+        OcctGeometryRepresentation::Invalid;
+    if (!ReadGeometryRepresentation(
+            label, hadRepresentationMarker, storedRepresentation)) {
+        return Standard_False;
+    }
     struct SavedRealAttribute {
         Standard_Boolean wasPresent = Standard_False;
         Standard_Real value = 0.0;
@@ -2078,6 +3163,15 @@ Standard_Boolean OcctDocument::ReplaceShape(
     const auto restorePrevious = [&]() noexcept {
         try {
             shapeTool->SetShape(label, previousShape);
+            if (hadRepresentationMarker) {
+                TDataStd_Integer::Set(
+                    label,
+                    GeometryRepresentationAttributeID(),
+                    static_cast<Standard_Integer>(storedRepresentation));
+            } else {
+                label.ForgetAttribute(
+                    GeometryRepresentationAttributeID());
+            }
             for (Standard_Integer tag = 1; tag <= 8; ++tag) {
                 const SavedRealAttribute& saved =
                     previousTransform[tag - 1];
@@ -2101,6 +3195,13 @@ Standard_Boolean OcctDocument::ReplaceShape(
             restorePrevious();
             return Standard_False;
         }
+        if (previousRepresentation
+                == OcctGeometryRepresentation::LegacyUnknown
+            && !WriteGeometryRepresentationMarker(
+                label, OcctGeometryRepresentation::BRep)) {
+            restorePrevious();
+            return Standard_False;
+        }
         SaveObjectTransform(label, aisShape);
         return Standard_True;
     } catch (...) {
@@ -2110,6 +3211,10 @@ Standard_Boolean OcctDocument::ReplaceShape(
 }
 
 void OcctDocument::SaveObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
+    if (anAis.IsNull()
+        || !EnsureGeometryRepresentationForMutation(label)) {
+        return;
+    }
     auto t = anAis->LocalTransformation();
     TDataStd_Real::Set(label.FindChild(1), t.TranslationPart().X());
     TDataStd_Real::Set(label.FindChild(2), t.TranslationPart().Y());
@@ -2144,10 +3249,16 @@ void OcctDocument::SaveObjectColor(Handle(AIS_Shape) object
 }
 
 void OcctDocument::SaveObjectMaterial(const TDF_Label& label, const Graphic3d_NameOfMaterial name_of_material) {
+    if (!EnsureGeometryRepresentationForMutation(label)) {
+        return;
+    }
     TDataStd_Integer::Set(label.FindChild(11), name_of_material);
 }
 
 void OcctDocument::SaveObjectColor(const TDF_Label& label, const Quantity_NameOfColor name_of_color) {
+    if (!EnsureGeometryRepresentationForMutation(label)) {
+        return;
+    }
     TDataStd_Integer::Set(label.FindChild(12), name_of_color);
 }
 
@@ -2553,6 +3664,11 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
         preparedUpdates.push_back({
             update.label, aPreviousMaterialLabel, aMaterial});
     }
+    for (const PreparedUpdate& update : preparedUpdates) {
+        if (!EnsureGeometryRepresentationForMutation(update.label)) {
+            return Standard_False;
+        }
+    }
 
     // Detach the whole batch first. This makes final-state reclaim realizable
     // even when several selected labels share one old definition and the table
@@ -2627,7 +3743,8 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
 Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
     const TDF_Label& label) {
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
-        || label.IsNull()) {
+        || label.IsNull()
+        || !EnsureGeometryRepresentationForMutation(label)) {
         return Standard_False;
     }
     if (XCAFDoc_DocumentTool::CheckVisMaterialTool(myOcafDoc->Main())) {
@@ -2651,7 +3768,10 @@ Standard_Boolean OcctDocument::CopyObjectAppearance(
     const TDF_Label& source,
     const TDF_Label& destination) {
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
-        || source.IsNull() || destination.IsNull()) {
+        || source.IsNull() || destination.IsNull()
+        || GeometryRepresentationForLabel(source)
+            == OcctGeometryRepresentation::Invalid
+        || !EnsureGeometryRepresentationForMutation(destination)) {
         return Standard_False;
     }
 
@@ -3012,7 +4132,8 @@ OcctDocument::SetEmissiveTextureFactorAutoPromotedForLabel(
     const TDF_Label& label,
     const Standard_Boolean isAutoPromoted) {
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
-        || label.IsNull()) {
+        || label.IsNull()
+        || !EnsureGeometryRepresentationForMutation(label)) {
         return Standard_False;
     }
     if (isAutoPromoted) {
@@ -3205,7 +4326,8 @@ Standard_Boolean OcctDocument::OpenPrivateExportSnapshot(
             progress);
         const Standard_Boolean wasRejected =
             Core3DSafeBinaryReadWasRejected();
-        if (wasRejected || status != PCDM_RS_OK || candidate.IsNull()) {
+        if (wasRejected || status != PCDM_RS_OK || candidate.IsNull()
+            || !ValidateGeometryRepresentations(candidate)) {
             if (!candidate.IsNull()) {
                 try {
                     myApp->Close(candidate);
@@ -3253,7 +4375,14 @@ void OcctDocument::ApplyTransforms() {
 
 Standard_Boolean OcctDocument::ApplyTransforms(
     const Message_ProgressRange& progress) {
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || !ValidateGeometryRepresentations()) {
+        return Standard_False;
+    }
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
+    if (shapeTool.IsNull()) {
+        return Standard_False;
+    }
     TDF_LabelSequence aLabels;
     shapeTool->GetFreeShapes (aLabels);
     Message_ProgressScope aScope(
@@ -3268,6 +4397,11 @@ Standard_Boolean OcctDocument::ApplyTransforms(
             return Standard_False;
         }
         const TDF_Label& aLabel = aLabels.Value (aLabIter);
+        if (XCAFDoc_ShapeTool::IsSimpleShape(aLabel)
+            && !XCAFDoc_ShapeTool::IsAssembly(aLabel)
+            && !EnsureGeometryRepresentationForMutation(aLabel)) {
+            return Standard_False;
+        }
         const auto t = ObjectTransformForLabel(aLabel);
         TNaming::Displace(aLabel, TopLoc_Location(t));
         aScope.Next();
@@ -3358,7 +4492,8 @@ std::string OcctDocument::save(const std::string& path) {
 std::string OcctDocument::save(
     const std::string& path,
     const Message_ProgressRange& progress) {
-    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()) {
+    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        || !ValidateGeometryRepresentations()) {
         return {};
     }
 

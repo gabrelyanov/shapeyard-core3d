@@ -37,6 +37,18 @@
 
 class Message_ProgressRange;
 
+//! Persistent geometry representation owned by each XCAF definition label.
+//! The non-negative values are serialized schema values: never renumber or
+//! reuse them. Invalid is a read-only fail-closed sentinel and must never be
+//! written to a document.
+enum class OcctGeometryRepresentation : Standard_Integer
+{
+    Invalid = -1,
+    LegacyUnknown = 0,
+    BRep = 1,
+    TriangleMesh = 2,
+};
+
 //! Validate/canonicalize the narrow texture representation produced by the
 //! mobile material editor. Only complete, single-frame PNG/JPEG images within
 //! the shared project/snapshot safety budgets are accepted. The returned
@@ -131,6 +143,40 @@ public:
   Standard_EXPORT std::string DocumentIdentifier() const;
   Standard_EXPORT std::string EntityIdentifierForLabel(const TDF_Label& label) const;
   Standard_EXPORT std::string DefinitionIdentifierForLabel(const TDF_Label& label) const;
+  //! Read the persisted representation without modifying the document.
+  //! Missing attributes on valid legacy BRep are returned as LegacyUnknown.
+  //! Invalid is returned for a non-definition label, unknown integer, or a
+  //! marker/geometry mismatch.
+  Standard_EXPORT OcctGeometryRepresentation GeometryRepresentationForLabel(
+      const TDF_Label& label) const;
+  //! Validate one definition's marker against its stored geometry. A missing
+  //! or explicit LegacyUnknown marker is accepted only for legacy BRep.
+  Standard_EXPORT Standard_Boolean ValidateGeometryRepresentationForLabel(
+      const TDF_Label& label) const;
+  //! Validate all definitions without stamping or otherwise mutating OCAF.
+  //! An empty document is valid and representation-neutral.
+  Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations() const;
+  Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations(
+      const Handle(TDocStd_Document)& document) const;
+  //! Set/copy a definition marker inside the caller's existing OCAF command.
+  //! These methods never open, commit, or abort a command. Copy resolves a
+  //! valid LegacyUnknown source to an explicit BRep destination marker.
+  Standard_EXPORT Standard_Boolean SetGeometryRepresentationForLabel(
+      const TDF_Label& label,
+      OcctGeometryRepresentation representation);
+  //! Validate the current marker for a definition mutation. A valid legacy
+  //! BRep is stamped BRep inside the caller's already-open command; explicit
+  //! BRep/TriangleMesh markers are preserved.
+  Standard_EXPORT Standard_Boolean EnsureGeometryRepresentationForMutation(
+      const TDF_Label& label);
+  Standard_EXPORT Standard_Boolean CopyGeometryRepresentation(
+      const TDF_Label& source,
+      const TDF_Label& destination);
+  //! Stamp every unmarked analytic definition produced by a fresh STEP
+  //! transfer. This isolated-import schema operation requires zero user
+  //! history, creates no retained undo entry, and is never called for legacy
+  //! project load.
+  Standard_EXPORT Standard_Boolean MarkImportedBRepDefinitions();
   //! Return Shapeyard's persisted object-local translation/rotation/uniform
   //! scale. This is independent of an XCAF assembly occurrence location.
   Standard_EXPORT gp_Trsf ObjectTransformForLabel(const TDF_Label& label) const;
@@ -214,7 +260,13 @@ public:
         const Handle(AIS_Shape) anAis);
 
     TDF_Label AddShape(Handle(AIS_Shape) object);
+    TDF_Label AddShape(
+        Handle(AIS_Shape) object,
+        OcctGeometryRepresentation representation);
     TDF_Label AddShape(Handle(AIS_InteractiveObject) object);
+    TDF_Label AddShape(
+        Handle(AIS_InteractiveObject) object,
+        OcctGeometryRepresentation representation);
     //! False for an XCAF component occurrence whose persistent edits cannot be
     //! represented safely by the current definition-owned editing model.
     Standard_Boolean IsPresentationEditable(
