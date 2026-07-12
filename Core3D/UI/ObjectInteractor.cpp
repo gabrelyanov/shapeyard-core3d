@@ -22,6 +22,7 @@
 #include <Standard_Failure.hxx>
 #include <array>
 #include <cmath>
+#include <utility>
 
 namespace core3d {
 	namespace {
@@ -58,7 +59,8 @@ namespace core3d {
                                        , Standard_ShortReal manipulatorSide)
         : Interactor(context, view, doc)
         , _manipulatorSide(manipulatorSide)
-        , _booleanOpController(context, doc) {
+        , _booleanOpController(
+            std::make_shared<BooleanOperationController>(context, doc)) {
     }
 
     void ObjectInteractor::selectLastObject() {
@@ -184,7 +186,7 @@ namespace core3d {
                     || _trialMirrorObjects.size() > kMaxMirrorPreviewBodies)) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
-            if (_booleanOpController.hasUnresolvedState()) {
+            if (_booleanOpController->hasUnresolvedState()) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             const bool isSubtract = _manipulatorType
@@ -195,10 +197,10 @@ namespace core3d {
                 if (hasMirrorPreview) {
                     return PresentationOverlayCaptureStatus::Unsafe;
                 }
-                if (!_booleanOpController.hasSelectionState()) {
+                if (!_booleanOpController->hasSelectionState()) {
                     return PresentationOverlayCaptureStatus::Available;
                 }
-                if (!_booleanOpController.capturePreview(theBooleanPreview)
+                if (!_booleanOpController->capturePreview(theBooleanPreview)
                     || (isSubtract
                         && theBooleanPreview.action
                             != BooleanAction::BooleanSubtract)
@@ -210,8 +212,8 @@ namespace core3d {
                 }
                 return PresentationOverlayCaptureStatus::Available;
             }
-            if (_booleanOpController.hasActiveOperation()
-                || _booleanOpController.hasSelectionState()) {
+            if (_booleanOpController->hasActiveOperation()
+                || _booleanOpController->hasSelectionState()) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             if (_manipulatorType
@@ -728,7 +730,7 @@ namespace core3d {
 
 	void ObjectInteractor::fillSelectedState(Standard_Boolean forceActor, BooleanAction action) {
 		const auto failClosed = [this]() noexcept {
-			_booleanOpController.cancelActive();
+			_booleanOpController->cancelActive();
 			try {
 				if (!myContext.IsNull()) {
 					myContext->ClearSelected(Standard_True);
@@ -752,7 +754,7 @@ namespace core3d {
 					myContext->SelectedInteractive();
 			}
 			for (std::size_t index = 0; index < selectedCount; ++index) {
-				_booleanOpController.updateDetectedState(
+				_booleanOpController->updateDetectedState(
 					selectedObjects[index],
 					Handle(SelectMgr_EntityOwner)(),
 					forceActor,
@@ -761,14 +763,14 @@ namespace core3d {
 					forceActor = false;
 				}
 			}
-			_booleanOpController.visualApply(action);
+			(void)_booleanOpController->visualApply(action);
 		} catch (...) {
 			failClosed();
 		}
 	}
 
 	void ObjectInteractor::updateDetectedState(Standard_Boolean forceActor, BooleanAction action) {
-		if (_booleanOpController.isSelectionFrozen()) {
+		if (_booleanOpController->isSelectionFrozen()) {
 			return;
 		}
 		std::size_t selectedCount = 0;
@@ -776,26 +778,26 @@ namespace core3d {
 			++selectedCount;
 		}
 		if (selectedCount > BooleanOperationController::kMaxSourceOperands) {
-			_booleanOpController.cancelActive();
+			_booleanOpController->cancelActive();
 			myContext->ClearSelected(Standard_True);
 			return;
 		}
 		if (myContext->HasDetected()) {
-			_booleanOpController.updateDetectedState(myContext->DetectedInteractive(), myContext->DetectedOwner(), forceActor, action);
-			_booleanOpController.visualApply(action);
+			_booleanOpController->updateDetectedState(myContext->DetectedInteractive(), myContext->DetectedOwner(), forceActor, action);
+			(void)_booleanOpController->visualApply(action);
 		}
 	}
 
 	Standard_Boolean ObjectInteractor::beginBoolean(BooleanAction action) noexcept {
-		return _booleanOpController.begin(action);
+		return _booleanOpController->begin(action);
 	}
 
 	BooleanApplyResult ObjectInteractor::applyBoolean(BooleanAction action) noexcept {
-		return _booleanOpController.apply(action);
+		return _booleanOpController->apply(action);
 	}
 
 	void ObjectInteractor::cancelBoolean(BooleanAction action) noexcept {
-		_booleanOpController.cancel(action);
+		_booleanOpController->cancel(action);
 		try {
 			attachManipulatorToSelection();
 		} catch (...) {
@@ -803,7 +805,7 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::cancelActiveBoolean() noexcept {
-		_booleanOpController.cancelActive();
+		_booleanOpController->cancelActive();
 		try {
 			attachManipulatorToSelection();
 		} catch (...) {
@@ -811,19 +813,30 @@ namespace core3d {
 	}
 
     const bool ObjectInteractor::canApplyBoolean() const {
-        return _booleanOpController.canApply();
+        return _booleanOpController->canApply();
     }
 
 	const bool ObjectInteractor::hasActiveBoolean() const {
-		return _booleanOpController.hasActiveOperation();
+		return _booleanOpController->hasActiveOperation();
+	}
+
+	const bool ObjectInteractor::hasActiveBoolean(
+		const BooleanAction action) const {
+		return _booleanOpController->hasActiveOperation(action);
 	}
 
 	const bool ObjectInteractor::hasUnresolvedBoolean() const {
-		return _booleanOpController.hasUnresolvedState();
+		return _booleanOpController->hasUnresolvedState();
 	}
 
 	const bool ObjectInteractor::isBooleanSelectionFrozen() const {
-		return _booleanOpController.isSelectionFrozen();
+		return _booleanOpController->isSelectionFrozen();
+	}
+
+	void ObjectInteractor::setBooleanPreviewStateChangedCallback(
+		std::function<void()> callback) {
+		_booleanOpController->setPreviewStateChangedCallback(
+			std::move(callback));
 	}
 
 #ifdef DEBUG
@@ -841,32 +854,31 @@ namespace core3d {
 					&& subjects.size() < 2)) {
 				return Standard_False;
 			}
-			_booleanOpController.cancelActive();
-			if (!_booleanOpController.begin(action)) {
+			_booleanOpController->cancelActive();
+			if (!_booleanOpController->begin(action)) {
 				return Standard_False;
 			}
 			for (const Handle(AIS_InteractiveObject)& actor : actors) {
-				if (!_booleanOpController.setSelectionState(
+				if (!_booleanOpController->setSelectionState(
 						actor,
 						BooleanSelectionType::Actor,
 						action)) {
-					_booleanOpController.cancelActive();
+					_booleanOpController->cancelActive();
 					return Standard_False;
 				}
 			}
 			for (const Handle(AIS_InteractiveObject)& subject : subjects) {
-				if (!_booleanOpController.setSelectionState(
+				if (!_booleanOpController->setSelectionState(
 						subject,
 						BooleanSelectionType::Subject,
 						action)) {
-					_booleanOpController.cancelActive();
+					_booleanOpController->cancelActive();
 					return Standard_False;
 				}
 			}
-			_booleanOpController.visualApply(action);
-			return _booleanOpController.canApply();
+			return _booleanOpController->visualApply(action);
 		} catch (...) {
-			_booleanOpController.cancelActive();
+			_booleanOpController->cancelActive();
 			return Standard_False;
 		}
 	}
@@ -874,15 +886,49 @@ namespace core3d {
 	Standard_Boolean ObjectInteractor::debugRecomputeBooleanPreview(
 		BooleanAction action) noexcept {
 		try {
-			if (!_booleanOpController.hasActiveOperation()) {
+			if (!_booleanOpController->hasActiveOperation()) {
 				return Standard_False;
 			}
-			_booleanOpController.visualApply(action);
-			return _booleanOpController.canApply();
+			return _booleanOpController->visualApply(action);
 		} catch (...) {
-			_booleanOpController.cancelActive();
+			_booleanOpController->cancelActive();
 			return Standard_False;
 		}
+	}
+
+	BooleanPreviewDebugState
+	ObjectInteractor::debugBooleanPreviewState() const noexcept {
+		return _booleanOpController->debugPreviewState();
+	}
+
+	void ObjectInteractor::debugSetBooleanPreviewWorkerBlocked(
+		const Standard_Boolean blocked) noexcept {
+		_booleanOpController->debugSetWorkerBlocked(blocked);
+	}
+
+	void ObjectInteractor::debugSetMaximumBooleanCaptureTopologyNodes(
+		const Standard_Size limit) noexcept {
+		_booleanOpController->debugSetMaximumCaptureTopologyNodes(limit);
+	}
+
+	void ObjectInteractor::debugSetMaximumBooleanResultTopologyNodes(
+		const Standard_Size limit) noexcept {
+		_booleanOpController->debugSetMaximumResultTopologyNodes(limit);
+	}
+
+	void ObjectInteractor::debugSetMaximumBooleanResultSolids(
+		const Standard_Size limit) noexcept {
+		_booleanOpController->debugSetMaximumResultSolids(limit);
+	}
+
+	void ObjectInteractor::debugSetBooleanTransactionFailureCount(
+		const Standard_Size count) noexcept {
+		_booleanOpController->debugSetTransactionFailureCount(count);
+	}
+
+	void ObjectInteractor::debugSetBooleanAbortFailureCount(
+		const Standard_Size count) noexcept {
+		_booleanOpController->debugSetAbortFailureCount(count);
 	}
 #endif
 

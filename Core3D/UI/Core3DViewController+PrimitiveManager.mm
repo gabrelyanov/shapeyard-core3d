@@ -179,23 +179,51 @@
 }
 
 - (void)applySubtract {
-	[GLController applySubtract];
-    [self completeOperationInteraction];
+	if ([GLController applySubtract]) {
+        [self completeOperationInteraction];
+    } else {
+        if (![GLController hasActiveBoolean]) {
+            [self completeOperationInteraction];
+            return;
+        }
+        self.can_apply = [GLController canApplyBoolean];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (void)cancelSubtract {
-	[GLController cancelSubtract];
-    [self completeOperationInteraction];
+	if ([GLController cancelSubtract]) {
+        [self completeOperationInteraction];
+    } else {
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (void)applyUnion {
-	[GLController applyUnion];
-    [self completeOperationInteraction];
+	if ([GLController applyUnion]) {
+        [self completeOperationInteraction];
+    } else {
+        if (![GLController hasActiveBoolean]) {
+            [self completeOperationInteraction];
+            return;
+        }
+        self.can_apply = [GLController canApplyBoolean];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (void)cancelUnion {
-    [GLController cancelUnion];
-    [self completeOperationInteraction];
+    if ([GLController cancelUnion]) {
+        [self completeOperationInteraction];
+    } else {
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
 }
 
 - (void)undo {

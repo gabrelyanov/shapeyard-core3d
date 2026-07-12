@@ -275,6 +275,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 - (void)checkSelections;
 - (void)addCube:(UIBarButtonItem *)sender;
+- (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
+- (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type;
 @end
 
 @implementation GLViewController {
@@ -461,16 +463,25 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     }
     if (hadBooleanOperation) {
         _viewer->getObjectInteractor()->cancelActiveBoolean();
+        const BOOL didResolveBoolean =
+            !_viewer->getObjectInteractor()->hasActiveBoolean()
+            && !_viewer->getObjectInteractor()->hasUnresolvedBoolean();
         // Background/view disappearance retires transient geometry but keeps an
         // empty action provenance while the public tool mode remains Boolean, so
         // foreground taps can start a fresh operation without a mode toggle.
         if (!_isPreviewMode) {
-            if (booleanGizmoType == PrimitiveGizmoTypeSubtract) {
-                (void)_viewer->getObjectInteractor()->beginBoolean(
-                    BooleanAction::BooleanSubtract);
-            } else if (booleanGizmoType == PrimitiveGizmoTypeUnion) {
-                (void)_viewer->getObjectInteractor()->beginBoolean(
-                    BooleanAction::BooleanUnion);
+            (void)[self restoreBooleanActionForRetainedGizmoType:
+                booleanGizmoType];
+        } else if (didResolveBoolean
+                   && (booleanGizmoType == PrimitiveGizmoTypeSubtract
+                   || booleanGizmoType == PrimitiveGizmoTypeUnion)) {
+            if (_delegate != nil
+                && [_delegate respondsToSelector:
+                    @selector(viewerDidFailToRetainBooleanMode:)]) {
+                [_delegate viewerDidFailToRetainBooleanMode:self];
+            } else {
+                _viewer->getObjectInteractor()->setManipulatorType(
+                    PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
             }
         }
     }
@@ -536,6 +547,18 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         return;
     }
 
+    __weak typeof(self) weakSelf = self;
+    _viewer->setBooleanPreviewStateChangedCallback([weakSelf]() {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            [strongSelf checkSelections];
+            [strongSelf requestRender];
+        });
+    });
+
     _didSetupViewer = YES;
     _viewer->showGrid(!_isPreviewMode);
     if (_isPreviewMode) {
@@ -547,6 +570,21 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [_delegate didSetupViewer:weakSelf];
     }
     [self requestRender];
+}
+
+- (void)didReceiveMemoryWarning
+{
+    [super didReceiveMemoryWarning];
+    if (_viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && (_viewer->getObjectInteractor()->hasActiveBoolean()
+            || _viewer->getObjectInteractor()->hasUnresolvedBoolean())) {
+        const PrimitiveGizmoType currentType = [self getGizmoType];
+        _viewer->getObjectInteractor()->cancelActiveBoolean();
+        (void)[self restoreBooleanActionForRetainedGizmoType:currentType];
+        [self checkSelections];
+        [self requestRender];
+    }
 }
 
 // =======================================================================
@@ -1062,6 +1100,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)undo {
 	PrimitiveGizmoType currentType = [self getGizmoType];
+	const BOOL wasBoolean = currentType == PrimitiveGizmoTypeSubtract
+		|| currentType == PrimitiveGizmoTypeUnion;
 	const std::shared_ptr<ShapeInteractor> shapeInteractor =
 		_viewer->getShapeInteractor();
 	if (shapeInteractor != nullptr
@@ -1075,27 +1115,36 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		return;
 	}
 	if (currentType == PrimitiveGizmoTypeSubtract) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+		if (![self retireBooleanActionForGizmoType:currentType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeUnion) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+		if (![self retireBooleanActionForGizmoType:currentType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
-	if (!_viewer->getDocument()->canUndo()) {
-		[self checkSelections];
-		[self requestRender];
-		return;
-	}
-	if (_viewer->getDocument()->undo()) {
+	if (_viewer->getDocument()->canUndo()
+		&& _viewer->getDocument()->undo()) {
 		_viewer->redrawDocument();
-		[self checkSelections];
-		[self requestRender];
 	}
+	if (wasBoolean) {
+		(void)[self restoreBooleanActionForRetainedGizmoType:currentType];
+	}
+	[self checkSelections];
+	[self requestRender];
 }
 
 - (void)redo {
 	PrimitiveGizmoType currentType = [self getGizmoType];
+	const BOOL wasBoolean = currentType == PrimitiveGizmoTypeSubtract
+		|| currentType == PrimitiveGizmoTypeUnion;
 	const std::shared_ptr<ShapeInteractor> shapeInteractor =
 		_viewer->getShapeInteractor();
 	if (shapeInteractor != nullptr
@@ -1109,23 +1158,30 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		return;
 	}
 	if (currentType == PrimitiveGizmoTypeSubtract) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+		if (![self retireBooleanActionForGizmoType:currentType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeUnion) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+		if (![self retireBooleanActionForGizmoType:currentType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
-	if (!_viewer->getDocument()->canRedo()) {
-		[self checkSelections];
-		[self requestRender];
-		return;
-	}
-	if (_viewer->getDocument()->redo()) {
+	if (_viewer->getDocument()->canRedo()
+		&& _viewer->getDocument()->redo()) {
 		_viewer->redrawDocument();
-		[self checkSelections];
-		[self requestRender];
 	}
+	if (wasBoolean) {
+		(void)[self restoreBooleanActionForRetainedGizmoType:currentType];
+	}
+	[self checkSelections];
+	[self requestRender];
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {
@@ -1134,9 +1190,17 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	if (currentType == PrimitiveGizmoTypeChamfer) {
 		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
 	} else if (currentType == PrimitiveGizmoTypeSubtract) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+		if (![self retireBooleanActionForGizmoType:currentType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeUnion) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+		if (![self retireBooleanActionForGizmoType:currentType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
 	} else if (currentType == PrimitiveGizmoTypeExtrude) {
@@ -1165,6 +1229,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
     }
     _viewer->getShapeInteractor()->setSelectionMode(selectionMode);
+    (void)[self restoreBooleanActionForRetainedGizmoType:currentType];
     [self requestRender];
 }
 
@@ -1211,6 +1276,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			_viewer->getObjectInteractor()->setManipulatorType(
 				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
 		}
+		if (type == PrimitiveGizmoTypeSubtract
+			|| type == PrimitiveGizmoTypeUnion) {
+			(void)[self restoreBooleanActionForRetainedGizmoType:type];
+		}
 		[self requestRender];
 		return;
 	}
@@ -1221,9 +1290,17 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	if (previousType == PrimitiveGizmoTypeChamfer) {
 		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
 	} else if (previousType == PrimitiveGizmoTypeSubtract) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+		if (![self retireBooleanActionForGizmoType:previousType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (previousType == PrimitiveGizmoTypeUnion) {
-		_viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+		if (![self retireBooleanActionForGizmoType:previousType]) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (previousType == PrimitiveGizmoTypeMirror) {
 		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
 	} else if (previousType == PrimitiveGizmoTypeExtrude) {
@@ -1392,36 +1469,120 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	[self requestRender];
 }
 
-- (void) applySubtract {
+- (BOOL) applySubtract {
 	const BooleanApplyResult result =
 		_viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanSubtract);
 	if (result == BooleanApplyResult::AppliedNeedsDocumentRedraw) {
 		_viewer->redrawDocument();
 	}
     [self requestRender];
+    return result != BooleanApplyResult::NoChange;
 }
 
-- (void) cancelSubtract {
-    _viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanSubtract);
+- (BOOL) cancelSubtract {
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    anInteractor->cancelBoolean(BooleanAction::BooleanSubtract);
     [self requestRender];
+    return !anInteractor->hasUnresolvedBoolean()
+        && !anInteractor->hasActiveBoolean(
+            BooleanAction::BooleanSubtract);
 }
 
-- (void) applyUnion {
+- (BOOL) applyUnion {
 	const BooleanApplyResult result =
 		_viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanUnion);
 	if (result == BooleanApplyResult::AppliedNeedsDocumentRedraw) {
 		_viewer->redrawDocument();
-	}
+    }
     [self requestRender];
+    return result != BooleanApplyResult::NoChange;
 }
 
-- (void) cancelUnion {
-    _viewer->getObjectInteractor()->cancelBoolean(BooleanAction::BooleanUnion);
+- (BOOL) cancelUnion {
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    anInteractor->cancelBoolean(BooleanAction::BooleanUnion);
     [self requestRender];
+    return !anInteractor->hasUnresolvedBoolean()
+        && !anInteractor->hasActiveBoolean(BooleanAction::BooleanUnion);
 }
 
 - (BOOL) canApplyBoolean {
     return _viewer->getObjectInteractor()->canApplyBoolean();
+}
+
+- (BOOL)hasActiveBoolean {
+    if (_viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr) {
+        return NO;
+    }
+    const PrimitiveGizmoType currentType = [self getGizmoType];
+    if (currentType == PrimitiveGizmoTypeSubtract) {
+        return _viewer->getObjectInteractor()->hasActiveBoolean(
+            BooleanAction::BooleanSubtract);
+    }
+    if (currentType == PrimitiveGizmoTypeUnion) {
+        return _viewer->getObjectInteractor()->hasActiveBoolean(
+            BooleanAction::BooleanUnion);
+    }
+    return NO;
+}
+
+- (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type {
+    if (type != PrimitiveGizmoTypeSubtract
+        && type != PrimitiveGizmoTypeUnion) {
+        return YES;
+    }
+    if (_viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr) {
+        return NO;
+    }
+    const BooleanAction action = type == PrimitiveGizmoTypeSubtract
+        ? BooleanAction::BooleanSubtract
+        : BooleanAction::BooleanUnion;
+    if (_viewer->getObjectInteractor()->hasActiveBoolean(action)) {
+        return YES;
+    }
+    if (_viewer->getObjectInteractor()->beginBoolean(action)) {
+        return YES;
+    }
+    if (_viewer->getObjectInteractor()->hasActiveBoolean(action)
+        || _viewer->getObjectInteractor()->hasUnresolvedBoolean()) {
+        // Cleanup is still retryable through the retained Boolean tool.
+        return NO;
+    }
+    // A retained Boolean manipulator with no matching controller action is an
+    // inert tool. Synchronize the public and native layers while exiting; do
+    // not mutate the native manipulator behind the owner's cached UI state.
+    if (_delegate != nil
+        && [_delegate respondsToSelector:
+            @selector(viewerDidFailToRetainBooleanMode:)]) {
+        [_delegate viewerDidFailToRetainBooleanMode:self];
+    } else {
+        _viewer->getObjectInteractor()->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+    }
+    return NO;
+}
+
+- (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type {
+    if (type != PrimitiveGizmoTypeSubtract
+        && type != PrimitiveGizmoTypeUnion) {
+        return YES;
+    }
+    if (_viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr) {
+        return NO;
+    }
+    const BooleanAction action = type == PrimitiveGizmoTypeSubtract
+        ? BooleanAction::BooleanSubtract
+        : BooleanAction::BooleanUnion;
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    anInteractor->cancelBoolean(action);
+    return !anInteractor->hasUnresolvedBoolean()
+        && !anInteractor->hasActiveBoolean(action);
 }
 
 - (BOOL) hasTrialMirrorObjects {
@@ -1482,6 +1643,76 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (NSInteger)debugSelectedShapeCount {
     return _viewer == nullptr ? 0 : _viewer->selectedCount();
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {
+    if (_viewer == nullptr) {
+        return @{};
+    }
+    const BooleanPreviewDebugState state =
+        _viewer->DebugBooleanPreviewState();
+    return @{
+        @"state": @(static_cast<NSUInteger>(state.state)),
+        @"generation": @(state.generation),
+        @"submittedCount": @(state.submittedCount),
+        @"startedCount": @(state.startedCount),
+        @"completedCount": @(state.completedCount),
+        @"cancelledCount": @(state.cancelledCount),
+        @"pendingReplacementCount": @(state.pendingReplacementCount),
+        @"acceptedCount": @(state.acceptedCount),
+        @"staleSuppressionCount": @(state.staleSuppressionCount),
+        @"activeOperation": @(state.activeOperation != Standard_False),
+        @"workerActive": @(state.workerActive != Standard_False),
+        @"workerPending": @(state.workerPending != Standard_False),
+        @"canApply": @(state.canApply != Standard_False),
+        @"documentCommandUnresolved": @(
+            state.documentCommandUnresolved != Standard_False),
+        @"documentCommandOpen": @(
+            state.documentCommandOpen != Standard_False),
+        @"lastComputeWasMainThread": @(
+            state.lastComputeWasMainThread != Standard_False),
+    };
+}
+
+- (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBooleanPreviewWorkerBlocked(blocked);
+    }
+}
+
+- (void)debugSetMaximumBooleanCaptureTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumBooleanCaptureTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumBooleanResultTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumBooleanResultTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumBooleanResultSolids(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBooleanTransactionFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetBooleanAbortFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBooleanAbortFailureCount(
+            static_cast<Standard_Size>(count));
+    }
 }
 
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode {

@@ -206,6 +206,21 @@ typedef struct {
 //! Test-only recompute seam for the active Boolean trial. This exercises the
 //! same replacement/ownership path used after an interactive adjustment.
 - (BOOL)debugRecomputeBooleanPreview;
+//! Real asynchronous Boolean worker/state counters. State values are
+//! Selecting=0, Computing=1, Ready=2, Committing=3, Failed=4.
+- (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState;
+//! Pause/release the process-global serial worker before BOP execution.
+- (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked;
+//! Lower production admission limits for deterministic fail-closed tests.
+- (void)debugSetMaximumBooleanCaptureTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBooleanResultTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit;
+//! Force the next N Ready Boolean applies through transaction rollback.
+- (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count;
+//! Make the next N Boolean transaction abort attempts fail before touching it.
+- (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
+//! Deliver the viewport's production memory-warning cancellation path.
+- (void)debugSimulateBooleanMemoryWarning;
 //! Deterministically capture a planar face by stable entity identifier and
 //! zero-based TopExp face index, using the production extrusion admission.
 - (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier

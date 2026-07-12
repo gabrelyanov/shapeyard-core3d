@@ -90,11 +90,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)canApplyExtrusion;
 - (void) applyMirror;
 - (void) cancelMirror;
-- (void) applySubtract;
-- (void) cancelSubtract;
-- (void) applyUnion;
-- (void) cancelUnion;
+- (BOOL) applySubtract;
+- (BOOL) cancelSubtract;
+- (BOOL) applyUnion;
+- (BOOL) cancelUnion;
 - (BOOL) canApplyBoolean;
+- (BOOL) hasActiveBoolean;
 - (BOOL) hasTrialMirrorObjects;
 #ifdef DEBUG
 - (void)debugRequestRender;
@@ -109,6 +110,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;
 - (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
+- (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState;
+- (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked;
+- (void)debugSetMaximumBooleanCaptureTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBooleanResultTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit;
+- (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
 - (NSDictionary<NSString *, NSNumber *> *)

@@ -15,6 +15,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -40,7 +42,7 @@ namespace core3d {
     class ObjectInteractor : public Interactor {
         
 		PrimitiveManipulatorType _manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
-        BooleanOperationController _booleanOpController;
+        std::shared_ptr<BooleanOperationController> _booleanOpController;
         Handle(Core3DManipulator) _manipulator;
 //        std::vector<TopoDS_Shape> _beforeTransformObjects;
     public:
@@ -89,8 +91,11 @@ namespace core3d {
 		void cancelActiveBoolean() noexcept;
 		const bool canApplyBoolean() const;
 		const bool hasActiveBoolean() const;
+		const bool hasActiveBoolean(BooleanAction action) const;
 		const bool hasUnresolvedBoolean() const;
 		const bool isBooleanSelectionFrozen() const;
+		void setBooleanPreviewStateChangedCallback(
+			std::function<void()> callback);
 #ifdef DEBUG
 		Standard_Boolean debugBeginBooleanSelection(
 			const std::vector<Handle(AIS_InteractiveObject)>& actors,
@@ -98,6 +103,19 @@ namespace core3d {
 			BooleanAction action) noexcept;
 		Standard_Boolean debugRecomputeBooleanPreview(
 			BooleanAction action) noexcept;
+		BooleanPreviewDebugState debugBooleanPreviewState() const noexcept;
+		void debugSetBooleanPreviewWorkerBlocked(
+			Standard_Boolean blocked) noexcept;
+		void debugSetMaximumBooleanCaptureTopologyNodes(
+			Standard_Size limit) noexcept;
+		void debugSetMaximumBooleanResultTopologyNodes(
+			Standard_Size limit) noexcept;
+		void debugSetMaximumBooleanResultSolids(
+			Standard_Size limit) noexcept;
+		void debugSetBooleanTransactionFailureCount(
+			Standard_Size count) noexcept;
+		void debugSetBooleanAbortFailureCount(
+			Standard_Size count) noexcept;
 #endif
 		void applyMirror();
 		void tryMirror(Standard_Integer axisIndex, bool backward) noexcept;

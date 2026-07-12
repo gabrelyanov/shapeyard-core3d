@@ -89,6 +89,8 @@ namespace core3d {
         inline void setInteractiveCallback(const std::function<void(int,int)> cb) {
             _interactiveCallback = cb;
         }
+        void setBooleanPreviewStateChangedCallback(
+            std::function<void()> callback);
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
 
@@ -113,6 +115,19 @@ namespace core3d {
             BooleanAction action,
             const std::vector<std::string>& actorEntityIdentifiers,
             const std::vector<std::string>& subjectEntityIdentifiers) noexcept;
+        BooleanPreviewDebugState DebugBooleanPreviewState() const noexcept;
+        void DebugSetBooleanPreviewWorkerBlocked(
+            Standard_Boolean blocked) noexcept;
+        void DebugSetMaximumBooleanCaptureTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetMaximumBooleanResultTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetMaximumBooleanResultSolids(
+            Standard_Size limit) noexcept;
+        void DebugSetBooleanTransactionFailureCount(
+            Standard_Size count) noexcept;
+        void DebugSetBooleanAbortFailureCount(
+            Standard_Size count) noexcept;
         Standard_Boolean debugBeginExtrusionSelection(
             const std::string& entityIdentifier,
             Standard_Size faceTopologyIndex) noexcept;
@@ -150,6 +165,7 @@ namespace core3d {
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
         
         std::function<void(int,int)> _interactiveCallback;
+        std::function<void()> _booleanPreviewStateChangedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
         Standard_Size myMaximumProjectTopologyValidationNodes = 2'000'000;
     };

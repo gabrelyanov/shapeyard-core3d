@@ -249,6 +249,14 @@ supportsBaseColorTextureEditing:supportsBaseColorTextureEditing];
     [self viewWillSelectAtDrawablePoint:point drawableSize:drawableSize];
 }
 
+- (void)viewerDidFailToRetainBooleanMode:(id)sender {
+    (void)sender;
+    if (_currentGizmoType == PrimitiveGizmoTypeSubtract
+        || _currentGizmoType == PrimitiveGizmoTypeUnion) {
+        [self completeOperationInteraction];
+    }
+}
+
 - (void)didSetupViewer:(id)sender { 
     [self viewDidSetup];
 }

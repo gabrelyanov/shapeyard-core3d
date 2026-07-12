@@ -10,33 +10,184 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+
+#include <dispatch/dispatch.h>
+#include <pthread.h>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <iomanip>
 #include <iostream>
+#include <limits>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <utility>
 
 namespace core3d {
+
+enum class BooleanPreviewWorkerOutcome : std::uint8_t {
+    Success = 0,
+    Cancelled,
+    Failed,
+};
+
+struct BooleanPreviewWorkerRequest {
+    BooleanAction action = BooleanAction::BooleanSubtract;
+    std::uint64_t generation = 0;
+    std::string fingerprint;
+    std::vector<TopoDS_Shape> actors;
+    std::vector<TopoDS_Shape> subjects;
+    std::shared_ptr<std::atomic_bool> cancellation;
+    Standard_Size maximumResultTopologyNodes =
+        BooleanOperationController::kMaxResultTopologyNodes;
+    Standard_Size maximumResultSolids =
+        BooleanOperationController::kMaxResultSolids;
+};
+
+struct BooleanPreviewWorkerResult {
+    BooleanAction action = BooleanAction::BooleanSubtract;
+    std::uint64_t generation = 0;
+    std::string fingerprint;
+    BooleanPreviewWorkerOutcome outcome =
+        BooleanPreviewWorkerOutcome::Failed;
+    std::vector<TopoDS_Shape> results;
+    Standard_Boolean computeWasMainThread = Standard_False;
+};
+
 namespace {
 
 constexpr Standard_Real kFuzzyValue = 1.0e-3;
+std::atomic<std::uint64_t> gBooleanControllerEpoch{0};
 
-Standard_Boolean IsValidSolidBooleanResult(const TopoDS_Shape& theShape)
+dispatch_queue_t BooleanWorkerQueue()
+{
+    static dispatch_queue_t aQueue = []() {
+        dispatch_queue_attr_t anAttribute =
+            dispatch_queue_attr_make_with_qos_class(
+                DISPATCH_QUEUE_SERIAL,
+                QOS_CLASS_USER_INITIATED,
+                0);
+        return dispatch_queue_create(
+            "com.shapeyard.core3d.boolean-preview",
+            anAttribute);
+    }();
+    return aQueue;
+}
+
+Standard_Boolean AccumulateBoundedTopology(
+    const TopoDS_Shape& theShape,
+    const Standard_Size thePerShapeLimit,
+    const Standard_Size theAggregateLimit,
+    Standard_Size& theAggregateCount,
+    Standard_Size* theSolidCount = nullptr,
+    const Standard_Size theMaximumSolidCount =
+        BooleanOperationController::kMaxResultSolids)
+{
+    if (theShape.IsNull() || thePerShapeLimit == 0
+        || theAggregateLimit == 0) {
+        return Standard_False;
+    }
+    std::vector<TopoDS_Shape> aStack;
+    aStack.reserve(std::min<Standard_Size>(thePerShapeLimit, 1'024));
+    aStack.push_back(theShape);
+    TopTools_IndexedMapOfShape aVisited;
+    Standard_Size aShapeCount = 0;
+    while (!aStack.empty()) {
+        const TopoDS_Shape aCurrent = aStack.back();
+        aStack.pop_back();
+        if (aVisited.Contains(aCurrent)) {
+            continue;
+        }
+        aVisited.Add(aCurrent);
+        if (++aShapeCount > thePerShapeLimit
+            || ++theAggregateCount > theAggregateLimit) {
+            return Standard_False;
+        }
+        if (theSolidCount != nullptr
+            && aCurrent.ShapeType() == TopAbs_SOLID
+            && ++*theSolidCount
+                > theMaximumSolidCount) {
+            return Standard_False;
+        }
+        for (TopoDS_Iterator aChild(aCurrent, Standard_True, Standard_True);
+             aChild.More(); aChild.Next()) {
+            if (!aVisited.Contains(aChild.Value())) {
+                // The pending frontier is independently bounded, so a broad
+                // malformed compound cannot allocate past admission limits
+                // before its nodes are counted.
+                if (aStack.size() >= thePerShapeLimit
+                    || aStack.size() >= theAggregateLimit) {
+                    return Standard_False;
+                }
+                aStack.push_back(aChild.Value());
+            }
+        }
+    }
+    return Standard_True;
+}
+
+Standard_Boolean IsValidSolidBooleanResult(
+    const TopoDS_Shape& theShape,
+    const Standard_Size theMaximumTopologyNodes,
+    const Standard_Size theMaximumSolidCount,
+    Standard_Size& theAggregateTopologyNodes,
+    Standard_Size& theAggregateSolidCount)
 {
     if (theShape.IsNull()) {
         return Standard_False;
     }
     try {
+        const Standard_Size aSolidCountBefore = theAggregateSolidCount;
+        if (!AccumulateBoundedTopology(
+                theShape,
+                theMaximumTopologyNodes,
+                theMaximumTopologyNodes,
+                theAggregateTopologyNodes,
+                &theAggregateSolidCount,
+                theMaximumSolidCount)
+            || theAggregateSolidCount == aSolidCountBefore) {
+            return Standard_False;
+        }
         BRepCheck_Analyzer anAnalyzer(theShape, Standard_True);
-        return anAnalyzer.IsValid()
-            && TopExp_Explorer(theShape, TopAbs_SOLID).More();
+        return anAnalyzer.IsValid();
     } catch (...) {
         return Standard_False;
     }
 }
+
+class BooleanCancellationIndicator final
+    : public Message_ProgressIndicator {
+    DEFINE_STANDARD_RTTI_INLINE(
+        BooleanCancellationIndicator,
+        Message_ProgressIndicator)
+public:
+    explicit BooleanCancellationIndicator(
+        std::shared_ptr<std::atomic_bool> theCancellation)
+    : myCancellation(std::move(theCancellation)) {}
+
+protected:
+    Standard_Boolean UserBreak() override
+    {
+        return myCancellation != nullptr
+            && myCancellation->load(std::memory_order_relaxed);
+    }
+
+    void Show(
+        const Message_ProgressScope&,
+        const Standard_Boolean) override {}
+
+private:
+    std::shared_ptr<std::atomic_bool> myCancellation;
+};
 
 bool ContainsLabel(
     const std::vector<TDF_Label>& theLabels,
@@ -75,18 +226,424 @@ Standard_Boolean AbortCommandNoThrow(
 
 } // namespace
 
+class BooleanPreviewWorker final
+    : public std::enable_shared_from_this<BooleanPreviewWorker> {
+public:
+    explicit BooleanPreviewWorker(
+        std::weak_ptr<BooleanOperationController> theOwner)
+    : myOwner(std::move(theOwner)) {}
+
+    ~BooleanPreviewWorker() noexcept
+    {
+        shutdown();
+    }
+
+    Standard_Boolean enqueue(BooleanPreviewWorkerRequest theRequest) noexcept
+    {
+        bool shouldSchedule = false;
+        try {
+            {
+                std::lock_guard<std::mutex> aLock(myMutex);
+                if (myStopped || theRequest.cancellation == nullptr) {
+                    return Standard_False;
+                }
+                if (myActiveCancellation != nullptr) {
+                    myActiveCancellation->store(
+                        true, std::memory_order_relaxed);
+                }
+                if (myPending.has_value()) {
+                    myPending->cancellation->store(
+                        true, std::memory_order_relaxed);
+                    ++myPendingReplacementCount;
+                }
+                myPending = std::move(theRequest);
+                ++mySubmittedCount;
+                if (!myDrainScheduled) {
+                    myDrainScheduled = true;
+                    shouldSchedule = true;
+                }
+            }
+            myCondition.notify_all();
+            if (shouldSchedule) {
+                auto* aContext = new std::shared_ptr<BooleanPreviewWorker>(
+                    shared_from_this());
+                dispatch_async_f(
+                    BooleanWorkerQueue(),
+                    aContext,
+                    &BooleanPreviewWorker::DrainTrampoline);
+            }
+            return Standard_True;
+        } catch (...) {
+            cancelAll();
+            std::lock_guard<std::mutex> aLock(myMutex);
+            myDrainScheduled = false;
+            return Standard_False;
+        }
+    }
+
+    void cancelAll() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> aLock(myMutex);
+            if (myActiveCancellation != nullptr) {
+                myActiveCancellation->store(
+                    true, std::memory_order_relaxed);
+            }
+            if (myPending.has_value()) {
+                myPending->cancellation->store(
+                    true, std::memory_order_relaxed);
+                myPending.reset();
+            }
+        }
+        myCondition.notify_all();
+    }
+
+    void cancelActiveForSupersede() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> aLock(myMutex);
+            if (myActiveCancellation != nullptr) {
+                myActiveCancellation->store(
+                    true, std::memory_order_relaxed);
+            }
+        }
+        myCondition.notify_all();
+    }
+
+    void shutdown() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> aLock(myMutex);
+            if (myStopped) {
+                return;
+            }
+            myStopped = true;
+            if (myActiveCancellation != nullptr) {
+                myActiveCancellation->store(
+                    true, std::memory_order_relaxed);
+            }
+            if (myPending.has_value()) {
+                myPending->cancellation->store(
+                    true, std::memory_order_relaxed);
+                myPending.reset();
+            }
+#ifdef DEBUG
+            myDebugBlocked = false;
+#endif
+        }
+        myCondition.notify_all();
+    }
+
+#ifdef DEBUG
+    struct DebugSnapshot {
+        std::uint64_t submittedCount = 0;
+        std::uint64_t startedCount = 0;
+        std::uint64_t completedCount = 0;
+        std::uint64_t cancelledCount = 0;
+        std::uint64_t pendingReplacementCount = 0;
+        Standard_Boolean active = Standard_False;
+        Standard_Boolean pending = Standard_False;
+        Standard_Boolean lastComputeWasMainThread = Standard_False;
+    };
+
+    DebugSnapshot debugSnapshot() const noexcept
+    {
+        std::lock_guard<std::mutex> aLock(myMutex);
+        return {
+            mySubmittedCount,
+            myStartedCount,
+            myCompletedCount,
+            myCancelledCount,
+            myPendingReplacementCount,
+            myActiveCancellation != nullptr,
+            myPending.has_value(),
+            myLastComputeWasMainThread,
+        };
+    }
+
+    void debugSetBlocked(const Standard_Boolean theBlocked) noexcept
+    {
+        {
+            std::lock_guard<std::mutex> aLock(myMutex);
+            myDebugBlocked = theBlocked;
+        }
+        myCondition.notify_all();
+    }
+#endif
+
+private:
+    struct MainCompletion {
+        std::weak_ptr<BooleanOperationController> owner;
+        BooleanPreviewWorkerResult result;
+    };
+
+    static void DrainTrampoline(void* theContext)
+    {
+        std::unique_ptr<std::shared_ptr<BooleanPreviewWorker>> aContext(
+            static_cast<std::shared_ptr<BooleanPreviewWorker>*>(
+                theContext));
+        (*aContext)->drain();
+    }
+
+    static void DeliverTrampoline(void* theContext)
+    {
+        std::unique_ptr<MainCompletion> aCompletion(
+            static_cast<MainCompletion*>(theContext));
+        if (const auto anOwner = aCompletion->owner.lock()) {
+            anOwner->acceptWorkerResult(
+                std::move(aCompletion->result));
+        }
+    }
+
+    void drain() noexcept
+    {
+        for (;;) {
+            BooleanPreviewWorkerRequest aRequest;
+            {
+                std::unique_lock<std::mutex> aLock(myMutex);
+                if (myStopped || !myPending.has_value()) {
+                    myDrainScheduled = false;
+                    myActiveCancellation.reset();
+                    return;
+                }
+                aRequest = std::move(*myPending);
+                myPending.reset();
+                myActiveCancellation = aRequest.cancellation;
+                ++myStartedCount;
+#ifdef DEBUG
+                myCondition.wait(aLock, [&]() {
+                    return myStopped || !myDebugBlocked;
+                });
+#endif
+            }
+
+            BooleanPreviewWorkerResult aResult = compute(aRequest);
+            {
+                std::lock_guard<std::mutex> aLock(myMutex);
+                myActiveCancellation.reset();
+                ++myCompletedCount;
+                myLastComputeWasMainThread =
+                    aResult.computeWasMainThread;
+                if (aResult.outcome
+                    == BooleanPreviewWorkerOutcome::Cancelled) {
+                    ++myCancelledCount;
+                }
+            }
+
+            try {
+                auto* aCompletion = new MainCompletion{
+                    myOwner,
+                    std::move(aResult),
+                };
+                dispatch_async_f(
+                    dispatch_get_main_queue(),
+                    aCompletion,
+                    &BooleanPreviewWorker::DeliverTrampoline);
+            } catch (...) {
+            }
+        }
+    }
+
+    static BooleanPreviewWorkerResult compute(
+        const BooleanPreviewWorkerRequest& theRequest) noexcept
+    {
+        BooleanPreviewWorkerResult aResult;
+        aResult.action = theRequest.action;
+        aResult.generation = theRequest.generation;
+        aResult.fingerprint = theRequest.fingerprint;
+        aResult.computeWasMainThread = pthread_main_np() != 0;
+        const auto wasCancelled = [&]() {
+            return theRequest.cancellation == nullptr
+                || theRequest.cancellation->load(
+                    std::memory_order_relaxed);
+        };
+        if (wasCancelled()) {
+            aResult.outcome = BooleanPreviewWorkerOutcome::Cancelled;
+            return aResult;
+        }
+
+        try {
+            OCC_CATCH_SIGNALS
+            Handle(BooleanCancellationIndicator) aProgress =
+                new BooleanCancellationIndicator(
+                    theRequest.cancellation);
+            Standard_Size anAggregateResultNodes = 0;
+            Standard_Size anAggregateResultSolids = 0;
+            if (theRequest.action == BooleanAction::BooleanSubtract) {
+                if (theRequest.actors.empty()
+                    || theRequest.subjects.empty()) {
+                    return aResult;
+                }
+                TopTools_ListOfShape aTools;
+                for (const TopoDS_Shape& anActor : theRequest.actors) {
+                    aTools.Append(anActor);
+                }
+                aResult.results.reserve(theRequest.subjects.size());
+                for (const TopoDS_Shape& aSubject : theRequest.subjects) {
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    TopTools_ListOfShape anArguments;
+                    anArguments.Append(aSubject);
+                    BRepAlgoAPI_Cut aCut;
+                    aCut.SetRunParallel(Standard_False);
+                    aCut.SetNonDestructive(Standard_True);
+                    aCut.SetArguments(anArguments);
+                    aCut.SetTools(aTools);
+                    aCut.SetFuzzyValue(kFuzzyValue);
+                    aCut.SetUseOBB(Standard_True);
+                    aCut.SetCheckInverted(Standard_True);
+                    aCut.Build(aProgress->Start());
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    if (!aCut.IsDone()) {
+                        return aResult;
+                    }
+                    TopoDS_Shape aRawResult = aCut.Shape();
+                    Standard_Size aRawNodes = 0;
+                    if (!AccumulateBoundedTopology(
+                            aRawResult,
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultTopologyNodes,
+                            aRawNodes)) {
+                        return aResult;
+                    }
+                    aCut.SimplifyResult();
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    if (!IsValidSolidBooleanResult(
+                            aCut.Shape(),
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids,
+                            anAggregateResultNodes,
+                            anAggregateResultSolids)) {
+                        return aResult;
+                    }
+                    aResult.results.push_back(aCut.Shape());
+                }
+            } else {
+                if (!theRequest.actors.empty()
+                    || theRequest.subjects.size() < 2) {
+                    return aResult;
+                }
+                TopTools_ListOfShape anArguments;
+                TopTools_ListOfShape aTools;
+                for (std::size_t anIndex = 0;
+                     anIndex < theRequest.subjects.size(); ++anIndex) {
+                    (anIndex == 0 ? anArguments : aTools).Append(
+                        theRequest.subjects[anIndex]);
+                }
+                BRepAlgoAPI_Fuse aFuse;
+                aFuse.SetRunParallel(Standard_False);
+                aFuse.SetNonDestructive(Standard_True);
+                aFuse.SetArguments(anArguments);
+                aFuse.SetTools(aTools);
+                aFuse.SetFuzzyValue(kFuzzyValue);
+                aFuse.SetUseOBB(Standard_True);
+                aFuse.SetCheckInverted(Standard_True);
+                aFuse.Build(aProgress->Start());
+                if (wasCancelled()) {
+                    aResult.outcome =
+                        BooleanPreviewWorkerOutcome::Cancelled;
+                    return aResult;
+                }
+                if (!aFuse.IsDone()) {
+                    return aResult;
+                }
+                Standard_Size aRawNodes = 0;
+                if (!AccumulateBoundedTopology(
+                        aFuse.Shape(),
+                        theRequest.maximumResultTopologyNodes,
+                        theRequest.maximumResultTopologyNodes,
+                        aRawNodes)) {
+                    return aResult;
+                }
+                aFuse.SimplifyResult();
+                if (wasCancelled()) {
+                    aResult.outcome =
+                        BooleanPreviewWorkerOutcome::Cancelled;
+                    return aResult;
+                }
+                if (!IsValidSolidBooleanResult(
+                        aFuse.Shape(),
+                        theRequest.maximumResultTopologyNodes,
+                        theRequest.maximumResultSolids,
+                        anAggregateResultNodes,
+                        anAggregateResultSolids)) {
+                    return aResult;
+                }
+                aResult.results.push_back(aFuse.Shape());
+            }
+            if (wasCancelled()) {
+                aResult.outcome = BooleanPreviewWorkerOutcome::Cancelled;
+                aResult.results.clear();
+                return aResult;
+            }
+            aResult.outcome = BooleanPreviewWorkerOutcome::Success;
+            return aResult;
+        } catch (...) {
+            if (wasCancelled()) {
+                aResult.outcome = BooleanPreviewWorkerOutcome::Cancelled;
+            }
+            aResult.results.clear();
+            return aResult;
+        }
+    }
+
+private:
+    std::weak_ptr<BooleanOperationController> myOwner;
+    mutable std::mutex myMutex;
+    std::condition_variable myCondition;
+    std::optional<BooleanPreviewWorkerRequest> myPending;
+    std::shared_ptr<std::atomic_bool> myActiveCancellation;
+    bool myDrainScheduled = false;
+    bool myStopped = false;
+    std::uint64_t mySubmittedCount = 0;
+    std::uint64_t myStartedCount = 0;
+    std::uint64_t myCompletedCount = 0;
+    std::uint64_t myCancelledCount = 0;
+    std::uint64_t myPendingReplacementCount = 0;
+    Standard_Boolean myLastComputeWasMainThread = Standard_False;
+#ifdef DEBUG
+    bool myDebugBlocked = false;
+#endif
+};
+
 BooleanOperationController::BooleanOperationController(
     Handle(AIS_InteractiveContext) theContext,
     Handle(OcctDocument) theDocument)
 : myContext(std::move(theContext)),
   myDoc(std::move(theDocument))
 {
+    _controllerEpoch = gBooleanControllerEpoch.fetch_add(
+        1, std::memory_order_relaxed) + 1;
     try {
         _ownedPresentations.reserve(kMaxSourceOperands * 3);
         _subjectSelectionOrder.reserve(kMaxSourceOperands);
     } catch (...) {
         _stateValid = Standard_False;
     }
+}
+
+BooleanOperationController::~BooleanOperationController() noexcept
+{
+    ++_previewGeneration;
+    if (_previewWorker != nullptr) {
+        _previewWorker->shutdown();
+        _previewWorker.reset();
+    }
+    _previewStateChangedCallback = {};
 }
 
 Standard_Boolean BooleanOperationController::begin(
@@ -115,6 +672,9 @@ Standard_Boolean BooleanOperationController::begin(
         _stateValid = Standard_True;
         _selectionFrozen = Standard_False;
         _canApply = Standard_False;
+        _previewState = BooleanPreviewState::Selecting;
+        _requestedFingerprint.clear();
+        notifyPreviewStateChanged();
         return Standard_True;
     } catch (...) {
         markInvalid();
@@ -130,12 +690,122 @@ Standard_Boolean BooleanOperationController::actionMatches(
 
 Standard_Boolean BooleanOperationController::canApply() const noexcept
 {
-    return _canApply && _stateValid && _activeAction.has_value();
+    return _canApply && _stateValid && _activeAction.has_value()
+        && _previewState == BooleanPreviewState::Ready;
 }
+
+BooleanPreviewState BooleanOperationController::previewState() const noexcept
+{
+    return _previewState;
+}
+
+void BooleanOperationController::setPreviewStateChangedCallback(
+    std::function<void()> theCallback)
+{
+    _previewStateChangedCallback = std::move(theCallback);
+}
+
+void BooleanOperationController::notifyPreviewStateChanged() noexcept
+{
+    try {
+        if (_previewStateChangedCallback) {
+            _previewStateChangedCallback();
+        }
+    } catch (...) {
+    }
+}
+
+#ifdef DEBUG
+BooleanPreviewDebugState
+BooleanOperationController::debugPreviewState() const noexcept
+{
+    BooleanPreviewDebugState aState;
+    aState.state = _previewState;
+    aState.generation = _previewGeneration;
+    aState.activeOperation = _activeAction.has_value();
+    aState.canApply = canApply();
+    aState.documentCommandUnresolved = _documentCommandUnresolved;
+    try {
+        if (!myDoc.IsNull()) {
+            const Handle(TDocStd_Document) aDocument =
+                myDoc->ChangeDocument();
+            aState.documentCommandOpen = !aDocument.IsNull()
+                && aDocument->HasOpenCommand();
+        }
+    } catch (...) {
+        aState.documentCommandOpen = Standard_True;
+    }
+    aState.acceptedCount = _debugAcceptedCount;
+    aState.staleSuppressionCount = _debugStaleSuppressionCount;
+    if (_previewWorker != nullptr) {
+        const BooleanPreviewWorker::DebugSnapshot aWorker =
+            _previewWorker->debugSnapshot();
+        aState.submittedCount = aWorker.submittedCount;
+        aState.startedCount = aWorker.startedCount;
+        aState.completedCount = aWorker.completedCount;
+        aState.cancelledCount = aWorker.cancelledCount;
+        aState.pendingReplacementCount =
+            aWorker.pendingReplacementCount;
+        aState.workerActive = aWorker.active;
+        aState.workerPending = aWorker.pending;
+        aState.lastComputeWasMainThread =
+            aWorker.lastComputeWasMainThread;
+    }
+    return aState;
+}
+
+void BooleanOperationController::debugSetWorkerBlocked(
+    const Standard_Boolean theBlocked) noexcept
+{
+    _debugWorkerBlocked = theBlocked;
+    if (_previewWorker != nullptr) {
+        _previewWorker->debugSetBlocked(theBlocked);
+    }
+}
+
+void BooleanOperationController::debugSetMaximumCaptureTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    _debugMaximumCaptureTopologyNodes = std::max<Standard_Size>(
+        1, std::min(theLimit, kMaxCaptureTopologyNodes));
+}
+
+void BooleanOperationController::debugSetMaximumResultTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    _debugMaximumResultTopologyNodes = std::max<Standard_Size>(
+        1, std::min(theLimit, kMaxResultTopologyNodes));
+}
+
+void BooleanOperationController::debugSetMaximumResultSolids(
+    const Standard_Size theLimit) noexcept
+{
+    _debugMaximumResultSolids = std::max<Standard_Size>(
+        1, std::min(theLimit, kMaxResultSolids));
+}
+
+void BooleanOperationController::debugSetTransactionFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    _debugTransactionFailureCount = theCount;
+}
+
+void BooleanOperationController::debugSetAbortFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    _debugAbortFailureCount = theCount;
+}
+#endif
 
 Standard_Boolean BooleanOperationController::hasActiveOperation() const noexcept
 {
     return _activeAction.has_value();
+}
+
+Standard_Boolean BooleanOperationController::hasActiveOperation(
+    const BooleanAction theAction) const noexcept
+{
+    return actionMatches(theAction);
 }
 
 Standard_Boolean BooleanOperationController::hasSelectionState() const noexcept
@@ -156,9 +826,12 @@ Standard_Boolean BooleanOperationController::isSelectionFrozen() const noexcept
 
 void BooleanOperationController::markInvalid() noexcept
 {
+    cancelWorkerRequests();
     _stateValid = Standard_False;
     _canApply = Standard_False;
     _selectionFrozen = Standard_True;
+    _previewState = BooleanPreviewState::Failed;
+    notifyPreviewStateChanged();
 }
 
 void BooleanOperationController::rememberOwned(
@@ -257,15 +930,30 @@ Standard_Boolean BooleanOperationController::pruneOwnedPresentations() noexcept
 void BooleanOperationController::rollbackFailedTransaction(
     const Handle(TDocStd_Document)& theDocument) noexcept
 {
-    const Standard_Boolean didAbort = AbortCommandNoThrow(theDocument);
+    const std::optional<BooleanAction> anAction = _activeAction;
+    const Standard_Boolean didAbort =
+        abortDocumentCommandNoThrow(theDocument);
     cancelImpl();
     if (!didAbort) {
         // Visual state can still be restored, but keep the controller
         // unresolved until a later cancel retries and confirms that OCAF no
         // longer has the Boolean command open.
+        _activeAction = anAction;
         _documentCommandUnresolved = Standard_True;
         markInvalid();
     }
+}
+
+Standard_Boolean BooleanOperationController::abortDocumentCommandNoThrow(
+    const Handle(TDocStd_Document)& theDocument) noexcept
+{
+#ifdef DEBUG
+    if (_debugAbortFailureCount > 0) {
+        --_debugAbortFailureCount;
+        return Standard_False;
+    }
+#endif
+    return AbortCommandNoThrow(theDocument);
 }
 
 void BooleanOperationController::updateDetectedState(
@@ -579,21 +1267,349 @@ std::vector<TDF_Label> BooleanOperationController::orderedSourceLabels(
     }
 }
 
-void BooleanOperationController::visualApply(
+std::string BooleanOperationController::currentSelectionFingerprint(
+    const BooleanAction theAction,
+    Standard_Boolean& theIsComplete) const
+{
+    theIsComplete = Standard_False;
+    try {
+        struct Entry {
+            std::string identifier;
+            BooleanSelectionType role = BooleanSelectionType::Undefined;
+            Handle(AIS_InteractiveObject) presentation;
+        };
+        std::vector<Entry> anActors;
+        std::vector<Entry> aSubjects;
+        for (const auto& aSelection : _selectionMap) {
+            const std::string anIdentifier =
+                myDoc->EntityIdentifierForLabel(
+                    aSelection.second.documentLabel);
+            if (anIdentifier.empty()
+                || aSelection.first.IsNull()
+                || Handle(AIS_Shape)::DownCast(
+                    aSelection.first).IsNull()) {
+                return {};
+            }
+            if (aSelection.second.selectionType
+                == BooleanSelectionType::Actor) {
+                anActors.push_back({
+                    anIdentifier,
+                    BooleanSelectionType::Actor,
+                    aSelection.second.original,
+                });
+            }
+        }
+        std::sort(
+            anActors.begin(), anActors.end(),
+            [](const Entry& theLeft, const Entry& theRight) {
+                return theLeft.identifier < theRight.identifier;
+            });
+        for (const TDF_Label& aSubjectLabel : _subjectSelectionOrder) {
+            Entry aMatch;
+            bool hasMatch = false;
+            for (const auto& aSelection : _selectionMap) {
+                if (aSelection.second.selectionType
+                        != BooleanSelectionType::Subject
+                    || !aSelection.second.documentLabel.IsEqual(
+                        aSubjectLabel)) {
+                    continue;
+                }
+                if (hasMatch) {
+                    return {};
+                }
+                aMatch.identifier =
+                    myDoc->EntityIdentifierForLabel(aSubjectLabel);
+                aMatch.role = BooleanSelectionType::Subject;
+                aMatch.presentation = aSelection.second.original;
+                hasMatch = true;
+            }
+            if (!hasMatch || aMatch.identifier.empty()) {
+                return {};
+            }
+            aSubjects.push_back(std::move(aMatch));
+        }
+        if (anActors.size() + aSubjects.size()
+                != _selectionMap.size()
+            || (theAction == BooleanAction::BooleanSubtract
+                && (anActors.empty() || aSubjects.empty()))
+            || (theAction == BooleanAction::BooleanUnion
+                && (!anActors.empty() || aSubjects.size() < 2))) {
+            return {};
+        }
+
+        std::ostringstream aFingerprint;
+        aFingerprint << static_cast<int>(theAction)
+            << ':' << _controllerEpoch
+            << ':' << reinterpret_cast<std::uintptr_t>(
+                myDoc->Document().get());
+        const auto append = [&](const Entry& theEntry) {
+            const Handle(AIS_Shape) aShape =
+                Handle(AIS_Shape)::DownCast(theEntry.presentation);
+            if (aShape.IsNull() || aShape->Shape().IsNull()) {
+                return false;
+            }
+            aFingerprint << '|' << static_cast<int>(theEntry.role)
+                << ':' << theEntry.identifier
+                << ':' << reinterpret_cast<std::uintptr_t>(
+                    aShape->Shape().TShape().get());
+            const gp_Trsf aTransform =
+                theEntry.presentation->LocalTransformation();
+            aFingerprint << std::setprecision(17);
+            for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+                for (Standard_Integer aColumn = 1;
+                     aColumn <= 4; ++aColumn) {
+                    aFingerprint << ':'
+                        << aTransform.Value(aRow, aColumn);
+                }
+            }
+            return true;
+        };
+        for (const Entry& anActor : anActors) {
+            if (!append(anActor)) {
+                return {};
+            }
+        }
+        for (const Entry& aSubject : aSubjects) {
+            if (!append(aSubject)) {
+                return {};
+            }
+        }
+        theIsComplete = Standard_True;
+        return aFingerprint.str();
+    } catch (...) {
+        return {};
+    }
+}
+
+void BooleanOperationController::cancelWorkerRequests() noexcept
+{
+    if (_previewGeneration
+        != std::numeric_limits<std::uint64_t>::max()) {
+        ++_previewGeneration;
+    }
+    if (_previewWorker != nullptr) {
+        _previewWorker->cancelAll();
+    }
+    _requestedFingerprint.clear();
+    _canApply = Standard_False;
+}
+
+void BooleanOperationController::supersedeWorkerRequests() noexcept
+{
+    if (_previewGeneration
+        != std::numeric_limits<std::uint64_t>::max()) {
+        ++_previewGeneration;
+    }
+    if (_previewWorker != nullptr) {
+        // Preserve one already-pending request until enqueue atomically
+        // replaces it. If admission fails, visualApply's retirement guard
+        // clears that obsolete pending request before returning.
+        _previewWorker->cancelActiveForSupersede();
+    }
+    _requestedFingerprint.clear();
+    _canApply = Standard_False;
+}
+
+Standard_Boolean BooleanOperationController::enqueuePreviewRequest(
+    const BooleanAction theAction) noexcept
+{
+    try {
+        Standard_Boolean hasCompleteFingerprint = Standard_False;
+        const std::string aFingerprint = currentSelectionFingerprint(
+            theAction, hasCompleteFingerprint);
+        if (!hasCompleteFingerprint || aFingerprint.empty()
+            || _actorIOArray.size() + _actedIOArray.size()
+                > kMaxSourceOperands) {
+            return Standard_False;
+        }
+
+        Standard_Size anAggregateTopologyNodes = 0;
+#ifdef DEBUG
+        const Standard_Size anAggregateLimit =
+            _debugMaximumCaptureTopologyNodes;
+        const Standard_Size aPerSourceLimit = std::min(
+            kMaxSourceTopologyNodes,
+            _debugMaximumCaptureTopologyNodes);
+#else
+        const Standard_Size anAggregateLimit =
+            kMaxCaptureTopologyNodes;
+        const Standard_Size aPerSourceLimit =
+            kMaxSourceTopologyNodes;
+#endif
+        const auto countSource = [&](
+            const Handle(AIS_InteractiveObject)& thePresentation) {
+            const Handle(AIS_Shape) aShape =
+                Handle(AIS_Shape)::DownCast(thePresentation);
+            return !aShape.IsNull() && !aShape->Shape().IsNull()
+                && AccumulateBoundedTopology(
+                    aShape->Shape(),
+                    aPerSourceLimit,
+                    anAggregateLimit,
+                    anAggregateTopologyNodes);
+        };
+        for (const Handle(AIS_InteractiveObject)& anActor :
+             _actorIOArray) {
+            if (!countSource(anActor)) {
+                return Standard_False;
+            }
+        }
+        for (const Handle(AIS_InteractiveObject)& aSubject :
+             _actedIOArray) {
+            if (!countSource(aSubject)) {
+                return Standard_False;
+            }
+        }
+
+        BooleanPreviewWorkerRequest aRequest;
+        aRequest.action = theAction;
+        if (_previewGeneration
+            == std::numeric_limits<std::uint64_t>::max()) {
+            return Standard_False;
+        }
+        aRequest.generation = ++_previewGeneration;
+        aRequest.fingerprint = aFingerprint;
+        aRequest.cancellation =
+            std::make_shared<std::atomic_bool>(false);
+#ifdef DEBUG
+        aRequest.maximumResultTopologyNodes =
+            _debugMaximumResultTopologyNodes;
+        aRequest.maximumResultSolids = _debugMaximumResultSolids;
+#endif
+        const auto deepCopyWorldShape = [](
+            const Handle(AIS_InteractiveObject)& thePresentation) {
+            const Handle(AIS_Shape) aShape =
+                Handle(AIS_Shape)::DownCast(thePresentation);
+            if (aShape.IsNull() || aShape->Shape().IsNull()) {
+                return TopoDS_Shape();
+            }
+            BRepBuilderAPI_Transform aTransform(
+                aShape->Shape(),
+                thePresentation->LocalTransformation(),
+                Standard_True,
+                Standard_False);
+            return aTransform.Shape();
+        };
+        aRequest.actors.reserve(_actorIOArray.size());
+        aRequest.subjects.reserve(_actedIOArray.size());
+        for (const Handle(AIS_InteractiveObject)& anActor :
+             _actorIOArray) {
+            TopoDS_Shape aCopy = deepCopyWorldShape(anActor);
+            if (aCopy.IsNull()) {
+                return Standard_False;
+            }
+            aRequest.actors.push_back(std::move(aCopy));
+        }
+        for (const Handle(AIS_InteractiveObject)& aSubject :
+             _actedIOArray) {
+            TopoDS_Shape aCopy = deepCopyWorldShape(aSubject);
+            if (aCopy.IsNull()) {
+                return Standard_False;
+            }
+            aRequest.subjects.push_back(std::move(aCopy));
+        }
+
+        if (_previewWorker == nullptr) {
+            _previewWorker = std::make_shared<BooleanPreviewWorker>(
+                weak_from_this());
+#ifdef DEBUG
+            _previewWorker->debugSetBlocked(_debugWorkerBlocked);
+#endif
+        }
+        _requestedFingerprint = aFingerprint;
+        _previewState = BooleanPreviewState::Computing;
+        _selectionFrozen = Standard_False;
+        _canApply = Standard_False;
+        if (!_previewWorker->enqueue(std::move(aRequest))) {
+            _previewState = BooleanPreviewState::Failed;
+            _requestedFingerprint.clear();
+            notifyPreviewStateChanged();
+            return Standard_False;
+        }
+        notifyPreviewStateChanged();
+        return Standard_True;
+    } catch (...) {
+        _previewState = BooleanPreviewState::Failed;
+        _canApply = Standard_False;
+        notifyPreviewStateChanged();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean BooleanOperationController::visualApply(
     const BooleanAction theAction) noexcept
 {
     if (!actionMatches(theAction) || !_stateValid) {
         _canApply = Standard_False;
-        return;
+        return Standard_False;
     }
     if (_selectionFrozen) {
-        return;
+        return Standard_False;
     }
-    _canApply = Standard_False;
+    // Retire the active generation before any admission branch. Preserve at
+    // most one pending request so a successfully admitted request can replace
+    // it atomically in enqueue(); a failed admission clears it via the guard.
+    supersedeWorkerRequests();
+    const std::shared_ptr<BooleanPreviewWorker> aPriorWorker = _previewWorker;
+    bool didScheduleReplacement = false;
+    struct PendingRetirementGuard {
+        std::shared_ptr<BooleanPreviewWorker> worker;
+        bool& didSchedule;
+        ~PendingRetirementGuard() noexcept
+        {
+            if (!didSchedule && worker != nullptr) {
+                worker->cancelAll();
+            }
+        }
+    } aPendingRetirement{aPriorWorker, didScheduleReplacement};
+    _previewState = BooleanPreviewState::Selecting;
     if (_selectionMap.empty()
-        || _selectionMap.size() > kMaxSourceOperands
-        || !resetCachedSelection()) {
-        return;
+        || _selectionMap.size() > kMaxSourceOperands) {
+        _previewState = BooleanPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return Standard_False;
+    }
+
+    // Admission precedes resetCachedSelection(), whose world-space AIS copies
+    // duplicate geometry. Count the immutable committed sources first so a
+    // huge input cannot make capture itself an unbounded main-thread task.
+    try {
+        Standard_Size anAggregateTopologyNodes = 0;
+#ifdef DEBUG
+        const Standard_Size anAggregateLimit =
+            _debugMaximumCaptureTopologyNodes;
+        const Standard_Size aPerSourceLimit = std::min(
+            kMaxSourceTopologyNodes,
+            _debugMaximumCaptureTopologyNodes);
+#else
+        const Standard_Size anAggregateLimit =
+            kMaxCaptureTopologyNodes;
+        const Standard_Size aPerSourceLimit =
+            kMaxSourceTopologyNodes;
+#endif
+        for (const auto& aSelection : _selectionMap) {
+            const Handle(AIS_Shape) aSource =
+                Handle(AIS_Shape)::DownCast(
+                    aSelection.second.original);
+            if (aSource.IsNull() || aSource->Shape().IsNull()
+                || !AccumulateBoundedTopology(
+                    aSource->Shape(),
+                    aPerSourceLimit,
+                    anAggregateLimit,
+                    anAggregateTopologyNodes)) {
+                _previewState = BooleanPreviewState::Failed;
+                notifyPreviewStateChanged();
+                return Standard_False;
+            }
+        }
+    } catch (...) {
+        _previewState = BooleanPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return Standard_False;
+    }
+    if (!resetCachedSelection()) {
+        _previewState = BooleanPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return Standard_False;
     }
 
     try {
@@ -601,107 +1617,178 @@ void BooleanOperationController::visualApply(
         _actorIOArray.clear();
         for (const auto& aSelection : _selectionMap) {
             if (aSelection.second.documentLabel.IsNull()) {
-                return;
+                _previewState = BooleanPreviewState::Failed;
+                notifyPreviewStateChanged();
+                return Standard_False;
             }
             if (aSelection.second.selectionType
                 == BooleanSelectionType::Actor) {
                 _actorIOArray.push_back(aSelection.first);
             }
         }
+        std::sort(
+            _actorIOArray.begin(), _actorIOArray.end(),
+            [&](const Handle(AIS_InteractiveObject)& theLeft,
+                const Handle(AIS_InteractiveObject)& theRight) {
+                return myDoc->EntityIdentifierForLabel(
+                    _selectionMap.find(theLeft)->second.documentLabel)
+                    < myDoc->EntityIdentifierForLabel(
+                        _selectionMap.find(theRight)->second.documentLabel);
+            });
         Standard_Boolean hasCompleteSubjects = Standard_False;
         _actedIOArray = orderedSubjectPresentations(hasCompleteSubjects);
-        if (!hasCompleteSubjects) {
-            return;
+        if (!hasCompleteSubjects
+            || (theAction == BooleanAction::BooleanSubtract
+                && (_actorIOArray.empty() || _actedIOArray.empty()))
+            || (theAction == BooleanAction::BooleanUnion
+                && (!_actorIOArray.empty() || _actedIOArray.size() < 2))
+            || _actorIOArray.size() + _actedIOArray.size()
+                > kMaxSourceOperands) {
+            _previewState = BooleanPreviewState::Failed;
+            notifyPreviewStateChanged();
+            return Standard_False;
         }
-
-        if (theAction == BooleanAction::BooleanSubtract) {
-            if (_actorIOArray.empty() || _actedIOArray.empty()
-                || _actorIOArray.size() + _actedIOArray.size()
-                    > kMaxSourceOperands) {
-                return;
-            }
-            _canApply = buildSubtractPreview(
-                _actorIOArray,
-                _actedIOArray);
-        } else {
-            if (!_actorIOArray.empty() || _actedIOArray.size() < 2
-                || _actedIOArray.size() > kMaxSourceOperands) {
-                return;
-            }
-            _canApply = buildUnionPreview(_actedIOArray);
+        const Standard_Boolean didSchedule =
+            enqueuePreviewRequest(theAction);
+        didScheduleReplacement = didSchedule != Standard_False;
+        if (!didSchedule) {
+            _previewState = BooleanPreviewState::Failed;
+            notifyPreviewStateChanged();
         }
-        if (_stateValid && !pruneOwnedPresentations()) {
-            _canApply = Standard_False;
-        }
+        return didSchedule;
     } catch (...) {
         markInvalid();
+        return Standard_False;
     }
 }
 
-Standard_Boolean BooleanOperationController::buildSubtractPreview(
-    const std::vector<Handle(AIS_InteractiveObject)>& theActors,
-    const std::vector<Handle(AIS_InteractiveObject)>& theSubjects) noexcept
+void BooleanOperationController::acceptWorkerResult(
+    BooleanPreviewWorkerResult theResult) noexcept
+{
+    Standard_Boolean hasCompleteFingerprint = Standard_False;
+    const std::string aCurrentFingerprint = currentSelectionFingerprint(
+        theResult.action, hasCompleteFingerprint);
+    if (pthread_main_np() == 0
+        || !_activeAction.has_value()
+        || *_activeAction != theResult.action
+        || _previewState != BooleanPreviewState::Computing
+        || theResult.generation != _previewGeneration
+        || theResult.fingerprint != _requestedFingerprint
+        || !hasCompleteFingerprint
+        || aCurrentFingerprint != theResult.fingerprint) {
+#ifdef DEBUG
+        ++_debugStaleSuppressionCount;
+#endif
+        return;
+    }
+    if (theResult.outcome != BooleanPreviewWorkerOutcome::Success) {
+        _canApply = Standard_False;
+        _selectionFrozen = Standard_False;
+        _previewState = theResult.outcome
+                == BooleanPreviewWorkerOutcome::Cancelled
+            ? BooleanPreviewState::Selecting
+            : BooleanPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return;
+    }
+
+    const Standard_Boolean didInstall =
+        theResult.action == BooleanAction::BooleanSubtract
+            ? installSubtractPreview(theResult.results)
+            : theResult.results.size() == 1
+                && installUnionPreview(theResult.results.front());
+    if (!didInstall || !_stateValid || !pruneOwnedPresentations()) {
+        _canApply = Standard_False;
+        _previewState = BooleanPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return;
+    }
+    _canApply = Standard_True;
+    _previewState = BooleanPreviewState::Ready;
+#ifdef DEBUG
+    ++_debugAcceptedCount;
+#endif
+    notifyPreviewStateChanged();
+}
+
+Standard_Boolean BooleanOperationController::installSubtractPreview(
+    const std::vector<TopoDS_Shape>& theResults) noexcept
 {
     struct Preview {
         Handle(AIS_InteractiveObject) source;
         Handle(AIS_InteractiveObject) result;
         TemporalBooleanObject state;
     };
+    std::vector<Preview> aPreviews;
+    const auto forgetOwnedResult = [&](
+        const Handle(AIS_InteractiveObject)& theResult) noexcept {
+        _ownedPresentations.erase(
+            std::remove(
+                _ownedPresentations.begin(),
+                _ownedPresentations.end(),
+                theResult),
+            _ownedPresentations.end());
+    };
+    const auto rollbackPresentation = [&]() noexcept {
+        bool didRollbackAll = true;
+        for (const Preview& aPreview : aPreviews) {
+            bool didRemove = aPreview.result.IsNull();
+            if (!didRemove) {
+                try {
+                    myContext->Remove(
+                        aPreview.result, Standard_False);
+                    didRemove = true;
+                } catch (...) {
+                    didRollbackAll = false;
+                }
+            }
+            if (didRemove) {
+                forgetOwnedResult(aPreview.result);
+            }
+            // Every result is registered before display, so a failed Remove
+            // remains owned and explicit Cancel can retry it.
+        }
+        for (const Handle(AIS_InteractiveObject)& aSubject :
+             _actedIOArray) {
+            try {
+                showInteractiveByType(
+                    aSubject, BooleanSelectionType::Subject);
+            } catch (...) {
+                didRollbackAll = false;
+            }
+        }
+        try {
+            myContext->UpdateCurrentViewer();
+        } catch (...) {
+            didRollbackAll = false;
+        }
+        if (!didRollbackAll) {
+            markInvalid();
+        }
+        return didRollbackAll;
+    };
 
     try {
-        TopTools_ListOfShape aTools;
-        for (const Handle(AIS_InteractiveObject)& anActorIO : theActors) {
-            const Handle(AIS_Shape) anActor =
-                Handle(AIS_Shape)::DownCast(anActorIO);
-            if (anActor.IsNull() || anActor->Shape().IsNull()) {
-                return Standard_False;
-            }
-            aTools.Append(BRepBuilderAPI_Transform(
-                anActor->Shape(),
-                anActorIO->LocalTransformation()).Shape());
+        if (theResults.size() != _actedIOArray.size()
+            || theResults.empty()) {
+            return Standard_False;
         }
-
-        std::vector<Preview> aPreviews;
-        aPreviews.reserve(theSubjects.size());
-        for (const Handle(AIS_InteractiveObject)& aSubjectIO : theSubjects) {
+        aPreviews.reserve(_actedIOArray.size());
+        for (std::size_t anIndex = 0;
+             anIndex < _actedIOArray.size(); ++anIndex) {
+            const Handle(AIS_InteractiveObject)& aSubjectIO =
+                _actedIOArray[anIndex];
             const auto aSelection = _selectionMap.find(aSubjectIO);
-            const Handle(AIS_Shape) aSubject =
-                Handle(AIS_Shape)::DownCast(aSubjectIO);
             if (aSelection == _selectionMap.end()
                 || aSelection->second.documentLabel.IsNull()
-                || aSubject.IsNull() || aSubject->Shape().IsNull()) {
+                || theResults[anIndex].IsNull()) {
                 return Standard_False;
             }
-
-            TopTools_ListOfShape anArguments;
-            anArguments.Append(BRepBuilderAPI_Transform(
-                aSubject->Shape(),
-                aSubjectIO->LocalTransformation()).Shape());
-            BRepAlgoAPI_Cut aCut;
-            aCut.SetNonDestructive(Standard_True);
-            aCut.SetArguments(anArguments);
-            aCut.SetTools(aTools);
-            aCut.SetFuzzyValue(kFuzzyValue);
-            aCut.SetUseOBB(Standard_True);
-            aCut.SetCheckInverted(Standard_True);
-            aCut.Build();
-            if (!aCut.IsDone()) {
-                return Standard_False;
-            }
-            aCut.SimplifyResult();
-            if (!IsValidSolidBooleanResult(aCut.Shape())) {
-                return Standard_False;
-            }
-
             TemporalBooleanObject aState = aSelection->second;
             aState.selectionType = BooleanSelectionType::Subject;
             Handle(AIS_InteractiveObject) aResult =
-                new AIS_Shape(aCut.Shape());
+                new AIS_Shape(theResults[anIndex]);
             applyStyle(aResult, aState);
-            rememberOwned(aResult);
-            if (!_stateValid) {
-                return Standard_False;
-            }
             aPreviews.push_back({aSubjectIO, aResult, aState});
         }
 
@@ -715,6 +1802,16 @@ Standard_Boolean BooleanOperationController::buildSubtractPreview(
                 return Standard_False;
             }
         }
+        // Register before the first AIS mutation. A display/remove exception
+        // can therefore never leave a visible preview outside cancellation's
+        // ownership set.
+        for (const Preview& aPreview : aPreviews) {
+            rememberOwned(aPreview.result);
+            if (!_stateValid) {
+                rollbackPresentation();
+                return Standard_False;
+            }
+        }
         for (const Preview& aPreview : aPreviews) {
             showInteractiveByType(
                 aPreview.result,
@@ -722,68 +1819,87 @@ Standard_Boolean BooleanOperationController::buildSubtractPreview(
             myContext->SetSelected(aPreview.result, Standard_False);
             myContext->Remove(aPreview.source, Standard_False);
         }
-        _selectionMap.swap(aReplacement);
         myContext->UpdateCurrentViewer();
+        // Publish controller ownership only after every fallible AIS step has
+        // completed. If UpdateCurrentViewer throws, rollback still sees the
+        // source-keyed map that matches the presentations it restores.
+        _selectionMap.swap(aReplacement);
         return Standard_True;
     } catch (const Standard_Failure& aFailure) {
         std::cout << "Boolean subtract preview failure: "
                   << aFailure.GetMessageString() << std::endl;
-        markInvalid();
+        rollbackPresentation();
         return Standard_False;
     } catch (...) {
-        markInvalid();
+        rollbackPresentation();
         return Standard_False;
     }
 }
 
-Standard_Boolean BooleanOperationController::buildUnionPreview(
-    const std::vector<Handle(AIS_InteractiveObject)>& theSubjects) noexcept
+Standard_Boolean BooleanOperationController::installUnionPreview(
+    const TopoDS_Shape& theResult) noexcept
 {
+    Handle(AIS_InteractiveObject) aResult;
+    const auto rollbackPresentation = [&]() noexcept {
+        bool didRollbackAll = true;
+        bool didRemoveResult = aResult.IsNull();
+        if (!didRemoveResult) {
+            try {
+                myContext->Remove(aResult, Standard_False);
+                didRemoveResult = true;
+            } catch (...) {
+                didRollbackAll = false;
+            }
+        }
+        if (didRemoveResult) {
+            _ownedPresentations.erase(
+                std::remove(
+                    _ownedPresentations.begin(),
+                    _ownedPresentations.end(),
+                    aResult),
+                _ownedPresentations.end());
+            _unionTrialResult.Nullify();
+        }
+        // A failed result removal deliberately leaves the handle owned. The
+        // next Cancel retries it instead of losing track of a ghost preview.
+        for (const Handle(AIS_InteractiveObject)& aSubject :
+             _actedIOArray) {
+            try {
+                showInteractiveByType(
+                    aSubject, BooleanSelectionType::Subject);
+            } catch (...) {
+                didRollbackAll = false;
+            }
+        }
+        try {
+            myContext->UpdateCurrentViewer();
+        } catch (...) {
+            didRollbackAll = false;
+        }
+        _selectionFrozen = Standard_False;
+        if (!didRollbackAll) {
+            markInvalid();
+        }
+        return didRollbackAll;
+    };
     try {
-        if (theSubjects.size() < 2
-            || theSubjects.size() > kMaxSourceOperands) {
+        if (theResult.IsNull() || _actedIOArray.size() < 2
+            || _actedIOArray.size() > kMaxSourceOperands) {
             return Standard_False;
         }
-        TopTools_ListOfShape anArguments;
-        TopTools_ListOfShape aTools;
-        for (std::size_t anIndex = 0;
-             anIndex < theSubjects.size(); ++anIndex) {
-            const Handle(AIS_Shape) aShape =
-                Handle(AIS_Shape)::DownCast(theSubjects[anIndex]);
-            if (aShape.IsNull() || aShape->Shape().IsNull()
-                || _selectionMap.find(theSubjects[anIndex])
-                    == _selectionMap.end()) {
+        for (const Handle(AIS_InteractiveObject)& aSubject :
+             _actedIOArray) {
+            if (_selectionMap.find(aSubject) == _selectionMap.end()) {
                 return Standard_False;
             }
-            const TopoDS_Shape aWorldShape = BRepBuilderAPI_Transform(
-                aShape->Shape(),
-                theSubjects[anIndex]->LocalTransformation()).Shape();
-            (anIndex == 0 ? anArguments : aTools).Append(aWorldShape);
         }
-
-        BRepAlgoAPI_Fuse aFuse;
-        aFuse.SetNonDestructive(Standard_True);
-        aFuse.SetArguments(anArguments);
-        aFuse.SetTools(aTools);
-        aFuse.SetFuzzyValue(kFuzzyValue);
-        aFuse.SetUseOBB(Standard_True);
-        aFuse.SetCheckInverted(Standard_True);
-        aFuse.Build();
-        if (!aFuse.IsDone()) {
-            return Standard_False;
-        }
-        aFuse.SimplifyResult();
-        if (!IsValidSolidBooleanResult(aFuse.Shape())) {
-            return Standard_False;
-        }
-
         const TemporalBooleanObject aResultStyle =
-            _selectionMap.find(theSubjects.front())->second;
-        Handle(AIS_InteractiveObject) aResult =
-            new AIS_Shape(aFuse.Shape());
+            _selectionMap.find(_actedIOArray.front())->second;
+        aResult = new AIS_Shape(theResult);
         applyStyle(aResult, aResultStyle);
         rememberOwned(aResult);
         if (!_stateValid) {
+            rollbackPresentation();
             return Standard_False;
         }
 
@@ -791,12 +1907,13 @@ Standard_Boolean BooleanOperationController::buildUnionPreview(
         myContext->ClearSelected(Standard_False);
         myContext->SetSelected(aResult, Standard_False);
         myContext->Deactivate(aResult);
-        for (const Handle(AIS_InteractiveObject)& aSubject : theSubjects) {
+        for (const Handle(AIS_InteractiveObject)& aSubject :
+             _actedIOArray) {
             myContext->Remove(aSubject, Standard_False);
         }
         _unionTrialResult = Handle(AIS_Shape)::DownCast(aResult);
         if (_unionTrialResult.IsNull()) {
-            markInvalid();
+            rollbackPresentation();
             return Standard_False;
         }
         _selectionFrozen = Standard_True;
@@ -805,10 +1922,10 @@ Standard_Boolean BooleanOperationController::buildUnionPreview(
     } catch (const Standard_Failure& aFailure) {
         std::cout << "Boolean union preview failure: "
                   << aFailure.GetMessageString() << std::endl;
-        markInvalid();
+        rollbackPresentation();
         return Standard_False;
     } catch (...) {
-        markInvalid();
+        rollbackPresentation();
         return Standard_False;
     }
 }
@@ -938,7 +2055,9 @@ BooleanOperationController::ioCopyWithStyle(
     }
     const TopoDS_Shape aWorldShape = BRepBuilderAPI_Transform(
         anOriginalShape->Shape(),
-        theOriginal->LocalTransformation()).Shape();
+        theOriginal->LocalTransformation(),
+        Standard_True,
+        Standard_False).Shape();
     if (aWorldShape.IsNull()) {
         return {};
     }
@@ -995,9 +2114,25 @@ BooleanApplyResult BooleanOperationController::apply(
     if (!actionMatches(theAction)) {
         return BooleanApplyResult::NoChange;
     }
-    if (!canApply() || _selectionMap.empty()) {
-        cancelImpl();
+    // Computing Apply is an intentional no-op. The worker and tool stay live;
+    // only a Ready preview may enter the document transaction.
+    if (_previewState != BooleanPreviewState::Ready
+        || !canApply() || _selectionMap.empty()) {
         return BooleanApplyResult::NoChange;
+    }
+
+    const auto failWithoutMutation = [&]() {
+        _canApply = Standard_False;
+        _previewState = BooleanPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return BooleanApplyResult::NoChange;
+    };
+    Standard_Boolean hasCurrentFingerprint = Standard_False;
+    if (currentSelectionFingerprint(
+            theAction, hasCurrentFingerprint)
+            != _requestedFingerprint
+        || !hasCurrentFingerprint) {
+        return failWithoutMutation();
     }
 
     Standard_Boolean hasCompleteLabels = Standard_False;
@@ -1005,26 +2140,26 @@ BooleanApplyResult BooleanOperationController::apply(
         orderedSourceLabels(hasCompleteLabels);
     if (!hasCompleteLabels || aSourceLabels.size() < 2
         || aSourceLabels.size() > kMaxSourceOperands) {
-        cancelImpl();
-        return BooleanApplyResult::NoChange;
+        return failWithoutMutation();
     }
 
     Handle(TDocStd_Document) aDocument;
     try {
         aDocument = myDoc->ChangeDocument();
     } catch (...) {
-        cancelImpl();
-        return BooleanApplyResult::NoChange;
+        return failWithoutMutation();
     }
     try {
         if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
-            cancelImpl();
-            return BooleanApplyResult::NoChange;
+            return failWithoutMutation();
         }
     } catch (...) {
-        cancelImpl();
-        return BooleanApplyResult::NoChange;
+        return failWithoutMutation();
     }
+
+    _canApply = Standard_False;
+    _previewState = BooleanPreviewState::Committing;
+    notifyPreviewStateChanged();
 
     std::vector<std::pair<Handle(AIS_InteractiveObject),
                           TemporalBooleanObject>> aResults;
@@ -1035,8 +2170,7 @@ BooleanApplyResult BooleanOperationController::apply(
                 orderedSubjectPresentations(hasCompleteSubjects);
             if (!hasCompleteSubjects || aSubjects.size() < 2
                 || _unionTrialResult.IsNull()) {
-                cancelImpl();
-                return BooleanApplyResult::NoChange;
+                return failWithoutMutation();
             }
             aResults.push_back({
                 _unionTrialResult,
@@ -1050,16 +2184,21 @@ BooleanApplyResult BooleanOperationController::apply(
                 }
             }
             if (aResults.empty()) {
-                cancelImpl();
-                return BooleanApplyResult::NoChange;
+                return failWithoutMutation();
             }
         }
 
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
-            cancelImpl();
+            return failWithoutMutation();
+        }
+#ifdef DEBUG
+        if (_debugTransactionFailureCount > 0) {
+            --_debugTransactionFailureCount;
+            rollbackFailedTransaction(aDocument);
             return BooleanApplyResult::NoChange;
         }
+#endif
         // Persist result appearance while each source label is still present;
         // removing a source first clears the XCAF material relationship that
         // the result must inherit.
@@ -1131,7 +2270,8 @@ BooleanApplyResult BooleanOperationController::apply(
 
 Standard_Boolean BooleanOperationController::cancelImpl() noexcept
 {
-    _canApply = Standard_False;
+    cancelWorkerRequests();
+    _previewState = BooleanPreviewState::Selecting;
     _selectionFrozen = Standard_True;
     bool didRestoreAll = true;
 
@@ -1143,7 +2283,7 @@ Standard_Boolean BooleanOperationController::cancelImpl() noexcept
             }
         } catch (...) {
         }
-        if (AbortCommandNoThrow(aDocument)) {
+        if (abortDocumentCommandNoThrow(aDocument)) {
             _documentCommandUnresolved = Standard_False;
         } else {
             didRestoreAll = false;
@@ -1191,6 +2331,7 @@ Standard_Boolean BooleanOperationController::cancelImpl() noexcept
 
     if (didRestoreAll) {
         clearOperationState();
+        notifyPreviewStateChanged();
         return Standard_True;
     }
     markInvalid();
@@ -1208,7 +2349,8 @@ void BooleanOperationController::cancel(
 void BooleanOperationController::cancelActive() noexcept
 {
     if (_activeAction.has_value() || !_selectionMap.empty()
-        || !_ownedPresentations.empty() || !_stateValid) {
+        || !_ownedPresentations.empty() || !_stateValid
+        || _previewState != BooleanPreviewState::Selecting) {
         cancelImpl();
     }
 }
@@ -1226,6 +2368,8 @@ void BooleanOperationController::clearOperationState() noexcept
     _stateValid = Standard_True;
     _selectionFrozen = Standard_False;
     _documentCommandUnresolved = Standard_False;
+    _previewState = BooleanPreviewState::Selecting;
+    _requestedFingerprint.clear();
 }
 
 } // namespace core3d

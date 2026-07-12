@@ -903,6 +903,7 @@ void Core3DViewer::release() noexcept {
     // so release them before the base handles and before that context is
     // restored. Repeated calls are intentionally harmless.
     _interactiveCallback = {};
+    _booleanPreviewStateChangedCallback = {};
     _shapeInteractor.reset();
     _objectInteractor.reset();
     OcctViewer::release();
@@ -961,6 +962,8 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
             const float ppm = scale * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163) / 25.4;
             const float device_independent_side = 15 * ppm;
             _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, device_independent_side);
+            _objectInteractor->setBooleanPreviewStateChangedCallback(
+                _booleanPreviewStateChangedCallback);
         }
         if(_shapeInteractor == nullptr) {
             _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
@@ -978,6 +981,8 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     const float manipulatorSide = 15 * pointsPerMillimeter;
 
     _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, manipulatorSide);
+    _objectInteractor->setBooleanPreviewStateChangedCallback(
+        _booleanPreviewStateChangedCallback);
     _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
 
     if (theSelectionMode != ShapeSelectionMode::WholeShape) {
@@ -994,6 +999,16 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
             (void)_objectInteractor->beginBoolean(
                 BooleanAction::BooleanUnion);
         }
+    }
+}
+
+void Core3DViewer::setBooleanPreviewStateChangedCallback(
+    std::function<void()> theCallback)
+{
+    _booleanPreviewStateChangedCallback = std::move(theCallback);
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->setBooleanPreviewStateChangedCallback(
+            _booleanPreviewStateChangedCallback);
     }
 }
 
@@ -1769,6 +1784,14 @@ Standard_Boolean Core3DViewer::debugBeginBooleanSelection(
             && !theActorEntityIdentifiers.empty())) {
         return Standard_False;
     }
+    const PrimitiveManipulatorType anExpectedManipulator =
+        theAction == BooleanAction::BooleanSubtract
+            ? PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract
+            : PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
+    if (_objectInteractor->getManipulatorType()
+        != anExpectedManipulator) {
+        return Standard_False;
+    }
     try {
         OCC_CATCH_SIGNALS
         _objectInteractor->cancelActiveBoolean();
@@ -1829,6 +1852,66 @@ Standard_Boolean Core3DViewer::debugBeginBooleanSelection(
     } catch (...) {
         _objectInteractor->cancelActiveBoolean();
         return Standard_False;
+    }
+}
+
+BooleanPreviewDebugState
+Core3DViewer::DebugBooleanPreviewState() const noexcept
+{
+    return _objectInteractor == nullptr
+        ? BooleanPreviewDebugState()
+        : _objectInteractor->debugBooleanPreviewState();
+}
+
+void Core3DViewer::DebugSetBooleanPreviewWorkerBlocked(
+    const Standard_Boolean theBlocked) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetBooleanPreviewWorkerBlocked(
+            theBlocked);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumBooleanCaptureTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetMaximumBooleanCaptureTopologyNodes(
+            theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumBooleanResultTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetMaximumBooleanResultTopologyNodes(
+            theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumBooleanResultSolids(
+    const Standard_Size theLimit) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetMaximumBooleanResultSolids(theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetBooleanTransactionFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetBooleanTransactionFailureCount(
+            theCount);
+    }
+}
+
+void Core3DViewer::DebugSetBooleanAbortFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetBooleanAbortFailureCount(theCount);
     }
 }
 

@@ -2712,6 +2712,14 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
 
         [self setGizmoType:gizmoType];
+        if (_currentGizmoType != gizmoType
+            || [GLController getGizmoType] != gizmoType) {
+            self.can_apply = NO;
+            [GLController debugRequestRender];
+            [self viewDidChangeViewportPresentationState];
+            [self sendNotifyUIState:UIStateChangingApply];
+            return NO;
+        }
         const std::shared_ptr<core3d::Core3DViewer> viewer =
             GLController.viewer;
         const BOOL didBegin = viewer != nullptr
@@ -2768,6 +2776,41 @@ void Core3DAddDebugOrphanVisualMaterial(
         [self sendNotifyUIState:UIStateChangingApply];
         return NO;
     }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugBooleanPreviewState];
+}
+
+- (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked {
+    [GLController debugSetBooleanPreviewWorkerBlocked:blocked];
+}
+
+- (void)debugSetMaximumBooleanCaptureTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumBooleanCaptureTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumBooleanResultTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumBooleanResultTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit {
+    [GLController debugSetMaximumBooleanResultSolids:limit];
+}
+
+- (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count {
+    [GLController debugSetBooleanTransactionFailureCount:count];
+}
+
+- (void)debugSetBooleanAbortFailureCount:(NSUInteger)count {
+    [GLController debugSetBooleanAbortFailureCount:count];
+}
+
+- (void)debugSimulateBooleanMemoryWarning {
+    [GLController didReceiveMemoryWarning];
 }
 
 - (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
