@@ -4,6 +4,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DNativeImportErrorDomain;
 
+typedef NS_ENUM(NSInteger, Core3DNativeImportFormat) {
+    Core3DNativeImportFormatSTEP NS_SWIFT_NAME(step) = 1,
+};
+
 typedef NS_ERROR_ENUM(
     Core3DNativeImportErrorDomain,
     Core3DNativeImportErrorCode
@@ -41,7 +45,7 @@ typedef void (NS_SWIFT_SENDABLE ^Core3DNativeImportCompletion)(
     NSError *_Nullable error
 );
 
-//! Thread-safe, exactly-once STEP-to-project import. The selected source is
+//! Thread-safe, exactly-once native-to-project import. The selected source is
 //! securely copied into app-owned staging before OCCT sees it. Parsing,
 //! migration, validation, serialization, and cleanup run on a private worker;
 //! completion is always delivered on the main thread.
@@ -51,6 +55,9 @@ NS_SWIFT_SENDABLE
 @property(atomic, readonly, getter=isCancelled) BOOL cancelled;
 
 - (instancetype)init NS_UNAVAILABLE;
+- (nullable instancetype)initWithSourceURL:(NSURL *)sourceURL
+                                    format:(Core3DNativeImportFormat)format
+    NS_SWIFT_NAME(init(sourceURL:format:));
 - (nullable instancetype)initWithSTEPURL:(NSURL *)stepURL
     NS_SWIFT_NAME(init(stepURL:));
 - (void)startWithCompletion:(Core3DNativeImportCompletion)completion

@@ -86,6 +86,7 @@ constexpr Standard_Integer kMaximumMaterialDefinitions = 2'048;
 
 struct NativeImportState {
     std::string sourcePath;
+    Core3DNativeImportFormat format = Core3DNativeImportFormatSTEP;
     std::string cleanupPath;
     std::string stagingDirectoryPath;
     std::string stagedSourcePath;
@@ -2041,18 +2042,27 @@ NativeImportResult RunNativeImport(
     try {
         OCC_CATCH_SIGNALS
         ThrowIfCancelled(state);
-        PinnedStagedFile stagedFile =
-            CopySourceIntoPrivateStaging(state);
-        PreflightStagedSTEP(state, stagedFile);
-        ThrowIfCancelled(state);
+        switch (state->format) {
+            case Core3DNativeImportFormatSTEP: {
+                PinnedStagedFile stagedFile =
+                    CopySourceIntoPrivateStaging(state);
+                PreflightStagedSTEP(state, stagedFile);
+                ThrowIfCancelled(state);
 
-        Handle(Message_ProgressIndicator) progress =
-            new NativeImportProgress(&state->cancelled);
-        Message_ProgressScope whole(
-            progress->Start(), "Native STEP import", 8);
-        document = new OcctDocument();
-        ImportSTEP(state, document, stagedFile, whole.Next(4));
-        SerializeAndValidate(state, document, whole.Next(4));
+                Handle(Message_ProgressIndicator) progress =
+                    new NativeImportProgress(&state->cancelled);
+                Message_ProgressScope whole(
+                    progress->Start(), "Native STEP import", 8);
+                document = new OcctDocument();
+                ImportSTEP(state, document, stagedFile, whole.Next(4));
+                SerializeAndValidate(state, document, whole.Next(4));
+                break;
+            }
+            default:
+                throw NativeImportFailure(
+                    Core3DNativeImportErrorInvalidSource,
+                    "The selected import format is unsupported.");
+        }
         ThrowIfCancelled(state);
         RemoveTreeNoThrow(state->stagingDirectoryPath);
         result.succeeded = true;
@@ -2133,29 +2143,40 @@ NSString *ErrorDescription(const NativeImportResult& result) {
 
 @interface Core3DNativeImportOperation () {
     std::shared_ptr<NativeImportState> _state;
-    NSURL *_stepURL;
+    NSURL *_sourceURL;
+    Core3DNativeImportFormat _format;
 }
 @end
 
 @implementation Core3DNativeImportOperation
 
 - (instancetype)initWithSTEPURL:(NSURL *)stepURL {
+    return [self initWithSourceURL:stepURL
+                           format:Core3DNativeImportFormatSTEP];
+}
+
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                            format:(Core3DNativeImportFormat)format {
     NSURL *temporaryRoot = [NSFileManager.defaultManager.temporaryDirectory
         URLByAppendingPathComponent:[NSString stringWithFormat:
             @"Core3DNativeImport-%@", NSUUID.UUID.UUIDString]
         isDirectory:YES];
-    return [self initWithSTEPURL:stepURL temporaryRoot:temporaryRoot];
+    return [self initWithSourceURL:sourceURL
+                           format:format
+                    temporaryRoot:temporaryRoot];
 }
 
-- (instancetype)initWithSTEPURL:(NSURL *)stepURL
-                   temporaryRoot:(NSURL *)temporaryRoot {
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                            format:(Core3DNativeImportFormat)format
+                     temporaryRoot:(NSURL *)temporaryRoot {
     self = [super init];
     if (!self
-        || !stepURL.isFileURL
+        || format != Core3DNativeImportFormatSTEP
+        || !sourceURL.isFileURL
         || !temporaryRoot.isFileURL) {
         return nil;
     }
-    const char *sourcePath = stepURL.path.fileSystemRepresentation;
+    const char *sourcePath = sourceURL.path.fileSystemRepresentation;
     const char *cleanupPath = temporaryRoot.path.fileSystemRepresentation;
     if (sourcePath == nullptr || cleanupPath == nullptr) {
         return nil;
@@ -2177,9 +2198,11 @@ NSString *ErrorDescription(const NativeImportResult& result) {
         return nil;
     }
 
-    _stepURL = [stepURL copy];
+    _sourceURL = [sourceURL copy];
+    _format = format;
     _state = std::make_shared<NativeImportState>();
     _state->sourcePath = sourcePath;
+    _state->format = format;
     _state->cleanupPath = cleanupPath;
     _state->stagingDirectoryPath =
         stagingDirectory.path.fileSystemRepresentation;
@@ -2261,7 +2284,7 @@ NSString *ErrorDescription(const NativeImportResult& result) {
     }
 
     Core3DNativeImportCompletion completionCopy = [completion copy];
-    NSURL *sourceURL = [_stepURL copy];
+    NSURL *sourceURL = [_sourceURL copy];
     [NativeImportQueue() addOperationWithBlock:^{
         WaitForDebugWorkerBarrier(state);
         const BOOL accessedSecurityScope =
