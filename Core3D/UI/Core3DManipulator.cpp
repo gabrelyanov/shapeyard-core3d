@@ -231,7 +231,7 @@ core3d::scene::MaterialSnapshot GizmoMaterial(
         ? core3d::scene::AlphaMode::Blend
         : core3d::scene::AlphaMode::Opaque;
     aMaterial.alphaCutoff = 0.5f;
-    aMaterial.doubleSided = true;
+    aMaterial.cullMode = core3d::scene::CullMode::None;
     return aMaterial;
 }
 

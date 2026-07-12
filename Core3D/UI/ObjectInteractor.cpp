@@ -344,8 +344,7 @@ namespace core3d {
         
 		struct DuplicateRecord {
 			Handle(AIS_Shape) presentation;
-			Graphic3d_NameOfMaterial material;
-			Quantity_NameOfColor color;
+			TDF_Label sourceLabel;
 		};
 		std::vector<DuplicateRecord> duplicates;
 		try {
@@ -357,12 +356,10 @@ namespace core3d {
 				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
 				copy->SetLocalTransformation(
 					source->LocalTransformation().Multiplied(minAxisDisplacement));
-				const Graphic3d_NameOfMaterial material = myDoc->MaterialNameForShape(source);
-				Quantity_Color color;
-				source->Color(color);
-				copy->SetMaterial(material);
-				copy->SetColor(color);
-				duplicates.push_back({copy, material, color.Name()});
+				const TDF_Label sourceLabel = myDoc->ShapeLabel(item);
+				if (sourceLabel.IsNull()) { return; }
+				myDoc->LoadObjectMeterial(sourceLabel, copy);
+				duplicates.push_back({copy, sourceLabel});
 			}
 		} catch (...) {
 			return;
@@ -377,8 +374,12 @@ namespace core3d {
 					doc->AbortCommand();
 					return;
 				}
-				myDoc->SaveObjectMaterial(label, duplicate.material);
-				myDoc->SaveObjectColor(label, duplicate.color);
+				if (!myDoc->CopyObjectAppearance(
+						duplicate.sourceLabel, label)) {
+					doc->AbortCommand();
+					return;
+				}
+				myDoc->LoadObjectMeterial(label, duplicate.presentation);
 			}
 			if (!doc->CommitCommand()) {
 				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
@@ -876,6 +877,9 @@ namespace core3d {
 		std::vector<Handle(AIS_Shape)> replacementObjects;
 		replacementObjects.reserve(
 			static_cast<std::size_t>(anObjects->Size()));
+		std::vector<TDF_Label> replacementSourceLabels;
+		replacementSourceLabels.reserve(
+			static_cast<std::size_t>(anObjects->Size()));
 		
 		Bnd_Box aBox, aBoxSum;
 	
@@ -937,11 +941,13 @@ namespace core3d {
 				Standard_False,
 				Standard_False);
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
-            aShapePrs->SetMaterial(myDoc->MaterialNameForShape(Handle(AIS_Shape)::DownCast(selected)));
-            Quantity_Color color;
-            selected->Color(color);
-            aShapePrs->SetColor(color.Name());
+			const TDF_Label sourceLabel = myDoc->ShapeLabel(selected);
+			if (sourceLabel.IsNull()) {
+				return;
+			}
+			myDoc->LoadObjectMeterial(sourceLabel, aShapePrs);
 			replacementObjects.push_back(aShapePrs);
+			replacementSourceLabels.push_back(sourceLabel);
 		}
 
 		// A plane is a choice for the current mirror operation, not an
@@ -976,6 +982,13 @@ namespace core3d {
 			myContext->Erase(aShapePrs, Standard_False);
 		}
 		_trialMirrorObjects = std::move(replacementObjects);
+		_trialMirrorSourceLabels.clear();
+		for (std::size_t index = 0;
+			 index < _trialMirrorObjects.size(); ++index) {
+			_trialMirrorSourceLabels.emplace(
+				_trialMirrorObjects[index].get(),
+				replacementSourceLabels[index]);
+		}
 		_trialMirrorObjectsValid = true;
 		myContext->UpdateCurrentViewer();
 	}
@@ -997,6 +1010,7 @@ namespace core3d {
 			}
 		}
 		_trialMirrorObjects = std::move(unresolvedObjects);
+		_trialMirrorSourceLabels.clear();
 		try {
 			myContext->UpdateCurrentViewer();
 		} catch (...) {
@@ -1025,6 +1039,11 @@ namespace core3d {
 			clearTrialMirrorObjects();
 			return;
 		}
+		if (_trialMirrorSourceLabels.size()
+			!= _trialMirrorObjects.size()) {
+			clearTrialMirrorObjects();
+			return;
+		}
 		for (const Handle(AIS_Shape)& shape : _trialMirrorObjects) {
 			if (shape.IsNull() || !IsTopologicallyValid(shape->Shape())) {
 				clearTrialMirrorObjects();
@@ -1035,16 +1054,25 @@ namespace core3d {
 		try {
 			doc->NewCommand();
 			for (const Handle(AIS_Shape)& shape : _trialMirrorObjects) {
+				const auto source =
+					_trialMirrorSourceLabels.find(shape.get());
+				if (source == _trialMirrorSourceLabels.end()) {
+					doc->AbortCommand();
+					clearTrialMirrorObjects();
+					return;
+				}
 				const TDF_Label label = myDoc->AddShape(shape);
 				if (label.IsNull()) {
 					doc->AbortCommand();
 					clearTrialMirrorObjects();
 					return;
 				}
-				myDoc->SaveObjectMaterial(label, shape->Material());
-				Quantity_Color color;
-				shape->Color(color);
-				myDoc->SaveObjectColor(label, color.Name());
+				if (!myDoc->CopyObjectAppearance(source->second, label)) {
+					doc->AbortCommand();
+					clearTrialMirrorObjects();
+					return;
+				}
+				myDoc->LoadObjectMeterial(label, shape);
 			}
 			if (!doc->CommitCommand()) {
 				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
@@ -1058,6 +1086,7 @@ namespace core3d {
 		}
 		myDoc->NotifyChanges();
 		_trialMirrorObjects.clear();
+		_trialMirrorSourceLabels.clear();
 		_trialMirrorObjectsValid = false;
 	}
 }

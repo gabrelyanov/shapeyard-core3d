@@ -33,6 +33,29 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+//! Editable metallic-roughness material values. `baseColor` is expressed in
+//! UIKit's extended-sRGB color space; Core3D converts it to linear RGB before
+//! persisting it in the XCAF document and publishing scene snapshots.
+@interface Core3DPBRMaterial : NSObject <NSCopying>
+
+@property (nonatomic, strong, readonly) UIColor* baseColor;
+@property (nonatomic, assign, readonly) CGFloat metallic;
+@property (nonatomic, assign, readonly) CGFloat roughness;
+//! False for texture-backed imported materials until project-owned texture
+//! resources are part of the editable material contract.
+@property (nonatomic, assign, readonly) BOOL supportsScalarEditing;
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                 metallic:(CGFloat)metallic
+                                roughness:(CGFloat)roughness;
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                 metallic:(CGFloat)metallic
+                                roughness:(CGFloat)roughness
+                    supportsScalarEditing:(BOOL)supportsScalarEditing;
+-(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other;
+
+@end
+
 @protocol Core3DMaterialControllerDelegate  <NSObject>
 
 @optional
@@ -46,6 +69,7 @@ NS_ASSUME_NONNULL_BEGIN
 @optional
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material
                            color:(Core3DColor*)color;
+-(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material;
 
 @end
 
@@ -58,10 +82,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, strong, readonly) NSArray<Core3DMaterial*>* selectedMaterials;
 @property (nonatomic, strong, readonly) NSArray<Core3DColor*>* selectedColors;
+@property (nonatomic, strong, readonly) NSArray<Core3DPBRMaterial*>* selectedPBRMaterials;
 
 -(void) updateSelectionWithMaterial:(Core3DMaterial* _Nullable)material color:(Core3DColor* _Nullable)color;
+-(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material;
 -(void) didChangeSelectionWithMaterials:(NSArray<Core3DMaterial*>*)materials
                                  colors:(NSArray<Core3DColor*>*) colors;
+-(void) didChangeSelectionWithPBRMaterials:(NSArray<Core3DPBRMaterial*>*)materials;
 -(Core3DColor* _Nullable) findColorWithName:(NSUInteger)name;
 
 @end

@@ -11,6 +11,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Solid.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <AIS_DisplayMode.hxx>
@@ -31,13 +32,18 @@
 #include "BRepAlgoAPI_Fuse.hxx"
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
-#include <BinDrivers.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
+#include <TDataStd_Integer.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepBndLib.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 
 
 #include <BRepBuilderAPI_GTransform.hxx>
@@ -45,8 +51,12 @@
 #include <Standard_Failure.hxx>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <new>
+#include <string>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -54,6 +64,7 @@
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreImage/CIFilter.h>
+#import <ImageIO/ImageIO.h>
 
 namespace core3d {
 
@@ -101,6 +112,24 @@ bool TryCountDisplayedModelShapes(
 }
 
 constexpr NSUInteger kMaximumPrimitiveCount = 1024;
+constexpr std::uint64_t kMaximumProjectDocumentBytes =
+    256ull * 1024ull * 1024ull;
+constexpr Standard_Integer kMaximumVisualMaterialDefinitions = 2048;
+constexpr Standard_Size kMaximumEmbeddedTextureBytes =
+    32ull * 1024ull * 1024ull;
+constexpr Standard_Size kMaximumAggregateTextureBytes =
+    128ull * 1024ull * 1024ull;
+constexpr Standard_Real kMaximumEmissionFactor = 65504.0;
+constexpr Standard_Size kMaximumAssemblyTraversalDepth = 128;
+constexpr Standard_Size kMaximumAssemblyTraversalNodes = 32768;
+constexpr Standard_Size kMaximumShapeDefinitions = 4096;
+constexpr Standard_Size kMaximumSubshapesPerDefinition = 250000;
+constexpr Standard_Size kMaximumAggregateSubshapes = 2000000;
+constexpr Standard_Size kMaximumDocumentLabels = 100000;
+constexpr std::uint64_t kMaximumTextureDimension = 8192;
+constexpr std::uint64_t kMaximumTexturePixels = 4096ull * 4096ull;
+constexpr Standard_Size kMaximumDecodedTextureBytes =
+    128ull * 1024ull * 1024ull;
 constexpr double kMinimumPrimitiveScale = 1.0e-4;
 constexpr double kMaximumPrimitiveScale = 1.0e4;
 constexpr double kMinimumPrimitiveDimension = 1.0e-3;
@@ -341,7 +370,64 @@ void CloseDocumentNoThrow(const Handle(TDocStd_Application)& app,
     document.Nullify();
 }
 
-bool ValidateShapeTree(const Handle(TDocStd_Document)& document) {
+bool ValidateBoundedTopologicalShape(
+    const TopoDS_Shape& shape,
+    Standard_Size& aggregateSubshapes) {
+    if (shape.IsNull()) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        struct TopologyFrame {
+            TopoDS_Shape shape;
+            Standard_Size depth = 0;
+        };
+        std::vector<TopologyFrame> stack = {{shape, 0}};
+        TopTools_MapOfShape visited;
+        Standard_Size count = 0;
+        while (!stack.empty()) {
+            const TopologyFrame frame = stack.back();
+            stack.pop_back();
+            if (frame.shape.IsNull()
+                || frame.depth > kMaximumAssemblyTraversalDepth) {
+                return false;
+            }
+            if (!visited.Add(frame.shape)) {
+                continue;
+            }
+            if (++count > kMaximumSubshapesPerDefinition
+                || aggregateSubshapes >= kMaximumAggregateSubshapes
+                || count > kMaximumAggregateSubshapes - aggregateSubshapes) {
+                return false;
+            }
+            for (TopoDS_Iterator child(
+                     frame.shape, Standard_True, Standard_True);
+                 child.More(); child.Next()) {
+                if (stack.size()
+                    >= static_cast<std::size_t>(
+                        kMaximumSubshapesPerDefinition)) {
+                    return false;
+                }
+                stack.push_back({child.Value(), frame.depth + 1});
+            }
+        }
+        aggregateSubshapes += count;
+        BRepCheck_Analyzer analyzer(shape, Standard_True);
+        return analyzer.IsValid();
+    } catch (...) {
+        return false;
+    }
+}
+
+struct ShapeTraversalFrame {
+    TDF_Label label;
+    Standard_Size depth = 0;
+    bool leaving = false;
+};
+
+bool ValidateShapeTree(const Handle(TDocStd_Document)& document,
+                       TDF_LabelMap& activeDefinitionLabels) {
+    activeDefinitionLabels.Clear();
     if (document.IsNull()) {
         return false;
     }
@@ -352,40 +438,463 @@ bool ValidateShapeTree(const Handle(TDocStd_Document)& document) {
         return false;
     }
 
-    TDF_LabelSequence freeShapes;
-    shapeTool->GetFreeShapes(freeShapes);
-    for (TDF_LabelSequence::Iterator freeShape(freeShapes); freeShape.More(); freeShape.Next()) {
-        const TDF_Label& label = freeShape.Value();
-        if (!XCAFDoc_ShapeTool::IsShape(label)
-            || !IsTopologicallyValid(XCAFDoc_ShapeTool::GetShape(label))) {
+    std::vector<ShapeTraversalFrame> stack;
+    stack.reserve(64);
+    for (TDF_ChildIterator root(shapeTool->Label(), Standard_False);
+         root.More(); root.Next()) {
+        const TDF_Label& label = root.Value();
+        if (!label.IsNull() && XCAFDoc_ShapeTool::IsShape(label)) {
+            if (stack.size()
+                >= static_cast<std::size_t>(kMaximumShapeDefinitions)) {
+                return false;
+            }
+            stack.push_back({label, 0, false});
+        }
+    }
+
+    TDF_LabelMap activePath;
+    TDF_LabelMap visitedLabels;
+    Standard_Size traversalNodes = 0;
+    Standard_Size definitionCount = 0;
+    Standard_Size aggregateSubshapes = 0;
+    while (!stack.empty()) {
+        const ShapeTraversalFrame frame = stack.back();
+        stack.pop_back();
+        if (frame.leaving) {
+            activePath.Remove(frame.label);
+            visitedLabels.Add(frame.label);
+            continue;
+        }
+        if (visitedLabels.Contains(frame.label)) {
+            continue;
+        }
+        if (frame.label.IsNull()
+            || frame.depth > kMaximumAssemblyTraversalDepth
+            || activePath.Contains(frame.label)
+            || ++traversalNodes > kMaximumAssemblyTraversalNodes) {
             return false;
         }
 
-        if (!XCAFDoc_ShapeTool::IsAssembly(label)) {
+        activePath.Add(frame.label);
+        stack.push_back({frame.label, frame.depth, true});
+
+        if (XCAFDoc_ShapeTool::IsReference(frame.label)
+            || XCAFDoc_ShapeTool::IsComponent(frame.label)) {
+            TDF_Label referredLabel;
+            if (!XCAFDoc_ShapeTool::GetReferredShape(
+                    frame.label, referredLabel)
+                || referredLabel.IsNull()
+                || referredLabel.Data() != frame.label.Data()
+                || !XCAFDoc_ShapeTool::IsShape(referredLabel)) {
+                return false;
+            }
+            stack.push_back({referredLabel, frame.depth + 1, false});
             continue;
         }
 
-        TDF_LabelSequence components;
-        XCAFDoc_ShapeTool::GetComponents(label, components, Standard_True);
-        for (TDF_LabelSequence::Iterator component(components); component.More(); component.Next()) {
-            const TDF_Label& componentLabel = component.Value();
-            if (!XCAFDoc_ShapeTool::IsComponent(componentLabel)
-                || !IsTopologicallyValid(XCAFDoc_ShapeTool::GetShape(componentLabel))) {
-                return false;
-            }
+        if (!XCAFDoc_ShapeTool::IsShape(frame.label)
+            || ++definitionCount > kMaximumShapeDefinitions) {
+            return false;
+        }
+        activeDefinitionLabels.Add(frame.label);
+        const TopoDS_Shape definitionShape =
+            XCAFDoc_ShapeTool::GetShape(frame.label);
+        if (!ValidateBoundedTopologicalShape(
+                definitionShape, aggregateSubshapes)) {
+            return false;
+        }
 
-            TDF_Label referredLabel;
-            if (!XCAFDoc_ShapeTool::GetReferredShape(componentLabel, referredLabel)
-                || referredLabel.IsNull()
-                || !XCAFDoc_ShapeTool::IsShape(referredLabel)
-                || !IsTopologicallyValid(XCAFDoc_ShapeTool::GetShape(referredLabel))) {
-                return false;
+        if (!XCAFDoc_ShapeTool::IsAssembly(frame.label)) {
+            continue;
+        }
+
+        std::vector<TDF_Label> components;
+        for (TDF_ChildIterator child(frame.label, Standard_False);
+             child.More(); child.Next()) {
+            const TDF_Label& component = child.Value();
+            if (XCAFDoc_ShapeTool::IsComponent(component)) {
+                const Standard_Size componentCount =
+                    static_cast<Standard_Size>(components.size()) + 1;
+                if (traversalNodes > kMaximumAssemblyTraversalNodes
+                    || componentCount
+                        > kMaximumAssemblyTraversalNodes - traversalNodes
+                    || stack.size()
+                        > static_cast<std::size_t>(
+                            kMaximumAssemblyTraversalNodes)
+                    || componentCount
+                        > kMaximumAssemblyTraversalNodes
+                            - static_cast<Standard_Size>(stack.size())) {
+                    return false;
+                }
+                components.push_back(component);
             }
+        }
+        for (auto component = components.rbegin();
+             component != components.rend(); ++component) {
+            stack.push_back({*component, frame.depth + 1, false});
         }
     }
 
     // An empty document is valid: a user can intentionally save a blank scene.
     return true;
+}
+
+const Standard_GUID& LocalPBRMaterialValidationAttributeID() {
+    static const Standard_GUID id(
+        "248A5203-4A22-4F2B-85C4-BE0BA89A5E4D");
+    return id;
+}
+
+bool IsFiniteUnit(const Standard_Real value) {
+    return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+}
+
+bool ValidateColor(const Quantity_Color& color) {
+    return IsFiniteUnit(color.Red())
+        && IsFiniteUnit(color.Green())
+        && IsFiniteUnit(color.Blue());
+}
+
+struct TextureValidationState {
+    Standard_Size aggregateBytes = 0;
+    Standard_Size aggregateDecodedBytes = 0;
+    std::unordered_set<const NCollection_Buffer*> countedBuffers;
+    std::unordered_map<std::string, const NCollection_Buffer*> buffersByID;
+};
+
+bool HasSupportedRasterSignature(const Standard_Byte* bytes,
+                                 const Standard_Size size) {
+    if (bytes == nullptr) {
+        return false;
+    }
+    return (size >= 8
+            && std::memcmp(bytes, "\x89PNG\r\n\x1A\n", 8) == 0)
+        || (size >= 3
+            && bytes[0] == 0xFF && bytes[1] == 0xD8
+            && bytes[2] == 0xFF)
+        || (size >= 6
+            && (std::memcmp(bytes, "GIF87a", 6) == 0
+                || std::memcmp(bytes, "GIF89a", 6) == 0))
+        || (size >= 4
+            && (std::memcmp(bytes, "II\x2A\x00", 4) == 0
+                || std::memcmp(bytes, "MM\x00\x2A", 4) == 0))
+        || (size >= 2 && std::memcmp(bytes, "BM", 2) == 0)
+        || (size >= 12
+            && std::memcmp(bytes, "RIFF", 4) == 0
+            && std::memcmp(bytes + 8, "WEBP", 4) == 0);
+}
+
+bool ValidateTextureImageMetadata(
+    const Handle(NCollection_Buffer)& buffer,
+    Standard_Size& decodedBytes) {
+    decodedBytes = 0;
+    if (buffer.IsNull() || buffer->Size() == 0
+        || !HasSupportedRasterSignature(
+            buffer->Data(), buffer->Size())) {
+        return false;
+    }
+
+    CFDataRef data = CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(buffer->Data()),
+        static_cast<CFIndex>(buffer->Size()),
+        kCFAllocatorNull);
+    if (data == nullptr) {
+        return false;
+    }
+    const void* optionKeys[] = {kCGImageSourceShouldCache};
+    const void* optionValues[] = {kCFBooleanFalse};
+    CFDictionaryRef options = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        optionKeys,
+        optionValues,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CGImageSourceRef source = CGImageSourceCreateWithData(data, options);
+    if (options != nullptr) {
+        CFRelease(options);
+    }
+    CFRelease(data);
+    if (source == nullptr || CGImageSourceGetType(source) == nullptr
+        || CGImageSourceGetCount(source) != 1
+        || CGImageSourceGetStatus(source) != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(source, 0)
+            != kCGImageStatusComplete) {
+        if (source != nullptr) {
+            CFRelease(source);
+        }
+        return false;
+    }
+
+    CFDictionaryRef properties =
+        CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (properties == nullptr) {
+        return false;
+    }
+    const CFTypeRef widthValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelWidth);
+    const CFTypeRef heightValue = CFDictionaryGetValue(
+        properties, kCGImagePropertyPixelHeight);
+    std::int64_t width = 0;
+    std::int64_t height = 0;
+    const bool isValid = widthValue != nullptr
+        && heightValue != nullptr
+        && CFGetTypeID(widthValue) == CFNumberGetTypeID()
+        && CFGetTypeID(heightValue) == CFNumberGetTypeID()
+        && CFNumberGetValue(
+            static_cast<CFNumberRef>(widthValue),
+            kCFNumberSInt64Type,
+            &width)
+        && CFNumberGetValue(
+            static_cast<CFNumberRef>(heightValue),
+            kCFNumberSInt64Type,
+            &height)
+        && width > 0 && height > 0
+        && static_cast<std::uint64_t>(width)
+            <= kMaximumTextureDimension
+        && static_cast<std::uint64_t>(height)
+            <= kMaximumTextureDimension
+        && static_cast<std::uint64_t>(width)
+            <= kMaximumTexturePixels
+                / static_cast<std::uint64_t>(height);
+    if (isValid) {
+        const std::uint64_t pixels = static_cast<std::uint64_t>(width)
+            * static_cast<std::uint64_t>(height);
+        if (pixels <= std::numeric_limits<Standard_Size>::max() / 4) {
+            decodedBytes = static_cast<Standard_Size>(pixels * 4);
+        }
+    }
+    CFRelease(properties);
+    return isValid && decodedBytes > 0
+        && decodedBytes <= kMaximumDecodedTextureBytes;
+}
+
+bool ValidateEmbeddedTexture(const Handle(Image_Texture)& texture,
+                             TextureValidationState& state) {
+    if (texture.IsNull()) {
+        return true;
+    }
+    if (!texture->FilePath().IsEmpty()
+        || texture->TextureId().IsEmpty()
+        || texture->TextureId().Length() > 256) {
+        return false;
+    }
+    const Handle(NCollection_Buffer)& buffer = texture->DataBuffer();
+    if (buffer.IsNull() || buffer->Size() == 0
+        || buffer->Size() > kMaximumEmbeddedTextureBytes) {
+        return false;
+    }
+
+    const std::string textureID(texture->TextureId().ToCString());
+    const auto existing = state.buffersByID.find(textureID);
+    if (existing != state.buffersByID.end()
+        && existing->second != buffer.get()) {
+        const NCollection_Buffer* existingBuffer = existing->second;
+        if (existingBuffer == nullptr
+            || existingBuffer->Size() != buffer->Size()
+            || std::memcmp(existingBuffer->Data(),
+                           buffer->Data(),
+                           buffer->Size()) != 0) {
+            return false;
+        }
+    }
+    state.buffersByID.emplace(textureID, buffer.get());
+    if (state.countedBuffers.insert(buffer.get()).second) {
+        Standard_Size decodedBytes = 0;
+        if (!ValidateTextureImageMetadata(buffer, decodedBytes)
+            || buffer->Size() > kMaximumAggregateTextureBytes
+            || state.aggregateBytes
+                > kMaximumAggregateTextureBytes - buffer->Size()
+            || decodedBytes > kMaximumDecodedTextureBytes
+            || state.aggregateDecodedBytes
+                > kMaximumDecodedTextureBytes - decodedBytes) {
+            return false;
+        }
+        state.aggregateBytes += buffer->Size();
+        state.aggregateDecodedBytes += decodedBytes;
+    }
+    return true;
+}
+
+bool ValidatePBRMaterial(const XCAFDoc_VisMaterialPBR& material,
+                         TextureValidationState& textures) {
+    const Quantity_Color& baseColor = material.BaseColor.GetRGB();
+    return material.IsDefined
+        && ValidateColor(baseColor)
+        && IsFiniteUnit(material.BaseColor.Alpha())
+        && IsFiniteUnit(material.Metallic)
+        && IsFiniteUnit(material.Roughness)
+        && std::isfinite(material.RefractionIndex)
+        && material.RefractionIndex >= 1.0f
+        && material.RefractionIndex <= 3.0f
+        && std::isfinite(material.EmissiveFactor.x())
+        && std::isfinite(material.EmissiveFactor.y())
+        && std::isfinite(material.EmissiveFactor.z())
+        && material.EmissiveFactor.x() >= 0.0f
+        && material.EmissiveFactor.y() >= 0.0f
+        && material.EmissiveFactor.z() >= 0.0f
+        && material.EmissiveFactor.x() <= kMaximumEmissionFactor
+        && material.EmissiveFactor.y() <= kMaximumEmissionFactor
+        && material.EmissiveFactor.z() <= kMaximumEmissionFactor
+        && ValidateEmbeddedTexture(material.BaseColorTexture, textures)
+        && ValidateEmbeddedTexture(
+            material.MetallicRoughnessTexture, textures)
+        && ValidateEmbeddedTexture(material.EmissiveTexture, textures)
+        && ValidateEmbeddedTexture(material.OcclusionTexture, textures)
+        && ValidateEmbeddedTexture(material.NormalTexture, textures);
+}
+
+bool ValidateCommonMaterial(const XCAFDoc_VisMaterialCommon& material,
+                            TextureValidationState& textures) {
+    return material.IsDefined
+        && ValidateColor(material.AmbientColor)
+        && ValidateColor(material.DiffuseColor)
+        && ValidateColor(material.SpecularColor)
+        && ValidateColor(material.EmissiveColor)
+        && IsFiniteUnit(material.Shininess)
+        && IsFiniteUnit(material.Transparency)
+        && ValidateEmbeddedTexture(material.DiffuseTexture, textures);
+}
+
+bool ValidateVisualMaterials(
+    const Handle(TDocStd_Document)& document,
+    const TDF_LabelMap& activeDefinitionLabels) {
+    if (document.IsNull()) {
+        return false;
+    }
+
+    Handle(XCAFDoc_VisMaterialTool) materialTool;
+    if (XCAFDoc_DocumentTool::CheckVisMaterialTool(document->Main())) {
+        materialTool = XCAFDoc_DocumentTool::VisMaterialTool(
+            document->Main());
+        if (materialTool.IsNull()) {
+            return false;
+        }
+    }
+
+    TextureValidationState textureState;
+    if (!materialTool.IsNull()) {
+        TDF_LabelSequence materialLabels;
+        materialTool->GetMaterials(materialLabels);
+        if (materialLabels.Length()
+            > kMaximumVisualMaterialDefinitions) {
+            return false;
+        }
+        for (TDF_LabelSequence::Iterator iterator(materialLabels);
+             iterator.More(); iterator.Next()) {
+            const Handle(XCAFDoc_VisMaterial) material =
+                XCAFDoc_VisMaterialTool::GetMaterial(iterator.Value());
+            if (material.IsNull()
+                || (!material->HasPbrMaterial()
+                    && !material->HasCommonMaterial())) {
+                return false;
+            }
+            if (material->HasPbrMaterial()
+                && !ValidatePBRMaterial(
+                    material->PbrMaterial(), textureState)) {
+                return false;
+            }
+            if (material->HasCommonMaterial()
+                && !ValidateCommonMaterial(
+                    material->CommonMaterial(), textureState)) {
+                return false;
+            }
+            switch (material->AlphaMode()) {
+                case Graphic3d_AlphaMode_BlendAuto:
+                case Graphic3d_AlphaMode_Opaque:
+                case Graphic3d_AlphaMode_Mask:
+                case Graphic3d_AlphaMode_Blend:
+                    break;
+                case Graphic3d_AlphaMode_MaskBlend:
+                    // The renderer-neutral contract currently has distinct
+                    // mask and blend modes, not a combined two-stage mode.
+                    // Reject instead of silently discarding the cutoff.
+                    return false;
+                default:
+                    return false;
+            }
+            if (!IsFiniteUnit(material->AlphaCutOff())) {
+                return false;
+            }
+            switch (material->FaceCulling()) {
+                case Graphic3d_TypeOfBackfacingModel_Auto:
+                case Graphic3d_TypeOfBackfacingModel_DoubleSided:
+                case Graphic3d_TypeOfBackfacingModel_BackCulled:
+                case Graphic3d_TypeOfBackfacingModel_FrontCulled:
+                    break;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    Standard_Size labelCount = 0;
+    for (TDF_ChildIterator iterator(document->Main(), Standard_True);
+         iterator.More(); iterator.Next()) {
+        if (++labelCount > kMaximumDocumentLabels) {
+            return false;
+        }
+        const TDF_Label& label = iterator.Value();
+        TDF_Label assignedMaterialLabel;
+        if (XCAFDoc_VisMaterialTool::GetShapeMaterial(
+                label, assignedMaterialLabel)
+            && (materialTool.IsNull()
+                || assignedMaterialLabel.IsNull()
+                || !materialTool->IsMaterial(assignedMaterialLabel))) {
+            return false;
+        }
+
+        Handle(TDataStd_Integer) marker;
+        if (!label.FindAttribute(
+                LocalPBRMaterialValidationAttributeID(), marker)) {
+            continue;
+        }
+        if (marker.IsNull() || marker->Get() != 1
+            || !activeDefinitionLabels.Contains(label)
+            || materialTool.IsNull()
+            || assignedMaterialLabel.IsNull()) {
+            return false;
+        }
+        const Handle(XCAFDoc_VisMaterial) material =
+            XCAFDoc_VisMaterialTool::GetMaterial(
+                assignedMaterialLabel);
+        if (material.IsNull() || !material->HasPbrMaterial()) {
+            return false;
+        }
+        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
+        if (!pbr.BaseColorTexture.IsNull()
+            || !pbr.MetallicRoughnessTexture.IsNull()
+            || !pbr.EmissiveTexture.IsNull()
+            || !pbr.OcclusionTexture.IsNull()
+            || !pbr.NormalTexture.IsNull()) {
+            return false;
+        }
+        if (material->HasCommonMaterial()
+            && !material->CommonMaterial().DiffuseTexture.IsNull()) {
+            return false;
+        }
+        for (const Standard_Integer tag : {11, 12}) {
+            const TDF_Label legacy = label.FindChild(tag, Standard_False);
+            Handle(TDataStd_Integer) legacyValue;
+            if (!legacy.IsNull()
+                && legacy.FindAttribute(
+                    TDataStd_Integer::GetID(), legacyValue)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool IsProjectFileWithinSizeLimit(const std::string& path) {
+    struct stat fileInfo = {};
+    return !path.empty()
+        && ::stat(path.c_str(), &fileInfo) == 0
+        && fileInfo.st_size >= 0
+        && static_cast<std::uint64_t>(fileInfo.st_size)
+            <= kMaximumProjectDocumentBytes;
 }
 
 } // namespace
@@ -852,50 +1361,97 @@ bool Core3DViewer::traverseLabel (const Handle(TDocStd_Document)& theDoc,
                                   const TopLoc_Location& theLoc,
                                   MapOfPrsForShapes& theMapOfShapes)
 {
-    TCollection_AsciiString aName;
-    {
-        Handle(TDataStd_Name) aNodeName;
-        if (theLabel.FindAttribute (TDataStd_Name::GetID(), aNodeName))
-        {
-            aName = aNodeName->Get(); // instance name
-        }
-        if (aName.IsEmpty())
-        {
-            TDF_Label aRefLabel;
-            if (XCAFDoc_ShapeTool::GetReferredShape (theLabel, aRefLabel)
-                && aRefLabel.FindAttribute (TDataStd_Name::GetID(), aNodeName))
-            {
-                aName = aNodeName->Get(); // product name
-            }
-        }
+    if (theDoc.IsNull() || theLabel.IsNull()) {
+        return true;
     }
-    aName = theNamePrefix + aName;
+    Handle(XCAFDoc_ShapeTool) theShapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(theDoc->Main());
+    Handle(XCAFDoc_ColorTool) theColorTool =
+        XCAFDoc_DocumentTool::ColorTool(theDoc->Main());
+    if (theShapeTool.IsNull() || theColorTool.IsNull()) {
+        return true;
+    }
 
-    TDF_Label aRefLabel = theLabel;
+    struct DisplayFrame {
+        TDF_Label label;
+        Standard_Size depth = 0;
+        bool leaving = false;
+    };
+    std::vector<DisplayFrame> stack = {{theLabel, 0, false}};
+    TDF_LabelMap activeAssemblies;
+    Standard_Size traversalNodes = 0;
+    XCAFPrs_Style aDefStyle;
+    aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
+    aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
+    while (!stack.empty()) {
+        const DisplayFrame frame = stack.back();
+        stack.pop_back();
+        if (frame.leaving) {
+            activeAssemblies.Remove(frame.label);
+            continue;
+        }
+        if (frame.label.IsNull()
+            || frame.depth > kMaximumAssemblyTraversalDepth
+            || ++traversalNodes > kMaximumAssemblyTraversalNodes) {
+            return true;
+        }
 
-    Handle(XCAFDoc_ShapeTool) theShapeTool = XCAFDoc_DocumentTool::ShapeTool (theDoc->Main());
-    Handle(XCAFDoc_ColorTool) theColorTool = XCAFDoc_DocumentTool::ColorTool (theDoc->Main());
-
-    theShapeTool->GetReferredShape (theLabel, aRefLabel);
-    if (XCAFDoc_ShapeTool::IsAssembly (aRefLabel))
-    {
-        aName += "/";
-        const TopLoc_Location aLoc = theLoc * XCAFDoc_ShapeTool::GetLocation (theLabel);
-        for (TDF_ChildIterator aChildIter (aRefLabel); aChildIter.More(); aChildIter.Next())
-        {
-            if (traverseLabel (theDoc, aChildIter.Value(), aName, aLoc, theMapOfShapes) == 1)
-            {
+        TDF_Label definition = frame.label;
+        if (XCAFDoc_ShapeTool::IsReference(frame.label)
+            || XCAFDoc_ShapeTool::IsComponent(frame.label)) {
+            if (!XCAFDoc_ShapeTool::GetReferredShape(
+                    frame.label, definition)
+                || definition.IsNull()
+                || definition.Data() != frame.label.Data()) {
                 return true;
             }
         }
-        return false;
-    }
-    //std::cout << aName << " ";
-    XCAFPrs_Style aDefStyle;
-    aDefStyle.SetColorSurf (Quantity_NOC_GRAY80);
-    aDefStyle.SetColorCurv (Quantity_NOC_GRAY80);
+        if (!XCAFDoc_ShapeTool::IsShape(definition)) {
+            return true;
+        }
+        if (!XCAFDoc_ShapeTool::IsAssembly(definition)) {
+            displayWithChildren(
+                *theShapeTool,
+                *theColorTool,
+                frame.label,
+                theLoc,
+                aDefStyle,
+                theNamePrefix,
+                theMapOfShapes);
+            continue;
+        }
+        if (activeAssemblies.Contains(definition)) {
+            return true;
+        }
+        activeAssemblies.Add(definition);
+        stack.push_back({definition, frame.depth, true});
 
-    displayWithChildren(*theShapeTool, *theColorTool, theLabel, TopLoc_Location(), aDefStyle, "", theMapOfShapes);
+        std::vector<TDF_Label> components;
+        for (TDF_ChildIterator child(definition, Standard_False);
+             child.More(); child.Next()) {
+            const TDF_Label& component = child.Value();
+            if (XCAFDoc_ShapeTool::IsComponent(component)) {
+                const Standard_Size componentCount =
+                    static_cast<Standard_Size>(components.size()) + 1;
+                if (traversalNodes > kMaximumAssemblyTraversalNodes
+                    || componentCount
+                        > kMaximumAssemblyTraversalNodes - traversalNodes
+                    || stack.size()
+                        > static_cast<std::size_t>(
+                            kMaximumAssemblyTraversalNodes)
+                    || componentCount
+                        > kMaximumAssemblyTraversalNodes
+                            - static_cast<Standard_Size>(stack.size())) {
+                    return true;
+                }
+                components.push_back(component);
+            }
+        }
+        for (auto component = components.rbegin();
+             component != components.rend(); ++component) {
+            stack.push_back({*component, frame.depth + 1, false});
+        }
+    }
 
     return false;
 }
@@ -978,8 +1534,15 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     Handle(TDocStd_Document) candidate;
     try {
         OCC_CATCH_SIGNALS
+        Core3DBeginSafeBinaryRead();
         PCDM_ReaderStatus status = app->Open(theFilename.c_str(), candidate);
-        if (status != PCDM_RS_OK || candidate.IsNull()) {
+        const Standard_Boolean wasRejected =
+            Core3DSafeBinaryReadWasRejected();
+        if (wasRejected || status != PCDM_RS_OK || candidate.IsNull()) {
+            if (wasRejected) {
+                CloseDocumentNoThrow(app, candidate);
+                return AssetImportResult::InvalidData;
+            }
             AssetImportResult result = status == PCDM_RS_OK
                 ? AssetImportResult::InvalidData
                 : ImportResultForReaderStatus(status);
@@ -1007,6 +1570,12 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 
 	try {
 		OCC_CATCH_SIGNALS
+		TDF_LabelMap candidateDefinitions;
+		if (!ValidateShapeTree(candidate, candidateDefinitions)
+			|| !ValidateVisualMaterials(candidate, candidateDefinitions)) {
+			CloseDocumentNoThrow(app, candidate);
+			return AssetImportResult::InvalidData;
+		}
 		// CBF files created before persistent scene identity need a one-time
 		// migration. Do this while the candidate is isolated, before it becomes
 		// the editable document and before normal undo history is enabled.
@@ -1019,7 +1588,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         // Keep the previous OCAF document alive until the candidate has been
         // fully traversed and displayed. Only the presentation is temporary.
         clearContext();
-        traverseDocument(candidate);
+        if (traverseDocument(candidate)) {
+			restorePreviousState();
+			CloseDocumentNoThrow(app, candidate);
+			return AssetImportResult::InvalidData;
+		}
         myContext->UpdateCurrentViewer();
 
         myDoc->ChangeDocument() = candidate;
@@ -1041,7 +1614,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 }
 
 AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) const {
-    if (theFilename.empty()) {
+    if (!IsProjectFileWithinSizeLimit(theFilename)) {
         return AssetImportResult::InvalidData;
     }
 
@@ -1050,11 +1623,18 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
     try {
         OCC_CATCH_SIGNALS
         validationApplication = new TDocStd_Application();
-        BinDrivers::DefineFormat(validationApplication);
+        Core3DDefineSafeBinXCAFFormat(validationApplication);
 
+        Core3DBeginSafeBinaryRead();
         const PCDM_ReaderStatus status =
             validationApplication->Open(theFilename.c_str(), candidate);
-        if (status != PCDM_RS_OK || candidate.IsNull()) {
+        const Standard_Boolean wasRejected =
+            Core3DSafeBinaryReadWasRejected();
+        if (wasRejected || status != PCDM_RS_OK || candidate.IsNull()) {
+            if (wasRejected) {
+                CloseDocumentNoThrow(validationApplication, candidate);
+                return AssetImportResult::InvalidData;
+            }
             const AssetImportResult result = status == PCDM_RS_OK
                 ? AssetImportResult::InvalidData
                 : ImportResultForReaderStatus(status);
@@ -1062,7 +1642,11 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
             return result;
         }
 
-        const bool isValid = ValidateShapeTree(candidate);
+        TDF_LabelMap activeDefinitionLabels;
+        const bool isValid = ValidateShapeTree(
+                candidate, activeDefinitionLabels)
+            && ValidateVisualMaterials(
+                candidate, activeDefinitionLabels);
         CloseDocumentNoThrow(validationApplication, candidate);
         return isValid
             ? AssetImportResult::Success

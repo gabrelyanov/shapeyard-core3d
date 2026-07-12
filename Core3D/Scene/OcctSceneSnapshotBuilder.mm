@@ -39,6 +39,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <V3d_View.hxx>
 #include <gp_Pnt.hxx>
@@ -535,7 +536,7 @@ bool ApplyPreset(MaterialSnapshot& theMaterial,
     theMaterial.alphaMode = aPbr.Alpha() < 0.999f
         ? AlphaMode::Blend
         : AlphaMode::Opaque;
-    theMaterial.doubleSided = !theClosed;
+    theMaterial.cullMode = theClosed ? CullMode::Back : CullMode::None;
     return true;
 }
 
@@ -573,16 +574,21 @@ bool ValidateMaterial(MaterialSnapshot& theMaterial)
         || theMaterial.emission.z < 0.0f) {
         return false;
     }
-    if (theMaterial.baseColor.w < 0.999f
-        && theMaterial.alphaMode == AlphaMode::Opaque) {
-        theMaterial.alphaMode = AlphaMode::Blend;
-    }
     return true;
 }
+
+struct WholeObjectPBRMaterial {
+    XCAFDoc_VisMaterialPBR pbr;
+    Graphic3d_AlphaMode alphaMode = Graphic3d_AlphaMode_Opaque;
+    Standard_ShortReal alphaCutoff = 0.5f;
+    Graphic3d_TypeOfBackfacingModel faceCulling =
+        Graphic3d_TypeOfBackfacingModel_Auto;
+};
 
 bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      const std::optional<Graphic3d_NameOfMaterial>& theMaterialOverride,
                      const std::optional<Quantity_NameOfColor>& theColorOverride,
+                     const std::optional<WholeObjectPBRMaterial>& thePbrOverride,
                      const bool theClosed,
                      MaterialSnapshot& theResult)
 {
@@ -623,14 +629,17 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
         theResult.alphaCutoff = aVisualMaterial->AlphaCutOff();
         switch (aVisualMaterial->FaceCulling()) {
             case Graphic3d_TypeOfBackfacingModel_DoubleSided:
-                theResult.doubleSided = true;
+                theResult.cullMode = CullMode::None;
                 break;
             case Graphic3d_TypeOfBackfacingModel_Auto:
-                theResult.doubleSided = !theClosed;
+                theResult.cullMode = theClosed
+                    ? CullMode::Back : CullMode::None;
                 break;
             case Graphic3d_TypeOfBackfacingModel_BackCulled:
+                theResult.cullMode = CullMode::Back;
+                break;
             case Graphic3d_TypeOfBackfacingModel_FrontCulled:
-                theResult.doubleSided = false;
+                theResult.cullMode = CullMode::Front;
                 break;
         }
     }
@@ -641,18 +650,53 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
         SetColor(theResult, aStyle.GetColorSurfRGBA());
     }
 
-    if (theMaterialOverride.has_value()
-        && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {
-        return false;
-    }
-    if (theColorOverride.has_value()) {
-        if (*theColorOverride < Quantity_NOC_BLACK
-            || *theColorOverride > Quantity_NOC_WHITE) {
+    if (thePbrOverride.has_value()) {
+        const WholeObjectPBRMaterial& anOverride = *thePbrOverride;
+        const XCAFDoc_VisMaterialPBR& aPbr = anOverride.pbr;
+        if (!aPbr.IsDefined) {
             return false;
         }
-        SetColor(theResult,
-                 Quantity_Color(*theColorOverride),
-                 theResult.baseColor.w);
+        SetColor(theResult, aPbr.BaseColor);
+        theResult.emission = {
+            aPbr.EmissiveFactor.x(),
+            aPbr.EmissiveFactor.y(),
+            aPbr.EmissiveFactor.z(),
+        };
+        theResult.metallic = aPbr.Metallic;
+        theResult.roughness = aPbr.Roughness;
+        theResult.indexOfRefraction = aPbr.RefractionIndex;
+        theResult.alphaMode = ConvertAlphaMode(
+            anOverride.alphaMode, aPbr.BaseColor.Alpha());
+        theResult.alphaCutoff = anOverride.alphaCutoff;
+        switch (anOverride.faceCulling) {
+            case Graphic3d_TypeOfBackfacingModel_DoubleSided:
+                theResult.cullMode = CullMode::None;
+                break;
+            case Graphic3d_TypeOfBackfacingModel_Auto:
+                theResult.cullMode = theClosed
+                    ? CullMode::Back : CullMode::None;
+                break;
+            case Graphic3d_TypeOfBackfacingModel_BackCulled:
+                theResult.cullMode = CullMode::Back;
+                break;
+            case Graphic3d_TypeOfBackfacingModel_FrontCulled:
+                theResult.cullMode = CullMode::Front;
+                break;
+        }
+    } else {
+        if (theMaterialOverride.has_value()
+            && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {
+            return false;
+        }
+        if (theColorOverride.has_value()) {
+            if (*theColorOverride < Quantity_NOC_BLACK
+                || *theColorOverride > Quantity_NOC_WHITE) {
+                return false;
+            }
+            SetColor(theResult,
+                     Quantity_Color(*theColorOverride),
+                     theResult.baseColor.w);
+        }
     }
     return ValidateMaterial(theResult);
 }
@@ -672,7 +716,7 @@ bool MaterialValuesEqual(const MaterialSnapshot& theLeft,
         && theLeft.indexOfRefraction == theRight.indexOfRefraction
         && theLeft.alphaMode == theRight.alphaMode
         && theLeft.alphaCutoff == theRight.alphaCutoff
-        && theLeft.doubleSided == theRight.doubleSided;
+        && theLeft.cullMode == theRight.cullMode;
 }
 
 void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial)
@@ -689,7 +733,7 @@ void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial
     theHash.AddFloat(theMaterial.indexOfRefraction);
     theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.alphaMode));
     theHash.AddFloat(theMaterial.alphaCutoff);
-    theHash.AddBool(theMaterial.doubleSided);
+    theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.cullMode));
 }
 
 std::string HexIdentifier(const char* thePrefix, const std::uint64_t theValue)
@@ -3027,6 +3071,24 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     anOccurrence.definitionLabel, aColorName)
                 ? std::optional<Quantity_NameOfColor>(aColorName)
                 : std::nullopt;
+            XCAFDoc_VisMaterialPBR aPbrMaterial;
+            std::optional<WholeObjectPBRMaterial> aPbrOverride;
+            if (theDocument->TryPBRMaterialForLabel(
+                    anOccurrence.definitionLabel, aPbrMaterial)) {
+                const Handle(XCAFDoc_VisMaterial) aVisualMaterial =
+                    XCAFDoc_VisMaterialTool::GetShapeMaterial(
+                        anOccurrence.definitionLabel);
+                if (aVisualMaterial.IsNull()
+                    || !aVisualMaterial->HasPbrMaterial()) {
+                    return {};
+                }
+                aPbrOverride = WholeObjectPBRMaterial{
+                    aPbrMaterial,
+                    aVisualMaterial->AlphaMode(),
+                    aVisualMaterial->AlphaCutOff(),
+                    aVisualMaterial->FaceCulling(),
+                };
+            }
 
             std::vector<std::optional<MaterialSnapshot>> aFaceMaterials(
                 aMesh.primitives.size());
@@ -3059,6 +3121,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 if (!ResolveMaterial(aFace,
                                      aMaterialOverride,
                                      aColorOverride,
+                                     aPbrOverride,
                                      aDefinition.closed,
                                      aMaterial)) {
                     return {};

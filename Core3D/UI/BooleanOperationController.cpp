@@ -905,19 +905,25 @@ void BooleanOperationController::applyStyle(
         throw Standard_Failure("Boolean presentation is not an AIS_Shape");
     }
     aShape->UnsetColor();
-    aShape->SetMaterial(theStyle.materialName);
-    aShape->SetColor(theStyle.colorName);
+    if (!theStyle.documentLabel.IsNull()) {
+        myDoc->LoadObjectMeterial(theStyle.documentLabel, aShape);
+    } else {
+        aShape->SetMaterial(theStyle.materialName);
+        aShape->SetColor(theStyle.colorName);
+    }
 }
 
 void BooleanOperationController::persistStyle(
     const TDF_Label& theLabel,
     const TemporalBooleanObject& theStyle)
 {
-    if (theLabel.IsNull()) {
-        throw Standard_Failure("Boolean result label is null");
+    if (theLabel.IsNull() || theStyle.documentLabel.IsNull()) {
+        throw Standard_Failure("Boolean appearance label is null");
     }
-    myDoc->SaveObjectMaterial(theLabel, theStyle.materialName);
-    myDoc->SaveObjectColor(theLabel, theStyle.colorName);
+    if (!myDoc->CopyObjectAppearance(
+            theStyle.documentLabel, theLabel)) {
+        throw Standard_Failure("Unable to preserve Boolean appearance");
+    }
 }
 
 Handle(AIS_InteractiveObject)
@@ -1054,12 +1060,9 @@ BooleanApplyResult BooleanOperationController::apply(
             cancelImpl();
             return BooleanApplyResult::NoChange;
         }
-        for (const TDF_Label& aLabel : aSourceLabels) {
-            if (!myDoc->RemoveShape(aLabel)) {
-                rollbackFailedTransaction(aDocument);
-                return BooleanApplyResult::NoChange;
-            }
-        }
+        // Persist result appearance while each source label is still present;
+        // removing a source first clears the XCAF material relationship that
+        // the result must inherit.
         for (const auto& aResult : aResults) {
             const TDF_Label aResultLabel = myDoc->AddShape(aResult.first);
             if (aResultLabel.IsNull()) {
@@ -1067,6 +1070,12 @@ BooleanApplyResult BooleanOperationController::apply(
                 return BooleanApplyResult::NoChange;
             }
             persistStyle(aResultLabel, aResult.second);
+        }
+        for (const TDF_Label& aLabel : aSourceLabels) {
+            if (!myDoc->RemoveShape(aLabel)) {
+                rollbackFailedTransaction(aDocument);
+                return BooleanApplyResult::NoChange;
+            }
         }
         if (!aDocument->CommitCommand()) {
             rollbackFailedTransaction(aDocument);

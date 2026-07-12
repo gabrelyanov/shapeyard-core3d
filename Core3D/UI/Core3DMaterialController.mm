@@ -12,6 +12,7 @@
 #include "Graphic3d_MaterialAspect.hxx"
 #import "NSBundle+Path.h"
 #include "ListOfColors.h"
+#include <cmath>
 
 @implementation Core3DMaterial {
     
@@ -26,6 +27,66 @@
         _defaultColor = defColor;
     }
     return self;
+}
+
+@end
+
+@implementation Core3DPBRMaterial
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                  metallic:(CGFloat)metallic
+                                 roughness:(CGFloat)roughness {
+    return [self initWithBaseColor:baseColor
+                          metallic:metallic
+                         roughness:roughness
+             supportsScalarEditing:YES];
+}
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                  metallic:(CGFloat)metallic
+                                 roughness:(CGFloat)roughness
+                     supportsScalarEditing:(BOOL)supportsScalarEditing {
+    if(baseColor == nil || !std::isfinite(metallic) || !std::isfinite(roughness)
+       || metallic < 0.0 || metallic > 1.0
+       || roughness < 0.0 || roughness > 1.0) {
+        return nil;
+    }
+    if(self = [super init]) {
+        _baseColor = baseColor;
+        _metallic = metallic;
+        _roughness = roughness;
+        _supportsScalarEditing = supportsScalarEditing;
+    }
+    return self;
+}
+
+-(id)copyWithZone:(NSZone*)zone {
+    return [[Core3DPBRMaterial allocWithZone:zone]
+        initWithBaseColor:self.baseColor
+                 metallic:self.metallic
+                roughness:self.roughness
+    supportsScalarEditing:self.supportsScalarEditing];
+}
+
+-(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other {
+    return other != nil
+        && [self.baseColor isEqual:other.baseColor]
+        && self.metallic == other.metallic
+        && self.roughness == other.roughness
+        && self.supportsScalarEditing == other.supportsScalarEditing;
+}
+
+-(BOOL)isEqual:(id)object {
+    return object == self
+        || ([object isKindOfClass:Core3DPBRMaterial.class]
+            && [self isEqualToPBRMaterial:(Core3DPBRMaterial*)object]);
+}
+
+-(NSUInteger)hash {
+    return self.baseColor.hash
+        ^ @((double)self.metallic).hash
+        ^ @((double)self.roughness).hash
+        ^ @(self.supportsScalarEditing).hash;
 }
 
 @end
@@ -50,6 +111,9 @@
 
 -(instancetype) init {
     if(self = [super init]) {
+        _selectedMaterials = @[];
+        _selectedColors = @[];
+        _selectedPBRMaterials = @[];
         [self initColors];
         [self initMaterials];
     }
@@ -101,12 +165,21 @@
     }
 }
 
+-(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material {
+    if(_pass && [_pass respondsToSelector:@selector(updateSelectionWithPBRMaterial:)]) {
+        [_pass updateSelectionWithPBRMaterial:material];
+    }
+}
+
 -(void) didChangeSelectionWithMaterials:(NSArray<Core3DMaterial*>*)materials
                                  colors:(NSArray<Core3DColor*>*) colors {
     _selectedMaterials = materials;
     _selectedColors = colors;
 }
 
+-(void) didChangeSelectionWithPBRMaterials:(NSArray<Core3DPBRMaterial*>*)materials {
+    _selectedPBRMaterials = [materials copy];
+}
+
 
 @end
-

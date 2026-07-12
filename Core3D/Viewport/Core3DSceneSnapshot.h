@@ -41,6 +41,12 @@ typedef NS_ENUM(NSInteger, Core3DSceneAlphaMode) {
     Core3DSceneAlphaModeBlend = 2,
 };
 
+typedef NS_ENUM(NSInteger, Core3DSceneCullMode) {
+    Core3DSceneCullModeNone = 0,
+    Core3DSceneCullModeBack = 1,
+    Core3DSceneCullModeFront = 2,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneRenderRole) {
     Core3DSceneRenderRoleModel = 0,
     Core3DSceneRenderRoleSelectionHighlight,
@@ -150,6 +156,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) float indexOfRefraction;
 @property (nonatomic, assign, readonly) Core3DSceneAlphaMode alphaMode;
 @property (nonatomic, assign, readonly) float alphaCutoff;
+@property (nonatomic, assign, readonly) Core3DSceneCullMode cullMode;
+//! Compatibility view of cullMode; true exactly when no faces are culled.
 @property (nonatomic, assign, readonly, getter=isDoubleSided) BOOL doubleSided;
 
 - (instancetype)init NS_UNAVAILABLE;

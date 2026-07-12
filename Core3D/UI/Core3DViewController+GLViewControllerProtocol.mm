@@ -6,11 +6,41 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import "GLViewController.h"
 
 #include "GLViewController+Trick.h"
 #include "Core3DViewController+GLViewControllerProtocol.h"
 #include "Core3DViewController+PrimitiveManager.h"
+
+#include <cmath>
+
+namespace {
+
+Core3DPBRMaterial* Core3DSelectionPBRMaterial(
+    const XCAFDoc_VisMaterialPBR& material,
+    const BOOL supportsScalarEditing) {
+    if (!material.IsDefined || !std::isfinite(material.Metallic)
+        || !std::isfinite(material.Roughness)) {
+        return nil;
+    }
+    Standard_Real red = 0.0;
+    Standard_Real green = 0.0;
+    Standard_Real blue = 0.0;
+    material.BaseColor.GetRGB().Values(
+        red, green, blue, Quantity_TOC_sRGB);
+    UIColor* color = [UIColor colorWithRed:red
+                                     green:green
+                                      blue:blue
+                                     alpha:material.BaseColor.Alpha()];
+    return [[Core3DPBRMaterial alloc]
+        initWithBaseColor:color
+                 metallic:material.Metallic
+                roughness:material.Roughness
+    supportsScalarEditing:supportsScalarEditing];
+}
+
+} // namespace
 
 @implementation Core3DViewController(GLViewControllerProtocol)
 
@@ -23,6 +53,7 @@
     auto document = GLController.viewer->getDocument();
     NSMutableArray* materials = [NSMutableArray array];
     NSMutableArray* colors = [NSMutableArray array];
+    NSMutableArray* pbrMaterials = [NSMutableArray array];
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
         auto selected = context->SelectedInteractive();
         Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
@@ -31,6 +62,20 @@
             continue;
         }
         
+        const TDF_Label label = document->ShapeLabel(selected);
+        XCAFDoc_VisMaterialPBR nativePBR;
+        if (!label.IsNull()
+            && document->TryEffectivePBRMaterialForLabel(
+                label, nativePBR)) {
+            Core3DPBRMaterial* pbr = Core3DSelectionPBRMaterial(
+                nativePBR,
+                document->SupportsScalarPBRMaterialEditingForLabel(label));
+            if (pbr != nil) {
+                [pbrMaterials addObject:pbr];
+            }
+            continue;
+        }
+
         auto name_of_material = GLController.viewer->getDocument()->MaterialNameForShape(shape);
         Graphic3d_MaterialAspect ma(name_of_material);
         Core3DMaterial* m = [[Core3DMaterial alloc] initWithIdentity:name_of_material
@@ -39,7 +84,6 @@
         [materials addObject:m];
         
         Quantity_NameOfColor name;
-        const TDF_Label label = document->ShapeLabel(selected);
         if (!label.IsNull()) {
             // OCAF is the source of truth for committed object styles. AIS can
             // transiently report no explicit color immediately after a load.
@@ -56,9 +100,24 @@
         if(color != nil) {
             [colors addObject:color];
         }
+
+        const Graphic3d_PBRMaterial& legacyPBR = ma.PBRMaterial();
+        XCAFDoc_VisMaterialPBR editablePBR;
+        editablePBR.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(name), legacyPBR.Alpha());
+        editablePBR.EmissiveFactor = legacyPBR.Emission();
+        editablePBR.Metallic = legacyPBR.Metallic();
+        editablePBR.Roughness = legacyPBR.NormalizedRoughness();
+        editablePBR.RefractionIndex = legacyPBR.IOR();
+        Core3DPBRMaterial* pbr = Core3DSelectionPBRMaterial(
+            editablePBR, YES);
+        if (pbr != nil) {
+            [pbrMaterials addObject:pbr];
+        }
     }
 
     [self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
+    [self.materialController didChangeSelectionWithPBRMaterials:[pbrMaterials copy]];
      
     switch (_currentGizmoType) {
         case PrimitiveGizmoTypeSubtract:

@@ -19,7 +19,7 @@
 
 namespace core3d::scene {
 
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 1;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 2;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 5;
 
 struct Float2 {
@@ -76,6 +76,12 @@ enum class AlphaMode : std::uint8_t {
     Opaque = 0,
     Mask = 1,
     Blend = 2,
+};
+
+enum class CullMode : std::uint8_t {
+    None = 0,
+    Back = 1,
+    Front = 2,
 };
 
 enum class RenderRole : std::uint8_t {
@@ -162,7 +168,7 @@ struct MaterialSnapshot {
     float indexOfRefraction = 1.5f;
     AlphaMode alphaMode = AlphaMode::Opaque;
     float alphaCutoff = 0.5f;
-    bool doubleSided = true;
+    CullMode cullMode = CullMode::None;
 };
 
 struct MeshPrimitive {

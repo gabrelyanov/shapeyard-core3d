@@ -15,12 +15,127 @@
 #include "GLViewController+Trick.h"
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
+#include "XCAFDoc_VisMaterial.hxx"
+#include "XCAFDoc_VisMaterialTool.hxx"
+#include "Image_Texture.hxx"
+#include "BRepPrimAPI_MakeBox.hxx"
+#include "BRep_Builder.hxx"
+#include "TopoDS_Compound.hxx"
+#include "NCollection_Buffer.hxx"
+#include "TDataStd_Integer.hxx"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
+
+namespace {
+
+void Core3DAbortCommandNoThrow(
+    const Handle(TDocStd_Document)& document) noexcept {
+    try {
+        if (!document.IsNull() && document->HasOpenCommand()) {
+            document->AbortCommand();
+        }
+    } catch (...) {
+    }
+}
+
+Core3DPBRMaterial* Core3DMakePBRMaterial(
+    const XCAFDoc_VisMaterialPBR& material) {
+    if (!material.IsDefined) {
+        return nil;
+    }
+    Standard_Real red = 0.0;
+    Standard_Real green = 0.0;
+    Standard_Real blue = 0.0;
+    material.BaseColor.GetRGB().Values(
+        red, green, blue, Quantity_TOC_sRGB);
+    if (!std::isfinite(red) || !std::isfinite(green)
+        || !std::isfinite(blue)) {
+        return nil;
+    }
+    UIColor* color = [UIColor colorWithRed:red
+                                     green:green
+                                      blue:blue
+                                     alpha:material.BaseColor.Alpha()];
+    const BOOL supportsScalarEditing =
+        material.BaseColorTexture.IsNull()
+        && material.MetallicRoughnessTexture.IsNull()
+        && material.EmissiveTexture.IsNull()
+        && material.OcclusionTexture.IsNull()
+        && material.NormalTexture.IsNull();
+    return [[Core3DPBRMaterial alloc]
+        initWithBaseColor:color
+                 metallic:material.Metallic
+                roughness:material.Roughness
+    supportsScalarEditing:supportsScalarEditing];
+}
+
+bool Core3DApplyNativePBRScalars(Core3DPBRMaterial* source,
+                                 XCAFDoc_VisMaterialPBR& result) {
+    if (source == nil || !std::isfinite(source.metallic)
+        || !std::isfinite(source.roughness)
+        || source.metallic < 0.0 || source.metallic > 1.0
+        || source.roughness < 0.0 || source.roughness > 1.0) {
+        return false;
+    }
+    CGFloat red = 0.0;
+    CGFloat green = 0.0;
+    CGFloat blue = 0.0;
+    CGFloat alpha = 0.0;
+    if (![source.baseColor getRed:&red green:&green blue:&blue alpha:&alpha]
+        || !std::isfinite(red) || !std::isfinite(green)
+        || !std::isfinite(blue) || !std::isfinite(alpha)
+        || alpha < 0.0 || alpha > 1.0) {
+        return false;
+    }
+    // UIColorWell may return Display-P3 / extended-sRGB components outside
+    // the persistable [0, 1] material gamut. Explicit clipping gives those
+    // legitimate colors a deterministic sRGB representation instead of a
+    // silent no-op.
+    red = std::clamp(red, static_cast<CGFloat>(0.0),
+                    static_cast<CGFloat>(1.0));
+    green = std::clamp(green, static_cast<CGFloat>(0.0),
+                      static_cast<CGFloat>(1.0));
+    blue = std::clamp(blue, static_cast<CGFloat>(0.0),
+                     static_cast<CGFloat>(1.0));
+    const Standard_ShortReal preservedAlpha = result.IsDefined
+        ? result.BaseColor.Alpha()
+        : static_cast<Standard_ShortReal>(alpha);
+    if (!std::isfinite(preservedAlpha)
+        || preservedAlpha < 0.0f || preservedAlpha > 1.0f) {
+        return false;
+    }
+    result.BaseColor = Quantity_ColorRGBA(
+        Quantity_Color(red, green, blue, Quantity_TOC_sRGB),
+        preservedAlpha);
+    result.Metallic = static_cast<Standard_ShortReal>(source.metallic);
+    result.Roughness = static_cast<Standard_ShortReal>(source.roughness);
+    result.IsDefined = Standard_True;
+    return true;
+}
+
+XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
+    const Graphic3d_NameOfMaterial materialName,
+    const Quantity_NameOfColor colorName) {
+    const Graphic3d_MaterialAspect aspect(materialName);
+    const Graphic3d_PBRMaterial& preset = aspect.PBRMaterial();
+    XCAFDoc_VisMaterialPBR result;
+    result.BaseColor = Quantity_ColorRGBA(
+        Quantity_Color(colorName), preset.Alpha());
+    result.EmissiveFactor = preset.Emission();
+    result.Metallic = preset.Metallic();
+    result.Roughness = preset.NormalizedRoughness();
+    result.RefractionIndex = preset.IOR();
+    result.IsDefined = Standard_True;
+    return result;
+}
+
+} // namespace
 
 @interface Core3DViewController () {
     BOOL _isSetuped;
@@ -155,18 +270,26 @@
 
 	try {
 		transaction->NewCommand();
+		if (!transaction->HasOpenCommand()) {
+			return;
+		}
 		for (const PendingStyle& style : pendingStyles) {
+			if (!doc->ClearObjectVisualMaterial(style.label)) {
+				Core3DAbortCommandNoThrow(transaction);
+				return;
+			}
 			doc->SaveObjectMaterial(style.label, style.material);
 			doc->SaveObjectColor(style.label, style.color);
 		}
 		if (!transaction->CommitCommand()) {
-			if (transaction->HasOpenCommand()) { transaction->AbortCommand(); }
+			Core3DAbortCommandNoThrow(transaction);
 			return;
 		}
 	} catch (...) {
-		if (transaction->HasOpenCommand()) { transaction->AbortCommand(); }
+		Core3DAbortCommandNoThrow(transaction);
 		return;
 	}
+	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
 		style.shape->UnsetColor();
@@ -174,9 +297,124 @@
 		style.shape->SetColor(style.color);
 	}
 	[self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
-	doc->NotifyChanges();
+	NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
+		[NSMutableArray arrayWithCapacity:pendingStyles.size()];
+	for (const PendingStyle& style : pendingStyles) {
+		const Graphic3d_MaterialAspect presetAspect(style.material);
+		const Graphic3d_PBRMaterial& preset = presetAspect.PBRMaterial();
+		XCAFDoc_VisMaterialPBR editable;
+		editable.BaseColor = Quantity_ColorRGBA(
+			Quantity_Color(style.color), preset.Alpha());
+		editable.EmissiveFactor = preset.Emission();
+		editable.Metallic = preset.Metallic();
+		editable.Roughness = preset.NormalizedRoughness();
+		editable.RefractionIndex = preset.IOR();
+		Core3DPBRMaterial* pbr = Core3DMakePBRMaterial(editable);
+		if (pbr != nil) {
+			[selectedPBR addObject:pbr];
+		}
+	}
+	[self.materialController didChangeSelectionWithPBRMaterials:selectedPBR];
     context->UpdateCurrentViewer();
-    [self sendNotifyUIState: UIStateChangingApplyMaterial];
+    [self sendNotifyUIState: UIStateChangingApplyMaterial
+                            | UIStateChangingHistory];
+}
+
+-(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material {
+    if (material == nil || !material.supportsScalarEditing) {
+        return;
+    }
+
+    auto context = GLController.viewer->AisContext();
+    auto doc = GLController.viewer->getDocument();
+    auto transaction = doc->ChangeDocument();
+    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+        return;
+    }
+
+    struct PendingPBRStyle {
+        Handle(AIS_Shape) shape;
+        TDF_Label label;
+        XCAFDoc_VisMaterialPBR material;
+    };
+    std::vector<PendingPBRStyle> pendingStyles;
+    for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
+        const Handle(AIS_InteractiveObject) selected =
+            context->SelectedInteractive();
+        const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
+        if (shape.IsNull() || shape->Shape().IsNull()) {
+            continue;
+        }
+        const TDF_Label label = doc->ShapeLabel(selected);
+        if (label.IsNull()) {
+            return;
+        }
+        if (!doc->SupportsScalarPBRMaterialEditingForLabel(label)) {
+            return;
+        }
+        XCAFDoc_VisMaterialPBR nativeMaterial;
+        if (!doc->TryEffectivePBRMaterialForLabel(
+                label, nativeMaterial)) {
+            nativeMaterial = Core3DLegacyPBRMaterial(
+                doc->MaterialNameForLabel(label),
+                doc->ColorNameForLabel(label));
+        }
+        if (!nativeMaterial.BaseColorTexture.IsNull()
+            || !nativeMaterial.MetallicRoughnessTexture.IsNull()
+            || !nativeMaterial.EmissiveTexture.IsNull()
+            || !nativeMaterial.OcclusionTexture.IsNull()
+            || !nativeMaterial.NormalTexture.IsNull()
+            || !Core3DApplyNativePBRScalars(
+                material, nativeMaterial)) {
+            return;
+        }
+        pendingStyles.push_back({shape, label, nativeMaterial});
+    }
+    if (pendingStyles.empty()) {
+        return;
+    }
+
+    try {
+        transaction->NewCommand();
+        if (!transaction->HasOpenCommand()) {
+            return;
+        }
+        for (const PendingPBRStyle& style : pendingStyles) {
+            if (!doc->SaveObjectPBRMaterial(
+                    style.label, style.material)) {
+                Core3DAbortCommandNoThrow(transaction);
+                return;
+            }
+        }
+        if (!transaction->CommitCommand()) {
+            Core3DAbortCommandNoThrow(transaction);
+            return;
+        }
+    } catch (...) {
+        Core3DAbortCommandNoThrow(transaction);
+        return;
+    }
+
+    doc->NotifyChanges();
+    for (const PendingPBRStyle& style : pendingStyles) {
+        style.shape->UnsetColor();
+        doc->LoadObjectMeterial(style.label, style.shape);
+    }
+
+    NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
+        [NSMutableArray arrayWithCapacity:pendingStyles.size()];
+    for (const PendingPBRStyle& style : pendingStyles) {
+        Core3DPBRMaterial* publishedMaterial =
+            Core3DMakePBRMaterial(style.material);
+        if (publishedMaterial != nil) {
+            [selectedPBR addObject:publishedMaterial];
+        }
+    }
+    [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
+    [self.materialController didChangeSelectionWithPBRMaterials:selectedPBR];
+    context->UpdateCurrentViewer();
+    [self sendNotifyUIState:UIStateChangingApplyMaterial
+                           | UIStateChangingHistory];
 }
 
 -(void) receiveOcctDocumentNotification:(NSNotification *) notification {
@@ -193,6 +431,501 @@
 
     [self viewDidAssetModify];
 }
+
+#ifdef DEBUG
+- (NSData *_Nullable)debugLegacyBinOcafFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.legacy-fixture", NSUUID.UUID.UUIDString]];
+    NSString* cbfPath = [baseURL.path stringByAppendingString:@".cbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinOcaf"), document);
+        if (document.IsNull()) {
+            throw Standard_Failure("Unable to create legacy fixture document");
+        }
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapeTool.IsNull()) {
+            throw Standard_Failure("Unable to create legacy shape tool");
+        }
+        const TopoDS_Shape cube = BRepPrimAPI_MakeBox(
+            gp_Pnt(-25.0, -25.0, 0.0), 50.0, 50.0, 50.0).Shape();
+        const TDF_Label label = shapeTool->AddShape(
+            cube, Standard_False, Standard_True);
+        if (label.IsNull()) {
+            throw Standard_Failure("Unable to create legacy fixture shape");
+        }
+        TDataStd_Integer::Set(
+            label.FindChild(11),
+            Graphic3d_NameOfMaterial_ShinyPlastified);
+        TDataStd_Integer::Set(
+            label.FindChild(12), Quantity_NOC_BLUE);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save legacy fixture");
+        }
+        result = [NSData dataWithContentsOfFile:cbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:cbfPath error:nil];
+    return result;
+}
+
+- (NSInteger)debugDocumentUndoCount {
+    auto document = GLController.viewer->getDocument()->ChangeDocument();
+    return document.IsNull()
+        ? 0
+        : static_cast<NSInteger>(document->GetAvailableUndos());
+}
+
+- (NSInteger)debugVisualMaterialDefinitionCount {
+    auto document = GLController.viewer->getDocument()->ChangeDocument();
+    if (document.IsNull()
+        || !XCAFDoc_DocumentTool::CheckVisMaterialTool(document->Main())) {
+        return 0;
+    }
+    Handle(XCAFDoc_VisMaterialTool) tool =
+        XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+    if (tool.IsNull()) {
+        return 0;
+    }
+    TDF_LabelSequence labels;
+    tool->GetMaterials(labels);
+    return static_cast<NSInteger>(labels.Length());
+}
+
+- (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.external-texture-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        if (document.IsNull()) {
+            throw Standard_Failure("Unable to create XCAF fixture document");
+        }
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) tool =
+            XCAFDoc_DocumentTool::VisMaterialTool(
+                document->Main());
+        if (shapeTool.IsNull() || tool.IsNull()) {
+            throw Standard_Failure("Unable to create XCAF fixture tools");
+        }
+        const TopoDS_Shape cube = BRepPrimAPI_MakeBox(
+            gp_Pnt(-25.0, -25.0, 0.0), 50.0, 50.0, 50.0).Shape();
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            cube, Standard_False, Standard_True);
+        if (shapeLabel.IsNull()) {
+            throw Standard_Failure("Unable to create XCAF fixture shape");
+        }
+        XCAFDoc_VisMaterialPBR pbr;
+        pbr.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(0.3, 0.6, 0.9, Quantity_TOC_sRGB),
+            1.0f);
+        pbr.Metallic = 0.2f;
+        pbr.Roughness = 0.7f;
+        pbr.BaseColorTexture = new Image_Texture(
+            TCollection_AsciiString(
+                "/tmp/shapeyard-unowned-texture.png"));
+        Handle(XCAFDoc_VisMaterial) material =
+            new XCAFDoc_VisMaterial();
+        material->SetPbrMaterial(pbr);
+        material->SetCommonMaterial(
+            material->ConvertToCommonMaterial());
+        const TDF_Label materialLabel = tool->AddMaterial(
+            material,
+            TCollection_AsciiString("External texture fixture"));
+        if (materialLabel.IsNull()) {
+            throw Standard_Failure("Unable to create XCAF fixture material");
+        }
+        tool->SetShapeMaterial(shapeLabel, materialLabel);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save XCAF fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugOversizedTextureLengthBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.oversized-texture-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSMutableData* result = nil;
+    static NSString* const marker =
+        @"texturebuf://shapeyard-oversized-texture-length";
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) tool =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull() || tool.IsNull()) {
+            throw Standard_Failure("Unable to create oversized fixture");
+        }
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(),
+            Standard_False,
+            Standard_True);
+        NSData* png = [[NSData alloc] initWithBase64EncodedString:
+            @"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            options:0];
+        Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+            NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
+        if (shapeLabel.IsNull() || png.length == 0 || buffer.IsNull()) {
+            throw Standard_Failure("Unable to create texture buffer");
+        }
+        std::memcpy(buffer->ChangeData(), png.bytes, png.length);
+        XCAFDoc_VisMaterialPBR pbr;
+        pbr.BaseColorTexture = new Image_Texture(
+            buffer,
+            TCollection_AsciiString(
+                "shapeyard-oversized-texture-length"));
+        Handle(XCAFDoc_VisMaterial) material =
+            new XCAFDoc_VisMaterial();
+        material->SetPbrMaterial(pbr);
+        const TDF_Label materialLabel = tool->AddMaterial(
+            material,
+            TCollection_AsciiString("Oversized texture fixture"));
+        if (materialLabel.IsNull()) {
+            throw Standard_Failure("Unable to add oversized fixture material");
+        }
+        tool->SetShapeMaterial(shapeLabel, materialLabel);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save oversized fixture");
+        }
+        result = [[NSData dataWithContentsOfFile:xbfPath] mutableCopy];
+        if (result == nil) {
+            throw Standard_Failure("Unable to read oversized fixture");
+        }
+        NSData* markerData = [marker dataUsingEncoding:NSUTF8StringEncoding];
+        const NSRange markerRange = [result rangeOfData:markerData
+                                                options:0
+                                                  range:NSMakeRange(
+                                                      0, result.length)];
+        if (markerRange.location == NSNotFound) {
+            throw Standard_Failure("Unable to locate texture length marker");
+        }
+        const NSUInteger afterTerminator = NSMaxRange(markerRange) + 1;
+        const NSUInteger booleanOffset = (afterTerminator + 3) & ~NSUInteger(3);
+        const NSUInteger lengthOffset = booleanOffset + sizeof(std::int32_t);
+        if (lengthOffset > result.length - sizeof(std::int32_t)) {
+            throw Standard_Failure("Invalid texture length offset");
+        }
+        const std::uint32_t maliciousLength = CFSwapInt32HostToLittle(
+            static_cast<std::uint32_t>(INT32_MAX));
+        [result replaceBytesInRange:NSMakeRange(
+                                        lengthOffset,
+                                        sizeof(maliciousLength))
+                           withBytes:&maliciousLength];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugCyclicAssemblyBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.cyclic-assembly-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull()) {
+            throw Standard_Failure("Unable to create cyclic fixture");
+        }
+        const TDF_Label root = shapeTool->NewShape();
+        const TDF_Label first = shapeTool->NewShape();
+        const TDF_Label second = shapeTool->NewShape();
+        if (root.IsNull() || first.IsNull() || second.IsNull()
+            || shapeTool->AddComponent(
+                root, first, TopLoc_Location()).IsNull()
+            || shapeTool->AddComponent(
+                first, second, TopLoc_Location()).IsNull()
+            || shapeTool->AddComponent(
+                second, first, TopLoc_Location()).IsNull()) {
+            throw Standard_Failure("Unable to create assembly cycle");
+        }
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save cyclic fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.common-texture-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) tool =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull() || tool.IsNull()) {
+            throw Standard_Failure("Unable to create Common texture fixture");
+        }
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(),
+            Standard_False,
+            Standard_True);
+        NSData* png = [[NSData alloc] initWithBase64EncodedString:
+            @"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            options:0];
+        Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+            NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
+        if (shapeLabel.IsNull() || png.length == 0 || buffer.IsNull()) {
+            throw Standard_Failure("Unable to create Common texture buffer");
+        }
+        std::memcpy(buffer->ChangeData(), png.bytes, png.length);
+
+        XCAFDoc_VisMaterialPBR pbr;
+        pbr.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(0.25, 0.55, 0.85, Quantity_TOC_sRGB),
+            1.0f);
+        pbr.Metallic = 0.35f;
+        pbr.Roughness = 0.65f;
+        Handle(XCAFDoc_VisMaterial) material =
+            new XCAFDoc_VisMaterial();
+        material->SetPbrMaterial(pbr);
+        XCAFDoc_VisMaterialCommon common =
+            material->ConvertToCommonMaterial();
+        common.DiffuseTexture = new Image_Texture(
+            buffer,
+            TCollection_AsciiString("shapeyard-common-diffuse"));
+        material->SetCommonMaterial(common);
+        const TDF_Label materialLabel = tool->AddMaterial(
+            material,
+            TCollection_AsciiString("Common texture fixture"));
+        if (materialLabel.IsNull()) {
+            throw Standard_Failure("Unable to add Common texture material");
+        }
+        tool->SetShapeMaterial(shapeLabel, materialLabel);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save Common texture fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugMaskedDoubleSidedPBRBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.masked-pbr-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) tool =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull() || tool.IsNull()) {
+            throw Standard_Failure("Unable to create masked PBR fixture");
+        }
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(),
+            Standard_False,
+            Standard_True);
+        XCAFDoc_VisMaterialPBR pbr;
+        pbr.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(0.2, 0.7, 0.4, Quantity_TOC_sRGB),
+            0.73f);
+        pbr.Metallic = 0.27f;
+        pbr.Roughness = 0.63f;
+        Handle(XCAFDoc_VisMaterial) material =
+            new XCAFDoc_VisMaterial();
+        material->SetPbrMaterial(pbr);
+        material->SetCommonMaterial(
+            material->ConvertToCommonMaterial());
+        material->SetAlphaMode(Graphic3d_AlphaMode_Mask, 0.37f);
+        material->SetFaceCulling(
+            Graphic3d_TypeOfBackfacingModel_DoubleSided);
+        const TDF_Label materialLabel = tool->AddMaterial(
+            material,
+            TCollection_AsciiString("Masked double-sided fixture"));
+        if (shapeLabel.IsNull() || materialLabel.IsNull()) {
+            throw Standard_Failure("Unable to add masked PBR material");
+        }
+        tool->SetShapeMaterial(shapeLabel, materialLabel);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save masked PBR fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugOpaqueFrontCulledPBRBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.opaque-front-pbr-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) tool =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull() || tool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create opaque front-culled PBR fixture");
+        }
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(),
+            Standard_False,
+            Standard_True);
+        XCAFDoc_VisMaterialPBR pbr;
+        pbr.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(0.8, 0.3, 0.1, Quantity_TOC_sRGB),
+            0.41f);
+        pbr.Metallic = 0.12f;
+        pbr.Roughness = 0.78f;
+        Handle(XCAFDoc_VisMaterial) material =
+            new XCAFDoc_VisMaterial();
+        material->SetPbrMaterial(pbr);
+        material->SetCommonMaterial(
+            material->ConvertToCommonMaterial());
+        material->SetAlphaMode(Graphic3d_AlphaMode_Opaque, 0.62f);
+        material->SetFaceCulling(
+            Graphic3d_TypeOfBackfacingModel_FrontCulled);
+        const TDF_Label materialLabel = tool->AddMaterial(
+            material,
+            TCollection_AsciiString("Opaque front-culled fixture"));
+        if (shapeLabel.IsNull() || materialLabel.IsNull()) {
+            throw Standard_Failure(
+                "Unable to add opaque front-culled PBR material");
+        }
+        tool->SetShapeMaterial(shapeLabel, materialLabel);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save opaque front-culled PBR fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+#endif
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];

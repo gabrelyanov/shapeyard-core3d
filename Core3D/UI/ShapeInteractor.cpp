@@ -42,6 +42,22 @@
 
 namespace core3d {
 	namespace {
+		bool CanExportCommittedDocument(
+			const Handle(OcctDocument)& document,
+			const std::string& filename) {
+			const Handle(TDocStd_Document) transaction = document.IsNull()
+				? Handle(TDocStd_Document)()
+				: document->ChangeDocument();
+			if (filename.empty() || transaction.IsNull()
+				|| transaction->HasOpenCommand()) {
+				if (!filename.empty()) {
+					std::remove(filename.c_str());
+				}
+				return false;
+			}
+			return true;
+		}
+
 		Standard_Boolean IsTopologicallyValid(const TopoDS_Shape& shape) {
 			if (shape.IsNull()) {
 				return Standard_False;
@@ -51,6 +67,16 @@ namespace core3d {
 				return analyzer.IsValid();
 			} catch (...) {
 				return Standard_False;
+			}
+		}
+
+		void AbortOpenCommandNoThrow(
+			const Handle(TDocStd_Document)& document) noexcept {
+			try {
+				if (!document.IsNull() && document->HasOpenCommand()) {
+					document->AbortCommand();
+				}
+			} catch (...) {
 			}
 		}
 	}
@@ -128,8 +154,7 @@ namespace core3d {
 
 				Handle(AIS_Shape) result = new AIS_Shape(resultShape);
 				result->SetLocalTransformation(sel.transform);
-				result->SetMaterial(sel.materialName);
-				result->SetColor(sel.colorName);
+				myDoc->LoadObjectMeterial(sel.documentLabel, result);
 				results.push_back({index, result});
 			}
 		} catch (const Standard_Failure&) {
@@ -155,8 +180,11 @@ namespace core3d {
 				if (resultLabel.IsNull()) {
 					throw Standard_Failure("Unable to add chamfer result");
 				}
-				myDoc->SaveObjectMaterial(resultLabel, sel.materialName);
-				myDoc->SaveObjectColor(resultLabel, sel.colorName);
+				if (!myDoc->CopyObjectAppearance(
+						sel.documentLabel, resultLabel)) {
+					throw Standard_Failure(
+						"Unable to copy chamfer result appearance");
+				}
 			}
 		} catch (...) {
 			if (_ownsChamferCommand && doc->HasOpenCommand()) {
@@ -480,6 +508,9 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToStl(const std::string &filename, const Standard_Boolean isASCII/* = Standard_True*/) {
+        if (!CanExportCommittedDocument(myDoc, filename)) {
+            return;
+        }
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         AIS_ListIteratorOfListOfInteractive iobject(objects);
@@ -503,6 +534,9 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToObj(const std::string &filename) {
+        if (!CanExportCommittedDocument(myDoc, filename)) {
+            return;
+        }
 //#define converter2obj
 #ifdef converter2obj
         const auto tmp_stl = filename + ".tmp";
@@ -586,9 +620,7 @@ namespace core3d {
         // document is left untouched for continued editing — even if the export above
         // threw. Leaving the command open would let a later NewCommand() commit stale
         // (double-transformed) geometry.
-        if (myDoc->ChangeDocument()->HasOpenCommand()) {
-            myDoc->ChangeDocument()->AbortCommand();
-        }
+        AbortOpenCommandNoThrow(myDoc->ChangeDocument());
 
         // A failed or aborted write can leave a partial (non-empty) file behind, which
         // would pass the size check upstream and share a corrupt OBJ — remove it so
@@ -600,36 +632,74 @@ namespace core3d {
     }
 
     void ShapeInteractor::exportToGltf(const std::string &filename) {
-        // Use the same document-based approach as OBJ export (which works)
-        myDoc->ChangeDocument()->NewCommand();
-        myDoc->ApplyTransforms();
-
-        // Triangulate all shapes in the document for mesh-based export
-        Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main());
-        TDF_LabelSequence labels;
-        shapeTool->GetFreeShapes(labels);
-        for (Standard_Integer i = 1; i <= labels.Length(); i++) {
-            TopoDS_Shape shape = shapeTool->GetShape(labels.Value(i));
-            if (!shape.IsNull()) {
-                BRepMesh_IncrementalMesh mesher(shape, 0.1);
-                mesher.Perform();
-            }
+        if (!CanExportCommittedDocument(myDoc, filename)) {
+            return;
         }
-
-        TColStd_IndexedDataMapOfStringString aFileInfo;
-        aFileInfo.Add("Author", "Shapeyard 3D");
-
+        bool exportSucceeded = false;
         try {
-            auto writer = RWGltf_CafWriter(TCollection_AsciiString(filename.c_str()), Standard_True);
-            writer.Perform(myDoc->Document(), aFileInfo, Message_ProgressRange());
+            // Bake presentation transforms only inside a transient command;
+            // every exit below aborts it so export cannot mutate the editor.
+            myDoc->ChangeDocument()->NewCommand();
+            myDoc->ApplyTransforms();
+
+            Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(
+                    myDoc->Document()->Main());
+            TDF_LabelSequence labels;
+            if (!shapeTool.IsNull()) {
+                shapeTool->GetFreeShapes(labels);
+            }
+            if (!shapeTool.IsNull() && !labels.IsEmpty()) {
+                TopoDS_Compound compound;
+                BRep_Builder builder;
+                builder.MakeCompound(compound);
+                for (Standard_Integer i = 1; i <= labels.Length(); ++i) {
+                    const TopoDS_Shape shape =
+                        shapeTool->GetShape(labels.Value(i));
+                    if (!shape.IsNull()) {
+                        builder.Add(compound, shape);
+                    }
+                }
+                Handle(Prs3d_Drawer) drawer = myContext->DefaultDrawer();
+                const Standard_Real deflection =
+                    StdPrs_ToolTriangulatedShape::GetDeflection(
+                        compound, drawer);
+                if (!BRepTools::Triangulation(compound, deflection)) {
+                    BRepMesh_IncrementalMesh mesher;
+                    mesher.ChangeParameters().Deflection = deflection;
+                    mesher.ChangeParameters().Angle = drawer->DeviationAngle();
+                    mesher.ChangeParameters().InParallel = Standard_True;
+                    mesher.SetShape(compound);
+                    mesher.Perform();
+                }
+
+                TColStd_IndexedDataMapOfStringString fileInfo;
+                fileInfo.Add("Author", "Shapeyard 3D");
+                RWGltf_CafWriter writer(
+                    TCollection_AsciiString(filename.c_str()),
+                    Standard_True);
+                exportSucceeded = writer.Perform(
+                    myDoc->Document(),
+                    fileInfo,
+                    Message_ProgressRange());
+            }
+        } catch (const Standard_Failure& failure) {
+            printf("Error creating glTF file (exception): %s [%s]\n",
+                   filename.c_str(), failure.GetMessageString());
         } catch (...) {
             printf("Error creating glTF file (exception): %s\n", filename.c_str());
         }
 
-        myDoc->ChangeDocument()->AbortCommand();
+        AbortOpenCommandNoThrow(myDoc->ChangeDocument());
+        if (!exportSucceeded) {
+            std::remove(filename.c_str());
+        }
     }
 
     void ShapeInteractor::exportToStep(const std::string &filename) {
+        if (!CanExportCommittedDocument(myDoc, filename)) {
+            return;
+        }
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         AIS_ListIteratorOfListOfInteractive iobject(objects);

@@ -74,6 +74,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 - (void)checkSelections;
+- (void)addCube:(UIBarButtonItem *)sender;
 @end
 
 @implementation GLViewController {
@@ -553,7 +554,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                                    initWithTitle:@"Add cube"
                                    style:UIBarButtonItemStylePlain
                                    target:self
-                                   action:@selector(addTestPrimitives:)];
+                                   action:@selector(addCube:)];
 
     UIBarButtonItem *displayAboutDlgBtn = [[UIBarButtonItem alloc]
                                            initWithTitle:@"About"
@@ -860,6 +861,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->undo()) {
 		_viewer->redrawDocument();
+		[self checkSelections];
 		[self requestRender];
 	}
 }
@@ -877,6 +879,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->redo()) {
 		_viewer->redrawDocument();
+		[self checkSelections];
 		[self requestRender];
 	}
 }
@@ -1134,6 +1137,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         NSURL *tmpDirectory = [NSFileManager.defaultManager temporaryDirectory];
         NSURL *baseURL = [tmpDirectory URLByAppendingPathComponent:tmpFilename];
         NSString *expectedCbfPath = [baseURL.path stringByAppendingString:@".cbf"];
+        NSString *expectedXbfPath = [baseURL.path stringByAppendingString:@".xbf"];
         const std::string fn = baseURL.path.UTF8String;
 
         __block std::string cbfFilePath;
@@ -1141,10 +1145,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             try {
                 if (strongSelf->_viewer != nullptr) {
                     cbfFilePath = strongSelf->_viewer->getDocument()->save(fn);
-                    if (!cbfFilePath.empty()
-                        && strongSelf->_viewer->ValidateCbf(cbfFilePath)
-                            != AssetImportResult::Success) {
-                        cbfFilePath.clear();
+                    if (!cbfFilePath.empty()) {
+                        const AssetImportResult validation =
+                            strongSelf->_viewer->ValidateCbf(cbfFilePath);
+                        if (validation != AssetImportResult::Success) {
+                            NSLog(@"CBF validation failed after save: %d at %@",
+                                  static_cast<int>(validation),
+                                  [NSString stringForStdString:cbfFilePath]);
+                            cbfFilePath.clear();
+                        }
                     }
                 }
             } catch (...) {
@@ -1163,7 +1172,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         NSFileManager *fileManager = NSFileManager.defaultManager;
         [fileManager removeItemAtURL:baseURL error:nil];
         [fileManager removeItemAtPath:expectedCbfPath error:nil];
-        if (dataPath != nil && ![dataPath isEqualToString:expectedCbfPath]) {
+        [fileManager removeItemAtPath:expectedXbfPath error:nil];
+        if (dataPath != nil
+            && ![dataPath isEqualToString:expectedCbfPath]
+            && ![dataPath isEqualToString:expectedXbfPath]) {
             [fileManager removeItemAtPath:dataPath error:nil];
         }
 
@@ -1185,12 +1197,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultInternalFailure);
             return;
         }
-        if (!HasCbfMagic(data)) {
+        static const NSUInteger kMaximumProjectDocumentBytes =
+            256ull * 1024ull * 1024ull;
+        if (data.length > kMaximumProjectDocumentBytes
+            || !HasCbfMagic(data)) {
             CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultInvalidData);
             return;
         }
 
-        NSString *tmpFilename = [NSString stringWithFormat:@"%@.tmp.cbf", NSUUID.UUID.UUIDString];
+        // OCCT reads FILE_FORMAT from the binary header before consulting the
+        // path extension. Both BinOcaf and BinXCAF readers are registered, so
+        // a neutral fixed suffix avoids duplicating its header parser here.
+        NSString *tmpFilename = [NSString stringWithFormat:@"%@.tmp.cbf",
+                                  NSUUID.UUID.UUIDString];
         NSURL *tmpUrl = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:tmpFilename];
         NSError *error = nil;
         [data writeToURL:tmpUrl options:NSDataWritingAtomic error:&error];
@@ -1241,12 +1260,39 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     return data;
 }
 
+- (BOOL)saveSnapshot {
+    NSData *data = [self thumbData];
+    UIImage *image = data == nil ? nil : [UIImage imageWithData:data];
+    if (image == nil) {
+        return NO;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil);
+    });
+    return YES;
+}
+
 - (BOOL)saveSnapshot:(NSURL *)tmpUrl {
     const auto fn = TCollection_AsciiString(tmpUrl.path.UTF8String);
     return _viewer->dumpOfDisplayedColoredObjects(500, 500, tmpUrl.path.UTF8String);
 }
 
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType {
+    if (_viewer == nullptr) {
+        return nil;
+    }
+    const Handle(OcctDocument) document = _viewer->getDocument();
+    const Handle(TDocStd_Document) transaction = document.IsNull()
+        ? Handle(TDocStd_Document)()
+        : document->ChangeDocument();
+    const auto objectInteractor = _viewer->getObjectInteractor();
+    if (transaction.IsNull() || transaction->HasOpenCommand()
+        || objectInteractor == nullptr
+        || objectInteractor->hasActiveBoolean()
+        || objectInteractor->hasUnresolvedBoolean()
+        || objectInteractor->hasTrialMirrorObjects()) {
+        return nil;
+    }
     NSString *pathExtension = NULL;
     switch (exportType) {
         case ExportTypeObj:

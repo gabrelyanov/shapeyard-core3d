@@ -168,6 +168,7 @@
 		32ECC7DD2BCD35B100770594 /* Core3DViewController+AvailabilityManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */; };
 		32ECC7DE2BCD36E600770594 /* Core3DViewController+AvailabilityManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		713D36DF2CD4F482002E7F21 /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 713D36DE2CD4F482002E7F21 /* CoreImage.framework */; };
+		C03D50900000000000000001 /* ImageIO.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C03D50910000000000000001 /* ImageIO.framework */; };
 		71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */; };
 		71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */; };
 		71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */; };
@@ -341,6 +342,7 @@
 		32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+AvailabilityManager.mm"; sourceTree = "<group>"; };
 		32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+AvailabilityManager.h"; sourceTree = "<group>"; };
 		713D36DE2CD4F482002E7F21 /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/CoreImage.framework; sourceTree = DEVELOPER_DIR; };
+		C03D50910000000000000001 /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = System/Library/Frameworks/ImageIO.framework; sourceTree = SDKROOT; };
 		71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ConstructorManipulator.cpp; sourceTree = "<group>"; };
 		71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ConstructorManipulator.hpp; sourceTree = "<group>"; };
 		71F7ACEB2C09D29A00FDF2EA /* BooleanOperationController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BooleanOperationController.hpp; sourceTree = "<group>"; };
@@ -358,6 +360,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C03D50900000000000000001 /* ImageIO.framework in Frameworks */,
 				322160B32BB56FC800040E84 /* libTKFeat.a in Frameworks */,
 				322160BB2BB56FC900040E84 /* libTKBinL.a in Frameworks */,
 				322160912BB56FC600040E84 /* libTKMath.a in Frameworks */,
@@ -529,6 +532,7 @@
 		322160552BB56F2200040E84 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				C03D50910000000000000001 /* ImageIO.framework */,
 				713D36DE2CD4F482002E7F21 /* CoreImage.framework */,
 				32BD97742C20678100ECF581 /* CoreGraphics.framework */,
 				3280C8272BBFE2EC00862483 /* libfreetype.a */,

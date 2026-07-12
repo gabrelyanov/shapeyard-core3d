@@ -75,7 +75,7 @@ static_assert(sizeof(std::uint32_t) == 4,
                   indexOfRefraction:(float)indexOfRefraction
                           alphaMode:(Core3DSceneAlphaMode)alphaMode
                         alphaCutoff:(float)alphaCutoff
-                        doubleSided:(BOOL)doubleSided;
+                           cullMode:(Core3DSceneCullMode)cullMode;
 @end
 
 @interface Core3DSceneFacePrimitiveSnapshot ()
@@ -243,7 +243,7 @@ static_assert(sizeof(std::uint32_t) == 4,
                   indexOfRefraction:(float)indexOfRefraction
                           alphaMode:(Core3DSceneAlphaMode)alphaMode
                         alphaCutoff:(float)alphaCutoff
-                        doubleSided:(BOOL)doubleSided {
+                           cullMode:(Core3DSceneCullMode)cullMode {
     self = [super init];
     if (self) {
         _identifier = [identifier copy];
@@ -254,7 +254,8 @@ static_assert(sizeof(std::uint32_t) == 4,
         _indexOfRefraction = indexOfRefraction;
         _alphaMode = alphaMode;
         _alphaCutoff = alphaCutoff;
-        _doubleSided = doubleSided;
+        _cullMode = cullMode;
+        _doubleSided = cullMode == Core3DSceneCullModeNone;
     }
     return self;
 }
@@ -692,6 +693,16 @@ bool IsValid(const AlphaMode value) noexcept {
     return false;
 }
 
+bool IsValid(const CullMode value) noexcept {
+    switch (value) {
+        case CullMode::None:
+        case CullMode::Back:
+        case CullMode::Front:
+            return true;
+    }
+    return false;
+}
+
 bool IsValid(const RenderRole value) noexcept {
     switch (value) {
         case RenderRole::Model:
@@ -812,7 +823,8 @@ bool IsValid(const MaterialSnapshot& value) noexcept {
         && value.roughness >= 0.0f && value.roughness <= 1.0f
         && value.indexOfRefraction > 0.0f
         && value.alphaCutoff >= 0.0f && value.alphaCutoff <= 1.0f
-        && IsValid(value.alphaMode);
+        && IsValid(value.alphaMode)
+        && IsValid(value.cullMode);
 }
 
 bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
@@ -1679,6 +1691,20 @@ Core3DSceneAlphaMode AlphaModeFromScene(AlphaMode value) {
     return Core3DSceneAlphaModeOpaque;
 }
 
+Core3DSceneCullMode CullModeFromScene(CullMode value) {
+    switch (value) {
+        case CullMode::None:
+            return Core3DSceneCullModeNone;
+        case CullMode::Back:
+            return Core3DSceneCullModeBack;
+        case CullMode::Front:
+            return Core3DSceneCullModeFront;
+    }
+
+    NSCAssert(NO, @"Unknown scene cull mode value: %u", static_cast<unsigned>(value));
+    return Core3DSceneCullModeBack;
+}
+
 Core3DSceneRenderRole RenderRoleFromScene(RenderRole value) {
     switch (value) {
         case RenderRole::Model:
@@ -1826,7 +1852,7 @@ Core3DSceneMaterialSnapshot *MaterialFromScene(const MaterialSnapshot& value) {
           indexOfRefraction:value.indexOfRefraction
                   alphaMode:AlphaModeFromScene(value.alphaMode)
                 alphaCutoff:value.alphaCutoff
-                doubleSided:value.doubleSided];
+                   cullMode:CullModeFromScene(value.cullMode)];
 }
 
 Core3DSceneFacePrimitiveSnapshot *FacePrimitiveFromScene(const MeshPrimitive& value) {

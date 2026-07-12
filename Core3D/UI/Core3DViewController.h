@@ -183,6 +183,29 @@ typedef struct {
 //! Test-only recompute seam for the active Boolean trial. This exercises the
 //! same replacement/ownership path used after an interactive adjustment.
 - (BOOL)debugRecomputeBooleanPreview;
+//! Build a standalone pre-schema BinOcaf fixture with geometry and legacy
+//! child-11/12 appearance, but no identity or visual-material infrastructure.
+- (NSData *_Nullable)debugLegacyBinOcafFixtureData;
+//! Authoritative OCAF history depth for migration/transaction assertions.
+- (NSInteger)debugDocumentUndoCount;
+//! Current XCAF visual-material table size for ownership/GC regressions.
+- (NSInteger)debugVisualMaterialDefinitionCount;
+//! Standalone malformed BinXCAF fixture used to prove that loading rejects
+//! external texture paths and preserves the active document on failure.
+- (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData;
+//! Standalone BinXCAF whose embedded texture declares INT32_MAX bytes. The
+//! bounded retrieval driver must reject it before allocating the payload.
+- (NSData *_Nullable)debugOversizedTextureLengthBinXCAFFixtureData;
+//! Standalone BinXCAF with a reachable assembly-reference cycle.
+- (NSData *_Nullable)debugCyclicAssemblyBinXCAFFixtureData;
+//! Valid imported PBR material whose Common fallback owns an embedded PNG.
+//! Scalar authoring must remain read-only until that texture is app-owned.
+- (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;
+//! Valid imported untextured PBR material with non-default alpha and culling.
+- (NSData *_Nullable)debugMaskedDoubleSidedPBRBinXCAFFixtureData;
+//! Valid imported PBR material proving that explicit opaque alpha and
+//! front-face culling survive snapshot transport without normalization.
+- (NSData *_Nullable)debugOpaqueFrontCulledPBRBinXCAFFixtureData;
 #endif
 
 - (void)addTestPrimitives;

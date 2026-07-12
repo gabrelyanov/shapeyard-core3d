@@ -27,8 +27,23 @@
 #include <AIS_InteractiveObject.hxx>
 #include <AIS_Shape.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterialPBR.hxx>
 
 #include <string>
+
+//! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
+//! fail-closed attribute schema and bounded visual-material/string readers.
+//! This is defense in depth for trusted Shapeyard project packages; raw XBF/CBF
+//! remains a private persistence format and must not be exposed as an arbitrary
+//! untrusted import surface without a separately hardened OCCT shape parser.
+Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
+    const Handle(TDocStd_Application)& application);
+//! Reset/query the current thread's fail-closed retrieval signal. OCCT treats
+//! a driver Paste(false) as a warning, so every Open must bracket and inspect
+//! this signal before accepting the returned document.
+Standard_EXPORT void Core3DBeginSafeBinaryRead();
+Standard_EXPORT Standard_Boolean Core3DSafeBinaryReadWasRejected();
+
 //! The document
 class OcctDocument : public Standard_Transient
 {
@@ -73,6 +88,20 @@ public:
     void SaveObjectColor(Handle(AIS_Shape) object, const Quantity_NameOfColor name_of_color);
     void SaveObjectMaterial(const TDF_Label& label, const Graphic3d_NameOfMaterial);
     void SaveObjectColor(const TDF_Label& label, const Quantity_NameOfColor name_of_color);
+    //! Persist a renderer-neutral XCAF metallic-roughness material. The caller
+    //! must own the surrounding document command so assignment, Undo, and Redo
+    //! remain one atomic edit.
+    Standard_Boolean SaveObjectPBRMaterial(
+        const TDF_Label& label,
+        const XCAFDoc_VisMaterialPBR& material);
+    //! Remove a canonical XCAF material assignment before applying a legacy
+    //! preset/color. Existing legacy projects continue to load unchanged.
+    Standard_Boolean ClearObjectVisualMaterial(const TDF_Label& label);
+    //! Copy the effective source appearance without mutating shared XCAF
+    //! material definitions. Used by duplicate and topology-changing tools.
+    Standard_Boolean CopyObjectAppearance(
+        const TDF_Label& source,
+        const TDF_Label& destination);
     void LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis);
 
     TDF_Label AddShape(Handle(AIS_Shape) object);
@@ -88,6 +117,19 @@ public:
     Standard_Boolean TryColorNameForLabel(
         const TDF_Label& label,
         Quantity_NameOfColor& color) const;
+    Standard_Boolean TryPBRMaterialForLabel(
+        const TDF_Label& label,
+        XCAFDoc_VisMaterialPBR& material) const;
+    //! Read the effective whole-object PBR assignment used by presentation and
+    //! editing. Unlike TryPBRMaterialForLabel(), this also accepts imported
+    //! XCAF materials when no legacy Shapeyard override takes precedence.
+    Standard_Boolean TryEffectivePBRMaterialForLabel(
+        const TDF_Label& label,
+        XCAFDoc_VisMaterialPBR& material) const;
+    //! False when scalar authoring would discard any texture owned by either
+    //! the PBR or Common representation of the assigned visual material.
+    Standard_Boolean SupportsScalarPBRMaterialEditingForLabel(
+        const TDF_Label& label) const;
 
     void ReplaceShape(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     

@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace core3d {
@@ -118,6 +119,8 @@ namespace core3d {
     private:
 		Standard_ShortReal _manipulatorSide;
 		std::vector<Handle(AIS_Shape)> _trialMirrorObjects;
+		std::unordered_map<const AIS_Shape*, TDF_Label>
+			_trialMirrorSourceLabels;
 		bool _trialMirrorObjectsValid = false;
     };
 }
