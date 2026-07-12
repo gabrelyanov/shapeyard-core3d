@@ -436,6 +436,25 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
 }
 
 #ifdef DEBUG
+- (BOOL)debugImportSTEPAtURL:(NSURL *)url {
+    if (![NSThread isMainThread]
+        || !url.isFileURL
+        || GLController == nil) {
+        return NO;
+    }
+    const char *path = url.path.fileSystemRepresentation;
+    const std::shared_ptr<core3d::Core3DViewer> viewer =
+        GLController.viewer;
+    if (path == nullptr
+        || viewer == nullptr
+        || !viewer->ImportSTEP(std::string(path))) {
+        return NO;
+    }
+    viewer->FitAll();
+    [GLController requestRender];
+    return YES;
+}
+
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {
     Handle(TDocStd_Application) application;
     Handle(TDocStd_Document) document;

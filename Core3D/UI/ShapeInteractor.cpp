@@ -6,6 +6,7 @@
 //
 
 #include "ShapeInteractor.hpp"
+#include "../OCCTKit/Core3DSTEPExchangeLock.h"
 #include <TopExp_Explorer.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -716,11 +717,15 @@ namespace core3d {
             iobject.Next();
         }
 
-        Interface_Static::SetCVal("write.step.schema", "AP214");
-        STEPControl_Writer stepWriter;
-        stepWriter.Transfer(resultShape, STEPControl_AsIs);
-        if (stepWriter.Write(filename.c_str()) != IFSelect_RetDone) {
-            printf("Error creating STEP file: %s\n", filename.c_str());
+        {
+            std::lock_guard<std::mutex> stepExchangeLock(
+                Core3DSTEPExchangeMutex());
+            Interface_Static::SetCVal("write.step.schema", "AP214IS");
+            STEPControl_Writer stepWriter;
+            stepWriter.Transfer(resultShape, STEPControl_AsIs);
+            if (stepWriter.Write(filename.c_str()) != IFSelect_RetDone) {
+                printf("Error creating STEP file: %s\n", filename.c_str());
+            }
         }
     }
 }

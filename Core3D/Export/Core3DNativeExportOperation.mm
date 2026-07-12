@@ -1,12 +1,15 @@
 #import "Core3DNativeExportOperation+Private.h"
 
+#include "../OCCTKit/Core3DSTEPExchangeLock.h"
 #include "../OCCTKit/OcctDocument.h"
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
+#include <IFSelect_ReturnStatus.hxx>
 #include <Image_Texture.hxx>
+#include <Interface_CheckIterator.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Message_ProgressScope.hxx>
 #include <NCollection_Map.hxx>
@@ -16,20 +19,31 @@
 #include <RWMesh_FaceIterator.hxx>
 #include <RWObj_CafWriter.hxx>
 #include <RWStl.hxx>
+#include <STEPCAFControl_Writer.hxx>
+#include <STEPControl_StepModelType.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
+#include <StepData_ConfParameters.hxx>
+#include <StepData_StepModel.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS.hxx>
+#include <UnitsMethods.hxx>
+#include <UnitsMethods_LengthUnit.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_ColorType.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
+#include <XSControl_WorkSession.hxx>
 
 #include <atomic>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -56,6 +70,8 @@ constexpr std::int64_t kMaximumSTLNodes = 1'500'000;
 constexpr std::int64_t kMaximumSTLTriangles = 1'500'000;
 constexpr std::uint64_t kMaximumSTLArtifactBytes =
     96ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaximumSTEPArtifactBytes =
+    256ULL * 1024ULL * 1024ULL;
 
 struct NativeExportState {
     std::string snapshotPath;
@@ -72,6 +88,7 @@ struct NativeExportState {
 #ifdef DEBUG
     std::atomic_bool debugOmitTextureReferences{false};
     std::atomic_bool debugCorruptSTLTriangleCount{false};
+    std::atomic_bool debugCorruptSTEPTerminator{false};
     std::atomic_bool debugExceedSTLResourceLimit{false};
 #endif
     std::mutex lifecycleMutex;
@@ -676,6 +693,493 @@ bool ValidateBinarySTLArtifact(
         && !input.bad();
 }
 
+class StreamingTokenMatcher {
+public:
+    explicit StreamingTokenMatcher(std::string token)
+    : myToken(std::move(token)) {
+    }
+
+    void Consume(const unsigned char byte) {
+        if (myFound || myToken.empty()) {
+            return;
+        }
+        if (byte == static_cast<unsigned char>(myToken[myMatched])) {
+            ++myMatched;
+            if (myMatched == myToken.size()) {
+                myFound = true;
+            }
+            return;
+        }
+        myMatched = byte == static_cast<unsigned char>(myToken.front())
+            ? 1
+            : 0;
+    }
+
+    bool Found() const {
+        return myFound;
+    }
+
+private:
+    std::string myToken;
+    std::size_t myMatched = 0;
+    bool myFound = false;
+};
+
+std::string ExpectedSTEPUnitToken(const UnitsMethods_LengthUnit unit) {
+    switch (unit) {
+        case UnitsMethods_LengthUnit_Inch:
+            return "CONVERSION_BASED_UNIT('INCH'";
+        case UnitsMethods_LengthUnit_Millimeter:
+            return "SI_UNIT(.MILLI.,.METRE.)";
+        case UnitsMethods_LengthUnit_Foot:
+            return "CONVERSION_BASED_UNIT('FOOT'";
+        case UnitsMethods_LengthUnit_Mile:
+            return "CONVERSION_BASED_UNIT('MILE'";
+        case UnitsMethods_LengthUnit_Meter:
+            return "SI_UNIT($,.METRE.)";
+        case UnitsMethods_LengthUnit_Kilometer:
+            return "SI_UNIT(.KILO.,.METRE.)";
+        case UnitsMethods_LengthUnit_Mil:
+            return "CONVERSION_BASED_UNIT('MIL'";
+        case UnitsMethods_LengthUnit_Micron:
+            return "SI_UNIT(.MICRO.,.METRE.)";
+        case UnitsMethods_LengthUnit_Centimeter:
+            return "SI_UNIT(.CENTI.,.METRE.)";
+        case UnitsMethods_LengthUnit_Microinch:
+            return "CONVERSION_BASED_UNIT('MICROINCH'";
+        case UnitsMethods_LengthUnit_Undefined:
+            return {};
+    }
+    return {};
+}
+
+bool HasExactSingleArtifact(
+    const std::shared_ptr<NativeExportState>& state) {
+    struct stat info = {};
+    if (::lstat(state->primaryPath.c_str(), &info) != 0
+        || !S_ISREG(info.st_mode)
+        || info.st_size <= 0) {
+        return false;
+    }
+    const std::filesystem::path packageRoot(state->packageRootPath);
+    const std::filesystem::path primaryPath =
+        std::filesystem::path(state->primaryPath).lexically_normal();
+    std::error_code error;
+    std::size_t artifactCount = 0;
+    for (std::filesystem::directory_iterator iterator(packageRoot, error), end;
+         !error && iterator != end;
+         iterator.increment(error)) {
+        ThrowIfCancelled(state);
+        const std::filesystem::file_status status =
+            iterator->symlink_status(error);
+        if (error
+            || std::filesystem::is_symlink(status)
+            || !std::filesystem::is_regular_file(status)
+            || iterator->path().lexically_normal() != primaryPath) {
+            return false;
+        }
+        ++artifactCount;
+    }
+    return !error && artifactCount == 1;
+}
+
+bool ValidateSTEPFileContents(
+    const std::shared_ptr<NativeExportState>& state,
+    const std::string& path,
+    const UnitsMethods_LengthUnit outputUnit,
+    const bool expectedColor) {
+    ThrowIfCancelled(state);
+    struct stat info = {};
+    if (::lstat(path.c_str(), &info) != 0
+        || !S_ISREG(info.st_mode)
+        || info.st_size <= 0
+        || static_cast<std::uint64_t>(info.st_size)
+            > kMaximumSTEPArtifactBytes) {
+        return false;
+    }
+
+    const std::string unitToken = ExpectedSTEPUnitToken(outputUnit);
+    if (unitToken.empty()) {
+        return false;
+    }
+    StreamingTokenMatcher schema(
+        "AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }");
+    StreamingTokenMatcher shapeRepresentation(
+        "SHAPE_DEFINITION_REPRESENTATION");
+    StreamingTokenMatcher lengthUnit("LENGTH_UNIT()");
+    StreamingTokenMatcher expectedUnit(unitToken);
+    StreamingTokenMatcher rgbColor("COLOUR_RGB");
+    StreamingTokenMatcher predefinedColor(
+        "DRAUGHTING_PRE_DEFINED_COLOUR");
+    const std::array<std::string, 4> structureTokens = {
+        "HEADER;",
+        "ENDSEC;",
+        "DATA;",
+        "ENDSEC;",
+    };
+    std::size_t structureStage = 0;
+    std::size_t structureMatched = 0;
+    enum class EntityState {
+        Waiting,
+        Hash,
+        Digits,
+        Whitespace,
+    };
+    EntityState entityState = EntityState::Waiting;
+    bool hasEntity = false;
+    const std::string requiredPrefix = "ISO-10303-21;";
+    std::size_t prefixIndex = 0;
+    bool prefixMatches = true;
+    const std::string terminator = "END-ISO-10303-21;";
+    std::string tail;
+    tail.reserve(256);
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+        return false;
+    }
+    std::array<unsigned char, 64 * 1024> buffer = {};
+    std::uint64_t byteCount = 0;
+    while (input) {
+        ThrowIfCancelled(state);
+        input.read(
+            reinterpret_cast<char *>(buffer.data()),
+            static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize readCount = input.gcount();
+        if (readCount <= 0) {
+            break;
+        }
+        byteCount += static_cast<std::uint64_t>(readCount);
+        if (byteCount > kMaximumSTEPArtifactBytes) {
+            return false;
+        }
+        for (std::streamsize index = 0; index < readCount; ++index) {
+            const unsigned char byte = buffer[static_cast<std::size_t>(index)];
+            if (byte == 0) {
+                return false;
+            }
+            if (prefixIndex < requiredPrefix.size()) {
+                prefixMatches = prefixMatches
+                    && byte == static_cast<unsigned char>(
+                        requiredPrefix[prefixIndex]);
+                ++prefixIndex;
+            }
+            if (structureStage < structureTokens.size()) {
+                const std::string& token = structureTokens[structureStage];
+                if (byte == static_cast<unsigned char>(
+                        token[structureMatched])) {
+                    ++structureMatched;
+                    if (structureMatched == token.size()) {
+                        ++structureStage;
+                        structureMatched = 0;
+                    }
+                } else {
+                    structureMatched =
+                        byte == static_cast<unsigned char>(token.front())
+                        ? 1
+                        : 0;
+                }
+            }
+            schema.Consume(byte);
+            shapeRepresentation.Consume(byte);
+            lengthUnit.Consume(byte);
+            expectedUnit.Consume(byte);
+            rgbColor.Consume(byte);
+            predefinedColor.Consume(byte);
+
+            if (!hasEntity) {
+                if (entityState == EntityState::Waiting) {
+                    if (byte == '#') {
+                        entityState = EntityState::Hash;
+                    }
+                } else if (entityState == EntityState::Hash) {
+                    if (std::isdigit(byte)) {
+                        entityState = EntityState::Digits;
+                    } else {
+                        entityState = byte == '#'
+                            ? EntityState::Hash
+                            : EntityState::Waiting;
+                    }
+                } else if (entityState == EntityState::Digits) {
+                    if (std::isdigit(byte)) {
+                        continue;
+                    }
+                    if (byte == '=') {
+                        hasEntity = true;
+                    } else if (std::isspace(byte)) {
+                        entityState = EntityState::Whitespace;
+                    } else {
+                        entityState = byte == '#'
+                            ? EntityState::Hash
+                            : EntityState::Waiting;
+                    }
+                } else {
+                    if (byte == '=') {
+                        hasEntity = true;
+                    } else if (!std::isspace(byte)) {
+                        entityState = byte == '#'
+                            ? EntityState::Hash
+                            : EntityState::Waiting;
+                    }
+                }
+            }
+        }
+        tail.append(
+            reinterpret_cast<const char *>(buffer.data()),
+            static_cast<std::size_t>(readCount));
+        if (tail.size() > 256) {
+            tail.erase(0, tail.size() - 256);
+        }
+    }
+    if (input.bad()
+        || byteCount != static_cast<std::uint64_t>(info.st_size)
+        || prefixIndex < requiredPrefix.size()
+        || !prefixMatches) {
+        return false;
+    }
+
+    const std::size_t lastNonWhitespace =
+        tail.find_last_not_of(" \t\r\n");
+    if (lastNonWhitespace == std::string::npos
+        || lastNonWhitespace + 1 < terminator.size()
+        || tail.compare(
+            lastNonWhitespace + 1 - terminator.size(),
+            terminator.size(),
+            terminator) != 0) {
+        return false;
+    }
+    return structureStage == structureTokens.size()
+        && schema.Found()
+        && shapeRepresentation.Found()
+        && lengthUnit.Found()
+        && expectedUnit.Found()
+        && hasEntity
+        && (!expectedColor
+            || rgbColor.Found()
+            || predefinedColor.Found());
+}
+
+#ifdef DEBUG
+bool CorruptSTEPTerminatorForDebug(const std::string& path) {
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    if (!output.is_open()) {
+        return false;
+    }
+    output << "CORRUPTED";
+    output.flush();
+    return output.good();
+}
+#endif
+
+void BridgeLegacySTEPColors(
+    const Handle(OcctDocument)& document,
+    const Handle(TDocStd_Document)& ocafDocument,
+    const TDF_LabelSequence& rootLabels) {
+    const Handle(XCAFDoc_ColorTool) colorTool =
+        XCAFDoc_DocumentTool::ColorTool(ocafDocument->Main());
+    if (colorTool.IsNull()) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorInvalidState,
+            "The STEP color table is unavailable.");
+    }
+    for (Standard_Integer index = 1;
+         index <= rootLabels.Length();
+         ++index) {
+        const TDF_Label& label = rootLabels.Value(index);
+        XCAFDoc_VisMaterialPBR localPBR;
+        Quantity_NameOfColor legacyColor = Quantity_NOC_GRAY80;
+        if (!document->TryPBRMaterialForLabel(label, localPBR)
+            && document->TryColorNameForLabel(label, legacyColor)) {
+            colorTool->SetColor(
+                label,
+                Quantity_Color(legacyColor),
+                XCAFDoc_ColorSurf);
+        }
+    }
+}
+
+bool HasSTEPColorExpectation(
+    const Handle(TDocStd_Document)& ocafDocument,
+    const TDF_LabelSequence& rootLabels) {
+    const Handle(XCAFDoc_ColorTool) colorTool =
+        XCAFDoc_DocumentTool::ColorTool(ocafDocument->Main());
+    if (colorTool.IsNull()) {
+        return false;
+    }
+    for (Standard_Integer index = 1;
+         index <= rootLabels.Length();
+         ++index) {
+        const TDF_Label& label = rootLabels.Value(index);
+        if (colorTool->IsSet(label, XCAFDoc_ColorGen)
+            || colorTool->IsSet(label, XCAFDoc_ColorSurf)
+            || colorTool->IsSet(label, XCAFDoc_ColorCurv)
+            || !XCAFDoc_VisMaterialTool::GetShapeMaterial(label).IsNull()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+UnitsMethods_LengthUnit ConfigureSTEPUnits(
+    const Handle(TDocStd_Document)& ocafDocument,
+    StepData_ConfParameters& parameters,
+    const Handle(StepData_StepModel)& stepModel) {
+    Standard_Real metersPerUnit = 0.001;
+    const Standard_Boolean hasUnit =
+        XCAFDoc_DocumentTool::GetLengthUnit(
+            ocafDocument,
+            metersPerUnit);
+    if (hasUnit
+        && (!std::isfinite(metersPerUnit) || metersPerUnit <= 0.0)) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorInvalidState,
+            "The STEP source unit is invalid.");
+    }
+    if (!hasUnit) {
+        metersPerUnit = 0.001;
+        XCAFDoc_DocumentTool::SetLengthUnit(
+            ocafDocument,
+            metersPerUnit);
+    }
+    UnitsMethods_LengthUnit outputUnit =
+        UnitsMethods::GetLengthUnitByFactorValue(
+            metersPerUnit,
+            UnitsMethods_LengthUnit_Meter);
+    if (outputUnit == UnitsMethods_LengthUnit_Undefined) {
+        outputUnit = UnitsMethods_LengthUnit_Millimeter;
+    }
+    const Standard_Real outputUnitMillimeters =
+        UnitsMethods::GetLengthUnitScale(
+            outputUnit,
+            UnitsMethods_LengthUnit_Millimeter);
+    if (!std::isfinite(outputUnitMillimeters)
+        || outputUnitMillimeters <= 0.0) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorInvalidState,
+            "The STEP output unit is invalid.");
+    }
+    parameters.WriteUnit = outputUnit;
+    stepModel->SetWriteLengthUnit(outputUnitMillimeters);
+    return outputUnit;
+}
+
+void WriteSTEP(
+    const std::shared_ptr<NativeExportState>& state,
+    const Handle(OcctDocument)& document,
+    const Handle(TDocStd_Document)& ocafDocument,
+    const TDF_LabelSequence& rootLabels,
+    const Message_ProgressRange& progress) {
+    ThrowIfCancelled(state);
+    BridgeLegacySTEPColors(document, ocafDocument, rootLabels);
+    const bool expectedColor =
+        HasSTEPColorExpectation(ocafDocument, rootLabels);
+    UnitsMethods_LengthUnit outputUnit =
+        UnitsMethods_LengthUnit_Undefined;
+    const std::string partialPath =
+        (std::filesystem::path(state->packageRootPath)
+            / ".model.step.partial").string();
+    {
+        std::lock_guard<std::mutex> exchangeLock(
+            Core3DSTEPExchangeMutex());
+        STEPCAFControl_Writer writer;
+        writer.SetColorMode(Standard_True);
+        writer.SetNameMode(Standard_True);
+        writer.SetMaterialMode(Standard_True);
+        writer.SetLayerMode(Standard_False);
+        writer.SetPropsMode(Standard_False);
+        writer.SetSHUOMode(Standard_False);
+        writer.SetDimTolMode(Standard_False);
+
+        StepData_ConfParameters parameters;
+        parameters.WriteSchema =
+            StepData_ConfParameters::WriteMode_StepSchema_AP214IS;
+        parameters.WriteAssembly =
+            StepData_ConfParameters::WriteMode_Assembly_Auto;
+        parameters.WriteTessellated =
+            StepData_ConfParameters::RWMode_Tessellated_Off;
+        parameters.WriteProductName =
+            TCollection_AsciiString("Shapeyard 3D");
+        parameters.WriteColor = true;
+        parameters.WriteName = true;
+        parameters.WriteLayer = false;
+        parameters.WriteProps = false;
+        parameters.WriteSubshapeNames = false;
+        parameters.WriteNonmanifold = false;
+        parameters.WriteModelType = STEPControl_AsIs;
+
+        const Handle(StepData_StepModel) stepModel =
+            writer.ChangeWriter().Model(Standard_False);
+        if (stepModel.IsNull()) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorWriterFailed,
+                "The STEP model could not be created.");
+        }
+        outputUnit = ConfigureSTEPUnits(
+            ocafDocument,
+            parameters,
+            stepModel);
+        const Standard_Boolean transferred = writer.Transfer(
+            rootLabels,
+            parameters,
+            STEPControl_AsIs,
+            nullptr,
+            progress);
+        ThrowIfCancelled(state);
+
+        const Handle(XSControl_WorkSession) session =
+            writer.ChangeWriter().WS();
+        const Interface_CheckIterator checks = session.IsNull()
+            ? Interface_CheckIterator()
+            : session->TransferWriteCheckList();
+        const Handle(StepData_StepModel) translatedModel =
+            writer.ChangeWriter().Model(Standard_False);
+        if (!transferred
+            || session.IsNull()
+            || translatedModel.IsNull()
+            || translatedModel->NbEntities() <= 0
+            || !checks.IsEmpty(Standard_True)) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorWriterFailed,
+                "The committed geometry could not be translated to STEP.");
+        }
+        if (writer.Write(partialPath.c_str()) != IFSelect_RetDone) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorWriterFailed,
+                "The STEP writer reported a failure.");
+        }
+    }
+    ThrowIfCancelled(state);
+#ifdef DEBUG
+    if (state->debugCorruptSTEPTerminator.load(
+            std::memory_order_acquire)
+        && !CorruptSTEPTerminatorForDebug(partialPath)) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorInternalFailure,
+            "The STEP corruption test seam could not be applied.");
+    }
+#endif
+    if (!ValidateSTEPFileContents(
+            state,
+            partialPath,
+            outputUnit,
+            expectedColor)) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorInvalidArtifact,
+            "The STEP writer produced an invalid artifact.");
+    }
+    std::error_code renameError;
+    std::filesystem::rename(
+        std::filesystem::path(partialPath),
+        std::filesystem::path(state->primaryPath),
+        renameError);
+    if (renameError || !HasExactSingleArtifact(state)) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorInvalidArtifact,
+            "The STEP artifact could not be finalized safely.");
+    }
+    ThrowIfCancelled(state);
+}
+
 NativeExportResult RunNativeExport(
     const std::shared_ptr<NativeExportState>& state) noexcept {
     NativeExportResult result;
@@ -697,11 +1201,14 @@ NativeExportResult RunNativeExport(
 
         Handle(Message_ProgressIndicator) progress =
             new NativeExportProgress(&state->cancelled);
+        const char *progressName = state->exportType == ExportTypeStl
+            ? "STL export"
+            : (state->exportType == ExportTypeStep
+                ? "STEP export"
+                : "OBJ export");
         Message_ProgressScope whole(
             progress->Start(),
-            state->exportType == ExportTypeStl
-                ? "STL export"
-                : "OBJ export",
+            progressName,
             11);
 
         document = new OcctDocument();
@@ -741,145 +1248,159 @@ NativeExportResult RunNativeExport(
 
         const Handle(XCAFDoc_ShapeTool) shapeTool =
             XCAFDoc_DocumentTool::ShapeTool(ocafDocument->Main());
-        TDF_LabelSequence rootLabels;
-        shapeTool->GetFreeShapes(rootLabels);
-        if (rootLabels.IsEmpty()) {
+        TDF_LabelSequence freeLabels;
+        shapeTool->GetFreeShapes(freeLabels);
+        if (freeLabels.IsEmpty()) {
             throw NativeExportFailure(
                 Core3DNativeExportErrorNoGeometry,
                 "There is no committed geometry to export.");
         }
-
-        TopoDS_Compound compound;
-        BRep_Builder builder;
-        builder.MakeCompound(compound);
-        Standard_Integer shapeCount = 0;
+        TDF_LabelSequence rootLabels;
         for (Standard_Integer index = 1;
-             index <= rootLabels.Length();
+             index <= freeLabels.Length();
              ++index) {
             ThrowIfCancelled(state);
-            const TopoDS_Shape shape = shapeTool->GetShape(
-                rootLabels.Value(index));
-            if (!shape.IsNull()) {
-                builder.Add(compound, shape);
-                ++shapeCount;
+            if (!shapeTool->GetShape(freeLabels.Value(index)).IsNull()) {
+                rootLabels.Append(freeLabels.Value(index));
             }
         }
-        if (shapeCount == 0) {
+        if (rootLabels.IsEmpty()) {
             throw NativeExportFailure(
                 Core3DNativeExportErrorNoGeometry,
                 "There is no valid committed geometry to export.");
         }
 
-        Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
-        drawer->SetTypeOfDeflection(state->deflectionType);
-        drawer->SetDeviationCoefficient(state->deviationCoefficient);
-        drawer->SetDeviationAngle(state->deviationAngle);
-        drawer->SetMaximalChordialDeviation(
-            state->maximalChordialDeviation);
-        const Standard_Real deflection =
-            StdPrs_ToolTriangulatedShape::GetDeflection(
-                compound,
-                drawer);
-        if (!std::isfinite(deflection) || deflection <= 0.0) {
-            throw NativeExportFailure(
-                Core3DNativeExportErrorMeshingFailed,
-                "The mesh deflection is invalid.");
-        }
-
-        if (!BRepTools::Triangulation(compound, deflection)) {
-            BRepMesh_IncrementalMesh mesher;
-            mesher.ChangeParameters().Deflection = deflection;
-            mesher.ChangeParameters().Angle = state->deviationAngle;
-            mesher.ChangeParameters().InParallel = Standard_True;
-            mesher.SetShape(compound);
-            mesher.Perform(whole.Next(4));
-            ThrowIfCancelled(state);
-            if (!mesher.IsDone()
-                || !BRepTools::Triangulation(compound, deflection)) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorMeshingFailed,
-                    "The committed geometry could not be meshed.");
-            }
-        } else {
-            whole.Next(4).Close();
-        }
-        ThrowIfCancelled(state);
-
-        if (state->exportType == ExportTypeStl) {
-            Message_ProgressScope stlScope(
-                whole.Next(5),
-                "Binary STL export",
-                2);
-            const Handle(Poly_Triangulation) stlMesh =
-                BuildBinarySTLMesh(
-                    compound,
-                    state,
-                    stlScope.Next(1));
-            const OSD_Path outputPath(
-                TCollection_AsciiString(state->primaryPath.c_str()));
-            const bool writerSucceeded = RWStl::WriteBinary(
-                stlMesh,
-                outputPath,
-                stlScope.Next(1));
-            ThrowIfCancelled(state);
-            if (!writerSucceeded) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorWriterFailed,
-                    "The STL writer reported a failure.");
-            }
-#ifdef DEBUG
-            if (state->debugCorruptSTLTriangleCount.load(
-                    std::memory_order_acquire)
-                && !CorruptSTLTriangleCountForDebug(state)) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorInternalFailure,
-                    "The STL corruption test seam could not be applied.");
-            }
-#endif
-            if (!ValidateBinarySTLArtifact(
-                    state,
-                    stlMesh->NbTriangles())) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorInvalidArtifact,
-                    "The STL writer produced an invalid binary artifact.");
-            }
-        } else if (state->exportType == ExportTypeObj) {
-            TColStd_IndexedDataMapOfStringString fileInfo;
-            fileInfo.Add("Author", "Shapeyard 3D");
-            ValidatedOBJWriter writer(
-                TCollection_AsciiString(state->primaryPath.c_str()));
-            const bool writerSucceeded = writer.Perform(
+        if (state->exportType == ExportTypeStep) {
+            WriteSTEP(
+                state,
+                document,
                 ocafDocument,
                 rootLabels,
-                nullptr,
-                fileInfo,
-                whole.Next(5));
-            ThrowIfCancelled(state);
-            if (!writerSucceeded) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorWriterFailed,
-                    "The OBJ writer reported a failure.");
-            }
-#ifdef DEBUG
-            if (state->debugOmitTextureReferences.load(
-                    std::memory_order_acquire)
-                && !OmitTextureReferencesForDebug(state)) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorInternalFailure,
-                    "The texture-omission test seam could not be applied.");
-            }
-#endif
-            if (!ValidateOBJArtifact(
-                    state,
-                    writer.ExpectedTextureCount())) {
-                throw NativeExportFailure(
-                    Core3DNativeExportErrorInvalidArtifact,
-                    "The OBJ writer produced an incomplete artifact bundle.");
-            }
+                whole.Next(9));
         } else {
-            throw NativeExportFailure(
-                Core3DNativeExportErrorInvalidState,
-                "The native export format is unsupported.");
+            TopoDS_Compound compound;
+            BRep_Builder builder;
+            builder.MakeCompound(compound);
+            for (Standard_Integer index = 1;
+                 index <= rootLabels.Length();
+                 ++index) {
+                ThrowIfCancelled(state);
+                const TopoDS_Shape shape = shapeTool->GetShape(
+                    rootLabels.Value(index));
+                builder.Add(compound, shape);
+            }
+
+            Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
+            drawer->SetTypeOfDeflection(state->deflectionType);
+            drawer->SetDeviationCoefficient(state->deviationCoefficient);
+            drawer->SetDeviationAngle(state->deviationAngle);
+            drawer->SetMaximalChordialDeviation(
+                state->maximalChordialDeviation);
+            const Standard_Real deflection =
+                StdPrs_ToolTriangulatedShape::GetDeflection(
+                    compound,
+                    drawer);
+            if (!std::isfinite(deflection) || deflection <= 0.0) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorMeshingFailed,
+                    "The mesh deflection is invalid.");
+            }
+
+            if (!BRepTools::Triangulation(compound, deflection)) {
+                BRepMesh_IncrementalMesh mesher;
+                mesher.ChangeParameters().Deflection = deflection;
+                mesher.ChangeParameters().Angle = state->deviationAngle;
+                mesher.ChangeParameters().InParallel = Standard_True;
+                mesher.SetShape(compound);
+                mesher.Perform(whole.Next(4));
+                ThrowIfCancelled(state);
+                if (!mesher.IsDone()
+                    || !BRepTools::Triangulation(compound, deflection)) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorMeshingFailed,
+                        "The committed geometry could not be meshed.");
+                }
+            } else {
+                whole.Next(4).Close();
+            }
+            ThrowIfCancelled(state);
+
+            if (state->exportType == ExportTypeStl) {
+                Message_ProgressScope stlScope(
+                    whole.Next(5),
+                    "Binary STL export",
+                    2);
+                const Handle(Poly_Triangulation) stlMesh =
+                    BuildBinarySTLMesh(
+                        compound,
+                        state,
+                        stlScope.Next(1));
+                const OSD_Path outputPath(
+                    TCollection_AsciiString(state->primaryPath.c_str()));
+                const bool writerSucceeded = RWStl::WriteBinary(
+                    stlMesh,
+                    outputPath,
+                    stlScope.Next(1));
+                ThrowIfCancelled(state);
+                if (!writerSucceeded) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorWriterFailed,
+                        "The STL writer reported a failure.");
+                }
+#ifdef DEBUG
+                if (state->debugCorruptSTLTriangleCount.load(
+                        std::memory_order_acquire)
+                    && !CorruptSTLTriangleCountForDebug(state)) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInternalFailure,
+                        "The STL corruption test seam could not be applied.");
+                }
+#endif
+                if (!ValidateBinarySTLArtifact(
+                        state,
+                        stlMesh->NbTriangles())) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInvalidArtifact,
+                        "The STL writer produced an invalid binary artifact.");
+                }
+            } else if (state->exportType == ExportTypeObj) {
+                TColStd_IndexedDataMapOfStringString fileInfo;
+                fileInfo.Add("Author", "Shapeyard 3D");
+                ValidatedOBJWriter writer(
+                    TCollection_AsciiString(state->primaryPath.c_str()));
+                const bool writerSucceeded = writer.Perform(
+                    ocafDocument,
+                    rootLabels,
+                    nullptr,
+                    fileInfo,
+                    whole.Next(5));
+                ThrowIfCancelled(state);
+                if (!writerSucceeded) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorWriterFailed,
+                        "The OBJ writer reported a failure.");
+                }
+#ifdef DEBUG
+                if (state->debugOmitTextureReferences.load(
+                        std::memory_order_acquire)
+                    && !OmitTextureReferencesForDebug(state)) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInternalFailure,
+                        "The texture-omission test seam could not be applied.");
+                }
+#endif
+                if (!ValidateOBJArtifact(
+                        state,
+                        writer.ExpectedTextureCount())) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInvalidArtifact,
+                        "The OBJ writer produced an incomplete artifact bundle.");
+                }
+            } else {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorInvalidState,
+                    "The native export format is unsupported.");
+            }
         }
 
         ThrowIfCancelled(state);
@@ -980,7 +1501,9 @@ NSString *ErrorDescription(const NativeExportResult& result) {
         || !snapshotCleanupURL.isFileURL
         || !packageRootURL.isFileURL
         || !cleanupURL.isFileURL
-        || (exportType != ExportTypeObj && exportType != ExportTypeStl)
+        || (exportType != ExportTypeObj
+            && exportType != ExportTypeStl
+            && exportType != ExportTypeStep)
         || (deflectionType != Aspect_TOD_ABSOLUTE
             && deflectionType != Aspect_TOD_RELATIVE)
         || !std::isfinite(deviationCoefficient)
@@ -1009,9 +1532,12 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->packageRootPath = packageRootPath;
     _state->cleanupPath = cleanupPath;
     _state->exportType = exportType;
+    const char *primaryFilename = exportType == ExportTypeStl
+        ? "model.stl"
+        : (exportType == ExportTypeStep ? "model.step" : "model.obj");
     _state->primaryPath = (
         std::filesystem::path(packageRootPath)
-        / (exportType == ExportTypeStl ? "model.stl" : "model.obj")
+        / primaryFilename
     ).string();
     _state->deflectionType =
         static_cast<Aspect_TypeOfDeflection>(deflectionType);
@@ -1175,6 +1701,19 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     std::lock_guard<std::mutex> lock(state->lifecycleMutex);
     if (!state->started && state->exportType == ExportTypeStl) {
         state->debugCorruptSTLTriangleCount.store(
+            true,
+            std::memory_order_release);
+    }
+}
+
+- (void)debugSimulateSTEPTerminatorCorruption {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (!state->started && state->exportType == ExportTypeStep) {
+        state->debugCorruptSTEPTerminator.store(
             true,
             std::memory_order_release);
     }

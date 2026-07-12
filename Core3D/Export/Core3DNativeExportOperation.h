@@ -63,6 +63,10 @@ NS_SWIFT_SENDABLE
 //! prove that artifact validation fails closed and removes every private file.
 - (void)debugSimulateSTLTriangleCountCorruption
     NS_SWIFT_NAME(debugSimulateSTLTriangleCountCorruption());
+//! Appends non-whitespace after the STEP terminator so XCTest can prove that
+//! structural validation fails closed and removes every private file.
+- (void)debugSimulateSTEPTerminatorCorruption
+    NS_SWIFT_NAME(debugSimulateSTEPTerminatorCorruption());
 //! Lowers the STL resource ceiling below one cube so XCTest can prove that an
 //! oversized flattened mesh fails before its duplicate allocation.
 - (void)debugSimulateSTLResourceLimitExceeded

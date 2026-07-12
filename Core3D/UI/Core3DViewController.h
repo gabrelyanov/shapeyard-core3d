@@ -94,8 +94,9 @@ typedef struct {
 
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;
 //! Freeze the committed document into a private handoff and return a worker
-//! operation. OBJ and binary STL keep only the bounded XBF save on the main
-//! thread; meshing, writing, validation, and cleanup run off-main.
+//! operation. OBJ, binary STL, and exact BRep STEP keep only the bounded XBF
+//! save on the main thread; translation/writing, validation, and cleanup run
+//! off-main.
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
@@ -204,6 +205,10 @@ typedef struct {
 //! Standalone BinXCAF fixture whose sole box has a negative-determinant root
 //! location. Used to prove mesh exporters preserve outward winding.
 - (NSData *_Nullable)debugNegativeLocationBinXCAFFixtureData;
+//! Import a private STEP artifact through the production reader for physical
+//! unit, assembly, name, and appearance round-trip assertions.
+- (BOOL)debugImportSTEPAtURL:(NSURL *)url
+    NS_SWIFT_NAME(debugImportSTEP(at:));
 //! Malformed BinXCAF fixture with a present negative document length unit.
 - (NSData *_Nullable)debugInvalidLengthUnitBinXCAFFixtureData;
 //! Explicit current XCAF length unit, or nil for a legacy unitless document.

@@ -21,6 +21,7 @@
 
 #include "OcctViewer.h"
 #include "OcctDocument.h"
+#include "Core3DSTEPExchangeLock.h"
 
 #include <OpenGl_GraphicDriver.hxx>
 #include <Standard_Failure.hxx>
@@ -366,38 +367,42 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
     myDoc->InitDoc();
     ImportedDocumentHistoryGuard aHistoryGuard(myDoc->ChangeDocument());
     
-    STEPCAFControl_Reader aReader;
-    Handle(XSControl_WorkSession) aSession = aReader.Reader().WS();
-    
-    try
     {
-        if (!aReader.ReadFile (theFilename.c_str()))
-        {
-            clearSession (aSession);
-            return false;
-        }
-        
-        if (!aReader.Transfer (myDoc->ChangeDocument()))
-        {
-            clearSession (aSession);
-            return false;
-        }
+        std::lock_guard<std::mutex> aStepExchangeLock(
+            Core3DSTEPExchangeMutex());
+        STEPCAFControl_Reader aReader;
+        Handle(XSControl_WorkSession) aSession = aReader.Reader().WS();
 
-		// STEP creates XCAF labels without Core3D identity attributes. Migrate the
-		// isolated document before it is exposed to normal editing/undo history.
-		if (!myDoc->MigrateLegacyIdentifiers())
-		{
+        try
+        {
+            if (aReader.ReadFile(theFilename.c_str()) != IFSelect_RetDone)
+            {
+                clearSession (aSession);
+                return false;
+            }
+
+            if (!aReader.Transfer (myDoc->ChangeDocument()))
+            {
+                clearSession (aSession);
+                return false;
+            }
+
+			// STEP creates XCAF labels without Core3D identity attributes. Migrate the
+			// isolated document before it is exposed to normal editing/undo history.
+			if (!myDoc->MigrateLegacyIdentifiers())
+			{
+				clearSession(aSession);
+				return false;
+			}
+
 			clearSession(aSession);
-			return false;
-		}
-
-		clearSession(aSession);
-    }
-    catch (const Standard_Failure& theFailure)
-    {
-        Message::SendFail (TCollection_AsciiString ("Exception raised during STEP import\n[")
-                           + theFailure.GetMessageString() + "]\n" + theFilename.c_str());
-        return false;
+        }
+        catch (const Standard_Failure& theFailure)
+        {
+            Message::SendFail (TCollection_AsciiString ("Exception raised during STEP import\n[")
+                               + theFailure.GetMessageString() + "]\n" + theFilename.c_str());
+            return false;
+        }
     }
     
     Handle(XCAFDoc_ShapeTool) aShapeTool = XCAFDoc_DocumentTool::ShapeTool (myDoc->Document()->Main());

@@ -45,7 +45,9 @@ bool CanCaptureCommittedExport(
 - (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
     (ExportType)exportType {
     if (![NSThread isMainThread]
-        || (exportType != ExportTypeObj && exportType != ExportTypeStl)
+        || (exportType != ExportTypeObj
+            && exportType != ExportTypeStl
+            && exportType != ExportTypeStep)
         || GLController == nil) {
         return nil;
     }
@@ -59,34 +61,39 @@ bool CanCaptureCommittedExport(
             return nil;
         }
 
-        const Handle(AIS_InteractiveContext)& context = viewer->AisContext();
-        const Handle(Prs3d_Drawer) drawer = context.IsNull()
-            ? Handle(Prs3d_Drawer)()
-            : context->DefaultDrawer();
-        if (drawer.IsNull()) {
-            return nil;
-        }
-        const Aspect_TypeOfDeflection deflectionType =
-            drawer->TypeOfDeflection();
-        const Standard_Real deviationCoefficient =
-            drawer->DeviationCoefficient();
-        const Standard_Real deviationAngle = drawer->DeviationAngle();
-        const Standard_Real maximalChordialDeviation =
-            drawer->MaximalChordialDeviation();
-        if ((deflectionType != Aspect_TOD_ABSOLUTE
-             && deflectionType != Aspect_TOD_RELATIVE)
-            || !std::isfinite(deviationCoefficient)
-            || deviationCoefficient <= 0.0
-            || !std::isfinite(deviationAngle)
-            || deviationAngle <= 0.0
-            || !std::isfinite(maximalChordialDeviation)
-            || maximalChordialDeviation <= 0.0) {
-            NSLog(@"[NativeExport] Invalid mesh settings: type=%ld coefficient=%g angle=%g chord=%g",
-                  static_cast<long>(deflectionType),
-                  deviationCoefficient,
-                  deviationAngle,
-                  maximalChordialDeviation);
-            return nil;
+        Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
+        Standard_Real deviationCoefficient = 0.001;
+        Standard_Real deviationAngle = 20.0 * M_PI / 180.0;
+        Standard_Real maximalChordialDeviation = 0.0001;
+        if (exportType != ExportTypeStep) {
+            const Handle(AIS_InteractiveContext)& context =
+                viewer->AisContext();
+            const Handle(Prs3d_Drawer) drawer = context.IsNull()
+                ? Handle(Prs3d_Drawer)()
+                : context->DefaultDrawer();
+            if (drawer.IsNull()) {
+                return nil;
+            }
+            deflectionType = drawer->TypeOfDeflection();
+            deviationCoefficient = drawer->DeviationCoefficient();
+            deviationAngle = drawer->DeviationAngle();
+            maximalChordialDeviation =
+                drawer->MaximalChordialDeviation();
+            if ((deflectionType != Aspect_TOD_ABSOLUTE
+                 && deflectionType != Aspect_TOD_RELATIVE)
+                || !std::isfinite(deviationCoefficient)
+                || deviationCoefficient <= 0.0
+                || !std::isfinite(deviationAngle)
+                || deviationAngle <= 0.0
+                || !std::isfinite(maximalChordialDeviation)
+                || maximalChordialDeviation <= 0.0) {
+                NSLog(@"[NativeExport] Invalid mesh settings: type=%ld coefficient=%g angle=%g chord=%g",
+                      static_cast<long>(deflectionType),
+                      deviationCoefficient,
+                      deviationAngle,
+                      maximalChordialDeviation);
+                return nil;
+            }
         }
 
         NSFileManager *fileManager = NSFileManager.defaultManager;
