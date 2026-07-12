@@ -1323,6 +1323,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 removeItemAtURL:[baseUrl URLByAppendingPathExtension:@"mtl"]
                          error:nil];
             [NSFileManager.defaultManager removeItemAtURL:baseUrl error:nil];
+            NSURL *textureDirectory = [NSURL fileURLWithPath:
+                [baseUrl.path stringByAppendingString:@"_textures"]];
+            [NSFileManager.defaultManager
+                removeItemAtURL:textureDirectory
+                         error:nil];
         }
     };
 

@@ -27,6 +27,8 @@
 #include <Standard_Failure.hxx>
 #include <Message.hxx>
 #include <Message_Messenger.hxx>
+#include <Message_ProgressRange.hxx>
+#include <Message_ProgressScope.hxx>
 
 #include <TCollection_AsciiString.hxx>
 #include <TDataStd_AsciiString.hxx>
@@ -1622,16 +1624,92 @@ void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_S
 }
 
 
+Standard_Boolean OcctDocument::OpenPrivateExportSnapshot(
+    const std::string& path,
+    const Message_ProgressRange& progress) {
+    if (path.empty() || myApp.IsNull() || !myOcafDoc.IsNull()) {
+        return Standard_False;
+    }
+
+    Handle(TDocStd_Document) candidate;
+    try {
+        OCC_CATCH_SIGNALS
+        Core3DDefineSafeBinXCAFFormat(myApp);
+        Core3DBeginSafeBinaryRead();
+        const PCDM_ReaderStatus status = myApp->Open(
+            TCollection_ExtendedString(path.c_str(), Standard_True),
+            candidate,
+            progress);
+        const Standard_Boolean wasRejected =
+            Core3DSafeBinaryReadWasRejected();
+        if (wasRejected || status != PCDM_RS_OK || candidate.IsNull()) {
+            if (!candidate.IsNull()) {
+                try {
+                    myApp->Close(candidate);
+                } catch (...) {
+                }
+                candidate.Nullify();
+            }
+            return Standard_False;
+        }
+        myOcafDoc = candidate;
+        return Standard_True;
+    } catch (...) {
+        if (!candidate.IsNull()) {
+            try {
+                myApp->Close(candidate);
+            } catch (...) {
+            }
+            candidate.Nullify();
+        }
+        return Standard_False;
+    }
+}
+
+void OcctDocument::ClosePrivateExportSnapshot() noexcept {
+    if (myApp.IsNull() || myOcafDoc.IsNull()) {
+        myOcafDoc.Nullify();
+        return;
+    }
+    try {
+        if (myOcafDoc->HasOpenCommand()) {
+            myOcafDoc->AbortCommand();
+        }
+    } catch (...) {
+    }
+    try {
+        myApp->Close(myOcafDoc);
+    } catch (...) {
+    }
+    myOcafDoc.Nullify();
+}
+
 void OcctDocument::ApplyTransforms() {
+    ApplyTransforms(Message_ProgressRange());
+}
+
+Standard_Boolean OcctDocument::ApplyTransforms(
+    const Message_ProgressRange& progress) {
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool (myOcafDoc->Main());
     TDF_LabelSequence aLabels;
     shapeTool->GetFreeShapes (aLabels);
-    for (Standard_Integer aLabIter = 1; aLabIter <= aLabels.Length(); ++aLabIter)
+    Message_ProgressScope aScope(
+        progress,
+        "Apply object transforms",
+        aLabels.Length());
+    for (Standard_Integer aLabIter = 1;
+         aLabIter <= aLabels.Length();
+         ++aLabIter)
     {
+        if (!aScope.More()) {
+            return Standard_False;
+        }
         const TDF_Label& aLabel = aLabels.Value (aLabIter);
         const auto t = ObjectTransformForLabel(aLabel);
         TNaming::Displace(aLabel, TopLoc_Location(t));
+        aScope.Next();
     }
+    return Standard_True;
 }
 
 gp_Trsf OcctDocument::ObjectTransformForLabel(const TDF_Label& aRefLabel) const {

@@ -31,6 +31,8 @@
 
 #include <string>
 
+class Message_ProgressRange;
+
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
 //! fail-closed attribute schema and bounded visual-material/string readers.
 //! This is defense in depth for trusted Shapeyard project packages; raw XBF/CBF
@@ -139,6 +141,20 @@ public:
     Standard_Boolean RemoveShape(const TDF_Label& label);
     
     void ApplyTransforms();
+    //! Bake app-owned object transforms into every free shape while observing
+    //! the supplied worker progress/cancellation range. Returns false when the
+    //! operation was interrupted before every root was displaced.
+    Standard_Boolean ApplyTransforms(
+        const Message_ProgressRange& progress);
+
+    //! Open an app-created private XBF handoff into this otherwise empty
+    //! document. This is intentionally narrower than general import and may be
+    //! called only by an isolated native-export worker.
+    Standard_EXPORT Standard_Boolean OpenPrivateExportSnapshot(
+        const std::string& path,
+        const Message_ProgressRange& progress);
+    //! Deterministically release the worker-owned export document.
+    Standard_EXPORT void ClosePrivateExportSnapshot() noexcept;
 
 	Standard_Boolean undo();
 	Standard_Boolean redo();

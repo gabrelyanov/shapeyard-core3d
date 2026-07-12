@@ -136,6 +136,8 @@
 		322185852BB5D5E100040E84 /* Core3DViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 322185842BB5D5E100040E84 /* Core3DViewController.mm */; };
 		322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */ = {isa = PBXBuildFile; fileRef = 322185832BB5D5E100040E84 /* Core3DViewController.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		3229D3222C00D7780025AECD /* ExportType.h in Headers */ = {isa = PBXBuildFile; fileRef = 3229D3212C00D7780025AECD /* ExportType.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D0E0112F10000100000011 /* Core3DNativeExportOperation.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */; };
 		323E89E22BD13F3F0035FF45 /* GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */; };
 		323E89E52BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm in Sources */ = {isa = PBXBuildFile; fileRef = 323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */; };
 		323E89E62BD145ED0035FF45 /* Core3DViewController+GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */; };
@@ -308,6 +310,9 @@
 		322185832BB5D5E100040E84 /* Core3DViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DViewController.h; sourceTree = "<group>"; };
 		322185842BB5D5E100040E84 /* Core3DViewController.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DViewController.mm; sourceTree = "<group>"; wrapsLines = 0; };
 		3229D3212C00D7780025AECD /* ExportType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ExportType.h; sourceTree = "<group>"; };
+		C3D0E0112F10000100000011 /* Core3DNativeExportOperation.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DNativeExportOperation.h; sourceTree = "<group>"; };
+		C3D0E0122F10000100000012 /* Core3DNativeExportOperation+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DNativeExportOperation+Private.h"; sourceTree = "<group>"; };
+		C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeExportOperation.mm; sourceTree = "<group>"; };
 		323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GLViewControllerProtocol.h; sourceTree = "<group>"; };
 		323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+GLViewControllerProtocol.mm"; sourceTree = "<group>"; };
 		323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+GLViewControllerProtocol.h"; sourceTree = "<group>"; };
@@ -670,6 +675,9 @@
 			children = (
 				329B2EC52C1AF51000F3A763 /* obj */,
 				3229D3212C00D7780025AECD /* ExportType.h */,
+				C3D0E0112F10000100000011 /* Core3DNativeExportOperation.h */,
+				C3D0E0122F10000100000012 /* Core3DNativeExportOperation+Private.h */,
+				C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */,
 			);
 			path = Export;
 			sourceTree = "<group>";
@@ -724,6 +732,7 @@
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */,
 				C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */,
 				181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */,
 				18665F032CA2DA8500141E05 /* ModelPart.h in Headers */,
@@ -870,6 +879,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
 				C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */,
 				C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */,
 				18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */,

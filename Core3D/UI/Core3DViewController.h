@@ -11,6 +11,7 @@
 #import <Core3D/PrimitiveGizmoType.h>
 #import <Core3D/UIStateChanging.h>
 #import <Core3D/ExportType.h>
+#import <Core3D/Core3DNativeExportOperation.h>
 #import <Core3D/OrthoProjectionType.h>
 #import <Core3D/Core3DMaterialController.h>
 
@@ -92,6 +93,12 @@ typedef struct {
 @protocol ExportManagerProtocol<NSObject>
 
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;
+//! Freeze the committed document into a private handoff and return a worker
+//! operation. The initial OBJ implementation keeps only the bounded XBF save
+//! on the main thread; meshing, writing, and cleanup run off-main.
+- (Core3DNativeExportOperation *_Nullable)
+    prepareNativeExportOperationWithType:(ExportType)exportType
+    NS_SWIFT_NAME(prepareNativeExportOperation(with:));
 //! Capture only committed exportable geometry. Unlike the presentation
 //! snapshot seam, this returns nil while a Boolean or Mirror trial is active,
 //! unresolved, or while the OCAF document owns an open command. Main-thread
