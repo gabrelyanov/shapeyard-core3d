@@ -92,6 +92,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void) cancelUnion;
 - (BOOL) canApplyBoolean;
 - (BOOL) hasTrialMirrorObjects;
+#ifdef DEBUG
+- (void)debugRequestRender;
+#endif
 
 - (void) setConstructorMode;
 

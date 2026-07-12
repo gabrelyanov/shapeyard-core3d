@@ -74,15 +74,29 @@ namespace core3d {
         //! retain OCCT.
         PresentationOverlayCaptureStatus captureIdlePresentationOverlay(
             scene::PresentationOverlayContent& theContent,
-            std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects) const noexcept;
+            std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects,
+            BooleanPreviewCapture& theBooleanPreview) const noexcept;
 
         const bool isSelected() const;
 		
 		void fillSelectedState(Standard_Boolean forceActor, BooleanAction action);
 		void updateDetectedState(Standard_Boolean forceActor, BooleanAction action);
-		void applyBoolean(BooleanAction action);
-		void cancelBoolean(BooleanAction action);
-        const bool canApplyBoolean() const;
+		Standard_Boolean beginBoolean(BooleanAction action) noexcept;
+		BooleanApplyResult applyBoolean(BooleanAction action) noexcept;
+		void cancelBoolean(BooleanAction action) noexcept;
+		void cancelActiveBoolean() noexcept;
+		const bool canApplyBoolean() const;
+		const bool hasActiveBoolean() const;
+		const bool hasUnresolvedBoolean() const;
+		const bool isBooleanSelectionFrozen() const;
+#ifdef DEBUG
+		Standard_Boolean debugBeginBooleanSelection(
+			const std::vector<Handle(AIS_InteractiveObject)>& actors,
+			const std::vector<Handle(AIS_InteractiveObject)>& subjects,
+			BooleanAction action) noexcept;
+		Standard_Boolean debugRecomputeBooleanPreview(
+			BooleanAction action) noexcept;
+#endif
 		void applyMirror();
 		void tryMirror(Standard_Integer axisIndex, bool backward) noexcept;
 		void clearTrialMirrorObjects() noexcept;

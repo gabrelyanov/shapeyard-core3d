@@ -19,6 +19,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <vector>
 
 @interface Core3DViewController () {
     BOOL _isSetuped;
@@ -345,6 +347,95 @@
         [self viewDidEndPrimaryInteractionCancelled:NO];
         return viewer->getObjectInteractor()->hasTrialMirrorObjects();
     } catch (...) {
+        return NO;
+    }
+}
+
+- (BOOL)debugBeginBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
+                actorEntityIdentifiers:(NSArray<NSString *> *)actorEntityIdentifiers
+              subjectEntityIdentifiers:(NSArray<NSString *> *)subjectEntityIdentifiers {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || (gizmoType != PrimitiveGizmoTypeSubtract
+            && gizmoType != PrimitiveGizmoTypeUnion)
+        || actorEntityIdentifiers == nil
+        || subjectEntityIdentifiers == nil) {
+        return NO;
+    }
+    try {
+        std::vector<std::string> actors;
+        std::vector<std::string> subjects;
+        actors.reserve(actorEntityIdentifiers.count);
+        subjects.reserve(subjectEntityIdentifiers.count);
+        for (NSString *identifier in actorEntityIdentifiers) {
+            if (![identifier isKindOfClass:NSString.class]
+                || identifier.length == 0 || identifier.UTF8String == nullptr) {
+                return NO;
+            }
+            actors.emplace_back(identifier.UTF8String);
+        }
+        for (NSString *identifier in subjectEntityIdentifiers) {
+            if (![identifier isKindOfClass:NSString.class]
+                || identifier.length == 0 || identifier.UTF8String == nullptr) {
+                return NO;
+            }
+            subjects.emplace_back(identifier.UTF8String);
+        }
+
+        [self setGizmoType:gizmoType];
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const BOOL didBegin = viewer != nullptr
+            && viewer->debugBeginBooleanSelection(
+                gizmoType == PrimitiveGizmoTypeSubtract
+                    ? core3d::BooleanAction::BooleanSubtract
+                    : core3d::BooleanAction::BooleanUnion,
+                actors,
+                subjects);
+        self.can_apply = didBegin && [GLController canApplyBoolean];
+        [GLController debugRequestRender];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+        return didBegin;
+    } catch (...) {
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+        return NO;
+    }
+}
+
+- (BOOL)debugRecomputeBooleanPreview {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || (_currentGizmoType != PrimitiveGizmoTypeSubtract
+            && _currentGizmoType != PrimitiveGizmoTypeUnion)) {
+        return NO;
+    }
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr) {
+            return NO;
+        }
+        const std::shared_ptr<core3d::ObjectInteractor> interactor =
+            viewer->getObjectInteractor();
+        if (interactor == nullptr) {
+            return NO;
+        }
+        const core3d::BooleanAction action =
+            _currentGizmoType == PrimitiveGizmoTypeSubtract
+                ? core3d::BooleanAction::BooleanSubtract
+                : core3d::BooleanAction::BooleanUnion;
+        const BOOL didRecompute =
+            interactor->debugRecomputeBooleanPreview(action);
+        self.can_apply = didRecompute && [GLController canApplyBoolean];
+        [GLController debugRequestRender];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+        return didRecompute;
+    } catch (...) {
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
         return NO;
     }
 }

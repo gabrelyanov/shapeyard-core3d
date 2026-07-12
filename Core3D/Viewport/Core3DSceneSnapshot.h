@@ -74,6 +74,8 @@ typedef NS_ENUM(NSInteger, Core3DScenePresentationOverlayKind) {
     Core3DScenePresentationOverlayKindScaleGizmo,
     Core3DScenePresentationOverlayKindMirrorGizmo,
     Core3DScenePresentationOverlayKindMirrorPreview,
+    Core3DScenePresentationOverlayKindBooleanSubtractPreview,
+    Core3DScenePresentationOverlayKindBooleanUnionPreview,
 };
 
 typedef NS_ENUM(NSInteger, Core3DSceneElementKind) {
@@ -292,6 +294,7 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneMeshSnapshot *> *meshes;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneRenderItemSnapshot *> *renderItems;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneMaterialSnapshot *> *materials;
+@property (nonatomic, copy, readonly) NSArray<NSString *> *suppressedEntityIdentifiers;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

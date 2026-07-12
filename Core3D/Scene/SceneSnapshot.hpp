@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 1;
-inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 4;
+inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 5;
 
 struct Float2 {
     float x = 0.0f;
@@ -111,6 +111,8 @@ enum class PresentationOverlayKind : std::uint8_t {
     ScaleGizmo,
     MirrorGizmo,
     MirrorPreview,
+    BooleanSubtractPreview,
+    BooleanUnionPreview,
 };
 
 enum class ElementKind : std::uint8_t {
@@ -251,6 +253,9 @@ struct PresentationOverlayContent {
     std::vector<MeshSnapshot> meshes;
     std::vector<InstanceSnapshot> instances;
     std::vector<MaterialSnapshot> materials;
+    //! Committed scene occurrences replaced by this transient presentation.
+    //! Renderers omit these base instances from both color and pick passes.
+    std::vector<std::string> suppressedEntityIdentifiers;
 };
 
 //! Immutable transient presentation paired with one exact full scene. Overlay
@@ -267,6 +272,7 @@ struct PresentationOverlaySnapshot {
     std::vector<MeshSnapshot> meshes;
     std::vector<InstanceSnapshot> instances;
     std::vector<MaterialSnapshot> materials;
+    std::vector<std::string> suppressedEntityIdentifiers;
 };
 
 } // namespace core3d::scene

@@ -86,7 +86,7 @@ constexpr std::size_t kMaxLabelInstanceMappings = 1'000'000;
 constexpr std::size_t kMaxSelectedElements = 50'000;
 constexpr std::size_t kMaxRetainedDefinitionRevisions = 250'000;
 constexpr std::size_t kMaxOverlayMeshes = 16;
-constexpr std::size_t kMaxRetainedOverlayDefinitions = 32;
+constexpr std::size_t kMaxRetainedOverlayDefinitions = 48;
 constexpr std::size_t kMaxOverlayInstances = 16;
 constexpr std::size_t kMaxOverlayMaterials = 16;
 constexpr std::size_t kMaxOverlayVertices = 100'000;
@@ -95,6 +95,7 @@ constexpr std::size_t kMaxOverlayPrimitives = 25'000;
 constexpr std::size_t kMaxOverlayPrimitiveBindings = 25'000;
 constexpr std::size_t kMaxOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxMirrorPreviewBodies = 8;
+constexpr std::size_t kMaxBooleanSourceOperands = 8;
 constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
     "gizmo/mirroring/x/negative",
     "gizmo/mirroring/y/negative",
@@ -796,7 +797,7 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
     return aHash.Value();
 }
 
-struct MirrorPreviewItem {
+struct WorldPreviewItem {
     MeshSnapshot mesh;
     InstanceSnapshot instance;
     MaterialSnapshot material;
@@ -805,16 +806,23 @@ struct MirrorPreviewItem {
 //! Copy one explicitly owned AIS mirror trial using only triangulations that
 //! already exist on its BRep faces. No mesher is invoked: a cache miss fails
 //! closed so OCCT remains the authoritative renderer for that frame.
-bool ExtractMirrorPreviewItem(
+bool ExtractWorldPreviewItem(
     const Handle(AIS_Shape)& thePresentation,
-    const std::size_t thePreviewIndex,
+    const std::string& theIdentifier,
+    const std::string& theName,
+    const std::uint32_t theMeshAndMaterialIndex,
+    const RenderRole theRole,
+    const RenderStyle theRenderStyle,
+    const std::optional<Quantity_NameOfColor> theColorOverride,
     const std::size_t theMaxVertices,
     const std::size_t theMaxIndices,
     const std::size_t theMaxPrimitives,
-    MirrorPreviewItem& theItem)
+    WorldPreviewItem& theItem)
 {
     if (thePresentation.IsNull()
-        || thePreviewIndex >= kMaxMirrorPreviewBodies
+        || !IsValidIdentifier(theIdentifier)
+        || theName.empty() || theName.size() > 4'096
+        || theMeshAndMaterialIndex >= kMaxOverlayMeshes
         || !thePresentation->HasColor()
         || !thePresentation->HasMaterial()) {
         return false;
@@ -1020,10 +1028,8 @@ bool ExtractMirrorPreviewItem(
         return false;
     }
 
-    const std::string anIdentifier =
-        "mirror/preview/" + std::to_string(thePreviewIndex);
     MeshSnapshot aMesh;
-    aMesh.definitionIdentifier = anIdentifier + "/mesh";
+    aMesh.definitionIdentifier = theIdentifier + "/mesh";
     aMesh.indices = std::move(aSourceIndices);
     aMesh.primitives = std::move(aPrimitives);
     const Double3 aSourceOrigin = Center(aSourceBounds);
@@ -1068,7 +1074,11 @@ bool ExtractMirrorPreviewItem(
         return false;
     }
     Quantity_Color aColor;
-    thePresentation->Color(aColor);
+    if (theColorOverride.has_value()) {
+        aColor = Quantity_Color(*theColorOverride);
+    } else {
+        thePresentation->Color(aColor);
+    }
     const double aTransparency = thePresentation->Transparency();
     if (!IsFinite(aTransparency)
         || aTransparency < 0.0 || aTransparency > 1.0
@@ -1079,30 +1089,30 @@ bool ExtractMirrorPreviewItem(
              aColor,
              static_cast<float>(1.0 - aTransparency));
     aMaterial.alphaMode = AlphaMode::Opaque;
-    aMaterial.identifier = anIdentifier + "/material";
+    aMaterial.identifier = theIdentifier + "/material";
     if (!ValidateMaterial(aMaterial)) {
         return false;
     }
 
     InstanceSnapshot anInstance;
-    anInstance.entityIdentifier = anIdentifier;
-    anInstance.meshIndex = static_cast<std::uint32_t>(6 + thePreviewIndex);
+    anInstance.entityIdentifier = theIdentifier;
+    anInstance.meshIndex = theMeshAndMaterialIndex;
     anInstance.worldFromObject.values[12] = aSourceOrigin.x;
     anInstance.worldFromObject.values[13] = aSourceOrigin.y;
     anInstance.worldFromObject.values[14] = aSourceOrigin.z;
     anInstance.visible = true;
     anInstance.selectable = false;
     anInstance.selected = false;
-    anInstance.name = "Mirror preview " + std::to_string(thePreviewIndex);
-    anInstance.role = RenderRole::MirrorPreview;
+    anInstance.name = theName;
+    anInstance.role = theRole;
     anInstance.coordinateSpace = CoordinateSpace::World;
     anInstance.depthPolicy = DepthPolicy::Scene;
-    anInstance.renderStyle = RenderStyle::Shaded;
+    anInstance.renderStyle = theRenderStyle;
     anInstance.primitiveBindings.reserve(aMesh.primitives.size());
     for (std::size_t aPrimitiveIndex = 0;
          aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
         anInstance.primitiveBindings.push_back({
-            static_cast<std::uint32_t>(6 + thePreviewIndex),
+            theMeshAndMaterialIndex,
             0,
             true,
         });
@@ -1483,6 +1493,7 @@ bool ValidatePresentationOverlayPayload(
     const std::vector<MeshSnapshot>& theMeshes,
     const std::vector<InstanceSnapshot>& theInstances,
     const std::vector<MaterialSnapshot>& theMaterials,
+    const std::vector<std::string>& theSuppressedEntityIdentifiers,
     const bool theHasPublishedGeometryRevisions)
 {
     if (theMeshes.size() > kMaxOverlayMeshes
@@ -1494,9 +1505,10 @@ bool ValidatePresentationOverlayPayload(
         && theInstances.empty() && theMaterials.empty();
     bool hasMirrorPlanePrefix = false;
     std::size_t aMirrorPreviewCount = 0;
+    std::size_t aBooleanActorCount = 0;
     switch (theKind) {
         case PresentationOverlayKind::None:
-            return isEmpty;
+            return isEmpty && theSuppressedEntityIdentifiers.empty();
         case PresentationOverlayKind::MoveRotateGizmo:
             if (isEmpty || theMeshes.size() != 7
                 || theInstances.size() != 7
@@ -1532,9 +1544,82 @@ bool ValidatePresentationOverlayPayload(
             }
             hasMirrorPlanePrefix = true;
             break;
+        case PresentationOverlayKind::BooleanSubtractPreview: {
+            const std::size_t anItemCount = theInstances.size();
+            if (anItemCount < 2
+                || anItemCount > kMaxBooleanSourceOperands
+                || theMeshes.size() != anItemCount
+                || theMaterials.size() != anItemCount
+                || theSuppressedEntityIdentifiers.size() != anItemCount) {
+                return false;
+            }
+            bool hasReachedResults = false;
+            for (const InstanceSnapshot& anInstance : theInstances) {
+                if (anInstance.role == RenderRole::BooleanActor
+                    && !hasReachedResults) {
+                    ++aBooleanActorCount;
+                } else if (anInstance.role == RenderRole::BooleanSubject) {
+                    hasReachedResults = true;
+                } else {
+                    return false;
+                }
+            }
+            if (aBooleanActorCount == 0
+                || aBooleanActorCount == anItemCount) {
+                return false;
+            }
+            break;
+        }
+        case PresentationOverlayKind::BooleanUnionPreview:
+            if (theMeshes.size() != 1 || theInstances.size() != 1
+                || theMaterials.size() != 1
+                || theSuppressedEntityIdentifiers.size() < 2
+                || theSuppressedEntityIdentifiers.size()
+                    > kMaxBooleanSourceOperands) {
+                return false;
+            }
+            break;
         default:
             return false;
     }
+
+    const bool isBooleanPreview =
+        theKind == PresentationOverlayKind::BooleanSubtractPreview
+        || theKind == PresentationOverlayKind::BooleanUnionPreview;
+    if (!isBooleanPreview && !theSuppressedEntityIdentifiers.empty()) {
+        return false;
+    }
+    std::unordered_set<std::string> aSuppressedIdentifiers;
+    aSuppressedIdentifiers.reserve(theSuppressedEntityIdentifiers.size());
+    for (const std::string& anIdentifier :
+         theSuppressedEntityIdentifiers) {
+        if (!IsValidIdentifier(anIdentifier)
+            || !aSuppressedIdentifiers.insert(anIdentifier).second) {
+            return false;
+        }
+    }
+    const auto aBooleanEntityIdentifier = [&](const std::size_t theIndex) {
+        if (theKind == PresentationOverlayKind::BooleanUnionPreview) {
+            return std::string("boolean/union/result/0");
+        }
+        if (theIndex < aBooleanActorCount) {
+            return std::string("boolean/subtract/actor/")
+                + std::to_string(theIndex);
+        }
+        return std::string("boolean/subtract/result/")
+            + std::to_string(theIndex - aBooleanActorCount);
+    };
+    const auto aBooleanName = [&](const std::size_t theIndex) {
+        if (theKind == PresentationOverlayKind::BooleanUnionPreview) {
+            return std::string("Boolean union result 0");
+        }
+        if (theIndex < aBooleanActorCount) {
+            return std::string("Boolean subtract actor ")
+                + std::to_string(theIndex);
+        }
+        return std::string("Boolean subtract result ")
+            + std::to_string(theIndex - aBooleanActorCount);
+    };
 
     std::unordered_set<std::string> aMaterialIdentifiers;
     aMaterialIdentifiers.reserve(theMaterials.size());
@@ -1551,6 +1636,7 @@ bool ValidatePresentationOverlayPayload(
             && aMaterialIndex >= 6;
         bool hasExpectedIdentifier = true;
         bool hasExpectedAlpha = true;
+        bool hasExpectedColor = true;
         if (isMirrorPlane) {
             hasExpectedIdentifier = aMaterial.identifier
                 == kMirrorMaterialIdentifiers[aMaterialIndex];
@@ -1569,11 +1655,27 @@ bool ValidatePresentationOverlayPayload(
             hasExpectedAlpha = aMaterial.baseColor.w == 1.0f
                 && (aMaterial.alphaMode == AlphaMode::Opaque
                     || aMaterial.alphaMode == AlphaMode::Mask);
+        } else if (isBooleanPreview) {
+            hasExpectedIdentifier = aMaterial.identifier
+                == aBooleanEntityIdentifier(aMaterialIndex) + "/material";
+            hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
+                && aMaterial.baseColor.w == 1.0f;
+            const Quantity_Color anExpectedColor(
+                aMaterialIndex < aBooleanActorCount
+                    ? Quantity_NOC_ORANGE
+                    : Quantity_NOC_LIGHTSKYBLUE);
+            hasExpectedColor =
+                std::abs(aMaterial.baseColor.x - anExpectedColor.Red())
+                        <= 1.0e-6f
+                && std::abs(aMaterial.baseColor.y - anExpectedColor.Green())
+                        <= 1.0e-6f
+                && std::abs(aMaterial.baseColor.z - anExpectedColor.Blue())
+                        <= 1.0e-6f;
         } else {
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
         }
-        if (!hasExpectedIdentifier
+        if (!hasExpectedIdentifier || !hasExpectedColor
             || !IsValidIdentifier(aMaterial.identifier)
             || !aMaterialIdentifiers.insert(aMaterial.identifier).second
             || !isUnit(aMaterial.baseColor.x)
@@ -1608,6 +1710,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isMirrorPreview =
             theKind == PresentationOverlayKind::MirrorPreview
             && aMeshIndex >= 6;
+        const bool isBooleanMesh = isBooleanPreview;
         const std::string anExpectedPreviewIdentifier = isMirrorPreview
             ? "mirror/preview/" + std::to_string(aMeshIndex - 6) + "/mesh"
             : std::string();
@@ -1617,6 +1720,9 @@ bool ValidatePresentationOverlayPayload(
             || (isMirrorPreview
                 && aMesh.definitionIdentifier
                     != anExpectedPreviewIdentifier)
+            || (isBooleanMesh
+                && aMesh.definitionIdentifier
+                    != aBooleanEntityIdentifier(aMeshIndex) + "/mesh")
             || !IsValidIdentifier(aMesh.definitionIdentifier)
             || !aDefinitionIdentifiers.insert(
                 aMesh.definitionIdentifier).second
@@ -1624,11 +1730,12 @@ bool ValidatePresentationOverlayPayload(
                     ? aMesh.geometryRevision == 0
                     : aMesh.geometryRevision != 0)
             || !IsValid(aMesh.localBounds)
-            || (isMirrorPreview
+            || ((isMirrorPreview || isBooleanMesh)
                 && !IsCenteredLocalBounds(aMesh.localBounds))
             || aMesh.vertices.empty() || aMesh.indices.empty()
             || aMesh.primitives.empty()
-            || (!isMirrorPreview && aMesh.primitives.size() != 1)
+            || (!isMirrorPreview && !isBooleanMesh
+                && aMesh.primitives.size() != 1)
             || !CheckedAdd(aPrimitiveCount,
                            aMesh.primitives.size(),
                            aPrimitiveCount)
@@ -1715,6 +1822,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isMirrorPreview =
             theKind == PresentationOverlayKind::MirrorPreview
             && anInstanceIndex >= 6;
+        const bool isBooleanItem = isBooleanPreview;
         const std::size_t aPreviewIndex = isMirrorPreview
             ? anInstanceIndex - 6
             : 0;
@@ -1732,8 +1840,21 @@ bool ValidatePresentationOverlayPayload(
                     && anInstance.name
                         == "Mirror preview " + std::to_string(aPreviewIndex)
                     && anInstance.meshIndex == anInstanceIndex
-                : true;
-        const bool hasExpectedSemantics = isMirrorPreview
+                : isBooleanItem
+                    ? anInstance.entityIdentifier
+                            == aBooleanEntityIdentifier(anInstanceIndex)
+                        && anInstance.name == aBooleanName(anInstanceIndex)
+                        && anInstance.meshIndex == anInstanceIndex
+                    : true;
+        const bool hasExpectedSemantics = isBooleanItem
+            ? anInstance.coordinateSpace == CoordinateSpace::World
+                && anInstance.depthPolicy == DepthPolicy::Scene
+                && (anInstanceIndex < aBooleanActorCount
+                    ? anInstance.role == RenderRole::BooleanActor
+                        && anInstance.renderStyle == RenderStyle::Wireframe
+                    : anInstance.role == RenderRole::BooleanSubject
+                        && anInstance.renderStyle == RenderStyle::Shaded)
+            : isMirrorPreview
             ? anInstance.role == RenderRole::MirrorPreview
                 && anInstance.coordinateSpace == CoordinateSpace::World
                 && anInstance.depthPolicy == DepthPolicy::Scene
@@ -1741,7 +1862,8 @@ bool ValidatePresentationOverlayPayload(
                 && anInstance.coordinateSpace
                     == CoordinateSpace::WorldAnchorPixels
                 && anInstance.depthPolicy == DepthPolicy::Topmost;
-        const std::size_t anExpectedBindingCount = isMirrorPreview
+        const std::size_t anExpectedBindingCount =
+            (isMirrorPreview || isBooleanItem)
             ? theMeshes[anInstanceIndex].primitives.size()
             : 1;
         if (!hasExpectedIdentity
@@ -1753,8 +1875,9 @@ bool ValidatePresentationOverlayPayload(
             || anInstance.reversesWinding || !anInstance.visible
             || anInstance.selectable || anInstance.selected
             || !hasExpectedSemantics
-            || anInstance.renderStyle != RenderStyle::Shaded
-            || (isMirrorPreview
+            || (!isBooleanItem
+                && anInstance.renderStyle != RenderStyle::Shaded)
+            || ((isMirrorPreview || isBooleanItem)
                 ? !IsTranslationOnlyWorldTransform(
                     anInstance.worldFromObject)
                 : !IsRigidWorldAnchorTransform(
@@ -1773,7 +1896,7 @@ bool ValidatePresentationOverlayPayload(
         }
         for (const PrimitiveBinding& aBinding :
              anInstance.primitiveBindings) {
-            if (((isMirrorPlane || isMirrorPreview)
+            if (((isMirrorPlane || isMirrorPreview || isBooleanItem)
                     && aBinding.materialIndex != anInstanceIndex)
                 || aBinding.materialIndex >= theMaterials.size()
                 || aBinding.pickToken != 0 || !aBinding.visible) {
@@ -1788,6 +1911,13 @@ bool ValidatePresentationOverlayPayload(
                        != anInstance.worldFromObject.values) {
                 return false;
             }
+        }
+    }
+    for (const std::string& aSuppressed :
+         theSuppressedEntityIdentifiers) {
+        if (anEntityIdentifiers.find(aSuppressed)
+            != anEntityIdentifiers.end()) {
+            return false;
         }
     }
     return std::all_of(aMeshReferences.begin(), aMeshReferences.end(),
@@ -1808,6 +1938,12 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
     // identifies only immutable overlay content, so camera-only full captures
     // do not advance it when the gizmo itself is unchanged.
     aHash.AddInteger(static_cast<std::uint8_t>(theOverlay.kind));
+    aHash.AddInteger<std::uint64_t>(
+        theOverlay.suppressedEntityIdentifiers.size());
+    for (const std::string& anIdentifier :
+         theOverlay.suppressedEntityIdentifiers) {
+        aHash.AddString(anIdentifier);
+    }
     aHash.AddInteger<std::uint64_t>(theOverlay.meshes.size());
     for (const MeshSnapshot& aMesh : theOverlay.meshes) {
         aHash.AddInteger(MeshFingerprint(aMesh, 0.0, 0.0));
@@ -1850,6 +1986,8 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 } // namespace
 
 struct OcctSceneSnapshotBuilder::State {
+    using LabelInstanceMap =
+        std::unordered_map<std::string, std::vector<std::size_t>>;
     struct DefinitionRevision {
         std::uint64_t fingerprint = 0;
         std::uint64_t revision = 0;
@@ -1888,6 +2026,11 @@ struct OcctSceneSnapshotBuilder::State {
     std::optional<std::uint64_t> presentationFingerprint;
     std::optional<std::uint64_t> cameraFingerprint;
     std::unordered_map<std::string, DefinitionRevision> definitions;
+    //! Shared immutable lookup for the exact last full snapshot. State copies
+    //! remain bounded during overlay publication because only these pointers are
+    //! copied, never the potentially large committed-scene maps.
+    std::shared_ptr<const LabelInstanceMap> lastFullLabelToInstances;
+    std::shared_ptr<const std::vector<std::string>> lastFullEntityIdentifiers;
     OverlayState overlay;
 };
 
@@ -1977,6 +2120,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
     return PublishPresentationOverlayImpl(
         theDocument,
         std::move(theContent),
+        false,
         false);
 }
 
@@ -1984,12 +2128,18 @@ OcctSceneSnapshotBuilder::OverlayPointer
 OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
     const Handle(OcctDocument)& theDocument,
     PresentationOverlayContent&& theContent,
-    const bool theAllowsMirrorPreview) noexcept
+    const bool theAllowsMirrorPreview,
+    const bool theAllowsBooleanPreview) noexcept
 {
     if (![NSThread isMainThread]
         || theDocument.IsNull()
         || (theContent.kind == PresentationOverlayKind::MirrorPreview
             && !theAllowsMirrorPreview)
+        || ((theContent.kind
+                == PresentationOverlayKind::BooleanSubtractPreview
+             || theContent.kind
+                == PresentationOverlayKind::BooleanUnionPreview)
+            && !theAllowsBooleanPreview)
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
         || myState->documentObject.IsNull()
@@ -2018,6 +2168,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
                 theContent.meshes,
                 theContent.instances,
                 theContent.materials,
+                theContent.suppressedEntityIdentifiers,
                 false)) {
             return {};
         }
@@ -2040,6 +2191,8 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
         anOverlay.meshes = std::move(theContent.meshes);
         anOverlay.instances = std::move(theContent.instances);
         anOverlay.materials = std::move(theContent.materials);
+        anOverlay.suppressedEntityIdentifiers =
+            std::move(theContent.suppressedEntityIdentifiers);
 
         for (MeshSnapshot& aMesh : anOverlay.meshes) {
             auto aRevisionFound = aNextOverlayState.definitions.find(
@@ -2073,6 +2226,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
                 anOverlay.meshes,
                 anOverlay.instances,
                 anOverlay.materials,
+                anOverlay.suppressedEntityIdentifiers,
                 true)) {
             return {};
         }
@@ -2132,6 +2286,7 @@ OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
                 theMirrorGizmoContent.meshes,
                 theMirrorGizmoContent.instances,
                 theMirrorGizmoContent.materials,
+                theMirrorGizmoContent.suppressedEntityIdentifiers,
                 false)) {
             return {};
         }
@@ -2195,10 +2350,17 @@ OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
                 return {};
             }
 
-            MirrorPreviewItem anItem;
-            if (!ExtractMirrorPreviewItem(
+            WorldPreviewItem anItem;
+            const std::string anIdentifier =
+                "mirror/preview/" + std::to_string(aPreviewIndex);
+            if (!ExtractWorldPreviewItem(
                     aPresentation,
-                    aPreviewIndex,
+                    anIdentifier,
+                    "Mirror preview " + std::to_string(aPreviewIndex),
+                    static_cast<std::uint32_t>(6 + aPreviewIndex),
+                    RenderRole::MirrorPreview,
+                    RenderStyle::Shaded,
+                    std::nullopt,
                     kMaxOverlayVertices - aVertexCount,
                     kMaxOverlayIndices - anIndexCount,
                     std::min(kMaxOverlayPrimitives - aPrimitiveCount,
@@ -2259,6 +2421,219 @@ OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
         return PublishPresentationOverlayImpl(
             theDocument,
             std::move(theMirrorGizmoContent),
+            true,
+            false);
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishBooleanPreviewOverlay(
+    const Handle(OcctDocument)& theDocument,
+    const PresentationOverlayKind theKind,
+    const std::vector<Handle(AIS_Shape)>& theActorShapes,
+    const std::vector<Handle(AIS_Shape)>& theResultShapes,
+    const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept
+{
+    const bool isSubtract =
+        theKind == PresentationOverlayKind::BooleanSubtractPreview;
+    const bool isUnion =
+        theKind == PresentationOverlayKind::BooleanUnionPreview;
+    const std::size_t anItemCount =
+        theActorShapes.size() + theResultShapes.size();
+    if (![NSThread isMainThread] || theDocument.IsNull()
+        || myState == nullptr || (!isSubtract && !isUnion)
+        || (isSubtract
+            && (theActorShapes.empty() || theResultShapes.empty()
+                || anItemCount > kMaxBooleanSourceOperands
+                || theSuppressedSourceLabels.size() != anItemCount))
+        || (isUnion
+            && (!theActorShapes.empty() || theResultShapes.size() != 1
+                || theSuppressedSourceLabels.size() < 2
+                || theSuppressedSourceLabels.size()
+                    > kMaxBooleanSourceOperands))) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument = theDocument->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier()
+                != myState->documentIdentifier
+            || myState->lastFullLabelToInstances == nullptr
+            || myState->lastFullEntityIdentifiers == nullptr) {
+            return {};
+        }
+        const Handle(TDF_Data)& aData = aDocument->GetData();
+        if (aData.IsNull()
+            || aData->Time() != myState->lastFullDocumentTime) {
+            return {};
+        }
+
+        PresentationOverlayContent aContent;
+        aContent.kind = theKind;
+        aContent.meshes.reserve(anItemCount);
+        aContent.instances.reserve(anItemCount);
+        aContent.materials.reserve(anItemCount);
+        aContent.suppressedEntityIdentifiers.reserve(
+            theSuppressedSourceLabels.size());
+
+        std::unordered_set<std::string> aSeenSourceLabels;
+        std::unordered_set<std::string> aSeenSuppressedEntities;
+        for (const TDF_Label& aLabel : theSuppressedSourceLabels) {
+            const std::string aLabelIdentifier =
+                theDocument->EntityIdentifierForLabel(aLabel);
+            const auto aMapping =
+                myState->lastFullLabelToInstances->find(aLabelIdentifier);
+            // The Boolean controller operates on one displayed committed body
+            // per source. Ambiguous assembly-definition mappings stay on OCCT.
+            if (aLabel.IsNull() || aLabelIdentifier.empty()
+                || !aSeenSourceLabels.insert(aLabelIdentifier).second
+                || aMapping == myState->lastFullLabelToInstances->end()
+                || aMapping->second.size() != 1) {
+                return {};
+            }
+            const std::size_t anInstanceIndex = aMapping->second.front();
+            if (anInstanceIndex
+                    >= myState->lastFullEntityIdentifiers->size()) {
+                return {};
+            }
+            const std::string& anEntityIdentifier =
+                (*myState->lastFullEntityIdentifiers)[anInstanceIndex];
+            if (!IsValidIdentifier(anEntityIdentifier)
+                || !aSeenSuppressedEntities.insert(
+                    anEntityIdentifier).second) {
+                return {};
+            }
+            aContent.suppressedEntityIdentifiers.push_back(
+                anEntityIdentifier);
+        }
+
+        std::size_t aVertexCount = 0;
+        std::size_t anIndexCount = 0;
+        std::size_t aPrimitiveCount = 0;
+        std::size_t aBindingCount = 0;
+        std::size_t aNumericByteCount = 0;
+        std::unordered_set<const AIS_Shape*> aSeenPresentations;
+        aSeenPresentations.reserve(anItemCount);
+
+        const auto appendItem = [&](const Handle(AIS_Shape)& theShape,
+                                    const std::string& theIdentifier,
+                                    const std::string& theName,
+                                    const RenderRole theRole,
+                                    const RenderStyle theStyle,
+                                    const Quantity_NameOfColor theColor) {
+            if (theShape.IsNull()
+                || !aSeenPresentations.insert(theShape.get()).second
+                || aContent.meshes.size() >= kMaxOverlayMeshes
+                || aVertexCount >= kMaxOverlayVertices
+                || anIndexCount >= kMaxOverlayIndices
+                || aPrimitiveCount >= kMaxOverlayPrimitives
+                || aBindingCount >= kMaxOverlayPrimitiveBindings) {
+                return false;
+            }
+            WorldPreviewItem anItem;
+            if (!ExtractWorldPreviewItem(
+                    theShape,
+                    theIdentifier,
+                    theName,
+                    static_cast<std::uint32_t>(aContent.meshes.size()),
+                    theRole,
+                    theStyle,
+                    theColor,
+                    kMaxOverlayVertices - aVertexCount,
+                    kMaxOverlayIndices - anIndexCount,
+                    std::min(kMaxOverlayPrimitives - aPrimitiveCount,
+                             kMaxOverlayPrimitiveBindings - aBindingCount),
+                    anItem)) {
+                return false;
+            }
+
+            std::size_t aVertexBytes = 0;
+            std::size_t anIndexBytes = 0;
+            if (!CheckedAdd(aVertexCount,
+                            anItem.mesh.vertices.size(),
+                            aVertexCount)
+                || aVertexCount > kMaxOverlayVertices
+                || !CheckedAdd(anIndexCount,
+                               anItem.mesh.indices.size(),
+                               anIndexCount)
+                || anIndexCount > kMaxOverlayIndices
+                || !CheckedAdd(aPrimitiveCount,
+                               anItem.mesh.primitives.size(),
+                               aPrimitiveCount)
+                || aPrimitiveCount > kMaxOverlayPrimitives
+                || !CheckedAdd(aBindingCount,
+                               anItem.instance.primitiveBindings.size(),
+                               aBindingCount)
+                || aBindingCount > kMaxOverlayPrimitiveBindings
+                || !CheckedMultiply(anItem.mesh.vertices.size(),
+                                    sizeof(Vertex),
+                                    aVertexBytes)
+                || !CheckedMultiply(anItem.mesh.indices.size(),
+                                    sizeof(std::uint32_t),
+                                    anIndexBytes)
+                || !CheckedAdd(aNumericByteCount,
+                               aVertexBytes,
+                               aNumericByteCount)
+                || !CheckedAdd(aNumericByteCount,
+                               anIndexBytes,
+                               aNumericByteCount)
+                || aNumericByteCount > kMaxOverlayNumericBytes) {
+                return false;
+            }
+            aContent.meshes.push_back(std::move(anItem.mesh));
+            aContent.instances.push_back(std::move(anItem.instance));
+            aContent.materials.push_back(std::move(anItem.material));
+            return true;
+        };
+
+        for (std::size_t anActorIndex = 0;
+             anActorIndex < theActorShapes.size(); ++anActorIndex) {
+            const std::string anIdentifier =
+                "boolean/subtract/actor/" + std::to_string(anActorIndex);
+            if (!appendItem(
+                    theActorShapes[anActorIndex],
+                    anIdentifier,
+                    "Boolean subtract actor "
+                        + std::to_string(anActorIndex),
+                    RenderRole::BooleanActor,
+                    RenderStyle::Wireframe,
+                    Quantity_NOC_ORANGE)) {
+                return {};
+            }
+        }
+        for (std::size_t aResultIndex = 0;
+             aResultIndex < theResultShapes.size(); ++aResultIndex) {
+            const std::string anIdentifier = isUnion
+                ? "boolean/union/result/0"
+                : "boolean/subtract/result/"
+                    + std::to_string(aResultIndex);
+            const std::string aName = isUnion
+                ? "Boolean union result 0"
+                : "Boolean subtract result "
+                    + std::to_string(aResultIndex);
+            if (!appendItem(
+                    theResultShapes[aResultIndex],
+                    anIdentifier,
+                    aName,
+                    RenderRole::BooleanSubject,
+                    RenderStyle::Shaded,
+                    Quantity_NOC_LIGHTSKYBLUE)) {
+                return {};
+            }
+        }
+
+        return PublishPresentationOverlayImpl(
+            theDocument,
+            std::move(aContent),
+            false,
             true);
     } catch (const Standard_Failure&) {
         return {};
@@ -2472,6 +2847,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aNextState.overlay.fingerprint.reset();
             aNextState.definitions.clear();
             aNextState.overlay.definitions.clear();
+            aNextState.lastFullLabelToInstances.reset();
+            aNextState.lastFullEntityIdentifiers.reset();
             aNextState.lastFullSnapshotRevision = 0;
             aNextState.lastFullDocumentTime = 0;
         }
@@ -3031,6 +3408,18 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         aNextState.lastFullSnapshotRevision =
             aNextState.snapshotRevision;
         aNextState.lastFullDocumentTime = aData->Time();
+        auto aLastFullEntityIdentifiers =
+            std::make_shared<std::vector<std::string>>();
+        aLastFullEntityIdentifiers->reserve(aScene.instances.size());
+        for (const InstanceSnapshot& anInstance : aScene.instances) {
+            aLastFullEntityIdentifiers->push_back(
+                anInstance.entityIdentifier);
+        }
+        aNextState.lastFullEntityIdentifiers =
+            std::move(aLastFullEntityIdentifiers);
+        aNextState.lastFullLabelToInstances =
+            std::make_shared<State::LabelInstanceMap>(
+                std::move(aLabelToInstances));
 
         // Finish every potentially allocating operation before publishing
         // state. A failed allocation must not consume any revision.

@@ -108,6 +108,12 @@ namespace core3d {
         //! recent full scene. Empty content is a valid explicit clear.
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
+#ifdef DEBUG
+        Standard_Boolean debugBeginBooleanSelection(
+            BooleanAction action,
+            const std::vector<std::string>& actorEntityIdentifiers,
+            const std::vector<std::string>& subjectEntityIdentifiers) noexcept;
+#endif
     private:
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);

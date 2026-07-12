@@ -8,6 +8,8 @@
 #import "Core3DSceneSnapshotFactory.hpp"
 
 #include "../Scene/SceneSnapshot.hpp"
+#include <Quantity_Color.hxx>
+#include <Quantity_NameOfColor.hxx>
 
 #include <array>
 #include <cmath>
@@ -144,7 +146,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                        overlayRevision:(uint64_t)overlayRevision
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
                            renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
-                             materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials;
+                             materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials
+           suppressedEntityIdentifiers:(NSArray<NSString *> *)suppressedEntityIdentifiers;
 @end
 
 @interface Core3DSceneSnapshot ()
@@ -427,7 +430,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                        overlayRevision:(uint64_t)overlayRevision
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
                            renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
-                             materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials {
+                             materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials
+           suppressedEntityIdentifiers:(NSArray<NSString *> *)suppressedEntityIdentifiers {
     self = [super init];
     if (self) {
         _schemaVersion = schemaVersion;
@@ -441,6 +445,7 @@ static_assert(sizeof(std::uint32_t) == 4,
         _meshes = [meshes copy];
         _renderItems = [renderItems copy];
         _materials = [materials copy];
+        _suppressedEntityIdentifiers = [suppressedEntityIdentifiers copy];
     }
     return self;
 }
@@ -507,6 +512,7 @@ constexpr std::size_t kMaximumOverlayPrimitives = 25'000;
 constexpr std::size_t kMaximumOverlayBindings = 25'000;
 constexpr std::size_t kMaximumOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumMirrorPreviewBodies = 8;
+constexpr std::size_t kMaximumBooleanSourceOperands = 8;
 constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
     "gizmo/mirroring/x/negative",
     "gizmo/mirroring/y/negative",
@@ -1165,11 +1171,13 @@ bool IsValidPresentationOverlaySnapshotImpl(
 
     const bool isEmpty = snapshot.meshes.empty()
         && snapshot.instances.empty() && snapshot.materials.empty();
+    std::size_t stringBytes = snapshot.publicationSourceIdentifier.size();
     bool hasMirrorPlanePrefix = false;
     std::size_t mirrorPreviewCount = 0;
+    std::size_t booleanActorCount = 0;
     switch (snapshot.kind) {
         case PresentationOverlayKind::None:
-            return isEmpty;
+            return isEmpty && snapshot.suppressedEntityIdentifiers.empty();
         case PresentationOverlayKind::MoveRotateGizmo:
             if (isEmpty || snapshot.meshes.size() != 7
                 || snapshot.instances.size() != 7
@@ -1205,11 +1213,85 @@ bool IsValidPresentationOverlaySnapshotImpl(
             }
             hasMirrorPlanePrefix = true;
             break;
+        case PresentationOverlayKind::BooleanSubtractPreview: {
+            const std::size_t itemCount = snapshot.instances.size();
+            if (itemCount < 2 || itemCount > kMaximumBooleanSourceOperands
+                || snapshot.meshes.size() != itemCount
+                || snapshot.materials.size() != itemCount
+                || snapshot.suppressedEntityIdentifiers.size() != itemCount) {
+                return false;
+            }
+            bool reachedResults = false;
+            for (const InstanceSnapshot& instance : snapshot.instances) {
+                if (instance.role == RenderRole::BooleanActor
+                    && !reachedResults) {
+                    ++booleanActorCount;
+                } else if (instance.role == RenderRole::BooleanSubject) {
+                    reachedResults = true;
+                } else {
+                    return false;
+                }
+            }
+            if (booleanActorCount == 0 || booleanActorCount == itemCount) {
+                return false;
+            }
+            break;
+        }
+        case PresentationOverlayKind::BooleanUnionPreview:
+            if (snapshot.meshes.size() != 1
+                || snapshot.instances.size() != 1
+                || snapshot.materials.size() != 1
+                || snapshot.suppressedEntityIdentifiers.size() < 2
+                || snapshot.suppressedEntityIdentifiers.size()
+                    > kMaximumBooleanSourceOperands) {
+                return false;
+            }
+            break;
         default:
             return false;
     }
 
-    std::size_t stringBytes = snapshot.publicationSourceIdentifier.size();
+    const bool isBooleanPreview =
+        snapshot.kind == PresentationOverlayKind::BooleanSubtractPreview
+        || snapshot.kind == PresentationOverlayKind::BooleanUnionPreview;
+    const auto booleanEntityIdentifier = [&](const std::size_t index) {
+        if (snapshot.kind == PresentationOverlayKind::BooleanUnionPreview) {
+            return std::string("boolean/union/result/0");
+        }
+        if (index < booleanActorCount) {
+            return std::string("boolean/subtract/actor/")
+                + std::to_string(index);
+        }
+        return std::string("boolean/subtract/result/")
+            + std::to_string(index - booleanActorCount);
+    };
+    const auto booleanName = [&](const std::size_t index) {
+        if (snapshot.kind == PresentationOverlayKind::BooleanUnionPreview) {
+            return std::string("Boolean union result 0");
+        }
+        if (index < booleanActorCount) {
+            return std::string("Boolean subtract actor ")
+                + std::to_string(index);
+        }
+        return std::string("Boolean subtract result ")
+            + std::to_string(index - booleanActorCount);
+    };
+    if (!isBooleanPreview
+        && !snapshot.suppressedEntityIdentifiers.empty()) {
+        return false;
+    }
+    std::unordered_set<std::string> suppressedIdentifiers;
+    suppressedIdentifiers.reserve(snapshot.suppressedEntityIdentifiers.size());
+    for (const std::string& identifier :
+         snapshot.suppressedEntityIdentifiers) {
+        if (!IsValidIdentifier(identifier)
+            || !suppressedIdentifiers.insert(identifier).second
+            || !CheckedAdd(stringBytes, identifier.size(), stringBytes)
+            || stringBytes > kMaximumDTOStringBytes) {
+            return false;
+        }
+    }
+
     std::unordered_set<std::string> materialIdentifiers;
     materialIdentifiers.reserve(snapshot.materials.size());
     for (std::size_t materialIndex = 0;
@@ -1224,8 +1306,10 @@ bool IsValidPresentationOverlaySnapshotImpl(
         const bool isMirrorPreview =
             snapshot.kind == PresentationOverlayKind::MirrorPreview
             && materialIndex >= 6;
+        const bool isBooleanMaterial = isBooleanPreview;
         bool hasExpectedIdentifier = true;
         bool hasExpectedAlpha = true;
+        bool hasExpectedColor = true;
         if (isMirrorPlane) {
             hasExpectedIdentifier = material.identifier
                 == kMirrorMaterialIdentifiers[materialIndex];
@@ -1244,11 +1328,27 @@ bool IsValidPresentationOverlaySnapshotImpl(
             hasExpectedAlpha = material.baseColor.w == 1.0f
                 && (material.alphaMode == AlphaMode::Opaque
                     || material.alphaMode == AlphaMode::Mask);
+        } else if (isBooleanMaterial) {
+            hasExpectedIdentifier = material.identifier
+                == booleanEntityIdentifier(materialIndex) + "/material";
+            hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
+                && material.baseColor.w == 1.0f;
+            const Quantity_Color expectedColor(
+                materialIndex < booleanActorCount
+                    ? Quantity_NOC_ORANGE
+                    : Quantity_NOC_LIGHTSKYBLUE);
+            hasExpectedColor =
+                std::abs(material.baseColor.x - expectedColor.Red())
+                        <= 1.0e-6f
+                && std::abs(material.baseColor.y - expectedColor.Green())
+                        <= 1.0e-6f
+                && std::abs(material.baseColor.z - expectedColor.Blue())
+                        <= 1.0e-6f;
         } else {
             hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
                 && material.baseColor.w == 1.0f;
         }
-        if (!hasExpectedIdentifier
+        if (!hasExpectedIdentifier || !hasExpectedColor
             || !IsValid(material)
             || !hasExpectedAlpha
             || !isUnit(material.baseColor.x)
@@ -1279,6 +1379,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         const bool isMirrorPreview =
             snapshot.kind == PresentationOverlayKind::MirrorPreview
             && meshIndex >= 6;
+        const bool isBooleanMesh = isBooleanPreview;
         const std::string expectedPreviewIdentifier = isMirrorPreview
             ? "mirror/preview/" + std::to_string(meshIndex - 6) + "/mesh"
             : std::string();
@@ -1288,16 +1389,20 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || (isMirrorPreview
                 && mesh.definitionIdentifier
                     != expectedPreviewIdentifier)
+            || (isBooleanMesh
+                && mesh.definitionIdentifier
+                    != booleanEntityIdentifier(meshIndex) + "/mesh")
             || !IsValidIdentifier(mesh.definitionIdentifier)
             || !definitionIdentifiers.insert(
                 mesh.definitionIdentifier).second
             || mesh.geometryRevision == 0
             || !mesh.localBounds.valid || !IsValid(mesh.localBounds)
-            || (isMirrorPreview
+            || ((isMirrorPreview || isBooleanMesh)
                 && !IsCenteredLocalBounds(mesh.localBounds))
             || mesh.vertices.empty() || mesh.indices.empty()
             || mesh.primitives.empty()
-            || (!isMirrorPreview && mesh.primitives.size() != 1)
+            || (!isMirrorPreview && !isBooleanMesh
+                && mesh.primitives.size() != 1)
             || !CheckedAdd(totalPrimitives,
                            mesh.primitives.size(),
                            totalPrimitives)
@@ -1387,6 +1492,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         const bool isMirrorPreview =
             snapshot.kind == PresentationOverlayKind::MirrorPreview
             && instanceIndex >= 6;
+        const bool isBooleanItem = isBooleanPreview;
         const std::size_t previewIndex = isMirrorPreview
             ? instanceIndex - 6
             : 0;
@@ -1403,8 +1509,21 @@ bool IsValidPresentationOverlaySnapshotImpl(
                     && instance.name
                         == "Mirror preview " + std::to_string(previewIndex)
                     && instance.meshIndex == instanceIndex
-                : true;
-        const bool hasExpectedSemantics = isMirrorPreview
+                : isBooleanItem
+                    ? instance.entityIdentifier
+                            == booleanEntityIdentifier(instanceIndex)
+                        && instance.name == booleanName(instanceIndex)
+                        && instance.meshIndex == instanceIndex
+                    : true;
+        const bool hasExpectedSemantics = isBooleanItem
+            ? instance.coordinateSpace == CoordinateSpace::World
+                && instance.depthPolicy == DepthPolicy::Scene
+                && (instanceIndex < booleanActorCount
+                    ? instance.role == RenderRole::BooleanActor
+                        && instance.renderStyle == RenderStyle::Wireframe
+                    : instance.role == RenderRole::BooleanSubject
+                        && instance.renderStyle == RenderStyle::Shaded)
+            : isMirrorPreview
             ? instance.role == RenderRole::MirrorPreview
                 && instance.coordinateSpace == CoordinateSpace::World
                 && instance.depthPolicy == DepthPolicy::Scene
@@ -1412,7 +1531,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
                 && instance.coordinateSpace
                     == CoordinateSpace::WorldAnchorPixels
                 && instance.depthPolicy == DepthPolicy::Topmost;
-        const std::size_t expectedBindingCount = isMirrorPreview
+        const std::size_t expectedBindingCount =
+            (isMirrorPreview || isBooleanItem)
             ? snapshot.meshes[instanceIndex].primitives.size()
             : 1;
         if (!hasExpectedIdentity
@@ -1422,7 +1542,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || instance.reversesWinding || !instance.visible
             || instance.selectable || instance.selected
             || !hasExpectedSemantics
-            || instance.renderStyle != RenderStyle::Shaded
+            || (!isBooleanItem
+                && instance.renderStyle != RenderStyle::Shaded)
             || instance.name.size() > kMaximumNameBytes
             || !CheckedAdd(stringBytes,
                            instance.entityIdentifier.size(),
@@ -1431,7 +1552,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
                            instance.name.size(),
                            stringBytes)
             || stringBytes > kMaximumDTOStringBytes
-            || (isMirrorPreview
+            || ((isMirrorPreview || isBooleanItem)
                 ? !IsTranslationOnlyWorldTransform(
                     instance.worldFromObject)
                 : !IsRigidWorldAnchorTransform(
@@ -1449,7 +1570,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         }
         for (const PrimitiveBinding& binding :
              instance.primitiveBindings) {
-            if (((isMirrorPlane || isMirrorPreview)
+            if (((isMirrorPlane || isMirrorPreview || isBooleanItem)
                     && binding.materialIndex != instanceIndex)
                 || binding.materialIndex >= snapshot.materials.size()
                 || binding.pickToken != 0 || !binding.visible) {
@@ -1464,6 +1585,13 @@ bool IsValidPresentationOverlaySnapshotImpl(
                        != instance.worldFromObject.values) {
                 return false;
             }
+        }
+    }
+    for (const std::string& suppressed :
+         snapshot.suppressedEntityIdentifiers) {
+        if (entityIdentifiers.find(suppressed)
+            != entityIdentifiers.end()) {
+            return false;
         }
     }
     return std::all_of(meshReferences.begin(), meshReferences.end(),
@@ -1629,6 +1757,10 @@ Core3DScenePresentationOverlayKind PresentationOverlayKindFromScene(
             return Core3DScenePresentationOverlayKindMirrorGizmo;
         case PresentationOverlayKind::MirrorPreview:
             return Core3DScenePresentationOverlayKindMirrorPreview;
+        case PresentationOverlayKind::BooleanSubtractPreview:
+            return Core3DScenePresentationOverlayKindBooleanSubtractPreview;
+        case PresentationOverlayKind::BooleanUnionPreview:
+            return Core3DScenePresentationOverlayKindBooleanUnionPreview;
     }
 
     NSCAssert(NO, @"Unknown presentation-overlay kind: %u",
@@ -1886,6 +2018,13 @@ Core3DCreateScenePresentationOverlaySnapshotDTO(
                                   Core3DSceneMaterialSnapshot>(
                 snapshot.materials,
                 MaterialFromScene);
+        NSMutableArray<NSString *> *suppressedEntityIdentifiers =
+            [NSMutableArray arrayWithCapacity:
+                snapshot.suppressedEntityIdentifiers.size()];
+        for (const std::string& identifier :
+             snapshot.suppressedEntityIdentifiers) {
+            [suppressedEntityIdentifiers addObject:StringFromUTF8(identifier)];
+        }
         return [[Core3DScenePresentationOverlaySnapshot alloc]
             initWithSchemaVersion:snapshot.schemaVersion
             kind:PresentationOverlayKindFromScene(snapshot.kind)
@@ -1898,7 +2037,8 @@ Core3DCreateScenePresentationOverlaySnapshotDTO(
             overlayRevision:snapshot.overlayRevision
             meshes:meshes
             renderItems:renderItems
-            materials:materials];
+            materials:materials
+            suppressedEntityIdentifiers:suppressedEntityIdentifiers];
     } catch (...) {
         return nil;
     }

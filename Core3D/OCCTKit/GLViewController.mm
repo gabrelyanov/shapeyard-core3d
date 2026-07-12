@@ -73,6 +73,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 @interface GLViewController () <UIGestureRecognizerDelegate>
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
+- (void)checkSelections;
 @end
 
 @implementation GLViewController {
@@ -171,6 +172,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     [[self viewportView] requestRender];
 }
 
+#ifdef DEBUG
+- (void)debugRequestRender
+{
+    [self requestRender];
+}
+#endif
+
 - (NSUInteger)renderedFrameCount
 {
     return [self viewportView].renderedFrameCount;
@@ -232,11 +240,34 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _viewer != nullptr
         && _viewer->getObjectInteractor() != nullptr
         && _viewer->getObjectInteractor()->hasUnresolvedMirrorObjects();
+    const BOOL hadBooleanOperation =
+        _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && (_viewer->getObjectInteractor()->hasActiveBoolean()
+            || _viewer->getObjectInteractor()->hasUnresolvedBoolean());
+    const PrimitiveGizmoType booleanGizmoType = hadBooleanOperation
+        ? [self getGizmoType]
+        : PrimitiveGizmoTypeNone;
     if (hadActiveInteraction && _viewer != nullptr) {
         _viewer->CancelInteraction(0, 0);
     }
     if (hadUnresolvedMirrorObjects) {
         _viewer->getObjectInteractor()->clearTrialMirrorObjects();
+    }
+    if (hadBooleanOperation) {
+        _viewer->getObjectInteractor()->cancelActiveBoolean();
+        // Background/view disappearance retires transient geometry but keeps an
+        // empty action provenance while the public tool mode remains Boolean, so
+        // foreground taps can start a fresh operation without a mode toggle.
+        if (!_isPreviewMode) {
+            if (booleanGizmoType == PrimitiveGizmoTypeSubtract) {
+                (void)_viewer->getObjectInteractor()->beginBoolean(
+                    BooleanAction::BooleanSubtract);
+            } else if (booleanGizmoType == PrimitiveGizmoTypeUnion) {
+                (void)_viewer->getObjectInteractor()->beginBoolean(
+                    BooleanAction::BooleanUnion);
+            }
+        }
     }
     if (_rawTouchRendering) {
         _rawTouchRendering = NO;
@@ -251,10 +282,17 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _panRendering = NO;
         [view endInteractiveRendering];
     }
-    if (hadActiveInteraction || hadUnresolvedMirrorObjects) {
+    if (hadActiveInteraction || hadUnresolvedMirrorObjects
+        || hadBooleanOperation) {
         [self requestRender];
     }
-    if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects)
+    if (hadBooleanOperation) {
+        // Selection notification is also the renderer-neutral presentation
+        // invalidation and Apply-state refresh for lifecycle cancellation.
+        [self checkSelections];
+    }
+    if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects
+         || hadBooleanOperation)
         && _delegate
         && [_delegate respondsToSelector:
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -805,8 +843,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)setPreviewMode {
-    [self endActiveRenderingInteractions];
     _isPreviewMode = YES;
+    [self endActiveRenderingInteractions];
 }
 
 - (void)undo {
@@ -961,13 +999,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (type == PrimitiveGizmoTypeChamfer) {
         _viewer->getShapeInteractor()->saveSelectionEdges();
 	} else if (type == PrimitiveGizmoTypeSubtract || type == PrimitiveGizmoTypeUnion) {
-		Standard_Boolean forceActor = (type == PrimitiveGizmoTypeSubtract);
-		_viewer->getObjectInteractor()->fillSelectedState(
-			forceActor,
-			type == PrimitiveGizmoTypeSubtract
+			Standard_Boolean forceActor = (type == PrimitiveGizmoTypeSubtract);
+			const BooleanAction action = type == PrimitiveGizmoTypeSubtract
 				? BooleanAction::BooleanSubtract
-				: BooleanAction::BooleanUnion);
-    }
+				: BooleanAction::BooleanUnion;
+			if (_viewer->getObjectInteractor()->beginBoolean(action)) {
+				_viewer->getObjectInteractor()->fillSelectedState(
+					forceActor,
+					action);
+			}
+	}
 	[self requestRender];
 }
 
@@ -1029,7 +1070,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void) applySubtract {
-    _viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanSubtract);
+	const BooleanApplyResult result =
+		_viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanSubtract);
+	if (result == BooleanApplyResult::AppliedNeedsDocumentRedraw) {
+		_viewer->redrawDocument();
+	}
     [self requestRender];
 }
 
@@ -1039,7 +1084,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void) applyUnion {
-    _viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanUnion);
+	const BooleanApplyResult result =
+		_viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanUnion);
+	if (result == BooleanApplyResult::AppliedNeedsDocumentRedraw) {
+		_viewer->redrawDocument();
+	}
     [self requestRender];
 }
 
@@ -1156,6 +1205,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         dispatch_sync(dispatch_get_main_queue(), ^{
             try {
                 if (strongSelf->_viewer != nullptr) {
+                    [strongSelf endActiveRenderingInteractions];
                     result = AssetLoadResultFromImportResult(strongSelf->_viewer->ImportCbf(fn));
                     if (result == Core3DAssetLoadResultSuccess) {
                         [strongSelf requestRender];

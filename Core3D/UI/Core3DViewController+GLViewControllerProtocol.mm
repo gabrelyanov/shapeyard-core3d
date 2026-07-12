@@ -134,6 +134,7 @@
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
+                self.can_apply = false;
                 break;
             case PrimitiveGizmoTypeChamfer:
                 self.can_apply = false;

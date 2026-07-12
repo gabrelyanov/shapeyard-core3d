@@ -158,16 +158,26 @@
 
 - (void)undo {
     [GLController undo];
-    if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
-        self.can_apply = [GLController hasTrialMirrorObjects];
+    if (_currentGizmoType == PrimitiveGizmoTypeMirror
+        || _currentGizmoType == PrimitiveGizmoTypeSubtract
+        || _currentGizmoType == PrimitiveGizmoTypeUnion) {
+        self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
+            ? [GLController hasTrialMirrorObjects]
+            : [GLController canApplyBoolean];
+        [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];
     }
 }
 
 - (void)redo {
     [GLController redo];
-    if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
-        self.can_apply = [GLController hasTrialMirrorObjects];
+    if (_currentGizmoType == PrimitiveGizmoTypeMirror
+        || _currentGizmoType == PrimitiveGizmoTypeSubtract
+        || _currentGizmoType == PrimitiveGizmoTypeUnion) {
+        self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
+            ? [GLController hasTrialMirrorObjects]
+            : [GLController canApplyBoolean];
+        [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];
     }
 }

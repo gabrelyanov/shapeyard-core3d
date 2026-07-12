@@ -47,6 +47,8 @@
 #include <cmath>
 #include <exception>
 #include <new>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #import <UIKit/UIKit.h>
@@ -476,6 +478,15 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     }
     if (theManipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
         _objectInteractor->setManipulatorType(theManipulatorType);
+        if (theManipulatorType
+            == PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract) {
+            (void)_objectInteractor->beginBoolean(
+                BooleanAction::BooleanSubtract);
+        } else if (theManipulatorType
+                   == PrimitiveManipulatorType::PrimitiveGizmoTypeUnion) {
+            (void)_objectInteractor->beginBoolean(
+                BooleanAction::BooleanUnion);
+        }
     }
 }
 
@@ -1177,9 +1188,11 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
     }
     scene::PresentationOverlayContent aContent;
     std::vector<Handle(AIS_Shape)> aMirrorPreviewObjects;
+    BooleanPreviewCapture aBooleanPreview;
     if (_objectInteractor->captureIdlePresentationOverlay(
             aContent,
-            aMirrorPreviewObjects)
+            aMirrorPreviewObjects,
+            aBooleanPreview)
         != PresentationOverlayCaptureStatus::Available) {
         return {};
     }
@@ -1189,10 +1202,95 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
             std::move(aContent),
             aMirrorPreviewObjects);
     }
+    if (!aBooleanPreview.actors.empty()
+        || !aBooleanPreview.results.empty()) {
+        return _sceneSnapshotBuilder.PublishBooleanPreviewOverlay(
+            myDoc,
+            aBooleanPreview.action == BooleanAction::BooleanSubtract
+                ? scene::PresentationOverlayKind::BooleanSubtractPreview
+                : scene::PresentationOverlayKind::BooleanUnionPreview,
+            aBooleanPreview.actors,
+            aBooleanPreview.results,
+            aBooleanPreview.suppressedSourceLabels);
+    }
     return _sceneSnapshotBuilder.PublishPresentationOverlay(
         myDoc,
         std::move(aContent));
 }
+
+#ifdef DEBUG
+Standard_Boolean Core3DViewer::debugBeginBooleanSelection(
+    const BooleanAction theAction,
+    const std::vector<std::string>& theActorEntityIdentifiers,
+    const std::vector<std::string>& theSubjectEntityIdentifiers) noexcept {
+    if (_objectInteractor == nullptr || myContext.IsNull() || myDoc.IsNull()
+        || (theAction == BooleanAction::BooleanUnion
+            && !theActorEntityIdentifiers.empty())) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        _objectInteractor->cancelActiveBoolean();
+
+        std::unordered_set<std::string> aRequested;
+        for (const std::string& anIdentifier : theActorEntityIdentifiers) {
+            if (anIdentifier.empty()
+                || !aRequested.insert(anIdentifier).second) {
+                return Standard_False;
+            }
+        }
+        for (const std::string& anIdentifier : theSubjectEntityIdentifiers) {
+            if (anIdentifier.empty()
+                || !aRequested.insert(anIdentifier).second) {
+                return Standard_False;
+            }
+        }
+
+        std::unordered_map<std::string, Handle(AIS_InteractiveObject)>
+            aCommittedPresentations;
+        AIS_ListOfInteractive aDisplayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
+        for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
+             anObject.More(); anObject.Next()) {
+            const Handle(AIS_InteractiveObject)& aPresentation =
+                anObject.Value();
+            const TDF_Label aLabel = myDoc->ShapeLabel(aPresentation);
+            const std::string anIdentifier =
+                myDoc->EntityIdentifierForLabel(aLabel);
+            if (aLabel.IsNull() || anIdentifier.empty()
+                || aRequested.find(anIdentifier) == aRequested.end()) {
+                continue;
+            }
+            if (!aCommittedPresentations.emplace(
+                    anIdentifier,
+                    aPresentation).second) {
+                return Standard_False;
+            }
+        }
+        if (aCommittedPresentations.size() != aRequested.size()) {
+            return Standard_False;
+        }
+
+        std::vector<Handle(AIS_InteractiveObject)> anActors;
+        std::vector<Handle(AIS_InteractiveObject)> aSubjects;
+        anActors.reserve(theActorEntityIdentifiers.size());
+        aSubjects.reserve(theSubjectEntityIdentifiers.size());
+        for (const std::string& anIdentifier : theActorEntityIdentifiers) {
+            anActors.push_back(aCommittedPresentations.at(anIdentifier));
+        }
+        for (const std::string& anIdentifier : theSubjectEntityIdentifiers) {
+            aSubjects.push_back(aCommittedPresentations.at(anIdentifier));
+        }
+        return _objectInteractor->debugBeginBooleanSelection(
+            anActors,
+            aSubjects,
+            theAction);
+    } catch (...) {
+        _objectInteractor->cancelActiveBoolean();
+        return Standard_False;
+    }
+}
+#endif
 
 void Core3DViewer::Rotation(int theX, int theY) {
     if(_objectInteractor == nullptr) {
@@ -1231,6 +1329,9 @@ const int Core3DViewer::selectedCount() const {
 void Core3DViewer::Select(int theX, int theY) {
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
         printf("ERROR with Select\n");
+        return;
+    }
+    if (_objectInteractor->isBooleanSelectionFrozen()) {
         return;
     }
 

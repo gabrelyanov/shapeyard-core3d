@@ -20,6 +20,7 @@
 #include <GP_Quaternion.hxx>
 #include <AIS_Shape.hxx>
 #include <Standard_Failure.hxx>
+#include <array>
 #include <cmath>
 
 namespace core3d {
@@ -143,16 +144,48 @@ namespace core3d {
     PresentationOverlayCaptureStatus
     ObjectInteractor::captureIdlePresentationOverlay(
         scene::PresentationOverlayContent& theContent,
-        std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects) const noexcept {
+        std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects,
+        BooleanPreviewCapture& theBooleanPreview) const noexcept {
         try {
             theContent = {};
             theMirrorPreviewObjects.clear();
+            theBooleanPreview = {};
             const bool hasMirrorPreview = !_trialMirrorObjects.empty();
             // Cleanup residue is deliberately not publishable. Retaining OCCT
             // prevents an unresolved presentation from being omitted.
             if (hasMirrorPreview
                 && (!_trialMirrorObjectsValid
                     || _trialMirrorObjects.size() > kMaxMirrorPreviewBodies)) {
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
+            if (_booleanOpController.hasUnresolvedState()) {
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
+            const bool isSubtract = _manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract;
+            const bool isUnion = _manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
+            if (isSubtract || isUnion) {
+                if (hasMirrorPreview) {
+                    return PresentationOverlayCaptureStatus::Unsafe;
+                }
+                if (!_booleanOpController.hasSelectionState()) {
+                    return PresentationOverlayCaptureStatus::Available;
+                }
+                if (!_booleanOpController.capturePreview(theBooleanPreview)
+                    || (isSubtract
+                        && theBooleanPreview.action
+                            != BooleanAction::BooleanSubtract)
+                    || (isUnion
+                        && theBooleanPreview.action
+                            != BooleanAction::BooleanUnion)) {
+                    theBooleanPreview = {};
+                    return PresentationOverlayCaptureStatus::Unsafe;
+                }
+                return PresentationOverlayCaptureStatus::Available;
+            }
+            if (_booleanOpController.hasActiveOperation()
+                || _booleanOpController.hasSelectionState()) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             if (_manipulatorType
@@ -214,6 +247,7 @@ namespace core3d {
         } catch (...) {
             theContent = {};
             theMirrorPreviewObjects.clear();
+            theBooleanPreview = {};
             return PresentationOverlayCaptureStatus::Unsafe;
         }
     }
@@ -643,33 +677,164 @@ namespace core3d {
     }
 
 	void ObjectInteractor::fillSelectedState(Standard_Boolean forceActor, BooleanAction action) {
-		for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
-			_booleanOpController.updateDetectedState(myContext->SelectedInteractive(), Handle(SelectMgr_EntityOwner)(), forceActor, action);
-			if (forceActor)
-				forceActor = false;
+		const auto failClosed = [this]() noexcept {
+			_booleanOpController.cancelActive();
+			try {
+				if (!myContext.IsNull()) {
+					myContext->ClearSelected(Standard_True);
+				}
+			} catch (...) {
+			}
+		};
+
+		try {
+			std::array<Handle(AIS_InteractiveObject),
+				BooleanOperationController::kMaxSourceOperands> selectedObjects;
+			std::size_t selectedCount = 0;
+			for (myContext->InitSelected();
+				 myContext->MoreSelected();
+				 myContext->NextSelected()) {
+				if (selectedCount >= selectedObjects.size()) {
+					failClosed();
+					return;
+				}
+				selectedObjects[selectedCount++] =
+					myContext->SelectedInteractive();
+			}
+			for (std::size_t index = 0; index < selectedCount; ++index) {
+				_booleanOpController.updateDetectedState(
+					selectedObjects[index],
+					Handle(SelectMgr_EntityOwner)(),
+					forceActor,
+					action);
+				if (forceActor) {
+					forceActor = false;
+				}
+			}
+			_booleanOpController.visualApply(action);
+		} catch (...) {
+			failClosed();
 		}
-		_booleanOpController.visualApply(action);
 	}
 
 	void ObjectInteractor::updateDetectedState(Standard_Boolean forceActor, BooleanAction action) {
+		if (_booleanOpController.isSelectionFrozen()) {
+			return;
+		}
+		std::size_t selectedCount = 0;
+		for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+			++selectedCount;
+		}
+		if (selectedCount > BooleanOperationController::kMaxSourceOperands) {
+			_booleanOpController.cancelActive();
+			myContext->ClearSelected(Standard_True);
+			return;
+		}
 		if (myContext->HasDetected()) {
 			_booleanOpController.updateDetectedState(myContext->DetectedInteractive(), myContext->DetectedOwner(), forceActor, action);
 			_booleanOpController.visualApply(action);
 		}
 	}
 
-	void ObjectInteractor::applyBoolean(BooleanAction action) {
-		_booleanOpController.apply(action);
+	Standard_Boolean ObjectInteractor::beginBoolean(BooleanAction action) noexcept {
+		return _booleanOpController.begin(action);
 	}
 
-	void ObjectInteractor::cancelBoolean(BooleanAction action) {
+	BooleanApplyResult ObjectInteractor::applyBoolean(BooleanAction action) noexcept {
+		return _booleanOpController.apply(action);
+	}
+
+	void ObjectInteractor::cancelBoolean(BooleanAction action) noexcept {
 		_booleanOpController.cancel(action);
-		attachManipulatorToSelection();
+		try {
+			attachManipulatorToSelection();
+		} catch (...) {
+		}
+	}
+
+	void ObjectInteractor::cancelActiveBoolean() noexcept {
+		_booleanOpController.cancelActive();
+		try {
+			attachManipulatorToSelection();
+		} catch (...) {
+		}
 	}
 
     const bool ObjectInteractor::canApplyBoolean() const {
         return _booleanOpController.canApply();
     }
+
+	const bool ObjectInteractor::hasActiveBoolean() const {
+		return _booleanOpController.hasActiveOperation();
+	}
+
+	const bool ObjectInteractor::hasUnresolvedBoolean() const {
+		return _booleanOpController.hasUnresolvedState();
+	}
+
+	const bool ObjectInteractor::isBooleanSelectionFrozen() const {
+		return _booleanOpController.isSelectionFrozen();
+	}
+
+#ifdef DEBUG
+	Standard_Boolean ObjectInteractor::debugBeginBooleanSelection(
+		const std::vector<Handle(AIS_InteractiveObject)>& actors,
+		const std::vector<Handle(AIS_InteractiveObject)>& subjects,
+		BooleanAction action) noexcept {
+		try {
+			if ((action == BooleanAction::BooleanUnion && !actors.empty())
+				|| actors.size() + subjects.size()
+					> BooleanOperationController::kMaxSourceOperands
+				|| (action == BooleanAction::BooleanSubtract
+					&& (actors.empty() || subjects.empty()))
+				|| (action == BooleanAction::BooleanUnion
+					&& subjects.size() < 2)) {
+				return Standard_False;
+			}
+			_booleanOpController.cancelActive();
+			if (!_booleanOpController.begin(action)) {
+				return Standard_False;
+			}
+			for (const Handle(AIS_InteractiveObject)& actor : actors) {
+				if (!_booleanOpController.setSelectionState(
+						actor,
+						BooleanSelectionType::Actor,
+						action)) {
+					_booleanOpController.cancelActive();
+					return Standard_False;
+				}
+			}
+			for (const Handle(AIS_InteractiveObject)& subject : subjects) {
+				if (!_booleanOpController.setSelectionState(
+						subject,
+						BooleanSelectionType::Subject,
+						action)) {
+					_booleanOpController.cancelActive();
+					return Standard_False;
+				}
+			}
+			_booleanOpController.visualApply(action);
+			return _booleanOpController.canApply();
+		} catch (...) {
+			_booleanOpController.cancelActive();
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::debugRecomputeBooleanPreview(
+		BooleanAction action) noexcept {
+		try {
+			if (!_booleanOpController.hasActiveOperation()) {
+				return Standard_False;
+			}
+			_booleanOpController.visualApply(action);
+			return _booleanOpController.canApply();
+		} catch (...) {
+			_booleanOpController.cancelActive();
+			return Standard_False;
+		}
+	}
+#endif
 
 	void ObjectInteractor::tryMirror(
 		Standard_Integer axisIndex,

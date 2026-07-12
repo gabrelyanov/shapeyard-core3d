@@ -173,6 +173,16 @@ typedef struct {
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis
                   backward:(BOOL)backward
     NS_SWIFT_NAME(debugTryMirror(axis:backward:));
+//! Test-only deterministic Boolean seam. Identifiers must name committed
+//! one-occurrence bodies; production selection, ownership, validation, preview,
+//! transaction, and renderer publication paths remain authoritative.
+- (BOOL)debugBeginBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
+                actorEntityIdentifiers:(NSArray<NSString *> *)actorEntityIdentifiers
+              subjectEntityIdentifiers:(NSArray<NSString *> *)subjectEntityIdentifiers
+    NS_SWIFT_NAME(debugBeginBoolean(gizmoType:actorEntityIdentifiers:subjectEntityIdentifiers:));
+//! Test-only recompute seam for the active Boolean trial. This exercises the
+//! same replacement/ownership path used after an interactive adjustment.
+- (BOOL)debugRecomputeBooleanPreview;
 #endif
 
 - (void)addTestPrimitives;

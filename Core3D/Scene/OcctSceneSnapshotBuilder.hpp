@@ -12,6 +12,7 @@
 #include "SceneSnapshot.hpp"
 
 #include <Standard_Handle.hxx>
+#include <TDF_Label.hxx>
 
 #include <memory>
 #include <optional>
@@ -74,11 +75,22 @@ public:
         PresentationOverlayContent&& theMirrorGizmoContent,
         const std::vector<Handle(AIS_Shape)>& thePreviewShapes) noexcept;
 
+    //! Publish one explicitly owned, already-displayed Boolean preview. Source
+    //! labels are resolved only through the retained mapping from the last full
+    //! scene; no AIS enumeration, OCAF traversal, or remeshing is performed.
+    OverlayPointer PublishBooleanPreviewOverlay(
+        const Handle(OcctDocument)& theDocument,
+        PresentationOverlayKind theKind,
+        const std::vector<Handle(AIS_Shape)>& theActorShapes,
+        const std::vector<Handle(AIS_Shape)>& theResultShapes,
+        const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept;
+
 private:
     OverlayPointer PublishPresentationOverlayImpl(
         const Handle(OcctDocument)& theDocument,
         PresentationOverlayContent&& theContent,
-        bool theAllowsMirrorPreview) noexcept;
+        bool theAllowsMirrorPreview,
+        bool theAllowsBooleanPreview) noexcept;
 
     struct State;
     std::unique_ptr<State> myState;
