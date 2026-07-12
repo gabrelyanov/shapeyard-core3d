@@ -92,6 +92,11 @@ typedef struct {
 @protocol ExportManagerProtocol<NSObject>
 
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;
+//! Capture only committed exportable geometry. Unlike the presentation
+//! snapshot seam, this returns nil while a Boolean or Mirror trial is active,
+//! unresolved, or while the OCAF document owns an open command. Main-thread
+//! only; the returned value is an immutable deep copy safe for background I/O.
+- (Core3DSceneSnapshot *_Nullable)captureExportSceneSnapshot;
 
 @end
 

@@ -1290,7 +1290,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || objectInteractor == nullptr
         || objectInteractor->hasActiveBoolean()
         || objectInteractor->hasUnresolvedBoolean()
-        || objectInteractor->hasTrialMirrorObjects()) {
+        || objectInteractor->hasUnresolvedMirrorObjects()) {
         return nil;
     }
     NSString *pathExtension = NULL;
@@ -1312,8 +1312,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
     }
 
-    NSString *exportFilename = [[NSString stringWithFormat:@"%u", (int)NSDate.now.timeIntervalSince1970] stringByAppendingPathExtension:pathExtension];
+    NSString *exportFilename = [NSUUID.UUID.UUIDString
+        stringByAppendingPathExtension:pathExtension];
     NSURL *exportUrl = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:exportFilename];
+    void (^removeExportArtifacts)(void) = ^{
+        [NSFileManager.defaultManager removeItemAtURL:exportUrl error:nil];
+        if (exportType == ExportTypeObj) {
+            NSURL *baseUrl = [exportUrl URLByDeletingPathExtension];
+            [NSFileManager.defaultManager
+                removeItemAtURL:[baseUrl URLByAppendingPathExtension:@"mtl"]
+                         error:nil];
+            [NSFileManager.defaultManager removeItemAtURL:baseUrl error:nil];
+        }
+    };
 
     const auto exportPath = std::string(exportUrl.path.UTF8String);
 
@@ -1339,6 +1350,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     // Verify the file was actually created
     if (![NSFileManager.defaultManager fileExistsAtPath:exportUrl.path]) {
         NSLog(@"[Export] File was NOT created at: %@", exportUrl.path);
+        removeExportArtifacts();
         return nil;
     }
     
@@ -1347,6 +1359,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     
     if ([attrs fileSize] == 0) {
         NSLog(@"[Export] File is empty, returning nil");
+        removeExportArtifacts();
         return nil;
     }
     
