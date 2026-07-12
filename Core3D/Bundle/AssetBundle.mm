@@ -79,23 +79,14 @@
                                      userInfo:nil];
     }
     for (NSString *content in contents) {
-        NSError *error = NULL;
         __auto_type contentUrl = [_url URLByAppendingPathComponent:content];
-        __auto_type contentData = [NSData dataWithContentsOfURL:contentUrl options:kNilOptions error:&error];
-        if (contentUrl == NULL || error) {
-            @throw [NSException exceptionWithName:@"ReadBundleException"
-                                           reason:[NSString stringWithFormat:
-                                                   @"The reading of the bundle item [%@] occurred in error: %@", contentUrl, error.localizedDescription]
-                                         userInfo:nil];
-        }
         __auto_type type = [self getFileTypeByExtension:contentUrl.pathExtension];
         if (type == AssetBundleItemTypeUnknown) {
             NSLog(@"WARNING: Asset bundle type is unknown: %@", contentUrl);
             continue;
         }
-        __auto_type item = [[AssetBundleItem alloc] initWithData:contentData
-                                                            type:type
-                                                             url:contentUrl];
+        __auto_type item = [[AssetBundleItem alloc] initWithURL:contentUrl
+                                                           type:type];
         [self addItem: item];
     }
 }
@@ -122,6 +113,12 @@
     [_items addObjectsFromArray:items];
     __auto_type filename = [NSString stringWithFormat:@"%ld", (long)((NSInteger)([NSDate date].timeIntervalSince1970 * 1000))];
     for (AssetBundleItem *item in _items) {
+        NSData *data = item.data;
+        if (data == nil) {
+            @throw [NSException exceptionWithName:@"WriteBundleException"
+                                           reason:@"The bundle item data is unavailable."
+                                         userInfo:nil];
+        }
         __auto_type fileExtension = [self getFileExtensionByType:item.type];
         [[self contentsWithExtension:fileExtension] enumerateObjectsUsingBlock:^(NSURL * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
             NSError *error = NULL;
@@ -132,7 +129,7 @@
         }];
         NSError *error = NULL;
         NSURL *url = [[_url URLByAppendingPathComponent:filename] URLByAppendingPathExtension:fileExtension];
-        [item.data writeToURL:url options:NSDataWritingAtomic error:&error];
+        [data writeToURL:url options:NSDataWritingAtomic error:&error];
         if (error) {
             @throw [NSException exceptionWithName:@"WriteBundleException"
                                            reason:[NSString stringWithFormat:

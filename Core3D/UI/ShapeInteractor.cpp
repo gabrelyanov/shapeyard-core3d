@@ -446,10 +446,15 @@ namespace core3d {
     }
 
 	void ShapeInteractor::setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio) {
+		if (aio.IsNull() || !myDoc->IsPresentationEditable(aio)) {
+			if (!aio.IsNull()) {
+				myContext->Deactivate(aio);
+			}
+			return;
+		}
 		myContext->Deactivate(aio, aio->GlobalSelectionMode());//(Standard_Integer)_previousSelectionMode);
 		myContext->Activate(aio, (Standard_Integer)_previousSelectionMode,  Standard_True);
-        myContext->SetSelectionModeActive (aio, AIS_Shape::SelectionMode (_topAbsSelMode), true, AIS_SelectionModesConcurrency::AIS_SelectionModesConcurrency_Single);
-		myContext->Activate((Standard_Integer)_previousSelectionMode);
+		myContext->SetSelectionModeActive (aio, AIS_Shape::SelectionMode (_topAbsSelMode), true, AIS_SelectionModesConcurrency::AIS_SelectionModesConcurrency_Single);
 	}
 
     const ShapeSelectionMode ShapeInteractor::getSelectionMode() const {

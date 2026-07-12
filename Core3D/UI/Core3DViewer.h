@@ -113,6 +113,23 @@ namespace core3d {
             BooleanAction action,
             const std::vector<std::string>& actorEntityIdentifiers,
             const std::vector<std::string>& subjectEntityIdentifiers) noexcept;
+        //! Test-only admission ceiling for the bounded project-load topology
+        //! walk. Production uses the fixed mobile-safe aggregate ceiling.
+        void SetDebugMaximumProjectTopologyValidationNodes(
+            const Standard_Size limit)
+        {
+            myMaximumProjectTopologyValidationNodes = limit > 0 ? limit : 1;
+        }
+        //! Runtime proof that project publication used the bounded structural
+        //! walk and did not enter Core3DViewer's geometric BRep checker.
+        void DebugResetProjectTopologyValidationCounters() const;
+        Standard_Size DebugBoundedProjectTopologyValidationCount() const;
+        Standard_Size DebugGeometricBRepValidationCount() const;
+        void DebugSetSceneSnapshotTriangulationFailure(
+            scene::OcctSceneSnapshotBuilder::DebugTriangulationFailure
+                theFailure) noexcept;
+        void DebugResetSceneSnapshotMesherInvocationCount() noexcept;
+        std::uint64_t DebugSceneSnapshotMesherInvocationCount() const noexcept;
 #endif
     private:
         // document traversal
@@ -131,6 +148,7 @@ namespace core3d {
         
         std::function<void(int,int)> _interactiveCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
+        Standard_Size myMaximumProjectTopologyValidationNodes = 2'000'000;
     };
 }
 

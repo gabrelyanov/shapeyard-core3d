@@ -40,6 +40,50 @@ public:
                const XCAFPrs_Style&            theStyle,
                const Graphic3d_MaterialAspect& theMaterial);
 
+  //! Construct a presentation for one occurrence of a shared definition.
+  //! XCAFPrs_AISObject must remain bound to the definition label so it can
+  //! dispatch sub-shape styles, while the occurrence label records whether
+  //! this presentation can be addressed safely by definition-owned editors.
+  CafShapePrs (const TDF_Label&                theDefinitionLabel,
+               const TDF_Label&                theOccurrenceLabel,
+               const XCAFPrs_Style&            theStyle,
+               const Graphic3d_MaterialAspect& theMaterial);
+
+  const TDF_Label& OccurrenceLabel() const { return myOccurrenceLabel; }
+
+  //! Shapeyard currently persists transforms, appearance, topology, and
+  //! deletion on free definition labels. A component occurrence has distinct
+  //! placement/style state and therefore must remain presentation-only until
+  //! those edit operations gain an occurrence-addressed persistence model.
+  Standard_Boolean IsEditablePresentation() const
+  {
+    return !myOccurrenceLabel.IsNull()
+        && myOccurrenceLabel.IsEqual(GetLabel());
+  }
+
+  //! Dispatch definition sub-shape styles, but for an occurrence remove the
+  //! redundant whole-definition custom drawer. Its effective whole-object
+  //! style is already represented by myDefStyle and includes higher-priority
+  //! occurrence color/material resolved by XCAFPrs_DocumentExplorer.
+  virtual void DispatchStyles(
+      const Standard_Boolean theToSyncStyles = Standard_False)
+      Standard_OVERRIDE;
+
+  //! Replace the captured explorer default with an app-authored PBR material.
+  //! AIS_Shape::SetMaterial alone cannot supersede XCAFPrs styles because
+  //! DefaultStyle() is consulted again whenever the presentation is computed.
+  void ApplyAuthoredVisualMaterial(
+      const Handle(XCAFDoc_VisMaterial)& theMaterial);
+
+  //! Apply legacy preset/color authoring to both the AIS drawer and the XCAF
+  //! default-style seam. A preset intentionally clears a captured imported
+  //! whole-object material; an omitted color preserves occurrence tint.
+  void ApplyAuthoredLegacyAppearance(
+      const Standard_Boolean             theHasMaterial,
+      const Graphic3d_MaterialAspect&    theMaterial,
+      const Standard_Boolean             theHasColor,
+      const Quantity_Color&              theColor);
+
   //! Search custom aspect for specified shape.
   Standard_Boolean FindCustomAspects (const TopoDS_Shape&        theShape,
                                       Handle(AIS_ColoredDrawer)& theAspects) const
@@ -58,7 +102,13 @@ public:
 
 protected:
 
+  void removeDefinitionRootCustomAspects();
+  void clearImportedSubshapeAppearanceOverrides(
+      const Standard_Boolean theClearMaterial,
+      const Standard_Boolean theClearColor);
+
   XCAFPrs_Style myDefStyle; //!< default style
+  TDF_Label     myOccurrenceLabel; //!< leaf occurrence represented by this AIS
 
 };
 

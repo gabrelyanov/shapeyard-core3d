@@ -8,22 +8,19 @@
 
 #include "OcctSceneSnapshotBuilder.hpp"
 
+#include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
-#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
-#include <BRepMesh_IncrementalMesh.hxx>
-#include <BRepTools.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_PBRMaterial.hxx>
 #include <Image_Texture.hxx>
-#include <IMeshData_Status.hxx>
 #include <Precision.hxx>
-#include <Prs3d_Drawer.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Poly_TriangulationParameters.hxx>
 #include <Poly_Triangle.hxx>
 #include <RWMesh_FaceIterator.hxx>
 #include <NCollection_Buffer.hxx>
@@ -37,7 +34,6 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
-#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -83,7 +79,6 @@ constexpr std::size_t kMaxMeshNumericBytes = 96ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxVerticesPerSnapshot = 1'500'000;
 constexpr std::size_t kMaxIndicesPerSnapshot = 4'500'000;
 constexpr std::size_t kMaxSnapshotNumericBytes = 96ULL * 1024ULL * 1024ULL;
-constexpr std::size_t kMaxInstancesPerSnapshot = 50'000;
 constexpr std::size_t kMaxMaterialsPerSnapshot = 50'000;
 constexpr std::size_t kMaxPickElementsPerSnapshot = 250'001;
 constexpr std::size_t kMaxPrimitiveBindingsPerSnapshot = 250'000;
@@ -1483,8 +1478,9 @@ bool ExtractWorldPreviewItem(
 
 bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
                                const std::string& theDefinitionIdentifier,
-                               const double theLinearDeflection,
-                               const double theAngularDeflection,
+#ifdef DEBUG
+                               const std::uint8_t theDebugTriangulationFailure,
+#endif
                                DefinitionData& theDefinition)
 {
     theDefinition.label = theDefinitionLabel;
@@ -1508,6 +1504,47 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
 
     RWMesh_FaceIterator aFace(theDefinitionLabel, TopLoc_Location(), Standard_False);
     for (; aFace.More(); aFace.Next()) {
+        Handle(Poly_Triangulation) aTriangulation = aFace.Triangulation();
+#ifdef DEBUG
+        // Exercise the exact production admission predicate without mutating
+        // live OCAF topology or the OpenGL-owned triangulation cache.
+        if (theDebugTriangulationFailure == 1U) {
+            aTriangulation.Nullify();
+        }
+#endif
+        if (aTriangulation.IsNull()
+            || !aTriangulation->HasGeometry()
+            || aTriangulation->NbNodes() <= 0
+            || aTriangulation->NbTriangles() <= 0) {
+            return false;
+        }
+        const Handle(Poly_TriangulationParameters)& aParameters =
+            aTriangulation->Parameters();
+        double aStoredDeflection = aTriangulation->Deflection();
+#ifdef DEBUG
+        if (theDebugTriangulationFailure == 2U) {
+            // A negative stored error is invalid even for legacy caches that
+            // predate Poly_TriangulationParameters serialization.
+            aStoredDeflection = -1.0;
+        }
+#endif
+        if (!IsFinite(aStoredDeflection)
+            || aStoredDeflection < 0.0) {
+            return false;
+        }
+        if (!aParameters.IsNull()) {
+            const double aParameterDeflection =
+                aParameters->Deflection();
+            const double aParameterAngle = aParameters->Angle();
+            if (!aParameters->HasDeflection()
+                || !aParameters->HasAngle()
+                || !IsFinite(aParameterDeflection)
+                || aParameterDeflection <= 0.0
+                || !IsFinite(aParameterAngle)
+                || aParameterAngle <= 0.0) {
+                return false;
+            }
+        }
         if (aFace.NbNodes() <= 0 || aFace.NbTriangles() <= 0) {
             return false;
         }
@@ -1691,9 +1728,10 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
         return false;
     }
     theDefinition.mesh = std::move(aMesh);
-    theDefinition.fingerprint = MeshFingerprint(theDefinition.mesh,
-                                                 theLinearDeflection,
-                                                 theAngularDeflection);
+    // Geometry identity is derived from the immutable copied payload itself.
+    // No desired quality is recomputed from attacker-controlled BRep geometry
+    // on the main thread.
+    theDefinition.fingerprint = MeshFingerprint(theDefinition.mesh, 0.0, 0.0);
     return true;
 }
 
@@ -2401,6 +2439,11 @@ struct OcctSceneSnapshotBuilder::State {
     std::shared_ptr<const LabelInstanceMap> lastFullLabelToInstances;
     std::shared_ptr<const std::vector<std::string>> lastFullEntityIdentifiers;
     OverlayState overlay;
+#ifdef DEBUG
+    DebugTriangulationFailure debugTriangulationFailure =
+        DebugTriangulationFailure::None;
+    std::uint64_t debugMesherInvocationCount = 0;
+#endif
 };
 
 OcctSceneSnapshotBuilder::OcctSceneSnapshotBuilder()
@@ -2414,6 +2457,28 @@ OcctSceneSnapshotBuilder::OcctSceneSnapshotBuilder()
 }
 
 OcctSceneSnapshotBuilder::~OcctSceneSnapshotBuilder() = default;
+
+#ifdef DEBUG
+void OcctSceneSnapshotBuilder::DebugSetTriangulationFailure(
+    const DebugTriangulationFailure theFailure) noexcept
+{
+    if (myState != nullptr) {
+        myState->debugTriangulationFailure = theFailure;
+    }
+}
+
+void OcctSceneSnapshotBuilder::DebugResetMesherInvocationCount() noexcept
+{
+    if (myState != nullptr) {
+        myState->debugMesherInvocationCount = 0;
+    }
+}
+
+std::uint64_t OcctSceneSnapshotBuilder::DebugMesherInvocationCount() const noexcept
+{
+    return myState == nullptr ? 0 : myState->debugMesherInvocationCount;
+}
+#endif
 
 std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(
     const Handle(OcctDocument)& theDocument,
@@ -3058,15 +3123,14 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         std::unordered_map<std::string, std::size_t> aDefinitionIndices;
         std::vector<DefinitionData> aDefinitions;
         std::size_t aLabelInstanceMappingCount = 0;
-        double aMeshDeflection = 0.0;
-        double aMeshAngle = 0.0;
 
         XCAFPrs_DocumentExplorer anExplorer(
             aDocument,
             XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes,
             XCAFPrs_Style());
         for (; anExplorer.More(); anExplorer.Next()) {
-            if (anOccurrences.size() >= kMaxInstancesPerSnapshot) {
+            if (anOccurrences.size()
+                >= core3d::limits::kMaximumLeafPresentations) {
                 return {};
             }
             const XCAFPrs_DocumentNode& aNode = anExplorer.Current();
@@ -3160,52 +3224,19 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             anOccurrences.push_back(std::move(anOccurrence));
         }
 
-        // Identity preflight is complete. Meshing below may update transient
-        // triangulation caches but never opens or commits an OCAF command.
+        // Identity preflight is complete. Full snapshot publication is a
+        // bounded read of triangulations already produced by OpenGL. It must
+        // never invoke a mesher here: Build is main-thread-only because it
+        // reads live OCAF/AIS/V3d state, and meshing can be unbounded.
         if (!aDefinitions.empty()) {
-            TopoDS_Compound aCompound;
-            BRep_Builder aBuilder;
-            aBuilder.MakeCompound(aCompound);
-            for (const DefinitionData& aDefinition : aDefinitions) {
-                aBuilder.Add(aCompound, aDefinition.shape);
-            }
-
-            Handle(Prs3d_Drawer) aMeshDrawer = new Prs3d_Drawer();
-            aMeshDrawer->Link(theContext->DefaultDrawer());
-            const Standard_Real aDeflection =
-                StdPrs_ToolTriangulatedShape::GetDeflection(aCompound, aMeshDrawer);
-            const Standard_Real anAngle = aMeshDrawer->DeviationAngle();
-            if (!IsFinite(aDeflection)
-                || aDeflection < Precision::Confusion()
-                || !IsFinite(anAngle)
-                || anAngle < Precision::Angular()
-                || anAngle > kPi) {
-                return {};
-            }
-            aMeshDeflection = aDeflection;
-            aMeshAngle = anAngle;
-            // Run the incremental mesher with both quality dimensions. The
-            // cheaper BRepTools::Triangulation() predicate only checks linear
-            // deflection and can incorrectly reuse a mesh after Angle tightens.
-            BRepMesh_IncrementalMesh aMesher;
-            aMesher.ChangeParameters().Deflection = aDeflection;
-            aMesher.ChangeParameters().Angle = anAngle;
-            aMesher.ChangeParameters().InParallel = Standard_True;
-            aMesher.ChangeParameters().Relative = Standard_False;
-            aMesher.SetShape(aCompound);
-            aMesher.Perform();
-            if (!aMesher.IsDone()
-                || (aMesher.GetStatusFlags() & IMeshData_Failure) != 0
-                || !BRepTools::Triangulation(aCompound, aDeflection)) {
-                return {};
-            }
-
             for (auto& [aDefinitionIdentifier, aDefinitionIndex] : aDefinitionIndices) {
                 if (!ExtractDefinitionGeometry(
                         aDefinitions[aDefinitionIndex].label,
                         aDefinitionIdentifier,
-                        aMeshDeflection,
-                        aMeshAngle,
+#ifdef DEBUG
+                        static_cast<std::uint8_t>(
+                            myState->debugTriangulationFailure),
+#endif
                         aDefinitions[aDefinitionIndex])) {
                     return {};
                 }

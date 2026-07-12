@@ -64,7 +64,17 @@ namespace core3d {
     void ObjectInteractor::selectLastObject() {
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
-        auto object = objects.Last();
+        Handle(AIS_InteractiveObject) object;
+        for (AIS_ListIteratorOfListOfInteractive item(objects);
+             item.More(); item.Next()) {
+            if (myDoc->IsPresentationEditable(item.Value())
+                && !myDoc->ShapeLabel(item.Value()).IsNull()) {
+                object = item.Value();
+            }
+        }
+        if (object.IsNull()) {
+            return;
+        }
         myContext->SetSelected(object, Standard_True);
         attachManipulator(object);
     }
@@ -79,6 +89,11 @@ namespace core3d {
     }
 
     void ObjectInteractor::attachManipulator(Handle(AIS_InteractiveObject) toObject) {
+        if (toObject.IsNull()
+            || !myDoc->IsPresentationEditable(toObject)
+            || myDoc->ShapeLabel(toObject).IsNull()) {
+            return;
+        }
         createManipulatorIfNeeded();
         _manipulator->Attach(toObject);
         myContext->UpdateCurrentViewer();
@@ -111,17 +126,28 @@ namespace core3d {
 		}
 		AIS_ListOfInteractive objects;
 		myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
-		AIS_ListIteratorOfListOfInteractive iobject(objects);
-		if (objects.Size()) {
-			myContext->ClearSelected(Standard_False);
+		std::vector<Handle(AIS_InteractiveObject)> editableObjects;
+		for (AIS_ListIteratorOfListOfInteractive iobject(objects);
+		     iobject.More(); iobject.Next()) {
+			const Handle(AIS_InteractiveObject)& object = iobject.Value();
+			if (myDoc->IsPresentationEditable(object)
+				&& !myDoc->ShapeLabel(object).IsNull()) {
+				editableObjects.push_back(object);
+			}
+		}
+		myContext->ClearSelected(Standard_False);
+		if (editableObjects.empty()) {
+			detachManipulator(false);
+			myContext->UpdateCurrentViewer();
+			return;
+		}
+		if (!editableObjects.empty()) {
 			createManipulatorIfNeeded();
-			while (iobject.More()) {
-				auto object = iobject.Value();
+			for (const Handle(AIS_InteractiveObject)& object
+				 : editableObjects) {
 				myContext->AddSelect(object);
 				myContext->HilightSelected(Standard_False);
 				_manipulator->Attach(object);
-				
-				iobject.Next();
 			}
 			myContext->UpdateCurrentViewer();
 		}
@@ -424,11 +450,24 @@ namespace core3d {
 			}
 		}
 		
-        Handle(AIS_InteractiveObject) selected;
+		Handle(AIS_InteractiveObject) selected;
+		bool hasUnsafeSelection = false;
         for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
         {
             selected = myContext->SelectedInteractive();
+			if (selected.IsNull()
+				|| !myDoc->IsPresentationEditable(selected)
+				|| myDoc->ShapeLabel(selected).IsNull()) {
+				hasUnsafeSelection = true;
+				break;
+			}
         }
+		if (hasUnsafeSelection) {
+			myContext->ClearSelected(Standard_False);
+			detachManipulator(false);
+			myContext->UpdateCurrentViewer();
+			return;
+		}
         
         if(selected.IsNull()) {
             if(!_manipulator.IsNull()) {
@@ -591,6 +630,7 @@ namespace core3d {
 				TDF_Label label;
 				if (presentation.IsNull()
 					|| presentation->Shape().IsNull()
+					|| !myDoc->IsPresentationEditable(presentation)
 					|| !shapeTool->FindShape(cachedShape.second, label)
 					|| label.IsNull()
 					|| (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale
@@ -669,6 +709,11 @@ namespace core3d {
     }
 
     void ObjectInteractor::SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject) {
+        if (toObject.IsNull()
+            || !myDoc->IsPresentationEditable(toObject)
+            || myDoc->ShapeLabel(toObject).IsNull()) {
+            return;
+        }
         myContext->SetSelected(toObject, Standard_True);
         attachManipulatorToSelection();
     }

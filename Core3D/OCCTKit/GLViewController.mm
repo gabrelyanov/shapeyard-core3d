@@ -25,11 +25,19 @@
 #import "GLView.h"
 
 #import "NSString+StdString.h"
+#import <CommonCrypto/CommonDigest.h>
 
 #include "ConstructorManipulator.hpp"
+#include "CafShapePrs.h"
 
 #include <gp_Quaternion.hxx>
+#include <TColStd_ListOfInteger.hxx>
+#include <array>
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace core3d;
 
@@ -42,6 +50,191 @@ BOOL HasCbfMagic(NSData *data) {
     return data != nil
         && data.length >= magicLength
         && std::memcmp(data.bytes, kCbfMagic, magicLength) == 0;
+}
+
+struct VerifiedFileIdentity {
+    dev_t device = 0;
+    ino_t inode = 0;
+    off_t size = 0;
+    mode_t mode = 0;
+    nlink_t links = 0;
+    timespec modification = {};
+    timespec change = {};
+};
+
+VerifiedFileIdentity FileIdentity(const struct stat& value) {
+    return {
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mode,
+        value.st_nlink,
+        value.st_mtimespec,
+        value.st_ctimespec,
+    };
+}
+
+bool operator==(const VerifiedFileIdentity& left,
+                const VerifiedFileIdentity& right) {
+    return left.device == right.device
+        && left.inode == right.inode
+        && left.size == right.size
+        && left.mode == right.mode
+        && left.links == right.links
+        && left.modification.tv_sec == right.modification.tv_sec
+        && left.modification.tv_nsec == right.modification.tv_nsec
+        && left.change.tv_sec == right.change.tv_sec
+        && left.change.tv_nsec == right.change.tv_nsec;
+}
+
+bool DecodeSHA256(NSString *value,
+                  std::array<unsigned char, CC_SHA256_DIGEST_LENGTH>& result) {
+    if (value == nil || value.length != CC_SHA256_DIGEST_LENGTH * 2) {
+        return false;
+    }
+    const auto nibble = [](const unichar character, unsigned char& output) {
+        if (character >= '0' && character <= '9') {
+            output = static_cast<unsigned char>(character - '0');
+            return true;
+        }
+        if (character >= 'a' && character <= 'f') {
+            output = static_cast<unsigned char>(character - 'a' + 10);
+            return true;
+        }
+        return false;
+    };
+    for (NSUInteger index = 0; index < result.size(); ++index) {
+        unsigned char high = 0;
+        unsigned char low = 0;
+        if (!nibble([value characterAtIndex:index * 2], high)
+            || !nibble([value characterAtIndex:index * 2 + 1], low)) {
+            return false;
+        }
+        result[index] = static_cast<unsigned char>((high << 4) | low);
+    }
+    return true;
+}
+
+Core3DAssetLoadResult StageVerifiedAssetFile(
+    NSURL *sourceURL,
+    const unsigned long long expectedByteCount,
+    NSString *expectedSHA256,
+    NSURL **stagedURL) {
+    static const unsigned long long kMaximumProjectDocumentBytes =
+        256ull * 1024ull * 1024ull;
+    if (stagedURL == nullptr) {
+        return Core3DAssetLoadResultInternalFailure;
+    }
+    *stagedURL = nil;
+    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> expectedDigest = {};
+    const char *sourcePath = sourceURL.fileSystemRepresentation;
+    if (!sourceURL.isFileURL || sourcePath == nullptr
+        || expectedByteCount == 0
+        || expectedByteCount > kMaximumProjectDocumentBytes
+        || !DecodeSHA256(expectedSHA256, expectedDigest)) {
+        return Core3DAssetLoadResultInvalidData;
+    }
+
+    struct stat pathStatus = {};
+    if (::lstat(sourcePath, &pathStatus) != 0
+        || (pathStatus.st_mode & S_IFMT) != S_IFREG
+        || pathStatus.st_nlink != 1
+        || pathStatus.st_size < 0
+        || static_cast<unsigned long long>(pathStatus.st_size)
+            != expectedByteCount) {
+        return Core3DAssetLoadResultInvalidData;
+    }
+    const int source = ::open(sourcePath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (source < 0) {
+        return errno == ENOENT || errno == ENOTDIR || errno == ELOOP
+            ? Core3DAssetLoadResultInvalidData
+            : Core3DAssetLoadResultTemporaryFileFailure;
+    }
+
+    NSURL *temporaryURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.verified-project.cbf", NSUUID.UUID.UUIDString]];
+    const char *temporaryPath = temporaryURL.fileSystemRepresentation;
+    const int destination = temporaryPath == nullptr
+        ? -1
+        : ::open(temporaryPath,
+                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                 S_IRUSR | S_IWUSR);
+    if (destination < 0) {
+        ::close(source);
+        return Core3DAssetLoadResultTemporaryFileFailure;
+    }
+
+    Core3DAssetLoadResult result = Core3DAssetLoadResultInvalidData;
+    CC_SHA256_CTX hash = {};
+    CC_SHA256_Init(&hash);
+    std::array<unsigned char, 64 * 1024> buffer = {};
+    unsigned long long copiedBytes = 0;
+    struct stat openedStatus = {};
+    if (::fstat(source, &openedStatus) == 0
+        && FileIdentity(pathStatus) == FileIdentity(openedStatus)) {
+        bool failed = false;
+        while (!failed) {
+            ssize_t count = ::read(source, buffer.data(), buffer.size());
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            if (count < 0) {
+                result = Core3DAssetLoadResultTemporaryFileFailure;
+                failed = true;
+                break;
+            }
+            if (count == 0) {
+                break;
+            }
+            if (static_cast<unsigned long long>(count)
+                    > expectedByteCount - copiedBytes
+                || CC_SHA256_Update(
+                    &hash, buffer.data(), static_cast<CC_LONG>(count)) != 1) {
+                failed = true;
+                break;
+            }
+            copiedBytes += static_cast<unsigned long long>(count);
+            ssize_t written = 0;
+            while (written < count) {
+                const ssize_t writeCount = ::write(
+                    destination,
+                    buffer.data() + written,
+                    static_cast<size_t>(count - written));
+                if (writeCount < 0 && errno == EINTR) {
+                    continue;
+                }
+                if (writeCount <= 0) {
+                    result = Core3DAssetLoadResultTemporaryFileFailure;
+                    failed = true;
+                    break;
+                }
+                written += writeCount;
+            }
+        }
+
+        std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> actualDigest = {};
+        struct stat finalStatus = {};
+        struct stat finalPathStatus = {};
+        if (!failed
+            && copiedBytes == expectedByteCount
+            && CC_SHA256_Final(actualDigest.data(), &hash) == 1
+            && actualDigest == expectedDigest
+            && ::fstat(source, &finalStatus) == 0
+            && FileIdentity(openedStatus) == FileIdentity(finalStatus)
+            && ::lstat(sourcePath, &finalPathStatus) == 0
+            && FileIdentity(openedStatus) == FileIdentity(finalPathStatus)) {
+            result = Core3DAssetLoadResultSuccess;
+        }
+    }
+    ::close(destination);
+    ::close(source);
+    if (result == Core3DAssetLoadResultSuccess) {
+        *stagedURL = temporaryURL;
+    } else {
+        [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
+    }
+    return result;
 }
 
 Core3DAssetLoadResult AssetLoadResultFromImportResult(AssetImportResult result) {
@@ -1118,6 +1311,192 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     return _viewer->getShapeInteractor()->getNumberOfDisplayedShapes();
 }
 
+#ifdef DEBUG
+- (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->SetDebugMaximumDisplayTraversalNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumLeafPresentations:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->SetDebugMaximumLeafPresentations(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumProjectTopologyValidationNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->SetDebugMaximumProjectTopologyValidationNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugResetProjectTopologyValidationCounters {
+    if (_viewer != nullptr) {
+        _viewer->DebugResetProjectTopologyValidationCounters();
+    }
+}
+
+- (NSUInteger)debugBoundedProjectTopologyValidationCount {
+    return _viewer == nullptr
+        ? 0
+        : static_cast<NSUInteger>(
+            _viewer->DebugBoundedProjectTopologyValidationCount());
+}
+
+- (NSUInteger)debugGeometricBRepValidationCount {
+    return _viewer == nullptr
+        ? 0
+        : static_cast<NSUInteger>(
+            _viewer->DebugGeometricBRepValidationCount());
+}
+
+- (NSInteger)debugSelectedShapeCount {
+    return _viewer == nullptr ? 0 : _viewer->selectedCount();
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
+    debugDisplayedShapePresentationStates {
+    if (_viewer == nullptr || _viewer->AisContext().IsNull()
+        || _viewer->getDocument().IsNull()) {
+        return @[];
+    }
+    AIS_ListOfInteractive displayed;
+    _viewer->AisContext()->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+    NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *states =
+        [NSMutableArray arrayWithCapacity:
+            static_cast<NSUInteger>(displayed.Size())];
+    for (AIS_ListIteratorOfListOfInteractive item(displayed);
+         item.More(); item.Next()) {
+        const Handle(AIS_Shape) shape =
+            Handle(AIS_Shape)::DownCast(item.Value());
+        if (shape.IsNull() || shape->Shape().IsNull()) {
+            continue;
+        }
+        const gp_XYZ translation =
+            shape->LocalTransformation().TranslationPart();
+        gp_Trsf aWorldTransform = shape->LocalTransformation();
+        aWorldTransform.Multiply(
+            shape->Shape().Location().Transformation());
+        const gp_XYZ aWorldTranslation =
+            aWorldTransform.TranslationPart();
+        Quantity_Color color(Quantity_NOC_BLACK);
+        if (shape->HasColor()) {
+            shape->Color(color);
+        }
+        Standard_Real red = 0.0;
+        Standard_Real green = 0.0;
+        Standard_Real blue = 0.0;
+        color.Values(red, green, blue, Quantity_TOC_sRGB);
+        Standard_Real metallic = -1.0;
+        Standard_Real roughness = -1.0;
+        const Handle(Prs3d_Drawer)& drawer = shape->Attributes();
+        if (!drawer.IsNull() && !drawer->ShadingAspect().IsNull()) {
+            const Graphic3d_PBRMaterial& pbrMaterial =
+                drawer->ShadingAspect()->Material().PBRMaterial();
+            metallic = pbrMaterial.Metallic();
+            roughness = pbrMaterial.NormalizedRoughness();
+        }
+        const Handle(CafShapePrs) cafShape =
+            Handle(CafShapePrs)::DownCast(shape);
+        Standard_Real defaultStyleRed = -1.0;
+        Standard_Real defaultStyleGreen = -1.0;
+        Standard_Real defaultStyleBlue = -1.0;
+        Standard_Real defaultStyleMetallic = -1.0;
+        Standard_Real defaultStyleRoughness = -1.0;
+        Standard_Boolean defaultStyleHasMaterial = Standard_False;
+        if (!cafShape.IsNull()) {
+            XCAFPrs_Style defaultStyle;
+            cafShape->DefaultStyle(defaultStyle);
+            Quantity_Color defaultStyleColor(Quantity_NOC_BLACK);
+            if (defaultStyle.IsSetColorSurf()) {
+                defaultStyleColor = defaultStyle.GetColorSurf();
+            } else if (defaultStyle.IsSetColorCurv()) {
+                defaultStyleColor = defaultStyle.GetColorCurv();
+            } else if (!defaultStyle.Material().IsNull()) {
+                defaultStyleColor =
+                    defaultStyle.Material()->BaseColor().GetRGB();
+            }
+            defaultStyleColor.Values(
+                defaultStyleRed,
+                defaultStyleGreen,
+                defaultStyleBlue,
+                Quantity_TOC_sRGB);
+            if (!defaultStyle.Material().IsNull()) {
+                defaultStyleHasMaterial = Standard_True;
+                Graphic3d_MaterialAspect defaultStyleAspect;
+                defaultStyle.Material()->FillMaterialAspect(
+                    defaultStyleAspect);
+                const Graphic3d_PBRMaterial& defaultStylePBR =
+                    defaultStyleAspect.PBRMaterial();
+                defaultStyleMetallic = defaultStylePBR.Metallic();
+                defaultStyleRoughness =
+                    defaultStylePBR.NormalizedRoughness();
+            }
+        }
+        Handle(AIS_ColoredDrawer) rootCustomAspects;
+        const Standard_Boolean hasRootCustomAspects =
+            !cafShape.IsNull()
+            && cafShape->FindCustomAspects(
+                shape->Shape(), rootCustomAspects);
+        Standard_Integer customMaterialOverrideCount = 0;
+        Standard_Integer customColorOverrideCount = 0;
+        if (!cafShape.IsNull()) {
+            for (CafDataMapOfShapeColor::Iterator anOverride(
+                     cafShape->ShapeColors());
+                 anOverride.More(); anOverride.Next()) {
+                const Handle(AIS_ColoredDrawer)& drawer =
+                    anOverride.Value();
+                if (!drawer.IsNull() && drawer->HasOwnMaterial()) {
+                    ++customMaterialOverrideCount;
+                }
+                if (!drawer.IsNull() && drawer->HasOwnColor()) {
+                    ++customColorOverrideCount;
+                }
+            }
+        }
+        TColStd_ListOfInteger activeSelectionModes;
+        _viewer->AisContext()->ActivatedModes(
+            shape, activeSelectionModes);
+        [states addObject:@{
+            @"translationX": @(translation.X()),
+            @"translationY": @(translation.Y()),
+            @"translationZ": @(translation.Z()),
+            @"worldTranslationX": @(aWorldTranslation.X()),
+            @"worldTranslationY": @(aWorldTranslation.Y()),
+            @"worldTranslationZ": @(aWorldTranslation.Z()),
+            @"hasColor": @(shape->HasColor()),
+            @"red": @(red),
+            @"green": @(green),
+            @"blue": @(blue),
+            @"metallic": @(metallic),
+            @"roughness": @(roughness),
+            @"defaultStyleHasMaterial": @(defaultStyleHasMaterial),
+            @"defaultStyleRed": @(defaultStyleRed),
+            @"defaultStyleGreen": @(defaultStyleGreen),
+            @"defaultStyleBlue": @(defaultStyleBlue),
+            @"defaultStyleMetallic": @(defaultStyleMetallic),
+            @"defaultStyleRoughness": @(defaultStyleRoughness),
+            @"isAssemblyOccurrence": @(
+                !cafShape.IsNull()
+                && !cafShape->IsEditablePresentation()),
+            @"isEditable": @(
+                _viewer->getDocument()->IsPresentationEditable(shape)),
+            @"hasRootCustomAspects": @(hasRootCustomAspects),
+            @"customMaterialOverrideCount": @(
+                customMaterialOverrideCount),
+            @"customColorOverrideCount": @(
+                customColorOverrideCount),
+            @"activeSelectionModeCount": @(
+                activeSelectionModes.Extent()),
+        }];
+    }
+    return states;
+}
+#endif
+
 - (NSInteger)numberOfDetectedEdges {
     return _viewer->getShapeInteractor()->getNumberOfDetectedEdges();
 }
@@ -1235,6 +1614,52 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             }
         });
         [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
+        CompleteAssetLoadOnMain(completion, result);
+    });
+}
+
+- (void)setAssetFileURL:(NSURL *)assetFileURL
+      expectedByteCount:(unsigned long long)expectedByteCount
+          expectedSHA256:(NSString *)expectedSHA256
+              completion:(void(^)(Core3DAssetLoadResult result))completion {
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(_assetDataQueue, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            CompleteAssetLoadOnMain(
+                completion, Core3DAssetLoadResultInternalFailure);
+            return;
+        }
+        NSURL *stagedURL = nil;
+        const Core3DAssetLoadResult stagingResult = StageVerifiedAssetFile(
+            assetFileURL,
+            expectedByteCount,
+            expectedSHA256,
+            &stagedURL);
+        if (stagingResult != Core3DAssetLoadResultSuccess
+            || stagedURL == nil) {
+            CompleteAssetLoadOnMain(completion, stagingResult);
+            return;
+        }
+
+        const std::string filename = stagedURL.path.UTF8String;
+        __block Core3DAssetLoadResult result =
+            Core3DAssetLoadResultInternalFailure;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            try {
+                if (strongSelf->_viewer != nullptr) {
+                    [strongSelf endActiveRenderingInteractions];
+                    result = AssetLoadResultFromImportResult(
+                        strongSelf->_viewer->ImportCbf(filename));
+                    if (result == Core3DAssetLoadResultSuccess) {
+                        [strongSelf requestRender];
+                    }
+                }
+            } catch (...) {
+                result = Core3DAssetLoadResultInternalFailure;
+            }
+        });
+        [NSFileManager.defaultManager removeItemAtURL:stagedURL error:nil];
         CompleteAssetLoadOnMain(completion, result);
     });
 }

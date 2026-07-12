@@ -23,11 +23,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithData:(NSData * _Nonnull)data
                         type:(AssetBundleItemType)type
                          url:(NSURL * _Nonnull)url;
+- (instancetype)initWithURL:(NSURL * _Nonnull)url
+                       type:(AssetBundleItemType)type;
 
 @property (nonatomic, assign, readonly) AssetBundleItemType type;
-@property (nonatomic, strong, readonly) NSData *data;
+//! File-backed reader items load their bytes only when this property is read.
+@property (nonatomic, strong, readonly, nullable) NSData *data;
 @property (nonatomic, strong, readonly, nullable) NSURL *url;
 @property (nonatomic, strong, readonly, nullable) NSNumber *timestamp;
+@property (nonatomic, assign, readonly) BOOL hasLoadedData;
 
 @end
 

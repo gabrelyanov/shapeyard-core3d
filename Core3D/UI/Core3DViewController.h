@@ -159,6 +159,12 @@ typedef struct {
 - (NSData *_Nullable)thumbData;
 
 - (void)loadFromBundle:(NSURL *)bundleUrl;
+//! Opens a manifest-authorized model without materializing it as NSData. Core3D
+//! pins, streams, hashes, and privately stages the file before OCCT sees it.
+- (void)loadFromAssetFile:(NSURL *)assetFileURL
+        expectedByteCount:(unsigned long long)expectedByteCount
+            expectedSHA256:(NSString *)expectedSHA256
+    NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
 
 //! Deep-copy the committed model and semantic camera into renderer-neutral,
@@ -225,6 +231,45 @@ typedef struct {
 - (NSData *_Nullable)debugOversizedTextureLengthBinXCAFFixtureData;
 //! Standalone BinXCAF with a reachable assembly-reference cycle.
 - (NSData *_Nullable)debugCyclicAssemblyBinXCAFFixtureData;
+//! Standalone nested BinXCAF assembly with two differently colored and
+//! translated occurrences sharing one box definition.
+- (NSData *_Nullable)debugSharedDefinitionAssemblyBinXCAFFixtureData;
+//! Standalone BinXCAF with two free roots sharing the same assembly subtree.
+- (NSData *_Nullable)debugSharedSubtreeMultipleRootsBinXCAFFixtureData;
+//! Standalone assembly containing visible and hidden path/layer variants.
+- (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData;
+//! Standalone free located box used to verify TopoDS location ownership.
+- (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
+//! Shared occurrences whose imported PBR definition also carries a legacy
+//! app-authored preset/color override for precedence testing.
+- (NSData *_Nullable)debugAuthoredLegacyAssemblyBinXCAFFixtureData;
+//! Lower the display traversal ceiling for bounded aggregate-budget tests.
+- (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
+//! Lower the leaf-presentation ceiling for all-or-nothing admission tests.
+- (void)debugSetMaximumLeafPresentations:(NSUInteger)limit;
+//! Lower the project-load topology ceiling and expose which validation path ran.
+- (void)debugSetMaximumProjectTopologyValidationNodes:(NSUInteger)limit;
+- (void)debugResetProjectTopologyValidationCounters;
+- (NSUInteger)debugBoundedProjectTopologyValidationCount;
+- (NSUInteger)debugGeometricBRepValidationCount;
+//! Force cached-triangulation admission for full snapshots: 0 = normal,
+//! 1 = missing, 2 = incompatible. This never mutates live OCAF/AIS state.
+- (void)debugSetSceneSnapshotTriangulationFailureMode:(NSInteger)mode;
+//! Full snapshot publication is forbidden from owning a mesher. These seams
+//! prove it remains at zero independently from OpenGL presentation meshing.
+- (void)debugResetSceneSnapshotMesherInvocationCount;
+- (NSUInteger)debugSceneSnapshotMesherInvocationCount;
+//! Assign an invisible in-memory XCAF layer to the occurrence at the requested
+//! accumulated X translation, then redraw the OpenGL fallback.
+- (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x
+    NS_SWIFT_NAME(debugHideOccurrenceWithInvisibleLayer(translationX:));
+//! Current OpenGL AIS shape presentation state. Test-only verification for
+//! occurrence-local transforms and resolved fallback colors.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
+    debugDisplayedShapePresentationStates;
+//! Current OpenGL selection size. Assembly occurrences are expected to remain
+//! zero after select-all because definition-addressed edits are unsafe.
+- (NSInteger)debugSelectedShapeCount;
 //! Valid imported PBR material whose Common fallback owns an embedded PNG.
 //! Scalar authoring must remain read-only until that texture is app-owned.
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;

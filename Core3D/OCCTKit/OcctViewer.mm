@@ -40,9 +40,13 @@
 #include <STEPCAFControl_Reader.hxx>
 #include <TDF_Tool.hxx>
 #include <TDF_ChildIterator.hxx>
+#include <TDF_LabelMap.hxx>
 #include <Transfer_TransientProcess.hxx>
 #include <XSControl_TransferReader.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
+#include <XCAFPrs_DocumentExplorer.hxx>
 
 #include "BRepPrimAPI_MakeCylinder.hxx"
 #include "BRepPrimAPI_MakeBox.hxx"
@@ -56,6 +60,8 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <TopoDS_Solid.hxx>
 #include <TopoDS.hxx>
+#include <algorithm>
+#include <vector>
 
 #include <StlAPI_Writer.hxx>
 #include <TDataStd_Name.hxx>
@@ -63,6 +69,65 @@
 #include <GP_Quaternion.hxx>
 
 namespace {
+
+constexpr Standard_Size kMaximumDisplayTraversalDepth = 128;
+
+Standard_Boolean IsLabelAndLayersVisible(
+    const TDF_Label& theLabel,
+    const Handle(XCAFDoc_LayerTool)& theLayerTool)
+{
+    if (theLabel.IsNull())
+    {
+        return Standard_True;
+    }
+    if (!XCAFDoc_ColorTool::IsVisible(theLabel))
+    {
+        return Standard_False;
+    }
+    if (theLayerTool.IsNull())
+    {
+        return Standard_True;
+    }
+
+    TDF_LabelSequence aLayers;
+    if (!theLayerTool->GetLayers(theLabel, aLayers))
+    {
+        return Standard_True;
+    }
+    for (TDF_LabelSequence::Iterator aLayer(aLayers);
+         aLayer.More(); aLayer.Next())
+    {
+        if (!theLayerTool->IsVisible(aLayer.Value()))
+        {
+            return Standard_False;
+        }
+    }
+    return Standard_True;
+}
+
+Standard_Boolean IsExplorerPathVisible(
+    const XCAFPrs_DocumentExplorer& theExplorer,
+    const Handle(XCAFDoc_LayerTool)& theLayerTool)
+{
+    const Standard_Integer aDepth = theExplorer.CurrentDepth();
+    if (aDepth < 0)
+    {
+        return Standard_False;
+    }
+    for (Standard_Integer aPathIndex = 0;
+         aPathIndex <= aDepth; ++aPathIndex)
+    {
+        const XCAFPrs_DocumentNode& aPathNode =
+            theExplorer.Current(aPathIndex);
+        if (!IsLabelAndLayersVisible(aPathNode.Label, theLayerTool)
+            || !IsLabelAndLayersVisible(
+                aPathNode.RefLabel, theLayerTool))
+        {
+            return Standard_False;
+        }
+    }
+    return Standard_True;
+}
 
 class ImportedDocumentHistoryGuard
 {
@@ -406,8 +471,6 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
     }
     
     Handle(XCAFDoc_ShapeTool) aShapeTool = XCAFDoc_DocumentTool::ShapeTool (myDoc->Document()->Main());
-    Handle(XCAFDoc_ColorTool) aColorTool = XCAFDoc_DocumentTool::ColorTool (myDoc->Document()->Main());
-    
     TDF_LabelSequence aLabels;
     aShapeTool->GetFreeShapes (aLabels);
     
@@ -441,14 +504,14 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
     clearContext();
     
     // create presentations
-    MapOfPrsForShapes aMapOfShapes;
     XCAFPrs_Style aDefStyle;
     aDefStyle.SetColorSurf (Quantity_NOC_GRAY65);
     aDefStyle.SetColorCurv (Quantity_NOC_GRAY65);
-    for (Standard_Integer aLabIter = 1; aLabIter <= aLabels.Length(); ++aLabIter)
+    if (aLabels.Length() > 0
+        && !displayWithChildren(myDoc->Document(), aLabels, aDefStyle))
     {
-        const TDF_Label& aLabel = aLabels.Value (aLabIter);
-        displayWithChildren (*aShapeTool, *aColorTool, aLabel, TopLoc_Location(), aDefStyle, "", aMapOfShapes);
+        clearContext();
+        return false;
     }
     
     return true;
@@ -458,71 +521,242 @@ bool OcctViewer::ImportSTEP(const std::string &theFilename)
 // function : displayWithChildren
 // purpose  :
 // =======================================================================
-void OcctViewer::displayWithChildren (XCAFDoc_ShapeTool&             theShapeTool,
-                                      XCAFDoc_ColorTool&             theColorTool,
-                                      const TDF_Label&               theLabel,
-                                      const TopLoc_Location&         theParentTrsf,
-                                      const XCAFPrs_Style&           theParentStyle,
-                                      const TCollection_AsciiString& theParentId,
-                                      MapOfPrsForShapes&             theMapOfShapes)
+bool OcctViewer::displayWithChildren (
+    const Handle(TDocStd_Document)& theDocument,
+    const TDF_Label&                theLabel,
+    const XCAFPrs_Style&            theDefaultStyle)
 {
-    TDF_Label aRefLabel = theLabel;
-    if (theShapeTool.IsReference (theLabel))
+    TDF_LabelSequence aRoots;
+    if (!theLabel.IsNull())
     {
-        theShapeTool.GetReferredShape (theLabel, aRefLabel);
+        aRoots.Append(theLabel);
     }
-    
-    TCollection_AsciiString anEntry;
-    TDF_Tool::Entry (theLabel, anEntry);
-    if (!theParentId.IsEmpty())
+    return displayWithChildren(theDocument, aRoots, theDefaultStyle);
+}
+
+// =======================================================================
+// function : displayWithChildren
+// purpose  : Traverse all unique roots under one aggregate admission budget.
+// =======================================================================
+bool OcctViewer::displayWithChildren (
+    const Handle(TDocStd_Document)& theDocument,
+    const TDF_LabelSequence&        theLabels,
+    const XCAFPrs_Style&            theDefaultStyle)
+{
+    if (theDocument.IsNull() || theLabels.IsEmpty()
+        || myContext.IsNull() || myDoc.IsNull()
+        || myMaximumDisplayTraversalNodes == 0
+        || myMaximumLeafPresentations == 0)
     {
-        anEntry = theParentId + "\n" + anEntry;
+        return false;
     }
-    anEntry += ".";
-    
-    if (!theShapeTool.IsAssembly (aRefLabel))
+
+    try
     {
-        Handle(AIS_InteractiveObject) anAis;
-        if (!theMapOfShapes.Find (aRefLabel, anAis))
+        OCC_CATCH_SIGNALS
+
+        TDF_LabelSequence aUniqueRoots;
+        TDF_LabelMap aVisitedRoots;
+        for (TDF_LabelSequence::Iterator aRoot(theLabels);
+             aRoot.More(); aRoot.Next())
         {
-            anAis = new AIS_Shape(theShapeTool.GetShape(aRefLabel));
-            //anAis = new CafShapePrs (aRefLabel, theParentStyle, Graphic3d_NameOfMaterial_ShinyPlastified);
-            theMapOfShapes.Bind (aRefLabel, anAis);
+            const TDF_Label& aLabel = aRoot.Value();
+            if (aLabel.IsNull()
+                || aLabel.Data() != theDocument->GetData())
+            {
+                return false;
+            }
+            if (aVisitedRoots.Add(aLabel))
+            {
+                aUniqueRoots.Append(aLabel);
+            }
+        }
+        if (aUniqueRoots.IsEmpty())
+        {
+            return false;
         }
 
-        myContext->ApplyDefaultMaterial(anAis);
-        myDoc->LoadObjectTransform(aRefLabel, Handle(AIS_Shape)::DownCast(anAis));        
-        myDoc->LoadObjectMeterial(aRefLabel, Handle(AIS_Shape)::DownCast(anAis));
-        
-        myContext->Display  (anAis, Standard_False);
-        return;
-    }
-    
-    XCAFPrs_Style aDefStyle = theParentStyle;
-    Quantity_Color aColor;
-    if (theColorTool.GetColor (aRefLabel, XCAFDoc_ColorGen, aColor))
-    {
-        aDefStyle.SetColorCurv (aColor);
-        aDefStyle.SetColorSurf (aColor);
-    }
-    if (theColorTool.GetColor (aRefLabel, XCAFDoc_ColorSurf, aColor))
-    {
-        aDefStyle.SetColorSurf (aColor);
-    }
-    if (theColorTool.GetColor (aRefLabel, XCAFDoc_ColorCurv, aColor))
-    {
-        aDefStyle.SetColorCurv (aColor);
-    }
-    
-    for (TDF_ChildIterator childIter (aRefLabel); childIter.More(); childIter.Next())
-    {
-        TDF_Label aLabel = childIter.Value();
-        if (!aLabel.IsNull()
-            && (aLabel.HasAttribute() || aLabel.HasChild()))
+        XCAFPrs_DocumentExplorer anExplorer;
+        anExplorer.Init(theDocument,
+                        aUniqueRoots,
+                        XCAFPrs_DocumentExplorerFlags_None,
+                        theDefaultStyle);
+        const Handle(XCAFDoc_LayerTool) aLayerTool =
+            XCAFDoc_DocumentTool::LayerTool(theDocument->Main());
+        struct AdmittedLeaf
         {
-            TopLoc_Location aTrsf = theParentTrsf * theShapeTool.GetLocation (aLabel);
-            displayWithChildren (theShapeTool, theColorTool, aLabel, aTrsf, aDefStyle, anEntry, theMapOfShapes);
+            TDF_Label occurrence;
+            TDF_Label definition;
+            XCAFPrs_Style style;
+            TopLoc_Location location;
+            TopoDS_Shape shape;
+        };
+        std::vector<AdmittedLeaf> anAdmittedVisibleLeaves;
+        anAdmittedVisibleLeaves.reserve(
+            std::min<Standard_Size>(myMaximumLeafPresentations, 256));
+        Standard_Size aNodeCount = 0;
+        Standard_Size aLeafCount = 0;
+
+        // Admission is a complete first pass. In particular, do not allocate
+        // CafShapePrs or touch AIS until the aggregate deduplicated-root walk
+        // has proved both its node and leaf ceilings. A shared definition may
+        // otherwise amplify into thousands of partially published objects
+        // before a late occurrence crosses the limit.
+        for (; anExplorer.More(); anExplorer.Next())
+        {
+            const Standard_Integer aDepth = anExplorer.CurrentDepth();
+            if (aDepth < 0
+                || static_cast<Standard_Size>(aDepth)
+                    > kMaximumDisplayTraversalDepth
+                || ++aNodeCount > myMaximumDisplayTraversalNodes)
+            {
+                return false;
+            }
+
+            const XCAFPrs_DocumentNode& aNode = anExplorer.Current();
+            if (aNode.IsAssembly)
+            {
+                continue;
+            }
+            const TDF_Label aDefinition = aNode.RefLabel.IsNull()
+                ? aNode.Label
+                : aNode.RefLabel;
+            if (aNode.Label.IsNull() || aDefinition.IsNull()
+                || aNode.Label.Data() != theDocument->GetData()
+                || aDefinition.Data() != theDocument->GetData()
+                || !XCAFDoc_ShapeTool::IsShape(aDefinition)
+                || XCAFDoc_ShapeTool::IsAssembly(aDefinition))
+            {
+                return false;
+            }
+            if (++aLeafCount > myMaximumLeafPresentations)
+            {
+                return false;
+            }
+            if (!aNode.Style.IsVisible()
+                || !IsExplorerPathVisible(anExplorer, aLayerTool))
+            {
+                continue;
+            }
+
+            const TopoDS_Shape aShape =
+                XCAFDoc_ShapeTool::GetShape(aDefinition);
+            if (aShape.IsNull())
+            {
+                return false;
+            }
+
+            anAdmittedVisibleLeaves.push_back({
+                aNode.Label,
+                aDefinition,
+                aNode.Style,
+                aNode.Location,
+                aShape,
+            });
         }
+        if (aLeafCount == 0)
+        {
+            return false;
+        }
+
+        // The full explorer is now admitted. Only this publication phase may
+        // allocate or display one CafShapePrs per visible leaf occurrence.
+        for (const AdmittedLeaf& aLeaf : anAdmittedVisibleLeaves)
+        {
+            // A definition may be instanced many times. Keep its BRep shared,
+            // but never share the AIS object: selection and the OpenGL local
+            // transform are occurrence state.
+            const Graphic3d_MaterialAspect aDefaultMaterial(
+                Graphic3d_NameOfMaterial_ShinyPlastified);
+            Handle(CafShapePrs) aPresentation = new CafShapePrs(
+                aLeaf.definition,
+                aLeaf.occurrence,
+                aLeaf.style,
+                aDefaultMaterial);
+            if (aPresentation.IsNull())
+            {
+                return false;
+            }
+            aPresentation->DispatchStyles(Standard_False);
+
+            // Apply the explorer's effective whole-object appearance directly
+            // as well as retaining CafShapePrs' per-subshape XCAF styles.
+            const Handle(XCAFDoc_VisMaterial)& aVisualMaterial =
+                aLeaf.style.Material();
+            if (!aVisualMaterial.IsNull())
+            {
+                Graphic3d_MaterialAspect anAspect;
+                aVisualMaterial->FillMaterialAspect(anAspect);
+                aPresentation->SetMaterial(anAspect);
+                aPresentation->SetColor(
+                    aVisualMaterial->BaseColor().GetRGB());
+            }
+            if (aLeaf.style.IsSetColorSurf())
+            {
+                aPresentation->SetColor(aLeaf.style.GetColorSurf());
+            }
+            else if (aLeaf.style.IsSetColorCurv())
+            {
+                aPresentation->SetColor(aLeaf.style.GetColorCurv());
+            }
+
+            // Match the renderer-neutral snapshot path: the app-owned edit
+            // transform stays on the definition and is composed with this
+            // leaf's accumulated XCAF occurrence location.
+            gp_Trsf aWorldTransform =
+                myDoc->ObjectTransformForLabel(aLeaf.definition);
+            aWorldTransform.Multiply(aLeaf.location.Transformation());
+
+            // XCAFPrs_DocumentExplorer includes a definition shape's own
+            // TopoDS location in the accumulated node location, while the AIS
+            // geometry still carries that same location. Keep the BRep located
+            // for sub-shape style identity, and cancel its location from the
+            // AIS-local transform so it contributes exactly once at render.
+            const TopLoc_Location& aShapeLocation = aLeaf.shape.Location();
+            if (!aShapeLocation.IsIdentity())
+            {
+                aWorldTransform.Multiply(
+                    aShapeLocation.Inverted().Transformation());
+            }
+            aPresentation->SetLocalTransformation(aWorldTransform);
+
+            if (aPresentation->IsEditablePresentation())
+            {
+                // Preserve the established free-definition edit path.
+                myDoc->LoadObjectMeterial(
+                    aLeaf.definition, aPresentation);
+                myContext->Display(aPresentation, Standard_False);
+            }
+            else
+            {
+                // The explorer style already merges imported definition
+                // material and occurrence color in XCAF precedence order.
+                // Re-applying the generic definition material here would
+                // erase the occurrence color. Only explicit Shapeyard-owned
+                // overrides may supersede that resolved style.
+                myDoc->LoadObjectAuthoredMaterialOverrides(
+                    aLeaf.definition, aPresentation);
+
+                // Current edit persistence is definition-addressed. Component
+                // occurrences remain visible but nonselectable so transform,
+                // material, boolean, duplicate, and delete cannot accidentally
+                // mutate their shared definition or double their placement.
+                myContext->Display(
+                    aPresentation,
+                    AIS_Shaded,
+                    -1,
+                    Standard_False);
+            }
+        }
+        return true;
+    }
+    catch (const Standard_Failure&)
+    {
+        return false;
+    }
+    catch (...)
+    {
+        return false;
     }
 }
 

@@ -105,9 +105,19 @@ public:
         const TDF_Label& source,
         const TDF_Label& destination);
     void LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    //! Apply only Shapeyard-owned whole-object overrides. Imported XCAF
+    //! material is deliberately excluded because an occurrence presentation
+    //! already owns the explorer-resolved definition/instance style.
+    void LoadObjectAuthoredMaterialOverrides(
+        const TDF_Label& label,
+        const Handle(AIS_Shape) anAis);
 
     TDF_Label AddShape(Handle(AIS_Shape) object);
     TDF_Label AddShape(Handle(AIS_InteractiveObject) object);
+    //! False for an XCAF component occurrence whose persistent edits cannot be
+    //! represented safely by the current definition-owned editing model.
+    Standard_Boolean IsPresentationEditable(
+        Handle(AIS_InteractiveObject) object) const;
     TDF_Label ShapeLabel(Handle(AIS_InteractiveObject) object) const;
     
     Graphic3d_NameOfMaterial MaterialNameForShape(Handle(AIS_Shape) object);
@@ -162,6 +172,9 @@ public:
     const bool canRedo() const;
     
     std::string save(const std::string& path);
+    std::string save(
+        const std::string& path,
+        const Message_ProgressRange& progress);
 
     void NotifyChanges();
 

@@ -24,6 +24,7 @@
 
 #include "OcctDocument.h"
 #include "CafShapePrs.h"
+#include "../Common/Core3DMobileResourceLimits.h"
 
 #include <AIS_InteractiveContext.hxx>
 #include <V3d_Viewer.hxx>
@@ -31,6 +32,7 @@
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFPrs_Style.hxx>
+#include <TDF_LabelSequence.hxx>
 
 #import <UIKit/UIKit.h>
 
@@ -90,16 +92,35 @@ public:
     Standard_EXPORT void Select(int theX, int theY, AIS_SelectionScheme scheme = AIS_SelectionScheme::AIS_SelectionScheme_XOR);
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);
+#ifdef DEBUG
+    //! Test-only traversal ceiling used to exercise aggregate multi-root
+    //! admission without constructing tens of thousands of AIS objects.
+    void SetDebugMaximumDisplayTraversalNodes(const Standard_Size theLimit)
+    {
+        myMaximumDisplayTraversalNodes = theLimit > 0 ? theLimit : 1;
+    }
+    //! Test-only leaf-presentation ceiling used to prove admission completes
+    //! before any AIS occurrence is allocated or displayed.
+    void SetDebugMaximumLeafPresentations(const Standard_Size theLimit)
+    {
+        myMaximumLeafPresentations = theLimit > 0 ? theLimit : 1;
+    }
+#endif
 protected:
     void clearSession(const Handle(XSControl_WorkSession)& theSession);
     
-    void displayWithChildren (XCAFDoc_ShapeTool&             theShapeTool,
-                              XCAFDoc_ColorTool&             theColorTool,
-                              const TDF_Label&               theLabel,
-                              const TopLoc_Location&         theParentTrsf,
-                              const XCAFPrs_Style&           theParentStyle,
-                              const TCollection_AsciiString& theParentId,
-                              MapOfPrsForShapes&             theMapOfShapes);
+    //! Display every leaf occurrence below a root as an independent AIS
+    //! presentation. XCAFPrs_DocumentExplorer supplies the resolved inherited
+    //! style and the accumulated occurrence location for each leaf.
+    bool displayWithChildren (const Handle(TDocStd_Document)& theDocument,
+                              const TDF_Label&                theLabel,
+                              const XCAFPrs_Style&            theDefaultStyle);
+    //! Display a deduplicated root set with one traversal budget. Validation
+    //! deduplicates document labels globally, so presentation admission must
+    //! not reset its resource ceiling for every free root.
+    bool displayWithChildren (const Handle(TDocStd_Document)& theDocument,
+                              const TDF_LabelSequence&        theLabels,
+                              const XCAFPrs_Style&            theDefaultStyle);
     void clearContext();
     
 protected:
@@ -108,6 +129,9 @@ protected:
     Handle(Core3DView)              myView;    //!< main view
     Handle(Core3DContext)           myContext; //!< interactive context containing displayed objects
     Handle(OcctDocument)            myDoc;
+    Standard_Size                   myMaximumDisplayTraversalNodes = 32'768;
+    Standard_Size                   myMaximumLeafPresentations =
+        core3d::limits::kMaximumLeafPresentations;
 };
 
 #endif // OcctViewer_H

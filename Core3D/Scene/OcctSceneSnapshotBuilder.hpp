@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <optional>
+#include <cstdint>
 #include <vector>
 
 class AIS_InteractiveContext;
@@ -84,6 +85,24 @@ public:
         const std::vector<Handle(AIS_Shape)>& theActorShapes,
         const std::vector<Handle(AIS_Shape)>& theResultShapes,
         const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept;
+
+#ifdef DEBUG
+    enum class DebugTriangulationFailure : std::uint8_t {
+        None = 0,
+        Missing = 1,
+        Incompatible = 2,
+    };
+
+    //! Test-only admission override. It exercises the same cached-mesh
+    //! validation used by Build without changing live OCAF/AIS state.
+    void DebugSetTriangulationFailure(
+        DebugTriangulationFailure theFailure) noexcept;
+
+    //! Counter seam for the forbidden snapshot-owned mesher path. Build must
+    //! leave this at zero; OpenGL presentation meshing is outside this adapter.
+    void DebugResetMesherInvocationCount() noexcept;
+    std::uint64_t DebugMesherInvocationCount() const noexcept;
+#endif
 
 private:
     OverlayPointer PublishPresentationOverlayImpl(

@@ -15,6 +15,8 @@
 #include "GLViewController+Trick.h"
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
+#include "XCAFDoc_ColorTool.hxx"
+#include "XCAFDoc_LayerTool.hxx"
 #include "XCAFDoc_VisMaterial.hxx"
 #include "XCAFDoc_VisMaterialTool.hxx"
 #include "Image_Texture.hxx"
@@ -26,11 +28,14 @@
 #include "gp_Ax2.hxx"
 #include "gp_Trsf.hxx"
 #include "TopLoc_Location.hxx"
+#include "TopExp_Explorer.hxx"
+#include "XCAFPrs_DocumentExplorer.hxx"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -138,11 +143,53 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
     return result;
 }
 
+NSData* Core3DCreateDebugBinXCAFFixture(
+    NSString* suffix,
+    const std::function<void(const Handle(TDocStd_Document)&)>& populate) {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.%@", NSUUID.UUID.UUIDString, suffix]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        if (document.IsNull()) {
+            throw Standard_Failure("Unable to create debug XCAF fixture");
+        }
+        XCAFDoc_DocumentTool::SetLengthUnit(document, 0.001);
+        populate(document);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure("Unable to save debug XCAF fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
 } // namespace
 
 @interface Core3DViewController () {
     BOOL _isSetuped;
     NSURL *_shouldLoadBundleUrl;
+    NSURL *_shouldLoadAssetFileURL;
+    unsigned long long _shouldLoadAssetByteCount;
+    NSString *_shouldLoadAssetSHA256;
     std::atomic_bool _isLoading;
 }
 
@@ -296,8 +343,7 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
 
 	for (const PendingStyle& style : pendingStyles) {
 		style.shape->UnsetColor();
-		style.shape->SetMaterial(style.material);
-		style.shape->SetColor(style.color);
+		doc->LoadObjectMeterial(style.label, style.shape);
 	}
 	[self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
 	NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
@@ -906,6 +952,514 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
     [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
     [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
     return result;
+}
+
+- (NSData *_Nullable)debugSharedDefinitionAssemblyBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.shared-definition-assembly-fixture",
+            NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        Handle(XCAFDoc_ShapeTool) shapeTool = document.IsNull()
+            ? Handle(XCAFDoc_ShapeTool)()
+            : XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        Handle(XCAFDoc_ColorTool) colorTool = document.IsNull()
+            ? Handle(XCAFDoc_ColorTool)()
+            : XCAFDoc_DocumentTool::ColorTool(document->Main());
+        Handle(XCAFDoc_VisMaterialTool) materialTool = document.IsNull()
+            ? Handle(XCAFDoc_VisMaterialTool)()
+            : XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (document.IsNull() || shapeTool.IsNull()
+            || colorTool.IsNull() || materialTool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create shared-definition assembly fixture");
+        }
+        XCAFDoc_DocumentTool::SetLengthUnit(document, 0.001);
+        const TDF_Label definition = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(),
+            Standard_False,
+            Standard_True);
+        const TDF_Label nestedAssembly = shapeTool->NewShape();
+        const TDF_Label rootAssembly = shapeTool->NewShape();
+        gp_Trsf firstTransform;
+        firstTransform.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+        gp_Trsf secondTransform;
+        secondTransform.SetTranslation(gp_Vec(50.0, 0.0, 0.0));
+        gp_Trsf parentTransform;
+        parentTransform.SetTranslation(gp_Vec(100.0, 0.0, 0.0));
+        const TDF_Label firstOccurrence = shapeTool->AddComponent(
+            nestedAssembly,
+            definition,
+            TopLoc_Location(firstTransform));
+        const TDF_Label secondOccurrence = shapeTool->AddComponent(
+            nestedAssembly,
+            definition,
+            TopLoc_Location(secondTransform));
+        const TDF_Label parentOccurrence = shapeTool->AddComponent(
+            rootAssembly,
+            nestedAssembly,
+            TopLoc_Location(parentTransform));
+        if (definition.IsNull() || nestedAssembly.IsNull()
+            || rootAssembly.IsNull() || firstOccurrence.IsNull()
+            || secondOccurrence.IsNull() || parentOccurrence.IsNull()) {
+            throw Standard_Failure(
+                "Unable to populate shared-definition assembly fixture");
+        }
+
+        // Imported definition material must supply non-color PBR properties,
+        // while each occurrence surface color remains the final resolved tint.
+        // Re-applying the definition material after XCAF style resolution
+        // would incorrectly turn both presentations green.
+        XCAFDoc_VisMaterialPBR definitionPBR;
+        definitionPBR.BaseColor = Quantity_ColorRGBA(
+            Quantity_Color(Quantity_NOC_GREEN), 1.0f);
+        definitionPBR.Metallic = 0.35f;
+        definitionPBR.Roughness = 0.65f;
+        Handle(XCAFDoc_VisMaterial) definitionMaterial =
+            new XCAFDoc_VisMaterial();
+        definitionMaterial->SetPbrMaterial(definitionPBR);
+        definitionMaterial->SetCommonMaterial(
+            definitionMaterial->ConvertToCommonMaterial());
+        const TDF_Label definitionMaterialLabel = materialTool->AddMaterial(
+            definitionMaterial,
+            TCollection_AsciiString("Imported green definition material"));
+        if (definitionMaterialLabel.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create shared-definition material fixture");
+        }
+        materialTool->SetShapeMaterial(
+            definition, definitionMaterialLabel);
+        colorTool->SetColor(
+            firstOccurrence,
+            Quantity_Color(Quantity_NOC_RED),
+            XCAFDoc_ColorSurf);
+        colorTool->SetColor(
+            secondOccurrence,
+            Quantity_Color(Quantity_NOC_BLUE1),
+            XCAFDoc_ColorSurf);
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save shared-definition assembly fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
+- (NSData *_Nullable)debugSharedSubtreeMultipleRootsBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"shared-subtree-multiple-roots-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapeTool.IsNull()) {
+                throw Standard_Failure("Unable to create shape tool");
+            }
+            const TDF_Label definition = shapeTool->AddShape(
+                BRepPrimAPI_MakeBox(4.0, 4.0, 4.0).Shape(),
+                Standard_False,
+                Standard_True);
+            const TDF_Label sharedAssembly = shapeTool->NewShape();
+            const TDF_Label firstRoot = shapeTool->NewShape();
+            const TDF_Label secondRoot = shapeTool->NewShape();
+            gp_Trsf firstLeafTransform;
+            firstLeafTransform.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+            gp_Trsf secondLeafTransform;
+            secondLeafTransform.SetTranslation(gp_Vec(20.0, 0.0, 0.0));
+            gp_Trsf firstRootTransform;
+            firstRootTransform.SetTranslation(gp_Vec(100.0, 0.0, 0.0));
+            gp_Trsf secondRootTransform;
+            secondRootTransform.SetTranslation(gp_Vec(200.0, 0.0, 0.0));
+            if (definition.IsNull() || sharedAssembly.IsNull()
+                || firstRoot.IsNull() || secondRoot.IsNull()
+                || shapeTool->AddComponent(
+                    sharedAssembly,
+                    definition,
+                    TopLoc_Location(firstLeafTransform)).IsNull()
+                || shapeTool->AddComponent(
+                    sharedAssembly,
+                    definition,
+                    TopLoc_Location(secondLeafTransform)).IsNull()
+                || shapeTool->AddComponent(
+                    firstRoot,
+                    sharedAssembly,
+                    TopLoc_Location(firstRootTransform)).IsNull()
+                || shapeTool->AddComponent(
+                    secondRoot,
+                    sharedAssembly,
+                    TopLoc_Location(secondRootTransform)).IsNull()) {
+                throw Standard_Failure(
+                    "Unable to populate shared multi-root fixture");
+            }
+        });
+}
+
+- (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"hidden-assembly-visibility-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const Handle(XCAFDoc_ColorTool) colorTool =
+                XCAFDoc_DocumentTool::ColorTool(document->Main());
+            if (shapeTool.IsNull() || colorTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create visibility fixture tools");
+            }
+
+            const TDF_Label visibleDefinition = shapeTool->AddShape(
+                BRepPrimAPI_MakeBox(4.0, 4.0, 4.0).Shape(),
+                Standard_False,
+                Standard_True);
+            const TDF_Label hiddenDefinition = shapeTool->AddShape(
+                BRepPrimAPI_MakeBox(5.0, 5.0, 5.0).Shape(),
+                Standard_False,
+                Standard_True);
+            const TDF_Label hiddenParent = shapeTool->NewShape();
+            const TDF_Label rootAssembly = shapeTool->NewShape();
+            gp_Trsf at10;
+            at10.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+            gp_Trsf at20;
+            at20.SetTranslation(gp_Vec(20.0, 0.0, 0.0));
+            gp_Trsf at30;
+            at30.SetTranslation(gp_Vec(30.0, 0.0, 0.0));
+            gp_Trsf at40;
+            at40.SetTranslation(gp_Vec(40.0, 0.0, 0.0));
+            gp_Trsf at50;
+            at50.SetTranslation(gp_Vec(50.0, 0.0, 0.0));
+            const TDF_Label visibleOccurrence = shapeTool->AddComponent(
+                rootAssembly,
+                visibleDefinition,
+                TopLoc_Location(at10));
+            const TDF_Label hiddenOccurrence = shapeTool->AddComponent(
+                rootAssembly,
+                visibleDefinition,
+                TopLoc_Location(at20));
+            const TDF_Label hiddenDefinitionOccurrence =
+                shapeTool->AddComponent(
+                    rootAssembly,
+                    hiddenDefinition,
+                    TopLoc_Location(at30));
+            const TDF_Label hiddenParentLeaf = shapeTool->AddComponent(
+                hiddenParent,
+                visibleDefinition,
+                TopLoc_Location());
+            const TDF_Label hiddenParentOccurrence =
+                shapeTool->AddComponent(
+                    rootAssembly,
+                    hiddenParent,
+                    TopLoc_Location(at40));
+            const TDF_Label hiddenLayerOccurrence =
+                shapeTool->AddComponent(
+                    rootAssembly,
+                    visibleDefinition,
+                    TopLoc_Location(at50));
+            if (visibleDefinition.IsNull() || hiddenDefinition.IsNull()
+                || hiddenParent.IsNull() || rootAssembly.IsNull()
+                || visibleOccurrence.IsNull()
+                || hiddenOccurrence.IsNull()
+                || hiddenDefinitionOccurrence.IsNull()
+                || hiddenParentLeaf.IsNull()
+                || hiddenParentOccurrence.IsNull()
+                || hiddenLayerOccurrence.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to populate visibility fixture");
+            }
+
+            colorTool->SetColor(
+                visibleOccurrence,
+                Quantity_Color(Quantity_NOC_RED),
+                XCAFDoc_ColorSurf);
+            colorTool->SetVisibility(
+                hiddenOccurrence, Standard_False);
+            colorTool->SetVisibility(
+                hiddenDefinition, Standard_False);
+            colorTool->SetVisibility(
+                hiddenParent, Standard_False);
+        });
+}
+
+- (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"located-free-shape-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const Handle(XCAFDoc_VisMaterialTool) materialTool =
+                XCAFDoc_DocumentTool::VisMaterialTool(
+                    document->Main());
+            if (shapeTool.IsNull() || materialTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create located fixture tools");
+            }
+            gp_Trsf locationTransform;
+            locationTransform.SetTranslation(gp_Vec(42.0, 0.0, 0.0));
+            TopoDS_Shape locatedShape =
+                BRepPrimAPI_MakeBox(4.0, 4.0, 4.0).Shape();
+            locatedShape.Location(TopLoc_Location(locationTransform));
+            const TDF_Label definition = shapeTool->NewShape();
+            if (definition.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create located fixture definition");
+            }
+            shapeTool->SetShape(definition, locatedShape);
+
+            XCAFDoc_VisMaterialPBR importedPBR;
+            importedPBR.BaseColor = Quantity_ColorRGBA(
+                Quantity_Color(Quantity_NOC_GREEN), 1.0f);
+            importedPBR.Metallic = 0.35f;
+            importedPBR.Roughness = 0.65f;
+            Handle(XCAFDoc_VisMaterial) importedMaterial =
+                new XCAFDoc_VisMaterial();
+            importedMaterial->SetPbrMaterial(importedPBR);
+            importedMaterial->SetCommonMaterial(
+                importedMaterial->ConvertToCommonMaterial());
+            const TDF_Label materialLabel = materialTool->AddMaterial(
+                importedMaterial,
+                TCollection_AsciiString("Located imported PBR"));
+            if (materialLabel.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create located fixture material");
+            }
+            materialTool->SetShapeMaterial(definition, materialLabel);
+        });
+}
+
+- (NSData *_Nullable)debugAuthoredLegacyAssemblyBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"authored-legacy-assembly-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const Handle(XCAFDoc_ColorTool) colorTool =
+                XCAFDoc_DocumentTool::ColorTool(document->Main());
+            const Handle(XCAFDoc_VisMaterialTool) materialTool =
+                XCAFDoc_DocumentTool::VisMaterialTool(
+                    document->Main());
+            if (shapeTool.IsNull() || colorTool.IsNull()
+                || materialTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create authored assembly tools");
+            }
+            const TDF_Label definition = shapeTool->AddShape(
+                BRepPrimAPI_MakeBox(4.0, 4.0, 4.0).Shape(),
+                Standard_False,
+                Standard_True);
+            const TDF_Label rootAssembly = shapeTool->NewShape();
+            gp_Trsf at10;
+            at10.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+            gp_Trsf at50;
+            at50.SetTranslation(gp_Vec(50.0, 0.0, 0.0));
+            const TDF_Label firstOccurrence = shapeTool->AddComponent(
+                rootAssembly, definition, TopLoc_Location(at10));
+            const TDF_Label secondOccurrence = shapeTool->AddComponent(
+                rootAssembly, definition, TopLoc_Location(at50));
+            if (definition.IsNull() || rootAssembly.IsNull()
+                || firstOccurrence.IsNull()
+                || secondOccurrence.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to populate authored assembly fixture");
+            }
+
+            XCAFDoc_VisMaterialPBR importedPBR;
+            importedPBR.BaseColor = Quantity_ColorRGBA(
+                Quantity_Color(Quantity_NOC_GREEN), 1.0f);
+            importedPBR.Metallic = 0.35f;
+            importedPBR.Roughness = 0.65f;
+            Handle(XCAFDoc_VisMaterial) importedMaterial =
+                new XCAFDoc_VisMaterial();
+            importedMaterial->SetPbrMaterial(importedPBR);
+            importedMaterial->SetCommonMaterial(
+                importedMaterial->ConvertToCommonMaterial());
+            const TDF_Label importedMaterialLabel =
+                materialTool->AddMaterial(
+                    importedMaterial,
+                    TCollection_AsciiString(
+                        "Lower-priority imported PBR"));
+            if (importedMaterialLabel.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create authored assembly material");
+            }
+            materialTool->SetShapeMaterial(
+                definition, importedMaterialLabel);
+
+            TopExp_Explorer aFace(definition.IsNull()
+                ? TopoDS_Shape()
+                : XCAFDoc_ShapeTool::GetShape(definition), TopAbs_FACE);
+            if (!aFace.More()) {
+                throw Standard_Failure(
+                    "Unable to find authored assembly face");
+            }
+            const TDF_Label faceLabel = shapeTool->AddSubShape(
+                definition, aFace.Current());
+            XCAFDoc_VisMaterialPBR facePBR;
+            facePBR.BaseColor = Quantity_ColorRGBA(
+                Quantity_Color(Quantity_NOC_BLUE1), 1.0f);
+            facePBR.Metallic = 0.05f;
+            facePBR.Roughness = 0.95f;
+            Handle(XCAFDoc_VisMaterial) faceMaterial =
+                new XCAFDoc_VisMaterial();
+            faceMaterial->SetPbrMaterial(facePBR);
+            faceMaterial->SetCommonMaterial(
+                faceMaterial->ConvertToCommonMaterial());
+            const TDF_Label faceMaterialLabel =
+                materialTool->AddMaterial(
+                    faceMaterial,
+                    TCollection_AsciiString(
+                        "Lower-priority imported face PBR"));
+            if (faceLabel.IsNull() || faceMaterialLabel.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create authored assembly face style");
+            }
+            materialTool->SetShapeMaterial(
+                faceLabel, faceMaterialLabel);
+            colorTool->SetColor(
+                faceLabel,
+                Quantity_Color(Quantity_NOC_BLUE1),
+                XCAFDoc_ColorSurf);
+            colorTool->SetColor(
+                firstOccurrence,
+                Quantity_Color(Quantity_NOC_BLUE1),
+                XCAFDoc_ColorSurf);
+            colorTool->SetColor(
+                secondOccurrence,
+                Quantity_Color(Quantity_NOC_YELLOW),
+                XCAFDoc_ColorSurf);
+
+            // Historical documents may contain both an imported XDE material
+            // and the app's legacy preset/color attributes. The authored
+            // values are deliberately authoritative in that coexistence case.
+            TDataStd_Integer::Set(
+                definition.FindChild(11),
+                Graphic3d_NameOfMaterial_Gold);
+            TDataStd_Integer::Set(
+                definition.FindChild(12),
+                Quantity_NOC_RED);
+        });
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
+    debugDisplayedShapePresentationStates {
+    return [GLController debugDisplayedShapePresentationStates];
+}
+
+- (NSInteger)debugSelectedShapeCount {
+    return [GLController debugSelectedShapeCount];
+}
+
+- (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumDisplayTraversalNodes:limit];
+}
+
+- (void)debugSetMaximumLeafPresentations:(NSUInteger)limit {
+    [GLController debugSetMaximumLeafPresentations:limit];
+}
+
+- (void)debugSetMaximumProjectTopologyValidationNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumProjectTopologyValidationNodes:limit];
+}
+
+- (void)debugResetProjectTopologyValidationCounters {
+    [GLController debugResetProjectTopologyValidationCounters];
+}
+
+- (NSUInteger)debugBoundedProjectTopologyValidationCount {
+    return [GLController debugBoundedProjectTopologyValidationCount];
+}
+
+- (NSUInteger)debugGeometricBRepValidationCount {
+    return [GLController debugGeometricBRepValidationCount];
+}
+
+- (void)debugSetSceneSnapshotTriangulationFailureMode:(NSInteger)mode {
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    using Failure =
+        core3d::scene::OcctSceneSnapshotBuilder::DebugTriangulationFailure;
+    Failure failure = Failure::None;
+    if (mode == 1) {
+        failure = Failure::Missing;
+    } else if (mode == 2) {
+        failure = Failure::Incompatible;
+    }
+    GLController.viewer->DebugSetSceneSnapshotTriangulationFailure(failure);
+}
+
+- (void)debugResetSceneSnapshotMesherInvocationCount {
+    if (GLController != nil && GLController.viewer != nullptr) {
+        GLController.viewer->DebugResetSceneSnapshotMesherInvocationCount();
+    }
+}
+
+- (NSUInteger)debugSceneSnapshotMesherInvocationCount {
+    return GLController == nil || GLController.viewer == nullptr
+        ? 0
+        : static_cast<NSUInteger>(
+            GLController.viewer->DebugSceneSnapshotMesherInvocationCount());
+}
+
+- (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x {
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return NO;
+    }
+    const Handle(OcctDocument) occtDocument =
+        GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) document = occtDocument.IsNull()
+        ? Handle(TDocStd_Document)()
+        : occtDocument->Document();
+    const Handle(XCAFDoc_LayerTool) layerTool = document.IsNull()
+        ? Handle(XCAFDoc_LayerTool)()
+        : XCAFDoc_DocumentTool::LayerTool(document->Main());
+    if (document.IsNull() || layerTool.IsNull()) {
+        return NO;
+    }
+    TDF_Label occurrence;
+    XCAFPrs_DocumentExplorer explorer(
+        document,
+        XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes
+            | XCAFPrs_DocumentExplorerFlags_NoStyle);
+    for (; explorer.More(); explorer.Next()) {
+        const XCAFPrs_DocumentNode& node = explorer.Current();
+        if (!node.Label.IsNull()
+            && Abs(node.Location.Transformation()
+                       .TranslationPart().X() - x) < 0.001) {
+            occurrence = node.Label;
+            break;
+        }
+    }
+    if (occurrence.IsNull()) {
+        return NO;
+    }
+    const TDF_Label hiddenLayer = layerTool->AddLayer(
+        TCollection_ExtendedString("Debug invisible layer"));
+    if (hiddenLayer.IsNull()) {
+        return NO;
+    }
+    layerTool->SetVisibility(hiddenLayer, Standard_False);
+    layerTool->SetLayer(occurrence, hiddenLayer, Standard_False);
+    GLController.viewer->redrawDocument();
+    [GLController requestRender];
+    return YES;
 }
 
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData {
@@ -1570,7 +2124,11 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
 - (void)viewDidSetup {
     if (!_isSetuped) {
         _isSetuped = YES;
-        if (_shouldLoadBundleUrl != NULL) {
+        if (_shouldLoadAssetFileURL != nil) {
+            [self loadFromAssetFile:_shouldLoadAssetFileURL
+                 expectedByteCount:_shouldLoadAssetByteCount
+                     expectedSHA256:_shouldLoadAssetSHA256];
+        } else if (_shouldLoadBundleUrl != NULL) {
             [self loadFromBundle:_shouldLoadBundleUrl];
         }
     }
@@ -1659,10 +2217,14 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
     }
     
     _isLoading = true;
+    _shouldLoadAssetFileURL = nil;
+    _shouldLoadAssetByteCount = 0;
+    _shouldLoadAssetSHA256 = nil;
     if (!_isSetuped) {
         _shouldLoadBundleUrl = bundleUrl;
         return;
     }
+    _shouldLoadBundleUrl = nil;
     NSData *assetData = nil;
     BOOL foundAssetItem = NO;
     Core3DAssetLoadResult readFailure = Core3DAssetLoadResultInvalidData;
@@ -1670,16 +2232,10 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
     for (AssetBundleItem *item in bundleReader.items) {
         if (item.type == AssetBundleItemTypeAsset) {
             foundAssetItem = YES;
-            NSError *error = nil;
-            assetData = [NSData dataWithContentsOfURL:item.url options:kNilOptions error:&error];
-            if (error) {
-                NSLog(@"ERROR: load from bundle: %@", error.localizedDescription);
+            assetData = item.data;
+            if (!assetData) {
+                NSLog(@"ERROR: load from bundle: NULL DATA");
                 readFailure = Core3DAssetLoadResultTemporaryFileFailure;
-            } else {
-                if (!assetData) {
-                    NSLog(@"ERROR: load from bundle: %@, NULL DATA", error.localizedDescription);
-                    readFailure = Core3DAssetLoadResultTemporaryFileFailure;
-                }
             }
             break;
         }
@@ -1707,6 +2263,49 @@ XCAFDoc_VisMaterialPBR Core3DLegacyPBRMaterial(
             ? readFailure
             : Core3DAssetLoadResultInvalidData];
     }
+}
+
+- (void)loadFromAssetFile:(NSURL *)assetFileURL
+        expectedByteCount:(unsigned long long)expectedByteCount
+            expectedSHA256:(NSString *)expectedSHA256 {
+    if (assetFileURL == nil || expectedByteCount == 0
+        || expectedSHA256 == nil) {
+        [self viewDidFailToLoadFromBundle:
+            Core3DAssetLoadResultInvalidData];
+        return;
+    }
+
+    _isLoading = true;
+    if (!_isSetuped) {
+        _shouldLoadBundleUrl = nil;
+        _shouldLoadAssetFileURL = assetFileURL;
+        _shouldLoadAssetByteCount = expectedByteCount;
+        _shouldLoadAssetSHA256 = expectedSHA256;
+        return;
+    }
+    _shouldLoadAssetFileURL = nil;
+    _shouldLoadAssetByteCount = 0;
+    _shouldLoadAssetSHA256 = nil;
+    _shouldLoadBundleUrl = nil;
+
+    __weak typeof(self) weakSelf = self;
+    [GLController setAssetFileURL:assetFileURL
+               expectedByteCount:expectedByteCount
+                   expectedSHA256:expectedSHA256
+                       completion:^(Core3DAssetLoadResult result) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf->_isLoading = false;
+        if (result != Core3DAssetLoadResultSuccess) {
+            [strongSelf viewDidFailToLoadFromBundle:result];
+            return;
+        }
+        [(GLViewController *)strongSelf.glController fitAll];
+        if ([strongSelf currentGizmoType] == PrimitiveGizmoTypeNone) {
+            [strongSelf setGizmoType:PrimitiveGizmoTypeMoveRotate];
+        }
+        [strongSelf viewDidLoadFromBundle];
+    }];
 }
 
 - (void)saveSnapshot {

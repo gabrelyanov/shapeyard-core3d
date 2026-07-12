@@ -94,6 +94,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL) hasTrialMirrorObjects;
 #ifdef DEBUG
 - (void)debugRequestRender;
+- (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
+- (void)debugSetMaximumLeafPresentations:(NSUInteger)limit;
+- (void)debugSetMaximumProjectTopologyValidationNodes:(NSUInteger)limit;
+- (void)debugResetProjectTopologyValidationCounters;
+- (NSUInteger)debugBoundedProjectTopologyValidationCount;
+- (NSUInteger)debugGeometricBRepValidationCount;
+- (NSInteger)debugSelectedShapeCount;
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
+    debugDisplayedShapePresentationStates;
 #endif
 
 - (void) setConstructorMode;
@@ -105,6 +114,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
 - (void)setAssetData:(NSData *_Nonnull)data completion:(void(^)(Core3DAssetLoadResult result))completion;
+- (void)setAssetFileURL:(NSURL *_Nonnull)assetFileURL
+      expectedByteCount:(unsigned long long)expectedByteCount
+          expectedSHA256:(NSString *_Nonnull)expectedSHA256
+              completion:(void(^)(Core3DAssetLoadResult result))completion;
 - (NSData *_Nullable)thumbData;
 - (BOOL)saveSnapshot;
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;

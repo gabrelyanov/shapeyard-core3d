@@ -22,6 +22,7 @@
 #import <Foundation/Foundation.h>
 
 #include "OcctDocument.h"
+#include "CafShapePrs.h"
 
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -1089,6 +1090,18 @@ TDF_Label OcctDocument::ShapeLabel(Handle(AIS_InteractiveObject) object) const {
         return label;
     }
 
+    const Handle(CafShapePrs) aCafPresentation =
+        Handle(CafShapePrs)::DownCast(object);
+    if (!aCafPresentation.IsNull()) {
+        if (!aCafPresentation->IsEditablePresentation()
+            || aCafPresentation->GetLabel().IsNull()
+            || aCafPresentation->GetLabel().Data()
+                != myOcafDoc->GetData()) {
+            return label;
+        }
+        return aCafPresentation->GetLabel();
+    }
+
     Handle(AIS_Shape) aisShape = Handle(AIS_Shape)::DownCast(object);
     if (aisShape.IsNull() || aisShape->Shape().IsNull()) {
         return label;
@@ -1102,6 +1115,17 @@ TDF_Label OcctDocument::ShapeLabel(Handle(AIS_InteractiveObject) object) const {
     shapeTool->FindShape(aisShape->Shape(), label)
         || shapeTool->FindShape(aisShape->Shape(), label, Standard_True);
     return label;
+}
+
+Standard_Boolean OcctDocument::IsPresentationEditable(
+    Handle(AIS_InteractiveObject) object) const {
+    if (object.IsNull()) {
+        return Standard_False;
+    }
+    const Handle(CafShapePrs) aCafPresentation =
+        Handle(CafShapePrs)::DownCast(object);
+    return aCafPresentation.IsNull()
+        || aCafPresentation->IsEditablePresentation();
 }
 
 Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
@@ -1589,6 +1613,9 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
 }
 
 void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
+    if (label.IsNull() || anAis.IsNull()) {
+        return;
+    }
     const Handle(XCAFDoc_VisMaterial) aVisualMaterial =
         XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
     Handle(TDataStd_Integer) aLocalPBRMarker;
@@ -1603,24 +1630,111 @@ void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_S
         TryMaterialNameForLabel(label, aLegacyMaterial);
     const Standard_Boolean hasLegacyColor =
         TryColorNameForLabel(label, aLegacyColor);
+    const Handle(CafShapePrs) aCafPresentation =
+        Handle(CafShapePrs)::DownCast(anAis);
     if (!aVisualMaterial.IsNull()) {
         Graphic3d_MaterialAspect anAspect;
         aVisualMaterial->FillMaterialAspect(anAspect);
+        if (hasLocalPBR) {
+            if (!aCafPresentation.IsNull()) {
+                aCafPresentation->ApplyAuthoredVisualMaterial(
+                    aVisualMaterial);
+            } else {
+                anAis->SetMaterial(anAspect);
+                anAis->SetColor(
+                    aVisualMaterial->BaseColor().GetRGB());
+            }
+            return;
+        }
         anAis->SetMaterial(anAspect);
         anAis->SetColor(aVisualMaterial->BaseColor().GetRGB());
-        if (hasLocalPBR) {
+    }
+    const Graphic3d_MaterialAspect aLegacyAspect = hasLegacyMaterial
+        ? Graphic3d_MaterialAspect(aLegacyMaterial)
+        : Graphic3d_MaterialAspect();
+    const Quantity_Color aLegacyQuantity = hasLegacyColor
+        ? Quantity_Color(aLegacyColor)
+        : Quantity_Color(Quantity_NOC_GRAY80);
+    if (!aCafPresentation.IsNull()
+        && (hasLegacyMaterial || hasLegacyColor)) {
+        aCafPresentation->ApplyAuthoredLegacyAppearance(
+            hasLegacyMaterial,
+            aLegacyAspect,
+            hasLegacyColor,
+            aLegacyQuantity);
+    } else {
+        if (hasLegacyMaterial) {
+            anAis->SetMaterial(aLegacyAspect);
+        }
+        if (hasLegacyColor) {
+            anAis->SetColor(aLegacyQuantity);
+        }
+    }
+
+}
+
+void OcctDocument::LoadObjectAuthoredMaterialOverrides(
+    const TDF_Label& label,
+    const Handle(AIS_Shape) anAis) {
+    if (label.IsNull() || anAis.IsNull()) {
+        return;
+    }
+
+    Handle(TDataStd_Integer) aLocalPBRMarker;
+    const Standard_Boolean hasLocalPBR =
+        label.FindAttribute(
+            LocalPBRMaterialAttributeID(), aLocalPBRMarker)
+        && !aLocalPBRMarker.IsNull()
+        && aLocalPBRMarker->Get() == 1;
+    if (hasLocalPBR) {
+        const Handle(XCAFDoc_VisMaterial) aVisualMaterial =
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if (!aVisualMaterial.IsNull()) {
+            Graphic3d_MaterialAspect anAspect;
+            aVisualMaterial->FillMaterialAspect(anAspect);
+            const Handle(CafShapePrs) aCafPresentation =
+                Handle(CafShapePrs)::DownCast(anAis);
+            if (!aCafPresentation.IsNull()) {
+                aCafPresentation->ApplyAuthoredVisualMaterial(
+                    aVisualMaterial);
+            } else {
+                anAis->SetMaterial(anAspect);
+                anAis->SetColor(
+                    aVisualMaterial->BaseColor().GetRGB());
+            }
             return;
         }
     }
-    if (hasLegacyMaterial) {
-        Graphic3d_MaterialAspect m =
-            Graphic3d_MaterialAspect(aLegacyMaterial);
-        anAis->SetMaterial(m);
-    }
-    if (hasLegacyColor) {
-        anAis->SetColor(Quantity_Color(aLegacyColor));
-    }
 
+    Graphic3d_NameOfMaterial aLegacyMaterial;
+    const Standard_Boolean hasLegacyMaterial =
+        TryMaterialNameForLabel(label, aLegacyMaterial);
+    Quantity_NameOfColor aLegacyColor;
+    const Standard_Boolean hasLegacyColor =
+        TryColorNameForLabel(label, aLegacyColor);
+    const Graphic3d_MaterialAspect aLegacyAspect = hasLegacyMaterial
+        ? Graphic3d_MaterialAspect(aLegacyMaterial)
+        : Graphic3d_MaterialAspect();
+    const Quantity_Color aLegacyQuantity = hasLegacyColor
+        ? Quantity_Color(aLegacyColor)
+        : Quantity_Color(Quantity_NOC_GRAY80);
+    const Handle(CafShapePrs) aCafPresentation =
+        Handle(CafShapePrs)::DownCast(anAis);
+    if (!aCafPresentation.IsNull()
+        && (hasLegacyMaterial || hasLegacyColor)) {
+        aCafPresentation->ApplyAuthoredLegacyAppearance(
+            hasLegacyMaterial,
+            aLegacyAspect,
+            hasLegacyColor,
+            aLegacyQuantity);
+    } else {
+        if (hasLegacyMaterial) {
+            anAis->SetMaterial(aLegacyAspect);
+        }
+        if (hasLegacyColor) {
+            anAis->SetColor(aLegacyQuantity);
+        }
+    }
 }
 
 
@@ -1789,6 +1903,12 @@ const bool OcctDocument::canRedo() const {
 }
 
 std::string OcctDocument::save(const std::string& path) {
+    return save(path, Message_ProgressRange());
+}
+
+std::string OcctDocument::save(
+    const std::string& path,
+    const Message_ProgressRange& progress) {
     if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()) {
         return {};
     }
@@ -1799,7 +1919,8 @@ std::string OcctDocument::save(const std::string& path) {
     }
 
     try {
-        PCDM_StoreStatus status = app->SaveAs(myOcafDoc, path.c_str()); // ".cbf"
+        PCDM_StoreStatus status = app->SaveAs(
+            myOcafDoc, path.c_str(), progress); // ".cbf"
         if (status != PCDM_SS_OK) {
             std::cout << "Save CBF failed with status " << status << std::endl;
             return {};

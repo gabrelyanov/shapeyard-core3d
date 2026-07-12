@@ -49,6 +49,8 @@
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
+#include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -70,13 +72,25 @@ namespace core3d {
 
 namespace {
 
+#ifdef DEBUG
+std::atomic<Standard_Size> gBoundedProjectTopologyValidationCount{0};
+std::atomic<Standard_Size> gGeometricBRepValidationCount{0};
+#endif
+
+bool RunGeometricBRepValidation(const TopoDS_Shape& shape) {
+#ifdef DEBUG
+    gGeometricBRepValidationCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+    BRepCheck_Analyzer analyzer(shape, Standard_True);
+    return analyzer.IsValid();
+}
+
 bool IsTopologicallyValid(const TopoDS_Shape& shape) {
     if (shape.IsNull()) {
         return false;
     }
     try {
-        BRepCheck_Analyzer analyzer(shape, Standard_True);
-        return analyzer.IsValid();
+        return RunGeometricBRepValidation(shape);
     } catch (...) {
         return false;
     }
@@ -124,7 +138,6 @@ constexpr Standard_Size kMaximumAssemblyTraversalDepth = 128;
 constexpr Standard_Size kMaximumAssemblyTraversalNodes = 32768;
 constexpr Standard_Size kMaximumShapeDefinitions = 4096;
 constexpr Standard_Size kMaximumSubshapesPerDefinition = 250000;
-constexpr Standard_Size kMaximumAggregateSubshapes = 2000000;
 constexpr Standard_Size kMaximumDocumentLabels = 100000;
 constexpr std::uint64_t kMaximumTextureDimension = 8192;
 constexpr std::uint64_t kMaximumTexturePixels = 4096ull * 4096ull;
@@ -370,50 +383,122 @@ void CloseDocumentNoThrow(const Handle(TDocStd_Application)& app,
     document.Nullify();
 }
 
+bool IsValidTopologyOrientation(
+    const TopAbs_Orientation orientation) noexcept {
+    switch (orientation) {
+        case TopAbs_FORWARD:
+        case TopAbs_REVERSED:
+        case TopAbs_INTERNAL:
+        case TopAbs_EXTERNAL:
+            return true;
+    }
+    return false;
+}
+
+bool IsAllowedTopologyChild(
+    const TopAbs_ShapeEnum parent,
+    const TopAbs_ShapeEnum child) noexcept {
+    switch (parent) {
+        case TopAbs_COMPOUND:
+            return child >= TopAbs_COMPOUND && child < TopAbs_SHAPE;
+        case TopAbs_COMPSOLID:
+            return child == TopAbs_SOLID;
+        case TopAbs_SOLID:
+            return child == TopAbs_SHELL;
+        case TopAbs_SHELL:
+            return child == TopAbs_FACE;
+        case TopAbs_FACE:
+            return child == TopAbs_WIRE;
+        case TopAbs_WIRE:
+            return child == TopAbs_EDGE;
+        case TopAbs_EDGE:
+            return child == TopAbs_VERTEX;
+        case TopAbs_VERTEX:
+        case TopAbs_SHAPE:
+            return false;
+    }
+    return false;
+}
+
 bool ValidateBoundedTopologicalShape(
     const TopoDS_Shape& shape,
-    Standard_Size& aggregateSubshapes) {
-    if (shape.IsNull()) {
+    Standard_Size& aggregateSubshapes,
+    const Standard_Size maximumAggregateSubshapes) {
+    if (shape.IsNull() || maximumAggregateSubshapes == 0) {
         return false;
     }
     try {
         OCC_CATCH_SIGNALS
+#ifdef DEBUG
+        gBoundedProjectTopologyValidationCount.fetch_add(
+            1, std::memory_order_relaxed);
+#endif
         struct TopologyFrame {
             TopoDS_Shape shape;
             Standard_Size depth = 0;
+            bool leaving = false;
         };
-        std::vector<TopologyFrame> stack = {{shape, 0}};
+        const Standard_Size maximumSubshapesPerDefinition =
+            std::min(kMaximumSubshapesPerDefinition,
+                     maximumAggregateSubshapes);
+        const std::size_t maximumStackFrames =
+            static_cast<std::size_t>(maximumSubshapesPerDefinition) * 2U;
+        std::vector<TopologyFrame> stack = {{shape, 0, false}};
         TopTools_MapOfShape visited;
+        TopTools_MapOfShape activePath;
         Standard_Size count = 0;
         while (!stack.empty()) {
             const TopologyFrame frame = stack.back();
             stack.pop_back();
-            if (frame.shape.IsNull()
-                || frame.depth > kMaximumAssemblyTraversalDepth) {
+            if (frame.shape.IsNull()) {
                 return false;
             }
-            if (!visited.Add(frame.shape)) {
+            if (frame.leaving) {
+                activePath.Remove(frame.shape);
+                visited.Add(frame.shape);
                 continue;
             }
-            if (++count > kMaximumSubshapesPerDefinition
-                || aggregateSubshapes >= kMaximumAggregateSubshapes
-                || count > kMaximumAggregateSubshapes - aggregateSubshapes) {
+            if (visited.Contains(frame.shape)) {
+                continue;
+            }
+            if (activePath.Contains(frame.shape)
+                || frame.shape.ShapeType() == TopAbs_SHAPE
+                || !IsValidTopologyOrientation(frame.shape.Orientation())
+                || frame.depth > kMaximumAssemblyTraversalDepth
+                || count >= maximumSubshapesPerDefinition
+                || aggregateSubshapes >= maximumAggregateSubshapes) {
                 return false;
             }
+            activePath.Add(frame.shape);
+            ++count;
+            if (count > maximumAggregateSubshapes - aggregateSubshapes
+                || stack.size() >= maximumStackFrames) {
+                return false;
+            }
+            stack.push_back({frame.shape, frame.depth, true});
+            const TopAbs_ShapeEnum parentType = frame.shape.ShapeType();
             for (TopoDS_Iterator child(
                      frame.shape, Standard_True, Standard_True);
                  child.More(); child.Next()) {
-                if (stack.size()
-                    >= static_cast<std::size_t>(
-                        kMaximumSubshapesPerDefinition)) {
+                const TopoDS_Shape& childShape = child.Value();
+                if (childShape.IsNull()
+                    || !IsAllowedTopologyChild(
+                        parentType, childShape.ShapeType())
+                    || !IsValidTopologyOrientation(
+                        childShape.Orientation())
+                    || stack.size() >= maximumStackFrames) {
                     return false;
                 }
-                stack.push_back({child.Value(), frame.depth + 1});
+                stack.push_back({childShape, frame.depth + 1, false});
             }
         }
         aggregateSubshapes += count;
-        BRepCheck_Analyzer analyzer(shape, Standard_True);
-        return analyzer.IsValid();
+        // Do not call BRepCheck_Analyzer here. It evaluates attacker-controlled
+        // curves and surfaces without a progress/cancellation hook. Safe binary
+        // retrieval plus this canonical, cycle-aware, allocation-bounded walk
+        // is the fail-closed project-load gate; ordinary modeling operations
+        // retain geometric validity checks through IsTopologicallyValid.
+        return true;
     } catch (...) {
         return false;
     }
@@ -438,10 +523,12 @@ bool HasValidOptionalLengthUnit(
         || (std::isfinite(metersPerUnit) && metersPerUnit > 0.0);
 }
 
-bool ValidateShapeTree(const Handle(TDocStd_Document)& document,
-                       TDF_LabelMap& activeDefinitionLabels) {
+bool ValidateShapeTree(
+    const Handle(TDocStd_Document)& document,
+    TDF_LabelMap& activeDefinitionLabels,
+    const Standard_Size maximumAggregateSubshapes) {
     activeDefinitionLabels.Clear();
-    if (document.IsNull()) {
+    if (document.IsNull() || maximumAggregateSubshapes == 0) {
         return false;
     }
 
@@ -513,7 +600,9 @@ bool ValidateShapeTree(const Handle(TDocStd_Document)& document,
         const TopoDS_Shape definitionShape =
             XCAFDoc_ShapeTool::GetShape(frame.label);
         if (!ValidateBoundedTopologicalShape(
-                definitionShape, aggregateSubshapes)) {
+                definitionShape,
+                aggregateSubshapes,
+                maximumAggregateSubshapes)) {
             return false;
         }
 
@@ -1377,113 +1466,65 @@ bool Core3DViewer::traverseLabel (const Handle(TDocStd_Document)& theDoc,
     if (theDoc.IsNull() || theLabel.IsNull()) {
         return true;
     }
-    Handle(XCAFDoc_ShapeTool) theShapeTool =
-        XCAFDoc_DocumentTool::ShapeTool(theDoc->Main());
-    Handle(XCAFDoc_ColorTool) theColorTool =
-        XCAFDoc_DocumentTool::ColorTool(theDoc->Main());
-    if (theShapeTool.IsNull() || theColorTool.IsNull()) {
-        return true;
-    }
-
-    struct DisplayFrame {
-        TDF_Label label;
-        Standard_Size depth = 0;
-        bool leaving = false;
-    };
-    std::vector<DisplayFrame> stack = {{theLabel, 0, false}};
-    TDF_LabelMap activeAssemblies;
-    Standard_Size traversalNodes = 0;
+    (void)theNamePrefix;
+    (void)theLoc;
+    (void)theMapOfShapes;
     XCAFPrs_Style aDefStyle;
     aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
     aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
-    while (!stack.empty()) {
-        const DisplayFrame frame = stack.back();
-        stack.pop_back();
-        if (frame.leaving) {
-            activeAssemblies.Remove(frame.label);
-            continue;
-        }
-        if (frame.label.IsNull()
-            || frame.depth > kMaximumAssemblyTraversalDepth
-            || ++traversalNodes > kMaximumAssemblyTraversalNodes) {
-            return true;
-        }
-
-        TDF_Label definition = frame.label;
-        if (XCAFDoc_ShapeTool::IsReference(frame.label)
-            || XCAFDoc_ShapeTool::IsComponent(frame.label)) {
-            if (!XCAFDoc_ShapeTool::GetReferredShape(
-                    frame.label, definition)
-                || definition.IsNull()
-                || definition.Data() != frame.label.Data()) {
-                return true;
-            }
-        }
-        if (!XCAFDoc_ShapeTool::IsShape(definition)) {
-            return true;
-        }
-        if (!XCAFDoc_ShapeTool::IsAssembly(definition)) {
-            displayWithChildren(
-                *theShapeTool,
-                *theColorTool,
-                frame.label,
-                theLoc,
-                aDefStyle,
-                theNamePrefix,
-                theMapOfShapes);
-            continue;
-        }
-        if (activeAssemblies.Contains(definition)) {
-            return true;
-        }
-        activeAssemblies.Add(definition);
-        stack.push_back({definition, frame.depth, true});
-
-        std::vector<TDF_Label> components;
-        for (TDF_ChildIterator child(definition, Standard_False);
-             child.More(); child.Next()) {
-            const TDF_Label& component = child.Value();
-            if (XCAFDoc_ShapeTool::IsComponent(component)) {
-                const Standard_Size componentCount =
-                    static_cast<Standard_Size>(components.size()) + 1;
-                if (traversalNodes > kMaximumAssemblyTraversalNodes
-                    || componentCount
-                        > kMaximumAssemblyTraversalNodes - traversalNodes
-                    || stack.size()
-                        > static_cast<std::size_t>(
-                            kMaximumAssemblyTraversalNodes)
-                    || componentCount
-                        > kMaximumAssemblyTraversalNodes
-                            - static_cast<Standard_Size>(stack.size())) {
-                    return true;
-                }
-                components.push_back(component);
-            }
-        }
-        for (auto component = components.rbegin();
-             component != components.rend(); ++component) {
-            stack.push_back({*component, frame.depth + 1, false});
-        }
-    }
-
-    return false;
+    return !displayWithChildren(theDoc, theLabel, aDefStyle);
 }
 
 bool Core3DViewer::traverseDocument (const Handle(TDocStd_Document)& theDoc)
 {
     TDF_LabelSequence aLabels;
     XCAFDoc_DocumentTool::ShapeTool (theDoc->Main())->GetFreeShapes (aLabels);
-    MapOfPrsForShapes aMapOfShapes;
-    for (TDF_LabelSequence::Iterator aLabIter (aLabels); aLabIter.More(); aLabIter.Next())
-    {
-        const TDF_Label& aLabel = aLabIter.Value();
-        if (traverseLabel (theDoc, aLabel, "", TopLoc_Location(), aMapOfShapes) == true)
-        {
-            return true;
-        }
+    if (aLabels.IsEmpty()) {
+        return false;
     }
-    return false;
+    XCAFPrs_Style aDefStyle;
+    aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
+    aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
+    return !displayWithChildren(theDoc, aLabels, aDefStyle);
 }
+
+#ifdef DEBUG
+void Core3DViewer::DebugResetProjectTopologyValidationCounters() const
+{
+    gBoundedProjectTopologyValidationCount.store(
+        0, std::memory_order_relaxed);
+    gGeometricBRepValidationCount.store(0, std::memory_order_relaxed);
+}
+
+Standard_Size Core3DViewer::DebugBoundedProjectTopologyValidationCount() const
+{
+    return gBoundedProjectTopologyValidationCount.load(
+        std::memory_order_relaxed);
+}
+
+Standard_Size Core3DViewer::DebugGeometricBRepValidationCount() const
+{
+    return gGeometricBRepValidationCount.load(std::memory_order_relaxed);
+}
+
+void Core3DViewer::DebugSetSceneSnapshotTriangulationFailure(
+    const scene::OcctSceneSnapshotBuilder::DebugTriangulationFailure
+        theFailure) noexcept
+{
+    _sceneSnapshotBuilder.DebugSetTriangulationFailure(theFailure);
+}
+
+void Core3DViewer::DebugResetSceneSnapshotMesherInvocationCount() noexcept
+{
+    _sceneSnapshotBuilder.DebugResetMesherInvocationCount();
+}
+
+std::uint64_t
+Core3DViewer::DebugSceneSnapshotMesherInvocationCount() const noexcept
+{
+    return _sceneSnapshotBuilder.DebugMesherInvocationCount();
+}
+#endif
 
 AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     assert(!myContext.IsNull());
@@ -1585,7 +1626,10 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 		OCC_CATCH_SIGNALS
 		TDF_LabelMap candidateDefinitions;
 		if (!HasValidOptionalLengthUnit(candidate)
-			|| !ValidateShapeTree(candidate, candidateDefinitions)
+			|| !ValidateShapeTree(
+                candidate,
+                candidateDefinitions,
+                myMaximumProjectTopologyValidationNodes)
 			|| !ValidateVisualMaterials(candidate, candidateDefinitions)) {
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InvalidData;
@@ -1659,7 +1703,9 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
         TDF_LabelMap activeDefinitionLabels;
         const bool isValid = HasValidOptionalLengthUnit(candidate)
             && ValidateShapeTree(
-                candidate, activeDefinitionLabels)
+                candidate,
+                activeDefinitionLabels,
+                myMaximumProjectTopologyValidationNodes)
             && ValidateVisualMaterials(
                 candidate, activeDefinitionLabels);
         CloseDocumentNoThrow(validationApplication, candidate);

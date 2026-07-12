@@ -20,6 +20,7 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/PrimitiveGizmoType.h>
 #import <Core3D/ExportType.h>
 #import <Core3D/Core3DNativeExportOperation.h>
+#import <Core3D/Core3DNativeImportOperation.h>
 #import <Core3D/UIStateChanging.h>
 #import <Core3D/Core3DViewController.h>
 #import <Core3D/Core3DViewController+PrimitiveManager.h>
