@@ -28,9 +28,15 @@ exponent-underflow correction referenced by CVE-2024-38517 and later parser
 hardening; the build script verifies that correction before compiling. The
 unmerged patch proposed in pull request 2357 for CVE-2024-39684 is deliberately
 not treated as an iOS fix: its `unsigned` to `uint32_t` change is a semantic
-no-op on this platform. Shapeyard's glTF/GLB import must remain disabled until
-its separate file-size and numeric-token preflight limits are implemented and
-covered by hostile-input regression tests.
+no-op on this platform. Shapeyard enables its deliberately limited GLB import
+subset only after a descriptor-pinned, bounded preflight validates the complete
+container, JSON structure, binary geometry, embedded images, scene graph, and
+transform ranges. Hostile-input regression tests cover malformed and
+unsupported content; extensions, external resources, sparse accessors, skins,
+animations, cameras, morph targets, normal/occlusion/metallic-roughness maps,
+legacy material techniques/values, and non-similarity transforms fail closed.
+This engineering gate does not change the separate distribution-license block
+above.
 
 ## Rebuilding `TKDEGLTF` for iOS
 

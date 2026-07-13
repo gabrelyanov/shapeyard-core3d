@@ -196,6 +196,10 @@ public:
   //! history, creates no retained undo entry, and is never called for legacy
   //! project load.
   Standard_EXPORT Standard_Boolean MarkImportedBRepDefinitions();
+  //! Stamp every unmarked triangle-only definition produced by a fresh,
+  //! flattened mesh import. The complete isolated document is classified and
+  //! admitted against aggregate mesh limits before an atomic marker command.
+  Standard_EXPORT Standard_Boolean MarkImportedTriangleMeshDefinitions();
   //! Return Shapeyard's persisted object-local translation/rotation/uniform
   //! scale. This is independent of an XCAF assembly occurrence location.
   Standard_EXPORT gp_Trsf ObjectTransformForLabel(const TDF_Label& label) const;

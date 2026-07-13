@@ -6,6 +6,7 @@ FOUNDATION_EXPORT NSErrorDomain const Core3DNativeImportErrorDomain;
 
 typedef NS_ENUM(NSInteger, Core3DNativeImportFormat) {
     Core3DNativeImportFormatSTEP NS_SWIFT_NAME(step) = 1,
+    Core3DNativeImportFormatGLB NS_SWIFT_NAME(glb) = 2,
 };
 
 typedef NS_ERROR_ENUM(

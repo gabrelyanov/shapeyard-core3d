@@ -2798,26 +2798,43 @@ Standard_Boolean OcctDocument::CopyGeometryRepresentation(
     }
 }
 
-Standard_Boolean OcctDocument::MarkImportedBRepDefinitions()
+namespace {
+
+Standard_Boolean MarkImportedDefinitions(
+    const Handle(TDocStd_Document)& theDocument,
+    const OcctGeometryRepresentation theExpectedRepresentation)
 {
-    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-        || myOcafDoc->GetAvailableUndos() != 0
-        || myOcafDoc->GetAvailableRedos() != 0
-        || !ValidateGeometryRepresentations()
+    if (theDocument.IsNull() || theDocument->HasOpenCommand()
+        || theDocument->GetAvailableUndos() != 0
+        || theDocument->GetAvailableRedos() != 0
+        || (theExpectedRepresentation != OcctGeometryRepresentation::BRep
+            && theExpectedRepresentation
+                != OcctGeometryRepresentation::TriangleMesh)
         || !XCAFDoc_DocumentTool::CheckShapeTool(
-            myOcafDoc->Main())) {
+            theDocument->Main())) {
         return Standard_False;
     }
 
+    const DefinitionGeometryClass anExpectedClass =
+        theExpectedRepresentation == OcctGeometryRepresentation::BRep
+        ? DefinitionGeometryClass::BRep
+        : DefinitionGeometryClass::TriangleMesh;
     const Handle(XCAFDoc_ShapeTool) aShapeTool =
-        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        XCAFDoc_DocumentTool::ShapeTool(theDocument->Main());
     if (aShapeTool.IsNull()) {
         return Standard_False;
     }
     TDF_LabelSequence aShapeLabels;
     aShapeTool->GetShapes(aShapeLabels);
+    if (aShapeLabels.IsEmpty()
+        || static_cast<Standard_Size>(aShapeLabels.Length())
+            > kMaximumGeometryDocumentLabels) {
+        return Standard_False;
+    }
+
     std::vector<TDF_Label> aLegacyDefinitions;
     TDF_LabelMap aVisitedDefinitions;
+    GeometryValidationBudget aBudget;
     try {
         OCC_CATCH_SIGNALS
         aLegacyDefinitions.reserve(
@@ -2841,15 +2858,22 @@ Standard_Boolean OcctDocument::MarkImportedBRepDefinitions()
                 }
             }
             if (!IsGeometryDefinitionLabel(
-                    myOcafDoc, aShapeTool, aLabel)) {
+                    theDocument, aShapeTool, aLabel)) {
                 return Standard_False;
             }
             if (aVisitedDefinitions.Contains(aLabel)) {
                 continue;
             }
-            if (!aVisitedDefinitions.Add(aLabel)) {
+            if (!aVisitedDefinitions.Add(aLabel)
+                || static_cast<Standard_Size>(
+                    aVisitedDefinitions.Extent())
+                    > kMaximumGeometryDefinitionLabels
+                || ClassifyDefinitionGeometry(
+                    XCAFDoc_ShapeTool::GetShape(aLabel), &aBudget)
+                    != anExpectedClass) {
                 return Standard_False;
             }
+
             bool hasMarker = false;
             OcctGeometryRepresentation aRepresentation =
                 OcctGeometryRepresentation::Invalid;
@@ -2862,52 +2886,72 @@ Standard_Boolean OcctDocument::MarkImportedBRepDefinitions()
                     == OcctGeometryRepresentation::LegacyUnknown) {
                 aLegacyDefinitions.push_back(aLabel);
             } else if (aRepresentation
-                    != OcctGeometryRepresentation::BRep) {
+                    != theExpectedRepresentation) {
                 return Standard_False;
             }
+        }
+        if (aVisitedDefinitions.IsEmpty()) {
+            return Standard_False;
         }
         if (aLegacyDefinitions.empty()) {
             return Standard_True;
         }
 
         const Standard_Integer aPreviousUndoLimit =
-            myOcafDoc->GetUndoLimit();
-        myOcafDoc->SetUndoLimit(1);
-        myOcafDoc->NewCommand();
-        if (!myOcafDoc->HasOpenCommand()) {
-            myOcafDoc->SetUndoLimit(aPreviousUndoLimit);
+            theDocument->GetUndoLimit();
+        theDocument->SetUndoLimit(1);
+        theDocument->NewCommand();
+        if (!theDocument->HasOpenCommand()) {
+            theDocument->SetUndoLimit(aPreviousUndoLimit);
             return Standard_False;
         }
         try {
             for (const TDF_Label& aLabel : aLegacyDefinitions) {
                 if (!WriteGeometryRepresentationMarker(
-                        aLabel, OcctGeometryRepresentation::BRep)) {
+                        aLabel, theExpectedRepresentation)) {
                     throw Standard_Failure(
-                        "Unable to mark imported BRep definition");
+                        "Unable to mark imported geometry definition");
                 }
             }
-            if (!myOcafDoc->CommitCommand()) {
+            if (!theDocument->CommitCommand()) {
                 throw Standard_Failure(
-                    "Unable to commit imported BRep markers");
+                    "Unable to commit imported geometry markers");
             }
-            myOcafDoc->ClearUndos();
-            myOcafDoc->SetUndoLimit(aPreviousUndoLimit);
+            theDocument->ClearUndos();
+            theDocument->SetUndoLimit(aPreviousUndoLimit);
         } catch (...) {
-            AbortCommandNoThrow(myOcafDoc);
+            AbortCommandNoThrow(theDocument);
             try {
-                myOcafDoc->ClearUndos();
+                theDocument->ClearUndos();
             } catch (...) {
             }
             try {
-                myOcafDoc->SetUndoLimit(aPreviousUndoLimit);
+                theDocument->SetUndoLimit(aPreviousUndoLimit);
             } catch (...) {
             }
             return Standard_False;
         }
-        return ValidateGeometryRepresentations();
+        return Standard_True;
     } catch (...) {
         return Standard_False;
     }
+}
+
+} // namespace
+
+Standard_Boolean OcctDocument::MarkImportedBRepDefinitions()
+{
+    return MarkImportedDefinitions(
+               myOcafDoc, OcctGeometryRepresentation::BRep)
+        && ValidateGeometryRepresentations();
+}
+
+Standard_Boolean OcctDocument::MarkImportedTriangleMeshDefinitions()
+{
+    return MarkImportedDefinitions(
+               myOcafDoc,
+               OcctGeometryRepresentation::TriangleMesh)
+        && ValidateGeometryRepresentations();
 }
 
 Standard_Boolean OcctDocument::MigrateLegacyIdentifiers()

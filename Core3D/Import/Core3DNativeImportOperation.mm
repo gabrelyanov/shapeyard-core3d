@@ -1,5 +1,7 @@
 #import "Core3DNativeImportOperation+Private.h"
 
+#include "Core3DGLBPreflight.hpp"
+#include "Core3DGLBReader.hpp"
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -256,18 +258,31 @@ void ThrowIfCancelled(
     if (state->cancelled.load(std::memory_order_acquire)) {
         throw NativeImportFailure(
             Core3DNativeImportErrorCancelled,
-            "The STEP import was cancelled.");
+            "The model import was cancelled.");
     }
 }
 
-bool IsSTEPPath(const std::filesystem::path& path) {
+std::string LowercaseExtension(const std::filesystem::path& path) {
     std::string extension = path.extension().string();
     for (char& character : extension) {
         if (character >= 'A' && character <= 'Z') {
             character = static_cast<char>(character - 'A' + 'a');
         }
     }
-    return extension == ".step" || extension == ".stp";
+    return extension;
+}
+
+bool IsSupportedImportPath(
+    const std::filesystem::path& path,
+    const Core3DNativeImportFormat format) {
+    const std::string extension = LowercaseExtension(path);
+    switch (format) {
+        case Core3DNativeImportFormatSTEP:
+            return extension == ".step" || extension == ".stp";
+        case Core3DNativeImportFormatGLB:
+            return extension == ".glb";
+    }
+    return false;
 }
 
 class FileDescriptor {
@@ -432,6 +447,75 @@ struct PinnedStagedFile {
     PinnedStagedFile(const PinnedStagedFile&) = delete;
     PinnedStagedFile& operator=(const PinnedStagedFile&) = delete;
 };
+
+void ValidatePinnedStagedFile(
+    const std::shared_ptr<NativeImportState>& state,
+    const PinnedStagedFile& stagedFile,
+    const char *phase) {
+    ThrowIfCancelled(state);
+    struct stat initialInfo = {};
+    if (!stagedFile.descriptor.IsValid()
+        || ::fstat(stagedFile.descriptor.Get(), &initialInfo) != 0
+        || !S_ISREG(initialInfo.st_mode)
+        || initialInfo.st_size <= 0
+        || static_cast<std::uint64_t>(initialInfo.st_size)
+            > kMaximumSourceBytes
+        || !SameFileIdentity(
+            IdentityFromStat(initialInfo), stagedFile.identity)) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorInvalidSource,
+            std::string("The private model staging file changed ")
+                + phase + ".");
+    }
+
+    SHA256Accumulator digest;
+    if (!digest.IsValid()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorInternalFailure,
+            "The private model staging digest could not be initialized.");
+    }
+    std::array<unsigned char, 64 * 1024> bytes = {};
+    std::uint64_t offset = 0;
+    const std::uint64_t expectedSize =
+        static_cast<std::uint64_t>(initialInfo.st_size);
+    while (offset < expectedSize) {
+        ThrowIfCancelled(state);
+        const std::size_t request = static_cast<std::size_t>(
+            std::min<std::uint64_t>(bytes.size(), expectedSize - offset));
+        ssize_t readCount = 0;
+        do {
+            readCount = ::pread(
+                stagedFile.descriptor.Get(),
+                bytes.data(),
+                request,
+                static_cast<off_t>(offset));
+        } while (readCount < 0 && errno == EINTR);
+        if (readCount <= 0
+            || static_cast<std::uint64_t>(readCount)
+                > expectedSize - offset
+            || !digest.Update(
+                bytes.data(), static_cast<std::size_t>(readCount))) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorInvalidSource,
+                std::string("The private model staging file changed ")
+                    + phase + ".");
+        }
+        offset += static_cast<std::uint64_t>(readCount);
+    }
+
+    struct stat finalInfo = {};
+    SHA256Digest actualDigest = {};
+    if (::fstat(stagedFile.descriptor.Get(), &finalInfo) != 0
+        || !SameFileIdentity(
+            IdentityFromStat(finalInfo), stagedFile.identity)
+        || !digest.Finish(actualDigest)
+        || actualDigest != stagedFile.digest) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorInvalidSource,
+            std::string("The private model staging file changed ")
+                + phase + ".");
+    }
+}
 
 class PrivateDocumentGuard {
 public:
@@ -1056,10 +1140,11 @@ private:
 PinnedStagedFile CopySourceIntoPrivateStaging(
     const std::shared_ptr<NativeImportState>& state) {
     ThrowIfCancelled(state);
-    if (!IsSTEPPath(std::filesystem::path(state->sourcePath))) {
+    if (!IsSupportedImportPath(
+            std::filesystem::path(state->sourcePath), state->format)) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInvalidSource,
-            "Choose a STEP or STP file.");
+            "Choose a file matching the selected import format.");
     }
 
     struct stat pathInfo = {};
@@ -1068,13 +1153,13 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
         || pathInfo.st_size <= 0) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInvalidSource,
-            "The selected STEP file is empty or unsafe.");
+            "The selected model file is empty or unsafe.");
     }
     if (static_cast<std::uint64_t>(pathInfo.st_size)
         > kMaximumSourceBytes) {
         throw NativeImportFailure(
             Core3DNativeImportErrorResourceLimit,
-            "The selected STEP file exceeds the 32 MiB mobile import limit.");
+            "The selected model file exceeds the 32 MiB mobile import limit.");
     }
 
     FileDescriptor source(::open(
@@ -1083,7 +1168,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
     if (!source.IsValid()) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInvalidSource,
-            "The selected STEP file could not be opened safely.");
+            "The selected model file could not be opened safely.");
     }
     struct stat openedInfo = {};
     if (::fstat(source.Get(), &openedInfo) != 0
@@ -1092,7 +1177,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
             IdentityFromStat(openedInfo), IdentityFromStat(pathInfo))) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInvalidSource,
-            "The selected STEP file changed while it was being opened.");
+            "The selected model file changed while it was being opened.");
     }
 
     FileDescriptor pinnedReader;
@@ -1106,13 +1191,13 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
         if (!destination.IsValid()) {
             throw NativeImportFailure(
                 Core3DNativeImportErrorInternalFailure,
-                "Private STEP staging could not be created.");
+                "Private model staging could not be created.");
         }
         SHA256Accumulator copyDigest;
         if (!copyDigest.IsValid()) {
             throw NativeImportFailure(
                 Core3DNativeImportErrorInternalFailure,
-                "Private STEP staging could not initialize validation.");
+                "Private model staging could not initialize validation.");
         }
 
         std::array<unsigned char, 64 * 1024> buffer = {};
@@ -1128,7 +1213,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
             if (readCount < 0) {
                 throw NativeImportFailure(
                     Core3DNativeImportErrorInvalidSource,
-                    "The selected STEP file could not be read.");
+                    "The selected model file could not be read.");
             }
             if (readCount == 0) {
                 break;
@@ -1140,7 +1225,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
                     buffer.data(), static_cast<std::size_t>(readCount))) {
                 throw NativeImportFailure(
                     Core3DNativeImportErrorInvalidSource,
-                    "The selected STEP file changed during staging.");
+                    "The selected model file changed during staging.");
             }
             ssize_t writtenBytes = 0;
             while (writtenBytes < readCount) {
@@ -1155,7 +1240,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
                 if (writeCount <= 0) {
                     throw NativeImportFailure(
                         Core3DNativeImportErrorInternalFailure,
-                        "The STEP staging copy could not be written.");
+                        "The model staging copy could not be written.");
                 }
                 writtenBytes += writeCount;
             }
@@ -1180,7 +1265,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
             || !copyDigest.Finish(stagedDigest)) {
             throw NativeImportFailure(
                 Core3DNativeImportErrorInvalidSource,
-                "The selected STEP file changed during staging.");
+                "The selected model file changed during staging.");
         }
 
         struct stat stagedWriterInfo = {};
@@ -1190,7 +1275,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
             || stagedWriterInfo.st_nlink != 1) {
             throw NativeImportFailure(
                 Core3DNativeImportErrorInternalFailure,
-                "The private STEP staging file is unsafe.");
+                "The private model staging file is unsafe.");
         }
         stagedIdentityBeforeUnlink = IdentityFromStat(stagedWriterInfo);
 
@@ -1206,7 +1291,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
                 stagedIdentityBeforeUnlink)) {
             throw NativeImportFailure(
                 Core3DNativeImportErrorInternalFailure,
-                "The private STEP staging file could not be pinned safely.");
+                "The private model staging file could not be pinned safely.");
         }
         pinnedReader = std::move(reader);
     }
@@ -1217,7 +1302,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
     if (::unlink(state->stagedSourcePath.c_str()) != 0) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInternalFailure,
-            "The private STEP staging file could not be isolated.");
+            "The private model staging file could not be isolated.");
     }
     struct stat pinnedInfo = {};
     if (::fstat(pinnedReader.Get(), &pinnedInfo) != 0
@@ -1227,7 +1312,7 @@ PinnedStagedFile CopySourceIntoPrivateStaging(
             IdentityFromStat(pinnedInfo), stagedIdentityBeforeUnlink)) {
         throw NativeImportFailure(
             Core3DNativeImportErrorInvalidSource,
-            "The private STEP staging file changed while it was isolated.");
+            "The private model staging file changed while it was isolated.");
     }
     RemoveTreeNoThrow(state->stagingDirectoryPath);
     return PinnedStagedFile(
@@ -1349,6 +1434,64 @@ void PreflightStagedSTEP(
                 Core3DNativeImportErrorReadFailed,
                 "The selected file is not a complete STEP Part 21 model.");
     }
+}
+
+core3d::gltf::PreflightResult PreflightStagedGLB(
+    const std::shared_ptr<NativeImportState>& state,
+    const PinnedStagedFile& stagedFile) {
+    ThrowIfCancelled(state);
+    if (!stagedFile.descriptor.IsValid()
+        || stagedFile.identity.size <= 0
+        || static_cast<std::uint64_t>(stagedFile.identity.size)
+            > kMaximumSourceBytes) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorInvalidSource,
+            "The private GLB staging descriptor is unavailable.");
+    }
+
+    core3d::gltf::PreflightResult result =
+        core3d::gltf::PreflightPinnedGLB(
+            stagedFile.descriptor.Get(),
+            static_cast<std::uint64_t>(stagedFile.identity.size),
+            &state->cancelled);
+    ThrowIfCancelled(state);
+    ValidatePinnedStagedFile(
+        state, stagedFile, "during GLB preflight validation");
+    switch (result.status) {
+        case core3d::gltf::PreflightStatus::Valid:
+            return result;
+        case core3d::gltf::PreflightStatus::Cancelled:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorCancelled,
+                "The model import was cancelled.");
+        case core3d::gltf::PreflightStatus::Unsupported:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorUnsupportedEncoding,
+                result.message.empty()
+                    ? "This GLB uses features that are not supported by the mobile importer."
+                    : result.message);
+        case core3d::gltf::PreflightStatus::ResourceLimit:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorResourceLimit,
+                result.message.empty()
+                    ? "The GLB model exceeds bounded mobile parser limits."
+                    : result.message);
+        case core3d::gltf::PreflightStatus::IOFailure:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorInvalidSource,
+                result.message.empty()
+                    ? "The private GLB staging file could not be checked safely."
+                    : result.message);
+        case core3d::gltf::PreflightStatus::Invalid:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                result.message.empty()
+                    ? "The selected file is not a structurally valid GLB 2.0 model."
+                    : result.message);
+    }
+    throw NativeImportFailure(
+        Core3DNativeImportErrorInternalFailure,
+        "The GLB preflight returned an unknown result.");
 }
 
 enum class ImportedDocumentValidation {
@@ -1977,6 +2120,133 @@ void ImportSTEP(
     scope.Next(1).Close();
 }
 
+void ImportGLB(
+    const std::shared_ptr<NativeImportState>& state,
+    const Handle(OcctDocument)& document,
+    const PinnedStagedFile& stagedFile,
+    const core3d::gltf::PreflightResult& preflight,
+    const Message_ProgressRange& progress) {
+    Message_ProgressScope scope(progress, "GLB import", 5);
+    document->InitDoc();
+    if (document->Document().IsNull()
+        || document->Document()->HasOpenCommand()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorInternalFailure,
+            "The private import document could not be created.");
+    }
+    scope.Next(1).Close();
+    ThrowIfCancelled(state);
+
+    const core3d::gltf::GLBReadResult readResult =
+        core3d::gltf::ImportPinnedGLB(
+            stagedFile.descriptor.Get(),
+            static_cast<std::uint64_t>(stagedFile.identity.size),
+            preflight,
+            document->ChangeDocument(),
+            &state->cancelled,
+            scope.Next(2));
+    ThrowIfCancelled(state);
+    ValidatePinnedStagedFile(
+        state, stagedFile, "during GLB transfer");
+    switch (readResult.status) {
+        case core3d::gltf::GLBReadStatus::Imported:
+            break;
+        case core3d::gltf::GLBReadStatus::Cancelled:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorCancelled,
+                "The model import was cancelled.");
+        case core3d::gltf::GLBReadStatus::Unsupported:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorUnsupportedEncoding,
+                readResult.message.empty()
+                    ? "This GLB uses features that are not supported by the mobile importer."
+                    : readResult.message);
+        case core3d::gltf::GLBReadStatus::ResourceLimit:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorResourceLimit,
+                readResult.message.empty()
+                    ? "The GLB model exceeds mobile project limits."
+                    : readResult.message);
+        case core3d::gltf::GLBReadStatus::IOFailure:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorInvalidSource,
+                readResult.message.empty()
+                    ? "The private GLB staging file could not be read safely."
+                    : readResult.message);
+        case core3d::gltf::GLBReadStatus::Invalid:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorTransferFailed,
+                readResult.message.empty()
+                    ? "The GLB geometry could not be converted into an editable project."
+                    : readResult.message);
+        case core3d::gltf::GLBReadStatus::InternalFailure:
+            throw NativeImportFailure(
+                Core3DNativeImportErrorInternalFailure,
+                readResult.message.empty()
+                    ? "The GLB importer failed internally."
+                    : readResult.message);
+    }
+    if (preflight.objectOccurrenceEstimate == 0
+        || readResult.flattenedObjectCount == 0
+        || readResult.flattenedObjectCount
+            != preflight.objectOccurrenceEstimate
+        || readResult.vertexCount != preflight.vertexEstimate
+        || readResult.indexCount != preflight.indexEstimate) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorTransferFailed,
+            "The GLB transfer did not reproduce the admitted scene exactly.");
+    }
+
+    if (!document->MarkImportedTriangleMeshDefinitions()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorTransferFailed,
+            "The imported GLB mesh geometry is not valid for editing.");
+    }
+    std::size_t leafCount = 0;
+    const ImportedDocumentValidation initialValidation =
+        ValidateImportedDocument(document, state, false, leafCount);
+    if (initialValidation == ImportedDocumentValidation::NoGeometry) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorNoGeometry,
+            "The GLB model has no supported geometry.");
+    }
+    if (initialValidation == ImportedDocumentValidation::ResourceLimit) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorResourceLimit,
+            "The GLB model exceeds mobile project limits.");
+    }
+    if (initialValidation != ImportedDocumentValidation::Valid
+        || static_cast<std::uint64_t>(leafCount)
+            != readResult.flattenedObjectCount) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorTransferFailed,
+            "The converted GLB project is structurally invalid.");
+    }
+    scope.Next(1).Close();
+
+    if (!document->MigrateLegacyIdentifiers()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorMigrationFailed,
+            "The imported model could not be prepared for editing.");
+    }
+    std::size_t migratedLeafCount = 0;
+    const ImportedDocumentValidation migratedValidation =
+        ValidateImportedDocument(document, state, true, migratedLeafCount);
+    if (migratedValidation == ImportedDocumentValidation::ResourceLimit) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorResourceLimit,
+            "The GLB model exceeds mobile project limits.");
+    }
+    if (migratedValidation != ImportedDocumentValidation::Valid
+        || migratedLeafCount != leafCount) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorMigrationFailed,
+            "The imported GLB failed editable-project validation.");
+    }
+    state->shapeCount = leafCount;
+    scope.Next(1).Close();
+}
+
 void SerializeAndValidate(
     const std::shared_ptr<NativeImportState>& state,
     const Handle(OcctDocument)& document,
@@ -2058,6 +2328,27 @@ NativeImportResult RunNativeImport(
                 SerializeAndValidate(state, document, whole.Next(4));
                 break;
             }
+            case Core3DNativeImportFormatGLB: {
+                PinnedStagedFile stagedFile =
+                    CopySourceIntoPrivateStaging(state);
+                const core3d::gltf::PreflightResult preflight =
+                    PreflightStagedGLB(state, stagedFile);
+                ThrowIfCancelled(state);
+
+                Handle(Message_ProgressIndicator) progress =
+                    new NativeImportProgress(&state->cancelled);
+                Message_ProgressScope whole(
+                    progress->Start(), "Native GLB import", 8);
+                document = new OcctDocument();
+                ImportGLB(
+                    state,
+                    document,
+                    stagedFile,
+                    preflight,
+                    whole.Next(4));
+                SerializeAndValidate(state, document, whole.Next(4));
+                break;
+            }
             default:
                 throw NativeImportFailure(
                     Core3DNativeImportErrorInvalidSource,
@@ -2076,7 +2367,7 @@ NativeImportResult RunNativeImport(
         result.message = failure.GetMessageString();
     } catch (const std::bad_alloc&) {
         result.errorCode = Core3DNativeImportErrorResourceLimit;
-        result.message = "The STEP import exceeded available memory.";
+        result.message = "The model import exceeded available memory.";
     } catch (const std::exception& exception) {
         result.errorCode = state->cancelled.load(std::memory_order_acquire)
             ? Core3DNativeImportErrorCancelled
@@ -2086,7 +2377,7 @@ NativeImportResult RunNativeImport(
         result.errorCode = state->cancelled.load(std::memory_order_acquire)
             ? Core3DNativeImportErrorCancelled
             : Core3DNativeImportErrorInternalFailure;
-        result.message = "The STEP import failed unexpectedly.";
+        result.message = "The model import failed unexpectedly.";
     }
 
     if (!document.IsNull()) {
@@ -2102,9 +2393,9 @@ NativeImportResult RunNativeImport(
 NSString *ErrorDescription(const NativeImportResult& result) {
     if (!result.message.empty()) {
         return [NSString stringWithUTF8String:result.message.c_str()]
-            ?: @"The STEP import failed.";
+            ?: @"The model import failed.";
     }
-    return @"The STEP import failed.";
+    return @"The model import failed.";
 }
 
 } // namespace
@@ -2171,7 +2462,8 @@ NSString *ErrorDescription(const NativeImportResult& result) {
                      temporaryRoot:(NSURL *)temporaryRoot {
     self = [super init];
     if (!self
-        || format != Core3DNativeImportFormatSTEP
+        || (format != Core3DNativeImportFormatSTEP
+            && format != Core3DNativeImportFormatGLB)
         || !sourceURL.isFileURL
         || !temporaryRoot.isFileURL) {
         return nil;
@@ -2206,8 +2498,11 @@ NSString *ErrorDescription(const NativeImportResult& result) {
     _state->cleanupPath = cleanupPath;
     _state->stagingDirectoryPath =
         stagingDirectory.path.fileSystemRepresentation;
+    NSString *stagedFileName = format == Core3DNativeImportFormatGLB
+        ? @"model.glb"
+        : @"model.step";
     _state->stagedSourcePath =
-        [stagingDirectory URLByAppendingPathComponent:@"model.step"]
+        [stagingDirectory URLByAppendingPathComponent:stagedFileName]
             .path.fileSystemRepresentation;
     _state->packageRootPath = packageRoot.path.fileSystemRepresentation;
     _state->primaryPath =
@@ -2261,7 +2556,7 @@ NSString *ErrorDescription(const NativeImportResult& result) {
                 code:Core3DNativeImportErrorInternalFailure
                 userInfo:@{
                     NSLocalizedDescriptionKey:
-                        @"The STEP import operation is unavailable."
+                        @"The model import operation is unavailable."
                 }]);
         });
         return;
@@ -2275,7 +2570,7 @@ NSString *ErrorDescription(const NativeImportResult& result) {
                     code:Core3DNativeImportErrorInternalFailure
                     userInfo:@{
                         NSLocalizedDescriptionKey:
-                            @"The STEP import operation was already started."
+                            @"The model import operation was already started."
                     }]);
             });
             return;
@@ -2300,7 +2595,7 @@ NSString *ErrorDescription(const NativeImportResult& result) {
                 && state->cancelled.load(std::memory_order_acquire)) {
                 result.succeeded = false;
                 result.errorCode = Core3DNativeImportErrorCancelled;
-                result.message = "The STEP import was cancelled.";
+                result.message = "The model import was cancelled.";
                 shouldDiscardArtifact = true;
             }
             state->finished = true;

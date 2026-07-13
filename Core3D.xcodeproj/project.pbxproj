@@ -140,6 +140,8 @@
 		C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */; };
 		C3D1A0012F20000100000001 /* Core3DNativeImportOperation.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D1A0112F20000100000011 /* Core3DNativeImportOperation.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D1A0022F20000100000002 /* Core3DNativeImportOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D1A0132F20000100000013 /* Core3DNativeImportOperation.mm */; };
+		C3D1B0012F21000100000001 /* Core3DGLBPreflight.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D1B0122F21000100000012 /* Core3DGLBPreflight.mm */; };
+		C3D1B0022F21000100000002 /* Core3DGLBReader.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D1B0142F21000100000014 /* Core3DGLBReader.mm */; };
 		323E89E22BD13F3F0035FF45 /* GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */; };
 		323E89E52BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm in Sources */ = {isa = PBXBuildFile; fileRef = 323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */; };
 		323E89E62BD145ED0035FF45 /* Core3DViewController+GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */; };
@@ -320,6 +322,10 @@
 		C3D1A0112F20000100000011 /* Core3DNativeImportOperation.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DNativeImportOperation.h; sourceTree = "<group>"; };
 		C3D1A0122F20000100000012 /* Core3DNativeImportOperation+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DNativeImportOperation+Private.h"; sourceTree = "<group>"; };
 		C3D1A0132F20000100000013 /* Core3DNativeImportOperation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeImportOperation.mm; sourceTree = "<group>"; };
+		C3D1B0112F21000100000011 /* Core3DGLBPreflight.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DGLBPreflight.hpp; sourceTree = "<group>"; };
+		C3D1B0122F21000100000012 /* Core3DGLBPreflight.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DGLBPreflight.mm; sourceTree = "<group>"; };
+		C3D1B0132F21000100000013 /* Core3DGLBReader.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DGLBReader.hpp; sourceTree = "<group>"; };
+		C3D1B0142F21000100000014 /* Core3DGLBReader.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DGLBReader.mm; sourceTree = "<group>"; };
 		323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GLViewControllerProtocol.h; sourceTree = "<group>"; };
 		323E89E32BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+GLViewControllerProtocol.mm"; sourceTree = "<group>"; };
 		323E89E42BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+GLViewControllerProtocol.h"; sourceTree = "<group>"; };
@@ -697,6 +703,10 @@
 				C3D1A0112F20000100000011 /* Core3DNativeImportOperation.h */,
 				C3D1A0122F20000100000012 /* Core3DNativeImportOperation+Private.h */,
 				C3D1A0132F20000100000013 /* Core3DNativeImportOperation.mm */,
+				C3D1B0112F21000100000011 /* Core3DGLBPreflight.hpp */,
+				C3D1B0122F21000100000012 /* Core3DGLBPreflight.mm */,
+				C3D1B0132F21000100000013 /* Core3DGLBReader.hpp */,
+				C3D1B0142F21000100000014 /* Core3DGLBReader.mm */,
 			);
 			path = Import;
 			sourceTree = "<group>";
@@ -926,6 +936,8 @@
 			files = (
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
 				C3D1A0022F20000100000002 /* Core3DNativeImportOperation.mm in Sources */,
+				C3D1B0012F21000100000001 /* Core3DGLBPreflight.mm in Sources */,
+				C3D1B0022F21000100000002 /* Core3DGLBReader.mm in Sources */,
 				C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */,
 				C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */,
 				18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */,
