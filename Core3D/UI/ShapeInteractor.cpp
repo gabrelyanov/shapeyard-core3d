@@ -901,6 +901,27 @@ namespace core3d {
 		return canApplyExtrusion();
 	}
 
+	ExtrusionPreviewState
+	ShapeInteractor::extrusionPreviewState() const noexcept {
+		if (!_extrusion.IsReady()) {
+			return ExtrusionPreviewState::Unavailable;
+		}
+		if (_extrusion.rollbackFailed) {
+			return ExtrusionPreviewState::Failed;
+		}
+		if (_extrusion.commitOutcomeUnknown) {
+			return ExtrusionPreviewState::OutcomeUnknown;
+		}
+		if (canApplyExtrusion()) {
+			return ExtrusionPreviewState::Ready;
+		}
+		if (!_extrusion.candidatePresentation.IsNull()
+			|| _extrusion.ownsCommand) {
+			return ExtrusionPreviewState::Failed;
+		}
+		return ExtrusionPreviewState::Selecting;
+	}
+
 	Standard_Boolean ShapeInteractor::applyExtrusion() noexcept {
 		const Standard_Size resultSubshapeCount =
 			_extrusion.candidateSubshapeCount;
@@ -1288,6 +1309,18 @@ namespace core3d {
 	Standard_Boolean ShapeInteractor::isBevelSelectionFrozen() const noexcept {
 		return _bevelController != nullptr
 			&& _bevelController->isSelectionFrozen();
+	}
+
+	BevelPreviewState ShapeInteractor::bevelPreviewState() const noexcept {
+		return _bevelController == nullptr
+			? BevelPreviewState::Selecting
+			: _bevelController->previewState();
+	}
+
+	std::uint64_t ShapeInteractor::bevelPreviewGeneration() const noexcept {
+		return _bevelController == nullptr
+			? 0
+			: _bevelController->previewGeneration();
 	}
 
 	Standard_Boolean ShapeInteractor::captureBevelPreview(

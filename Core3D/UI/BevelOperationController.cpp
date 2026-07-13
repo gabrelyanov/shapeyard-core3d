@@ -1193,6 +1193,11 @@ BevelPreviewState BevelOperationController::previewState() const noexcept
     return myState;
 }
 
+std::uint64_t BevelOperationController::previewGeneration() const noexcept
+{
+    return myGeneration;
+}
+
 Standard_Boolean BevelOperationController::capturePreview(
     BevelPreviewCapture& theCapture) const noexcept
 {

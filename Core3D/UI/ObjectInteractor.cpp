@@ -1449,6 +1449,18 @@ namespace core3d {
 		return _booleanOpController->isSelectionFrozen();
 	}
 
+	BooleanPreviewState ObjectInteractor::booleanPreviewState() const noexcept {
+		return _booleanOpController == nullptr
+			? BooleanPreviewState::Selecting
+			: _booleanOpController->previewState();
+	}
+
+	std::uint64_t ObjectInteractor::booleanPreviewGeneration() const noexcept {
+		return _booleanOpController == nullptr
+			? 0
+			: _booleanOpController->previewGeneration();
+	}
+
 	void ObjectInteractor::setBooleanPreviewStateChangedCallback(
 		std::function<void()> callback) {
 		_booleanOpController->setPreviewStateChangedCallback(

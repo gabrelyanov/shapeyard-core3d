@@ -4304,15 +4304,25 @@ void Core3DAddDebugOrphanVisualMaterial(
 			viewer->getObjectInteractor()->setManipulatorType(
 				core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude);
 		}
+		if (didBegin) {
+			_availableGizmoTypes = @[
+				@(PrimitiveGizmoTypeChamfer),
+				@(PrimitiveGizmoTypeExtrude)
+			];
+		}
 		_currentGizmoType = [GLController getGizmoType];
         self.can_apply = NO;
         [GLController debugRequestRender];
         [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
+        [self sendNotifyUIState:(UIStateChangingGizmo
+            | UIStateChangingSelection
+            | UIStateChangingApply)];
         return didBegin;
     } catch (...) {
         self.can_apply = NO;
-        [self sendNotifyUIState:UIStateChangingApply];
+        [self sendNotifyUIState:(UIStateChangingGizmo
+            | UIStateChangingSelection
+            | UIStateChangingApply)];
         return NO;
     }
 }

@@ -926,6 +926,11 @@ BooleanPreviewState BooleanOperationController::previewState() const noexcept
     return _previewState;
 }
 
+std::uint64_t BooleanOperationController::previewGeneration() const noexcept
+{
+    return _previewGeneration;
+}
+
 void BooleanOperationController::setPreviewStateChangedCallback(
     std::function<void()> theCallback)
 {

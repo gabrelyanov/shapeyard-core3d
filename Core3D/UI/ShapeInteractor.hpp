@@ -16,6 +16,7 @@
 #include <TDocStd_Document.hxx>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -32,6 +33,14 @@ namespace core3d {
         Edge,
         Wire,
         Face
+    };
+
+    enum class ExtrusionPreviewState : std::uint8_t {
+        Unavailable = 0,
+        Selecting,
+        Ready,
+        OutcomeUnknown,
+        Failed,
     };
 
 	struct EdgesSelection {
@@ -144,6 +153,8 @@ namespace core3d {
 			Standard_Boolean canApplyBevel() const noexcept;
 			Standard_Boolean hasActiveBevel() const noexcept;
 			Standard_Boolean isBevelSelectionFrozen() const noexcept;
+			BevelPreviewState bevelPreviewState() const noexcept;
+			std::uint64_t bevelPreviewGeneration() const noexcept;
 			Standard_Boolean captureBevelPreview(
 				BevelPreviewCapture& capture) const noexcept;
 			void setBevelPreviewStateChangedCallback(
@@ -165,6 +176,7 @@ namespace core3d {
         Standard_Boolean canRetryExtrusionResolution() const noexcept;
         Standard_Boolean hasActiveExtrusion() const noexcept;
         Standard_Boolean hasExtrusionPreview() const noexcept;
+        ExtrusionPreviewState extrusionPreviewState() const noexcept;
         Standard_Boolean applyExtrusion() noexcept;
         //! Return false only when an owned preview command could not be
         //! confirmed aborted; state remains intact so cancellation can retry.

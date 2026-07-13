@@ -12,6 +12,168 @@
 #include "GLViewController+Trick.h"
 #include "Snapping.hpp"
 
+namespace {
+
+Core3DModelingPreviewStatus Core3DUnavailableModelingStatus(
+    const PrimitiveGizmoType theOperation) noexcept {
+    return {
+        theOperation,
+        Core3DModelingPreviewStateUnavailable,
+        0,
+        NO,
+        NO,
+    };
+}
+
+Core3DModelingPreviewState Core3DPreviewState(
+    const core3d::BevelPreviewState theState) noexcept {
+    switch (theState) {
+        case core3d::BevelPreviewState::Selecting:
+            return Core3DModelingPreviewStateSelecting;
+        case core3d::BevelPreviewState::Computing:
+        case core3d::BevelPreviewState::Committing:
+            return Core3DModelingPreviewStateComputing;
+        case core3d::BevelPreviewState::Ready:
+            return Core3DModelingPreviewStateReady;
+        case core3d::BevelPreviewState::Failed:
+            return Core3DModelingPreviewStateFailed;
+    }
+    return Core3DModelingPreviewStateFailed;
+}
+
+Core3DModelingPreviewState Core3DPreviewState(
+    const core3d::BooleanPreviewState theState) noexcept {
+    switch (theState) {
+        case core3d::BooleanPreviewState::Selecting:
+            return Core3DModelingPreviewStateSelecting;
+        case core3d::BooleanPreviewState::Computing:
+        case core3d::BooleanPreviewState::Committing:
+            return Core3DModelingPreviewStateComputing;
+        case core3d::BooleanPreviewState::Ready:
+            return Core3DModelingPreviewStateReady;
+        case core3d::BooleanPreviewState::Failed:
+            return Core3DModelingPreviewStateFailed;
+    }
+    return Core3DModelingPreviewStateFailed;
+}
+
+Core3DModelingPreviewState Core3DPreviewState(
+    const core3d::ExtrusionPreviewState theState) noexcept {
+    switch (theState) {
+        case core3d::ExtrusionPreviewState::Unavailable:
+            return Core3DModelingPreviewStateUnavailable;
+        case core3d::ExtrusionPreviewState::Selecting:
+            return Core3DModelingPreviewStateSelecting;
+        case core3d::ExtrusionPreviewState::Ready:
+            return Core3DModelingPreviewStateReady;
+        case core3d::ExtrusionPreviewState::OutcomeUnknown:
+            return Core3DModelingPreviewStateOutcomeUnknown;
+        case core3d::ExtrusionPreviewState::Failed:
+            return Core3DModelingPreviewStateFailed;
+    }
+    return Core3DModelingPreviewStateFailed;
+}
+
+Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
+    GLViewController *theController,
+    const PrimitiveGizmoType theOperation) {
+    Core3DModelingPreviewStatus aStatus =
+        Core3DUnavailableModelingStatus(theOperation);
+    if (theController == nil || theController.viewer == nullptr) {
+        return aStatus;
+    }
+
+    switch (theOperation) {
+        case PrimitiveGizmoTypeChamfer: {
+            const std::shared_ptr<core3d::ShapeInteractor> anInteractor =
+                theController.viewer->getShapeInteractor();
+            if (anInteractor == nullptr) {
+                return aStatus;
+            }
+            aStatus.generation = anInteractor->bevelPreviewGeneration();
+            aStatus.active = anInteractor->hasActiveBevel();
+            if (!aStatus.active) {
+                return aStatus;
+            }
+            aStatus.state = Core3DPreviewState(
+                anInteractor->bevelPreviewState());
+            aStatus.canApply =
+                aStatus.state == Core3DModelingPreviewStateReady
+                && anInteractor->canApplyBevel();
+            return aStatus;
+        }
+        case PrimitiveGizmoTypeExtrude: {
+            const std::shared_ptr<core3d::ShapeInteractor> anInteractor =
+                theController.viewer->getShapeInteractor();
+            if (anInteractor == nullptr) {
+                return aStatus;
+            }
+            aStatus.active = anInteractor->hasActiveExtrusion();
+            if (!aStatus.active) {
+                return aStatus;
+            }
+            // Extrusion is synchronous, so generation zero is a complete
+            // contract: no worker result can arrive after this observation.
+            aStatus.state = Core3DPreviewState(
+                anInteractor->extrusionPreviewState());
+            aStatus.canApply =
+                (aStatus.state == Core3DModelingPreviewStateReady
+                    && anInteractor->canApplyExtrusion())
+                || (aStatus.state
+                        == Core3DModelingPreviewStateOutcomeUnknown
+                    && anInteractor->canRetryExtrusionResolution());
+            return aStatus;
+        }
+        case PrimitiveGizmoTypeSubtract:
+        case PrimitiveGizmoTypeUnion:
+        case PrimitiveGizmoTypeIntersect: {
+            const std::shared_ptr<core3d::ObjectInteractor> anInteractor =
+                theController.viewer->getObjectInteractor();
+            if (anInteractor == nullptr) {
+                return aStatus;
+            }
+            core3d::BooleanAction anAction =
+                core3d::BooleanAction::BooleanSubtract;
+            if (theOperation == PrimitiveGizmoTypeUnion) {
+                anAction = core3d::BooleanAction::BooleanUnion;
+            } else if (theOperation == PrimitiveGizmoTypeIntersect) {
+                anAction = core3d::BooleanAction::BooleanIntersect;
+            }
+            aStatus.generation =
+                anInteractor->booleanPreviewGeneration();
+            aStatus.active = anInteractor->hasActiveBoolean(anAction);
+            if (!aStatus.active) {
+                return aStatus;
+            }
+            aStatus.state = Core3DPreviewState(
+                anInteractor->booleanPreviewState());
+            aStatus.canApply =
+                aStatus.state == Core3DModelingPreviewStateReady
+                && anInteractor->canApplyBoolean();
+            return aStatus;
+        }
+        default:
+            return aStatus;
+    }
+}
+
+} // namespace
+
+@interface Core3DViewController (PrimitiveManagerOutcomePrivate)
+
+- (Core3DModelingOperationResult)core3d_tryApplyOperation:
+    (PrimitiveGizmoType)operation
+    attempt:(BOOL (^)(void))attempt;
+- (Core3DModelingOperationResult)core3d_tryCancelOperation:
+    (PrimitiveGizmoType)operation
+    attempt:(BOOL (^)(void))attempt;
+- (void)core3d_retainOperationWithStatus:
+    (Core3DModelingPreviewStatus)status;
+- (void)core3d_reconcileInactiveOperation:
+    (PrimitiveGizmoType)operation;
+
+@end
+
 @implementation Core3DViewController (PrimitiveManager)
 
 - (void)addPrimitivesFromJSON:(NSString *)json {
@@ -91,6 +253,123 @@
                             | UIStateChangingHistory];
 }
 
+- (Core3DModelingPreviewStatus)modelingPreviewStatusForGizmoType:
+    (PrimitiveGizmoType)gizmoType {
+    if (![NSThread isMainThread]) {
+        return Core3DUnavailableModelingStatus(gizmoType);
+    }
+    return Core3DCurrentModelingStatus(GLController, gizmoType);
+}
+
+- (void)core3d_retainOperationWithStatus:
+    (Core3DModelingPreviewStatus)status {
+    self.can_apply = status.active && status.canApply;
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingGizmo
+                             | UIStateChangingApply];
+}
+
+- (void)core3d_reconcileInactiveOperation:
+    (PrimitiveGizmoType)operation {
+    if (_currentGizmoType != operation) {
+        return;
+    }
+
+    // A stale control may outlive its Core operation by one UI refresh. Only
+    // converge that matching control after proving that cleanup cannot abort
+    // a different live modeling operation (for example, Subtract queried
+    // while Union remains active).
+    const PrimitiveGizmoType modelingOperations[] = {
+        PrimitiveGizmoTypeChamfer,
+        PrimitiveGizmoTypeExtrude,
+        PrimitiveGizmoTypeSubtract,
+        PrimitiveGizmoTypeUnion,
+        PrimitiveGizmoTypeIntersect,
+    };
+    for (const PrimitiveGizmoType candidate : modelingOperations) {
+        if (candidate != operation
+            && [self modelingPreviewStatusForGizmoType:candidate].active) {
+            return;
+        }
+    }
+    [self completeOperationInteraction];
+}
+
+- (Core3DModelingOperationResult)core3d_tryApplyOperation:
+    (PrimitiveGizmoType)operation
+    attempt:(BOOL (^)(void))attempt {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) {
+        return Core3DModelingOperationResultNoActiveOperation;
+    }
+    const Core3DModelingPreviewStatus before =
+        [self modelingPreviewStatusForGizmoType:operation];
+    if (!before.active) {
+        [self core3d_reconcileInactiveOperation:operation];
+        return Core3DModelingOperationResultNoActiveOperation;
+    }
+    const BOOL isApplicable =
+        before.state == Core3DModelingPreviewStateReady
+        || before.state == Core3DModelingPreviewStateOutcomeUnknown;
+    if (!isApplicable || !before.canApply) {
+        return Core3DModelingOperationResultNotReady;
+    }
+
+    const BOOL reportedCompletion = attempt != nil && attempt();
+    const Core3DModelingPreviewStatus after =
+        [self modelingPreviewStatusForGizmoType:operation];
+    if (reportedCompletion && !after.active) {
+        [self completeOperationInteraction];
+        return Core3DModelingOperationResultSucceeded;
+    }
+    if (after.active) {
+        [self core3d_retainOperationWithStatus:after];
+        if (after.state == Core3DModelingPreviewStateOutcomeUnknown) {
+            return Core3DModelingOperationResultOutcomeUnknown;
+        }
+        return Core3DModelingOperationResultRetryableFailure;
+    }
+
+    // The underlying operation did not report a completed commit and no
+    // recovery state remains. Reconcile the public tool UI with that
+    // fail-closed cleanup, but never report a false success.
+    [self completeOperationInteraction];
+    return Core3DModelingOperationResultFailed;
+}
+
+- (Core3DModelingOperationResult)core3d_tryCancelOperation:
+    (PrimitiveGizmoType)operation
+    attempt:(BOOL (^)(void))attempt {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) {
+        return Core3DModelingOperationResultNoActiveOperation;
+    }
+    const Core3DModelingPreviewStatus before =
+        [self modelingPreviewStatusForGizmoType:operation];
+    if (!before.active) {
+        [self core3d_reconcileInactiveOperation:operation];
+        return Core3DModelingOperationResultNoActiveOperation;
+    }
+
+    const BOOL reportedCompletion = attempt != nil && attempt();
+    const Core3DModelingPreviewStatus after =
+        [self modelingPreviewStatusForGizmoType:operation];
+    if (reportedCompletion && !after.active) {
+        [self completeOperationInteraction];
+        return Core3DModelingOperationResultSucceeded;
+    }
+    if (after.active) {
+        [self core3d_retainOperationWithStatus:after];
+        if (after.state == Core3DModelingPreviewStateOutcomeUnknown) {
+            return Core3DModelingOperationResultOutcomeUnknown;
+        }
+        return Core3DModelingOperationResultRetryableFailure;
+    }
+
+    [self completeOperationInteraction];
+    return Core3DModelingOperationResultFailed;
+}
+
 - (void)setChamfer:(CGFloat)value {
     if (_currentGizmoType != PrimitiveGizmoTypeChamfer) { return; }
     [GLController setChamfer:value*100];
@@ -119,54 +398,51 @@
     return {.min = -1.0, .max = 1.0};
 }
 
+- (Core3DModelingOperationResult)tryApplyExtrusion {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeExtrude
+        attempt:^BOOL {
+            return [GLController applyExtrusion];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelExtrusion {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeExtrude
+        attempt:^BOOL {
+            return [GLController cancelExtrusion];
+        }];
+}
+
 - (BOOL)applyExtrusion {
-    const BOOL applied = [GLController applyExtrusion];
-    if (applied) {
-        [self completeOperationInteraction];
-    } else {
-        self.can_apply = [GLController canApplyExtrusion];
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
-    return applied;
+    return [self tryApplyExtrusion]
+        == Core3DModelingOperationResultSucceeded;
 }
 
 - (BOOL)cancelExtrusion {
-    const BOOL cancelled = [GLController cancelExtrusion];
-    if (cancelled) {
-        [self completeOperationInteraction];
-    } else {
-        self.can_apply = [GLController canApplyExtrusion];
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
-    return cancelled;
+    return [self tryCancelExtrusion]
+        == Core3DModelingOperationResultSucceeded;
+}
+
+- (Core3DModelingOperationResult)tryApplyChamfer {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeChamfer
+        attempt:^BOOL {
+            return [GLController applyChamfer];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelChamfer {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeChamfer
+        attempt:^BOOL {
+            return [GLController cancelChamfer];
+        }];
 }
 
 - (void)applyChamfer {
-	if ([GLController applyChamfer]) {
-		[self completeOperationInteraction];
-	} else {
-		self.can_apply = [GLController canApplyChamfer];
-		[self viewDidChangeViewportPresentationState];
-		[self sendNotifyUIState:UIStateChangingApply];
-	}
+    (void)[self tryApplyChamfer];
 }
 
 - (BOOL)cancelChamfer {
-    if (_currentGizmoType != PrimitiveGizmoTypeChamfer) {
-        return NO;
-    }
-    const BOOL cancelled = [GLController cancelChamfer];
-    if (cancelled) {
-        [self completeOperationInteraction];
-    } else {
-        self.can_apply = [GLController canApplyChamfer];
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingGizmo
-                                 | UIStateChangingApply];
-    }
-    return cancelled;
+    return [self tryCancelChamfer]
+        == Core3DModelingOperationResultSucceeded;
 }
 
 - (void)completeOperationInteraction {
@@ -197,76 +473,70 @@
     [self completeOperationInteraction];
 }
 
+- (Core3DModelingOperationResult)tryApplySubtract {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeSubtract
+        attempt:^BOOL {
+            return [GLController applySubtract];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelSubtract {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeSubtract
+        attempt:^BOOL {
+            return [GLController cancelSubtract];
+        }];
+}
+
 - (void)applySubtract {
-	if ([GLController applySubtract]) {
-        [self completeOperationInteraction];
-    } else {
-        if (![GLController hasActiveBoolean]) {
-            [self completeOperationInteraction];
-            return;
-        }
-        self.can_apply = [GLController canApplyBoolean];
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
+    (void)[self tryApplySubtract];
 }
 
 - (void)cancelSubtract {
-	if ([GLController cancelSubtract]) {
-        [self completeOperationInteraction];
-    } else {
-        self.can_apply = NO;
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
+    (void)[self tryCancelSubtract];
+}
+
+- (Core3DModelingOperationResult)tryApplyUnion {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeUnion
+        attempt:^BOOL {
+            return [GLController applyUnion];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelUnion {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeUnion
+        attempt:^BOOL {
+            return [GLController cancelUnion];
+        }];
 }
 
 - (void)applyUnion {
-	if ([GLController applyUnion]) {
-        [self completeOperationInteraction];
-    } else {
-        if (![GLController hasActiveBoolean]) {
-            [self completeOperationInteraction];
-            return;
-        }
-        self.can_apply = [GLController canApplyBoolean];
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
+    (void)[self tryApplyUnion];
 }
 
 - (void)cancelUnion {
-    if ([GLController cancelUnion]) {
-        [self completeOperationInteraction];
-    } else {
-        self.can_apply = NO;
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
+    (void)[self tryCancelUnion];
+}
+
+- (Core3DModelingOperationResult)tryApplyIntersect {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeIntersect
+        attempt:^BOOL {
+            return [GLController applyIntersect];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelIntersect {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeIntersect
+        attempt:^BOOL {
+            return [GLController cancelIntersect];
+        }];
 }
 
 - (void)applyIntersect {
-    if ([GLController applyIntersect]) {
-        [self completeOperationInteraction];
-    } else {
-        if (![GLController hasActiveBoolean]) {
-            [self completeOperationInteraction];
-            return;
-        }
-        self.can_apply = [GLController canApplyBoolean];
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
+    (void)[self tryApplyIntersect];
 }
 
 - (void)cancelIntersect {
-    if ([GLController cancelIntersect]) {
-        [self completeOperationInteraction];
-    } else {
-        self.can_apply = NO;
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
-    }
+    (void)[self tryCancelIntersect];
 }
 
 - (void)undo {

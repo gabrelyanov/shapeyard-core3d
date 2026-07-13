@@ -114,6 +114,7 @@ public:
     Standard_Boolean hasActiveOperation() const noexcept;
     Standard_Boolean isSelectionFrozen() const noexcept;
     BevelPreviewState previewState() const noexcept;
+    std::uint64_t previewGeneration() const noexcept;
     Standard_Boolean capturePreview(
         BevelPreviewCapture& capture) const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);

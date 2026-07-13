@@ -109,6 +109,8 @@ namespace core3d {
 		const bool hasActiveBoolean(BooleanAction action) const;
 		const bool hasUnresolvedBoolean() const;
 		const bool isBooleanSelectionFrozen() const;
+		BooleanPreviewState booleanPreviewState() const noexcept;
+		std::uint64_t booleanPreviewGeneration() const noexcept;
 		void setBooleanPreviewStateChangedCallback(
 			std::function<void()> callback);
 #ifdef DEBUG

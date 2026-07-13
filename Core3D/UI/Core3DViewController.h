@@ -76,6 +76,39 @@ typedef struct {
     double max;
 } Boundaries;
 
+//! Truthful outcome for an explicit modeling Apply or Cancel request. An
+//! unknown outcome remains retained but must be reconciled with another Apply;
+//! a retryable failure retains the ordinary Apply/Cancel recovery controls.
+typedef NS_ENUM(NSInteger, Core3DModelingOperationResult) {
+    Core3DModelingOperationResultSucceeded = 0,
+    Core3DModelingOperationResultNoActiveOperation,
+    Core3DModelingOperationResultNotReady,
+    Core3DModelingOperationResultOutcomeUnknown,
+    Core3DModelingOperationResultRetryableFailure,
+    Core3DModelingOperationResultFailed,
+};
+
+//! Renderer-independent phase of one modeling preview. Committing is exposed
+//! as Computing because neither phase is user-applicable.
+typedef NS_ENUM(NSInteger, Core3DModelingPreviewState) {
+    Core3DModelingPreviewStateUnavailable = 0,
+    Core3DModelingPreviewStateSelecting,
+    Core3DModelingPreviewStateComputing,
+    Core3DModelingPreviewStateReady,
+    Core3DModelingPreviewStateOutcomeUnknown,
+    Core3DModelingPreviewStateFailed,
+};
+
+//! Release-safe, immutable observation of one modeling operation. Generation
+//! is controller-owned and suppresses stale asynchronous preview results.
+typedef struct {
+    PrimitiveGizmoType operation;
+    Core3DModelingPreviewState state;
+    uint64_t generation;
+    BOOL active;
+    BOOL canApply;
+} Core3DModelingPreviewStatus;
+
 @protocol PrimitiveManagerProtocol<NSObject>
 
 - (void)addPrimitive:(PrimitiveType)primitiveType;
@@ -85,20 +118,43 @@ typedef struct {
 - (void)duplicateSelected;
 - (void)setChamfer:(CGFloat)value;
 - (Boundaries)getChamferBoundaries;
+- (Core3DModelingOperationResult)tryApplyChamfer
+    NS_SWIFT_NAME(tryApplyChamfer());
+- (Core3DModelingOperationResult)tryCancelChamfer
+    NS_SWIFT_NAME(tryCancelChamfer());
 - (void)applyChamfer;
 - (BOOL)cancelChamfer;
 - (void)setExtrusion:(CGFloat)value;
 - (Boundaries)getExtrusionBoundaries;
+- (Core3DModelingOperationResult)tryApplyExtrusion
+    NS_SWIFT_NAME(tryApplyExtrusion());
+- (Core3DModelingOperationResult)tryCancelExtrusion
+    NS_SWIFT_NAME(tryCancelExtrusion());
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+- (Core3DModelingOperationResult)tryApplySubtract
+    NS_SWIFT_NAME(tryApplySubtract());
+- (Core3DModelingOperationResult)tryCancelSubtract
+    NS_SWIFT_NAME(tryCancelSubtract());
 - (void)applyMirror;
 - (void)cancelMirror;
 - (void)applySubtract;
 - (void)cancelSubtract;
+- (Core3DModelingOperationResult)tryApplyUnion
+    NS_SWIFT_NAME(tryApplyUnion());
+- (Core3DModelingOperationResult)tryCancelUnion
+    NS_SWIFT_NAME(tryCancelUnion());
 - (void)applyUnion;
 - (void)cancelUnion;
+- (Core3DModelingOperationResult)tryApplyIntersect
+    NS_SWIFT_NAME(tryApplyIntersect());
+- (Core3DModelingOperationResult)tryCancelIntersect
+    NS_SWIFT_NAME(tryCancelIntersect());
 - (void)applyIntersect;
 - (void)cancelIntersect;
+- (Core3DModelingPreviewStatus)modelingPreviewStatusForGizmoType:
+    (PrimitiveGizmoType)gizmoType
+    NS_SWIFT_NAME(modelingPreviewStatus(for:));
 - (void)undo;
 - (void)redo;
 - (NSString *_Nullable)getCoreInfoText;

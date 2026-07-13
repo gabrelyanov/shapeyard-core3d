@@ -128,6 +128,7 @@ public:
     Standard_Boolean capturePreview(
         BooleanPreviewCapture& capture) const noexcept;
     BooleanPreviewState previewState() const noexcept;
+    std::uint64_t previewGeneration() const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
 #ifdef DEBUG
     //! Production result validator exposed only for deterministic fixtures.

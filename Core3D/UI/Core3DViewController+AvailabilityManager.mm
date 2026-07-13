@@ -267,11 +267,9 @@ Core3DModelCapability DocumentExportCapabilities(
 }
 
 - (NSArray<NSNumber *> *)availableGizmoTypes {
-    // Boolean and Bevel previews deliberately suppress their committed source
-    // presentations. AIS therefore has no document-editable live selection
-    // while a retained operation is computing or ready, but the operation was
-    // admitted from a validated BRep-only selection. Keep its tool rail (and,
-    // critically, Apply/Cancel) available until it resolves.
+    // Boolean, Bevel, and Extrusion previews can suppress or consume their live
+    // AIS selection while retaining an admitted BRep-only operation. Keep the
+    // tool rail (and, critically, Apply/Cancel) available until it resolves.
     const BOOL hasRetainedBoolean =
         Core3DIsBooleanGizmo(_currentGizmoType)
         && GLController != nil
@@ -280,8 +278,15 @@ Core3DModelCapability DocumentExportCapabilities(
         _currentGizmoType == PrimitiveGizmoTypeChamfer
         && GLController != nil
         && [GLController hasActiveBevel];
+    const std::shared_ptr<core3d::Core3DViewer> viewer =
+        GLController == nil ? nullptr : GLController.viewer;
+    const BOOL hasRetainedExtrusion =
+        _currentGizmoType == PrimitiveGizmoTypeExtrude
+        && viewer != nullptr
+        && viewer->getShapeInteractor() != nullptr
+        && viewer->getShapeInteractor()->hasActiveExtrusion();
     const Core3DModelCapability capabilities =
-        hasRetainedBoolean || hasRetainedChamfer
+        hasRetainedBoolean || hasRetainedChamfer || hasRetainedExtrusion
         ? kBRepCapabilities
         : self.selectedModelCapabilities;
     if (capabilities == Core3DModelCapabilityNone
