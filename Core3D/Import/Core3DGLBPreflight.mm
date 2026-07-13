@@ -1951,6 +1951,15 @@ private:
                     ? false
                     : Fail(PreflightStatus::Invalid, "GLB node is invalid.");
             }
+            // OCCT also accepts this glTF 1.0 member on 2.0 assets and
+            // processes every entry in addition to the standard `mesh`.
+            // Reject its presence so downstream occurrences cannot exceed
+            // the geometry budget established by this validator.
+            if (node[@"meshes"] != nil) {
+                return Fail(
+                    PreflightStatus::Unsupported,
+                    "Legacy GLB node mesh arrays are unsupported.");
+            }
             if (node[@"camera"] != nil || node[@"skin"] != nil
                 || node[@"weights"] != nil) {
                 return Fail(
