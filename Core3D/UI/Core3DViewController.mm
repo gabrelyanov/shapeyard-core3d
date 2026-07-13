@@ -11,9 +11,11 @@
 #import "Core3DViewController+GLViewControllerProtocol.h"
 #import <Core3D/AssetBundle.h>
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
+#import "Core3DTransformInspectorSnapshotFactory.hpp"
 
 #include "GLViewController+Trick.h"
 #include "BooleanOperationController.hpp"
+#include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
@@ -37,12 +39,14 @@
 #include "Poly_Triangulation.hxx"
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
+#include "TDataStd_Real.hxx"
 #include "TDF_LabelSequence.hxx"
 #include "Standard_GUID.hxx"
 #include "gp_Ax2.hxx"
 #include "gp_Dir.hxx"
 #include "gp_Pnt2d.hxx"
 #include "gp_Trsf.hxx"
+#include "gp_Vec.hxx"
 #include "TopLoc_Location.hxx"
 #include "TopExp_Explorer.hxx"
 #include "XCAFPrs_DocumentExplorer.hxx"
@@ -56,6 +60,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -351,9 +356,13 @@ const Standard_GUID& Core3DDebugGeometryRepresentationAttributeID() {
 }
 
 TopoDS_Face Core3DMakeDebugTriangleMeshFace(
-    const Standard_Real translationX = 0.0) {
+    const Standard_Real translationX = 0.0,
+    const Standard_Boolean includeUnreferencedOutlier = Standard_False) {
+    const Standard_Integer nodeCount =
+        includeUnreferencedOutlier ? 4 : 3;
     Handle(Poly_Triangulation) triangulation =
-        new Poly_Triangulation(3, 1, Standard_True, Standard_True);
+        new Poly_Triangulation(
+            nodeCount, 1, Standard_True, Standard_True);
     if (triangulation.IsNull()) {
         throw Standard_Failure("Unable to allocate triangle fixture");
     }
@@ -366,7 +375,12 @@ TopoDS_Face Core3DMakeDebugTriangleMeshFace(
     triangulation->SetUVNode(1, gp_Pnt2d(0.0, 0.0));
     triangulation->SetUVNode(2, gp_Pnt2d(1.0, 0.0));
     triangulation->SetUVNode(3, gp_Pnt2d(0.5, 1.0));
-    for (Standard_Integer node = 1; node <= 3; ++node) {
+    if (includeUnreferencedOutlier) {
+        triangulation->SetNode(
+            4, gp_Pnt(translationX + 1'000.0, 0.0, 0.0));
+        triangulation->SetUVNode(4, gp_Pnt2d(0.5, 0.5));
+    }
+    for (Standard_Integer node = 1; node <= nodeCount; ++node) {
         triangulation->SetNormal(node, gp_Dir(0.0, 0.0, 1.0));
     }
     triangulation->SetTriangle(1, Poly_Triangle(1, 2, 3));
@@ -380,6 +394,31 @@ TopoDS_Face Core3DMakeDebugTriangleMeshFace(
             "Triangle fixture unexpectedly owns an analytic surface");
     }
     return face;
+}
+
+TopoDS_Compound Core3DMakeDebugLocatedTriangleMeshDefinition() {
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+
+    TopoDS_Face face = Core3DMakeDebugTriangleMeshFace();
+    gp_Trsf transform;
+    transform.SetTranslation(gp_Vec(25.0, 0.0, 0.0));
+    const TopLoc_Location location(transform);
+    if (location.IsIdentity()) {
+        throw Standard_Failure(
+            "Located triangle fixture unexpectedly has identity location");
+    }
+    face.Location(location);
+    if (face.Location().IsIdentity()) {
+        throw Standard_Failure(
+            "Unable to assign triangle fixture face location");
+    }
+    // Keep the definition root at identity: only the authoritative face
+    // triangulation owns this location, so a bounds implementation cannot
+    // pass by accidentally applying the definition's object transform.
+    builder.Add(compound, face);
+    return compound;
 }
 
 TopoDS_Compound Core3DMakeDebugMixedGeometryDefinition() {
@@ -418,6 +457,19 @@ void Core3DSetDebugGeometryRepresentation(
             Core3DDebugGeometryRepresentationAttributeID(),
             rawValue).IsNull()) {
         throw Standard_Failure("Unable to mark geometry fixture definition");
+    }
+}
+
+void Core3DSetDebugObjectScale(
+    const TDF_Label& label,
+    const Standard_Real scale) {
+    // Even the deliberately corrupt fixture remains finite and nonzero. This
+    // lets the legacy production loader safely construct its gp_Trsf while
+    // the inspector's stricter persisted-transform validation rejects it.
+    if (label.IsNull() || !std::isfinite(scale) || scale == 0.0
+        || TDataStd_Real::Set(
+            label.FindChild(8, Standard_True), scale).IsNull()) {
+        throw Standard_Failure("Unable to set geometry fixture object scale");
     }
 }
 #endif
@@ -1685,6 +1737,18 @@ void Core3DAddDebugOrphanVisualMaterial(
         case Core3DDebugGeometryFixtureOrphanMarker:
             suffix = @"orphan-geometry-representation-marker";
             break;
+        case Core3DDebugGeometryFixtureMarkedTriangleMeshWithUnreferencedOutlier:
+            suffix = @"marked-triangle-mesh-unreferenced-outlier";
+            break;
+        case Core3DDebugGeometryFixtureMarkedBRepWithUniformScale:
+            suffix = @"marked-brep-uniform-scale";
+            break;
+        case Core3DDebugGeometryFixtureMarkedBRepWithCorruptTransform:
+            suffix = @"marked-brep-corrupt-transform";
+            break;
+        case Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation:
+            suffix = @"marked-triangle-mesh-located-triangulation";
+            break;
     }
     if (suffix == nil) {
         return nil;
@@ -1716,6 +1780,17 @@ void Core3DAddDebugOrphanVisualMaterial(
                 return Core3DAddDebugGeometryDefinition(
                     shapeTool,
                     Core3DMakeDebugTriangleMeshFace(25.0));
+            };
+            const auto addTriangleMeshWithUnreferencedOutlier = [&]() {
+                return Core3DAddDebugGeometryDefinition(
+                    shapeTool,
+                    Core3DMakeDebugTriangleMeshFace(
+                        25.0, Standard_True));
+            };
+            const auto addLocatedTriangleMesh = [&]() {
+                return Core3DAddDebugGeometryDefinition(
+                    shapeTool,
+                    Core3DMakeDebugLocatedTriangleMeshDefinition());
             };
             const auto addMixed = [&]() {
                 return Core3DAddDebugGeometryDefinition(
@@ -1772,6 +1847,30 @@ void Core3DAddDebugOrphanVisualMaterial(
                     Core3DSetDebugGeometryRepresentation(orphan, bRep);
                     return;
                 }
+                case Core3DDebugGeometryFixtureMarkedTriangleMeshWithUnreferencedOutlier:
+                    Core3DSetDebugGeometryRepresentation(
+                        addTriangleMeshWithUnreferencedOutlier(),
+                        triangleMesh);
+                    return;
+                case Core3DDebugGeometryFixtureMarkedBRepWithUniformScale: {
+                    const TDF_Label label = addBRep();
+                    Core3DSetDebugGeometryRepresentation(label, bRep);
+                    Core3DSetDebugObjectScale(label, 2.5);
+                    return;
+                }
+                case Core3DDebugGeometryFixtureMarkedBRepWithCorruptTransform: {
+                    const TDF_Label label = addBRep();
+                    Core3DSetDebugGeometryRepresentation(label, bRep);
+                    // gp_Trsf accepts this finite, nonzero scale during load;
+                    // the checked inspector rejects it because it is below
+                    // Precision::Confusion().
+                    Core3DSetDebugObjectScale(label, 1.0e-12);
+                    return;
+                }
+                case Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation:
+                    Core3DSetDebugGeometryRepresentation(
+                        addLocatedTriangleMesh(), triangleMesh);
+                    return;
             }
         });
 }
@@ -3605,7 +3704,233 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (Core3DTransformInspectorSnapshot *)
+    requestTransformInspectorSnapshotWithCompletion:
+        (Core3DTransformInspectorCompletion)completion {
+    if (![NSThread isMainThread]) {
+        return Core3DCreateTransformInspectorStateSnapshotDTO(
+            Core3DTransformInspectorStateUnavailable);
+    }
+    if (!_isSetuped) {
+        return Core3DCreateTransformInspectorStateSnapshotDTO(
+            Core3DTransformInspectorStateNotSetup);
+    }
+    if (GLController == nil || GLController.viewer == nullptr) {
+        return Core3DCreateTransformInspectorStateSnapshotDTO(
+            Core3DTransformInspectorStateUnavailable);
+    }
+
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr) {
+            return Core3DCreateTransformInspectorStateSnapshotDTO(
+                Core3DTransformInspectorStateUnavailable);
+        }
+
+        __weak typeof(self) weakSelf = self;
+        Core3DTransformInspectorCompletion completionCopy =
+            [completion copy];
+        core3d::TransformInspectorMeasurementCompletion
+            nativeCompletion;
+        if (completionCopy != nil) {
+            nativeCompletion = [weakSelf, completionCopy](
+                core3d::TransformInspectorMeasurement measurement) {
+                Core3DTransformInspectorSnapshot *snapshot =
+                    Core3DCreateTransformInspectorSnapshotDTO(measurement);
+                dispatch_block_t deliver = ^{
+                    if (weakSelf == nil) {
+                        return;
+                    }
+                    completionCopy(snapshot);
+                };
+                if ([NSThread isMainThread]) {
+                    deliver();
+                } else {
+                    dispatch_async(dispatch_get_main_queue(), deliver);
+                }
+            };
+        }
+
+        const core3d::TransformInspectorMeasurement measurement =
+            viewer->captureTransformInspectorMeasurement(
+                std::move(nativeCompletion));
+        Core3DTransformInspectorSnapshot *snapshot =
+            Core3DCreateTransformInspectorSnapshotDTO(measurement);
+        if (measurement.state
+                == core3d::TransformInspectorMeasurementState::Measuring
+            && snapshot.state
+                != Core3DTransformInspectorStateMeasuring) {
+            viewer->cancelTransformInspectorMeasurement();
+        }
+        return snapshot;
+    } catch (...) {
+        return Core3DCreateTransformInspectorStateSnapshotDTO(
+            Core3DTransformInspectorStateUnavailable);
+    }
+}
+
+- (void)cancelTransformInspectorSnapshotRequest {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    try {
+        GLController.viewer->cancelTransformInspectorMeasurement();
+    } catch (...) {
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)
+    transformInspectorPerformanceState {
+    if (![NSThread isMainThread] || !_isSetuped
+        || GLController == nil || GLController.viewer == nullptr) {
+        return @{};
+    }
+    try {
+        const core3d::TransformInspectorMeasurementPerformanceState state =
+            GLController.viewer
+                ->transformInspectorMeasurementPerformanceState();
+        return @{
+            @"lastMeshSweepMilliseconds": @(
+                static_cast<double>(state.lastMeshSweepMilliseconds)),
+            @"lastBRepCopyMilliseconds": @(
+                static_cast<double>(state.lastBRepCopyMilliseconds)),
+            @"meshSweepRunCount": @(
+                static_cast<unsigned long long>(state.meshSweepRunCount)),
+            @"watchdogFireCount": @(
+                static_cast<unsigned long long>(state.watchdogFireCount)),
+            @"cacheEntryCount": @(
+                static_cast<unsigned long long>(state.cacheEntryCount)),
+            @"negativeCacheEntryCount": @(
+                static_cast<unsigned long long>(
+                    state.negativeCacheEntryCount)),
+        };
+    } catch (...) {
+        return @{};
+    }
+}
+
 #ifdef DEBUG
+- (NSDictionary<NSString *, NSNumber *> *)
+    debugTransformInspectorMeasurementState {
+    if (![NSThread isMainThread] || !_isSetuped
+        || GLController == nil || GLController.viewer == nullptr) {
+        return @{};
+    }
+    try {
+        const core3d::TransformInspectorMeasurementDebugState state =
+            GLController.viewer->DebugTransformInspectorMeasurementState();
+        return @{
+            @"generation": @(
+                static_cast<unsigned long long>(state.generation)),
+            @"submittedCount": @(
+                static_cast<unsigned long long>(state.submittedCount)),
+            @"startedCount": @(
+                static_cast<unsigned long long>(state.startedCount)),
+            @"completedCount": @(
+                static_cast<unsigned long long>(state.completedCount)),
+            @"cancelledOrSupersededCount": @(
+                static_cast<unsigned long long>(
+                    state.cancelledOrSupersededCount)),
+            @"pendingReplacementCount": @(
+                static_cast<unsigned long long>(
+                    state.pendingReplacementCount)),
+            @"acceptedCount": @(
+                static_cast<unsigned long long>(state.acceptedCount)),
+            @"staleCount": @(
+                static_cast<unsigned long long>(state.staleCount)),
+            @"workerActive": @(state.workerActive == Standard_True),
+            @"workerPending": @(state.workerPending == Standard_True),
+            @"lastComputeWasMainThread": @(
+                state.lastComputeWasMainThread == Standard_True),
+            @"workerBlocked": @(state.workerBlocked == Standard_True),
+            @"forcedBoundsFailure": @(
+                state.forcedBoundsFailure == Standard_True),
+            @"lastMeshSweepMilliseconds": @(
+                static_cast<double>(state.lastMeshSweepMilliseconds)),
+            @"lastBRepCopyMilliseconds": @(
+                static_cast<double>(state.lastBRepCopyMilliseconds)),
+            @"maximumBRepTopologyNodes": @(
+                static_cast<unsigned long long>(
+                    state.maximumBRepTopologyNodes)),
+            @"maximumTriangleMeshSweepNodes": @(
+                static_cast<unsigned long long>(
+                    state.maximumTriangleMeshSweepNodes)),
+            @"meshSweepWatchdogDeadlineMilliseconds": @(
+                static_cast<double>(
+                    state.meshSweepWatchdogDeadlineMilliseconds)),
+            @"meshSweepWatchdogPollNodes": @(
+                static_cast<unsigned long long>(
+                    state.meshSweepWatchdogPollNodes)),
+            @"meshSweepRunCount": @(
+                static_cast<unsigned long long>(state.meshSweepRunCount)),
+            @"watchdogFireCount": @(
+                static_cast<unsigned long long>(state.watchdogFireCount)),
+            @"cacheEntryCount": @(
+                static_cast<unsigned long long>(state.cacheEntryCount)),
+            @"negativeCacheEntryCount": @(
+                static_cast<unsigned long long>(
+                    state.negativeCacheEntryCount)),
+        };
+    } catch (...) {
+        return @{};
+    }
+}
+
+- (void)debugSetTransformInspectorWorkerBlocked:(BOOL)blocked {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    GLController.viewer->DebugSetTransformInspectorWorkerBlocked(blocked);
+}
+
+- (void)debugSetTransformInspectorForcedMeasurementFailure:(BOOL)failure {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr) {
+        return;
+    }
+    GLController.viewer->DebugSetTransformInspectorForcedMeasurementFailure(
+        failure);
+}
+
+- (void)debugSetMaximumTransformInspectorBRepTopologyNodes:
+    (NSUInteger)limit {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr
+        || limit > std::numeric_limits<Standard_Size>::max()) {
+        return;
+    }
+    GLController.viewer->DebugSetMaximumTransformInspectorBRepTopologyNodes(
+        static_cast<Standard_Size>(limit));
+}
+
+- (void)debugSetMaximumTransformInspectorTriangleMeshSweepNodes:
+    (NSUInteger)limit {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr
+        || limit > std::numeric_limits<Standard_Size>::max()) {
+        return;
+    }
+    GLController.viewer
+        ->DebugSetMaximumTransformInspectorTriangleMeshSweepNodes(
+            static_cast<Standard_Size>(limit));
+}
+
+- (void)debugSetTransformInspectorMeshSweepWatchdogDeadlineMilliseconds:
+    (double)deadlineMilliseconds
+    pollNodes:(NSUInteger)pollNodes {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr
+        || pollNodes > std::numeric_limits<Standard_Size>::max()) {
+        return;
+    }
+    GLController.viewer->DebugSetTransformInspectorMeshSweepWatchdog(
+        static_cast<Standard_Real>(deadlineMilliseconds),
+        static_cast<Standard_Size>(pollNodes));
+}
+
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis backward:(BOOL)backward {
     if (![NSThread isMainThread]
         || !_isSetuped

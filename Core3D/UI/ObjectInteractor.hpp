@@ -69,6 +69,11 @@ namespace core3d {
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         const bool isManipulatorAttached() const;
+        //! True only from a successful raw touch start through finish/cancel.
+        //! Unlike isManipulatorInteractionActive(), hover detection alone does
+        //! not activate this state; mirror-plane gestures are included.
+        const bool isManipulatorGestureActive() const;
+        //! Legacy detected-mode state used by GL touch/tap suppression.
         const bool isManipulatorInteractionActive() const;
         const PrimitiveManipulatorType getManipulatorType() const;
 
@@ -126,6 +131,7 @@ namespace core3d {
 		
 		void setManipulator(Handle(Core3DManipulator) manipulator) {
 			_manipulator = manipulator;
+			_manipulatorGestureActive = false;
 			_manipulatorSourceLabels.clear();
 		}
 		void setObjectTransparent(Handle(AIS_InteractiveObject) selected, const bool on);
@@ -147,6 +153,7 @@ namespace core3d {
 		std::unordered_map<const AIS_Shape*, TDF_Label>
 			_trialMirrorSourceLabels;
 		bool _trialMirrorObjectsValid = false;
+		bool _manipulatorGestureActive = false;
     };
 }
 #endif /* Core3dObjectInteractor_hpp */

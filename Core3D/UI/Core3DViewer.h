@@ -15,6 +15,7 @@
 
 #include "ObjectInteractor.hpp"
 #include "ShapeInteractor.hpp"
+#include "TransformInspectorMeasurementController.hpp"
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -93,6 +94,17 @@ namespace core3d {
             std::function<void()> callback);
         void setBevelPreviewStateChangedCallback(
             std::function<void()> callback);
+
+        //! Capture the document-authoritative single-selection transform and
+        //! hybrid exact local bounds. A BRep cache miss returns Measuring and
+        //! may deliver one terminal main-thread completion.
+        TransformInspectorMeasurement captureTransformInspectorMeasurement(
+            TransformInspectorMeasurementCompletion completion = {}) noexcept;
+        //! Suppress any pending transform-inspector completion. Exact worker
+        //! work already inside OCCT may still populate its bounded cache.
+        void cancelTransformInspectorMeasurement() noexcept;
+        TransformInspectorMeasurementPerformanceState
+            transformInspectorMeasurementPerformanceState() const noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
 
@@ -173,6 +185,19 @@ namespace core3d {
                 theFailure) noexcept;
         void DebugResetSceneSnapshotMesherInvocationCount() noexcept;
         std::uint64_t DebugSceneSnapshotMesherInvocationCount() const noexcept;
+        TransformInspectorMeasurementDebugState
+            DebugTransformInspectorMeasurementState() const noexcept;
+        void DebugSetTransformInspectorWorkerBlocked(
+            Standard_Boolean blocked) noexcept;
+        void DebugSetTransformInspectorForcedMeasurementFailure(
+            Standard_Boolean failure) noexcept;
+        void DebugSetMaximumTransformInspectorBRepTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetMaximumTransformInspectorTriangleMeshSweepNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetTransformInspectorMeshSweepWatchdog(
+            Standard_Real deadlineMilliseconds,
+            Standard_Size pollNodes) noexcept;
 #endif
     private:
         // document traversal
@@ -188,6 +213,8 @@ namespace core3d {
     private:
         std::shared_ptr<ObjectInteractor> _objectInteractor;
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
+        std::shared_ptr<TransformInspectorMeasurementController>
+            _transformInspectorMeasurementController;
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;

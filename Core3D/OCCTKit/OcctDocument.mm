@@ -2250,6 +2250,37 @@ OcctGeometryRepresentation OcctDocument::GeometryRepresentationForLabel(
     }
 }
 
+OcctGeometryRepresentation
+OcctDocument::StoredGeometryRepresentationForLabel(
+    const TDF_Label& label) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return OcctGeometryRepresentation::Invalid;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (!IsGeometryDefinitionLabel(
+                myOcafDoc, aShapeTool, label)) {
+            return OcctGeometryRepresentation::Invalid;
+        }
+        bool hasMarker = false;
+        OcctGeometryRepresentation aRepresentation =
+            OcctGeometryRepresentation::Invalid;
+        if (!ReadGeometryRepresentation(
+                label, hasMarker, aRepresentation)) {
+            return OcctGeometryRepresentation::Invalid;
+        }
+        (void)hasMarker;
+        return aRepresentation;
+    } catch (...) {
+        return OcctGeometryRepresentation::Invalid;
+    }
+}
+
 Standard_Boolean OcctDocument::ValidateGeometryRepresentationForLabel(
     const TDF_Label& label) const
 {

@@ -61,6 +61,7 @@
 #include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #import <UIKit/UIKit.h>
@@ -990,6 +991,10 @@ void Core3DViewer::release() noexcept {
     _interactiveCallback = {};
     _booleanPreviewStateChangedCallback = {};
     _bevelPreviewStateChangedCallback = {};
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController->shutdown();
+        _transformInspectorMeasurementController.reset();
+    }
     _shapeInteractor.reset();
     _objectInteractor.reset();
     OcctViewer::release();
@@ -1056,6 +1061,17 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
             _shapeInteractor->setBevelPreviewStateChangedCallback(
                 _bevelPreviewStateChangedCallback);
         }
+        if (_transformInspectorMeasurementController == nullptr) {
+            try {
+                _transformInspectorMeasurementController =
+                    std::make_shared<
+                        TransformInspectorMeasurementController>(
+                        myContext,
+                        myDoc);
+            } catch (...) {
+                return false;
+            }
+        }
     }
     return result;
 }
@@ -1106,6 +1122,38 @@ void Core3DViewer::setBevelPreviewStateChangedCallback(
         _shapeInteractor->setBevelPreviewStateChangedCallback(
             _bevelPreviewStateChangedCallback);
     }
+}
+
+TransformInspectorMeasurement
+Core3DViewer::captureTransformInspectorMeasurement(
+    TransformInspectorMeasurementCompletion theCompletion) noexcept
+{
+    if (_transformInspectorMeasurementController == nullptr) {
+        TransformInspectorMeasurement aMeasurement;
+        aMeasurement.state =
+            TransformInspectorMeasurementState::Invalid;
+        return aMeasurement;
+    }
+    return _transformInspectorMeasurementController->capture(
+        _objectInteractor,
+        _shapeInteractor,
+        std::move(theCompletion));
+}
+
+void Core3DViewer::cancelTransformInspectorMeasurement() noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController
+            ->cancelPendingMeasurement();
+    }
+}
+
+TransformInspectorMeasurementPerformanceState
+Core3DViewer::transformInspectorMeasurementPerformanceState() const noexcept
+{
+    return _transformInspectorMeasurementController == nullptr
+        ? TransformInspectorMeasurementPerformanceState()
+        : _transformInspectorMeasurementController->performanceState();
 }
 
 std::shared_ptr<ObjectInteractor> Core3DViewer::getObjectInteractor() {
@@ -1530,6 +1578,63 @@ std::uint64_t
 Core3DViewer::DebugSceneSnapshotMesherInvocationCount() const noexcept
 {
     return _sceneSnapshotBuilder.DebugMesherInvocationCount();
+}
+
+TransformInspectorMeasurementDebugState
+Core3DViewer::DebugTransformInspectorMeasurementState() const noexcept
+{
+    return _transformInspectorMeasurementController == nullptr
+        ? TransformInspectorMeasurementDebugState()
+        : _transformInspectorMeasurementController->debugState();
+}
+
+void Core3DViewer::DebugSetTransformInspectorWorkerBlocked(
+    const Standard_Boolean theBlocked) noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController
+            ->debugSetWorkerBlocked(theBlocked);
+    }
+}
+
+void Core3DViewer::
+DebugSetTransformInspectorForcedMeasurementFailure(
+    const Standard_Boolean theFailure) noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController
+            ->debugSetForcedBoundsFailure(theFailure);
+    }
+}
+
+void Core3DViewer::
+DebugSetMaximumTransformInspectorBRepTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController
+            ->debugSetMaximumBRepTopologyNodes(theLimit);
+    }
+}
+
+void Core3DViewer::
+DebugSetMaximumTransformInspectorTriangleMeshSweepNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController
+            ->debugSetMaximumTriangleMeshSweepNodes(theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetTransformInspectorMeshSweepWatchdog(
+    const Standard_Real theDeadlineMilliseconds,
+    const Standard_Size thePollNodes) noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController->debugSetMeshSweepWatchdog(
+            theDeadlineMilliseconds, thePollNodes);
+    }
 }
 #endif
 

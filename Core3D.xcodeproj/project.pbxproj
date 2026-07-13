@@ -37,6 +37,7 @@
 		180D48C82CD2505200B20035 /* ListOfColors.h in Headers */ = {isa = PBXBuildFile; fileRef = 180D48C72CD2504900B20035 /* ListOfColors.h */; };
 		181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */ = {isa = PBXBuildFile; fileRef = 181242912CC25F96002E5A39 /* Core3DMaterialController.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		181242942CC262A3002E5A39 /* Core3DMaterialController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 181242932CC2629B002E5A39 /* Core3DMaterialController.mm */; };
+		1EA2D4A59925473C9BA22AAD /* Core3DModelCapability.h in Headers */ = {isa = PBXBuildFile; fileRef = 2842F3698BBC4EDFB41A125C /* Core3DModelCapability.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		18247AD72C0FAF2000674D04 /* Core3DManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18247AD62C0FAF2000674D04 /* Core3DManipulator.hpp */; };
 		18247AD82C0FAF2000674D04 /* Core3DManipulator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18247AD52C0FAF2000674D04 /* Core3DManipulator.cpp */; };
 		185461B72C0F299E00C794A8 /* Core3DView.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 185461B52C0F299E00C794A8 /* Core3DView.cpp */; };
@@ -179,6 +180,9 @@
 		71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */; };
 		71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */; };
 		BEA000032F31000100000003 /* BevelOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = BEA000022F31000100000002 /* BevelOperationController.cpp */; };
+		D427676541F245DBAE023481 /* Core3DTransformInspectorSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = 510A255AF18E41269794D211 /* Core3DTransformInspectorSnapshot.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		59729FAFBF8D4B7F9B0BE095 /* Core3DTransformInspectorSnapshot.mm in Sources */ = {isa = PBXBuildFile; fileRef = CCADAE21781B4149A1F3C8F5 /* Core3DTransformInspectorSnapshot.mm */; };
+		EE5FD2E86F2F453EBB5101C3 /* TransformInspectorMeasurementController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 719BDC27E6B74FC1A1977D2C /* TransformInspectorMeasurementController.cpp */; };
 		C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = C03D50030000000000000001 /* Core3DSceneSnapshot.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50040000000000000001 /* Core3DSceneSnapshot.mm */; };
 		C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */; };
@@ -360,6 +364,12 @@
 		32ECC7D92BC9603700770594 /* UIStateChanging.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = UIStateChanging.h; sourceTree = "<group>"; };
 		32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+AvailabilityManager.mm"; sourceTree = "<group>"; };
 		32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+AvailabilityManager.h"; sourceTree = "<group>"; };
+		2842F3698BBC4EDFB41A125C /* Core3DModelCapability.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DModelCapability.h; sourceTree = "<group>"; };
+		510A255AF18E41269794D211 /* Core3DTransformInspectorSnapshot.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DTransformInspectorSnapshot.h; sourceTree = "<group>"; };
+		CCADAE21781B4149A1F3C8F5 /* Core3DTransformInspectorSnapshot.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DTransformInspectorSnapshot.mm; sourceTree = "<group>"; };
+		3F98EB9F02FC40DF96AF3B3F /* Core3DTransformInspectorSnapshotFactory.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DTransformInspectorSnapshotFactory.hpp; sourceTree = "<group>"; };
+		6D90BECEA5924E48A3BDEA1C /* TransformInspectorMeasurementController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = TransformInspectorMeasurementController.hpp; sourceTree = "<group>"; };
+		719BDC27E6B74FC1A1977D2C /* TransformInspectorMeasurementController.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = TransformInspectorMeasurementController.cpp; sourceTree = "<group>"; };
 		713D36DE2CD4F482002E7F21 /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/CoreImage.framework; sourceTree = DEVELOPER_DIR; };
 		C03D50910000000000000001 /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = System/Library/Frameworks/ImageIO.framework; sourceTree = SDKROOT; };
 		71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ConstructorManipulator.cpp; sourceTree = "<group>"; };
@@ -641,8 +651,12 @@
 			children = (
 				326E38B22CE340CD00E20D0C /* OrthoProjectionType.h */,
 				180D48C72CD2504900B20035 /* ListOfColors.h */,
+				2842F3698BBC4EDFB41A125C /* Core3DModelCapability.h */,
 				181242912CC25F96002E5A39 /* Core3DMaterialController.h */,
 				181242932CC2629B002E5A39 /* Core3DMaterialController.mm */,
+				510A255AF18E41269794D211 /* Core3DTransformInspectorSnapshot.h */,
+				CCADAE21781B4149A1F3C8F5 /* Core3DTransformInspectorSnapshot.mm */,
+				3F98EB9F02FC40DF96AF3B3F /* Core3DTransformInspectorSnapshotFactory.hpp */,
 				324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */,
 				322185832BB5D5E100040E84 /* Core3DViewController.h */,
 				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
@@ -669,6 +683,8 @@
 				71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */,
 				BEA000012F31000100000001 /* BevelOperationController.hpp */,
 				BEA000022F31000100000002 /* BevelOperationController.cpp */,
+				6D90BECEA5924E48A3BDEA1C /* TransformInspectorMeasurementController.hpp */,
+				719BDC27E6B74FC1A1977D2C /* TransformInspectorMeasurementController.cpp */,
 				185552D12D01BE8000CCFA2B /* SimpleSingleton.hpp */,
 				185552D32D01BE9000CCFA2B /* Snapping.hpp */,
 				185552D52D01C07000CCFA2B /* Snapping.cpp */,
@@ -768,6 +784,8 @@
 			files = (
 				C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */,
 				C3D1A0012F20000100000001 /* Core3DNativeImportOperation.h in Headers */,
+				1EA2D4A59925473C9BA22AAD /* Core3DModelCapability.h in Headers */,
+				D427676541F245DBAE023481 /* Core3DTransformInspectorSnapshot.h in Headers */,
 				C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */,
 				181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */,
 				18665F032CA2DA8500141E05 /* ModelPart.h in Headers */,
@@ -941,6 +959,8 @@
 			files = (
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
 				C3D1A0022F20000100000002 /* Core3DNativeImportOperation.mm in Sources */,
+				59729FAFBF8D4B7F9B0BE095 /* Core3DTransformInspectorSnapshot.mm in Sources */,
+				EE5FD2E86F2F453EBB5101C3 /* TransformInspectorMeasurementController.cpp in Sources */,
 				C3D1B0012F21000100000001 /* Core3DGLBPreflight.mm in Sources */,
 				C3D1B0022F21000100000002 /* Core3DGLBReader.mm in Sources */,
 				C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */,

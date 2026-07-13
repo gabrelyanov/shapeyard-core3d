@@ -159,6 +159,14 @@ public:
   //! marker/geometry mismatch.
   Standard_EXPORT OcctGeometryRepresentation GeometryRepresentationForLabel(
       const TDF_Label& label) const;
+  //! Read only the persisted representation marker after constant-time
+  //! definition-label checks. This deliberately does not reclassify stored
+  //! geometry and is therefore suitable only for hot paths whose document was
+  //! already admitted by the normal load/import/mutation validation gates.
+  //! Missing markers are returned as LegacyUnknown; malformed markers or
+  //! non-definition labels return Invalid.
+  Standard_EXPORT OcctGeometryRepresentation StoredGeometryRepresentationForLabel(
+      const TDF_Label& label) const;
   //! Validate one definition's marker against its stored geometry. A missing
   //! or explicit LegacyUnknown marker is accepted only for legacy BRep.
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentationForLabel(

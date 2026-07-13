@@ -394,7 +394,8 @@ namespace core3d {
 
 	void ObjectInteractor::detachManipulator(Handle(AIS_InteractiveObject) fromObject) {
 		if (!_manipulator.IsNull()) {
-			if (_manipulator->HasActiveTransformation()) {
+			if (_manipulatorGestureActive
+				|| _manipulator->HasActiveTransformation()) {
 				cancelInteraction();
 			}
 			_manipulator->Detach(fromObject);
@@ -405,7 +406,8 @@ namespace core3d {
 
 	void ObjectInteractor::detachManipulator(bool updateViewer) {
 		if (!_manipulator.IsNull()) {
-			if (_manipulator->HasActiveTransformation()) {
+			if (_manipulatorGestureActive
+				|| _manipulator->HasActiveTransformation()) {
 				cancelInteraction();
 			}
 			_manipulator->Detach();
@@ -416,7 +418,9 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::	selectAll() {
-		if (!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) {
+		if (!_manipulator.IsNull()
+			&& (_manipulatorGestureActive
+				|| _manipulator->HasActiveTransformation())) {
 			cancelInteraction();
 		}
 		AIS_ListOfInteractive objects;
@@ -925,7 +929,9 @@ namespace core3d {
 	}
 
     void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
-		if (!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) {
+		if (!_manipulator.IsNull()
+			&& (_manipulatorGestureActive
+				|| _manipulator->HasActiveTransformation())) {
 			cancelInteraction();
 		}
 		if (ManipulatorRequiresBRepModeling(type)
@@ -1048,6 +1054,7 @@ namespace core3d {
             myContext->UpdateCurrentViewer();
             if(_manipulator->HasActiveMode()) {
                 _manipulator->StartTransform(theX, theY, myView, myContext);
+				_manipulatorGestureActive = true;
                 return true;
             }
         }
@@ -1055,6 +1062,10 @@ namespace core3d {
     }
 
     void ObjectInteractor::finishInteraction() {
+		struct GestureStateReset final {
+			bool& state;
+			~GestureStateReset() noexcept { state = false; }
+		} aGestureStateReset{_manipulatorGestureActive};
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
 				_manipulator,
@@ -1221,6 +1232,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
+		_manipulatorGestureActive = false;
         if(!_manipulator.IsNull() && _manipulator->IsAttached()) {
 			_manipulator->StopTransform(Standard_False);
 			for (const auto& cachedShape : _manipulator->cachedShapes()) {
@@ -1240,6 +1252,10 @@ namespace core3d {
 
     const bool ObjectInteractor::isManipulatorAttached() const {
         return !_manipulator.IsNull() && _manipulator->IsAttached();
+    }
+
+    const bool ObjectInteractor::isManipulatorGestureActive() const {
+        return _manipulatorGestureActive;
     }
 
     const bool ObjectInteractor::isManipulatorInteractionActive() const {

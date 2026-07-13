@@ -14,6 +14,8 @@
 #import <Core3D/Core3DNativeExportOperation.h>
 #import <Core3D/OrthoProjectionType.h>
 #import <Core3D/Core3DMaterialController.h>
+#import <Core3D/Core3DModelCapability.h>
+#import <Core3D/Core3DTransformInspectorSnapshot.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -36,29 +38,6 @@ typedef NS_ENUM(NSInteger, Core3DViewportRenderingAPI) {
     Core3DViewportRenderingAPIOpenGLES3 = 3,
 };
 
-//! Stable feature policy for the selected model representation. These bit
-//! values are public API and must never be renumbered or reused.
-typedef NS_OPTIONS(NSUInteger, Core3DModelCapability) {
-    Core3DModelCapabilityNone = 0,
-    Core3DModelCapabilityObjectSelection = 1UL << 0,
-    Core3DModelCapabilitySubshapeSelection = 1UL << 1,
-    Core3DModelCapabilityTranslate = 1UL << 2,
-    Core3DModelCapabilityRotate = 1UL << 3,
-    Core3DModelCapabilityUniformScale = 1UL << 4,
-    Core3DModelCapabilityNonuniformScale = 1UL << 5,
-    Core3DModelCapabilityDelete = 1UL << 6,
-    Core3DModelCapabilityDuplicate = 1UL << 7,
-    Core3DModelCapabilityMirror = 1UL << 8,
-    Core3DModelCapabilityBoolean = 1UL << 9,
-    Core3DModelCapabilityChamfer = 1UL << 10,
-    Core3DModelCapabilityExtrusion = 1UL << 11,
-    Core3DModelCapabilityMaterial = 1UL << 12,
-    Core3DModelCapabilityExportOBJ = 1UL << 13,
-    Core3DModelCapabilityExportSTL = 1UL << 14,
-    Core3DModelCapabilityExportGLB = 1UL << 15,
-    Core3DModelCapabilityExportSTEP = 1UL << 16,
-};
-
 #ifdef DEBUG
 //! Bounded standalone BinXCAF documents used to exercise the persistent
 //! definition-owned geometry representation contract through production load.
@@ -76,6 +55,19 @@ typedef NS_ENUM(NSInteger, Core3DDebugGeometryFixtureMode) {
     Core3DDebugGeometryFixtureTriangleMeshMarkerOnMixedDefinition,
     Core3DDebugGeometryFixtureUnknownMarkerOnBRep,
     Core3DDebugGeometryFixtureOrphanMarker,
+    //! Valid admitted mesh with one finite node not referenced by its triangle.
+    //! Used to lock the inspector's full stored-vertex-table bounds contract.
+    Core3DDebugGeometryFixtureMarkedTriangleMeshWithUnreferencedOutlier,
+    //! Valid admitted BRep with a persisted definition-owned uniform scale.
+    //! The fixture locks scale separation from authoritative local bounds.
+    Core3DDebugGeometryFixtureMarkedBRepWithUniformScale,
+    //! Marked BRep with a finite, nonzero persisted scale below the inspector's
+    //! validity tolerance. Production loading can construct it safely, while
+    //! the checked inspector must report Invalid.
+    Core3DDebugGeometryFixtureMarkedBRepWithCorruptTransform,
+    //! Valid admitted mesh whose authoritative face triangulation owns a
+    //! nonidentity TopLoc_Location that must be applied to every stored node.
+    Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation,
 };
 #endif
 
@@ -240,10 +232,48 @@ typedef struct {
 - (Core3DScenePresentationOverlaySnapshot *_Nullable)
     captureScenePresentationOverlay;
 
+//! Capture authoritative single-selection transform values. Main-thread only.
+//! A BRep cache miss returns Measuring immediately and retains `completion`
+//! for one terminal main-thread callback. Every other immediate state is
+//! terminal and never invokes the optional block. A newer request or explicit
+//! cancellation suppresses an older callback.
+- (Core3DTransformInspectorSnapshot *)
+    requestTransformInspectorSnapshotWithCompletion:
+        (Core3DTransformInspectorCompletion _Nullable)completion
+    NS_SWIFT_NAME(requestTransformInspectorSnapshot(completion:));
+
+//! Invalidate the current inspector request and suppress its callback.
+//! Already-running exact bounds work may finish privately and seed the cache.
+- (void)cancelTransformInspectorSnapshotRequest
+    NS_SWIFT_NAME(cancelTransformInspectorSnapshotRequest());
+
+//! Release-safe counters for opt-in signed-device performance qualification.
+//! Values are observational only and never alter inspector admission policy.
+- (NSDictionary<NSString *, NSNumber *> *)
+    transformInspectorPerformanceState;
+
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
 #ifdef DEBUG
+//! Bounded counters and timings from the production inspector measurement
+//! controller. Values are intended for deterministic XCTest evidence only.
+- (NSDictionary<NSString *, NSNumber *> *)
+    debugTransformInspectorMeasurementState;
+//! Pause or release the inspector's serial bounds worker.
+- (void)debugSetTransformInspectorWorkerBlocked:(BOOL)blocked;
+//! Force admitted BRep bounds work to return MeasurementFailed.
+- (void)debugSetTransformInspectorForcedMeasurementFailure:(BOOL)failure;
+//! Lower the production BRep topology-copy admission cap for fail-closed tests.
+- (void)debugSetMaximumTransformInspectorBRepTopologyNodes:(NSUInteger)limit;
+//! Lower the production TriangleMesh node admission cap for deterministic tests.
+- (void)debugSetMaximumTransformInspectorTriangleMeshSweepNodes:
+    (NSUInteger)limit;
+//! Override the normally-disabled DEBUG mesh watchdog for deterministic tests.
+- (void)debugSetTransformInspectorMeshSweepWatchdogDeadlineMilliseconds:
+    (double)deadlineMilliseconds
+    pollNodes:(NSUInteger)pollNodes;
+
 //! Actual native enum values backing the persistent representation schema.
 + (NSDictionary<NSString *, NSNumber *> *)
     debugGeometryRepresentationSchemaValues;
