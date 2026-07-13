@@ -52,6 +52,31 @@ namespace {
 
 constexpr char kCbfMagic[] = "BINFILE";
 
+bool TryBooleanActionForGizmo(
+    const PrimitiveGizmoType theType,
+    BooleanAction& theAction) noexcept
+{
+    switch (theType) {
+        case PrimitiveGizmoTypeSubtract:
+            theAction = BooleanAction::BooleanSubtract;
+            return true;
+        case PrimitiveGizmoTypeUnion:
+            theAction = BooleanAction::BooleanUnion;
+            return true;
+        case PrimitiveGizmoTypeIntersect:
+            theAction = BooleanAction::BooleanIntersect;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsBooleanGizmo(const PrimitiveGizmoType theType) noexcept
+{
+    BooleanAction anAction = BooleanAction::BooleanSubtract;
+    return TryBooleanActionForGizmo(theType, anAction);
+}
+
 BOOL HasCbfMagic(NSData *data) {
     constexpr NSUInteger magicLength = sizeof(kCbfMagic) - 1;
     return data != nil
@@ -473,8 +498,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             (void)[self restoreBooleanActionForRetainedGizmoType:
                 booleanGizmoType];
         } else if (didResolveBoolean
-                   && (booleanGizmoType == PrimitiveGizmoTypeSubtract
-                   || booleanGizmoType == PrimitiveGizmoTypeUnion)) {
+                   && IsBooleanGizmo(booleanGizmoType)) {
             if (_delegate != nil
                 && [_delegate respondsToSelector:
                     @selector(viewerDidFailToRetainBooleanMode:)]) {
@@ -1100,8 +1124,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)undo {
 	PrimitiveGizmoType currentType = [self getGizmoType];
-	const BOOL wasBoolean = currentType == PrimitiveGizmoTypeSubtract
-		|| currentType == PrimitiveGizmoTypeUnion;
+	const BOOL wasBoolean = IsBooleanGizmo(currentType);
 	const std::shared_ptr<ShapeInteractor> shapeInteractor =
 		_viewer->getShapeInteractor();
 	if (shapeInteractor != nullptr
@@ -1114,13 +1137,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		[self requestRender];
 		return;
 	}
-	if (currentType == PrimitiveGizmoTypeSubtract) {
-		if (![self retireBooleanActionForGizmoType:currentType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeUnion) {
+	if (IsBooleanGizmo(currentType)) {
 		if (![self retireBooleanActionForGizmoType:currentType]) {
 			[self checkSelections];
 			[self requestRender];
@@ -1143,8 +1160,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (void)redo {
 	PrimitiveGizmoType currentType = [self getGizmoType];
-	const BOOL wasBoolean = currentType == PrimitiveGizmoTypeSubtract
-		|| currentType == PrimitiveGizmoTypeUnion;
+	const BOOL wasBoolean = IsBooleanGizmo(currentType);
 	const std::shared_ptr<ShapeInteractor> shapeInteractor =
 		_viewer->getShapeInteractor();
 	if (shapeInteractor != nullptr
@@ -1157,13 +1173,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		[self requestRender];
 		return;
 	}
-	if (currentType == PrimitiveGizmoTypeSubtract) {
-		if (![self retireBooleanActionForGizmoType:currentType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeUnion) {
+	if (IsBooleanGizmo(currentType)) {
 		if (![self retireBooleanActionForGizmoType:currentType]) {
 			[self checkSelections];
 			[self requestRender];
@@ -1189,13 +1199,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	PrimitiveGizmoType currentType = [self getGizmoType];
 	if (currentType == PrimitiveGizmoTypeChamfer) {
 		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
-	} else if (currentType == PrimitiveGizmoTypeSubtract) {
-		if (![self retireBooleanActionForGizmoType:currentType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeUnion) {
+	} else if (IsBooleanGizmo(currentType)) {
 		if (![self retireBooleanActionForGizmoType:currentType]) {
 			[self checkSelections];
 			[self requestRender];
@@ -1276,8 +1280,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			_viewer->getObjectInteractor()->setManipulatorType(
 				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
 		}
-		if (type == PrimitiveGizmoTypeSubtract
-			|| type == PrimitiveGizmoTypeUnion) {
+		if (IsBooleanGizmo(type)) {
 			(void)[self restoreBooleanActionForRetainedGizmoType:type];
 		}
 		[self requestRender];
@@ -1289,13 +1292,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	// that the resolution step replaces or removes.
 	if (previousType == PrimitiveGizmoTypeChamfer) {
 		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
-	} else if (previousType == PrimitiveGizmoTypeSubtract) {
-		if (![self retireBooleanActionForGizmoType:previousType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (previousType == PrimitiveGizmoTypeUnion) {
+	} else if (IsBooleanGizmo(previousType)) {
 		if (![self retireBooleanActionForGizmoType:previousType]) {
 			[self checkSelections];
 			[self requestRender];
@@ -1330,6 +1327,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         case PrimitiveGizmoTypeUnion:
             manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
             break;
+        case PrimitiveGizmoTypeIntersect:
+            manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect;
+            break;
         case PrimitiveGizmoTypeMirror:
             manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeMirror;
             break;
@@ -1351,11 +1351,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	}
     if (type == PrimitiveGizmoTypeChamfer) {
         _viewer->getShapeInteractor()->saveSelectionEdges();
-	} else if (type == PrimitiveGizmoTypeSubtract || type == PrimitiveGizmoTypeUnion) {
+	} else if (IsBooleanGizmo(type)) {
 			Standard_Boolean forceActor = (type == PrimitiveGizmoTypeSubtract);
-			const BooleanAction action = type == PrimitiveGizmoTypeSubtract
-				? BooleanAction::BooleanSubtract
-				: BooleanAction::BooleanUnion;
+			BooleanAction action = BooleanAction::BooleanSubtract;
+			if (!TryBooleanActionForGizmo(type, action)) {
+				[self requestRender];
+				return;
+			}
 			if (_viewer->getObjectInteractor()->beginBoolean(action)) {
 				_viewer->getObjectInteractor()->fillSelectedState(
 					forceActor,
@@ -1390,6 +1392,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
             type = PrimitiveGizmoTypeUnion;
+            break;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
+            type = PrimitiveGizmoTypeIntersect;
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
             type = PrimitiveGizmoTypeMirror;
@@ -1513,6 +1518,27 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         && !anInteractor->hasActiveBoolean(BooleanAction::BooleanUnion);
 }
 
+- (BOOL) applyIntersect {
+    const BooleanApplyResult result =
+        _viewer->getObjectInteractor()->applyBoolean(
+            BooleanAction::BooleanIntersect);
+    if (result == BooleanApplyResult::AppliedNeedsDocumentRedraw) {
+        _viewer->redrawDocument();
+    }
+    [self requestRender];
+    return result != BooleanApplyResult::NoChange;
+}
+
+- (BOOL) cancelIntersect {
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    anInteractor->cancelBoolean(BooleanAction::BooleanIntersect);
+    [self requestRender];
+    return !anInteractor->hasUnresolvedBoolean()
+        && !anInteractor->hasActiveBoolean(
+            BooleanAction::BooleanIntersect);
+}
+
 - (BOOL) canApplyBoolean {
     return _viewer->getObjectInteractor()->canApplyBoolean();
 }
@@ -1523,29 +1549,22 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         return NO;
     }
     const PrimitiveGizmoType currentType = [self getGizmoType];
-    if (currentType == PrimitiveGizmoTypeSubtract) {
-        return _viewer->getObjectInteractor()->hasActiveBoolean(
-            BooleanAction::BooleanSubtract);
-    }
-    if (currentType == PrimitiveGizmoTypeUnion) {
-        return _viewer->getObjectInteractor()->hasActiveBoolean(
-            BooleanAction::BooleanUnion);
+    BooleanAction action = BooleanAction::BooleanSubtract;
+    if (TryBooleanActionForGizmo(currentType, action)) {
+        return _viewer->getObjectInteractor()->hasActiveBoolean(action);
     }
     return NO;
 }
 
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type {
-    if (type != PrimitiveGizmoTypeSubtract
-        && type != PrimitiveGizmoTypeUnion) {
+    BooleanAction action = BooleanAction::BooleanSubtract;
+    if (!TryBooleanActionForGizmo(type, action)) {
         return YES;
     }
     if (_viewer == nullptr
         || _viewer->getObjectInteractor() == nullptr) {
         return NO;
     }
-    const BooleanAction action = type == PrimitiveGizmoTypeSubtract
-        ? BooleanAction::BooleanSubtract
-        : BooleanAction::BooleanUnion;
     if (_viewer->getObjectInteractor()->hasActiveBoolean(action)) {
         return YES;
     }
@@ -1572,17 +1591,14 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type {
-    if (type != PrimitiveGizmoTypeSubtract
-        && type != PrimitiveGizmoTypeUnion) {
+    BooleanAction action = BooleanAction::BooleanSubtract;
+    if (!TryBooleanActionForGizmo(type, action)) {
         return YES;
     }
     if (_viewer == nullptr
         || _viewer->getObjectInteractor() == nullptr) {
         return NO;
     }
-    const BooleanAction action = type == PrimitiveGizmoTypeSubtract
-        ? BooleanAction::BooleanSubtract
-        : BooleanAction::BooleanUnion;
     const std::shared_ptr<ObjectInteractor> anInteractor =
         _viewer->getObjectInteractor();
     anInteractor->cancelBoolean(action);

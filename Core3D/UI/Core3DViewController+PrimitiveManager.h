@@ -23,6 +23,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (Boundaries)getExtrusionBoundaries;
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+- (void)applyIntersect;
+- (void)cancelIntersect;
 - (void)undo;
 - (void)redo;
 - (void)completeOperationInteraction;

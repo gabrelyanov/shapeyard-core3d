@@ -105,6 +105,8 @@ typedef struct {
 - (void)cancelSubtract;
 - (void)applyUnion;
 - (void)cancelUnion;
+- (void)applyIntersect;
+- (void)cancelIntersect;
 - (void)undo;
 - (void)redo;
 - (NSString *_Nullable)getCoreInfoText;
@@ -272,6 +274,10 @@ typedef struct {
 //! Real asynchronous Boolean worker/state counters. State values are
 //! Selecting=0, Computing=1, Ready=2, Committing=3, Failed=4.
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState;
+//! Pure-volume result admission fixture. Every returned value must be true:
+//! solids and solid-only compounds are accepted; a loose face is rejected.
++ (NSDictionary<NSString *, NSNumber *> *)
+    debugBooleanResultDimensionValidation;
 //! Pause/release the process-global serial worker before BOP execution.
 - (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked;
 //! Lower production admission limits for deterministic fail-closed tests.

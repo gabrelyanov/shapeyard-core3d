@@ -91,6 +91,7 @@ typedef NS_ENUM(NSInteger, Core3DScenePresentationOverlayKind) {
     Core3DScenePresentationOverlayKindMirrorPreview,
     Core3DScenePresentationOverlayKindBooleanSubtractPreview,
     Core3DScenePresentationOverlayKindBooleanUnionPreview,
+    Core3DScenePresentationOverlayKindBooleanIntersectPreview,
 };
 
 typedef NS_ENUM(NSInteger, Core3DSceneElementKind) {

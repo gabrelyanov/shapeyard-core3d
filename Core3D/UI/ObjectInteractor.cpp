@@ -180,6 +180,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
 					return true;
@@ -197,6 +198,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
 					// These modes acquire and validate their BRep source after
 					// the tool is entered.  Empty selection is therefore a valid
@@ -513,7 +515,9 @@ namespace core3d {
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract;
             const bool isUnion = _manipulatorType
                 == PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
-            if (isSubtract || isUnion) {
+            const bool isIntersect = _manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect;
+            if (isSubtract || isUnion || isIntersect) {
                 if (hasMirrorPreview) {
                     return PresentationOverlayCaptureStatus::Unsafe;
                 }
@@ -526,7 +530,10 @@ namespace core3d {
                             != BooleanAction::BooleanSubtract)
                     || (isUnion
                         && theBooleanPreview.action
-                            != BooleanAction::BooleanUnion)) {
+                            != BooleanAction::BooleanUnion)
+                    || (isIntersect
+                        && theBooleanPreview.action
+                            != BooleanAction::BooleanIntersect)) {
                     theBooleanPreview = {};
                     return PresentationOverlayCaptureStatus::Unsafe;
                 }
@@ -1372,12 +1379,17 @@ namespace core3d {
 		const std::vector<Handle(AIS_InteractiveObject)>& subjects,
 		BooleanAction action) noexcept {
 		try {
-			if ((action == BooleanAction::BooleanUnion && !actors.empty())
+			const bool isSingleResult =
+				action == BooleanAction::BooleanUnion
+				|| action == BooleanAction::BooleanIntersect;
+			if ((action != BooleanAction::BooleanSubtract
+					&& !isSingleResult)
+				|| (isSingleResult && !actors.empty())
 				|| actors.size() + subjects.size()
 					> BooleanOperationController::kMaxSourceOperands
 				|| (action == BooleanAction::BooleanSubtract
 					&& (actors.empty() || subjects.empty()))
-				|| (action == BooleanAction::BooleanUnion
+				|| (isSingleResult
 					&& subjects.size() < 2)) {
 				return Standard_False;
 			}

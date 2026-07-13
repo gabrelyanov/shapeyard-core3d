@@ -105,6 +105,7 @@ bool CapabilitiesAllowGizmo(
             return has(Core3DModelCapabilityChamfer);
         case PrimitiveGizmoTypeSubtract:
         case PrimitiveGizmoTypeUnion:
+        case PrimitiveGizmoTypeIntersect:
             return has(Core3DModelCapabilityBoolean);
         case PrimitiveGizmoTypeMirror:
             return has(Core3DModelCapabilityMirror);
@@ -116,6 +117,12 @@ bool CapabilitiesAllowGizmo(
             return false;
     }
     return false;
+}
+
+bool Core3DIsBooleanGizmo(const PrimitiveGizmoType type) noexcept {
+    return type == PrimitiveGizmoTypeSubtract
+        || type == PrimitiveGizmoTypeUnion
+        || type == PrimitiveGizmoTypeIntersect;
 }
 
 Core3DModelCapability DocumentExportCapabilities(
@@ -260,8 +267,18 @@ Core3DModelCapability DocumentExportCapabilities(
 }
 
 - (NSArray<NSNumber *> *)availableGizmoTypes {
-    const Core3DModelCapability capabilities =
-        self.selectedModelCapabilities;
+    // Boolean previews deliberately suppress their committed source
+    // presentations. AIS therefore has no document-editable live selection
+    // while the retained operation is computing or ready, but the operation
+    // was admitted from a validated BRep-only selection. Keep its tool rail
+    // (and, critically, Apply/Cancel) available until it resolves.
+    const BOOL hasRetainedBoolean =
+        Core3DIsBooleanGizmo(_currentGizmoType)
+        && GLController != nil
+        && [GLController hasActiveBoolean];
+    const Core3DModelCapability capabilities = hasRetainedBoolean
+        ? kBRepCapabilities
+        : self.selectedModelCapabilities;
     if (capabilities == Core3DModelCapabilityNone
         || _availableGizmoTypes.count == 0) {
         return @[];

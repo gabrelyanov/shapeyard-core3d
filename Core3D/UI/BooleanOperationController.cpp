@@ -6,6 +6,7 @@
 #include "BooleanOperationController.hpp"
 
 #include <AIS_Shape.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -67,6 +68,21 @@ namespace {
 
 constexpr Standard_Real kFuzzyValue = 1.0e-3;
 std::atomic<std::uint64_t> gBooleanControllerEpoch{0};
+
+Standard_Boolean IsSupportedBooleanAction(
+    const BooleanAction theAction) noexcept
+{
+    return theAction == BooleanAction::BooleanSubtract
+        || theAction == BooleanAction::BooleanUnion
+        || theAction == BooleanAction::BooleanIntersect;
+}
+
+Standard_Boolean IsSingleResultBooleanAction(
+    const BooleanAction theAction) noexcept
+{
+    return theAction == BooleanAction::BooleanUnion
+        || theAction == BooleanAction::BooleanIntersect;
+}
 
 Standard_Boolean IsBRepModelingLabel(
     const Handle(OcctDocument)& theDocument,
@@ -173,6 +189,85 @@ Standard_Boolean AccumulateBoundedTopology(
     return Standard_True;
 }
 
+Standard_Boolean HasOnlySolidBooleanResultBranches(
+    const TopoDS_Shape& theShape,
+    const Standard_Size theMaximumTopologyNodes)
+{
+    if (theShape.IsNull() || theMaximumTopologyNodes == 0) {
+        return Standard_False;
+    }
+
+    // Boolean modeling commits volumes. A compound that merely contains one
+    // valid solid is not sufficient: OCCT can also return loose shells, faces,
+    // wires, or edges alongside it. Traverse only the result's container
+    // hierarchy and stop at solids so their normal boundary topology remains
+    // valid, while any lower-dimensional sibling branch fails closed.
+    std::vector<TopoDS_Shape> aStack;
+    aStack.push_back(theShape);
+    TopTools_IndexedMapOfShape aVisited;
+    Standard_Size aShapeCount = 0;
+    Standard_Boolean hasSolid = Standard_False;
+    while (!aStack.empty()) {
+        const TopoDS_Shape aCurrent = aStack.back();
+        aStack.pop_back();
+        if (aVisited.Contains(aCurrent)) {
+            continue;
+        }
+        aVisited.Add(aCurrent);
+        if (++aShapeCount > theMaximumTopologyNodes) {
+            return Standard_False;
+        }
+
+        switch (aCurrent.ShapeType()) {
+            case TopAbs_SOLID:
+                hasSolid = Standard_True;
+                break;
+            case TopAbs_COMPOUND: {
+                Standard_Boolean hasChild = Standard_False;
+                for (TopoDS_Iterator aChild(
+                         aCurrent, Standard_True, Standard_True);
+                     aChild.More(); aChild.Next()) {
+                    hasChild = Standard_True;
+                    if (!aVisited.Contains(aChild.Value())) {
+                        if (aStack.size() >= theMaximumTopologyNodes) {
+                            return Standard_False;
+                        }
+                        aStack.push_back(aChild.Value());
+                    }
+                }
+                if (!hasChild) {
+                    return Standard_False;
+                }
+                break;
+            }
+            case TopAbs_COMPSOLID: {
+                Standard_Boolean hasChild = Standard_False;
+                for (TopoDS_Iterator aChild(
+                         aCurrent, Standard_True, Standard_True);
+                     aChild.More(); aChild.Next()) {
+                    hasChild = Standard_True;
+                    if (aChild.Value().ShapeType() != TopAbs_SOLID) {
+                        return Standard_False;
+                    }
+                    if (!aVisited.Contains(aChild.Value())) {
+                        if (aStack.size() >= theMaximumTopologyNodes) {
+                            return Standard_False;
+                        }
+                        aStack.push_back(aChild.Value());
+                    }
+                }
+                if (!hasChild) {
+                    return Standard_False;
+                }
+                break;
+            }
+            default:
+                return Standard_False;
+        }
+    }
+    return hasSolid;
+}
+
 Standard_Boolean IsValidSolidBooleanResult(
     const TopoDS_Shape& theShape,
     const Standard_Size theMaximumTopologyNodes,
@@ -192,7 +287,9 @@ Standard_Boolean IsValidSolidBooleanResult(
                 theAggregateTopologyNodes,
                 &theAggregateSolidCount,
                 theMaximumSolidCount)
-            || theAggregateSolidCount == aSolidCountBefore) {
+            || theAggregateSolidCount == aSolidCountBefore
+            || !HasOnlySolidBooleanResultBranches(
+                theShape, theMaximumTopologyNodes)) {
             return Standard_False;
         }
         BRepCheck_Analyzer anAnalyzer(theShape, Standard_True);
@@ -553,6 +650,12 @@ private:
                             aRawNodes)) {
                         return aResult;
                     }
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
                     aCut.SimplifyResult();
                     if (wasCancelled()) {
                         aResult.outcome =
@@ -570,7 +673,7 @@ private:
                     }
                     aResult.results.push_back(aCut.Shape());
                 }
-            } else {
+            } else if (theRequest.action == BooleanAction::BooleanUnion) {
                 if (!theRequest.actors.empty()
                     || theRequest.subjects.size() < 2) {
                     return aResult;
@@ -607,6 +710,11 @@ private:
                         aRawNodes)) {
                     return aResult;
                 }
+                if (wasCancelled()) {
+                    aResult.outcome =
+                        BooleanPreviewWorkerOutcome::Cancelled;
+                    return aResult;
+                }
                 aFuse.SimplifyResult();
                 if (wasCancelled()) {
                     aResult.outcome =
@@ -622,6 +730,85 @@ private:
                     return aResult;
                 }
                 aResult.results.push_back(aFuse.Shape());
+            } else if (theRequest.action
+                       == BooleanAction::BooleanIntersect) {
+                if (!theRequest.actors.empty()
+                    || theRequest.subjects.size() < 2) {
+                    return aResult;
+                }
+
+                // OCCT Common is defined between argument and tool groups.
+                // Fold deterministically so three or more subjects mean a
+                // true N-way intersection rather than an intersection of two
+                // unions. Each intermediate is bounded and validated before
+                // it can become the next operand.
+                TopoDS_Shape aCurrent = theRequest.subjects.front();
+                for (std::size_t anIndex = 1;
+                     anIndex < theRequest.subjects.size(); ++anIndex) {
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    TopTools_ListOfShape anArguments;
+                    TopTools_ListOfShape aTools;
+                    anArguments.Append(aCurrent);
+                    aTools.Append(theRequest.subjects[anIndex]);
+                    BRepAlgoAPI_Common aCommon;
+                    aCommon.SetRunParallel(Standard_False);
+                    aCommon.SetNonDestructive(Standard_True);
+                    aCommon.SetArguments(anArguments);
+                    aCommon.SetTools(aTools);
+                    aCommon.SetFuzzyValue(kFuzzyValue);
+                    aCommon.SetUseOBB(Standard_True);
+                    aCommon.SetCheckInverted(Standard_True);
+                    aCommon.Build(aProgress->Start());
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    if (!aCommon.IsDone()) {
+                        return aResult;
+                    }
+                    Standard_Size aRawNodes = 0;
+                    if (!AccumulateBoundedTopology(
+                            aCommon.Shape(),
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultTopologyNodes,
+                            aRawNodes)) {
+                        return aResult;
+                    }
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    aCommon.SimplifyResult();
+                    if (wasCancelled()) {
+                        aResult.outcome =
+                            BooleanPreviewWorkerOutcome::Cancelled;
+                        aResult.results.clear();
+                        return aResult;
+                    }
+                    Standard_Size aStepResultNodes = 0;
+                    Standard_Size aStepResultSolids = 0;
+                    if (!IsValidSolidBooleanResult(
+                            aCommon.Shape(),
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids,
+                            aStepResultNodes,
+                            aStepResultSolids)) {
+                        return aResult;
+                    }
+                    aCurrent = aCommon.Shape();
+                }
+                aResult.results.push_back(aCurrent);
+            } else {
+                return aResult;
             }
             if (wasCancelled()) {
                 aResult.outcome = BooleanPreviewWorkerOutcome::Cancelled;
@@ -688,7 +875,8 @@ Standard_Boolean BooleanOperationController::begin(
     const BooleanAction theAction) noexcept
 {
     try {
-        if (myContext.IsNull() || myDoc.IsNull()) {
+        if (!IsSupportedBooleanAction(theAction)
+            || myContext.IsNull() || myDoc.IsNull()) {
             return Standard_False;
         }
         if (_activeAction.has_value()) {
@@ -723,7 +911,8 @@ Standard_Boolean BooleanOperationController::begin(
 Standard_Boolean BooleanOperationController::actionMatches(
     const BooleanAction theAction) const noexcept
 {
-    return _activeAction.has_value() && *_activeAction == theAction;
+    return IsSupportedBooleanAction(theAction)
+        && _activeAction.has_value() && *_activeAction == theAction;
 }
 
 Standard_Boolean BooleanOperationController::canApply() const noexcept
@@ -754,6 +943,19 @@ void BooleanOperationController::notifyPreviewStateChanged() noexcept
 }
 
 #ifdef DEBUG
+Standard_Boolean BooleanOperationController::debugValidateSolidResult(
+    const TopoDS_Shape& theShape) noexcept
+{
+    Standard_Size anAggregateTopologyNodes = 0;
+    Standard_Size anAggregateSolidCount = 0;
+    return IsValidSolidBooleanResult(
+        theShape,
+        kMaxResultTopologyNodes,
+        kMaxResultSolids,
+        anAggregateTopologyNodes,
+        anAggregateSolidCount);
+}
+
 BooleanPreviewDebugState
 BooleanOperationController::debugPreviewState() const noexcept
 {
@@ -848,7 +1050,7 @@ Standard_Boolean BooleanOperationController::hasActiveOperation(
 
 Standard_Boolean BooleanOperationController::hasSelectionState() const noexcept
 {
-    return !_selectionMap.empty() || !_unionTrialResult.IsNull();
+    return !_selectionMap.empty() || !_singleTrialResult.IsNull();
 }
 
 Standard_Boolean BooleanOperationController::hasUnresolvedState() const noexcept
@@ -859,7 +1061,8 @@ Standard_Boolean BooleanOperationController::hasUnresolvedState() const noexcept
 Standard_Boolean BooleanOperationController::isSelectionFrozen() const noexcept
 {
     return _selectionFrozen && canApply()
-        && actionMatches(BooleanAction::BooleanUnion);
+        && _activeAction.has_value()
+        && IsSingleResultBooleanAction(*_activeAction);
 }
 
 void BooleanOperationController::markInvalid() noexcept
@@ -940,8 +1143,8 @@ Standard_Boolean BooleanOperationController::pruneOwnedPresentations() noexcept
     for (const Handle(AIS_InteractiveObject)& anOwned :
          _ownedPresentations) {
         bool isLive = !anOwned.IsNull()
-            && (!_unionTrialResult.IsNull()
-                && anOwned == _unionTrialResult);
+            && (!_singleTrialResult.IsNull()
+                && anOwned == _singleTrialResult);
         if (!isLive) {
             isLive = _selectionMap.find(anOwned) != _selectionMap.end();
         }
@@ -1099,7 +1302,7 @@ Standard_Boolean BooleanOperationController::setSelectionState(
         || theObject.IsNull()
         || (theType != BooleanSelectionType::Actor
             && theType != BooleanSelectionType::Subject)
-        || (theAction == BooleanAction::BooleanUnion
+        || (IsSingleResultBooleanAction(theAction)
             && theType != BooleanSelectionType::Subject)
         || _selectionMap.size() >= kMaxSourceOperands) {
         return Standard_False;
@@ -1382,7 +1585,7 @@ std::string BooleanOperationController::currentSelectionFingerprint(
                 != _selectionMap.size()
             || (theAction == BooleanAction::BooleanSubtract
                 && (anActors.empty() || aSubjects.empty()))
-            || (theAction == BooleanAction::BooleanUnion
+            || (IsSingleResultBooleanAction(theAction)
                 && (!anActors.empty() || aSubjects.size() < 2))) {
             return {};
         }
@@ -1692,7 +1895,7 @@ Standard_Boolean BooleanOperationController::visualApply(
         if (!hasCompleteSubjects
             || (theAction == BooleanAction::BooleanSubtract
                 && (_actorIOArray.empty() || _actedIOArray.empty()))
-            || (theAction == BooleanAction::BooleanUnion
+            || (IsSingleResultBooleanAction(theAction)
                 && (!_actorIOArray.empty() || _actedIOArray.size() < 2))
             || _actorIOArray.size() + _actedIOArray.size()
                 > kMaxSourceOperands) {
@@ -1752,11 +1955,14 @@ void BooleanOperationController::acceptWorkerResult(
         return;
     }
 
-    const Standard_Boolean didInstall =
-        theResult.action == BooleanAction::BooleanSubtract
-            ? installSubtractPreview(theResult.results)
-            : theResult.results.size() == 1
-                && installUnionPreview(theResult.results.front());
+    Standard_Boolean didInstall = Standard_False;
+    if (theResult.action == BooleanAction::BooleanSubtract) {
+        didInstall = installSubtractPreview(theResult.results);
+    } else if (IsSingleResultBooleanAction(theResult.action)
+               && theResult.results.size() == 1) {
+        didInstall = installSingleResultPreview(
+            theResult.results.front());
+    }
     if (!didInstall || !_stateValid || !pruneOwnedPresentations()) {
         _canApply = Standard_False;
         _previewState = BooleanPreviewState::Failed;
@@ -1896,7 +2102,7 @@ Standard_Boolean BooleanOperationController::installSubtractPreview(
     }
 }
 
-Standard_Boolean BooleanOperationController::installUnionPreview(
+Standard_Boolean BooleanOperationController::installSingleResultPreview(
     const TopoDS_Shape& theResult) noexcept
 {
     Handle(AIS_InteractiveObject) aResult;
@@ -1918,7 +2124,7 @@ Standard_Boolean BooleanOperationController::installUnionPreview(
                     _ownedPresentations.end(),
                     aResult),
                 _ownedPresentations.end());
-            _unionTrialResult.Nullify();
+            _singleTrialResult.Nullify();
         }
         // A failed result removal deliberately leaves the handle owned. The
         // next Cancel retries it instead of losing track of a ghost preview.
@@ -1971,8 +2177,8 @@ Standard_Boolean BooleanOperationController::installUnionPreview(
              _actedIOArray) {
             myContext->Remove(aSubject, Standard_False);
         }
-        _unionTrialResult = Handle(AIS_Shape)::DownCast(aResult);
-        if (_unionTrialResult.IsNull()) {
+        _singleTrialResult = Handle(AIS_Shape)::DownCast(aResult);
+        if (_singleTrialResult.IsNull()) {
             rollbackPresentation();
             return Standard_False;
         }
@@ -1980,7 +2186,7 @@ Standard_Boolean BooleanOperationController::installUnionPreview(
         myContext->UpdateCurrentViewer();
         return Standard_True;
     } catch (const Standard_Failure& aFailure) {
-        std::cout << "Boolean union preview failure: "
+        std::cout << "Boolean single-result preview failure: "
                   << aFailure.GetMessageString() << std::endl;
         rollbackPresentation();
         return Standard_False;
@@ -2015,12 +2221,12 @@ Standard_Boolean BooleanOperationController::capturePreview(
         BooleanPreviewCapture aCapture;
         aCapture.action = *_activeAction;
         aCapture.suppressedSourceLabels = std::move(aLabels);
-        if (*_activeAction == BooleanAction::BooleanUnion) {
-            if (!_selectionFrozen || _unionTrialResult.IsNull()
-                || !myContext->IsDisplayed(_unionTrialResult)) {
+        if (IsSingleResultBooleanAction(*_activeAction)) {
+            if (!_selectionFrozen || _singleTrialResult.IsNull()
+                || !myContext->IsDisplayed(_singleTrialResult)) {
                 return Standard_False;
             }
-            aCapture.results.push_back(_unionTrialResult);
+            aCapture.results.push_back(_singleTrialResult);
         } else {
             std::vector<std::pair<std::string, Handle(AIS_Shape)>> anActors;
             for (const auto& aSelection : _selectionMap) {
@@ -2234,16 +2440,16 @@ BooleanApplyResult BooleanOperationController::apply(
     std::vector<std::pair<Handle(AIS_InteractiveObject),
                           TemporalBooleanObject>> aResults;
     try {
-        if (theAction == BooleanAction::BooleanUnion) {
+        if (IsSingleResultBooleanAction(theAction)) {
             Standard_Boolean hasCompleteSubjects = Standard_False;
             const auto aSubjects =
                 orderedSubjectPresentations(hasCompleteSubjects);
             if (!hasCompleteSubjects || aSubjects.size() < 2
-                || _unionTrialResult.IsNull()) {
+                || _singleTrialResult.IsNull()) {
                 return failWithoutMutation();
             }
             aResults.push_back({
-                _unionTrialResult,
+                _singleTrialResult,
                 _selectionMap.find(aSubjects.front())->second,
             });
         } else {
@@ -2322,7 +2528,7 @@ BooleanApplyResult BooleanOperationController::apply(
             }
         } else {
             showInteractiveByType(
-                _unionTrialResult,
+                _singleTrialResult,
                 BooleanSelectionType::Undefined);
         }
         myContext->ClearSelected(Standard_False);
@@ -2438,7 +2644,7 @@ void BooleanOperationController::clearOperationState() noexcept
     _actorIOArray.clear();
     _subjectSelectionOrder.clear();
     _ownedPresentations.clear();
-    _unionTrialResult.Nullify();
+    _singleTrialResult.Nullify();
     _activeAction.reset();
     _canApply = Standard_False;
     _stateValid = Standard_True;

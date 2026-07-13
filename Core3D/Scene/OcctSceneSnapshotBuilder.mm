@@ -1990,6 +1990,7 @@ bool ValidatePresentationOverlayPayload(
             break;
         }
         case PresentationOverlayKind::BooleanUnionPreview:
+        case PresentationOverlayKind::BooleanIntersectPreview:
             if (theMeshes.size() != 1 || theInstances.size() != 1
                 || theMaterials.size() != 1
                 || theSuppressedEntityIdentifiers.size() < 2
@@ -2004,7 +2005,8 @@ bool ValidatePresentationOverlayPayload(
 
     const bool isBooleanPreview =
         theKind == PresentationOverlayKind::BooleanSubtractPreview
-        || theKind == PresentationOverlayKind::BooleanUnionPreview;
+        || theKind == PresentationOverlayKind::BooleanUnionPreview
+        || theKind == PresentationOverlayKind::BooleanIntersectPreview;
     if (!isBooleanPreview && !theSuppressedEntityIdentifiers.empty()) {
         return false;
     }
@@ -2021,6 +2023,9 @@ bool ValidatePresentationOverlayPayload(
         if (theKind == PresentationOverlayKind::BooleanUnionPreview) {
             return std::string("boolean/union/result/0");
         }
+        if (theKind == PresentationOverlayKind::BooleanIntersectPreview) {
+            return std::string("boolean/intersect/result/0");
+        }
         if (theIndex < aBooleanActorCount) {
             return std::string("boolean/subtract/actor/")
                 + std::to_string(theIndex);
@@ -2031,6 +2036,9 @@ bool ValidatePresentationOverlayPayload(
     const auto aBooleanName = [&](const std::size_t theIndex) {
         if (theKind == PresentationOverlayKind::BooleanUnionPreview) {
             return std::string("Boolean union result 0");
+        }
+        if (theKind == PresentationOverlayKind::BooleanIntersectPreview) {
+            return std::string("Boolean intersect result 0");
         }
         if (theIndex < aBooleanActorCount) {
             return std::string("Boolean subtract actor ")
@@ -2584,7 +2592,9 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
         || ((theContent.kind
                 == PresentationOverlayKind::BooleanSubtractPreview
              || theContent.kind
-                == PresentationOverlayKind::BooleanUnionPreview)
+                == PresentationOverlayKind::BooleanUnionPreview
+             || theContent.kind
+                == PresentationOverlayKind::BooleanIntersectPreview)
             && !theAllowsBooleanPreview)
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
@@ -2888,15 +2898,18 @@ OcctSceneSnapshotBuilder::PublishBooleanPreviewOverlay(
         theKind == PresentationOverlayKind::BooleanSubtractPreview;
     const bool isUnion =
         theKind == PresentationOverlayKind::BooleanUnionPreview;
+    const bool isIntersect =
+        theKind == PresentationOverlayKind::BooleanIntersectPreview;
+    const bool isSingleResult = isUnion || isIntersect;
     const std::size_t anItemCount =
         theActorShapes.size() + theResultShapes.size();
     if (![NSThread isMainThread] || theDocument.IsNull()
-        || myState == nullptr || (!isSubtract && !isUnion)
+        || myState == nullptr || (!isSubtract && !isSingleResult)
         || (isSubtract
             && (theActorShapes.empty() || theResultShapes.empty()
                 || anItemCount > kMaxBooleanSourceOperands
                 || theSuppressedSourceLabels.size() != anItemCount))
-        || (isUnion
+        || (isSingleResult
             && (!theActorShapes.empty() || theResultShapes.size() != 1
                 || theSuppressedSourceLabels.size() < 2
                 || theSuppressedSourceLabels.size()
@@ -3059,12 +3072,16 @@ OcctSceneSnapshotBuilder::PublishBooleanPreviewOverlay(
              aResultIndex < theResultShapes.size(); ++aResultIndex) {
             const std::string anIdentifier = isUnion
                 ? "boolean/union/result/0"
-                : "boolean/subtract/result/"
-                    + std::to_string(aResultIndex);
+                : isIntersect
+                    ? "boolean/intersect/result/0"
+                    : "boolean/subtract/result/"
+                        + std::to_string(aResultIndex);
             const std::string aName = isUnion
                 ? "Boolean union result 0"
-                : "Boolean subtract result "
-                    + std::to_string(aResultIndex);
+                : isIntersect
+                    ? "Boolean intersect result 0"
+                    : "Boolean subtract result "
+                        + std::to_string(aResultIndex);
             if (!appendItem(
                     theResultShapes[aResultIndex],
                     anIdentifier,

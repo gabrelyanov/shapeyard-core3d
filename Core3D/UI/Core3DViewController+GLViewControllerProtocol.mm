@@ -17,6 +17,12 @@
 
 namespace {
 
+bool Core3DIsBooleanGizmo(const PrimitiveGizmoType type) noexcept {
+    return type == PrimitiveGizmoTypeSubtract
+        || type == PrimitiveGizmoTypeUnion
+        || type == PrimitiveGizmoTypeIntersect;
+}
+
 Core3DPBRMaterial* Core3DSelectionPBRMaterial(
     const XCAFDoc_VisMaterialPBR& material,
     const BOOL supportsScalarEditing,
@@ -130,6 +136,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
     switch (_currentGizmoType) {
         case PrimitiveGizmoTypeSubtract:
         case PrimitiveGizmoTypeUnion:
+        case PrimitiveGizmoTypeIntersect:
         case PrimitiveGizmoTypeExtrude:
             self.can_delete = false;
             self.can_duplicate = false;
@@ -161,6 +168,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                                          @(PrimitiveGizmoTypeMirror),
                                          @(PrimitiveGizmoTypeSubtract),
                                          @(PrimitiveGizmoTypeUnion),
+                                         @(PrimitiveGizmoTypeIntersect),
                                          @(PrimitiveGizmoTypeMaterial)];
                 break;
 
@@ -174,6 +182,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
+            case PrimitiveGizmoTypeIntersect:
                 self.can_apply = [GLController canApplyBoolean];
                 break;
             case PrimitiveGizmoTypeExtrude:
@@ -210,6 +219,12 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
+            case PrimitiveGizmoTypeIntersect:
+                // A ready Boolean preview owns and suppresses its source
+                // presentations, so an empty AIS selection is expected here.
+                // The retained operation remains the authority for Apply.
+                self.can_apply = [GLController canApplyBoolean];
+                break;
             case PrimitiveGizmoTypeExtrude:
                 self.can_apply = false;
                 break;
@@ -255,8 +270,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 
 - (void)viewerDidFailToRetainBooleanMode:(id)sender {
     (void)sender;
-    if (_currentGizmoType == PrimitiveGizmoTypeSubtract
-        || _currentGizmoType == PrimitiveGizmoTypeUnion) {
+    if (Core3DIsBooleanGizmo(_currentGizmoType)) {
         [self completeOperationInteraction];
     }
 }

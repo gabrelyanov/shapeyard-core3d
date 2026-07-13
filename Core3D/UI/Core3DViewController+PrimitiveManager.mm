@@ -28,6 +28,7 @@
                              @(PrimitiveGizmoTypeMirror),
                              @(PrimitiveGizmoTypeSubtract),
                              @(PrimitiveGizmoTypeUnion),
+                             @(PrimitiveGizmoTypeIntersect),
                              @(PrimitiveGizmoTypeMaterial)];
     [self sendNotifyUIState:UIStateChangingGizmo
                             | UIStateChangingSelection
@@ -51,6 +52,7 @@
                              @(PrimitiveGizmoTypeMirror),
                              @(PrimitiveGizmoTypeSubtract),
                              @(PrimitiveGizmoTypeUnion),
+                             @(PrimitiveGizmoTypeIntersect),
                              @(PrimitiveGizmoTypeMaterial)];
     //    [GLController selectLastObject];
     [self sendNotifyUIState:UIStateChangingGizmo
@@ -226,6 +228,30 @@
     }
 }
 
+- (void)applyIntersect {
+    if ([GLController applyIntersect]) {
+        [self completeOperationInteraction];
+    } else {
+        if (![GLController hasActiveBoolean]) {
+            [self completeOperationInteraction];
+            return;
+        }
+        self.can_apply = [GLController canApplyBoolean];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
+}
+
+- (void)cancelIntersect {
+    if ([GLController cancelIntersect]) {
+        [self completeOperationInteraction];
+    } else {
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+    }
+}
+
 - (void)undo {
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
@@ -246,6 +272,7 @@
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
         || _currentGizmoType == PrimitiveGizmoTypeUnion
+        || _currentGizmoType == PrimitiveGizmoTypeIntersect
         || _currentGizmoType == PrimitiveGizmoTypeExtrude) {
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
             ? [GLController hasTrialMirrorObjects]
@@ -277,6 +304,7 @@
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
         || _currentGizmoType == PrimitiveGizmoTypeUnion
+        || _currentGizmoType == PrimitiveGizmoTypeIntersect
         || _currentGizmoType == PrimitiveGizmoTypeExtrude) {
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
             ? [GLController hasTrialMirrorObjects]

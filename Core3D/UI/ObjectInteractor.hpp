@@ -32,6 +32,7 @@ namespace core3d {
         PrimitiveGizmoTypeMirror,
         PrimitiveGizmoTypeMaterial,
         PrimitiveGizmoTypeExtrude,
+        PrimitiveGizmoTypeIntersect,
     };
 
     enum class PresentationOverlayCaptureStatus : std::uint8_t {

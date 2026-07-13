@@ -94,6 +94,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL) cancelSubtract;
 - (BOOL) applyUnion;
 - (BOOL) cancelUnion;
+- (BOOL) applyIntersect;
+- (BOOL) cancelIntersect;
 - (BOOL) canApplyBoolean;
 - (BOOL) hasActiveBoolean;
 - (BOOL) hasTrialMirrorObjects;

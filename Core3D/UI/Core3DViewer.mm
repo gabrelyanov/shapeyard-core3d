@@ -71,6 +71,57 @@ namespace core3d {
 
 namespace {
 
+bool TryBooleanActionForManipulator(
+    const PrimitiveManipulatorType theType,
+    BooleanAction& theAction) noexcept
+{
+    switch (theType) {
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
+            theAction = BooleanAction::BooleanSubtract;
+            return true;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+            theAction = BooleanAction::BooleanUnion;
+            return true;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
+            theAction = BooleanAction::BooleanIntersect;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool TryManipulatorForBooleanAction(
+    const BooleanAction theAction,
+    PrimitiveManipulatorType& theType) noexcept
+{
+    switch (theAction) {
+        case BooleanAction::BooleanSubtract:
+            theType = PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract;
+            return true;
+        case BooleanAction::BooleanUnion:
+            theType = PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
+            return true;
+        case BooleanAction::BooleanIntersect:
+            theType = PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect;
+            return true;
+    }
+    return false;
+}
+
+scene::PresentationOverlayKind BooleanOverlayKind(
+    const BooleanAction theAction) noexcept
+{
+    switch (theAction) {
+        case BooleanAction::BooleanSubtract:
+            return scene::PresentationOverlayKind::BooleanSubtractPreview;
+        case BooleanAction::BooleanUnion:
+            return scene::PresentationOverlayKind::BooleanUnionPreview;
+        case BooleanAction::BooleanIntersect:
+            return scene::PresentationOverlayKind::BooleanIntersectPreview;
+    }
+    return scene::PresentationOverlayKind::None;
+}
+
 #ifdef DEBUG
 std::atomic<Standard_Size> gBoundedProjectTopologyValidationCount{0};
 std::atomic<Standard_Size> gGeometricBRepValidationCount{0};
@@ -1024,14 +1075,10 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     }
     if (theManipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
         _objectInteractor->setManipulatorType(theManipulatorType);
-        if (theManipulatorType
-            == PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract) {
-            (void)_objectInteractor->beginBoolean(
-                BooleanAction::BooleanSubtract);
-        } else if (theManipulatorType
-                   == PrimitiveManipulatorType::PrimitiveGizmoTypeUnion) {
-            (void)_objectInteractor->beginBoolean(
-                BooleanAction::BooleanUnion);
+        BooleanAction anAction = BooleanAction::BooleanSubtract;
+        if (TryBooleanActionForManipulator(
+                theManipulatorType, anAction)) {
+            (void)_objectInteractor->beginBoolean(anAction);
         }
     }
 }
@@ -1798,9 +1845,7 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
         || !aBooleanPreview.results.empty()) {
         return _sceneSnapshotBuilder.PublishBooleanPreviewOverlay(
             myDoc,
-            aBooleanPreview.action == BooleanAction::BooleanSubtract
-                ? scene::PresentationOverlayKind::BooleanSubtractPreview
-                : scene::PresentationOverlayKind::BooleanUnionPreview,
+            BooleanOverlayKind(aBooleanPreview.action),
             aBooleanPreview.actors,
             aBooleanPreview.results,
             aBooleanPreview.suppressedSourceLabels);
@@ -1815,15 +1860,15 @@ Standard_Boolean Core3DViewer::debugBeginBooleanSelection(
     const BooleanAction theAction,
     const std::vector<std::string>& theActorEntityIdentifiers,
     const std::vector<std::string>& theSubjectEntityIdentifiers) noexcept {
+    PrimitiveManipulatorType anExpectedManipulator =
+        PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
     if (_objectInteractor == nullptr || myContext.IsNull() || myDoc.IsNull()
-        || (theAction == BooleanAction::BooleanUnion
+        || !TryManipulatorForBooleanAction(
+            theAction, anExpectedManipulator)
+        || (theAction != BooleanAction::BooleanSubtract
             && !theActorEntityIdentifiers.empty())) {
         return Standard_False;
     }
-    const PrimitiveManipulatorType anExpectedManipulator =
-        theAction == BooleanAction::BooleanSubtract
-            ? PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract
-            : PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
     if (_objectInteractor->getManipulatorType()
         != anExpectedManipulator) {
         return Standard_False;
@@ -2055,6 +2100,7 @@ void Core3DViewer::Select(int theX, int theY) {
         case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
         case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
         case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
             if (!hitTest(theX, theY)) {
                 return;
             }
@@ -2092,6 +2138,10 @@ void Core3DViewer::Select(int theX, int theY) {
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
             _objectInteractor->updateDetectedState(false, BooleanAction::BooleanUnion);
+            break;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
+            _objectInteractor->updateDetectedState(
+                false, BooleanAction::BooleanIntersect);
             break;
         default:
             break;

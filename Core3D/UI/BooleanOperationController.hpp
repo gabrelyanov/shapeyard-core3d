@@ -23,7 +23,8 @@ namespace core3d {
 
 enum BooleanAction {
     BooleanSubtract = 0,
-    BooleanUnion,
+    BooleanUnion = 1,
+    BooleanIntersect = 2,
 };
 
 enum BooleanSelectionType {
@@ -129,6 +130,9 @@ public:
     BooleanPreviewState previewState() const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
 #ifdef DEBUG
+    //! Production result validator exposed only for deterministic fixtures.
+    static Standard_Boolean debugValidateSolidResult(
+        const TopoDS_Shape& shape) noexcept;
     BooleanPreviewDebugState debugPreviewState() const noexcept;
     void debugSetWorkerBlocked(Standard_Boolean blocked) noexcept;
     void debugSetMaximumCaptureTopologyNodes(Standard_Size limit) noexcept;
@@ -151,7 +155,7 @@ private:
     Standard_Boolean resetCachedSelection() noexcept;
     Standard_Boolean installSubtractPreview(
         const std::vector<TopoDS_Shape>& results) noexcept;
-    Standard_Boolean installUnionPreview(
+    Standard_Boolean installSingleResultPreview(
         const TopoDS_Shape& result) noexcept;
     Standard_Boolean cancelImpl() noexcept;
     void clearOperationState() noexcept;
@@ -188,7 +192,7 @@ private:
     std::vector<Handle(AIS_InteractiveObject)> _actedIOArray;
     std::vector<Handle(AIS_InteractiveObject)> _actorIOArray;
     std::vector<TDF_Label> _subjectSelectionOrder;
-    Handle(AIS_Shape) _unionTrialResult;
+    Handle(AIS_Shape) _singleTrialResult;
     std::vector<Handle(AIS_InteractiveObject)> _ownedPresentations;
     std::optional<BooleanAction> _activeAction;
     Standard_Boolean _canApply = Standard_False;

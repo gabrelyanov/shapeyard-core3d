@@ -1503,6 +1503,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
             break;
         }
         case PresentationOverlayKind::BooleanUnionPreview:
+        case PresentationOverlayKind::BooleanIntersectPreview:
             if (snapshot.meshes.size() != 1
                 || snapshot.instances.size() != 1
                 || snapshot.materials.size() != 1
@@ -1518,10 +1519,15 @@ bool IsValidPresentationOverlaySnapshotImpl(
 
     const bool isBooleanPreview =
         snapshot.kind == PresentationOverlayKind::BooleanSubtractPreview
-        || snapshot.kind == PresentationOverlayKind::BooleanUnionPreview;
+        || snapshot.kind == PresentationOverlayKind::BooleanUnionPreview
+        || snapshot.kind == PresentationOverlayKind::BooleanIntersectPreview;
     const auto booleanEntityIdentifier = [&](const std::size_t index) {
         if (snapshot.kind == PresentationOverlayKind::BooleanUnionPreview) {
             return std::string("boolean/union/result/0");
+        }
+        if (snapshot.kind
+            == PresentationOverlayKind::BooleanIntersectPreview) {
+            return std::string("boolean/intersect/result/0");
         }
         if (index < booleanActorCount) {
             return std::string("boolean/subtract/actor/")
@@ -1533,6 +1539,10 @@ bool IsValidPresentationOverlaySnapshotImpl(
     const auto booleanName = [&](const std::size_t index) {
         if (snapshot.kind == PresentationOverlayKind::BooleanUnionPreview) {
             return std::string("Boolean union result 0");
+        }
+        if (snapshot.kind
+            == PresentationOverlayKind::BooleanIntersectPreview) {
+            return std::string("Boolean intersect result 0");
         }
         if (index < booleanActorCount) {
             return std::string("Boolean subtract actor ")
@@ -2063,6 +2073,8 @@ Core3DScenePresentationOverlayKind PresentationOverlayKindFromScene(
             return Core3DScenePresentationOverlayKindBooleanSubtractPreview;
         case PresentationOverlayKind::BooleanUnionPreview:
             return Core3DScenePresentationOverlayKindBooleanUnionPreview;
+        case PresentationOverlayKind::BooleanIntersectPreview:
+            return Core3DScenePresentationOverlayKindBooleanIntersectPreview;
     }
 
     NSCAssert(NO, @"Unknown presentation-overlay kind: %u",

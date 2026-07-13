@@ -13,6 +13,7 @@
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 
 #include "GLViewController+Trick.h"
+#include "BooleanOperationController.hpp"
 #include "../OCCTKit/OcctDocument.h"
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
@@ -29,6 +30,7 @@
 #include "BRepBuilderAPI_MakeFace.hxx"
 #include "BRep_Builder.hxx"
 #include "TopoDS_Compound.hxx"
+#include "TopoDS_CompSolid.hxx"
 #include "TopoDS.hxx"
 #include "TopoDS_Face.hxx"
 #include "Poly_Triangle.hxx"
@@ -57,6 +59,24 @@
 #include <vector>
 
 namespace {
+
+bool Core3DTryBooleanActionForGizmo(
+    const PrimitiveGizmoType type,
+    core3d::BooleanAction& action) noexcept {
+    switch (type) {
+        case PrimitiveGizmoTypeSubtract:
+            action = core3d::BooleanAction::BooleanSubtract;
+            return true;
+        case PrimitiveGizmoTypeUnion:
+            action = core3d::BooleanAction::BooleanUnion;
+            return true;
+        case PrimitiveGizmoTypeIntersect:
+            action = core3d::BooleanAction::BooleanIntersect;
+            return true;
+        default:
+            return false;
+    }
+}
 
 void Core3DAbortCommandNoThrow(
     const Handle(TDocStd_Document)& document) noexcept {
@@ -3617,9 +3637,10 @@ void Core3DAddDebugOrphanVisualMaterial(
 - (BOOL)debugBeginBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
                 actorEntityIdentifiers:(NSArray<NSString *> *)actorEntityIdentifiers
               subjectEntityIdentifiers:(NSArray<NSString *> *)subjectEntityIdentifiers {
+    core3d::BooleanAction action =
+        core3d::BooleanAction::BooleanSubtract;
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
-        || (gizmoType != PrimitiveGizmoTypeSubtract
-            && gizmoType != PrimitiveGizmoTypeUnion)
+        || !Core3DTryBooleanActionForGizmo(gizmoType, action)
         || actorEntityIdentifiers == nil
         || subjectEntityIdentifiers == nil) {
         return NO;
@@ -3657,9 +3678,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             GLController.viewer;
         const BOOL didBegin = viewer != nullptr
             && viewer->debugBeginBooleanSelection(
-                gizmoType == PrimitiveGizmoTypeSubtract
-                    ? core3d::BooleanAction::BooleanSubtract
-                    : core3d::BooleanAction::BooleanUnion,
+                action,
                 actors,
                 subjects);
         self.can_apply = didBegin && [GLController canApplyBoolean];
@@ -3676,9 +3695,11 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)debugRecomputeBooleanPreview {
+    core3d::BooleanAction action =
+        core3d::BooleanAction::BooleanSubtract;
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
-        || (_currentGizmoType != PrimitiveGizmoTypeSubtract
-            && _currentGizmoType != PrimitiveGizmoTypeUnion)) {
+        || !Core3DTryBooleanActionForGizmo(
+            _currentGizmoType, action)) {
         return NO;
     }
     try {
@@ -3692,10 +3713,6 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (interactor == nullptr) {
             return NO;
         }
-        const core3d::BooleanAction action =
-            _currentGizmoType == PrimitiveGizmoTypeSubtract
-                ? core3d::BooleanAction::BooleanSubtract
-                : core3d::BooleanAction::BooleanUnion;
         const BOOL didRecompute =
             interactor->debugRecomputeBooleanPreview(action);
         self.can_apply = didRecompute && [GLController canApplyBoolean];
@@ -3716,6 +3733,58 @@ void Core3DAddDebugOrphanVisualMaterial(
         return @{};
     }
     return [GLController debugBooleanPreviewState];
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)
+    debugBooleanResultDimensionValidation {
+    try {
+        const TopoDS_Shape solid =
+            BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+
+        BRep_Builder builder;
+        TopoDS_Compound pureCompound;
+        builder.MakeCompound(pureCompound);
+        builder.Add(pureCompound, solid);
+        builder.Add(
+            pureCompound,
+            BRepPrimAPI_MakeBox(
+                gp_Pnt(20.0, 0.0, 0.0), 10.0, 10.0, 10.0)
+                .Shape());
+
+        TopoDS_CompSolid pureCompSolid;
+        builder.MakeCompSolid(pureCompSolid);
+        builder.Add(pureCompSolid, solid);
+
+        TopoDS_Compound mixedCompound;
+        builder.MakeCompound(mixedCompound);
+        builder.Add(mixedCompound, solid);
+        const TopoDS_Shape separateSolid =
+            BRepPrimAPI_MakeBox(
+                gp_Pnt(40.0, 0.0, 0.0), 10.0, 10.0, 10.0)
+                .Shape();
+        TopExp_Explorer aFace(separateSolid, TopAbs_FACE);
+        if (!aFace.More()) {
+            return @{};
+        }
+        builder.Add(mixedCompound, aFace.Current());
+
+        return @{
+            @"solidAccepted": @(
+                core3d::BooleanOperationController::
+                    debugValidateSolidResult(solid)),
+            @"pureCompoundAccepted": @(
+                core3d::BooleanOperationController::
+                    debugValidateSolidResult(pureCompound)),
+            @"pureCompSolidAccepted": @(
+                core3d::BooleanOperationController::
+                    debugValidateSolidResult(pureCompSolid)),
+            @"mixedCompoundRejected": @(
+                !core3d::BooleanOperationController::
+                    debugValidateSolidResult(mixedCompound)),
+        };
+    } catch (...) {
+        return @{};
+    }
 }
 
 - (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked {
@@ -3855,6 +3924,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                                              @(PrimitiveGizmoTypeMirror),
                                              @(PrimitiveGizmoTypeSubtract),
                                              @(PrimitiveGizmoTypeUnion),
+                                             @(PrimitiveGizmoTypeIntersect),
                                              @(PrimitiveGizmoTypeMaterial)];
                 } else {
                     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
@@ -3922,6 +3992,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
+            case PrimitiveGizmoTypeIntersect:
                 self.can_apply = [_glController canApplyBoolean];
                 break;
             case PrimitiveGizmoTypeMirror:
