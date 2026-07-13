@@ -1140,6 +1140,110 @@ Core3DViewer::captureTransformInspectorMeasurement(
         std::move(theCompletion));
 }
 
+TransformInspectorPositionCommitResult
+Core3DViewer::commitTransformInspectorPosition(
+    const TransformInspectorPositionCommitRequest& theRequest) noexcept
+{
+    if (_transformInspectorMeasurementController == nullptr) {
+        return TransformInspectorPositionCommitResult::Unavailable;
+    }
+    TransformInspectorPositionCommitOutcome anOutcome =
+        _transformInspectorMeasurementController->commitPosition(
+            _objectInteractor,
+            _shapeInteractor,
+            theRequest);
+    if (anOutcome.result
+        != TransformInspectorPositionCommitResult::Committed) {
+        return anOutcome.result;
+    }
+
+    const PrimitiveManipulatorType aCommittedManipulatorType =
+        _objectInteractor == nullptr
+        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+        : _objectInteractor->getManipulatorType();
+    const Standard_Integer aDebugPublicationFallbackMode =
+#ifdef DEBUG
+        std::exchange(
+            _debugTransformInspectorPositionPublicationFallbackMode,
+            0);
+#else
+        0;
+#endif
+    bool wasPublished = false;
+    if (aDebugPublicationFallbackMode == 0
+        && _objectInteractor != nullptr) {
+        wasPublished = _objectInteractor
+            ->publishCommittedInspectorTransform(
+                anOutcome.presentation,
+                anOutcome.committedTransform);
+    }
+    if (!wasPublished) {
+        try {
+            // redrawDocument() retains these AIS handles as its transactional
+            // fallback. Make the already-authoritative Position visible even
+            // if rebuilding every presentation from OCAF later fails.
+            if (!anOutcome.presentation.IsNull()) {
+                anOutcome.presentation->SetLocalTransformation(
+                    anOutcome.committedTransform);
+            }
+            // The OCAF command is already authoritative. Rebuild every AIS
+            // object as a fail-safe if incremental publication could not prove
+            // parity, then restore the uniquely identified selection so a
+            // recoverable renderer fault does not eject the user's context.
+#ifdef DEBUG
+            _debugForceNextTransformInspectorRedrawFailure =
+                aDebugPublicationFallbackMode == 2;
+#endif
+            redrawDocument();
+            Handle(AIS_InteractiveObject) aRestoredSelection;
+            AIS_ListOfInteractive aDisplayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
+            for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
+                 anObject.More(); anObject.Next()) {
+                const Handle(AIS_InteractiveObject)& aCandidate =
+                    anObject.Value();
+                const TDF_Label aLabel = myDoc->ShapeLabel(aCandidate);
+                if (aLabel.IsNull()
+                    || myDoc->EntityIdentifierForLabel(aLabel)
+                        != theRequest.entityIdentifier
+                    || myDoc->DefinitionIdentifierForLabel(aLabel)
+                        != theRequest.definitionIdentifier
+                    || !myDoc->IsPresentationEditable(aCandidate)) {
+                    continue;
+                }
+                if (!aRestoredSelection.IsNull()) {
+                    aRestoredSelection.Nullify();
+                    break;
+                }
+                aRestoredSelection = aCandidate;
+            }
+            if (!aRestoredSelection.IsNull()
+                && _objectInteractor != nullptr) {
+                // Establish selection before restoring BRep-only Scale/Mirror;
+                // setManipulatorType intentionally rejects those modes with
+                // an empty selection during recreateInteractors().
+                _objectInteractor->SelectAndAttachManipulator(
+                    aRestoredSelection);
+                if (_objectInteractor->getManipulatorType()
+                        != aCommittedManipulatorType) {
+                    _objectInteractor->setManipulatorType(
+                        aCommittedManipulatorType);
+                    _objectInteractor->SelectAndAttachManipulator(
+                        aRestoredSelection);
+                }
+            }
+        } catch (...) {
+        }
+    }
+    try {
+        if (!myDoc.IsNull()) {
+            myDoc->NotifyChanges();
+        }
+    } catch (...) {
+    }
+    return TransformInspectorPositionCommitResult::Committed;
+}
+
 void Core3DViewer::cancelTransformInspectorMeasurement() noexcept
 {
     if (_transformInspectorMeasurementController != nullptr) {
@@ -1636,6 +1740,24 @@ void Core3DViewer::DebugSetTransformInspectorMeshSweepWatchdog(
             theDeadlineMilliseconds, thePollNodes);
     }
 }
+
+void Core3DViewer::DebugSetTransformInspectorPositionCommitMode(
+    const Standard_Integer theMode) noexcept
+{
+    if (_transformInspectorMeasurementController != nullptr) {
+        _transformInspectorMeasurementController->debugSetPositionCommitMode(
+            theMode);
+    }
+}
+
+void Core3DViewer::
+DebugSetTransformInspectorPositionPublicationFallbackMode(
+    const Standard_Integer theMode) noexcept
+{
+    _debugTransformInspectorPositionPublicationFallbackMode =
+        theMode >= 0 && theMode <= 2 ? theMode : 0;
+    _debugForceNextTransformInspectorRedrawFailure = Standard_False;
+}
 #endif
 
 AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
@@ -1843,17 +1965,65 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
     }
 }
 
-void Core3DViewer::redrawDocument() {
-	const PrimitiveManipulatorType manipulatorType = _objectInteractor == nullptr
-		? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
-		: _objectInteractor->getManipulatorType();
-	const ShapeSelectionMode selectionMode = _shapeInteractor == nullptr
-		? ShapeSelectionMode::WholeShape
-		: _shapeInteractor->getSelectionMode();
-    clearContext();
-    traverseDocument(myDoc->ChangeDocument());
-	recreateInteractors(manipulatorType, selectionMode);
-    myContext->UpdateCurrentViewer();
+bool Core3DViewer::redrawDocument() noexcept {
+#ifdef DEBUG
+    const Standard_Boolean shouldForceTraversalFailure = std::exchange(
+        _debugForceNextTransformInspectorRedrawFailure,
+        Standard_False);
+#endif
+    const PrimitiveManipulatorType manipulatorType =
+        _objectInteractor == nullptr
+        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+        : _objectInteractor->getManipulatorType();
+    const ShapeSelectionMode selectionMode = _shapeInteractor == nullptr
+        ? ShapeSelectionMode::WholeShape
+        : _shapeInteractor->getSelectionMode();
+    AIS_ListOfInteractive previousPresentations;
+    try {
+        OCC_CATCH_SIGNALS
+        myContext->DisplayedObjects(
+            AIS_KOI_Shape,
+            -1,
+            previousPresentations
+        );
+        clearContext();
+#ifdef DEBUG
+        if (shouldForceTraversalFailure) {
+            throw Standard_Failure(
+                "Injected Position redraw traversal failure"
+            );
+        }
+#endif
+        if (traverseDocument(myDoc->ChangeDocument())) {
+            throw Standard_Failure(
+                "Unable to rebuild document presentations"
+            );
+        }
+        recreateInteractors(manipulatorType, selectionMode);
+        myContext->UpdateCurrentViewer();
+        return true;
+    } catch (...) {
+        // Remove any partial traversal before restoring the exact retained
+        // presentation handles. RemoveAll() never destroys those handles.
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        clearContext();
+        for (AIS_ListIteratorOfListOfInteractive aPresentation(
+                 previousPresentations);
+             aPresentation.More(); aPresentation.Next()) {
+            const Handle(AIS_InteractiveObject)& anObject =
+                aPresentation.Value();
+            if (!Handle(AIS_Shape)::DownCast(anObject).IsNull()) {
+                myContext->Display(anObject, Standard_False);
+            }
+        }
+        recreateInteractors(manipulatorType, selectionMode);
+        myContext->UpdateCurrentViewer();
+    } catch (...) {
+    }
+    return false;
 }
 
 void Core3DViewer::setPreviewMode() {

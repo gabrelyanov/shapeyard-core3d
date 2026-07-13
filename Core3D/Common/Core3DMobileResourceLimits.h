@@ -11,6 +11,11 @@ namespace core3d::limits {
 //! beyond the memory envelope accepted at ingestion.
 constexpr std::size_t kMaximumLeafPresentations = 2'048;
 
+//! Absolute value accepted for any authored/imported document-space
+//! coordinate. Import validation and numeric transform authoring share this
+//! ceiling so the editor cannot persist a value its own loader rejects.
+constexpr double kMaximumModelCoordinateMagnitude = 1.0e6;
+
 } // namespace core3d::limits
 
 #endif // Core3DMobileResourceLimits_h

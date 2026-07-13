@@ -3781,6 +3781,129 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorPositionValue:(double)value
+                                      axis:(Core3DTransformInspectorAxis)axis
+                          expectedSnapshot:
+                              (Core3DTransformInspectorSnapshot *)snapshot {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) {
+        return Core3DTransformInspectorPositionCommitResultUnavailable;
+    }
+    if (snapshot == nil || !snapshot.canEditPosition
+        || !snapshot.presentationMatchesDocument
+        || snapshot.positionEditGeneration == 0
+        || snapshot.documentEditGeneration == 0
+        || snapshot.geometryEditGeneration == 0
+        || snapshot.entityIdentifier.length == 0
+        || snapshot.definitionIdentifier.length == 0
+        || snapshot.entityIdentifier.UTF8String == nullptr
+        || snapshot.definitionIdentifier.UTF8String == nullptr) {
+        return Core3DTransformInspectorPositionCommitResultUnsupported;
+    }
+
+    core3d::TransformInspectorPositionAxis nativeAxis;
+    switch (axis) {
+        case Core3DTransformInspectorAxisX:
+            nativeAxis = core3d::TransformInspectorPositionAxis::X;
+            break;
+        case Core3DTransformInspectorAxisY:
+            nativeAxis = core3d::TransformInspectorPositionAxis::Y;
+            break;
+        case Core3DTransformInspectorAxisZ:
+            nativeAxis = core3d::TransformInspectorPositionAxis::Z;
+            break;
+        default:
+            return Core3DTransformInspectorPositionCommitResultInvalidValue;
+    }
+
+    core3d::TransformInspectorGeometryRepresentation nativeRepresentation;
+    switch (snapshot.representation) {
+        case Core3DTransformInspectorRepresentationBRep:
+            nativeRepresentation =
+                core3d::TransformInspectorGeometryRepresentation::BRep;
+            break;
+        case Core3DTransformInspectorRepresentationTriangleMesh:
+            nativeRepresentation =
+                core3d::TransformInspectorGeometryRepresentation::
+                    TriangleMesh;
+            break;
+        case Core3DTransformInspectorRepresentationUnknown:
+        default:
+            return Core3DTransformInspectorPositionCommitResultUnsupported;
+    }
+
+    core3d::TransformInspectorPositionCommitResult nativeResult =
+        core3d::TransformInspectorPositionCommitResult::InternalFailure;
+    try {
+        // std::string construction may allocate. Keep request assembly inside
+        // the exception boundary so this Objective-C entry point never lets a
+        // low-memory C++ exception cross into Swift.
+        core3d::TransformInspectorPositionCommitRequest request;
+        request.positionEditGeneration = snapshot.positionEditGeneration;
+        request.documentEditGeneration = snapshot.documentEditGeneration;
+        request.geometryEditGeneration = snapshot.geometryEditGeneration;
+        request.entityIdentifier = snapshot.entityIdentifier.UTF8String;
+        request.definitionIdentifier =
+            snapshot.definitionIdentifier.UTF8String;
+        request.expectedPosition = {
+            snapshot.position.x,
+            snapshot.position.y,
+            snapshot.position.z,
+        };
+        request.expectedMetersPerUnit = snapshot.metersPerUnit;
+        request.expectedRepresentation = nativeRepresentation;
+        request.expectedModelCapabilities =
+            static_cast<std::uint64_t>(snapshot.modelCapabilities);
+        request.axis = nativeAxis;
+        request.value = value;
+        nativeResult = GLController.viewer
+            ->commitTransformInspectorPosition(request);
+    } catch (...) {
+        nativeResult =
+            core3d::TransformInspectorPositionCommitResult::InternalFailure;
+    }
+
+    Core3DTransformInspectorPositionCommitResult result =
+        Core3DTransformInspectorPositionCommitResultInternalFailure;
+    switch (nativeResult) {
+        case core3d::TransformInspectorPositionCommitResult::Committed:
+            result = Core3DTransformInspectorPositionCommitResultCommitted;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::Unchanged:
+            result = Core3DTransformInspectorPositionCommitResultUnchanged;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::InvalidValue:
+            result = Core3DTransformInspectorPositionCommitResultInvalidValue;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::Busy:
+            result = Core3DTransformInspectorPositionCommitResultBusy;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::Stale:
+            result = Core3DTransformInspectorPositionCommitResultStale;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::Unsupported:
+            result = Core3DTransformInspectorPositionCommitResultUnsupported;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::Unavailable:
+            result = Core3DTransformInspectorPositionCommitResultUnavailable;
+            break;
+        case core3d::TransformInspectorPositionCommitResult::InternalFailure:
+            result = Core3DTransformInspectorPositionCommitResultInternalFailure;
+            break;
+    }
+
+    if (result == Core3DTransformInspectorPositionCommitResultCommitted) {
+        // NotifyChanges already schedules the OpenGL frame and its one scene
+        // invalidation callback. Publish the Metal snapshot/UI state here
+        // without requesting a duplicate renderer-neutral invalidation.
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                 | UIStateChangingHistory];
+    }
+    return result;
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)
     transformInspectorPerformanceState {
     if (![NSThread isMainThread] || !_isSetuped
@@ -3929,6 +4052,28 @@ void Core3DAddDebugOrphanVisualMaterial(
     GLController.viewer->DebugSetTransformInspectorMeshSweepWatchdog(
         static_cast<Standard_Real>(deadlineMilliseconds),
         static_cast<Standard_Size>(pollNodes));
+}
+
+- (void)debugSetTransformInspectorPositionCommitMode:(NSInteger)mode {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr
+        || mode < 0 || mode > 3) {
+        return;
+    }
+    GLController.viewer->DebugSetTransformInspectorPositionCommitMode(
+        static_cast<Standard_Integer>(mode));
+}
+
+- (void)debugSetTransformInspectorPositionPublicationFallbackMode:
+    (NSInteger)mode {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr
+        || mode < 0 || mode > 2) {
+        return;
+    }
+    GLController.viewer
+        ->DebugSetTransformInspectorPositionPublicationFallbackMode(
+            static_cast<Standard_Integer>(mode));
 }
 
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis backward:(BOOL)backward {

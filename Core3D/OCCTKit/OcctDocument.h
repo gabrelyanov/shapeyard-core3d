@@ -237,6 +237,15 @@ public:
 
     void SaveObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
     void LoadObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    //! Write exactly one translation scalar in the caller's already-open OCAF
+    //! command. Axis is 0...2 and value uses raw document model units. The
+    //! definition, representation, coordinate ceiling, and read-back are
+    //! independently validated; untouched rotation/scale attributes are never
+    //! rewritten.
+    Standard_EXPORT Standard_Boolean SetObjectPositionComponentForLabel(
+        const TDF_Label& label,
+        Standard_Integer axis,
+        Standard_Real value);
 
     void SaveObjectMaterial(Handle(AIS_Shape) object, const Graphic3d_NameOfMaterial name_of_material);
     void SaveObjectColor(Handle(AIS_Shape) object, const Quantity_NameOfColor name_of_color);

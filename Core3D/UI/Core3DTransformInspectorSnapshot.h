@@ -48,6 +48,33 @@ typedef NS_ENUM(NSInteger, Core3DTransformInspectorRepresentation) {
     Core3DTransformInspectorRepresentationTriangleMesh,
 };
 
+//! Position component addressed by a numeric Transform Inspector commit.
+typedef NS_ENUM(NSInteger, Core3DTransformInspectorAxis) {
+    Core3DTransformInspectorAxisX = 0,
+    Core3DTransformInspectorAxisY,
+    Core3DTransformInspectorAxisZ,
+};
+
+//! Synchronous result of one compare-and-swap Position field commit.
+typedef NS_ENUM(NSInteger, Core3DTransformInspectorPositionCommitResult) {
+    Core3DTransformInspectorPositionCommitResultCommitted = 0,
+    //! The requested raw model-unit scalar exactly matched OCAF. No command,
+    //! notification, autosave, or renderer invalidation was produced.
+    Core3DTransformInspectorPositionCommitResultUnchanged,
+    Core3DTransformInspectorPositionCommitResultInvalidValue,
+    Core3DTransformInspectorPositionCommitResultBusy,
+    Core3DTransformInspectorPositionCommitResultStale,
+    Core3DTransformInspectorPositionCommitResultUnsupported,
+    Core3DTransformInspectorPositionCommitResultUnavailable,
+    Core3DTransformInspectorPositionCommitResultInternalFailure,
+};
+
+//! Absolute raw document-model-unit ceiling shared by import and numeric
+//! Position authoring. Swift validates against this value before Core3D
+//! independently repeats the check.
+FOUNDATION_EXPORT const double
+    Core3DTransformInspectorMaximumPositionMagnitude;
+
 //! A document-authoritative snapshot for one inspector refresh. It never reads
 //! renderer meshes or transient presentation transforms.
 //!
@@ -70,6 +97,16 @@ CORE3D_TRANSFORM_INSPECTOR_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) NSUInteger selectedCount;
 //! Monotonic token used to discard stale asynchronous measurement results.
 @property (nonatomic, assign, readonly) uint64_t requestGeneration;
+
+//! True only when this exact snapshot owns a current Position mutation lease.
+//! The lease remains usable if an asynchronous bounds request is cancelled,
+//! but is replaced by the next inspector capture and consumed by a commit.
+@property (nonatomic, assign, readonly) BOOL canEditPosition;
+//! Process-unique opaque compare-and-swap lease. Zero means unavailable.
+@property (nonatomic, assign, readonly) uint64_t positionEditGeneration;
+//! OCAF edit stamps encoded as native value + 1 so zero remains unavailable.
+@property (nonatomic, assign, readonly) uint64_t documentEditGeneration;
+@property (nonatomic, assign, readonly) uint64_t geometryEditGeneration;
 
 @property (nonatomic, copy, readonly, nullable) NSString *entityIdentifier;
 @property (nonatomic, copy, readonly, nullable) NSString *definitionIdentifier;

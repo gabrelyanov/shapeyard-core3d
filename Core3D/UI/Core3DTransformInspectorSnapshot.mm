@@ -8,6 +8,7 @@
 #import "Core3DTransformInspectorSnapshotFactory.hpp"
 
 #include "TransformInspectorMeasurementController.hpp"
+#include "../Common/Core3DMobileResourceLimits.h"
 
 #include <gp_Quaternion.hxx>
 
@@ -22,6 +23,10 @@
 - (instancetype)initWithState:(Core3DTransformInspectorState)state
                  selectedCount:(NSUInteger)selectedCount
              requestGeneration:(uint64_t)requestGeneration
+               canEditPosition:(BOOL)canEditPosition
+        positionEditGeneration:(uint64_t)positionEditGeneration
+        documentEditGeneration:(uint64_t)documentEditGeneration
+        geometryEditGeneration:(uint64_t)geometryEditGeneration
               entityIdentifier:(nullable NSString *)entityIdentifier
           definitionIdentifier:(nullable NSString *)definitionIdentifier
                    displayName:(nullable NSString *)displayName
@@ -40,11 +45,18 @@
 
 @end
 
+const double Core3DTransformInspectorMaximumPositionMagnitude =
+    core3d::limits::kMaximumModelCoordinateMagnitude;
+
 @implementation Core3DTransformInspectorSnapshot
 
 - (instancetype)initWithState:(Core3DTransformInspectorState)state
                  selectedCount:(NSUInteger)selectedCount
              requestGeneration:(uint64_t)requestGeneration
+               canEditPosition:(BOOL)canEditPosition
+        positionEditGeneration:(uint64_t)positionEditGeneration
+        documentEditGeneration:(uint64_t)documentEditGeneration
+        geometryEditGeneration:(uint64_t)geometryEditGeneration
               entityIdentifier:(NSString *)entityIdentifier
           definitionIdentifier:(NSString *)definitionIdentifier
                    displayName:(NSString *)displayName
@@ -65,6 +77,10 @@
         _state = state;
         _selectedCount = selectedCount;
         _requestGeneration = requestGeneration;
+        _canEditPosition = canEditPosition;
+        _positionEditGeneration = positionEditGeneration;
+        _documentEditGeneration = documentEditGeneration;
+        _geometryEditGeneration = geometryEditGeneration;
         _entityIdentifier = [entityIdentifier copy];
         _definitionIdentifier = [definitionIdentifier copy];
         _displayName = [displayName copy];
@@ -166,6 +182,10 @@ Core3DTransformInspectorSnapshot *Core3DMakeStateSnapshot(
         initWithState:state
         selectedCount:selectedCount
         requestGeneration:generation
+        canEditPosition:NO
+        positionEditGeneration:0
+        documentEditGeneration:0
+        geometryEditGeneration:0
         entityIdentifier:nil
         definitionIdentifier:nil
         displayName:nil
@@ -443,6 +463,26 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
                 <= std::numeric_limits<NSUInteger>::max()
             && Core3DHasExpectedCapabilities(
                 representation, measurement.modelCapabilities);
+        const bool hasPositionEditLease =
+            measurement.canEditPosition
+            && measurement.positionEditGeneration != 0
+            && measurement.documentEditGeneration != 0
+            && measurement.geometryEditGeneration != 0
+            && measurement.presentationMatchesDocument
+            && (measurement.modelCapabilities
+                & static_cast<std::uint64_t>(
+                    Core3DModelCapabilityTranslate)) != 0
+            && std::abs(measurement.position.x)
+                <= core3d::limits::kMaximumModelCoordinateMagnitude
+            && std::abs(measurement.position.y)
+                <= core3d::limits::kMaximumModelCoordinateMagnitude
+            && std::abs(measurement.position.z)
+                <= core3d::limits::kMaximumModelCoordinateMagnitude;
+        const bool hasNoPositionEditLease =
+            !measurement.canEditPosition
+            && measurement.positionEditGeneration == 0
+            && measurement.documentEditGeneration == 0
+            && measurement.geometryEditGeneration == 0;
         if (entityIdentifier == nil || definitionIdentifier == nil
             || displayName == nil
             || representation
@@ -461,7 +501,8 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
             || measurement.uniformScale == 0.0
             || !std::isfinite(measurement.metersPerUnit)
             || measurement.metersPerUnit <= 0.0
-            || !hasExpectedCapabilities) {
+            || !hasExpectedCapabilities
+            || (!hasPositionEditLease && !hasNoPositionEditLease)) {
             return Core3DMakeStateSnapshot(
                 Core3DTransformInspectorStateInvalid, selectedCount,
                 measurement.generation);
@@ -493,6 +534,10 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
             initWithState:state
             selectedCount:selectedCount
             requestGeneration:measurement.generation
+            canEditPosition:measurement.canEditPosition
+            positionEditGeneration:measurement.positionEditGeneration
+            documentEditGeneration:measurement.documentEditGeneration
+            geometryEditGeneration:measurement.geometryEditGeneration
             entityIdentifier:entityIdentifier
             definitionIdentifier:definitionIdentifier
             displayName:displayName

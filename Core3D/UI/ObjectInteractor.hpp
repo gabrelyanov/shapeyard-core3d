@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <gp_Trsf.hxx>
+
 namespace core3d {
 
     enum struct PrimitiveManipulatorType {
@@ -76,6 +78,13 @@ namespace core3d {
         //! Legacy detected-mode state used by GL touch/tap suppression.
         const bool isManipulatorInteractionActive() const;
         const PrimitiveManipulatorType getManipulatorType() const;
+
+        //! Publish an already-committed authoritative transform to the
+        //! selected AIS object and resynchronize any attached manipulator.
+        //! Returns false so the viewer can rebuild from OCAF as a fail-safe.
+        bool publishCommittedInspectorTransform(
+            const Handle(AIS_Shape)& presentation,
+            const gp_Trsf& transform) noexcept;
 
         //! Capture only supported idle presentation. A valid mirror trial set
         //! is returned as explicit owned AIS_Shape handles so the snapshot

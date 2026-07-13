@@ -25,6 +25,7 @@
 
 #include "OcctDocument.h"
 #include "CafShapePrs.h"
+#include "../Common/Core3DMobileResourceLimits.h"
 
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -1279,7 +1280,6 @@ constexpr Standard_Size kMaximumMeshVerticesPerDefinition = 1'000'000;
 constexpr Standard_Size kMaximumMeshVerticesPerDocument = 1'500'000;
 constexpr Standard_Size kMaximumMeshIndicesPerDefinition = 3'000'000;
 constexpr Standard_Size kMaximumMeshIndicesPerDocument = 4'500'000;
-constexpr Standard_Real kMaximumMeshCoordinateMagnitude = 1.0e6;
 static_assert(
     static_cast<Standard_Integer>(
         OcctGeometryRepresentation::LegacyUnknown) == 0);
@@ -1307,7 +1307,8 @@ struct GeometryValidationBudget
 bool IsFiniteBoundedMeshCoordinate(const Standard_Real theValue) noexcept
 {
     return std::isfinite(theValue)
-        && std::abs(theValue) <= kMaximumMeshCoordinateMagnitude;
+        && std::abs(theValue)
+            <= core3d::limits::kMaximumModelCoordinateMagnitude;
 }
 
 bool AddWithinLimit(Standard_Size& theAggregate,
@@ -3536,6 +3537,48 @@ void OcctDocument::SaveObjectTransform(const TDF_Label& label, const Handle(AIS_
     TDataStd_Real::Set(label.FindChild(7), t.GetRotation().W());
     TDataStd_Real::Set(label.FindChild(8), t.ScaleFactor());
  
+}
+
+Standard_Boolean OcctDocument::SetObjectPositionComponentForLabel(
+    const TDF_Label& label,
+    const Standard_Integer axis,
+    const Standard_Real value)
+{
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull() || label.Data() != myOcafDoc->GetData()
+        || axis < 0 || axis > 2 || !std::isfinite(value)
+        || std::abs(value)
+            > core3d::limits::kMaximumModelCoordinateMagnitude
+        || !IsEditableFreeSimpleDefinitionLabel(label)) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const OcctGeometryRepresentation representation =
+            StoredGeometryRepresentationForLabel(label);
+        const bool isSupportedRepresentation =
+            representation == OcctGeometryRepresentation::BRep
+            || representation
+                == OcctGeometryRepresentation::TriangleMesh
+            || (representation
+                    == OcctGeometryRepresentation::LegacyUnknown
+                && GeometryRepresentationForLabel(label)
+                    == OcctGeometryRepresentation::BRep);
+        if (!isSupportedRepresentation) {
+            return Standard_False;
+        }
+        const TDF_Label child = label.FindChild(axis + 1);
+        if (child.IsNull()) {
+            return Standard_False;
+        }
+        TDataStd_Real::Set(child, value);
+        Handle(TDataStd_Real) stored;
+        return child.FindAttribute(TDataStd_Real::GetID(), stored)
+            && !stored.IsNull()
+            && stored->Get() == value;
+    } catch (...) {
+        return Standard_False;
+    }
 }
 
 void OcctDocument::SaveObjectMaterial(Handle(AIS_Shape) object

@@ -1278,6 +1278,72 @@ namespace core3d {
         return _manipulatorType;
     }
 
+    bool ObjectInteractor::publishCommittedInspectorTransform(
+        const Handle(AIS_Shape)& thePresentation,
+        const gp_Trsf& theTransform) noexcept
+    {
+        try {
+            OCC_CATCH_SIGNALS
+            if (thePresentation.IsNull()
+                || thePresentation->Shape().IsNull()
+                || myContext.IsNull() || myDoc.IsNull()
+                || !myDoc->IsPresentationEditable(thePresentation)) {
+                return false;
+            }
+            const TDF_Label aLabel = myDoc->ShapeLabel(thePresentation);
+            const TopoDS_Shape aStoredShape = aLabel.IsNull()
+                ? TopoDS_Shape()
+                : XCAFDoc_ShapeTool::GetShape(aLabel);
+            const bool wasManipulatorAttached =
+                !_manipulator.IsNull() && _manipulator->IsAttached();
+            if (wasManipulatorAttached) {
+                const auto objects = _manipulator->Objects();
+                if (objects.IsNull() || objects->Size() != 1
+                    || objects->First() != thePresentation) {
+                    return false;
+                }
+            }
+            if (aLabel.IsNull()
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(aLabel)
+                || aStoredShape.IsNull()
+                || !aStoredShape.IsEqual(thePresentation->Shape())
+                || _manipulatorGestureActive
+                || (!_manipulator.IsNull()
+                    && _manipulator->HasActiveTransformation())) {
+                return false;
+            }
+
+            thePresentation->SetLocalTransformation(theTransform);
+            myContext->Redisplay(thePresentation, Standard_False);
+            if (!_manipulator.IsNull() && _manipulator->IsAttached()) {
+                // Reusing the existing type follows the normal detach/reattach
+                // path, which recomputes the gizmo origin and refreshes cached
+                // source shapes without appending a duplicate owner.
+                setManipulatorType(_manipulatorType);
+            }
+            if (wasManipulatorAttached) {
+                if (_manipulator.IsNull()
+                    || !_manipulator->IsAttached()) {
+                    return false;
+                }
+                const auto objects = _manipulator->Objects();
+                if (objects.IsNull() || objects->Size() != 1
+                    || objects->First() != thePresentation) {
+                    return false;
+                }
+            }
+            if (TransformDiffers(
+                    thePresentation->LocalTransformation(),
+                    theTransform)) {
+                return false;
+            }
+            myContext->UpdateCurrentViewer();
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
 	void ObjectInteractor::fillSelectedState(Standard_Boolean forceActor, BooleanAction action) {
 		const auto failClosed = [this]() noexcept {
 			_booleanOpController->cancelActive();

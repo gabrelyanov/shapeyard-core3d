@@ -7,6 +7,7 @@
 
 #include "ObjectInteractor.hpp"
 #include "ShapeInteractor.hpp"
+#include "../Common/Core3DMobileResourceLimits.h"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -20,6 +21,8 @@
 #include <StdSelect_BRepOwner.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDataStd_Real.hxx>
+#include <TDF_Data.hxx>
+#include <TNaming_NamedShape.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -58,6 +61,104 @@ constexpr double kQuaternionHalfTurnZeroTolerance =
     64.0 * std::numeric_limits<double>::epsilon();
 constexpr double kRadiansToDegrees =
     57.295779513082320876798154814105;
+
+bool PositionIsFiniteAndBounded(
+    const TransformInspectorVector3& thePosition) noexcept
+{
+    const auto isValid = [](const double theValue) {
+        return std::isfinite(theValue)
+            && std::abs(theValue)
+                <= limits::kMaximumModelCoordinateMagnitude;
+    };
+    return isValid(thePosition.x)
+        && isValid(thePosition.y)
+        && isValid(thePosition.z);
+}
+
+std::atomic<std::uint64_t> gNextPositionEditGeneration{0};
+
+bool TryNextPositionEditGeneration(
+    std::uint64_t& theGeneration) noexcept
+{
+    std::uint64_t aCurrent =
+        gNextPositionEditGeneration.load(std::memory_order_relaxed);
+    while (aCurrent != std::numeric_limits<std::uint64_t>::max()) {
+        if (gNextPositionEditGeneration.compare_exchange_weak(
+                aCurrent,
+                aCurrent + 1,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            theGeneration = aCurrent + 1;
+            return true;
+        }
+    }
+    theGeneration = 0;
+    return false;
+}
+
+bool TryPublicEditGeneration(
+    const Standard_Integer theNativeGeneration,
+    std::uint64_t& thePublicGeneration) noexcept
+{
+    if (theNativeGeneration < 0) {
+        thePublicGeneration = 0;
+        return false;
+    }
+    thePublicGeneration =
+        static_cast<std::uint64_t>(theNativeGeneration) + 1;
+    return thePublicGeneration != 0;
+}
+
+//! Once armed, every exit path attempts a direct OCAF abort. In particular,
+//! cleanup must not depend on HasOpenCommand(), because that diagnostic can
+//! itself raise while a command is live.
+class OcafCommandAbortGuard final {
+public:
+    explicit OcafCommandAbortGuard(
+        Handle(TDocStd_Document) theDocument) noexcept
+    : myDocument(std::move(theDocument))
+    {
+    }
+
+    OcafCommandAbortGuard(const OcafCommandAbortGuard&) = delete;
+    OcafCommandAbortGuard& operator=(
+        const OcafCommandAbortGuard&) = delete;
+
+    ~OcafCommandAbortGuard() noexcept
+    {
+        if (!myArmed || myDocument.IsNull()) {
+            return;
+        }
+        try {
+            myDocument->AbortCommand();
+        } catch (...) {
+        }
+    }
+
+    void arm() noexcept { myArmed = true; }
+    void release() noexcept { myArmed = false; }
+
+    bool abortNow() noexcept
+    {
+        if (!myArmed || myDocument.IsNull()) {
+            return false;
+        }
+        try {
+            myDocument->AbortCommand();
+            if (myDocument->HasOpenCommand()) {
+                return false;
+            }
+            myArmed = false;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    Handle(TDocStd_Document) myDocument;
+    bool myArmed = false;
+};
 
 // These are the serialization-stable Core3DModelCapability bits. Keeping the
 // representation policy here means the public bridge copies one authoritative
@@ -1055,6 +1156,22 @@ private:
 };
 
 struct TransformInspectorMeasurementController::Impl {
+    struct PositionEditContext {
+        std::uint64_t generation = 0;
+        Handle(TDocStd_Document) document;
+        std::string documentIdentifier;
+        std::uint64_t documentEditGeneration = 0;
+        TopoDS_Shape storedShape;
+        std::uint64_t geometryEditGeneration = 0;
+        std::string entityIdentifier;
+        std::string definitionIdentifier;
+        PersistedTransformCapture persistedTransform;
+        TransformInspectorGeometryRepresentation representation =
+            TransformInspectorGeometryRepresentation::Invalid;
+        std::uint64_t modelCapabilities = 0;
+        double metersPerUnit = 0.0;
+    };
+
     struct CacheEntry {
         TransformInspectorBoundsKey key;
         TransformInspectorBoundsValue value;
@@ -1076,6 +1193,7 @@ struct TransformInspectorMeasurementController::Impl {
     Handle(TDocStd_Document) cacheDocument;
     std::optional<TransformInspectorBoundsKey> requestedKey;
     TransformInspectorMeasurement pendingMeasurement;
+    std::optional<PositionEditContext> positionEditContext;
     std::shared_ptr<TransformInspectorBoundsWorker> worker;
     Standard_Real lastMeshSweepMilliseconds = 0.0;
     Standard_Real lastBRepCopyMilliseconds = 0.0;
@@ -1095,6 +1213,7 @@ struct TransformInspectorMeasurementController::Impl {
     Standard_Size debugMeshSweepWatchdogPollNodes =
         TransformInspectorMeasurementController::
             kMeshSweepWatchdogPollNodes;
+    Standard_Integer debugPositionCommitMode = 0;
     std::uint64_t acceptedCount = 0;
     std::uint64_t staleCount = 0;
 #endif
@@ -1325,6 +1444,7 @@ void TransformInspectorMeasurementController::shutdown() noexcept
         myImpl->cache.clear();
         myImpl->negativeCache.clear();
         myImpl->outstandingKeys.clear();
+        myImpl->positionEditContext.reset();
         myImpl->cacheDocument.Nullify();
     }
     myObjectInteractor.reset();
@@ -1373,6 +1493,10 @@ TransformInspectorMeasurementController::capture(
     // still finish and seed the same-document cache with its exact result.
     myCompletion = {};
     myImpl->requestedKey.reset();
+    // Each capture replaces the mutation lease. Explicit bounds cancellation
+    // deliberately does not clear it, so text editing can freeze a Measuring
+    // snapshot while suppressing only the asynchronous completion.
+    myImpl->positionEditContext.reset();
     if (myImpl->worker != nullptr) {
         const std::optional<std::uint64_t>
             aCancelledPendingGeneration =
@@ -1524,6 +1648,59 @@ TransformInspectorMeasurementController::capture(
             return aMeasurement;
         }
         aMeasurement.metersPerUnit = aMetersPerUnit;
+
+        // A Position edit is an explicit compare-and-swap lease over this
+        // exact authoritative capture. Bounds work is intentionally outside
+        // the lease: translation never changes definition-local bounds.
+        const Handle(TDF_Data) aDocumentData = aDocument->GetData();
+        Handle(TNaming_NamedShape) aNamedShape;
+        std::uint64_t aPositionEditGeneration = 0;
+        std::uint64_t aDocumentEditGeneration = 0;
+        std::uint64_t aGeometryEditGeneration = 0;
+        const std::string aDocumentIdentifier =
+            myDoc->DocumentIdentifier();
+        if (aMeasurement.presentationMatchesDocument
+            && PositionIsFiniteAndBounded(
+                aPersistedTransform.position)
+            && !aDocumentData.IsNull()
+            && !aDocumentIdentifier.empty()
+            && aDefinition.FindAttribute(
+                TNaming_NamedShape::GetID(), aNamedShape)
+            && !aNamedShape.IsNull()
+            && TryNextPositionEditGeneration(
+                aPositionEditGeneration)
+            && TryPublicEditGeneration(
+                aDocumentData->Time(), aDocumentEditGeneration)
+            && TryPublicEditGeneration(
+                aNamedShape->Transaction(), aGeometryEditGeneration)) {
+            Impl::PositionEditContext anEditContext;
+            anEditContext.generation = aPositionEditGeneration;
+            anEditContext.document = aDocument;
+            anEditContext.documentIdentifier = aDocumentIdentifier;
+            anEditContext.documentEditGeneration =
+                aDocumentEditGeneration;
+            anEditContext.storedShape = aStoredShape;
+            anEditContext.geometryEditGeneration =
+                aGeometryEditGeneration;
+            anEditContext.entityIdentifier =
+                aMeasurement.entityIdentifier;
+            anEditContext.definitionIdentifier =
+                aMeasurement.definitionIdentifier;
+            anEditContext.persistedTransform = aPersistedTransform;
+            anEditContext.representation = aMeasurement.representation;
+            anEditContext.modelCapabilities =
+                aMeasurement.modelCapabilities;
+            anEditContext.metersPerUnit = aMetersPerUnit;
+            myImpl->positionEditContext = std::move(anEditContext);
+
+            aMeasurement.canEditPosition = true;
+            aMeasurement.positionEditGeneration =
+                aPositionEditGeneration;
+            aMeasurement.documentEditGeneration =
+                aDocumentEditGeneration;
+            aMeasurement.geometryEditGeneration =
+                aGeometryEditGeneration;
+        }
 
         const TransformInspectorBoundsKey aKey{
             aDocument,
@@ -1737,6 +1914,391 @@ TransformInspectorMeasurementController::capture(
         aMeasurement.state =
             TransformInspectorMeasurementState::Invalid;
         return aMeasurement;
+    }
+}
+
+TransformInspectorPositionCommitOutcome
+TransformInspectorMeasurementController::commitPosition(
+    const std::shared_ptr<ObjectInteractor>& theObjectInteractor,
+    const std::shared_ptr<ShapeInteractor>& theShapeInteractor,
+    const TransformInspectorPositionCommitRequest& theRequest) noexcept
+{
+    TransformInspectorPositionCommitOutcome anOutcome;
+    anOutcome.result =
+        TransformInspectorPositionCommitResult::InternalFailure;
+    if (myStopped || pthread_main_np() == 0 || myImpl == nullptr
+        || myContext.IsNull() || myDoc.IsNull()) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Unavailable;
+        return anOutcome;
+    }
+
+    const auto positionIsExact = [](
+        const TransformInspectorVector3& left,
+        const TransformInspectorVector3& right) {
+        return left.x == right.x
+            && left.y == right.y
+            && left.z == right.z;
+    };
+    std::size_t anAxis = 0;
+    switch (theRequest.axis) {
+        case TransformInspectorPositionAxis::X:
+            anAxis = 0;
+            break;
+        case TransformInspectorPositionAxis::Y:
+            anAxis = 1;
+            break;
+        case TransformInspectorPositionAxis::Z:
+            anAxis = 2;
+            break;
+        default:
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InvalidValue;
+            return anOutcome;
+    }
+    if (!std::isfinite(theRequest.value)
+        || std::abs(theRequest.value)
+            > limits::kMaximumModelCoordinateMagnitude
+        || !PositionIsFiniteAndBounded(
+            theRequest.expectedPosition)
+        || !std::isfinite(theRequest.expectedMetersPerUnit)
+        || theRequest.expectedMetersPerUnit <= 0.0) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::InvalidValue;
+        return anOutcome;
+    }
+
+    if (!myImpl->positionEditContext.has_value()
+        || theRequest.positionEditGeneration == 0
+        || theRequest.documentEditGeneration == 0
+        || theRequest.geometryEditGeneration == 0) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Stale;
+        return anOutcome;
+    }
+    // An old snapshot must never consume the newer lease installed by a more
+    // recent capture. Compare the opaque process-unique token first while the
+    // live context is still untouched.
+    if (theRequest.positionEditGeneration
+        != myImpl->positionEditContext->generation) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Stale;
+        return anOutcome;
+    }
+    Impl::PositionEditContext anEditContext;
+    try {
+        // Copy before consumption so allocation failure cannot escape this
+        // noexcept API or destroy the still-valid lease.
+        anEditContext = *myImpl->positionEditContext;
+    } catch (...) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::InternalFailure;
+        return anOutcome;
+    }
+    // A valid attempt consumes the lease, including Busy/Stale/failed
+    // outcomes. Invalid text is rejected above without consuming it so the
+    // same focused field can be corrected.
+    myImpl->positionEditContext.reset();
+    cancelPendingMeasurement();
+
+    if (theRequest.documentEditGeneration
+            != anEditContext.documentEditGeneration
+        || theRequest.geometryEditGeneration
+            != anEditContext.geometryEditGeneration
+        || theRequest.entityIdentifier
+            != anEditContext.entityIdentifier
+        || theRequest.definitionIdentifier
+            != anEditContext.definitionIdentifier
+        || !positionIsExact(
+            theRequest.expectedPosition,
+            anEditContext.persistedTransform.position)
+        || theRequest.expectedMetersPerUnit
+            != anEditContext.metersPerUnit
+        || theRequest.expectedRepresentation
+            != anEditContext.representation
+        || theRequest.expectedModelCapabilities
+            != anEditContext.modelCapabilities) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Stale;
+        return anOutcome;
+    }
+
+    if (!EnvironmentIsIdle(
+            myDoc, theObjectInteractor, theShapeInteractor)) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Busy;
+        return anOutcome;
+    }
+    if (theShapeInteractor->getSelectionMode()
+        != ShapeSelectionMode::WholeShape) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Stale;
+        return anOutcome;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        const Handle(TDF_Data) aDocumentData = aDocument.IsNull()
+            ? Handle(TDF_Data)()
+            : aDocument->GetData();
+        std::uint64_t aDocumentEditGeneration = 0;
+        if (aDocument.IsNull() || aDocument != anEditContext.document
+            || aDocumentData.IsNull()
+            || myDoc->DocumentIdentifier()
+                != anEditContext.documentIdentifier
+            || !TryPublicEditGeneration(
+                aDocumentData->Time(), aDocumentEditGeneration)
+            || aDocumentEditGeneration
+                != anEditContext.documentEditGeneration) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Stale;
+            return anOutcome;
+        }
+        if (aDocument->HasOpenCommand()) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Busy;
+            return anOutcome;
+        }
+
+        Handle(AIS_InteractiveObject) aSelected;
+        Handle(SelectMgr_EntityOwner) aSelectedOwner;
+        std::size_t aSelectionCount = 0;
+        for (myContext->InitSelected(); myContext->MoreSelected();
+             myContext->NextSelected()) {
+            ++aSelectionCount;
+            if (aSelectionCount == 1) {
+                aSelected = myContext->SelectedInteractive();
+                aSelectedOwner = myContext->SelectedOwner();
+            }
+        }
+        if (aSelectionCount != 1 || aSelected.IsNull()
+            || aSelectedOwner.IsNull()
+            || !aSelectedOwner->HasSelectable()
+            || aSelectedOwner->Selectable() != aSelected
+            || !myDoc->IsPresentationEditable(aSelected)) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Stale;
+            return anOutcome;
+        }
+
+        const Handle(AIS_Shape) aPresentation =
+            Handle(AIS_Shape)::DownCast(aSelected);
+        const Handle(StdSelect_BRepOwner) aBRepOwner =
+            Handle(StdSelect_BRepOwner)::DownCast(aSelectedOwner);
+        const TDF_Label aDefinition = myDoc->ShapeLabel(aSelected);
+        const TopoDS_Shape aStoredShape = aDefinition.IsNull()
+            ? TopoDS_Shape()
+            : XCAFDoc_ShapeTool::GetShape(aDefinition);
+        Handle(TNaming_NamedShape) aNamedShape;
+        std::uint64_t aGeometryEditGeneration = 0;
+        if (aPresentation.IsNull() || aBRepOwner.IsNull()
+            || !aBRepOwner->HasShape() || aDefinition.IsNull()
+            || !myDoc->IsEditableFreeSimpleDefinitionLabel(aDefinition)
+            || aStoredShape.IsNull()
+            || !aStoredShape.IsEqual(anEditContext.storedShape)
+            || aPresentation->Shape().IsNull()
+            || !aPresentation->Shape().IsEqual(aStoredShape)
+            || !aBRepOwner->Shape().IsEqual(aStoredShape)
+            || !aDefinition.FindAttribute(
+                TNaming_NamedShape::GetID(), aNamedShape)
+            || aNamedShape.IsNull()
+            || !TryPublicEditGeneration(
+                aNamedShape->Transaction(), aGeometryEditGeneration)
+            || aGeometryEditGeneration
+                != anEditContext.geometryEditGeneration
+            || myDoc->EntityIdentifierForLabel(aDefinition)
+                != anEditContext.entityIdentifier
+            || myDoc->DefinitionIdentifierForLabel(aDefinition)
+                != anEditContext.definitionIdentifier) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Stale;
+            return anOutcome;
+        }
+
+        TransformInspectorGeometryRepresentation aRepresentation =
+            TransformInspectorGeometryRepresentation::Invalid;
+        std::uint64_t aCapabilities = 0;
+        if (!TryInspectorRepresentation(
+                myDoc->StoredGeometryRepresentationForLabel(aDefinition),
+                aRepresentation,
+                aCapabilities)
+            || aRepresentation != anEditContext.representation
+            || aCapabilities != anEditContext.modelCapabilities
+            || (aCapabilities & (1ull << 2)) == 0) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Unsupported;
+            return anOutcome;
+        }
+
+        double aMetersPerUnit = 0.0;
+        PersistedTransformCapture aCurrentTransform;
+        if (!TryReadMetersPerUnit(aDocument, aMetersPerUnit)
+            || aMetersPerUnit != anEditContext.metersPerUnit
+            || !TryCapturePersistedTransform(
+                aDefinition, aCurrentTransform)
+            || !PositionIsFiniteAndBounded(
+                aCurrentTransform.position)
+            || !positionIsExact(
+                aCurrentTransform.position,
+                anEditContext.persistedTransform.position)
+            || !TransformsMatch(
+                aCurrentTransform.transform,
+                anEditContext.persistedTransform.transform)
+            || !TransformsMatch(
+                aPresentation->LocalTransformation(),
+                aCurrentTransform.transform)) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Stale;
+            return anOutcome;
+        }
+
+        TransformInspectorVector3 aCandidatePosition =
+            aCurrentTransform.position;
+        double* const aCandidateComponents[3] = {
+            &aCandidatePosition.x,
+            &aCandidatePosition.y,
+            &aCandidatePosition.z,
+        };
+        if (*aCandidateComponents[anAxis] == theRequest.value) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::Unchanged;
+            return anOutcome;
+        }
+        *aCandidateComponents[anAxis] = theRequest.value;
+
+        gp_Trsf aCandidateTransform = aCurrentTransform.transform;
+        aCandidateTransform.SetTranslationPart(gp_XYZ(
+            aCandidatePosition.x,
+            aCandidatePosition.y,
+            aCandidatePosition.z));
+        for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+            for (Standard_Integer aColumn = 1; aColumn <= 4;
+                 ++aColumn) {
+                if (!std::isfinite(
+                        aCandidateTransform.Value(aRow, aColumn))) {
+                    anOutcome.result =
+                        TransformInspectorPositionCommitResult::InvalidValue;
+                    return anOutcome;
+                }
+            }
+        }
+
+        OcafCommandAbortGuard aCommandGuard(aDocument);
+        aCommandGuard.arm();
+        try {
+            aDocument->NewCommand();
+        } catch (...) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+        if (!aDocument->HasOpenCommand()) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+
+        if (!myDoc->SetObjectPositionComponentForLabel(
+                aDefinition,
+                static_cast<Standard_Integer>(anAxis),
+                theRequest.value)) {
+            (void)aCommandGuard.abortNow();
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+        PersistedTransformCapture aStagedTransform;
+        if (!TryCapturePersistedTransform(
+                aDefinition, aStagedTransform)
+            || !positionIsExact(
+                aStagedTransform.position, aCandidatePosition)
+            || !TransformsMatch(
+                aStagedTransform.transform, aCandidateTransform)) {
+            (void)aCommandGuard.abortNow();
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+
+        const Standard_Integer aDebugCommitMode =
+#ifdef DEBUG
+            std::exchange(myImpl->debugPositionCommitMode, 0);
+#else
+            0;
+#endif
+        try {
+            Standard_Boolean wasReportedCommitted = Standard_False;
+            if (aDebugCommitMode != 3) {
+                wasReportedCommitted = aDocument->CommitCommand();
+            }
+#ifdef DEBUG
+            if (aDebugCommitMode == 1) {
+                // Model an OCCT wrapper that reports failure after the real
+                // command has already closed and durably applied.
+                wasReportedCommitted = Standard_False;
+            } else if (aDebugCommitMode == 2) {
+                throw Standard_Failure(
+                    "Injected Position failure after command close");
+            }
+#endif
+            (void)wasReportedCommitted;
+        } catch (...) {
+            // Reconcile below: OCCT can close and durably apply a command
+            // before a wrapper reports failure.
+        }
+
+        bool isOpen = false;
+        try {
+            isOpen = aDocument->HasOpenCommand();
+        } catch (...) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+        if (isOpen) {
+            const bool wasAborted = aCommandGuard.abortNow();
+            PersistedTransformCapture aRestoredTransform;
+            if (!wasAborted
+                || !TryCapturePersistedTransform(
+                    aDefinition, aRestoredTransform)
+                || !positionIsExact(
+                    aRestoredTransform.position,
+                    aCurrentTransform.position)
+                || !TransformsMatch(
+                    aRestoredTransform.transform,
+                    aCurrentTransform.transform)) {
+                anOutcome.result =
+                    TransformInspectorPositionCommitResult::InternalFailure;
+                return anOutcome;
+            }
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+        aCommandGuard.release();
+
+        PersistedTransformCapture aCommittedTransform;
+        if (!TryCapturePersistedTransform(
+                aDefinition, aCommittedTransform)
+            || !positionIsExact(
+                aCommittedTransform.position, aCandidatePosition)
+            || !TransformsMatch(
+                aCommittedTransform.transform, aCandidateTransform)) {
+            anOutcome.result =
+                TransformInspectorPositionCommitResult::InternalFailure;
+            return anOutcome;
+        }
+
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::Committed;
+        anOutcome.presentation = aPresentation;
+        anOutcome.committedTransform = aCommittedTransform.transform;
+        return anOutcome;
+    } catch (...) {
+        anOutcome.result =
+            TransformInspectorPositionCommitResult::InternalFailure;
+        return anOutcome;
     }
 }
 
@@ -2097,6 +2659,15 @@ debugSetMeshSweepWatchdog(
         myImpl->debugMeshSweepWatchdogPollNodes = aResolvedPollNodes;
         myImpl->cache.clear();
         myImpl->negativeCache.clear();
+    }
+}
+
+void TransformInspectorMeasurementController::debugSetPositionCommitMode(
+    const Standard_Integer theMode) noexcept
+{
+    if (myImpl != nullptr) {
+        myImpl->debugPositionCommitMode =
+            theMode >= 0 && theMode <= 3 ? theMode : 0;
     }
 }
 #endif

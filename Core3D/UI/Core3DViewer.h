@@ -84,7 +84,11 @@ namespace core3d {
         
         AssetImportResult ImportCbf(const std::string &theFilename);
         AssetImportResult ValidateCbf(const std::string &theFilename) const;
-        void redrawDocument();
+        //! Rebuild presentations from authoritative OCAF. If traversal or
+        //! interactor recreation fails after clearing the context, restore the
+        //! retained pre-redraw AIS handles instead of leaving a blank/partial
+        //! viewport. Returns true only for a complete OCAF rebuild.
+        bool redrawDocument() noexcept;
 
         void setPreviewMode();
         inline void setInteractiveCallback(const std::function<void(int,int)> cb) {
@@ -100,6 +104,10 @@ namespace core3d {
         //! may deliver one terminal main-thread completion.
         TransformInspectorMeasurement captureTransformInspectorMeasurement(
             TransformInspectorMeasurementCompletion completion = {}) noexcept;
+        TransformInspectorPositionCommitResult
+            commitTransformInspectorPosition(
+                const TransformInspectorPositionCommitRequest& request)
+                noexcept;
         //! Suppress any pending transform-inspector completion. Exact worker
         //! work already inside OCCT may still populate its bounded cache.
         void cancelTransformInspectorMeasurement() noexcept;
@@ -198,6 +206,13 @@ namespace core3d {
         void DebugSetTransformInspectorMeshSweepWatchdog(
             Standard_Real deadlineMilliseconds,
             Standard_Size pollNodes) noexcept;
+        void DebugSetTransformInspectorPositionCommitMode(
+            Standard_Integer mode) noexcept;
+        //! One-shot publication fallback: 0 normal, 1 forces incremental
+        //! publication failure with a successful OCAF redraw, and 2 also
+        //! forces redraw traversal failure to exercise retained AIS restore.
+        void DebugSetTransformInspectorPositionPublicationFallbackMode(
+            Standard_Integer mode) noexcept;
 #endif
     private:
         // document traversal
@@ -220,6 +235,12 @@ namespace core3d {
         std::function<void()> _booleanPreviewStateChangedCallback;
         std::function<void()> _bevelPreviewStateChangedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
+#ifdef DEBUG
+        Standard_Integer
+            _debugTransformInspectorPositionPublicationFallbackMode = 0;
+        Standard_Boolean
+            _debugForceNextTransformInspectorRedrawFailure = Standard_False;
+#endif
         Standard_Size myMaximumProjectTopologyValidationNodes = 2'000'000;
     };
 }

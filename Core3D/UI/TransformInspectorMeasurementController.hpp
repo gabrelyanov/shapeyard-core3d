@@ -16,6 +16,9 @@
 #include <memory>
 #include <string>
 
+#include <AIS_Shape.hxx>
+#include <gp_Trsf.hxx>
+
 namespace core3d {
 
 class ObjectInteractor;
@@ -69,6 +72,10 @@ struct TransformInspectorMeasurement {
         TransformInspectorMeasurementState::Invalid;
     std::size_t selectionCount = 0;
     std::uint64_t generation = 0;
+    bool canEditPosition = false;
+    std::uint64_t positionEditGeneration = 0;
+    std::uint64_t documentEditGeneration = 0;
+    std::uint64_t geometryEditGeneration = 0;
     std::string entityIdentifier;
     std::string definitionIdentifier;
     std::string name;
@@ -88,6 +95,47 @@ struct TransformInspectorMeasurement {
     std::array<double, 6> localBounds{};
     TransformInspectorVector3 localDimensions;
     TransformInspectorVector3 dimensions;
+};
+
+enum class TransformInspectorPositionAxis : std::uint8_t {
+    X = 0,
+    Y,
+    Z,
+};
+
+enum class TransformInspectorPositionCommitResult : std::uint8_t {
+    Committed = 0,
+    Unchanged,
+    InvalidValue,
+    Busy,
+    Stale,
+    Unsupported,
+    Unavailable,
+    InternalFailure,
+};
+
+//! Public DTO values copied back into the native compare-and-swap gate. The
+//! actual document/TShape lease remains private to the controller.
+struct TransformInspectorPositionCommitRequest {
+    std::uint64_t positionEditGeneration = 0;
+    std::uint64_t documentEditGeneration = 0;
+    std::uint64_t geometryEditGeneration = 0;
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+    TransformInspectorVector3 expectedPosition;
+    double expectedMetersPerUnit = 0.0;
+    TransformInspectorGeometryRepresentation expectedRepresentation =
+        TransformInspectorGeometryRepresentation::Invalid;
+    std::uint64_t expectedModelCapabilities = 0;
+    TransformInspectorPositionAxis axis = TransformInspectorPositionAxis::X;
+    double value = 0.0;
+};
+
+struct TransformInspectorPositionCommitOutcome {
+    TransformInspectorPositionCommitResult result =
+        TransformInspectorPositionCommitResult::InternalFailure;
+    Handle(AIS_Shape) presentation;
+    gp_Trsf committedTransform;
 };
 
 //! Release-safe, read-only counters used by signed-device qualification.
@@ -164,6 +212,14 @@ public:
         const std::shared_ptr<ShapeInteractor>& shapeInteractor,
         TransformInspectorMeasurementCompletion completion = {}) noexcept;
 
+    //! Compare-and-swap one raw model-unit Position scalar. Persistence is
+    //! completed here; Core3DViewer owns presentation publication and the one
+    //! document notification after a Committed outcome.
+    TransformInspectorPositionCommitOutcome commitPosition(
+        const std::shared_ptr<ObjectInteractor>& objectInteractor,
+        const std::shared_ptr<ShapeInteractor>& shapeInteractor,
+        const TransformInspectorPositionCommitRequest& request) noexcept;
+
     //! Invalidate the current generation and suppress its completion. Exact
     //! AddOptimal work already inside OCCT may finish and populate the cache.
     void cancelPendingMeasurement() noexcept;
@@ -184,6 +240,10 @@ public:
     void debugSetMeshSweepWatchdog(
         Standard_Real deadlineMilliseconds,
         Standard_Size pollNodes) noexcept;
+    //! One-shot transaction reconciliation fault. 0 is normal, 1 reports
+    //! false after a real close, 2 throws after a real close, and 3 leaves
+    //! the staged command open so production reconciliation must abort it.
+    void debugSetPositionCommitMode(Standard_Integer mode) noexcept;
 #endif
 
 private:

@@ -247,6 +247,19 @@ typedef struct {
 - (void)cancelTransformInspectorSnapshotRequest
     NS_SWIFT_NAME(cancelTransformInspectorSnapshotRequest());
 
+//! Atomically commit one Position component from an immutable inspector
+//! snapshot. `value` is in raw document model units. The expected snapshot is
+//! a compare-and-swap lease: Core3D independently rechecks document/geometry
+//! generations, stable identity, selection, transform, representation, unit,
+//! presentation, and all transient-operation guards before opening history.
+//! Main-thread only.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorPositionValue:(double)value
+                                      axis:(Core3DTransformInspectorAxis)axis
+                          expectedSnapshot:
+                              (Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorPosition(_:axis:expected:));
+
 //! Release-safe counters for opt-in signed-device performance qualification.
 //! Values are observational only and never alter inspector admission policy.
 - (NSDictionary<NSString *, NSNumber *> *)
@@ -273,6 +286,13 @@ typedef struct {
 - (void)debugSetTransformInspectorMeshSweepWatchdogDeadlineMilliseconds:
     (double)deadlineMilliseconds
     pollNodes:(NSUInteger)pollNodes;
+//! One-shot commit reconciliation mode: 0 normal, 1 false after close,
+//! 2 throw after close, and 3 staged write left open for production abort.
+- (void)debugSetTransformInspectorPositionCommitMode:(NSInteger)mode;
+//! One-shot publication mode: 0 normal, 1 incremental failure followed by a
+//! successful redraw, and 2 incremental plus redraw traversal failure.
+- (void)debugSetTransformInspectorPositionPublicationFallbackMode:
+    (NSInteger)mode;
 
 //! Actual native enum values backing the persistent representation schema.
 + (NSDictionary<NSString *, NSNumber *> *)
