@@ -12,7 +12,14 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_ListOfTriangulation.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Poly_TriangulationParameters.hxx>
 #include <Precision.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <V3d_View.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -38,6 +45,100 @@ namespace core3d {
 			return IsBRepModelingRepresentation(theRepresentation)
 				|| theRepresentation
 					== OcctGeometryRepresentation::TriangleMesh;
+		}
+
+		bool RestoreTriangleMeshCopyParameters(
+			const TopoDS_Shape& theSource,
+			BRepBuilderAPI_Copy& theCopy) noexcept {
+			try {
+				Standard_Size aFaceCount = 0;
+				for (TopExp_Explorer aFaceExplorer(
+						theSource, TopAbs_FACE);
+					 aFaceExplorer.More(); aFaceExplorer.Next()) {
+					const TopoDS_Face aSourceFace =
+						TopoDS::Face(aFaceExplorer.Current());
+					const TopoDS_Shape aCopiedShape =
+						theCopy.ModifiedShape(aSourceFace);
+					if (aCopiedShape.IsNull()
+						|| aCopiedShape.ShapeType() != TopAbs_FACE) {
+						return false;
+					}
+					const TopoDS_Face aCopiedFace =
+						TopoDS::Face(aCopiedShape);
+					TopLoc_Location aSourceLocation;
+					TopLoc_Location aCopiedLocation;
+					const Poly_ListOfTriangulation& aSourceMeshes =
+						BRep_Tool::Triangulations(
+							aSourceFace, aSourceLocation);
+					const Poly_ListOfTriangulation& aCopiedMeshes =
+						BRep_Tool::Triangulations(
+							aCopiedFace, aCopiedLocation);
+					// OCCT 7.8 copies only the active triangulation. Reject a
+					// source carrying hidden alternates instead of silently
+					// producing a lossy definition.
+					if (aSourceMeshes.Size() != 1
+						|| aCopiedMeshes.Size() != 1) {
+						return false;
+					}
+					const Handle(Poly_Triangulation)& aSourceMesh =
+						BRep_Tool::Triangulation(
+							aSourceFace, aSourceLocation);
+					const Handle(Poly_Triangulation)& aCopiedMesh =
+						BRep_Tool::Triangulation(
+							aCopiedFace, aCopiedLocation);
+					if (aSourceMesh.IsNull() || aCopiedMesh.IsNull()
+						|| aCopiedFace.IsPartner(aSourceFace)
+						|| aCopiedFace.Orientation()
+							!= aSourceFace.Orientation()
+						|| !aCopiedLocation.IsEqual(aSourceLocation)
+						|| aSourceMesh == aCopiedMesh
+						|| aSourceMesh->Deflection()
+							!= aCopiedMesh->Deflection()
+						|| aSourceMesh->NbNodes()
+							!= aCopiedMesh->NbNodes()
+						|| aSourceMesh->NbTriangles()
+							!= aCopiedMesh->NbTriangles()
+						|| aSourceMesh->HasUVNodes()
+							!= aCopiedMesh->HasUVNodes()
+						|| aSourceMesh->HasNormals()
+							!= aCopiedMesh->HasNormals()
+						|| aSourceMesh->MeshPurpose()
+							!= aCopiedMesh->MeshPurpose()) {
+						return false;
+					}
+
+					// OCCT 7.8 deep-copies the active triangulation but omits
+					// its immutable generation parameters. Restore an
+					// independent value object so snapshot compatibility and
+					// persistence metadata remain faithful.
+					const Handle(Poly_TriangulationParameters)&
+						aSourceParameters = aSourceMesh->Parameters();
+					if (!aSourceParameters.IsNull()) {
+						aCopiedMesh->Parameters(
+							new Poly_TriangulationParameters(
+								aSourceParameters->Deflection(),
+								aSourceParameters->Angle(),
+								aSourceParameters->MinSize()));
+						const Handle(Poly_TriangulationParameters)&
+							aCopiedParameters = aCopiedMesh->Parameters();
+						if (aCopiedParameters.IsNull()
+							|| aCopiedParameters->Deflection()
+								!= aSourceParameters->Deflection()
+							|| aCopiedParameters->Angle()
+								!= aSourceParameters->Angle()
+							|| aCopiedParameters->MinSize()
+								!= aSourceParameters->MinSize()) {
+							return false;
+						}
+					} else if (!aCopiedMesh->Parameters().IsNull()) {
+						return false;
+					}
+					++aFaceCount;
+				}
+				return aFaceCount > 0;
+			} catch (...) {
+				return false;
+			}
 		}
 
 		bool SelectionSupportsBRepModeling(
@@ -554,6 +655,7 @@ namespace core3d {
         struct DuplicateSource {
             Handle(AIS_Shape) presentation;
             TDF_Label label;
+			OcctGeometryRepresentation representation;
         };
         std::vector<DuplicateSource> sources;
         for (myContext->InitSelected(); myContext->MoreSelected();
@@ -565,6 +667,11 @@ namespace core3d {
             const TDF_Label label = myDoc->ShapeLabel(selected);
             const OcctGeometryRepresentation representation =
                 myDoc->GeometryRepresentationForLabel(label);
+			const OcctGeometryRepresentation destinationRepresentation =
+				representation
+					== OcctGeometryRepresentation::LegacyUnknown
+				? OcctGeometryRepresentation::BRep
+				: representation;
             const TopoDS_Shape storedShape = label.IsNull()
                 ? TopoDS_Shape()
                 : XCAFDoc_ShapeTool::GetShape(label);
@@ -573,13 +680,13 @@ namespace core3d {
                 || !myDoc->IsPresentationEditable(selected)
                 || label.IsNull()
                 || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
-                || !IsBRepModelingRepresentation(representation)
+				|| !IsObjectModelingRepresentation(representation)
+				|| (destinationRepresentation
+						!= OcctGeometryRepresentation::BRep
+					&& destinationRepresentation
+						!= OcctGeometryRepresentation::TriangleMesh)
                 || storedShape.IsNull()
                 || !storedShape.IsEqual(shape->Shape())) {
-                // Triangle-only duplication remains disabled until the copy
-                // path preserves Poly_Triangulation data explicitly. Reject
-                // every unsupported source before bounding or copying any
-                // geometry.
                 return;
             }
             bool isDuplicateLabel = false;
@@ -590,10 +697,19 @@ namespace core3d {
                 }
             }
             if (!isDuplicateLabel) {
-                sources.push_back({shape, label});
+				sources.push_back({
+					shape, label, destinationRepresentation});
             }
         }
         if (sources.empty()) { return; }
+		std::vector<TDF_Label> sourceLabels;
+		sourceLabels.reserve(sources.size());
+		for (const DuplicateSource& source : sources) {
+			sourceLabels.push_back(source.label);
+		}
+		if (!myDoc->CanDuplicateGeometryDefinitions(sourceLabels)) {
+			return;
+		}
 
         Bnd_Box overallBox;
         for (const DuplicateSource& source : sources) {
@@ -613,10 +729,31 @@ namespace core3d {
         overallBox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
         const Standard_Real w = xmax - xmin;
         const Standard_Real d = ymax - ymin;
+		const Standard_Real h = zmax - zmin;
+		if (!std::isfinite(w) || !std::isfinite(d) || !std::isfinite(h)
+			|| w < 0.0 || d < 0.0 || h < 0.0) {
+			return;
+		}
         
         gp_Trsf minAxisDisplacement;
-        
-        minAxisDisplacement.SetTranslation((w>d)?(gp_Vec){0., d, 0.}:(gp_Vec){w, 0., 0.});
+		const Standard_Real aMinimumExtent = Precision::Confusion();
+		gp_Vec aDisplacement;
+		if (w > aMinimumExtent && d > aMinimumExtent) {
+			aDisplacement = w > d
+				? gp_Vec(0.0, d, 0.0)
+				: gp_Vec(w, 0.0, 0.0);
+		} else if (w > aMinimumExtent) {
+			aDisplacement = gp_Vec(w, 0.0, 0.0);
+		} else if (d > aMinimumExtent) {
+			aDisplacement = gp_Vec(0.0, d, 0.0);
+		} else if (h > aMinimumExtent) {
+			aDisplacement = gp_Vec(0.0, 0.0, h);
+		} else {
+			// Keep a point-sized legacy BRep visibly separate without risking
+			// the document coordinate bound.
+			aDisplacement = gp_Vec(10.0, 0.0, 0.0);
+		}
+		minAxisDisplacement.SetTranslation(aDisplacement);
         
 		struct DuplicateRecord {
 			Handle(AIS_Shape) presentation;
@@ -631,8 +768,22 @@ namespace core3d {
 				shapeCopy.Perform(
 					source.presentation->Shape(),
 					Standard_True,
-					Standard_False);
-				if (!shapeCopy.IsDone() || !IsTopologicallyValid(shapeCopy.Shape())) { return; }
+					source.representation
+						== OcctGeometryRepresentation::TriangleMesh
+					? Standard_True
+					: Standard_False);
+				if (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()
+					|| shapeCopy.Shape().IsPartner(
+						source.presentation->Shape())
+					|| (source.representation
+							== OcctGeometryRepresentation::BRep
+						&& !IsTopologicallyValid(shapeCopy.Shape()))
+					|| (source.representation
+							== OcctGeometryRepresentation::TriangleMesh
+						&& !RestoreTriangleMeshCopyParameters(
+							source.presentation->Shape(), shapeCopy))) {
+					return;
+				}
 				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
 				copy->SetLocalTransformation(
 					source.presentation->LocalTransformation().Multiplied(
@@ -642,7 +793,7 @@ namespace core3d {
 					copy,
 					source.label,
 					TDF_Label(),
-					OcctGeometryRepresentation::BRep});
+					source.representation});
 			}
 		} catch (...) {
 			return;
@@ -651,6 +802,7 @@ namespace core3d {
 
 		try {
 			doc->NewCommand();
+			if (!doc->HasOpenCommand()) { return; }
 			for (auto& duplicate : duplicates) {
 				const TDF_Label label = myDoc->AddShape(
 					duplicate.presentation,
@@ -668,6 +820,10 @@ namespace core3d {
 				}
 				duplicate.resultLabel = label;
 				myDoc->LoadObjectMeterial(label, duplicate.presentation);
+			}
+			if (!myDoc->ValidateGeometryRepresentations()) {
+				doc->AbortCommand();
+				return;
 			}
 			if (!doc->CommitCommand()) {
 				if (doc->HasOpenCommand()) { doc->AbortCommand(); }

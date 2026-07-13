@@ -2262,8 +2262,19 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations() const
     return ValidateGeometryRepresentations(myOcafDoc);
 }
 
-Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
-    const Handle(TDocStd_Document)& document) const
+namespace {
+
+struct GeometryDocumentUsage
+{
+    GeometryValidationBudget geometry;
+    Standard_Size definitions = 0;
+    Standard_Size labels = 0;
+    Standard_Size graphVisits = 0;
+};
+
+Standard_Boolean ValidateGeometryDocument(
+    const Handle(TDocStd_Document)& document,
+    GeometryDocumentUsage* output)
 {
     try {
         OCC_CATCH_SIGNALS
@@ -2295,6 +2306,11 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
                         TNaming_NamedShape::GetID(), aNamedShape)) {
                     return Standard_False;
                 }
+            }
+            if (output != nullptr) {
+                GeometryDocumentUsage usage;
+                usage.labels = aLabelCount;
+                *output = usage;
             }
             return Standard_True;
         }
@@ -2530,6 +2546,108 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
                 && !aVisitedGraphLabels.Contains(aLabel.Value())
                 && !aValidatedSubshapeLabels.Contains(
                     aLabel.Value())) {
+                return Standard_False;
+            }
+        }
+        if (output != nullptr) {
+            GeometryDocumentUsage usage;
+            usage.geometry = aBudget;
+            usage.definitions = aDefinitionCount;
+            usage.labels = aLabelCount;
+            usage.graphVisits = anAggregateGraphVisitCount;
+            *output = usage;
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+} // namespace
+
+Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
+    const Handle(TDocStd_Document)& document) const
+{
+    return ValidateGeometryDocument(document, nullptr);
+}
+
+Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
+    const std::vector<TDF_Label>& sourceDefinitionLabels) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || sourceDefinitionLabels.empty()
+            || sourceDefinitionLabels.size()
+                > static_cast<std::size_t>(
+                    kMaximumGeometryDefinitionLabels)
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+
+        GeometryDocumentUsage current;
+        if (!ValidateGeometryDocument(myOcafDoc, &current)) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapeTool.IsNull()) {
+            return Standard_False;
+        }
+
+        GeometryValidationBudget projectedGeometry = current.geometry;
+        Standard_Size projectedDefinitions = current.definitions;
+        Standard_Size projectedLabels = current.labels;
+        Standard_Size projectedGraphVisits = current.graphVisits;
+        TDF_LabelMap uniqueSources;
+        for (const TDF_Label& source : sourceDefinitionLabels) {
+            if (source.IsNull()
+                || source.Data() != myOcafDoc->GetData()
+                || !IsEditableFreeSimpleDefinitionLabel(source)
+                || !uniqueSources.Add(source)
+                || !AddWithinLimit(
+                    projectedDefinitions,
+                    1U,
+                    kMaximumGeometryDefinitionLabels)
+                || !AddWithinLimit(
+                    projectedGraphVisits,
+                    1U,
+                    kMaximumGeometryDocumentLabels)
+                || ValidatedGeometryRepresentation(
+                    myOcafDoc,
+                    shapeTool,
+                    source,
+                    &projectedGeometry)
+                    == OcctGeometryRepresentation::Invalid) {
+                return Standard_False;
+            }
+
+            // AddShape creates one definition label and eight transform
+            // children. CopyObjectAppearance creates the legacy material and
+            // color children only when a local PBR assignment is not
+            // authoritative; visual-material/texture definitions are shared.
+            Standard_Size destinationLabels = 9U;
+            Handle(TDataStd_Integer) localPBRMarker;
+            const Standard_Boolean hasLocalPBR =
+                source.FindAttribute(
+                    LocalPBRMaterialAttributeID(), localPBRMarker)
+                && !localPBRMarker.IsNull()
+                && localPBRMarker->Get() == 1;
+            if (!hasLocalPBR) {
+                Graphic3d_NameOfMaterial material;
+                Quantity_NameOfColor color;
+                if (TryMaterialNameForLabel(source, material)) {
+                    ++destinationLabels;
+                }
+                if (TryColorNameForLabel(source, color)) {
+                    ++destinationLabels;
+                }
+            }
+            if (!AddWithinLimit(
+                    projectedLabels,
+                    destinationLabels,
+                    kMaximumGeometryDocumentLabels)) {
                 return Standard_False;
             }
         }

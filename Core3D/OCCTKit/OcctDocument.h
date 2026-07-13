@@ -168,6 +168,13 @@ public:
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations() const;
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations(
       const Handle(TDocStd_Document)& document) const;
+  //! Read-only preallocation gate for creating one independent free
+  //! definition per unique source label. The current closed document and the
+  //! projected result must remain inside every aggregate geometry, graph, and
+  //! OCAF-label budget. Callers must still validate the mutated document
+  //! before committing its command.
+  Standard_EXPORT Standard_Boolean CanDuplicateGeometryDefinitions(
+      const std::vector<TDF_Label>& sourceDefinitionLabels) const;
   //! Return the document-wide intersection of safe export formats. Invalid or
   //! empty documents return zero; any TriangleMesh definition removes STEP.
   Standard_EXPORT Standard_Integer SupportedGeometryExportFormats() const;
