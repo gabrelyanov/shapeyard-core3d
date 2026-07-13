@@ -724,6 +724,12 @@ bool UInt64(id value, std::uint64_t& output) {
     if (![value isKindOfClass:[NSNumber class]] || IsBoolean(value)) {
         return false;
     }
+    // Match the pinned RapidJSON consumer's integer-token contract. Accepting
+    // an integral-valued JSON real here (for example, `byteStride: 16.0`)
+    // would let preflight validate one layout while OCCT loads another.
+    if (CFNumberIsFloatType((__bridge CFNumberRef)value)) {
+        return false;
+    }
     // Every unsigned integer in glTF 2.0 is a JSON integer backed by a
     // 32-bit schema field. Constraining conversion here also avoids lossy
     // NSNumber double-to-uint64 conversions at the 64-bit boundary.
