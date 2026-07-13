@@ -3865,6 +3865,139 @@ void Core3DAddDebugOrphanVisualMaterial(
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count {
     [GLController debugSetExtrusionPostCommitInspectFailureCount:count];
 }
+
+- (BOOL)debugBeginBevelWithEntityIdentifier:(NSString *)entityIdentifier
+                       edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices {
+    if (![entityIdentifier isKindOfClass:NSString.class]
+        || ![edgeTopologyIndices isKindOfClass:NSArray.class]) {
+        return NO;
+    }
+    return [self debugBeginBevelWithEntityIdentifiers:@[entityIdentifier]
+                          edgeTopologyIndicesByEntity:@[edgeTopologyIndices]];
+}
+
+- (BOOL)debugBeginBevelWithEntityIdentifiers:(NSArray<NSString *> *)entityIdentifiers
+                 edgeTopologyIndicesByEntity:(NSArray<NSArray<NSNumber *> *> *)edgeTopologyIndicesByEntity {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || ![entityIdentifiers isKindOfClass:NSArray.class]
+        || ![edgeTopologyIndicesByEntity isKindOfClass:NSArray.class]
+        || entityIdentifiers.count == 0
+        || entityIdentifiers.count != edgeTopologyIndicesByEntity.count
+        || entityIdentifiers.count
+            > core3d::BevelOperationController::kMaxSourceBodies) {
+        return NO;
+    }
+    try {
+        std::vector<std::string> identifiers;
+        std::vector<std::vector<Standard_Size>> allIndices;
+        identifiers.reserve(entityIdentifiers.count);
+        allIndices.reserve(entityIdentifiers.count);
+        std::unordered_set<std::string> uniqueIdentifiers;
+        Standard_Size aggregateEdgeCount = 0;
+        for (NSUInteger sourceIndex = 0;
+             sourceIndex < entityIdentifiers.count; ++sourceIndex) {
+            id identifierValue = entityIdentifiers[sourceIndex];
+            id indicesValue = edgeTopologyIndicesByEntity[sourceIndex];
+            if (![identifierValue isKindOfClass:NSString.class]
+                || ![indicesValue isKindOfClass:NSArray.class]) {
+                return NO;
+            }
+            NSString* identifier = static_cast<NSString*>(identifierValue);
+            NSArray* sourceIndices = static_cast<NSArray*>(indicesValue);
+            if (identifier.length == 0 || identifier.UTF8String == nullptr
+                || sourceIndices.count == 0
+                || sourceIndices.count
+                    > core3d::BevelOperationController::kMaxSelectedEdges
+                || aggregateEdgeCount
+                    > core3d::BevelOperationController::kMaxSelectedEdges
+                        - sourceIndices.count) {
+                return NO;
+            }
+            const std::string identifierString(identifier.UTF8String);
+            if (!uniqueIdentifiers.insert(identifierString).second) {
+                return NO;
+            }
+            aggregateEdgeCount += sourceIndices.count;
+            std::vector<Standard_Size> indices;
+            indices.reserve(sourceIndices.count);
+            std::unordered_set<Standard_Size> uniqueIndices;
+            for (id value in sourceIndices) {
+                if (![value isKindOfClass:NSNumber.class]
+                    || CFGetTypeID((__bridge CFTypeRef)value)
+                        == CFBooleanGetTypeID()) {
+                    return NO;
+                }
+                NSNumber* number = static_cast<NSNumber*>(value);
+                const double raw = number.doubleValue;
+                if (!std::isfinite(raw) || raw < 0.0
+                    || std::floor(raw) != raw
+                    || raw > static_cast<double>(
+                        std::numeric_limits<Standard_Size>::max())) {
+                    return NO;
+                }
+                const Standard_Size index =
+                    static_cast<Standard_Size>(raw);
+                if (!uniqueIndices.insert(index).second) {
+                    return NO;
+                }
+                indices.push_back(index);
+            }
+            identifiers.push_back(identifierString);
+            allIndices.push_back(std::move(indices));
+        }
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const BOOL didBegin = viewer != nullptr
+            && viewer->debugBeginBevelSelection(
+                identifiers, allIndices);
+        _currentGizmoType = [GLController getGizmoType];
+        self.can_apply = NO;
+        [GLController debugRequestRender];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                 | UIStateChangingApply];
+        return didBegin;
+    } catch (...) {
+        self.can_apply = NO;
+        [self sendNotifyUIState:UIStateChangingApply];
+        return NO;
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugBevelState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugBevelState];
+}
+
+- (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked {
+    [GLController debugSetBevelPreviewWorkerBlocked:blocked];
+}
+
+- (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumBevelCaptureTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumBevelResultTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit {
+    [GLController debugSetMaximumBevelResultSolids:limit];
+}
+
+- (void)debugSetBevelTransactionFailureCount:(NSUInteger)count {
+    [GLController debugSetBevelTransactionFailureCount:count];
+}
+
+- (void)debugSetBevelCancelDiscardFailureCount:(NSUInteger)count {
+    [GLController debugSetBevelCancelDiscardFailureCount:count];
+}
+
+- (BOOL)debugMutateFirstBevelSourcePersistedTransform {
+    return [GLController debugMutateFirstBevelSourcePersistedTransform];
+}
 #endif
 
 - (void)viewDidInvalidateSceneSnapshot {
@@ -3906,6 +4039,10 @@ void Core3DAddDebugOrphanVisualMaterial(
         // last camera/frame publication with stale preview geometry.
         [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];
+    }
+    if (_currentGizmoType == PrimitiveGizmoTypeChamfer
+        && ![GLController hasActiveBevel]) {
+        [self completeOperationInteraction];
     }
 }
 
@@ -3988,7 +4125,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 		_currentGizmoType = [GLController getGizmoType];
         switch (_currentGizmoType) {
             case PrimitiveGizmoTypeChamfer:
-                self.can_apply = [_glController isSelected];
+                self.can_apply = [_glController canApplyChamfer];
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:

@@ -27,12 +27,16 @@ bool CanCaptureCommittedExport(
         ? Handle(TDocStd_Document)()
         : document->ChangeDocument();
     const auto objectInteractor = viewer->getObjectInteractor();
+    const auto shapeInteractor = viewer->getShapeInteractor();
     return !transaction.IsNull()
         && !transaction->HasOpenCommand()
         && objectInteractor != nullptr
+        && shapeInteractor != nullptr
         && !objectInteractor->hasActiveBoolean()
         && !objectInteractor->hasUnresolvedBoolean()
-        && !objectInteractor->hasUnresolvedMirrorObjects();
+        && !objectInteractor->hasUnresolvedMirrorObjects()
+        && !shapeInteractor->hasActiveExtrusion()
+        && !shapeInteractor->hasActiveBevel();
 }
 
 } // namespace

@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 4;
-inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 6;
+inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 7;
 
 struct Float2 {
     float x = 0.0f;
@@ -129,6 +129,7 @@ enum class PresentationOverlayKind : std::uint8_t {
     BooleanSubtractPreview,
     BooleanUnionPreview,
     BooleanIntersectPreview,
+    ChamferPreview,
 };
 
 enum class ElementKind : std::uint8_t {

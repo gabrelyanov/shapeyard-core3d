@@ -134,6 +134,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
     [self.materialController didChangeSelectionWithPBRMaterials:[pbrMaterials copy]];
      
     switch (_currentGizmoType) {
+        case PrimitiveGizmoTypeChamfer:
         case PrimitiveGizmoTypeSubtract:
         case PrimitiveGizmoTypeUnion:
         case PrimitiveGizmoTypeIntersect:
@@ -178,7 +179,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 
         switch (_currentGizmoType) {
             case PrimitiveGizmoTypeChamfer:
-                self.can_apply = true;
+                self.can_apply = [GLController canApplyChamfer];
                 break;
             case PrimitiveGizmoTypeSubtract:
             case PrimitiveGizmoTypeUnion:
@@ -229,7 +230,9 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply = false;
                 break;
             case PrimitiveGizmoTypeChamfer:
-                self.can_apply = false;
+                // A retained Bevel preview suppresses its source presentation,
+                // so empty AIS selection does not mean the operation ended.
+                self.can_apply = [GLController canApplyChamfer];
                 break;
 
             default:

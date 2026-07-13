@@ -9,13 +9,17 @@
 #define ShapeInteractor_hpp
 
 #include "Interactor.hpp"
+#include "BevelOperationController.hpp"
 #include <AIS_Shape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TDocStd_Document.hxx>
 
 #include <cstddef>
+#include <functional>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace core3d {
 
@@ -77,9 +81,8 @@ namespace core3d {
 		TopAbs_ShapeEnum _topAbsSelMode = TopAbs_ShapeEnum::TopAbs_SHAPE;
 		Handle(AIS_Shape) _temporalChamferShapePrs;
 		Handle(AIS_InteractiveObject) _subtractorObjectPrs;
-		std::vector<EdgesSelection> _detectedEdges;
-		Standard_Real _chamferValue = 0;
-		Standard_Boolean _ownsChamferCommand = Standard_False;
+			std::vector<EdgesSelection> _detectedEdges;
+			std::shared_ptr<BevelOperationController> _bevelController;
 
         struct ExtrusionSelection {
             TDF_Label label;
@@ -136,9 +139,17 @@ namespace core3d {
         const size_t getNumberOfDetectedEdges() const;
         void setSelectionMode(const ShapeSelectionMode mode);
         const ShapeSelectionMode getSelectionMode() const;
-		Standard_Boolean setChamferValueForSelection(const Standard_Real value);
-		void resetWireframeTemplateShape();
-		void cancelChamfer();
+			Standard_Boolean setChamferValueForSelection(const Standard_Real value);
+			BevelApplyResult applyBevel() noexcept;
+			Standard_Boolean canApplyBevel() const noexcept;
+			Standard_Boolean hasActiveBevel() const noexcept;
+			Standard_Boolean isBevelSelectionFrozen() const noexcept;
+			Standard_Boolean captureBevelPreview(
+				BevelPreviewCapture& capture) const noexcept;
+			void setBevelPreviewStateChangedCallback(
+				std::function<void()> callback);
+				Standard_Boolean resetWireframeTemplateShape() noexcept;
+			Standard_Boolean cancelChamfer() noexcept;
 
         //! Capture one selected planar face on one editable free solid.
         //! No document command is opened until a nonzero preview succeeds.
@@ -162,7 +173,27 @@ namespace core3d {
         Standard_Boolean debugBeginExtrusionSelection(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;
-        ExtrusionDebugState debugExtrusionState() const noexcept;
+	        ExtrusionDebugState debugExtrusionState() const noexcept;
+			Standard_Boolean debugBeginBevelSelection(
+				const Handle(AIS_Shape)& presentation,
+				const std::vector<Standard_Size>& edgeTopologyIndices) noexcept;
+			Standard_Boolean debugBeginBevelSelection(
+				const std::vector<Handle(AIS_Shape)>& presentations,
+				const std::vector<std::vector<Standard_Size>>&
+					edgeTopologyIndices) noexcept;
+			BevelPreviewDebugState debugBevelState() const noexcept;
+			void debugSetBevelWorkerBlocked(Standard_Boolean blocked) noexcept;
+			void debugSetMaximumBevelCaptureTopologyNodes(
+				Standard_Size limit) noexcept;
+			void debugSetMaximumBevelResultTopologyNodes(
+				Standard_Size limit) noexcept;
+			void debugSetMaximumBevelResultSolids(Standard_Size limit) noexcept;
+			void debugSetBevelTransactionFailureCount(
+				Standard_Size count) noexcept;
+			void debugSetBevelCancelDiscardFailureCount(
+				Standard_Size count) noexcept;
+			Standard_Boolean
+				debugMutateFirstBevelSourcePersistedTransform() noexcept;
         void debugSetExtrusionCommitMode(Standard_Integer mode) noexcept {
             _debugExtrusionCommitMode = mode >= 0 && mode <= 2 ? mode : 0;
         }
@@ -185,8 +216,7 @@ namespace core3d {
 
 	private:
 		void setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio);
-		void copyMaterial(Handle(AIS_Shape) &to, const Handle(AIS_Shape) &from);
-		void discardChamferPreview();
+			Standard_Boolean beginBevelSelectionFromDetectedEdges() noexcept;
         Standard_Boolean beginExtrusionSelectionImpl(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;

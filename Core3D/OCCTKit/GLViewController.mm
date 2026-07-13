@@ -480,6 +480,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr
         && _viewer->getShapeInteractor()->hasActiveExtrusion();
+    const BOOL hadBevel =
+        _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->hasActiveBevel();
     if (hadActiveInteraction && _viewer != nullptr) {
         _viewer->CancelInteraction(0, 0);
     }
@@ -512,6 +516,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (hadExtrusion) {
         _viewer->getShapeInteractor()->cancelExtrusion();
     }
+    if (hadBevel) {
+        (void)_viewer->getShapeInteractor()->cancelChamfer();
+    }
     if (_rawTouchRendering) {
         _rawTouchRendering = NO;
         [view endInteractiveRendering];
@@ -526,16 +533,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [view endInteractiveRendering];
     }
     if (hadActiveInteraction || hadUnresolvedMirrorObjects
-        || hadBooleanOperation || hadExtrusion) {
+        || hadBooleanOperation || hadExtrusion || hadBevel) {
         [self requestRender];
     }
-    if (hadBooleanOperation || hadExtrusion) {
+    if (hadBooleanOperation || hadExtrusion || hadBevel) {
         // Selection notification is also the renderer-neutral presentation
         // invalidation and Apply-state refresh for lifecycle cancellation.
         [self checkSelections];
     }
     if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects
-         || hadBooleanOperation || hadExtrusion)
+         || hadBooleanOperation || hadExtrusion || hadBevel)
         && _delegate
         && [_delegate respondsToSelector:
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -582,6 +589,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             [strongSelf requestRender];
         });
     });
+    _viewer->setBevelPreviewStateChangedCallback([weakSelf]() {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            [strongSelf checkSelections];
+            [strongSelf requestRender];
+        });
+    });
 
     _didSetupViewer = YES;
     _viewer->showGrid(!_isPreviewMode);
@@ -608,6 +625,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         (void)[self restoreBooleanActionForRetainedGizmoType:currentType];
         [self checkSelections];
         [self requestRender];
+    }
+    if (_viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->hasActiveBevel()) {
+        (void)_viewer->getShapeInteractor()->cancelChamfer();
+        [self checkSelections];
+        [self requestRender];
+        if (_delegate
+            && [_delegate respondsToSelector:
+                @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+            [_delegate viewer:self
+                didEndPrimaryInteractionCancelled:YES];
+        }
     }
 }
 
@@ -1125,9 +1155,22 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)undo {
 	PrimitiveGizmoType currentType = [self getGizmoType];
 	const BOOL wasBoolean = IsBooleanGizmo(currentType);
-	const std::shared_ptr<ShapeInteractor> shapeInteractor =
-		_viewer->getShapeInteractor();
-	if (shapeInteractor != nullptr
+		const std::shared_ptr<ShapeInteractor> shapeInteractor =
+			_viewer->getShapeInteractor();
+		if (shapeInteractor != nullptr
+			&& shapeInteractor->hasActiveBevel()) {
+			const BOOL didCancel = shapeInteractor->cancelChamfer();
+			[self checkSelections];
+			[self requestRender];
+			if (didCancel && _delegate
+				&& [_delegate respondsToSelector:
+					@selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+				[_delegate viewer:self
+					didEndPrimaryInteractionCancelled:YES];
+			}
+			return;
+		}
+		if (shapeInteractor != nullptr
 		&& (currentType == PrimitiveGizmoTypeExtrude
 			|| shapeInteractor->hasActiveExtrusion())) {
 		if (shapeInteractor->cancelExtrusion()) {
@@ -1161,9 +1204,22 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)redo {
 	PrimitiveGizmoType currentType = [self getGizmoType];
 	const BOOL wasBoolean = IsBooleanGizmo(currentType);
-	const std::shared_ptr<ShapeInteractor> shapeInteractor =
-		_viewer->getShapeInteractor();
-	if (shapeInteractor != nullptr
+		const std::shared_ptr<ShapeInteractor> shapeInteractor =
+			_viewer->getShapeInteractor();
+		if (shapeInteractor != nullptr
+			&& shapeInteractor->hasActiveBevel()) {
+			const BOOL didCancel = shapeInteractor->cancelChamfer();
+			[self checkSelections];
+			[self requestRender];
+			if (didCancel && _delegate
+				&& [_delegate respondsToSelector:
+					@selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+				[_delegate viewer:self
+					didEndPrimaryInteractionCancelled:YES];
+			}
+			return;
+		}
+		if (shapeInteractor != nullptr
 		&& (currentType == PrimitiveGizmoTypeExtrude
 			|| shapeInteractor->hasActiveExtrusion())) {
 		if (shapeInteractor->cancelExtrusion()) {
@@ -1198,7 +1254,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	_viewer->getObjectInteractor()->cancelInteraction();
 	PrimitiveGizmoType currentType = [self getGizmoType];
 	if (currentType == PrimitiveGizmoTypeChamfer) {
-		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
+		if (!_viewer->getShapeInteractor()->resetWireframeTemplateShape()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (IsBooleanGizmo(currentType)) {
 		if (![self retireBooleanActionForGizmoType:currentType]) {
 			[self checkSelections];
@@ -1291,7 +1351,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	// selection for the next tool. Its AIS previews may refer to document labels
 	// that the resolution step replaces or removes.
 	if (previousType == PrimitiveGizmoTypeChamfer) {
-		_viewer->getShapeInteractor()->resetWireframeTemplateShape();
+		if (!_viewer->getShapeInteractor()->resetWireframeTemplateShape()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (IsBooleanGizmo(previousType)) {
 		if (![self retireBooleanActionForGizmoType:previousType]) {
 			[self checkSelections];
@@ -1419,9 +1483,43 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     //	std::cout << "incorrect chamfer value" << std::endl;
 }
 
-- (void)cancelChamfer {
-    _viewer->getShapeInteractor()->cancelChamfer();
+- (BOOL)applyChamfer {
+    if ([self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BevelApplyResult result =
+        _viewer->getShapeInteractor()->applyBevel();
+    if (result == BevelApplyResult::AppliedNeedsDocumentRedraw) {
+        _viewer->redrawDocument();
+    }
+    [self checkSelections];
     [self requestRender];
+    return result != BevelApplyResult::NoChange;
+}
+
+- (BOOL)cancelChamfer {
+	if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+		return NO;
+	}
+	const BOOL didCancel =
+		_viewer->getShapeInteractor()->cancelChamfer();
+	[self checkSelections];
+	[self requestRender];
+	return didCancel;
+}
+
+- (BOOL)canApplyChamfer {
+    return _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->canApplyBevel();
+}
+
+- (BOOL)hasActiveBevel {
+    return _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->hasActiveBevel();
 }
 
 - (BOOL)setExtrusion:(CGFloat)value {
@@ -1797,6 +1895,102 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         @"candidateMaxY": @(state.candidateMaxY),
         @"candidateMaxZ": @(state.candidateMaxZ),
     };
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugBevelState {
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return @{};
+    }
+    const BevelPreviewDebugState state =
+        _viewer->DebugBevelPreviewState();
+    const BOOL previewActive =
+        state.state == BevelPreviewState::Ready && state.canApply;
+    return @{
+        @"state": @(static_cast<NSUInteger>(state.state)),
+        @"generation": @(state.generation),
+        @"selectionReady": @(state.activeOperation != Standard_False),
+        @"activeOperation": @(state.activeOperation != Standard_False),
+        @"previewActive": @(previewActive),
+        @"canApply": @(state.canApply != Standard_False),
+        @"selectionFrozen": @(state.selectionFrozen != Standard_False),
+        @"commandOpen": @(state.documentCommandOpen != Standard_False),
+        @"workerActive": @(state.workerActive != Standard_False),
+        @"workerPending": @(state.workerPending != Standard_False),
+        @"lastComputeWasMainThread": @(
+            state.lastComputeWasMainThread != Standard_False),
+        @"submittedCount": @(state.submittedCount),
+        @"startedCount": @(state.startedCount),
+        @"completedCount": @(state.completedCount),
+        @"cancelledCount": @(state.cancelledCount),
+        @"pendingReplacementCount": @(state.pendingReplacementCount),
+        @"acceptedCount": @(state.acceptedCount),
+        @"staleSuppressionCount": @(state.staleSuppressionCount),
+        @"sourceCount": @(state.sourceCount),
+        @"sourceEdgeCount": @(state.sourceEdgeCount),
+        @"capturedEdgeCount": @(state.edgeCount),
+        @"capturedEdgeTopologyIndex": @(
+            state.capturedEdgeTopologyIndex),
+        @"capturedEdgeLength": @(state.capturedEdgeLength),
+        @"signedDistance": @(state.value),
+        @"isFillet": @(state.value > 0.0),
+        @"isChamfer": @(state.value < 0.0),
+        @"candidateTopologyNodeCount": @(
+            state.candidateTopologyNodeCount),
+        @"candidateSolidCount": @(state.candidateSolidCount),
+        @"candidateVolume": @(state.candidateVolume),
+        @"candidateMinX": @(state.candidateBounds[0]),
+        @"candidateMinY": @(state.candidateBounds[1]),
+        @"candidateMinZ": @(state.candidateBounds[2]),
+        @"candidateMaxX": @(state.candidateBounds[3]),
+        @"candidateMaxY": @(state.candidateBounds[4]),
+        @"candidateMaxZ": @(state.candidateBounds[5]),
+    };
+}
+
+- (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBevelPreviewWorkerBlocked(blocked);
+    }
+}
+
+- (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumBevelCaptureTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumBevelResultTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumBevelResultSolids(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetBevelTransactionFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBevelTransactionFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetBevelCancelDiscardFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBevelCancelDiscardFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (BOOL)debugMutateFirstBevelSourcePersistedTransform {
+    return _viewer != nullptr
+        && _viewer->DebugMutateFirstBevelSourcePersistedTransform();
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
@@ -2337,7 +2531,27 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         dispatch_sync(dispatch_get_main_queue(), ^{
             try {
                 if (strongSelf->_viewer != nullptr) {
-                    cbfFilePath = strongSelf->_viewer->getDocument()->save(fn);
+                    const auto objectInteractor =
+                        strongSelf->_viewer->getObjectInteractor();
+                    const auto shapeInteractor =
+                        strongSelf->_viewer->getShapeInteractor();
+                    const bool hasTransientModeling =
+                        objectInteractor == nullptr
+                        || shapeInteractor == nullptr
+                        || objectInteractor->hasActiveBoolean()
+                        || objectInteractor->hasUnresolvedBoolean()
+                        || objectInteractor->hasUnresolvedMirrorObjects()
+                        || shapeInteractor->hasActiveExtrusion();
+                    // Bevel previews own only transient AIS presentations and
+                    // never retain an open OCAF command. Apply is synchronous
+                    // on this main queue, so serializing here always captures
+                    // a coherent committed document (not the transient trial).
+                    // Keep recovery autosaves working while a user evaluates
+                    // or retries a Bevel preview.
+                    if (!hasTransientModeling) {
+                        cbfFilePath = strongSelf->_viewer
+                            ->getDocument()->save(fn);
+                    }
                     if (!cbfFilePath.empty()) {
                         const AssetImportResult validation =
                             strongSelf->_viewer->ValidateCbf(cbfFilePath);
@@ -2525,6 +2739,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         ? Handle(TDocStd_Document)()
         : document->ChangeDocument();
     const auto objectInteractor = _viewer->getObjectInteractor();
+    const auto shapeInteractor = _viewer->getShapeInteractor();
     OcctGeometryExportFormat geometryExportFormat;
     switch (exportType) {
         case ExportTypeObj:
@@ -2545,9 +2760,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (transaction.IsNull() || transaction->HasOpenCommand()
         || !document->CanExportGeometry(geometryExportFormat)
         || objectInteractor == nullptr
+        || shapeInteractor == nullptr
         || objectInteractor->hasActiveBoolean()
         || objectInteractor->hasUnresolvedBoolean()
-        || objectInteractor->hasUnresolvedMirrorObjects()) {
+        || objectInteractor->hasUnresolvedMirrorObjects()
+        || shapeInteractor->hasActiveExtrusion()
+        || shapeInteractor->hasActiveBevel()) {
         return nil;
     }
     NSString *pathExtension = NULL;

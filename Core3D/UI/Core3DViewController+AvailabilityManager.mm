@@ -267,16 +267,21 @@ Core3DModelCapability DocumentExportCapabilities(
 }
 
 - (NSArray<NSNumber *> *)availableGizmoTypes {
-    // Boolean previews deliberately suppress their committed source
+    // Boolean and Bevel previews deliberately suppress their committed source
     // presentations. AIS therefore has no document-editable live selection
-    // while the retained operation is computing or ready, but the operation
-    // was admitted from a validated BRep-only selection. Keep its tool rail
-    // (and, critically, Apply/Cancel) available until it resolves.
+    // while a retained operation is computing or ready, but the operation was
+    // admitted from a validated BRep-only selection. Keep its tool rail (and,
+    // critically, Apply/Cancel) available until it resolves.
     const BOOL hasRetainedBoolean =
         Core3DIsBooleanGizmo(_currentGizmoType)
         && GLController != nil
         && [GLController hasActiveBoolean];
-    const Core3DModelCapability capabilities = hasRetainedBoolean
+    const BOOL hasRetainedChamfer =
+        _currentGizmoType == PrimitiveGizmoTypeChamfer
+        && GLController != nil
+        && [GLController hasActiveBevel];
+    const Core3DModelCapability capabilities =
+        hasRetainedBoolean || hasRetainedChamfer
         ? kBRepCapabilities
         : self.selectedModelCapabilities;
     if (capabilities == Core3DModelCapabilityNone

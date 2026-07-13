@@ -83,7 +83,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSInteger)numberOfDetectedEdges;
 
 - (void)setChamfer:(CGFloat)value;
-- (void)cancelChamfer;
+- (BOOL)applyChamfer;
+- (BOOL)cancelChamfer;
+- (BOOL)canApplyChamfer;
+- (BOOL)hasActiveBevel;
 - (BOOL)setExtrusion:(CGFloat)value;
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
@@ -112,6 +115,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;
 - (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
+- (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
+- (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
+- (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;
+- (void)debugSetBevelTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetBevelCancelDiscardFailureCount:(NSUInteger)count;
+- (BOOL)debugMutateFirstBevelSourcePersistedTransform;
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState;
 - (void)debugSetBooleanPreviewWorkerBlocked:(BOOL)blocked;
 - (void)debugSetMaximumBooleanCaptureTopologyNodes:(NSUInteger)limit;

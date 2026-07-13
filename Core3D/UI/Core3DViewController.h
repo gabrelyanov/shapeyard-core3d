@@ -94,7 +94,7 @@ typedef struct {
 - (void)setChamfer:(CGFloat)value;
 - (Boundaries)getChamferBoundaries;
 - (void)applyChamfer;
-- (void)cancelChamfer;
+- (BOOL)cancelChamfer;
 - (void)setExtrusion:(CGFloat)value;
 - (Boundaries)getExtrusionBoundaries;
 - (BOOL)applyExtrusion;
@@ -297,6 +297,29 @@ typedef struct {
     NS_SWIFT_NAME(debugBeginExtrusion(entityIdentifier:faceTopologyIndex:));
 //! Bounded native extrusion preview/result counters and command state.
 - (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
+//! Deterministically capture committed BRep edges by stable entity identifier
+//! and zero-based TopExp edge indices. The production Bevel controller remains
+//! authoritative for admission, asynchronous preview, and transaction apply.
+- (BOOL)debugBeginBevelWithEntityIdentifier:(NSString *)entityIdentifier
+                       edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices
+    NS_SWIFT_NAME(debugBeginBevel(entityIdentifier:edgeTopologyIndices:));
+//! Multi-body variant used to prove aggregate Bevel result budgets. Every
+//! entity has one nonempty array of zero-based TopExp edge indices.
+- (BOOL)debugBeginBevelWithEntityIdentifiers:(NSArray<NSString *> *)entityIdentifiers
+                 edgeTopologyIndicesByEntity:(NSArray<NSArray<NSNumber *> *> *)edgeTopologyIndicesByEntity
+    NS_SWIFT_NAME(debugBeginBevel(entityIdentifiers:edgeTopologyIndicesByEntity:));
+- (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
+- (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
+- (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;
+- (void)debugSetBevelTransactionFailureCount:(NSUInteger)count;
+//! Make the next N transient-preview discard attempts fail without clearing
+//! controller state, so Cancel can be retried safely.
+- (void)debugSetBevelCancelDiscardFailureCount:(NSUInteger)count;
+//! Commit a real persisted XCAF transform change on the first captured source
+//! without updating its retained AIS presentation.
+- (BOOL)debugMutateFirstBevelSourcePersistedTransform;
 //! Inject CommitCommand reporting/throw behavior after a real close: 0 normal,
 //! 1 false-after-close, 2 throw-after-close.
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode;

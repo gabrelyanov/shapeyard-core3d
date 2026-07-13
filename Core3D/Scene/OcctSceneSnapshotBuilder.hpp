@@ -86,6 +86,14 @@ public:
         const std::vector<Handle(AIS_Shape)>& theResultShapes,
         const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept;
 
+    //! Publish one bounded, explicitly owned Bevel result per committed source.
+    //! Source labels are resolved only through the retained last-full-scene map;
+    //! existing face triangulations are copied without AIS discovery or meshing.
+    OverlayPointer PublishChamferPreviewOverlay(
+        const Handle(OcctDocument)& theDocument,
+        const std::vector<Handle(AIS_Shape)>& theResultShapes,
+        const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept;
+
 #ifdef DEBUG
     enum class DebugTriangulationFailure : std::uint8_t {
         None = 0,
@@ -109,7 +117,8 @@ private:
         const Handle(OcctDocument)& theDocument,
         PresentationOverlayContent&& theContent,
         bool theAllowsMirrorPreview,
-        bool theAllowsBooleanPreview) noexcept;
+        bool theAllowsBooleanPreview,
+        bool theAllowsChamferPreview) noexcept;
 
     struct State;
     std::unique_ptr<State> myState;

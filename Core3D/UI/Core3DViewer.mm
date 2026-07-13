@@ -989,6 +989,7 @@ void Core3DViewer::release() noexcept {
     // restored. Repeated calls are intentionally harmless.
     _interactiveCallback = {};
     _booleanPreviewStateChangedCallback = {};
+    _bevelPreviewStateChangedCallback = {};
     _shapeInteractor.reset();
     _objectInteractor.reset();
     OcctViewer::release();
@@ -1052,6 +1053,8 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
         }
         if(_shapeInteractor == nullptr) {
             _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
+            _shapeInteractor->setBevelPreviewStateChangedCallback(
+                _bevelPreviewStateChangedCallback);
         }
     }
     return result;
@@ -1069,6 +1072,8 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     _objectInteractor->setBooleanPreviewStateChangedCallback(
         _booleanPreviewStateChangedCallback);
     _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
+    _shapeInteractor->setBevelPreviewStateChangedCallback(
+        _bevelPreviewStateChangedCallback);
 
     if (theSelectionMode != ShapeSelectionMode::WholeShape) {
         _shapeInteractor->setSelectionMode(theSelectionMode);
@@ -1090,6 +1095,16 @@ void Core3DViewer::setBooleanPreviewStateChangedCallback(
     if (_objectInteractor != nullptr) {
         _objectInteractor->setBooleanPreviewStateChangedCallback(
             _booleanPreviewStateChangedCallback);
+    }
+}
+
+void Core3DViewer::setBevelPreviewStateChangedCallback(
+    std::function<void()> theCallback)
+{
+    _bevelPreviewStateChangedCallback = std::move(theCallback);
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->setBevelPreviewStateChangedCallback(
+            _bevelPreviewStateChangedCallback);
     }
 }
 
@@ -1822,6 +1837,19 @@ Core3DViewer::captureSceneFrameSnapshot(
 
 scene::OcctSceneSnapshotBuilder::OverlayPointer
 Core3DViewer::captureScenePresentationOverlay() noexcept {
+    if (_shapeInteractor != nullptr
+        && _shapeInteractor->hasActiveBevel()) {
+        BevelPreviewCapture aBevelPreview;
+        if (!_shapeInteractor->captureBevelPreview(aBevelPreview)) {
+            // Selecting, computing, committing, failed, or otherwise unsafe
+            // Bevel state remains exclusively owned by the OCCT viewport.
+            return {};
+        }
+        return _sceneSnapshotBuilder.PublishChamferPreviewOverlay(
+            myDoc,
+            aBevelPreview.results,
+            aBevelPreview.suppressedSourceLabels);
+    }
     if (_objectInteractor == nullptr) {
         return {};
     }
@@ -2048,6 +2076,164 @@ Standard_Boolean Core3DViewer::debugBeginExtrusionSelection(
         return Standard_False;
     }
 }
+
+Standard_Boolean Core3DViewer::debugBeginBevelSelection(
+    const std::string& theEntityIdentifier,
+    const std::vector<Standard_Size>& theEdgeTopologyIndices) noexcept {
+    return debugBeginBevelSelection(
+        std::vector<std::string>{theEntityIdentifier},
+        std::vector<std::vector<Standard_Size>>{
+            theEdgeTopologyIndices});
+}
+
+Standard_Boolean Core3DViewer::debugBeginBevelSelection(
+    const std::vector<std::string>& theEntityIdentifiers,
+    const std::vector<std::vector<Standard_Size>>&
+        theEdgeTopologyIndices) noexcept {
+    if (_shapeInteractor == nullptr || _objectInteractor == nullptr
+        || myContext.IsNull() || myDoc.IsNull()
+        || theEntityIdentifiers.empty()
+        || theEntityIdentifiers.size() != theEdgeTopologyIndices.size()
+        || theEntityIdentifiers.size()
+            > BevelOperationController::kMaxSourceBodies) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        std::unordered_map<std::string, Standard_Size> anIdentifierIndices;
+        Standard_Size anAggregateEdgeCount = 0;
+        for (Standard_Size anIndex = 0;
+             anIndex < theEntityIdentifiers.size(); ++anIndex) {
+            const std::string& anIdentifier = theEntityIdentifiers[anIndex];
+            const std::vector<Standard_Size>& anEdges =
+                theEdgeTopologyIndices[anIndex];
+            if (anIdentifier.empty() || anEdges.empty()
+                || anEdges.size()
+                    > BevelOperationController::kMaxSelectedEdges
+                || anAggregateEdgeCount
+                    > BevelOperationController::kMaxSelectedEdges
+                        - anEdges.size()
+                || !anIdentifierIndices.emplace(
+                    anIdentifier, anIndex).second) {
+                return Standard_False;
+            }
+            anAggregateEdgeCount += anEdges.size();
+        }
+        if (_shapeInteractor->hasActiveBevel()
+            && !_shapeInteractor->cancelChamfer()) {
+            return Standard_False;
+        }
+        std::vector<Handle(AIS_Shape)> aPresentations(
+            theEntityIdentifiers.size());
+        AIS_ListOfInteractive aDisplayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
+        for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
+             anObject.More(); anObject.Next()) {
+            const Handle(AIS_InteractiveObject)& anInteractive =
+                anObject.Value();
+            const TDF_Label aLabel = myDoc->ShapeLabel(anInteractive);
+            if (aLabel.IsNull()) {
+                continue;
+            }
+            const auto anIdentifier = anIdentifierIndices.find(
+                myDoc->EntityIdentifierForLabel(aLabel));
+            if (anIdentifier == anIdentifierIndices.end()) {
+                continue;
+            }
+            const Handle(AIS_Shape) aCandidate =
+                Handle(AIS_Shape)::DownCast(anInteractive);
+            Handle(AIS_Shape)& aPresentation =
+                aPresentations[anIdentifier->second];
+            if (!aPresentation.IsNull() || aCandidate.IsNull()
+                || !myDoc->IsPresentationEditable(aCandidate)) {
+                return Standard_False;
+            }
+            aPresentation = aCandidate;
+        }
+        for (const Handle(AIS_Shape)& aPresentation : aPresentations) {
+            if (aPresentation.IsNull()) {
+                return Standard_False;
+            }
+        }
+        if (!_shapeInteractor->debugBeginBevelSelection(
+                aPresentations, theEdgeTopologyIndices)) {
+            return Standard_False;
+        }
+        _objectInteractor->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer);
+        return _objectInteractor->getManipulatorType()
+            == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer;
+    } catch (...) {
+        (void)_shapeInteractor->cancelChamfer();
+        return Standard_False;
+    }
+}
+
+BevelPreviewDebugState
+Core3DViewer::DebugBevelPreviewState() const noexcept
+{
+    return _shapeInteractor == nullptr
+        ? BevelPreviewDebugState()
+        : _shapeInteractor->debugBevelState();
+}
+
+void Core3DViewer::DebugSetBevelPreviewWorkerBlocked(
+    const Standard_Boolean theBlocked) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetBevelWorkerBlocked(theBlocked);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumBevelCaptureTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetMaximumBevelCaptureTopologyNodes(
+            theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumBevelResultTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetMaximumBevelResultTopologyNodes(
+            theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumBevelResultSolids(
+    const Standard_Size theLimit) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetMaximumBevelResultSolids(theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetBevelTransactionFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetBevelTransactionFailureCount(theCount);
+    }
+}
+
+void Core3DViewer::DebugSetBevelCancelDiscardFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetBevelCancelDiscardFailureCount(theCount);
+    }
+}
+
+Standard_Boolean
+Core3DViewer::DebugMutateFirstBevelSourcePersistedTransform() noexcept
+{
+    return _shapeInteractor != nullptr
+        && _shapeInteractor
+            ->debugMutateFirstBevelSourcePersistedTransform();
+}
 #endif
 
 void Core3DViewer::Rotation(int theX, int theY) {
@@ -2095,6 +2281,9 @@ void Core3DViewer::Select(int theX, int theY) {
     if (_shapeInteractor->hasActiveExtrusion()) {
         return;
     }
+    if (_shapeInteractor->isBevelSelectionFrozen()) {
+        return;
+    }
 
     switch(_objectInteractor->getManipulatorType()) {
         case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
@@ -2129,8 +2318,12 @@ void Core3DViewer::Select(int theX, int theY) {
     
     switch (_objectInteractor->getManipulatorType()) {
         case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
-            if (PREVENT_RECHAMFER && _shapeInteractor->saveSelectionEdges() == 0) {
-                myContext->ClearSelected(Standard_False);
+            if (PREVENT_RECHAMFER) {
+                // Admission failure keeps the authoritative AIS selection
+                // visible so the user can remove an unsupported body and
+                // retry. The Bevel controller/cache remains empty and no OCAF
+                // state is changed.
+                (void)_shapeInteractor->saveSelectionEdges();
             }
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
@@ -2156,6 +2349,11 @@ void Core3DViewer::Select(int theX, int theY) {
 			&& !_shapeInteractor->cancelExtrusion()) {
 			return;
 		}
+		if (_shapeInteractor != nullptr
+			&& _shapeInteractor->hasActiveBevel()
+			&& !_shapeInteractor->cancelChamfer()) {
+			return;
+		}
 		if (_objectInteractor != nullptr) {
 			_objectInteractor->cancelInteraction();
 		}
@@ -2164,7 +2362,7 @@ void Core3DViewer::Select(int theX, int theY) {
         if (_objectInteractor == nullptr) { return; }
         if (_objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
             && _shapeInteractor != nullptr) {
-            _shapeInteractor->resetWireframeTemplateShape();
+            (void)_shapeInteractor->resetWireframeTemplateShape();
         }
         redraw();
     }

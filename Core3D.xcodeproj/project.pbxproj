@@ -178,6 +178,7 @@
 		71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71E871512C906DBE000112D8 /* ConstructorManipulator.cpp */; };
 		71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */; };
 		71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */; };
+		BEA000032F31000100000003 /* BevelOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = BEA000022F31000100000002 /* BevelOperationController.cpp */; };
 		C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = C03D50030000000000000001 /* Core3DSceneSnapshot.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50040000000000000001 /* Core3DSceneSnapshot.mm */; };
 		C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */; };
@@ -365,6 +366,8 @@
 		71E871522C906DBE000112D8 /* ConstructorManipulator.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ConstructorManipulator.hpp; sourceTree = "<group>"; };
 		71F7ACEB2C09D29A00FDF2EA /* BooleanOperationController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BooleanOperationController.hpp; sourceTree = "<group>"; };
 		71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = BooleanOperationController.cpp; sourceTree = "<group>"; };
+		BEA000012F31000100000001 /* BevelOperationController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BevelOperationController.hpp; sourceTree = "<group>"; };
+		BEA000022F31000100000002 /* BevelOperationController.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = BevelOperationController.cpp; sourceTree = "<group>"; };
 		C03D50030000000000000001 /* Core3DSceneSnapshot.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DSceneSnapshot.h; sourceTree = "<group>"; };
 		C03D50040000000000000001 /* Core3DSceneSnapshot.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DSceneSnapshot.mm; sourceTree = "<group>"; };
 		C03D50050000000000000001 /* Core3DSceneSnapshotFactory.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DSceneSnapshotFactory.hpp; sourceTree = "<group>"; };
@@ -664,6 +667,8 @@
 				3262C21F2BF500F4004B5AAB /* SelectedObjectType.h */,
 				71F7ACEB2C09D29A00FDF2EA /* BooleanOperationController.hpp */,
 				71F7ACEC2C09D2BD00FDF2EA /* BooleanOperationController.cpp */,
+				BEA000012F31000100000001 /* BevelOperationController.hpp */,
+				BEA000022F31000100000002 /* BevelOperationController.cpp */,
 				185552D12D01BE8000CCFA2B /* SimpleSingleton.hpp */,
 				185552D32D01BE9000CCFA2B /* Snapping.hpp */,
 				185552D52D01C07000CCFA2B /* Snapping.cpp */,
@@ -952,6 +957,7 @@
 				18A006322BD2B306004931B1 /* ShapeInteractor.cpp in Sources */,
 				324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */,
 				71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */,
+				BEA000032F31000100000003 /* BevelOperationController.cpp in Sources */,
 				3221857D2BB5CC1500040E84 /* GLView.mm in Sources */,
 				320197262BD7B7F400F30E62 /* AssetBundleItem.m in Sources */,
 				3201971D2BD7AF0500F30E62 /* AssetBundle.mm in Sources */,

@@ -106,6 +106,7 @@ constexpr std::size_t kMaxOverlayPrimitiveBindings = 25'000;
 constexpr std::size_t kMaxOverlayNumericBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxMirrorPreviewBodies = 8;
 constexpr std::size_t kMaxBooleanSourceOperands = 8;
+constexpr std::size_t kMaxChamferPreviewBodies = 8;
 constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
     "gizmo/mirroring/x/negative",
     "gizmo/mirroring/y/negative",
@@ -1166,7 +1167,7 @@ struct WorldPreviewItem {
     MaterialSnapshot material;
 };
 
-//! Copy one explicitly owned AIS mirror trial using only triangulations that
+//! Copy one explicitly owned AIS preview using only triangulations that
 //! already exist on its BRep faces. No mesher is invoked: a cache miss fails
 //! closed so OCCT remains the authoritative renderer for that frame.
 bool ExtractWorldPreviewItem(
@@ -1999,6 +2000,17 @@ bool ValidatePresentationOverlayPayload(
                 return false;
             }
             break;
+        case PresentationOverlayKind::ChamferPreview: {
+            const std::size_t anItemCount = theInstances.size();
+            if (anItemCount == 0
+                || anItemCount > kMaxChamferPreviewBodies
+                || theMeshes.size() != anItemCount
+                || theMaterials.size() != anItemCount
+                || theSuppressedEntityIdentifiers.size() != anItemCount) {
+                return false;
+            }
+            break;
+        }
         default:
             return false;
     }
@@ -2007,7 +2019,10 @@ bool ValidatePresentationOverlayPayload(
         theKind == PresentationOverlayKind::BooleanSubtractPreview
         || theKind == PresentationOverlayKind::BooleanUnionPreview
         || theKind == PresentationOverlayKind::BooleanIntersectPreview;
-    if (!isBooleanPreview && !theSuppressedEntityIdentifiers.empty()) {
+    const bool isChamferPreview =
+        theKind == PresentationOverlayKind::ChamferPreview;
+    if (!isBooleanPreview && !isChamferPreview
+        && !theSuppressedEntityIdentifiers.empty()) {
         return false;
     }
     std::unordered_set<std::string> aSuppressedIdentifiers;
@@ -2047,6 +2062,9 @@ bool ValidatePresentationOverlayPayload(
         return std::string("Boolean subtract result ")
             + std::to_string(theIndex - aBooleanActorCount);
     };
+    const auto aChamferEntityIdentifier = [](const std::size_t theIndex) {
+        return std::string("chamfer/preview/") + std::to_string(theIndex);
+    };
 
     std::unordered_set<std::string> aMaterialIdentifiers;
     aMaterialIdentifiers.reserve(theMaterials.size());
@@ -2061,6 +2079,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isMirrorPreview =
             theKind == PresentationOverlayKind::MirrorPreview
             && aMaterialIndex >= 6;
+        const bool isChamferMaterial = isChamferPreview;
         bool hasExpectedIdentifier = true;
         bool hasExpectedAlpha = true;
         bool hasExpectedColor = true;
@@ -2098,6 +2117,11 @@ bool ValidatePresentationOverlayPayload(
                         <= 1.0e-6f
                 && std::abs(aMaterial.baseColor.z - anExpectedColor.Blue())
                         <= 1.0e-6f;
+        } else if (isChamferMaterial) {
+            hasExpectedIdentifier = aMaterial.identifier
+                == aChamferEntityIdentifier(aMaterialIndex) + "/material";
+            hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
+                && aMaterial.baseColor.w == 1.0f;
         } else {
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
@@ -2109,6 +2133,9 @@ bool ValidatePresentationOverlayPayload(
             || !isUnit(aMaterial.baseColor.y)
             || !isUnit(aMaterial.baseColor.z)
             || !hasExpectedAlpha
+            || (isChamferMaterial
+                && (aMaterial.baseColorTextureIndex != -1
+                    || aMaterial.emissiveTextureIndex != -1))
             || !IsFinite(aMaterial.emission.x)
             || !IsFinite(aMaterial.emission.y)
             || !IsFinite(aMaterial.emission.z)
@@ -2138,6 +2165,7 @@ bool ValidatePresentationOverlayPayload(
             theKind == PresentationOverlayKind::MirrorPreview
             && aMeshIndex >= 6;
         const bool isBooleanMesh = isBooleanPreview;
+        const bool isChamferMesh = isChamferPreview;
         const std::string anExpectedPreviewIdentifier = isMirrorPreview
             ? "mirror/preview/" + std::to_string(aMeshIndex - 6) + "/mesh"
             : std::string();
@@ -2150,6 +2178,9 @@ bool ValidatePresentationOverlayPayload(
             || (isBooleanMesh
                 && aMesh.definitionIdentifier
                     != aBooleanEntityIdentifier(aMeshIndex) + "/mesh")
+            || (isChamferMesh
+                && aMesh.definitionIdentifier
+                    != aChamferEntityIdentifier(aMeshIndex) + "/mesh")
             || !IsValidIdentifier(aMesh.definitionIdentifier)
             || !aDefinitionIdentifiers.insert(
                 aMesh.definitionIdentifier).second
@@ -2157,11 +2188,11 @@ bool ValidatePresentationOverlayPayload(
                     ? aMesh.geometryRevision == 0
                     : aMesh.geometryRevision != 0)
             || !IsValid(aMesh.localBounds)
-            || ((isMirrorPreview || isBooleanMesh)
+            || ((isMirrorPreview || isBooleanMesh || isChamferMesh)
                 && !IsCenteredLocalBounds(aMesh.localBounds))
             || aMesh.vertices.empty() || aMesh.indices.empty()
             || aMesh.primitives.empty()
-            || (!isMirrorPreview && !isBooleanMesh
+            || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
                 && aMesh.primitives.size() != 1)
             || !CheckedAdd(aPrimitiveCount,
                            aMesh.primitives.size(),
@@ -2250,6 +2281,7 @@ bool ValidatePresentationOverlayPayload(
             theKind == PresentationOverlayKind::MirrorPreview
             && anInstanceIndex >= 6;
         const bool isBooleanItem = isBooleanPreview;
+        const bool isChamferItem = isChamferPreview;
         const std::size_t aPreviewIndex = isMirrorPreview
             ? anInstanceIndex - 6
             : 0;
@@ -2272,6 +2304,13 @@ bool ValidatePresentationOverlayPayload(
                             == aBooleanEntityIdentifier(anInstanceIndex)
                         && anInstance.name == aBooleanName(anInstanceIndex)
                         && anInstance.meshIndex == anInstanceIndex
+                    : isChamferItem
+                        ? anInstance.entityIdentifier
+                                == aChamferEntityIdentifier(anInstanceIndex)
+                            && anInstance.name
+                                == "Chamfer preview "
+                                    + std::to_string(anInstanceIndex)
+                            && anInstance.meshIndex == anInstanceIndex
                     : true;
         const bool hasExpectedSemantics = isBooleanItem
             ? anInstance.coordinateSpace == CoordinateSpace::World
@@ -2281,16 +2320,18 @@ bool ValidatePresentationOverlayPayload(
                         && anInstance.renderStyle == RenderStyle::Wireframe
                     : anInstance.role == RenderRole::BooleanSubject
                         && anInstance.renderStyle == RenderStyle::Shaded)
-            : isMirrorPreview
-            ? anInstance.role == RenderRole::MirrorPreview
-                && anInstance.coordinateSpace == CoordinateSpace::World
-                && anInstance.depthPolicy == DepthPolicy::Scene
-            : anInstance.role == RenderRole::Gizmo
-                && anInstance.coordinateSpace
-                    == CoordinateSpace::WorldAnchorPixels
-                && anInstance.depthPolicy == DepthPolicy::Topmost;
+            : (isMirrorPreview || isChamferItem)
+                ? anInstance.role == (isChamferItem
+                        ? RenderRole::ChamferPreview
+                        : RenderRole::MirrorPreview)
+                    && anInstance.coordinateSpace == CoordinateSpace::World
+                    && anInstance.depthPolicy == DepthPolicy::Scene
+                : anInstance.role == RenderRole::Gizmo
+                    && anInstance.coordinateSpace
+                        == CoordinateSpace::WorldAnchorPixels
+                    && anInstance.depthPolicy == DepthPolicy::Topmost;
         const std::size_t anExpectedBindingCount =
-            (isMirrorPreview || isBooleanItem)
+            (isMirrorPreview || isBooleanItem || isChamferItem)
             ? theMeshes[anInstanceIndex].primitives.size()
             : 1;
         if (!hasExpectedIdentity
@@ -2302,9 +2343,11 @@ bool ValidatePresentationOverlayPayload(
             || anInstance.reversesWinding || !anInstance.visible
             || anInstance.selectable || anInstance.selected
             || !hasExpectedSemantics
-            || (!isBooleanItem
+            || (!isBooleanItem && !isChamferItem
                 && anInstance.renderStyle != RenderStyle::Shaded)
-            || ((isMirrorPreview || isBooleanItem)
+            || (isChamferItem
+                && anInstance.renderStyle != RenderStyle::Shaded)
+            || ((isMirrorPreview || isBooleanItem || isChamferItem)
                 ? !IsTranslationOnlyWorldTransform(
                     anInstance.worldFromObject)
                 : !IsRigidWorldAnchorTransform(
@@ -2323,7 +2366,8 @@ bool ValidatePresentationOverlayPayload(
         }
         for (const PrimitiveBinding& aBinding :
              anInstance.primitiveBindings) {
-            if (((isMirrorPlane || isMirrorPreview || isBooleanItem)
+            if (((isMirrorPlane || isMirrorPreview
+                    || isBooleanItem || isChamferItem)
                     && aBinding.materialIndex != anInstanceIndex)
                 || aBinding.materialIndex >= theMaterials.size()
                 || aBinding.pickToken != 0 || !aBinding.visible) {
@@ -2575,6 +2619,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
         theDocument,
         std::move(theContent),
         false,
+        false,
         false);
 }
 
@@ -2583,7 +2628,8 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
     const Handle(OcctDocument)& theDocument,
     PresentationOverlayContent&& theContent,
     const bool theAllowsMirrorPreview,
-    const bool theAllowsBooleanPreview) noexcept
+    const bool theAllowsBooleanPreview,
+    const bool theAllowsChamferPreview) noexcept
 {
     if (![NSThread isMainThread]
         || theDocument.IsNull()
@@ -2596,6 +2642,8 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
              || theContent.kind
                 == PresentationOverlayKind::BooleanIntersectPreview)
             && !theAllowsBooleanPreview)
+        || (theContent.kind == PresentationOverlayKind::ChamferPreview
+            && !theAllowsChamferPreview)
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
         || myState->documentObject.IsNull()
@@ -2878,6 +2926,7 @@ OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
             theDocument,
             std::move(theMirrorGizmoContent),
             true,
+            false,
             false);
     } catch (const Standard_Failure&) {
         return {};
@@ -3096,6 +3145,225 @@ OcctSceneSnapshotBuilder::PublishBooleanPreviewOverlay(
         return PublishPresentationOverlayImpl(
             theDocument,
             std::move(aContent),
+            false,
+            true,
+            false);
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishChamferPreviewOverlay(
+    const Handle(OcctDocument)& theDocument,
+    const std::vector<Handle(AIS_Shape)>& theResultShapes,
+    const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept
+{
+    const std::size_t anItemCount = theResultShapes.size();
+    if (![NSThread isMainThread] || theDocument.IsNull()
+        || myState == nullptr || anItemCount == 0
+        || anItemCount > kMaxChamferPreviewBodies
+        || theSuppressedSourceLabels.size() != anItemCount) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument = theDocument->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier()
+                != myState->documentIdentifier
+            || myState->lastFullLabelToInstances == nullptr
+            || myState->lastFullEntityIdentifiers == nullptr) {
+            return {};
+        }
+        const Handle(TDF_Data)& aData = aDocument->GetData();
+        if (aData.IsNull()
+            || aData->Time() != myState->lastFullDocumentTime) {
+            return {};
+        }
+
+        struct SourceResultPair {
+            Handle(AIS_Shape) result;
+            std::string labelIdentifier;
+        };
+        std::vector<SourceResultPair> aPairs;
+        aPairs.reserve(anItemCount);
+        std::unordered_set<std::string> aSeenSourceLabels;
+        std::unordered_set<const AIS_Shape*> aSeenPresentations;
+        std::unordered_set<const void*> aSeenResultTopologies;
+        for (std::size_t anIndex = 0; anIndex < anItemCount; ++anIndex) {
+            const Handle(AIS_Shape)& aResult = theResultShapes[anIndex];
+            const TDF_Label& aLabel = theSuppressedSourceLabels[anIndex];
+            if (aResult.IsNull() || aResult->Shape().IsNull()
+                || aLabel.IsNull()
+                || !theDocument->IsEditableFreeSimpleDefinitionLabel(aLabel)
+                || !aSeenPresentations.insert(aResult.get()).second
+                || !aSeenResultTopologies.insert(
+                    aResult->Shape().TShape().get()).second) {
+                return {};
+            }
+            const OcctGeometryRepresentation aRepresentation =
+                theDocument->GeometryRepresentationForLabel(aLabel);
+            if (aRepresentation != OcctGeometryRepresentation::LegacyUnknown
+                && aRepresentation != OcctGeometryRepresentation::BRep) {
+                return {};
+            }
+            // Presentation overlays intentionally carry no texture resource
+            // table. Suppressing a textured committed occurrence and replacing
+            // it with a scalar-only Bevel material would be a visible fidelity
+            // regression, so keep OCCT authoritative for that preview.
+            const Handle(XCAFDoc_VisMaterial) aSourceMaterial =
+                XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel);
+            if (!aSourceMaterial.IsNull()) {
+                if (aSourceMaterial->HasPbrMaterial()) {
+                    const XCAFDoc_VisMaterialPBR& aPbr =
+                        aSourceMaterial->PbrMaterial();
+                    if (!aPbr.BaseColorTexture.IsNull()
+                        || !aPbr.EmissiveTexture.IsNull()
+                        || !aPbr.MetallicRoughnessTexture.IsNull()
+                        || !aPbr.OcclusionTexture.IsNull()
+                        || !aPbr.NormalTexture.IsNull()) {
+                        return {};
+                    }
+                }
+                if (aSourceMaterial->HasCommonMaterial()
+                    && !aSourceMaterial->CommonMaterial()
+                            .DiffuseTexture.IsNull()) {
+                    return {};
+                }
+            }
+            std::string aLabelIdentifier =
+                theDocument->EntityIdentifierForLabel(aLabel);
+            if (!IsValidIdentifier(aLabelIdentifier)
+                || !aSeenSourceLabels.insert(aLabelIdentifier).second) {
+                return {};
+            }
+            aPairs.push_back({
+                aResult,
+                std::move(aLabelIdentifier),
+            });
+        }
+        std::sort(
+            aPairs.begin(),
+            aPairs.end(),
+            [](const SourceResultPair& theLeft,
+               const SourceResultPair& theRight) {
+                return theLeft.labelIdentifier < theRight.labelIdentifier;
+            });
+
+        PresentationOverlayContent aContent;
+        aContent.kind = PresentationOverlayKind::ChamferPreview;
+        aContent.meshes.reserve(anItemCount);
+        aContent.instances.reserve(anItemCount);
+        aContent.materials.reserve(anItemCount);
+        aContent.suppressedEntityIdentifiers.reserve(anItemCount);
+
+        std::unordered_set<std::string> aSeenSuppressedEntities;
+        for (const SourceResultPair& aPair : aPairs) {
+            const auto aMapping =
+                myState->lastFullLabelToInstances->find(
+                    aPair.labelIdentifier);
+            // A transient result replaces exactly one committed occurrence.
+            // Assembly definitions with multiple occurrences stay on OCCT.
+            if (aMapping == myState->lastFullLabelToInstances->end()
+                || aMapping->second.size() != 1) {
+                return {};
+            }
+            const std::size_t anInstanceIndex = aMapping->second.front();
+            if (anInstanceIndex
+                    >= myState->lastFullEntityIdentifiers->size()) {
+                return {};
+            }
+            const std::string& anEntityIdentifier =
+                (*myState->lastFullEntityIdentifiers)[anInstanceIndex];
+            if (!IsValidIdentifier(anEntityIdentifier)
+                || !aSeenSuppressedEntities.insert(
+                    anEntityIdentifier).second) {
+                return {};
+            }
+            aContent.suppressedEntityIdentifiers.push_back(
+                anEntityIdentifier);
+        }
+
+        std::size_t aVertexCount = 0;
+        std::size_t anIndexCount = 0;
+        std::size_t aPrimitiveCount = 0;
+        std::size_t aBindingCount = 0;
+        std::size_t aNumericByteCount = 0;
+        for (std::size_t anIndex = 0; anIndex < aPairs.size(); ++anIndex) {
+            if (aContent.meshes.size() >= kMaxOverlayMeshes
+                || aVertexCount >= kMaxOverlayVertices
+                || anIndexCount >= kMaxOverlayIndices
+                || aPrimitiveCount >= kMaxOverlayPrimitives
+                || aBindingCount >= kMaxOverlayPrimitiveBindings) {
+                return {};
+            }
+            const std::string anIdentifier =
+                "chamfer/preview/" + std::to_string(anIndex);
+            WorldPreviewItem anItem;
+            if (!ExtractWorldPreviewItem(
+                    aPairs[anIndex].result,
+                    anIdentifier,
+                    "Chamfer preview " + std::to_string(anIndex),
+                    static_cast<std::uint32_t>(anIndex),
+                    RenderRole::ChamferPreview,
+                    RenderStyle::Shaded,
+                    std::nullopt,
+                    kMaxOverlayVertices - aVertexCount,
+                    kMaxOverlayIndices - anIndexCount,
+                    std::min(kMaxOverlayPrimitives - aPrimitiveCount,
+                             kMaxOverlayPrimitiveBindings - aBindingCount),
+                    anItem)) {
+                return {};
+            }
+
+            std::size_t aVertexBytes = 0;
+            std::size_t anIndexBytes = 0;
+            if (!CheckedAdd(aVertexCount,
+                            anItem.mesh.vertices.size(),
+                            aVertexCount)
+                || aVertexCount > kMaxOverlayVertices
+                || !CheckedAdd(anIndexCount,
+                               anItem.mesh.indices.size(),
+                               anIndexCount)
+                || anIndexCount > kMaxOverlayIndices
+                || !CheckedAdd(aPrimitiveCount,
+                               anItem.mesh.primitives.size(),
+                               aPrimitiveCount)
+                || aPrimitiveCount > kMaxOverlayPrimitives
+                || !CheckedAdd(aBindingCount,
+                               anItem.instance.primitiveBindings.size(),
+                               aBindingCount)
+                || aBindingCount > kMaxOverlayPrimitiveBindings
+                || !CheckedMultiply(anItem.mesh.vertices.size(),
+                                    sizeof(Vertex),
+                                    aVertexBytes)
+                || !CheckedMultiply(anItem.mesh.indices.size(),
+                                    sizeof(std::uint32_t),
+                                    anIndexBytes)
+                || !CheckedAdd(aNumericByteCount,
+                               aVertexBytes,
+                               aNumericByteCount)
+                || !CheckedAdd(aNumericByteCount,
+                               anIndexBytes,
+                               aNumericByteCount)
+                || aNumericByteCount > kMaxOverlayNumericBytes) {
+                return {};
+            }
+            aContent.meshes.push_back(std::move(anItem.mesh));
+            aContent.instances.push_back(std::move(anItem.instance));
+            aContent.materials.push_back(std::move(anItem.material));
+        }
+
+        return PublishPresentationOverlayImpl(
+            theDocument,
+            std::move(aContent),
+            false,
             false,
             true);
     } catch (const Standard_Failure&) {

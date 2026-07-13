@@ -91,6 +91,8 @@ namespace core3d {
         }
         void setBooleanPreviewStateChangedCallback(
             std::function<void()> callback);
+        void setBevelPreviewStateChangedCallback(
+            std::function<void()> callback);
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
 
@@ -106,8 +108,9 @@ namespace core3d {
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
 
-        //! Capture an immutable idle move/rotate gizmo paired with the most
-        //! recent full scene. Empty content is a valid explicit clear.
+        //! Capture an immutable idle tool presentation paired with the most
+        //! recent full scene. Ready Bevel previews replace their committed
+        //! sources; empty generic content is a valid explicit clear.
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
 #ifdef DEBUG
@@ -131,6 +134,28 @@ namespace core3d {
         Standard_Boolean debugBeginExtrusionSelection(
             const std::string& entityIdentifier,
             Standard_Size faceTopologyIndex) noexcept;
+        Standard_Boolean debugBeginBevelSelection(
+            const std::string& entityIdentifier,
+            const std::vector<Standard_Size>& edgeTopologyIndices) noexcept;
+        Standard_Boolean debugBeginBevelSelection(
+            const std::vector<std::string>& entityIdentifiers,
+            const std::vector<std::vector<Standard_Size>>&
+                edgeTopologyIndices) noexcept;
+        BevelPreviewDebugState DebugBevelPreviewState() const noexcept;
+        void DebugSetBevelPreviewWorkerBlocked(
+            Standard_Boolean blocked) noexcept;
+        void DebugSetMaximumBevelCaptureTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetMaximumBevelResultTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetMaximumBevelResultSolids(
+            Standard_Size limit) noexcept;
+        void DebugSetBevelTransactionFailureCount(
+            Standard_Size count) noexcept;
+        void DebugSetBevelCancelDiscardFailureCount(
+            Standard_Size count) noexcept;
+        Standard_Boolean
+            DebugMutateFirstBevelSourcePersistedTransform() noexcept;
         //! Test-only admission ceiling for the bounded project-load topology
         //! walk. Production uses the fixed mobile-safe aggregate ceiling.
         void SetDebugMaximumProjectTopologyValidationNodes(
@@ -166,6 +191,7 @@ namespace core3d {
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;
+        std::function<void()> _bevelPreviewStateChangedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
         Standard_Size myMaximumProjectTopologyValidationNodes = 2'000'000;
     };

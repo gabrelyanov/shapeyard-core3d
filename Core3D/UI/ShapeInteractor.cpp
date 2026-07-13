@@ -7,10 +7,9 @@
 
 #include "ShapeInteractor.hpp"
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <StdSelect_BRepOwner.hxx>
-#include <BRepFilletAPI_MakeFillet.hxx>
-#include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRep_Tool.hxx>
 #include <StlAPI_Writer.hxx>
 #include <RWObj_CafWriter.hxx>
@@ -23,6 +22,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <GeomAdaptor_Curve.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -43,6 +43,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
+#include <set>
 #include <vector>
 
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -438,34 +439,24 @@ namespace core3d {
 			}
 		}
 
-		bool CanExportCommittedDocument(
-			const Handle(OcctDocument)& document,
-			const std::string& filename,
-			const OcctGeometryExportFormat format) {
-			const Handle(TDocStd_Document) transaction = document.IsNull()
-				? Handle(TDocStd_Document)()
-				: document->ChangeDocument();
-			if (filename.empty() || transaction.IsNull()
-				|| transaction->HasOpenCommand()
-				|| !document->CanExportGeometry(format)) {
+			bool CanExportCommittedDocument(
+				const Handle(OcctDocument)& document,
+				const std::string& filename,
+				const OcctGeometryExportFormat format,
+				const bool hasActiveTransientOperation) {
+				const Handle(TDocStd_Document) transaction = document.IsNull()
+					? Handle(TDocStd_Document)()
+					: document->ChangeDocument();
+				if (filename.empty() || hasActiveTransientOperation
+					|| transaction.IsNull()
+					|| transaction->HasOpenCommand()
+					|| !document->CanExportGeometry(format)) {
 				if (!filename.empty()) {
 					std::remove(filename.c_str());
 				}
 				return false;
 			}
 			return true;
-		}
-
-		Standard_Boolean IsTopologicallyValid(const TopoDS_Shape& shape) {
-			if (shape.IsNull()) {
-				return Standard_False;
-			}
-			try {
-				BRepCheck_Analyzer analyzer(shape, Standard_True);
-				return analyzer.IsValid();
-			} catch (...) {
-				return Standard_False;
-			}
 		}
 
 		void AbortOpenCommandNoThrow(
@@ -479,10 +470,11 @@ namespace core3d {
 		}
 	}
 
-    ShapeInteractor::ShapeInteractor(Handle(Core3DContext) context, Handle(Core3DView) view, Handle(OcctDocument) doc)
-    : Interactor(context, view, doc) {
-
-    }
+	    ShapeInteractor::ShapeInteractor(Handle(Core3DContext) context, Handle(Core3DView) view, Handle(OcctDocument) doc)
+	    : Interactor(context, view, doc),
+	      _bevelController(std::make_shared<BevelOperationController>(
+	          context, doc)) {
+	    }
 
 	ShapeInteractor::~ShapeInteractor() noexcept {
 		if (!cancelExtrusion()) {
@@ -1055,7 +1047,7 @@ namespace core3d {
 		return beginExtrusionSelectionImpl(presentation, face);
 	}
 
-	ExtrusionDebugState ShapeInteractor::debugExtrusionState() const noexcept {
+		ExtrusionDebugState ShapeInteractor::debugExtrusionState() const noexcept {
 		ExtrusionDebugState state;
 		try {
 			OCC_CATCH_SIGNALS
@@ -1104,263 +1096,227 @@ namespace core3d {
 			// DEBUG telemetry is strictly observational and must never terminate
 			// a test host if OCCT reports a signal or document access failure.
 		}
-		return state;
-	}
-#endif
-
-	void ShapeInteractor::copyMaterial(Handle(AIS_Shape) &to, const Handle(AIS_Shape) &from) {
-		to->UnsetColor();
-		to->SetMaterial(myDoc->MaterialNameForShape(from));
-		Quantity_Color c;
-		from->Color(c);
-		to->SetColor(c.Name());
-	}
-
-	Standard_Boolean ShapeInteractor::setChamferValueForSelection(const Standard_Real value) {
-		auto doc = myDoc->ChangeDocument();
-		if (doc.IsNull() || (doc->HasOpenCommand() && !_ownsChamferCommand)) {
-			return Standard_False;
-		}
-		const Standard_Real normalizedValue = value < 0
-			? std::fmax(value / 100.0, -20.0)
-			: std::fmin(value / 100.0, 20.0);
-		if (std::abs(_chamferValue - normalizedValue) < 1e-3) {
-			return Standard_True;
-		}
-		if (std::abs(normalizedValue) <= FLT_EPSILON) {
-			discardChamferPreview();
-			return Standard_True;
+			return state;
 		}
 
-		const Standard_Boolean isChamfer = normalizedValue < 0;
-
-		struct ChamferResult {
-			Standard_Size selectionIndex;
-			Handle(AIS_Shape) presentation;
-		};
-		std::vector<ChamferResult> results;
-		results.reserve(_detectedEdges.size());
-		try {
-			OCC_CATCH_SIGNALS
-			for (Standard_Size index = 0; index < _detectedEdges.size(); ++index) {
-				const EdgesSelection& sel = _detectedEdges[index];
-				if (sel.detectedOwner.IsNull() || !sel.detectedOwner->HasSelectable()
-					|| sel.documentLabel.IsNull() || sel.edges.empty()
-					|| !IsBRepModelingLabel(
-						myDoc, sel.documentLabel)) {
-					return Standard_False;
-				}
-				Handle(AIS_Shape) ownerShape =
-					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				if (ownerShape.IsNull() || ownerShape->Shape().IsNull()
-					|| !myDoc->IsPresentationEditable(ownerShape)
-					|| !myDoc->ShapeLabel(ownerShape).IsEqual(
-						sel.documentLabel)) {
-					return Standard_False;
-				}
-
-				TopoDS_Shape resultShape;
-				if (isChamfer) {
-					BRepFilletAPI_MakeChamfer builder(ownerShape->Shape());
-					for (const TopoDS_Edge& edge : sel.edges) {
-						builder.Add(std::abs(normalizedValue), edge);
-					}
-					builder.Build();
-					if (!builder.IsDone()) { return Standard_False; }
-					resultShape = builder.Shape();
-				} else {
-					BRepFilletAPI_MakeFillet builder(ownerShape->Shape());
-					for (const TopoDS_Edge& edge : sel.edges) {
-						builder.Add(normalizedValue, edge);
-					}
-					builder.Build();
-					if (!builder.IsDone()) { return Standard_False; }
-					resultShape = builder.Shape();
-				}
-				if (!IsTopologicallyValid(resultShape)) { return Standard_False; }
-
-				Handle(AIS_Shape) result = new AIS_Shape(resultShape);
-				result->SetLocalTransformation(sel.transform);
-				myDoc->LoadObjectMeterial(sel.documentLabel, result);
-				results.push_back({index, result});
-			}
-		} catch (const Standard_Failure&) {
-			return Standard_False;
-		} catch (...) {
-			return Standard_False;
-		}
-		if (results.empty() || results.size() != _detectedEdges.size()) {
-			return Standard_False;
+		Standard_Boolean ShapeInteractor::debugBeginBevelSelection(
+			const Handle(AIS_Shape)& presentation,
+			const std::vector<Standard_Size>& edgeTopologyIndices) noexcept {
+			return debugBeginBevelSelection(
+				std::vector<Handle(AIS_Shape)>{presentation},
+				std::vector<std::vector<Standard_Size>>{
+					edgeTopologyIndices});
 		}
 
-		discardChamferPreview();
-		try {
-			OCC_CATCH_SIGNALS
-			doc->NewCommand();
-			if (!doc->HasOpenCommand()) {
+		Standard_Boolean ShapeInteractor::debugBeginBevelSelection(
+			const std::vector<Handle(AIS_Shape)>& presentations,
+			const std::vector<std::vector<Standard_Size>>&
+				edgeTopologyIndices) noexcept {
+			if (_bevelController == nullptr || presentations.empty()
+				|| presentations.size() != edgeTopologyIndices.size()
+				|| presentations.size()
+					> BevelOperationController::kMaxSourceBodies) {
 				return Standard_False;
 			}
-			_ownsChamferCommand = Standard_True;
-			for (const ChamferResult& result : results) {
-				const EdgesSelection& sel = _detectedEdges[result.selectionIndex];
-				const TDF_Label resultLabel = myDoc->AddShape(
-					result.presentation,
-					OcctGeometryRepresentation::BRep);
-				if (resultLabel.IsNull()) {
-					throw Standard_Failure("Unable to add chamfer result");
+			try {
+				OCC_CATCH_SIGNALS
+				std::vector<BevelSourceSelection> aSources;
+				aSources.reserve(presentations.size());
+				Standard_Size anAggregateEdgeCount = 0;
+				for (Standard_Size aSourceIndex = 0;
+					 aSourceIndex < presentations.size(); ++aSourceIndex) {
+					const Handle(AIS_Shape)& aPresentation =
+						presentations[aSourceIndex];
+					const std::vector<Standard_Size>& aTopologyIndices =
+						edgeTopologyIndices[aSourceIndex];
+					if (aPresentation.IsNull()
+						|| aPresentation->Shape().IsNull()
+						|| aTopologyIndices.empty()
+						|| aTopologyIndices.size()
+							> BevelOperationController::kMaxSelectedEdges
+						|| anAggregateEdgeCount
+							> BevelOperationController::kMaxSelectedEdges
+								- aTopologyIndices.size()) {
+						return Standard_False;
+					}
+					anAggregateEdgeCount += aTopologyIndices.size();
+					TopTools_IndexedMapOfShape anEdges;
+					TopExp::MapShapes(
+						aPresentation->Shape(), TopAbs_EDGE, anEdges);
+					std::vector<TopoDS_Edge> aCaptured;
+					aCaptured.reserve(aTopologyIndices.size());
+					std::set<Standard_Size> aUniqueIndices;
+					for (const Standard_Size anIndex : aTopologyIndices) {
+						if (anIndex
+								>= static_cast<Standard_Size>(anEdges.Extent())
+							|| !aUniqueIndices.insert(anIndex).second) {
+							return Standard_False;
+						}
+						aCaptured.push_back(TopoDS::Edge(
+							anEdges(static_cast<Standard_Integer>(anIndex + 1))));
+					}
+					BevelSourceSelection aSource;
+					aSource.original = aPresentation;
+					aSource.documentLabel = myDoc->ShapeLabel(aPresentation);
+					aSource.edges = std::move(aCaptured);
+					aSource.edgeTopologyIndices = aTopologyIndices;
+					aSource.selectionMode =
+						AIS_Shape::SelectionMode(_topAbsSelMode);
+					aSources.push_back(std::move(aSource));
 				}
-				if (myDoc->GeometryRepresentationForLabel(resultLabel)
-					!= OcctGeometryRepresentation::BRep) {
-					throw Standard_Failure(
-						"Chamfer result is not persisted as BRep");
-				}
-				if (!myDoc->CopyObjectAppearance(
-						sel.documentLabel, resultLabel)) {
-					throw Standard_Failure(
-						"Unable to copy chamfer result appearance");
-				}
+				return _bevelController->begin(aSources);
+			} catch (...) {
+				(void)_bevelController->cancel();
+				return Standard_False;
 			}
-		} catch (...) {
-			if (_ownsChamferCommand && doc->HasOpenCommand()) {
-				doc->AbortCommand();
+		}
+
+		BevelPreviewDebugState ShapeInteractor::debugBevelState() const noexcept {
+			return _bevelController == nullptr
+				? BevelPreviewDebugState()
+				: _bevelController->debugPreviewState();
+		}
+
+		void ShapeInteractor::debugSetBevelWorkerBlocked(
+			const Standard_Boolean blocked) noexcept {
+			if (_bevelController != nullptr) {
+				_bevelController->debugSetWorkerBlocked(blocked);
 			}
-			_ownsChamferCommand = Standard_False;
+		}
+
+		void ShapeInteractor::debugSetMaximumBevelCaptureTopologyNodes(
+			const Standard_Size limit) noexcept {
+			if (_bevelController != nullptr) {
+				_bevelController->debugSetMaximumCaptureTopologyNodes(limit);
+			}
+		}
+
+		void ShapeInteractor::debugSetMaximumBevelResultTopologyNodes(
+			const Standard_Size limit) noexcept {
+			if (_bevelController != nullptr) {
+				_bevelController->debugSetMaximumResultTopologyNodes(limit);
+			}
+		}
+
+		void ShapeInteractor::debugSetMaximumBevelResultSolids(
+			const Standard_Size limit) noexcept {
+			if (_bevelController != nullptr) {
+				_bevelController->debugSetMaximumResultSolids(limit);
+			}
+		}
+
+		void ShapeInteractor::debugSetBevelTransactionFailureCount(
+			const Standard_Size count) noexcept {
+			if (_bevelController != nullptr) {
+				_bevelController->debugSetTransactionFailureCount(count);
+			}
+		}
+
+		void ShapeInteractor::debugSetBevelCancelDiscardFailureCount(
+			const Standard_Size count) noexcept {
+			if (_bevelController != nullptr) {
+				_bevelController->debugSetCancelDiscardFailureCount(count);
+			}
+		}
+
+		Standard_Boolean
+		ShapeInteractor::debugMutateFirstBevelSourcePersistedTransform() noexcept {
+			return _bevelController != nullptr
+				&& _bevelController
+					->debugMutateFirstSourcePersistedTransform();
+		}
+#endif
+
+	Standard_Boolean ShapeInteractor::beginBevelSelectionFromDetectedEdges() noexcept {
+		if (_bevelController == nullptr || _detectedEdges.empty()) {
 			return Standard_False;
 		}
-
-		for (const ChamferResult& result : results) {
-			EdgesSelection& sel = _detectedEdges[result.selectionIndex];
-			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
-				Handle(AIS_Shape) ownerShape =
-					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				if (!ownerShape.IsNull()) {
-					myContext->Display(ownerShape, AIS_WireFrame, _topAbsSelMode, Standard_False);
-				}
-			}
-			sel.filletShapePrs = result.presentation;
-			myContext->Display(sel.filletShapePrs, AIS_Shaded, _topAbsSelMode, Standard_False);
-			setInteractiveObjectSelectionMode(sel.filletShapePrs);
-		}
-		_chamferValue = normalizedValue;
-		myContext->UpdateCurrentViewer();
-		return Standard_True;
-	}
-
-	void ShapeInteractor::discardChamferPreview() {
-		auto doc = myDoc->ChangeDocument();
-		if (_ownsChamferCommand && !doc.IsNull() && doc->HasOpenCommand()) {
-			doc->AbortCommand();
-		}
-		_ownsChamferCommand = Standard_False;
-		for (EdgesSelection& sel : _detectedEdges) {
-			if (!sel.tempFilletShapePrs.IsNull()) {
-				myContext->Remove(sel.tempFilletShapePrs, Standard_False);
-				sel.tempFilletShapePrs.Nullify();
-			}
-			if (!sel.filletShapePrs.IsNull()) {
-				myContext->Remove(sel.filletShapePrs, Standard_False);
-				sel.filletShapePrs.Nullify();
-			}
-			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
-				Handle(AIS_Shape) ownerShape =
-					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				if (!ownerShape.IsNull()) {
-					myContext->Display(ownerShape, AIS_Shaded, _topAbsSelMode, Standard_False);
-					setInteractiveObjectSelectionMode(ownerShape);
-				}
-			}
-		}
-		_chamferValue = 0;
-		myContext->UpdateCurrentViewer();
-	}
-
-	void ShapeInteractor::cancelChamfer() {
-		discardChamferPreview();
-		for (EdgesSelection& sel : _detectedEdges) {
-			sel.edges.clear();
-		}
-		_detectedEdges.clear();
-	}
-
-	void ShapeInteractor::resetWireframeTemplateShape() {
-		auto doc = myDoc->ChangeDocument();
-		if (!_ownsChamferCommand || doc.IsNull() || !doc->HasOpenCommand()) {
-			cancelChamfer();
-			return;
-		}
-
-		std::vector<TDF_Label> resultLabels;
-		resultLabels.reserve(_detectedEdges.size());
-		for (const EdgesSelection& sel : _detectedEdges) {
-			if (sel.documentLabel.IsNull() || sel.filletShapePrs.IsNull()
-				|| !IsBRepModelingLabel(myDoc, sel.documentLabel)) {
-				cancelChamfer();
-				return;
-			}
-			const TDF_Label resultLabel =
-				myDoc->ShapeLabel(sel.filletShapePrs);
-			if (resultLabel.IsNull()
-				|| myDoc->GeometryRepresentationForLabel(resultLabel)
-					!= OcctGeometryRepresentation::BRep) {
-				cancelChamfer();
-				return;
-			}
-			for (const TDF_Label& existing : resultLabels) {
-				if (existing.IsEqual(resultLabel)) {
-					cancelChamfer();
-					return;
-				}
-			}
-			resultLabels.push_back(resultLabel);
-		}
-
-		Standard_Boolean removedAll = Standard_True;
 		try {
-			OCC_CATCH_SIGNALS
-			for (const EdgesSelection& sel : _detectedEdges) {
-				if (!myDoc->RemoveShape(sel.documentLabel)) {
-					removedAll = Standard_False;
-					break;
+			std::vector<BevelSourceSelection> aSelection;
+			aSelection.reserve(_detectedEdges.size());
+			for (const EdgesSelection& anEdges : _detectedEdges) {
+				if (anEdges.detectedOwner.IsNull()
+					|| !anEdges.detectedOwner->HasSelectable()
+					|| anEdges.edges.empty()) {
+					return Standard_False;
 				}
-			}
-		} catch (...) {
-			removedAll = Standard_False;
-		}
-		if (!removedAll) {
-			cancelChamfer();
-			return;
-		}
-
-		Standard_Boolean committed = Standard_False;
-		try {
-			committed = doc->CommitCommand();
-		} catch (...) {
-			committed = Standard_False;
-		}
-		if (!committed) {
-			cancelChamfer();
-			return;
-		}
-
-		_ownsChamferCommand = Standard_False;
-		for (EdgesSelection& sel : _detectedEdges) {
-			if (!sel.detectedOwner.IsNull() && sel.detectedOwner->HasSelectable()) {
-				Handle(AIS_Shape) ownerShape =
-					Handle(AIS_Shape)::DownCast(sel.detectedOwner->Selectable());
-				if (!ownerShape.IsNull()) {
-					myContext->Remove(ownerShape, Standard_False);
+				const Handle(AIS_Shape) anOriginal =
+					Handle(AIS_Shape)::DownCast(
+						anEdges.detectedOwner->Selectable());
+				if (anOriginal.IsNull()) {
+					return Standard_False;
 				}
+				BevelSourceSelection aSource;
+				aSource.original = anOriginal;
+				aSource.documentLabel = anEdges.documentLabel;
+				aSource.edges = anEdges.edges;
+				aSource.selectionMode =
+					AIS_Shape::SelectionMode(_topAbsSelMode);
+				aSelection.push_back(std::move(aSource));
 			}
-			if (!sel.filletShapePrs.IsNull()) {
-				myContext->Display(sel.filletShapePrs, AIS_Shaded, _topAbsSelMode, Standard_False);
-				setInteractiveObjectSelectionMode(sel.filletShapePrs);
-			}
-			sel.edges.clear();
+			return _bevelController->begin(aSelection);
+		} catch (...) {
+			return Standard_False;
 		}
-		_detectedEdges.clear();
-		_chamferValue = 0;
-		myDoc->NotifyChanges();
-		myContext->UpdateCurrentViewer();
+	}
+
+	Standard_Boolean ShapeInteractor::setChamferValueForSelection(
+		const Standard_Real value) {
+		return _bevelController != nullptr
+			&& _bevelController->setValue(value / 100.0);
+	}
+
+	BevelApplyResult ShapeInteractor::applyBevel() noexcept {
+		const BevelApplyResult aResult = _bevelController == nullptr
+			? BevelApplyResult::NoChange
+			: _bevelController->apply();
+		if (aResult != BevelApplyResult::NoChange) {
+			_detectedEdges.clear();
+		}
+		return aResult;
+	}
+
+	Standard_Boolean ShapeInteractor::canApplyBevel() const noexcept {
+		return _bevelController != nullptr && _bevelController->canApply();
+	}
+
+	Standard_Boolean ShapeInteractor::hasActiveBevel() const noexcept {
+		return _bevelController != nullptr
+			&& _bevelController->hasActiveOperation();
+	}
+
+	Standard_Boolean ShapeInteractor::isBevelSelectionFrozen() const noexcept {
+		return _bevelController != nullptr
+			&& _bevelController->isSelectionFrozen();
+	}
+
+	Standard_Boolean ShapeInteractor::captureBevelPreview(
+		BevelPreviewCapture& capture) const noexcept {
+		return _bevelController != nullptr
+			&& _bevelController->capturePreview(capture);
+	}
+
+	void ShapeInteractor::setBevelPreviewStateChangedCallback(
+		std::function<void()> callback) {
+		if (_bevelController != nullptr) {
+			_bevelController->setPreviewStateChangedCallback(
+				std::move(callback));
+		}
+	}
+
+	Standard_Boolean ShapeInteractor::cancelChamfer() noexcept {
+		const Standard_Boolean didCancel = _bevelController == nullptr
+			|| _bevelController->cancel();
+		if (didCancel) {
+			_detectedEdges.clear();
+		}
+		return didCancel;
+	}
+
+	Standard_Boolean ShapeInteractor::resetWireframeTemplateShape() noexcept {
+		// Legacy call sites use this when deselecting or changing tools. Those
+		// lifecycle edges are Cancel, never an implicit geometry commit.
+		return cancelChamfer();
 	}
 
     Standard_Size ShapeInteractor::saveSelectionEdges(bool preventRechamfer) {
@@ -1368,7 +1324,9 @@ namespace core3d {
 	//      - false - enable the chamfer functionality anyway
 	//      - true - disable the chamfer functionality if it has already been used
         
-        resetWireframeTemplateShape();
+		if (!resetWireframeTemplateShape()) {
+			return 0;
+		}
 
         for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
             const Handle(SelectMgr_EntityOwner) detectedOwner = myContext->SelectedOwner();
@@ -1441,8 +1399,13 @@ namespace core3d {
 				_detectedEdges.erase(_detectedEdges.begin() + found);
 			}
         }
-        return _detectedEdges.size();
-    }
+		if (_detectedEdges.empty()
+			|| !beginBevelSelectionFromDetectedEdges()) {
+			_detectedEdges.clear();
+			return 0;
+		}
+	        return _detectedEdges.size();
+	    }
 
     const size_t ShapeInteractor::getNumberOfDetectedEdges() const {
         return _detectedEdges.size();
@@ -1460,8 +1423,10 @@ namespace core3d {
         }
 
 		if (_previousSelectionMode != mode) {
+			if (!resetWireframeTemplateShape()) {
+				return;
+			}
 			myContext->ClearSelected(Standard_True);
-			resetWireframeTemplateShape();
 		}
         else {
             return;
@@ -1588,7 +1553,10 @@ namespace core3d {
 
     void ShapeInteractor::exportToStl(const std::string &filename, const Standard_Boolean isASCII/* = Standard_True*/) {
         if (!CanExportCommittedDocument(
-				myDoc, filename, OcctGeometryExportFormat::Stl)) {
+					myDoc,
+					filename,
+					OcctGeometryExportFormat::Stl,
+					hasActiveBevel() || hasActiveExtrusion())) {
             return;
         }
         AIS_ListOfInteractive objects;
@@ -1615,7 +1583,10 @@ namespace core3d {
 
     void ShapeInteractor::exportToObj(const std::string &filename) {
         if (!CanExportCommittedDocument(
-				myDoc, filename, OcctGeometryExportFormat::Obj)) {
+					myDoc,
+					filename,
+					OcctGeometryExportFormat::Obj,
+					hasActiveBevel() || hasActiveExtrusion())) {
             return;
         }
 //#define converter2obj
@@ -1714,7 +1685,10 @@ namespace core3d {
 
     void ShapeInteractor::exportToGltf(const std::string &filename) {
         if (!CanExportCommittedDocument(
-				myDoc, filename, OcctGeometryExportFormat::Gltf)) {
+					myDoc,
+					filename,
+					OcctGeometryExportFormat::Gltf,
+					hasActiveBevel() || hasActiveExtrusion())) {
             return;
         }
         bool exportSucceeded = false;
@@ -1780,7 +1754,10 @@ namespace core3d {
 
     void ShapeInteractor::exportToStep(const std::string &filename) {
         if (!CanExportCommittedDocument(
-				myDoc, filename, OcctGeometryExportFormat::Step)) {
+					myDoc,
+					filename,
+					OcctGeometryExportFormat::Step,
+					hasActiveBevel() || hasActiveExtrusion())) {
             return;
         }
         AIS_ListOfInteractive objects;

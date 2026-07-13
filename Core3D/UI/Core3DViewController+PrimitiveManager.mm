@@ -94,6 +94,9 @@
 - (void)setChamfer:(CGFloat)value {
     if (_currentGizmoType != PrimitiveGizmoTypeChamfer) { return; }
     [GLController setChamfer:value*100];
+    self.can_apply = [GLController canApplyChamfer];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
 }
 
 - (Boundaries)getChamferBoundaries {
@@ -141,15 +144,29 @@
 }
 
 - (void)applyChamfer {
-    [self completeOperationInteraction];
+	if ([GLController applyChamfer]) {
+		[self completeOperationInteraction];
+	} else {
+		self.can_apply = [GLController canApplyChamfer];
+		[self viewDidChangeViewportPresentationState];
+		[self sendNotifyUIState:UIStateChangingApply];
+	}
 }
 
-- (void)cancelChamfer {
+- (BOOL)cancelChamfer {
     if (_currentGizmoType != PrimitiveGizmoTypeChamfer) {
-        return;
+        return NO;
     }
-    [GLController cancelChamfer];
-    [self completeOperationInteraction];
+    const BOOL cancelled = [GLController cancelChamfer];
+    if (cancelled) {
+        [self completeOperationInteraction];
+    } else {
+        self.can_apply = [GLController canApplyChamfer];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                 | UIStateChangingApply];
+    }
+    return cancelled;
 }
 
 - (void)completeOperationInteraction {
