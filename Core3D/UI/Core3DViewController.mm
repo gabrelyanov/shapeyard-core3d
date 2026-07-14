@@ -4091,17 +4091,52 @@ void Core3DAddDebugOrphanVisualMaterial(
             || viewer->getObjectInteractor() == nullptr) {
             return NO;
         }
-        viewer->getObjectInteractor()->tryMirror(
+        const BOOL didCreate = viewer->getObjectInteractor()->tryMirror(
             static_cast<Standard_Integer>(axis),
             backward);
         [GLController requestRender];
         // Reuse the same finalized lifecycle path as an authoritative touch
         // release so Apply state and alternate-renderer capture stay aligned.
         [self viewDidEndPrimaryInteractionCancelled:NO];
-        return viewer->getObjectInteractor()->hasTrialMirrorObjects();
+        return didCreate;
     } catch (...) {
         return NO;
     }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugMirrorState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugMirrorState];
+}
+
+- (void)debugSetMirrorTransactionFailureCount:(NSUInteger)count {
+    [GLController debugSetMirrorTransactionFailureCount:count];
+}
+
+- (void)debugSetMirrorAbortFailureCount:(NSUInteger)count {
+    [GLController debugSetMirrorAbortFailureCount:count];
+}
+
+- (void)debugSetMirrorEraseFailureCount:(NSUInteger)count {
+    [GLController debugSetMirrorEraseFailureCount:count];
+}
+
+- (void)debugSetMirrorCommitMode:(NSInteger)mode {
+    [GLController debugSetMirrorCommitMode:mode];
+}
+
+- (void)debugSetMirrorPostCommitInspectFailureCount:(NSUInteger)count {
+    [GLController debugSetMirrorPostCommitInspectFailureCount:count];
+}
+
+- (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumMirrorTopologyNodes:limit];
+}
+
+- (BOOL)debugMutateFirstMirrorSourcePersistedTransform {
+    return [GLController debugMutateFirstMirrorSourcePersistedTransform];
 }
 
 - (BOOL)debugBeginBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
@@ -4512,7 +4547,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     // while an authoritative transient body exists; lifecycle cancellation
     // clears that body through the same renderer-neutral callback.
     if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
-        self.can_apply = [GLController hasTrialMirrorObjects];
+        const Core3DModelingPreviewStatus aStatus =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeMirror];
+        self.can_apply = aStatus.canApply;
         // Lifecycle cancellation can clear an idle trial without an active
         // raw touch. Publish the finalized mirror presentation state here so
         // alternate renderers recapture the overlay instead of reusing the
@@ -4527,9 +4565,22 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {
-    if (_currentSelectionType != type) {
-        [GLController setSelectionType:type];
-        _currentSelectionType = type;
+	if (_currentSelectionType != type) {
+		[GLController setSelectionType:type];
+		if ([GLController getSelectionType] != type) {
+			if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
+				const Core3DModelingPreviewStatus aStatus =
+					[self modelingPreviewStatusForGizmoType:
+						PrimitiveGizmoTypeMirror];
+				self.can_apply = aStatus.canApply;
+				[self viewDidChangeViewportPresentationState];
+				[self sendNotifyUIState:UIStateChangingSelection
+									 | UIStateChangingGizmo
+									 | UIStateChangingApply];
+			}
+			return;
+		}
+		_currentSelectionType = type;
 
         _availableGizmoTypes = @[];
         switch (_currentSelectionType) {
@@ -4613,8 +4664,13 @@ void Core3DAddDebugOrphanVisualMaterial(
                 self.can_apply = [_glController canApplyBoolean];
                 break;
             case PrimitiveGizmoTypeMirror:
-                self.can_apply = NO;
+            {
+                const Core3DModelingPreviewStatus aStatus =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeMirror];
+                self.can_apply = aStatus.canApply;
                 break;
+            }
             case PrimitiveGizmoTypeExtrude:
                 self.can_apply = [GLController canApplyExtrusion];
                 break;

@@ -136,6 +136,10 @@ typedef struct {
     NS_SWIFT_NAME(tryApplySubtract());
 - (Core3DModelingOperationResult)tryCancelSubtract
     NS_SWIFT_NAME(tryCancelSubtract());
+- (Core3DModelingOperationResult)tryApplyMirror
+    NS_SWIFT_NAME(tryApplyMirror());
+- (Core3DModelingOperationResult)tryCancelMirror
+    NS_SWIFT_NAME(tryCancelMirror());
 - (void)applyMirror;
 - (void)cancelMirror;
 - (void)applySubtract;
@@ -367,6 +371,25 @@ typedef struct {
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis
                   backward:(BOOL)backward
     NS_SWIFT_NAME(debugTryMirror(axis:backward:));
+//! Mirror state values are Unavailable=0, Selecting=1, Ready=2,
+//! Committing=3, OutcomeUnknown=4, and Failed=5.
+- (NSDictionary<NSString *, NSNumber *> *)debugMirrorState;
+//! Force the next N Mirror applies to fail after opening the OCAF command.
+- (void)debugSetMirrorTransactionFailureCount:(NSUInteger)count;
+//! Make the next N owned Mirror command aborts fail before touching OCAF.
+- (void)debugSetMirrorAbortFailureCount:(NSUInteger)count;
+//! Make the next N transient Mirror erases retain their owned presentation.
+- (void)debugSetMirrorEraseFailureCount:(NSUInteger)count;
+//! Inject CommitCommand behavior after a real close: 0 normal,
+//! 1 false-after-close, and 2 throw-after-close.
+- (void)debugSetMirrorCommitMode:(NSInteger)mode;
+//! Make the next N post-commit label inspections report unavailable.
+- (void)debugSetMirrorPostCommitInspectFailureCount:(NSUInteger)count;
+//! Lower Mirror's aggregate source-and-result topology ceiling.
+- (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit;
+//! Commit a persisted transform change behind the active Mirror snapshot while
+//! leaving its presentation untouched, proving Apply rejects stale sources.
+- (BOOL)debugMutateFirstMirrorSourcePersistedTransform;
 //! Test-only deterministic Boolean seam. Identifiers must name committed
 //! one-occurrence bodies; production selection, ownership, validation, preview,
 //! transaction, and renderer publication paths remain authoritative.

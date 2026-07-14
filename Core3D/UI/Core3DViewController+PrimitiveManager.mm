@@ -74,6 +74,25 @@ Core3DModelingPreviewState Core3DPreviewState(
     return Core3DModelingPreviewStateFailed;
 }
 
+Core3DModelingPreviewState Core3DPreviewState(
+    const core3d::MirrorPreviewState theState) noexcept {
+    switch (theState) {
+        case core3d::MirrorPreviewState::Unavailable:
+            return Core3DModelingPreviewStateUnavailable;
+        case core3d::MirrorPreviewState::Selecting:
+            return Core3DModelingPreviewStateSelecting;
+        case core3d::MirrorPreviewState::Ready:
+            return Core3DModelingPreviewStateReady;
+        case core3d::MirrorPreviewState::Committing:
+            return Core3DModelingPreviewStateComputing;
+        case core3d::MirrorPreviewState::OutcomeUnknown:
+            return Core3DModelingPreviewStateOutcomeUnknown;
+        case core3d::MirrorPreviewState::Failed:
+            return Core3DModelingPreviewStateFailed;
+    }
+    return Core3DModelingPreviewStateFailed;
+}
+
 Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     GLViewController *theController,
     const PrimitiveGizmoType theOperation) {
@@ -122,6 +141,25 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                 || (aStatus.state
                         == Core3DModelingPreviewStateOutcomeUnknown
                     && anInteractor->canRetryExtrusionResolution());
+            return aStatus;
+        }
+        case PrimitiveGizmoTypeMirror: {
+            const std::shared_ptr<core3d::ObjectInteractor> anInteractor =
+                theController.viewer->getObjectInteractor();
+            if (anInteractor == nullptr) {
+                return aStatus;
+            }
+            aStatus.generation = anInteractor->mirrorPreviewGeneration();
+            aStatus.active = anInteractor->hasActiveMirror();
+            if (!aStatus.active) {
+                return aStatus;
+            }
+            aStatus.state = Core3DPreviewState(
+                anInteractor->mirrorPreviewState());
+            aStatus.canApply = anInteractor->canApplyMirror()
+                && (aStatus.state == Core3DModelingPreviewStateReady
+                    || aStatus.state
+                        == Core3DModelingPreviewStateOutcomeUnknown);
             return aStatus;
         }
         case PrimitiveGizmoTypeSubtract:
@@ -178,7 +216,15 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 
 - (void)addPrimitivesFromJSON:(NSString *)json {
     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+        return;
+    }
     [self setSelectionType:PrimitiveSelectionTypeShape];
+    if (_currentSelectionType != PrimitiveSelectionTypeShape
+        || [GLController getSelectionType] != PrimitiveSelectionTypeShape) {
+        return;
+    }
     [GLController addPrimitivesFromJSON:json];
     self.can_undo = YES;
     self.can_delete = YES;
@@ -202,7 +248,15 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 
 - (void)addPrimitive:(PrimitiveType)primitiveType {
     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+        return;
+    }
     [self setSelectionType:PrimitiveSelectionTypeShape];
+    if (_currentSelectionType != PrimitiveSelectionTypeShape
+        || [GLController getSelectionType] != PrimitiveSelectionTypeShape) {
+        return;
+    }
     [GLController addPrimitive:primitiveType];
     self.can_undo = YES;
     self.can_delete = YES;
@@ -226,6 +280,11 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)deleteSelected {
+    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+        return;
+    }
     [GLController deleteSelected];
     self.can_undo = YES;
     self.can_delete = NO;
@@ -241,12 +300,29 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)selectAll {
+	if (_currentGizmoType == PrimitiveGizmoTypeChamfer
+		|| _currentGizmoType == PrimitiveGizmoTypeExtrude
+		|| _currentGizmoType == PrimitiveGizmoTypeMirror
+		|| _currentGizmoType == PrimitiveGizmoTypeSubtract
+		|| _currentGizmoType == PrimitiveGizmoTypeUnion
+		|| _currentGizmoType == PrimitiveGizmoTypeIntersect) {
+		[self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+		if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+			|| [GLController getGizmoType]
+				!= PrimitiveGizmoTypeMoveRotate) {
+			return;
+		}
+	}
 	[GLController selectAll];
 	[self sendNotifyUIState:UIStateChangingSelection];
 }
 
 - (void)duplicateSelected {
     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+        return;
+    }
     [GLController duplicateSelected];
     self.can_apply_material = YES;
     [self sendNotifyUIState:UIStateChangingApplyMaterial
@@ -282,6 +358,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const PrimitiveGizmoType modelingOperations[] = {
         PrimitiveGizmoTypeChamfer,
         PrimitiveGizmoTypeExtrude,
+        PrimitiveGizmoTypeMirror,
         PrimitiveGizmoTypeSubtract,
         PrimitiveGizmoTypeUnion,
         PrimitiveGizmoTypeIntersect,
@@ -463,14 +540,26 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                              | UIStateChangingHistory];
 }
 
+- (Core3DModelingOperationResult)tryApplyMirror {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeMirror
+        attempt:^BOOL {
+            return [GLController applyMirror];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelMirror {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeMirror
+        attempt:^BOOL {
+            return [GLController cancelMirror];
+        }];
+}
+
 - (void)applyMirror {
-    [GLController applyMirror];
-    [self completeOperationInteraction];
+    (void)[self tryApplyMirror];
 }
 
 - (void)cancelMirror {
-    [GLController cancelMirror];
-    [self completeOperationInteraction];
+    (void)[self tryCancelMirror];
 }
 
 - (Core3DModelingOperationResult)tryApplySubtract {
@@ -562,7 +651,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         || _currentGizmoType == PrimitiveGizmoTypeIntersect
         || _currentGizmoType == PrimitiveGizmoTypeExtrude) {
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
-            ? [GLController hasTrialMirrorObjects]
+            ? [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeMirror].canApply
             : _currentGizmoType == PrimitiveGizmoTypeExtrude
                 ? [GLController canApplyExtrusion]
             : [GLController canApplyBoolean];
@@ -594,7 +684,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         || _currentGizmoType == PrimitiveGizmoTypeIntersect
         || _currentGizmoType == PrimitiveGizmoTypeExtrude) {
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
-            ? [GLController hasTrialMirrorObjects]
+            ? [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeMirror].canApply
             : _currentGizmoType == PrimitiveGizmoTypeExtrude
                 ? [GLController canApplyExtrusion]
             : [GLController canApplyBoolean];

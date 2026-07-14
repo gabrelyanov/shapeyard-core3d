@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -42,6 +43,35 @@ namespace core3d {
         Unsafe,
     };
 
+    enum class MirrorApplyResult : std::uint8_t {
+        NoChange = 0,
+        Applied,
+        AppliedNeedsDocumentRedraw,
+    };
+
+    enum class MirrorPreviewState : std::uint8_t {
+        Unavailable = 0,
+        Selecting,
+        Ready,
+        Committing,
+        OutcomeUnknown,
+        Failed,
+    };
+
+#ifdef DEBUG
+    struct MirrorPreviewDebugState {
+        MirrorPreviewState state = MirrorPreviewState::Unavailable;
+        std::uint64_t generation = 0;
+        Standard_Size previewBodyCount = 0;
+        Standard_Size pendingResultCount = 0;
+        Standard_Boolean activeOperation = Standard_False;
+        Standard_Boolean previewValid = Standard_False;
+        Standard_Boolean canApply = Standard_False;
+        Standard_Boolean ownsDocumentCommand = Standard_False;
+        Standard_Boolean documentCommandOpen = Standard_False;
+    };
+#endif
+
     class ObjectInteractor : public Interactor {
         
 		PrimitiveManipulatorType _manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
@@ -51,6 +81,8 @@ namespace core3d {
     public:
         static constexpr Standard_ShortReal kManipulatorGap = 100;
         static constexpr std::size_t kMaxMirrorPreviewBodies = 8;
+		static constexpr Standard_Size kMaxMirrorSourceTopologyNodes = 1'024;
+		static constexpr Standard_Size kMaxMirrorTopologyNodes = 8'192;
         
         ObjectInteractor() = delete;
         ObjectInteractor(Handle(Core3DContext), Handle(Core3DView), Handle(OcctDocument) doc, Standard_ShortReal manipulatorSide = 300);
@@ -134,11 +166,34 @@ namespace core3d {
 		void debugSetBooleanAbortFailureCount(
 			Standard_Size count) noexcept;
 #endif
-		void applyMirror();
-		void tryMirror(Standard_Integer axisIndex, bool backward) noexcept;
-		void clearTrialMirrorObjects() noexcept;
+		MirrorApplyResult applyMirror() noexcept;
+		Standard_Boolean cancelMirror() noexcept;
+		Standard_Boolean tryMirror(
+			Standard_Integer axisIndex,
+			bool backward) noexcept;
+		//! Discard only transient preview geometry while retaining Mirror mode.
+		//! False means owned state remains and every caller must stop transitioning.
+		Standard_Boolean clearTrialMirrorObjects() noexcept;
 		const bool hasTrialMirrorObjects() const;
 		const bool hasUnresolvedMirrorObjects() const;
+		const bool hasActiveMirror() const noexcept;
+		const bool canApplyMirror() const noexcept;
+		MirrorPreviewState mirrorPreviewState() const noexcept;
+		std::uint64_t mirrorPreviewGeneration() const noexcept;
+#ifdef DEBUG
+		MirrorPreviewDebugState debugMirrorPreviewState() const noexcept;
+		void debugSetMirrorTransactionFailureCount(
+			Standard_Size count) noexcept;
+		void debugSetMirrorAbortFailureCount(Standard_Size count) noexcept;
+		void debugSetMirrorEraseFailureCount(Standard_Size count) noexcept;
+		void debugSetMirrorCommitMode(Standard_Integer mode) noexcept;
+		void debugSetMirrorPostCommitInspectFailureCount(
+			Standard_Size count) noexcept;
+		void debugSetMaximumMirrorTopologyNodes(
+			Standard_Size limit) noexcept;
+		Standard_Boolean
+			debugMutateFirstMirrorSourcePersistedTransform() noexcept;
+#endif
 		
 		void setManipulator(Handle(Core3DManipulator) manipulator) {
 			_manipulator = manipulator;
@@ -152,7 +207,20 @@ namespace core3d {
         void createManipulatorIfNeeded();
         void attachManipulator(Handle(AIS_InteractiveObject) toObject);
 		void detachManipulator(Handle(AIS_InteractiveObject) fromObject);
-		void tryMirrorImpl(Standard_Integer axisIndex, bool backward);
+		Standard_Boolean tryMirrorImpl(
+			Standard_Integer axisIndex,
+			bool backward);
+		Standard_Boolean mirrorSourcesAreCurrent() const noexcept;
+		Standard_Boolean abortOwnedMirrorCommand() noexcept;
+		MirrorApplyResult finishCommittedMirror() noexcept;
+		enum class MirrorDocumentState : std::uint8_t {
+			None = 0,
+			AllCommitted,
+			OpenCommand,
+			PartialOrMismatched,
+			Unavailable,
+		};
+		MirrorDocumentState inspectPendingMirrorResults() const noexcept;
 		
 		void setSelectionTransparent(Handle(AIS_InteractiveObject) selected, const bool on);
 		
@@ -161,10 +229,36 @@ namespace core3d {
 		std::unordered_map<const AIS_InteractiveObject*, TDF_Label>
 			_manipulatorSourceLabels;
 		std::vector<Handle(AIS_Shape)> _trialMirrorObjects;
-		std::unordered_map<const AIS_Shape*, TDF_Label>
-			_trialMirrorSourceLabels;
+		struct MirrorSourceSnapshot {
+			Handle(AIS_Shape) presentation;
+			TDF_Label label;
+			std::string entityIdentifier;
+			std::string definitionIdentifier;
+			TopoDS_Shape storedShape;
+			gp_Trsf transform;
+		};
+		struct MirrorPendingResult {
+			TDF_Label label;
+			std::string entityIdentifier;
+			std::string definitionIdentifier;
+			TopoDS_Shape expectedShape;
+		};
+		std::vector<MirrorSourceSnapshot> _trialMirrorSources;
+		std::vector<MirrorPendingResult> _pendingMirrorResults;
 		bool _trialMirrorObjectsValid = false;
+		bool _mirrorOwnsDocumentCommand = false;
+		MirrorPreviewState _mirrorPreviewState =
+			MirrorPreviewState::Unavailable;
+		std::uint64_t _mirrorPreviewGeneration = 0;
 		bool _manipulatorGestureActive = false;
+#ifdef DEBUG
+		Standard_Size _debugMirrorTransactionFailureCount = 0;
+		Standard_Size _debugMirrorAbortFailureCount = 0;
+		Standard_Size _debugMirrorEraseFailureCount = 0;
+		Standard_Integer _debugMirrorCommitMode = 0;
+		Standard_Size _debugMirrorPostCommitInspectFailureCount = 0;
+		Standard_Size _debugMaximumMirrorTopologyNodes = 8'192;
+#endif
     };
 }
 #endif /* Core3dObjectInteractor_hpp */

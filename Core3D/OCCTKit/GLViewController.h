@@ -91,8 +91,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
 - (BOOL)canApplyExtrusion;
-- (void) applyMirror;
-- (void) cancelMirror;
+- (BOOL) applyMirror;
+- (BOOL) cancelMirror;
 - (BOOL) applySubtract;
 - (BOOL) cancelSubtract;
 - (BOOL) applyUnion;
@@ -111,6 +111,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSUInteger)debugBoundedProjectTopologyValidationCount;
 - (NSUInteger)debugGeometricBRepValidationCount;
 - (NSInteger)debugSelectedShapeCount;
+- (NSDictionary<NSString *, NSNumber *> *)debugMirrorState;
+- (void)debugSetMirrorTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetMirrorAbortFailureCount:(NSUInteger)count;
+- (void)debugSetMirrorEraseFailureCount:(NSUInteger)count;
+- (void)debugSetMirrorCommitMode:(NSInteger)mode;
+- (void)debugSetMirrorPostCommitInspectFailureCount:(NSUInteger)count;
+- (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit;
+- (BOOL)debugMutateFirstMirrorSourcePersistedTransform;
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;

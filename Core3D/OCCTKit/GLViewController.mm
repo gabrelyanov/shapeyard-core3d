@@ -1187,7 +1187,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			return;
 		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
-		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+		if (!_viewer->getObjectInteractor()->cancelMirror()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->canUndo()
@@ -1236,7 +1240,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			return;
 		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
-		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+		if (!_viewer->getObjectInteractor()->cancelMirror()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->canRedo()
@@ -1266,7 +1274,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			return;
 		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
-		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+		if (!_viewer->getObjectInteractor()->cancelMirror()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (currentType == PrimitiveGizmoTypeExtrude) {
 		if (!_viewer->getShapeInteractor()->cancelExtrusion()) {
 			[self requestRender];
@@ -1363,7 +1375,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			return;
 		}
 	} else if (previousType == PrimitiveGizmoTypeMirror) {
-		_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+		if (!_viewer->getObjectInteractor()->cancelMirror()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
 	} else if (previousType == PrimitiveGizmoTypeExtrude) {
 		if (!_viewer->getShapeInteractor()->cancelExtrusion()) {
 			[self requestRender];
@@ -1566,15 +1582,29 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 ->canRetryExtrusionResolution());
 }
 
-- (void) applyMirror {
-    assert([self getGizmoType] == PrimitiveGizmoTypeMirror);
-	_viewer->getObjectInteractor()->applyMirror();
+- (BOOL) applyMirror {
+	if (_viewer == nullptr
+		|| _viewer->getObjectInteractor() == nullptr
+		|| [self getGizmoType] != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	const MirrorApplyResult aResult =
+		_viewer->getObjectInteractor()->applyMirror();
+	if (aResult == MirrorApplyResult::AppliedNeedsDocumentRedraw) {
+		_viewer->redrawDocument();
+	}
 	[self requestRender];
+	return aResult != MirrorApplyResult::NoChange;
 }
 
-- (void) cancelMirror {
-	_viewer->getObjectInteractor()->clearTrialMirrorObjects();
+- (BOOL) cancelMirror {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+		return NO;
+	}
+	const BOOL didCancel =
+		_viewer->getObjectInteractor()->cancelMirror();
 	[self requestRender];
+	return didCancel;
 }
 
 - (BOOL) applySubtract {
@@ -1762,6 +1792,80 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (NSInteger)debugSelectedShapeCount {
     return _viewer == nullptr ? 0 : _viewer->selectedCount();
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugMirrorState {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+        return @{};
+    }
+    const MirrorPreviewDebugState state =
+        _viewer->getObjectInteractor()->debugMirrorPreviewState();
+    return @{
+        @"state": @(static_cast<NSUInteger>(state.state)),
+        @"generation": @(
+            static_cast<unsigned long long>(state.generation)),
+        @"previewBodyCount": @(state.previewBodyCount),
+        @"pendingResultCount": @(state.pendingResultCount),
+        @"activeOperation": @(
+            state.activeOperation != Standard_False),
+        @"previewValid": @(state.previewValid != Standard_False),
+        @"canApply": @(state.canApply != Standard_False),
+        @"ownsDocumentCommand": @(
+            state.ownsDocumentCommand != Standard_False),
+        @"documentCommandOpen": @(
+            state.documentCommandOpen != Standard_False),
+    };
+}
+
+- (void)debugSetMirrorTransactionFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetMirrorTransactionFailureCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetMirrorAbortFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetMirrorAbortFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetMirrorEraseFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetMirrorEraseFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetMirrorCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetMirrorCommitMode(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetMirrorPostCommitInspectFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetMirrorPostCommitInspectFailureCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetMaximumMirrorTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (BOOL)debugMutateFirstMirrorSourcePersistedTransform {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()
+            ->debugMutateFirstMirrorSourcePersistedTransform();
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {

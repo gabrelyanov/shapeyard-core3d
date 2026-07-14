@@ -31,6 +31,12 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(tryCancelExtrusion());
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+- (Core3DModelingOperationResult)tryApplyMirror
+    NS_SWIFT_NAME(tryApplyMirror());
+- (Core3DModelingOperationResult)tryCancelMirror
+    NS_SWIFT_NAME(tryCancelMirror());
+- (void)applyMirror;
+- (void)cancelMirror;
 - (Core3DModelingOperationResult)tryApplySubtract
     NS_SWIFT_NAME(tryApplySubtract());
 - (Core3DModelingOperationResult)tryCancelSubtract

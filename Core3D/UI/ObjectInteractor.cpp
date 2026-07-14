@@ -18,17 +18,27 @@
 #include <Poly_TriangulationParameters.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <V3d_View.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDF_LabelSequence.hxx>
 #include <TDataStd_Real.hxx>
 #include <GP_Quaternion.hxx>
 #include <AIS_Shape.hxx>
+#include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <array>
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace core3d {
@@ -320,6 +330,107 @@ namespace core3d {
 			}
 		}
 
+		Standard_Boolean CountBoundedMirrorTopology(
+			const TopoDS_Shape& theShape,
+			const Standard_Size theMaximum,
+			Standard_Size& theCount) noexcept {
+			theCount = 0;
+			if (theShape.IsNull() || theMaximum == 0) {
+				return Standard_False;
+			}
+			try {
+				TopTools_IndexedMapOfShape aVisited;
+				std::vector<TopoDS_Shape> aPending{theShape};
+				while (!aPending.empty()) {
+					const TopoDS_Shape aCurrent = aPending.back();
+					aPending.pop_back();
+					if (aCurrent.IsNull() || aVisited.Contains(aCurrent)) {
+						continue;
+					}
+					aVisited.Add(aCurrent);
+					if (static_cast<Standard_Size>(aVisited.Extent())
+						> theMaximum) {
+						return Standard_False;
+					}
+					for (TopoDS_Iterator aChild(
+							aCurrent, Standard_True, Standard_True);
+						 aChild.More(); aChild.Next()) {
+						if (aPending.size()
+							>= static_cast<std::size_t>(theMaximum)) {
+							return Standard_False;
+						}
+						aPending.push_back(aChild.Value());
+					}
+				}
+				theCount = static_cast<Standard_Size>(aVisited.Extent());
+				return theCount > 0;
+			} catch (...) {
+				theCount = 0;
+				return Standard_False;
+			}
+		}
+
+		// Root appearance can be copied directly, but per-face/per-edge XCAF
+		// assignments target source topology labels. Until Mirror remaps the
+		// transform history into destination subshape labels, accepting one would
+		// silently strip authored appearance. The direct-child scan is bounded
+		// because XCAF subshape labels belong to their simple definition.
+		Standard_Boolean HasStyledMirrorSubshape(
+			const Handle(TDocStd_Document)& theDocument,
+			const TDF_Label& theDefinition,
+			const Standard_Size theMaximumLabels) noexcept {
+			if (theDocument.IsNull() || theDefinition.IsNull()
+				|| theDefinition.Data() != theDocument->GetData()
+				|| theMaximumLabels == 0) {
+				return Standard_True;
+			}
+			try {
+				OCC_CATCH_SIGNALS
+				const Handle(XCAFDoc_ColorTool) aColorTool =
+					XCAFDoc_DocumentTool::CheckColorTool(
+						theDocument->Main())
+					? XCAFDoc_DocumentTool::ColorTool(theDocument->Main())
+					: Handle(XCAFDoc_ColorTool)();
+				const Handle(XCAFDoc_LayerTool) aLayerTool =
+					XCAFDoc_DocumentTool::CheckLayerTool(
+						theDocument->Main())
+					? XCAFDoc_DocumentTool::LayerTool(theDocument->Main())
+					: Handle(XCAFDoc_LayerTool)();
+				Standard_Size aLabelCount = 0;
+				for (TDF_ChildIterator anItem(
+						theDefinition, Standard_False);
+					 anItem.More(); anItem.Next()) {
+					if (++aLabelCount > theMaximumLabels) {
+						return Standard_True;
+					}
+					const TDF_Label& aLabel = anItem.Value();
+					if (!XCAFDoc_ShapeTool::IsSubShape(aLabel)) {
+						continue;
+					}
+					TDF_LabelSequence aLayers;
+					if (aLabel.IsNull()
+						|| (!aColorTool.IsNull()
+							&& (aColorTool->IsSet(
+									aLabel, XCAFDoc_ColorGen)
+								|| aColorTool->IsSet(
+									aLabel, XCAFDoc_ColorSurf)
+								|| aColorTool->IsSet(
+									aLabel, XCAFDoc_ColorCurv)
+								|| !XCAFDoc_ColorTool::IsVisible(aLabel)))
+						|| !XCAFDoc_VisMaterialTool::GetShapeMaterial(
+							aLabel).IsNull()
+						|| (!aLayerTool.IsNull()
+							&& aLayerTool->GetLayers(aLabel, aLayers)
+							&& !aLayers.IsEmpty())) {
+						return Standard_True;
+					}
+				}
+				return Standard_False;
+			} catch (...) {
+				return Standard_True;
+			}
+		}
+
 		bool TransformDiffers(const gp_Trsf& theLeft,
 		                      const gp_Trsf& theRight) {
 			for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
@@ -509,9 +620,18 @@ namespace core3d {
             // prevents an unresolved presentation from being omitted.
             if (hasMirrorPreview
                 && (!_trialMirrorObjectsValid
+					|| _mirrorPreviewState != MirrorPreviewState::Ready
                     || _trialMirrorObjects.size() > kMaxMirrorPreviewBodies)) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
+			if (_mirrorOwnsDocumentCommand
+				|| !_pendingMirrorResults.empty()
+				|| _mirrorPreviewState == MirrorPreviewState::Committing
+				|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+				|| (_mirrorPreviewState == MirrorPreviewState::Failed
+					&& hasUnresolvedMirrorObjects())) {
+				return PresentationOverlayCaptureStatus::Unsafe;
+			}
             if (_booleanOpController->hasUnresolvedState()) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
@@ -929,6 +1049,15 @@ namespace core3d {
 	}
 
     void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
+		const PrimitiveManipulatorType aPreviousType = _manipulatorType;
+		if (type != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			&& hasActiveMirror()
+			&& !cancelMirror()) {
+			// Unresolved Mirror ownership is a hard transition barrier. Keeping
+			// the old manipulator type makes the existing GL caller's post-set
+			// equality check fail closed instead of hiding recovery controls.
+			return;
+		}
 		if (!_manipulator.IsNull()
 			&& (_manipulatorGestureActive
 				|| _manipulator->HasActiveTransformation())) {
@@ -941,6 +1070,18 @@ namespace core3d {
 			type = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
 		}
         _manipulatorType = type;
+		if (_manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			&& aPreviousType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror) {
+			_mirrorPreviewState = MirrorPreviewState::Selecting;
+			++_mirrorPreviewGeneration;
+		} else if (_manipulatorType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			&& !hasUnresolvedMirrorObjects()
+			&& _pendingMirrorResults.empty()) {
+			_mirrorPreviewState = MirrorPreviewState::Unavailable;
+		}
         createManipulatorIfNeeded();
         bool scale = type == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
         bool movRot = type == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
@@ -1565,30 +1706,52 @@ namespace core3d {
 	}
 #endif
 
-	void ObjectInteractor::tryMirror(
+	Standard_Boolean ObjectInteractor::tryMirror(
 		Standard_Integer axisIndex,
 		bool backward) noexcept {
+		if (_manipulatorType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			|| _mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown) {
+			return Standard_False;
+		}
+		++_mirrorPreviewGeneration;
 		try {
-			tryMirrorImpl(axisIndex, backward);
+			if (!tryMirrorImpl(axisIndex, backward)) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+				return Standard_False;
+			}
+			_mirrorPreviewState = MirrorPreviewState::Ready;
+			return Standard_True;
 		} catch (...) {
-			clearTrialMirrorObjects();
+			(void)clearTrialMirrorObjects();
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
 		}
 	}
 
-	void ObjectInteractor::tryMirrorImpl(
+	Standard_Boolean ObjectInteractor::tryMirrorImpl(
 		Standard_Integer axisIndex,
 		bool backward) {
 		if (!_trialMirrorObjects.empty() && !_trialMirrorObjectsValid) {
-			clearTrialMirrorObjects();
+			(void)clearTrialMirrorObjects();
 			if (!_trialMirrorObjects.empty()) {
-				return;
+				return Standard_False;
 			}
 		}
 		if (_manipulator.IsNull()
 			|| !_manipulator->IsAttached()
 			|| axisIndex < 0
 			|| axisIndex > 2) {
-			return;
+			return Standard_False;
+		}
+		const Handle(TDocStd_Document) aSourceDocument =
+			myDoc.IsNull()
+			? Handle(TDocStd_Document)()
+			: myDoc->ChangeDocument();
+		if (aSourceDocument.IsNull()
+			|| aSourceDocument->HasOpenCommand()) {
+			return Standard_False;
 		}
 
 		const gp_Ax2 &manipulatorTransform = _manipulator->Position();
@@ -1599,14 +1762,14 @@ namespace core3d {
 		if (anObjects.IsNull() || anObjects->Size() == 0
 			|| static_cast<std::size_t>(anObjects->Size())
 				> kMaxMirrorPreviewBodies) {
-			return;
+			return Standard_False;
 		}
 		Core3DManipulatorObjectSequence::Iterator anObjIter (*anObjects);
 		std::vector<Handle(AIS_Shape)> replacementObjects;
 		replacementObjects.reserve(
 			static_cast<std::size_t>(anObjects->Size()));
-		std::vector<TDF_Label> replacementSourceLabels;
-		replacementSourceLabels.reserve(
+		std::vector<MirrorSourceSnapshot> replacementSources;
+		replacementSources.reserve(
 			static_cast<std::size_t>(anObjects->Size()));
 		
 		if (!ManipulatorObjectsSupportBRepModeling(
@@ -1614,8 +1777,22 @@ namespace core3d {
 				myDoc,
 				PrimitiveManipulatorType::PrimitiveGizmoTypeMirror,
 				_manipulatorSourceLabels)) {
-			return;
+			return Standard_False;
 		}
+
+#ifdef DEBUG
+		const Standard_Size anAggregateLimit =
+			std::max<Standard_Size>(
+				1,
+				std::min(
+					_debugMaximumMirrorTopologyNodes,
+					kMaxMirrorTopologyNodes));
+#else
+		const Standard_Size anAggregateLimit = kMaxMirrorTopologyNodes;
+#endif
+		const Standard_Size aPerSourceLimit =
+			std::min(kMaxMirrorSourceTopologyNodes, anAggregateLimit);
+		Standard_Size anAggregateTopologyNodes = 0;
 
 		Bnd_Box aBox, aBoxSum;
 	
@@ -1628,10 +1805,10 @@ namespace core3d {
 			gp_Pnt offset = manipulatorTransform.Location();
 		
 			Handle(AIS_InteractiveObject) selected = anObjIter.Value();
-			
+
 			Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
 			if (shape.IsNull() || shape->Shape().IsNull()) {
-				return;
+				return Standard_False;
 			}
 			const auto source = _manipulatorSourceLabels.find(
 				selected.get());
@@ -1648,10 +1825,38 @@ namespace core3d {
 						!= OcctGeometryRepresentation::BRep)) {
 				// The current negative-transform path deliberately drops mesh
 				// data, so triangle-only definitions cannot enter a preview.
-				return;
+				return Standard_False;
 			}
-			
+			const TopoDS_Shape sourceStoredShape =
+				XCAFDoc_ShapeTool::GetShape(sourceLabel);
+			const std::string sourceEntityIdentifier =
+				myDoc->EntityIdentifierForLabel(sourceLabel);
+			const std::string sourceDefinitionIdentifier =
+				myDoc->DefinitionIdentifierForLabel(sourceLabel);
 			gp_Trsf aTrsfSelected = selected->Transformation();
+			Standard_Size sourceNodeCount = 0;
+			if (sourceStoredShape.IsNull()
+				|| !sourceStoredShape.IsEqual(shape->Shape())
+				|| sourceEntityIdentifier.empty()
+				|| sourceDefinitionIdentifier.empty()
+				|| TransformDiffers(
+					myDoc->ObjectTransformForLabel(sourceLabel),
+					aTrsfSelected)
+				|| HasStyledMirrorSubshape(
+					aSourceDocument,
+					sourceLabel,
+					kMaxMirrorSourceTopologyNodes)
+				|| !CountBoundedMirrorTopology(
+					sourceStoredShape,
+					aPerSourceLimit,
+					sourceNodeCount)
+				|| sourceNodeCount
+					> anAggregateLimit - anAggregateTopologyNodes
+				|| !IsTopologicallyValid(sourceStoredShape)) {
+				return Standard_False;
+			}
+			anAggregateTopologyNodes += sourceNodeCount;
+
 			gp_Pnt max = aBoxSum.CornerMax();
 			gp_Pnt min = aBoxSum.CornerMin();
 			gp_Dir mirrorAxis;
@@ -1694,9 +1899,35 @@ namespace core3d {
 				Standard_False,
 				Standard_False);
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
+			Standard_Size resultNodeCount = 0;
+			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
+				|| !CountBoundedMirrorTopology(
+					aShapePrs->Shape(),
+					anAggregateLimit - anAggregateTopologyNodes,
+					resultNodeCount)
+				|| resultNodeCount == 0
+				|| !IsTopologicallyValid(aShapePrs->Shape())) {
+				return Standard_False;
+			}
+			anAggregateTopologyNodes += resultNodeCount;
 			myDoc->LoadObjectMeterial(sourceLabel, aShapePrs);
 			replacementObjects.push_back(aShapePrs);
-			replacementSourceLabels.push_back(sourceLabel);
+			replacementSources.push_back({
+				shape,
+				sourceLabel,
+				sourceEntityIdentifier,
+				sourceDefinitionIdentifier,
+				sourceStoredShape,
+				aTrsfSelected,
+			});
+		}
+		std::vector<TDF_Label> aSourceLabels;
+		aSourceLabels.reserve(replacementSources.size());
+		for (const MirrorSourceSnapshot& aSource : replacementSources) {
+			aSourceLabels.push_back(aSource.label);
+		}
+		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
+			return Standard_False;
 		}
 
 		// A plane is a choice for the current mirror operation, not an
@@ -1725,46 +1956,92 @@ namespace core3d {
 			// fallback behavior aligned with the renderer-neutral nonselectable
 			// contract while the operation is pending.
 			myContext->Deactivate(aShapePrs);
+			if (!myContext->IsDisplayed(aShapePrs)) {
+				return Standard_False;
+			}
 		}
 		for (const Handle(AIS_Shape)& aShapePrs
 			 : previousObjects) {
-			myContext->Erase(aShapePrs, Standard_False);
+			bool shouldErase = true;
+#ifdef DEBUG
+			if (_debugMirrorEraseFailureCount > 0) {
+				--_debugMirrorEraseFailureCount;
+				shouldErase = false;
+			}
+#endif
+			if (shouldErase) {
+				myContext->Erase(aShapePrs, Standard_False);
+			}
+			if (myContext->IsDisplayed(aShapePrs)) {
+				// _trialMirrorObjects still owns the combined old/new set.
+				// A non-throwing no-op erase must not orphan the old preview.
+				return Standard_False;
+			}
 		}
 		_trialMirrorObjects = std::move(replacementObjects);
-		_trialMirrorSourceLabels.clear();
-		for (std::size_t index = 0;
-			 index < _trialMirrorObjects.size(); ++index) {
-			_trialMirrorSourceLabels.emplace(
-				_trialMirrorObjects[index].get(),
-				replacementSourceLabels[index]);
-		}
+		_trialMirrorSources = std::move(replacementSources);
+		_pendingMirrorResults.clear();
+		_mirrorOwnsDocumentCommand = false;
 		_trialMirrorObjectsValid = true;
+		_mirrorPreviewState = MirrorPreviewState::Ready;
 		myContext->UpdateCurrentViewer();
+		return Standard_True;
 	}
 
-	void ObjectInteractor::clearTrialMirrorObjects() noexcept {
+	Standard_Boolean ObjectInteractor::clearTrialMirrorObjects() noexcept {
+		if (_mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+			|| _mirrorOwnsDocumentCommand
+			|| !_pendingMirrorResults.empty()) {
+			_mirrorPreviewState = MirrorPreviewState::OutcomeUnknown;
+			return Standard_False;
+		}
 		_trialMirrorObjectsValid = false;
 		std::vector<Handle(AIS_Shape)> unresolvedObjects;
 		try {
 			unresolvedObjects.reserve(_trialMirrorObjects.size());
 		} catch (...) {
-			return;
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
 		}
 		for (const Handle(AIS_Shape)& aShapePrs
 			 : _trialMirrorObjects) {
 			try {
+#ifdef DEBUG
+				if (_debugMirrorEraseFailureCount > 0) {
+					--_debugMirrorEraseFailureCount;
+					unresolvedObjects.push_back(aShapePrs);
+					continue;
+				}
+#endif
 				myContext->Erase(aShapePrs, Standard_False);
+				if (myContext->IsDisplayed(aShapePrs)) {
+					unresolvedObjects.push_back(aShapePrs);
+				}
 			} catch (...) {
 				unresolvedObjects.push_back(aShapePrs);
 			}
 		}
 		_trialMirrorObjects = std::move(unresolvedObjects);
-		_trialMirrorSourceLabels.clear();
 		try {
 			myContext->UpdateCurrentViewer();
 		} catch (...) {
 			// Cleanup state remains authoritative and can be retried later.
 		}
+		if (!_trialMirrorObjects.empty()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			++_mirrorPreviewGeneration;
+			return Standard_False;
+		}
+		_trialMirrorSources.clear();
+		_pendingMirrorResults.clear();
+		_mirrorOwnsDocumentCommand = false;
+		_mirrorPreviewState = _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			? MirrorPreviewState::Selecting
+			: MirrorPreviewState::Unavailable;
+		++_mirrorPreviewGeneration;
+		return Standard_True;
 	}
 
 	const bool ObjectInteractor::hasTrialMirrorObjects() const {
@@ -1772,88 +2049,542 @@ namespace core3d {
 	}
 
 	const bool ObjectInteractor::hasUnresolvedMirrorObjects() const {
-		return !_trialMirrorObjects.empty();
+		return !_trialMirrorObjects.empty()
+			|| !_pendingMirrorResults.empty()
+			|| _mirrorOwnsDocumentCommand;
 	}
 
-	void ObjectInteractor::applyMirror() {
-		if (!hasTrialMirrorObjects()) {
-			if (hasUnresolvedMirrorObjects()) {
-				clearTrialMirrorObjects();
-			}
-			return;
-		}
+	const bool ObjectInteractor::hasActiveMirror() const noexcept {
+		return _mirrorPreviewState != MirrorPreviewState::Unavailable
+			|| hasUnresolvedMirrorObjects();
+	}
 
-		auto doc = myDoc->ChangeDocument();
-		if (doc.IsNull() || doc->HasOpenCommand()) {
-			clearTrialMirrorObjects();
-			return;
-		}
-		if (_trialMirrorSourceLabels.size()
-			!= _trialMirrorObjects.size()) {
-			clearTrialMirrorObjects();
-			return;
-		}
-		for (const Handle(AIS_Shape)& shape : _trialMirrorObjects) {
-			if (shape.IsNull() || !IsTopologicallyValid(shape->Shape())) {
-				clearTrialMirrorObjects();
-				return;
-			}
-		}
-		for (const auto& source : _trialMirrorSourceLabels) {
-			if (!IsBRepModelingRepresentation(
-					myDoc->GeometryRepresentationForLabel(source.second))
-				|| !myDoc->IsEditableFreeSimpleDefinitionLabel(
-					source.second)) {
-				clearTrialMirrorObjects();
-				return;
-			}
-		}
+	const bool ObjectInteractor::canApplyMirror() const noexcept {
+		return (_mirrorPreviewState == MirrorPreviewState::Ready
+				&& _trialMirrorObjectsValid
+				&& !_trialMirrorObjects.empty()
+				&& _trialMirrorObjects.size() == _trialMirrorSources.size())
+			|| (_mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+				&& (_mirrorOwnsDocumentCommand
+					|| !_pendingMirrorResults.empty()));
+	}
 
+	MirrorPreviewState ObjectInteractor::mirrorPreviewState() const noexcept {
+		return _mirrorPreviewState;
+	}
+
+	std::uint64_t ObjectInteractor::mirrorPreviewGeneration() const noexcept {
+		return _mirrorPreviewGeneration;
+	}
+
+	Standard_Boolean ObjectInteractor::mirrorSourcesAreCurrent() const noexcept {
+		if (!_trialMirrorObjectsValid || _trialMirrorObjects.empty()
+			|| _trialMirrorObjects.size() != _trialMirrorSources.size()
+			|| _trialMirrorObjects.size() > kMaxMirrorPreviewBodies
+			|| myDoc.IsNull() || myContext.IsNull()) {
+			return Standard_False;
+		}
 		try {
-			doc->NewCommand();
-			for (const Handle(AIS_Shape)& shape : _trialMirrorObjects) {
-				const auto source =
-					_trialMirrorSourceLabels.find(shape.get());
-				if (source == _trialMirrorSourceLabels.end()) {
-					doc->AbortCommand();
-					clearTrialMirrorObjects();
-					return;
-				}
-				const TDF_Label label = myDoc->AddShape(
-					shape, OcctGeometryRepresentation::BRep);
-				if (label.IsNull()) {
-					doc->AbortCommand();
-					clearTrialMirrorObjects();
-					return;
-				}
-				if (myDoc->GeometryRepresentationForLabel(label)
-					!= OcctGeometryRepresentation::BRep) {
-					doc->AbortCommand();
-					clearTrialMirrorObjects();
-					return;
-				}
-				if (!myDoc->CopyGeometryRepresentation(
-						source->second, label)
-					|| !myDoc->CopyObjectAppearance(source->second, label)) {
-					doc->AbortCommand();
-					clearTrialMirrorObjects();
-					return;
-				}
-				myDoc->LoadObjectMeterial(label, shape);
+			const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
+			if (aDocument.IsNull()) {
+				return Standard_False;
 			}
-			if (!doc->CommitCommand()) {
-				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-				clearTrialMirrorObjects();
-				return;
+#ifdef DEBUG
+			const Standard_Size anAggregateLimit =
+				std::max<Standard_Size>(
+					1,
+					std::min(
+						_debugMaximumMirrorTopologyNodes,
+						kMaxMirrorTopologyNodes));
+#else
+			const Standard_Size anAggregateLimit = kMaxMirrorTopologyNodes;
+#endif
+			const Standard_Size aPerSourceLimit =
+				std::min(kMaxMirrorSourceTopologyNodes, anAggregateLimit);
+			Standard_Size anAggregateNodes = 0;
+			for (std::size_t anIndex = 0;
+				 anIndex < _trialMirrorSources.size(); ++anIndex) {
+				const MirrorSourceSnapshot& aSource =
+					_trialMirrorSources[anIndex];
+				const Handle(AIS_Shape)& aResult =
+					_trialMirrorObjects[anIndex];
+				const TopoDS_Shape aStored = aSource.label.IsNull()
+					? TopoDS_Shape()
+					: XCAFDoc_ShapeTool::GetShape(aSource.label);
+				Standard_Size aSourceNodes = 0;
+				Standard_Size aResultNodes = 0;
+				if (aSource.presentation.IsNull()
+					|| aSource.label.IsNull()
+					|| aSource.label.Data() != aDocument->GetData()
+					|| aSource.storedShape.IsNull()
+					|| aStored.IsNull()
+					|| !aStored.IsEqual(aSource.storedShape)
+					|| aSource.presentation->Shape().IsNull()
+					|| !aSource.presentation->Shape().IsEqual(
+						aSource.storedShape)
+					|| TransformDiffers(
+						aSource.presentation->Transformation(),
+						aSource.transform)
+					|| TransformDiffers(
+						myDoc->ObjectTransformForLabel(aSource.label),
+						aSource.transform)
+					|| HasStyledMirrorSubshape(
+						aDocument,
+						aSource.label,
+						kMaxMirrorSourceTopologyNodes)
+					|| !myDoc->ShapeLabel(aSource.presentation).IsEqual(
+						aSource.label)
+					|| !myDoc->IsPresentationEditable(aSource.presentation)
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(
+						aSource.label)
+					|| !IsBRepModelingRepresentation(
+						myDoc->GeometryRepresentationForLabel(
+							aSource.label))
+					|| myDoc->EntityIdentifierForLabel(aSource.label)
+						!= aSource.entityIdentifier
+					|| myDoc->DefinitionIdentifierForLabel(aSource.label)
+						!= aSource.definitionIdentifier
+					|| !myContext->IsDisplayed(aSource.presentation)
+					|| aResult.IsNull() || aResult->Shape().IsNull()
+					|| !CountBoundedMirrorTopology(
+						aStored, aPerSourceLimit, aSourceNodes)
+					|| aSourceNodes
+						> anAggregateLimit - anAggregateNodes) {
+					return Standard_False;
+				}
+				anAggregateNodes += aSourceNodes;
+				if (!myContext->IsDisplayed(aResult)
+					|| !CountBoundedMirrorTopology(
+						aResult->Shape(),
+						anAggregateLimit - anAggregateNodes,
+						aResultNodes)
+					|| !IsTopologicallyValid(aStored)
+					|| !IsTopologicallyValid(aResult->Shape())) {
+					return Standard_False;
+				}
+				anAggregateNodes += aResultNodes;
+			}
+			return Standard_True;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	ObjectInteractor::MirrorDocumentState
+	ObjectInteractor::inspectPendingMirrorResults() const noexcept {
+		try {
+			if (myDoc.IsNull()) {
+				return MirrorDocumentState::Unavailable;
+			}
+			const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
+			if (aDocument.IsNull()) {
+				return MirrorDocumentState::Unavailable;
+			}
+			if (aDocument->HasOpenCommand()) {
+				return _mirrorOwnsDocumentCommand
+					? MirrorDocumentState::OpenCommand
+					: MirrorDocumentState::Unavailable;
+			}
+			if (_pendingMirrorResults.empty()) {
+				return MirrorDocumentState::None;
+			}
+			Standard_Size aMissingCount = 0;
+			Standard_Size aCommittedCount = 0;
+			for (const MirrorPendingResult& aResult
+				 : _pendingMirrorResults) {
+				if (aResult.label.IsNull()
+					|| aResult.label.Data() != aDocument->GetData()) {
+					return MirrorDocumentState::PartialOrMismatched;
+				}
+				const TopoDS_Shape aStored =
+					XCAFDoc_ShapeTool::GetShape(aResult.label);
+				if (aStored.IsNull()) {
+					++aMissingCount;
+					continue;
+				}
+				if (aResult.expectedShape.IsNull()
+					|| !aStored.IsEqual(aResult.expectedShape)
+					|| aResult.entityIdentifier.empty()
+					|| aResult.definitionIdentifier.empty()
+					|| myDoc->EntityIdentifierForLabel(aResult.label)
+						!= aResult.entityIdentifier
+					|| myDoc->DefinitionIdentifierForLabel(aResult.label)
+						!= aResult.definitionIdentifier
+					|| myDoc->GeometryRepresentationForLabel(aResult.label)
+						!= OcctGeometryRepresentation::BRep
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(
+						aResult.label)) {
+					return MirrorDocumentState::PartialOrMismatched;
+				}
+				++aCommittedCount;
+			}
+			if (aCommittedCount == _pendingMirrorResults.size()) {
+				return MirrorDocumentState::AllCommitted;
+			}
+			if (aMissingCount == _pendingMirrorResults.size()) {
+				return MirrorDocumentState::None;
+			}
+			return MirrorDocumentState::PartialOrMismatched;
+		} catch (...) {
+			return MirrorDocumentState::Unavailable;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::abortOwnedMirrorCommand() noexcept {
+		if (!_mirrorOwnsDocumentCommand || myDoc.IsNull()) {
+			return Standard_False;
+		}
+		try {
+			const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
+			if (aDocument.IsNull()) {
+				return Standard_False;
+			}
+			if (aDocument->HasOpenCommand()) {
+#ifdef DEBUG
+				if (_debugMirrorAbortFailureCount > 0) {
+					--_debugMirrorAbortFailureCount;
+					return Standard_False;
+				}
+#endif
+				aDocument->AbortCommand();
+			}
+			if (aDocument->HasOpenCommand()) {
+				return Standard_False;
+			}
+			_mirrorOwnsDocumentCommand = false;
+			return Standard_True;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	MirrorApplyResult ObjectInteractor::finishCommittedMirror() noexcept {
+		try {
+			myDoc->NotifyChanges();
+		} catch (...) {
+		}
+		// The same AIS handles are now backed by the committed document labels.
+		// Release transient ownership without erasing document-owned geometry.
+		_trialMirrorObjects.clear();
+		_trialMirrorSources.clear();
+		_pendingMirrorResults.clear();
+		_trialMirrorObjectsValid = false;
+		_mirrorOwnsDocumentCommand = false;
+		_mirrorPreviewState = MirrorPreviewState::Unavailable;
+		++_mirrorPreviewGeneration;
+		return MirrorApplyResult::AppliedNeedsDocumentRedraw;
+	}
+
+	MirrorApplyResult ObjectInteractor::applyMirror() noexcept {
+		if (!hasActiveMirror()) {
+			return MirrorApplyResult::NoChange;
+		}
+
+		auto inspectAfterCommit = [&]() noexcept {
+#ifdef DEBUG
+			if (_debugMirrorPostCommitInspectFailureCount > 0) {
+				--_debugMirrorPostCommitInspectFailureCount;
+				return MirrorDocumentState::Unavailable;
+			}
+#endif
+			return inspectPendingMirrorResults();
+		};
+
+		if (_mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+			|| _mirrorOwnsDocumentCommand
+			|| !_pendingMirrorResults.empty()) {
+			MirrorDocumentState aState = inspectAfterCommit();
+			if (aState == MirrorDocumentState::OpenCommand
+				&& abortOwnedMirrorCommand()) {
+				aState = inspectAfterCommit();
+			}
+			if (aState == MirrorDocumentState::AllCommitted) {
+				return finishCommittedMirror();
+			}
+			if (aState == MirrorDocumentState::None) {
+				_pendingMirrorResults.clear();
+				_mirrorOwnsDocumentCommand = false;
+				_mirrorPreviewState = hasTrialMirrorObjects()
+					? MirrorPreviewState::Ready
+					: MirrorPreviewState::Failed;
+				return MirrorApplyResult::NoChange;
+			}
+			_mirrorPreviewState = MirrorPreviewState::OutcomeUnknown;
+			return MirrorApplyResult::NoChange;
+		}
+
+		if (_mirrorPreviewState != MirrorPreviewState::Ready
+			|| !canApplyMirror()) {
+			return MirrorApplyResult::NoChange;
+		}
+		if (!mirrorSourcesAreCurrent()) {
+			if (!cancelMirror()) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+			}
+			return MirrorApplyResult::NoChange;
+		}
+
+		Handle(TDocStd_Document) aDocument;
+		try {
+			aDocument = myDoc->ChangeDocument();
+			if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
+				return MirrorApplyResult::NoChange;
 			}
 		} catch (...) {
-			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-			clearTrialMirrorObjects();
-			return;
+			return MirrorApplyResult::NoChange;
 		}
-		myDoc->NotifyChanges();
-		_trialMirrorObjects.clear();
-		_trialMirrorSourceLabels.clear();
-		_trialMirrorObjectsValid = false;
+		std::vector<TDF_Label> aSourceLabels;
+		try {
+			aSourceLabels.reserve(_trialMirrorSources.size());
+			for (const MirrorSourceSnapshot& aSource : _trialMirrorSources) {
+				aSourceLabels.push_back(aSource.label);
+			}
+		} catch (...) {
+			return MirrorApplyResult::NoChange;
+		}
+		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
+			if (!cancelMirror()) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+			}
+			return MirrorApplyResult::NoChange;
+		}
+
+		const auto retainRetryableOrUnknown = [&]() noexcept {
+			if (abortOwnedMirrorCommand()
+				&& inspectPendingMirrorResults()
+					== MirrorDocumentState::None) {
+				_pendingMirrorResults.clear();
+				_mirrorPreviewState = MirrorPreviewState::Ready;
+			} else {
+				_mirrorPreviewState = MirrorPreviewState::OutcomeUnknown;
+			}
+			return MirrorApplyResult::NoChange;
+		};
+
+		_mirrorPreviewState = MirrorPreviewState::Committing;
+		_pendingMirrorResults.clear();
+		try {
+			OCC_CATCH_SIGNALS
+			// No command was open at admission. Claim this synchronous command
+			// attempt before calling into OCAF so an exception thrown after it
+			// opens can still be aborted deterministically. abortOwnedMirrorCommand
+			// also clears this intent safely when NewCommand opened nothing.
+			_mirrorOwnsDocumentCommand = true;
+			aDocument->NewCommand();
+			if (!aDocument->HasOpenCommand()) {
+				_mirrorOwnsDocumentCommand = false;
+				_mirrorPreviewState = MirrorPreviewState::Ready;
+				return MirrorApplyResult::NoChange;
+			}
+#ifdef DEBUG
+			if (_debugMirrorTransactionFailureCount > 0) {
+				--_debugMirrorTransactionFailureCount;
+				return retainRetryableOrUnknown();
+			}
+#endif
+			_pendingMirrorResults.reserve(_trialMirrorObjects.size());
+			for (std::size_t anIndex = 0;
+				 anIndex < _trialMirrorObjects.size(); ++anIndex) {
+				const Handle(AIS_Shape)& aShape =
+					_trialMirrorObjects[anIndex];
+				const MirrorSourceSnapshot& aSource =
+					_trialMirrorSources[anIndex];
+				const TDF_Label aLabel = myDoc->AddShape(
+					aShape, OcctGeometryRepresentation::BRep);
+				if (aLabel.IsNull()) {
+					return retainRetryableOrUnknown();
+				}
+				_pendingMirrorResults.push_back({
+					aLabel,
+					myDoc->EntityIdentifierForLabel(aLabel),
+					myDoc->DefinitionIdentifierForLabel(aLabel),
+					aShape->Shape(),
+				});
+				if (_pendingMirrorResults.back().entityIdentifier.empty()
+					|| _pendingMirrorResults.back()
+						.definitionIdentifier.empty()
+					|| myDoc->GeometryRepresentationForLabel(aLabel)
+						!= OcctGeometryRepresentation::BRep
+					|| !myDoc->CopyGeometryRepresentation(
+						aSource.label, aLabel)
+					|| !myDoc->CopyObjectAppearance(
+						aSource.label, aLabel)) {
+					return retainRetryableOrUnknown();
+				}
+				myDoc->LoadObjectMeterial(aLabel, aShape);
+			}
+			if (!myDoc->ValidateGeometryRepresentations()) {
+				return retainRetryableOrUnknown();
+			}
+
+			try {
+				Standard_Boolean aCommitReported =
+					aDocument->CommitCommand();
+#ifdef DEBUG
+				const Standard_Integer aCommitMode =
+					_debugMirrorCommitMode;
+				_debugMirrorCommitMode = 0;
+				if (aCommitMode == 1) {
+					aCommitReported = Standard_False;
+				} else if (aCommitMode == 2) {
+					throw Standard_Failure(
+						"Injected Mirror commit exception after close");
+				}
+#endif
+				(void)aCommitReported;
+			} catch (...) {
+				// Authoritative OCAF inspection below distinguishes a closed commit
+				// from an open command. Never infer document truth from this throw.
+			}
+		} catch (...) {
+			return retainRetryableOrUnknown();
+		}
+
+		MirrorDocumentState aState = inspectAfterCommit();
+		if (aState == MirrorDocumentState::OpenCommand
+			&& abortOwnedMirrorCommand()) {
+			aState = inspectAfterCommit();
+		}
+		if (aState == MirrorDocumentState::AllCommitted) {
+			return finishCommittedMirror();
+		}
+		if (aState == MirrorDocumentState::None) {
+			_pendingMirrorResults.clear();
+			_mirrorOwnsDocumentCommand = false;
+			_mirrorPreviewState = MirrorPreviewState::Ready;
+			return MirrorApplyResult::NoChange;
+		}
+		_mirrorPreviewState = MirrorPreviewState::OutcomeUnknown;
+		return MirrorApplyResult::NoChange;
 	}
+
+	Standard_Boolean ObjectInteractor::cancelMirror() noexcept {
+		if (!hasActiveMirror()) {
+			return Standard_True;
+		}
+		if (_mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+			|| _mirrorOwnsDocumentCommand
+			|| !_pendingMirrorResults.empty()) {
+			_mirrorPreviewState = MirrorPreviewState::OutcomeUnknown;
+			return Standard_False;
+		}
+		if (!clearTrialMirrorObjects()) {
+			return Standard_False;
+		}
+		_mirrorPreviewState = MirrorPreviewState::Unavailable;
+		++_mirrorPreviewGeneration;
+		return Standard_True;
+	}
+
+#ifdef DEBUG
+	MirrorPreviewDebugState
+	ObjectInteractor::debugMirrorPreviewState() const noexcept {
+		MirrorPreviewDebugState aState;
+		aState.state = _mirrorPreviewState;
+		aState.generation = _mirrorPreviewGeneration;
+		aState.previewBodyCount = _trialMirrorObjects.size();
+		aState.pendingResultCount = _pendingMirrorResults.size();
+		aState.activeOperation = hasActiveMirror();
+		aState.previewValid = _trialMirrorObjectsValid;
+		aState.canApply = canApplyMirror();
+		aState.ownsDocumentCommand = _mirrorOwnsDocumentCommand;
+		try {
+			const Handle(TDocStd_Document) aDocument = myDoc.IsNull()
+				? Handle(TDocStd_Document)()
+				: myDoc->ChangeDocument();
+			aState.documentCommandOpen = !aDocument.IsNull()
+				&& aDocument->HasOpenCommand();
+		} catch (...) {
+			aState.documentCommandOpen = Standard_True;
+		}
+		return aState;
+	}
+
+	void ObjectInteractor::debugSetMirrorTransactionFailureCount(
+		const Standard_Size count) noexcept {
+		_debugMirrorTransactionFailureCount = count;
+	}
+
+	void ObjectInteractor::debugSetMirrorAbortFailureCount(
+		const Standard_Size count) noexcept {
+		_debugMirrorAbortFailureCount = count;
+	}
+
+	void ObjectInteractor::debugSetMirrorEraseFailureCount(
+		const Standard_Size count) noexcept {
+		_debugMirrorEraseFailureCount = count;
+	}
+
+	void ObjectInteractor::debugSetMirrorCommitMode(
+		const Standard_Integer mode) noexcept {
+		_debugMirrorCommitMode = mode >= 0 && mode <= 2 ? mode : 0;
+	}
+
+	void ObjectInteractor::debugSetMirrorPostCommitInspectFailureCount(
+		const Standard_Size count) noexcept {
+		_debugMirrorPostCommitInspectFailureCount = count;
+	}
+
+	void ObjectInteractor::debugSetMaximumMirrorTopologyNodes(
+		const Standard_Size limit) noexcept {
+		_debugMaximumMirrorTopologyNodes = std::max<Standard_Size>(
+			1, std::min(limit, kMaxMirrorTopologyNodes));
+	}
+
+	Standard_Boolean
+	ObjectInteractor::debugMutateFirstMirrorSourcePersistedTransform() noexcept {
+		if (!mirrorSourcesAreCurrent() || _trialMirrorSources.empty()
+			|| myDoc.IsNull()) {
+			return Standard_False;
+		}
+		Handle(TDocStd_Document) aDocument;
+		try {
+			OCC_CATCH_SIGNALS
+			aDocument = myDoc->ChangeDocument();
+			const MirrorSourceSnapshot& aSource =
+				_trialMirrorSources.front();
+			if (aDocument.IsNull() || aDocument->HasOpenCommand()
+				|| aSource.label.IsNull()
+				|| aSource.label.Data() != aDocument->GetData()) {
+				return Standard_False;
+			}
+			const Standard_Real anOriginalX =
+				myDoc->ObjectTransformForLabel(aSource.label)
+					.TranslationPart().X();
+			if (!std::isfinite(anOriginalX)) {
+				return Standard_False;
+			}
+			aDocument->NewCommand();
+			if (!aDocument->HasOpenCommand()) {
+				return Standard_False;
+			}
+			TDataStd_Real::Set(
+				aSource.label.FindChild(1),
+				anOriginalX + 1.0);
+			try {
+				(void)aDocument->CommitCommand();
+			} catch (...) {
+			}
+			if (aDocument->HasOpenCommand()) {
+				aDocument->AbortCommand();
+				return Standard_False;
+			}
+			return TransformDiffers(
+					myDoc->ObjectTransformForLabel(aSource.label),
+					aSource.transform)
+				&& !TransformDiffers(
+					aSource.presentation->Transformation(),
+					aSource.transform);
+		} catch (...) {
+			try {
+				if (!aDocument.IsNull() && aDocument->HasOpenCommand()) {
+					aDocument->AbortCommand();
+				}
+			} catch (...) {
+			}
+			return Standard_False;
+		}
+	}
+#endif
 }
