@@ -7,8 +7,11 @@
 
 #include "ObjectInteractor.hpp"
 #include "../Scene/SceneSnapshot.hpp"
+#include "../Common/Core3DMobileResourceLimits.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -17,6 +20,10 @@
 #include <Poly_Triangulation.hxx>
 #include <Poly_TriangulationParameters.hxx>
 #include <Precision.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <TColStd_ListIteratorOfListOfInteger.hxx>
+#include <TColStd_ListOfInteger.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
@@ -32,6 +39,9 @@
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Real.hxx>
 #include <GP_Quaternion.hxx>
+#include <Graphic3d_ZLayerId.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Prs3d_LineAspect.hxx>
 #include <AIS_Shape.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -339,33 +349,107 @@ namespace core3d {
 				return Standard_False;
 			}
 			try {
-				TopTools_IndexedMapOfShape aVisited;
+				std::vector<TopoDS_Shape> aPending{theShape};
+				Standard_Size aTraversalCount = 0;
+				while (!aPending.empty()) {
+					const TopoDS_Shape aCurrent = aPending.back();
+					aPending.pop_back();
+					if (aCurrent.IsNull()
+						|| ++aTraversalCount > theMaximum) {
+						return Standard_False;
+					}
+					std::vector<TopoDS_Shape> aChildren;
+					for (TopoDS_Iterator aChild(
+							aCurrent, Standard_True, Standard_True);
+						 aChild.More(); aChild.Next()) {
+						const Standard_Size aRemaining =
+							theMaximum - aTraversalCount;
+						if (aPending.size() + aChildren.size()
+								>= static_cast<std::size_t>(aRemaining)) {
+							return Standard_False;
+						}
+						aChildren.push_back(aChild.Value());
+					}
+					for (auto aChild = aChildren.rbegin();
+						 aChild != aChildren.rend(); ++aChild) {
+						aPending.push_back(*aChild);
+					}
+				}
+				// Count occurrences, not only unique TShapes. This is the actual
+				// synchronous work budget consumed by shared-DAG topology and makes
+				// the aggregate source/result ceiling authoritative.
+				theCount = aTraversalCount;
+				return theCount > 0;
+			} catch (...) {
+				theCount = 0;
+				return Standard_False;
+			}
+		}
+
+		//! Build the same deterministic, first-occurrence face ordering as
+		//! TopExp::MapShapes using an explicit depth-first walk. Every topology
+		//! occurrence and every queued child is charged before traversal, so a
+		//! shared DAG cannot hide exponential work behind a small unique-node map.
+		//! Descendants of faces are also visited and charged; this makes the output
+		//! count a conservative whole-BRep work budget. An empty map is a valid
+		//! face-less BRep; false always means the shape exceeded a safety budget
+		//! or could not be inspected safely.
+		Standard_Boolean MapBoundedMirrorReferenceFaces(
+			const TopoDS_Shape& theShape,
+			const Standard_Size theMaximumTopologyNodes,
+			const Standard_Size theMaximumFaces,
+			Standard_Size& theTopologyNodeCount,
+			TopTools_IndexedMapOfShape& theFaces) noexcept {
+			theTopologyNodeCount = 0;
+			theFaces.Clear();
+			if (theShape.IsNull() || theMaximumTopologyNodes == 0
+				|| theMaximumFaces == 0) {
+				return Standard_False;
+			}
+			try {
 				std::vector<TopoDS_Shape> aPending{theShape};
 				while (!aPending.empty()) {
 					const TopoDS_Shape aCurrent = aPending.back();
 					aPending.pop_back();
-					if (aCurrent.IsNull() || aVisited.Contains(aCurrent)) {
-						continue;
-					}
-					aVisited.Add(aCurrent);
-					if (static_cast<Standard_Size>(aVisited.Extent())
-						> theMaximum) {
+					if (aCurrent.IsNull()
+						|| ++theTopologyNodeCount
+							> theMaximumTopologyNodes) {
+						theFaces.Clear();
 						return Standard_False;
 					}
+					if (aCurrent.ShapeType() == TopAbs_FACE
+						&& !theFaces.Contains(aCurrent)) {
+						if (static_cast<Standard_Size>(theFaces.Extent())
+							>= theMaximumFaces) {
+							theFaces.Clear();
+							return Standard_False;
+						}
+						theFaces.Add(aCurrent);
+					}
+
+					std::vector<TopoDS_Shape> aChildren;
 					for (TopoDS_Iterator aChild(
 							aCurrent, Standard_True, Standard_True);
 						 aChild.More(); aChild.Next()) {
-						if (aPending.size()
-							>= static_cast<std::size_t>(theMaximum)) {
+						const Standard_Size aRemaining =
+							theMaximumTopologyNodes
+								- theTopologyNodeCount;
+						if (aPending.size() + aChildren.size()
+								>= static_cast<std::size_t>(aRemaining)) {
+							theFaces.Clear();
 							return Standard_False;
 						}
-						aPending.push_back(aChild.Value());
+						aChildren.push_back(aChild.Value());
+					}
+					for (auto aChild = aChildren.rbegin();
+						 aChild != aChildren.rend(); ++aChild) {
+						aPending.push_back(*aChild);
 					}
 				}
-				theCount = static_cast<Standard_Size>(aVisited.Extent());
-				return theCount > 0;
+				return Standard_True;
 			} catch (...) {
-				theCount = 0;
+				theTopologyNodeCount = 0;
+				theFaces.Clear();
 				return Standard_False;
 			}
 		}
@@ -443,6 +527,126 @@ namespace core3d {
 				}
 			}
 			return false;
+		}
+
+		bool IsFiniteBoundedCoordinate(const Standard_Real theValue) noexcept {
+			return std::isfinite(theValue)
+				&& std::abs(theValue)
+					<= limits::kMaximumModelCoordinateMagnitude;
+		}
+
+		bool IsFiniteBoundedPoint(const gp_Pnt& thePoint) noexcept {
+			return IsFiniteBoundedCoordinate(thePoint.X())
+				&& IsFiniteBoundedCoordinate(thePoint.Y())
+				&& IsFiniteBoundedCoordinate(thePoint.Z());
+		}
+
+		bool IsFiniteDirection(const gp_Dir& theDirection) noexcept {
+			return std::isfinite(theDirection.X())
+				&& std::isfinite(theDirection.Y())
+				&& std::isfinite(theDirection.Z());
+		}
+
+		bool IsShapeWithinModelCoordinates(
+			const TopoDS_Shape& theShape,
+			const gp_Trsf& theTransform = gp_Trsf()) noexcept {
+			if (theShape.IsNull()) {
+				return false;
+			}
+			try {
+				Bnd_Box aBox;
+				BRepBndLib::Add(theShape, aBox, Standard_False);
+				if (aBox.IsVoid() || aBox.IsOpen()) {
+					return false;
+				}
+				aBox = aBox.Transformed(theTransform);
+				return IsFiniteBoundedPoint(aBox.CornerMin())
+					&& IsFiniteBoundedPoint(aBox.CornerMax());
+			} catch (...) {
+				return false;
+			}
+		}
+
+		bool BuildOrientedWorldPlane(
+			const TopoDS_Face& theFace,
+			const gp_Trsf& thePresentationTransform,
+			gp_Pnt& theWorldOrigin,
+			gp_Dir& theWorldNormal,
+			gp_Dir& theWorldXDirection) noexcept {
+			if (theFace.IsNull()
+				|| (theFace.Orientation() != TopAbs_FORWARD
+					&& theFace.Orientation() != TopAbs_REVERSED)) {
+				return false;
+			}
+			try {
+				BRepAdaptor_Surface aSurface(theFace, Standard_True);
+				if (aSurface.GetType() != GeomAbs_Plane) {
+					return false;
+				}
+				const gp_Pln aPlane = aSurface.Plane();
+				theWorldOrigin = aPlane.Location();
+				theWorldNormal = aPlane.Axis().Direction();
+				if (theFace.Orientation() == TopAbs_REVERSED) {
+					theWorldNormal.Reverse();
+				}
+				theWorldOrigin.Transform(thePresentationTransform);
+				theWorldNormal.Transform(thePresentationTransform);
+				if (!IsFiniteBoundedPoint(theWorldOrigin)
+					|| !IsFiniteDirection(theWorldNormal)) {
+					return false;
+				}
+
+				// Choose the least parallel positive world axis, then project it
+				// into the plane. Equal components retain X/Y/Z order, making the
+				// in-plane frame deterministic across reloads and tessellation.
+				const std::array<gp_Dir, 3> aWorldAxes = {
+					gp::DX(), gp::DY(), gp::DZ()};
+				Standard_Integer aBestAxis = 0;
+				Standard_Real aBestAlignment = std::abs(
+					theWorldNormal.Dot(aWorldAxes[0]));
+				for (Standard_Integer anAxis = 1; anAxis < 3; ++anAxis) {
+					const Standard_Real anAlignment = std::abs(
+						theWorldNormal.Dot(aWorldAxes[anAxis]));
+					if (anAlignment < aBestAlignment) {
+						aBestAlignment = anAlignment;
+						aBestAxis = anAxis;
+					}
+				}
+				gp_Vec anX(aWorldAxes[aBestAxis]);
+				const gp_Vec aNormal(theWorldNormal);
+				anX -= aNormal * anX.Dot(aNormal);
+				if (!std::isfinite(anX.SquareMagnitude())
+					|| anX.SquareMagnitude() <= gp::Resolution()) {
+					return false;
+				}
+				theWorldXDirection = gp_Dir(anX);
+				return IsFiniteDirection(theWorldXDirection)
+					&& IsShapeWithinModelCoordinates(
+						theFace, thePresentationTransform);
+			} catch (...) {
+				return false;
+			}
+		}
+
+		bool SelectionModesMatch(
+			const Handle(Core3DContext)& theContext,
+			const Handle(AIS_InteractiveObject)& thePresentation,
+			const std::vector<Standard_Integer>& theExpected) {
+			if (theContext.IsNull() || thePresentation.IsNull()) {
+				return false;
+			}
+			TColStd_ListOfInteger anActive;
+			theContext->ActivatedModes(thePresentation, anActive);
+			std::vector<Standard_Integer> anActual;
+			anActual.reserve(static_cast<std::size_t>(anActive.Extent()));
+			for (TColStd_ListIteratorOfListOfInteger anIterator(anActive);
+				 anIterator.More(); anIterator.Next()) {
+				anActual.push_back(anIterator.Value());
+			}
+			auto aSortedExpected = theExpected;
+			std::sort(aSortedExpected.begin(), aSortedExpected.end());
+			std::sort(anActual.begin(), anActual.end());
+			return anActual == aSortedExpected;
 		}
 	}
 
@@ -616,6 +820,17 @@ namespace core3d {
             theMirrorPreviewObjects.clear();
             theBooleanPreview = {};
             const bool hasMirrorPreview = !_trialMirrorObjects.empty();
+			// The current renderer-neutral MirrorPreview contract has exactly
+			// six gizmo slots followed by N mirrored result bodies, all with the
+			// MirrorPreview role. A picked reference face is a distinct semantic
+			// object and cannot be appended truthfully without a schema change.
+			// Retain OCCT while picking/custom preview is visible instead of
+			// publishing a mislabeled Metal payload.
+			if (_mirrorPlanePicking || _customMirrorPlane.has_value()
+				|| !_mirrorReferencePresentations.empty()
+				|| _trialMirrorUsesCustomPlane) {
+				return PresentationOverlayCaptureStatus::Unsafe;
+			}
             // Cleanup residue is deliberately not publishable. Retaining OCCT
             // prevents an unresolved presentation from being omitted.
             if (hasMirrorPreview
@@ -1400,7 +1615,8 @@ namespace core3d {
     }
 
     const bool ObjectInteractor::isManipulatorInteractionActive() const {
-        return !_manipulator.IsNull()
+		return !_mirrorPlanePicking
+			&& !_manipulator.IsNull()
             && _manipulator->IsAttached()
             && _manipulator->HasActiveMode();
     }
@@ -1715,12 +1931,20 @@ namespace core3d {
 			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown) {
 			return Standard_False;
 		}
+		if (_mirrorPlanePicking && !cancelMirrorPlanePicking()) {
+			return Standard_False;
+		}
 		++_mirrorPreviewGeneration;
 		try {
 			if (!tryMirrorImpl(axisIndex, backward)) {
 				_mirrorPreviewState = MirrorPreviewState::Failed;
 				return Standard_False;
 			}
+			if (!clearCustomMirrorPlaneState()) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+				return Standard_False;
+			}
+			_trialMirrorUsesCustomPlane = false;
 			_mirrorPreviewState = MirrorPreviewState::Ready;
 			return Standard_True;
 		} catch (...) {
@@ -1733,16 +1957,76 @@ namespace core3d {
 	Standard_Boolean ObjectInteractor::tryMirrorImpl(
 		Standard_Integer axisIndex,
 		bool backward) {
+		if (_manipulator.IsNull()
+			|| !_manipulator->IsAttached()
+			|| axisIndex < 0
+			|| axisIndex > 2) {
+			return Standard_False;
+		}
+		const Handle(Core3DManipulatorObjectSequence) anObjects =
+			_manipulator->Objects();
+		if (anObjects.IsNull() || anObjects->Size() == 0
+			|| static_cast<std::size_t>(anObjects->Size())
+				> kMaxMirrorPreviewBodies) {
+			return Standard_False;
+		}
+
+		Bnd_Box aBox, aBoxSum;
+		for (const Handle(AIS_InteractiveObject)& anObject : *anObjects) {
+			anObject->BoundingBox(aBox);
+			aBoxSum.Add(aBox);
+		}
+		if (aBoxSum.IsVoid() || aBoxSum.IsOpen()) {
+			return Standard_False;
+		}
+		const gp_Pnt aMaximum = aBoxSum.CornerMax();
+		const gp_Pnt aMinimum = aBoxSum.CornerMin();
+		gp_Pnt anOrigin = _manipulator->Position().Location();
+		gp_Dir aNormal;
+		gp_Dir anXDirection;
+		const Standard_ShortReal aSign = backward ? -1.0f : 1.0f;
+		switch (axisIndex) {
+			case 0:
+				aNormal = gp_Dir(1.0, 0.0, 0.0);
+				anXDirection = gp_Dir(0.0, 1.0, 0.0);
+				anOrigin.Translate(gp_Vec(
+					abs(aMaximum.X() - aMinimum.X()) * 0.5f * aSign,
+					0.0, 0.0));
+				break;
+			case 1:
+				aNormal = gp_Dir(0.0, 1.0, 0.0);
+				anXDirection = gp_Dir(0.0, 0.0, 1.0);
+				anOrigin.Translate(gp_Vec(
+					0.0,
+					abs(aMaximum.Y() - aMinimum.Y()) * 0.5f * aSign,
+					0.0));
+				break;
+			case 2:
+				aNormal = gp_Dir(0.0, 0.0, 1.0);
+				anXDirection = gp_Dir(1.0, 0.0, 0.0);
+				anOrigin.Translate(gp_Vec(
+					0.0, 0.0,
+					abs(aMaximum.Z() - aMinimum.Z()) * 0.5f * aSign));
+				break;
+			default:
+				return Standard_False;
+		}
+		return tryMirrorWorldPlaneImpl(
+			gp_Ax2(anOrigin, aNormal, anXDirection));
+	}
+
+	Standard_Boolean ObjectInteractor::tryMirrorWorldPlaneImpl(
+		const gp_Ax2& theWorldPlane) {
 		if (!_trialMirrorObjects.empty() && !_trialMirrorObjectsValid) {
 			(void)clearTrialMirrorObjects();
 			if (!_trialMirrorObjects.empty()) {
 				return Standard_False;
 			}
 		}
-		if (_manipulator.IsNull()
-			|| !_manipulator->IsAttached()
-			|| axisIndex < 0
-			|| axisIndex > 2) {
+		if (_manipulator.IsNull() || !_manipulator->IsAttached()
+			|| !IsFiniteBoundedPoint(theWorldPlane.Location())
+			|| !IsFiniteDirection(theWorldPlane.Direction())
+			|| !IsFiniteDirection(theWorldPlane.XDirection())) {
 			return Standard_False;
 		}
 		const Handle(TDocStd_Document) aSourceDocument =
@@ -1754,10 +2038,6 @@ namespace core3d {
 			return Standard_False;
 		}
 
-		const gp_Ax2 &manipulatorTransform = _manipulator->Position();
-		
-		Standard_ShortReal sign = backward ? -1.0f : 1.0f;
-		
 		Handle(Core3DManipulatorObjectSequence) anObjects = _manipulator->Objects();
 		if (anObjects.IsNull() || anObjects->Size() == 0
 			|| static_cast<std::size_t>(anObjects->Size())
@@ -1794,16 +2074,7 @@ namespace core3d {
 			std::min(kMaxMirrorSourceTopologyNodes, anAggregateLimit);
 		Standard_Size anAggregateTopologyNodes = 0;
 
-		Bnd_Box aBox, aBoxSum;
-	
-		for (auto &obj : *anObjects) { //calculate summary bounding box
-			obj->BoundingBox (aBox);
-			aBoxSum.Add(aBox);
-		}
-		
 		for (; anObjIter.More(); anObjIter.Next()) {
-			gp_Pnt offset = manipulatorTransform.Location();
-		
 			Handle(AIS_InteractiveObject) selected = anObjIter.Value();
 
 			Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
@@ -1857,30 +2128,9 @@ namespace core3d {
 			}
 			anAggregateTopologyNodes += sourceNodeCount;
 
-			gp_Pnt max = aBoxSum.CornerMax();
-			gp_Pnt min = aBoxSum.CornerMin();
-			gp_Dir mirrorAxis;
-			gp_Dir mirrorPln;
-			
-			switch (axisIndex) {
-				case 0:
-					mirrorAxis = gp_Dir(1.0, 0.0, 0.0);
-					mirrorPln = gp_Dir(0.0, 1.0, 0.0);
-					offset.Translate(gp_Vec(abs(max.X() - min.X()) * 0.5f * sign, 0.0, 0.0));
-					break;
-				case 1:
-					mirrorAxis = gp_Dir(0.0, 1.0, 0.0);
-					mirrorPln = gp_Dir(0.0, 0.0, 1.0);
-					offset.Translate(gp_Vec(0.0, abs(max.Y() - min.Y()) * 0.5f * sign, 0.0));
-					break;
-				case 2:
-					mirrorAxis = gp_Dir(0.0, 0.0, 1.0);
-					mirrorPln = gp_Dir(1.0, 0.0, 0.0);
-					offset.Translate(gp_Vec(0.0, 0.0, abs(max.Z() - min.Z()) * 0.5f * sign));
-					break;
-				default:
-					break;
-			}
+			gp_Pnt offset = theWorldPlane.Location();
+			gp_Dir mirrorAxis = theWorldPlane.Direction();
+			gp_Dir mirrorPln = theWorldPlane.XDirection();
 			
 			mirrorAxis.Transform(aTrsfSelected.Inverted());
 			mirrorPln.Transform(aTrsfSelected.Inverted());
@@ -1901,6 +2151,7 @@ namespace core3d {
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
 			Standard_Size resultNodeCount = 0;
 			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
+				|| !IsShapeWithinModelCoordinates(aShapePrs->Shape())
 				|| !CountBoundedMirrorTopology(
 					aShapePrs->Shape(),
 					anAggregateLimit - anAggregateTopologyNodes,
@@ -1988,6 +2239,915 @@ namespace core3d {
 		return Standard_True;
 	}
 
+	Standard_Boolean ObjectInteractor::beginMirrorPlanePicking() noexcept {
+		if (_mirrorPlanePicking) {
+			return Standard_True;
+		}
+		if (_manipulatorType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			|| _mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+			|| myContext.IsNull() || myDoc.IsNull()
+			|| _manipulator.IsNull() || !_manipulator->IsAttached()) {
+			return Standard_False;
+		}
+
+		try {
+			OCC_CATCH_SIGNALS
+			std::vector<MirrorPlanePickSelectionModes> aSnapshots;
+			AIS_ListOfInteractive aDisplayed;
+			myContext->DisplayedObjects(aDisplayed);
+			constexpr std::size_t kMaximumPickPresentations =
+				limits::kMaximumLeafPresentations + 1;
+			aSnapshots.reserve(std::min<std::size_t>(
+				static_cast<std::size_t>(aDisplayed.Size()) + 1,
+				kMaximumPickPresentations));
+
+			auto captureModes = [&](const Handle(AIS_InteractiveObject)& theObject) {
+				MirrorPlanePickSelectionModes aSnapshot;
+				aSnapshot.presentation = theObject;
+				TColStd_ListOfInteger anActive;
+				myContext->ActivatedModes(theObject, anActive);
+				aSnapshot.modes.reserve(
+					static_cast<std::size_t>(anActive.Extent()));
+				for (TColStd_ListIteratorOfListOfInteger anIterator(anActive);
+					 anIterator.More(); anIterator.Next()) {
+					aSnapshot.modes.push_back(anIterator.Value());
+				}
+				aSnapshots.push_back(std::move(aSnapshot));
+			};
+
+			const Standard_Integer aFaceMode =
+				AIS_Shape::SelectionMode(TopAbs_FACE);
+#ifdef DEBUG
+			const Standard_Size aMaximumReferenceTopologyNodes =
+				std::max<Standard_Size>(
+					1,
+					std::min(
+						_debugMaximumMirrorReferenceTopologyNodes,
+						kMaxMirrorReferenceTopologyNodes));
+			const Standard_Size aMaximumReferenceFaces =
+				std::max<Standard_Size>(
+					1,
+					std::min(
+						_debugMaximumMirrorReferenceFaces,
+						kMaxMirrorReferenceFaces));
+#else
+			const Standard_Size aMaximumReferenceTopologyNodes =
+				kMaxMirrorReferenceTopologyNodes;
+			const Standard_Size aMaximumReferenceFaces =
+				kMaxMirrorReferenceFaces;
+#endif
+			Standard_Size anAggregateReferenceTopologyNodes = 0;
+			Standard_Size anAggregateReferenceFaces = 0;
+			for (AIS_ListIteratorOfListOfInteractive anIterator(aDisplayed);
+				 anIterator.More(); anIterator.Next()) {
+				const Handle(AIS_InteractiveObject)& anObject =
+					anIterator.Value();
+				const Handle(AIS_Shape) aShape =
+					Handle(AIS_Shape)::DownCast(anObject);
+				const TDF_Label aLabel = myDoc->ShapeLabel(anObject);
+				const OcctGeometryRepresentation aRepresentation =
+					myDoc->GeometryRepresentationForLabel(aLabel);
+				const TopoDS_Shape aStoredShape = aLabel.IsNull()
+					? TopoDS_Shape()
+					: XCAFDoc_ShapeTool::GetShape(aLabel);
+				if (aShape.IsNull() || aShape->Shape().IsNull()
+					|| !myDoc->IsPresentationEditable(anObject)
+					|| aLabel.IsNull()
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(aLabel)
+					|| !IsBRepModelingRepresentation(aRepresentation)
+					|| aStoredShape.IsNull()
+					|| !aStoredShape.IsEqual(aShape->Shape())) {
+					continue;
+				}
+				if (anAggregateReferenceTopologyNodes
+						>= aMaximumReferenceTopologyNodes
+					|| anAggregateReferenceFaces
+						>= aMaximumReferenceFaces) {
+					return Standard_False;
+				}
+				const Standard_Size aPresentationTopologyLimit =
+					std::min(
+						kMaxMirrorReferenceTopologyNodesPerPresentation,
+						aMaximumReferenceTopologyNodes
+							- anAggregateReferenceTopologyNodes);
+				const Standard_Size aPresentationFaceLimit =
+					std::min(
+						kMaxMirrorReferenceFacesPerPresentation,
+						aMaximumReferenceFaces
+							- anAggregateReferenceFaces);
+				Standard_Size aTopologyNodeCount = 0;
+				TopTools_IndexedMapOfShape aFaces;
+				if (!MapBoundedMirrorReferenceFaces(
+						aStoredShape,
+						aPresentationTopologyLimit,
+						aPresentationFaceLimit,
+						aTopologyNodeCount,
+						aFaces)) {
+					return Standard_False;
+				}
+				anAggregateReferenceTopologyNodes += aTopologyNodeCount;
+				if (aFaces.Extent() == 0) {
+					continue;
+				}
+				anAggregateReferenceFaces +=
+					static_cast<Standard_Size>(aFaces.Extent());
+				if (aSnapshots.size() >= kMaximumPickPresentations) {
+					return Standard_False;
+				}
+				captureModes(anObject);
+			}
+			if (aSnapshots.empty()
+				|| aSnapshots.size() >= kMaximumPickPresentations) {
+				return Standard_False;
+			}
+
+			captureModes(_manipulator);
+			_mirrorPlanePickModes = std::move(aSnapshots);
+			_mirrorPlanePicking = true;
+			for (std::size_t anIndex = 0;
+				 anIndex + 1 < _mirrorPlanePickModes.size(); ++anIndex) {
+				myContext->SetSelectionModeActive(
+					_mirrorPlanePickModes[anIndex].presentation,
+					aFaceMode,
+					Standard_True,
+					AIS_SelectionModesConcurrency_Multiple,
+					Standard_True);
+			}
+			_manipulator->DeactivateCurrentMode();
+			myContext->Deactivate(_manipulator);
+			myContext->ClearDetected(Standard_False);
+
+			for (std::size_t anIndex = 0;
+				 anIndex + 1 < _mirrorPlanePickModes.size(); ++anIndex) {
+				auto anExpected = _mirrorPlanePickModes[anIndex].modes;
+				if (std::find(anExpected.begin(), anExpected.end(), aFaceMode)
+					== anExpected.end()) {
+					anExpected.push_back(aFaceMode);
+				}
+				if (!SelectionModesMatch(
+						myContext,
+						_mirrorPlanePickModes[anIndex].presentation,
+						anExpected)) {
+					if (restoreMirrorPlanePickingModes()) {
+						return Standard_False;
+					}
+					_mirrorPreviewState = MirrorPreviewState::Failed;
+					return Standard_False;
+				}
+			}
+			if (!SelectionModesMatch(myContext, _manipulator, {})) {
+				if (restoreMirrorPlanePickingModes()) {
+					return Standard_False;
+				}
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+				return Standard_False;
+			}
+			_manipulator->Redisplay();
+			myContext->UpdateCurrentViewer();
+			return Standard_True;
+		} catch (...) {
+			if (_mirrorPlanePicking
+				&& !restoreMirrorPlanePickingModes()) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+			}
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean
+	ObjectInteractor::restoreMirrorPlanePickingModes() noexcept {
+		if (!_mirrorPlanePicking) {
+			return Standard_True;
+		}
+		if (myContext.IsNull() || _mirrorPlanePickModes.empty()) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			const Standard_Integer aFaceMode =
+				AIS_Shape::SelectionMode(TopAbs_FACE);
+			for (std::size_t anIndex = 0;
+				 anIndex < _mirrorPlanePickModes.size(); ++anIndex) {
+				const MirrorPlanePickSelectionModes& aSnapshot =
+					_mirrorPlanePickModes[anIndex];
+				if (aSnapshot.presentation.IsNull()) {
+					return Standard_False;
+				}
+				const bool isManipulator =
+					anIndex + 1 == _mirrorPlanePickModes.size();
+				if (isManipulator) {
+					myContext->Deactivate(aSnapshot.presentation);
+					for (const Standard_Integer aMode : aSnapshot.modes) {
+						myContext->SetSelectionModeActive(
+							aSnapshot.presentation,
+							aMode,
+							Standard_True,
+							AIS_SelectionModesConcurrency_Multiple,
+							Standard_True);
+					}
+				} else if (std::find(
+						aSnapshot.modes.begin(),
+						aSnapshot.modes.end(),
+						aFaceMode) == aSnapshot.modes.end()) {
+					// Remove only the additive face detector. Deactivating the
+					// source's original mode can invalidate its selected owner.
+					myContext->SetSelectionModeActive(
+						aSnapshot.presentation,
+						aFaceMode,
+						Standard_False,
+						AIS_SelectionModesConcurrency_Multiple,
+						Standard_True);
+				}
+			}
+			for (const MirrorPlanePickSelectionModes& aSnapshot :
+				 _mirrorPlanePickModes) {
+				if (!SelectionModesMatch(
+						myContext,
+						aSnapshot.presentation,
+						aSnapshot.modes)) {
+					return Standard_False;
+				}
+			}
+			_mirrorPlanePickModes.clear();
+			_mirrorPlanePicking = false;
+			if (!_manipulator.IsNull()) {
+				_manipulator->Redisplay();
+			}
+			myContext->ClearDetected(Standard_False);
+			myContext->UpdateCurrentViewer();
+			return Standard_True;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean
+	ObjectInteractor::cancelMirrorPlanePicking() noexcept {
+		return restoreMirrorPlanePickingModes();
+	}
+
+	const bool ObjectInteractor::isPickingMirrorPlane() const noexcept {
+		return _mirrorPlanePicking;
+	}
+
+	const bool ObjectInteractor::hasCustomMirrorPlane() const noexcept {
+		return _customMirrorPlane.has_value()
+			&& _mirrorReferencePresentations.size() == 1
+			&& !_mirrorReferencePresentations.front().IsNull()
+			&& _trialMirrorUsesCustomPlane;
+	}
+
+	const bool ObjectInteractor::hasCustomMirrorPlaneState() const noexcept {
+		return _customMirrorPlane.has_value()
+			|| !_mirrorReferencePresentations.empty()
+			|| _trialMirrorUsesCustomPlane;
+	}
+
+	Standard_Real ObjectInteractor::mirrorPlaneOffset() const noexcept {
+		return _mirrorPlaneOffset;
+	}
+
+	std::pair<Standard_Real, Standard_Real>
+	ObjectInteractor::mirrorPlaneOffsetRange() const noexcept {
+		const std::pair<Standard_Real, Standard_Real> anUnavailable{0.0, 0.0};
+		if (!_customMirrorPlane.has_value() || !_trialMirrorUsesCustomPlane
+			|| !_trialMirrorObjectsValid || _trialMirrorObjects.empty()) {
+			return anUnavailable;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			gp_Ax2 aCurrentPlane;
+			if (!customMirrorPlaneIsCurrent(
+					*_customMirrorPlane,
+					aCurrentPlane,
+					_mirrorPlaneOffset)) {
+				return anUnavailable;
+			}
+
+			const Standard_Real aLimit =
+				limits::kMaximumModelCoordinateMagnitude
+				- 16.0 * Precision::Confusion();
+			Standard_Real aMinimum = -aLimit;
+			Standard_Real aMaximum = aLimit;
+			auto intersectCoordinate = [&](
+					const Standard_Real theValue,
+					const Standard_Real theCoefficient,
+					const Standard_Real theParameterOrigin) {
+				if (!std::isfinite(theValue)
+					|| !std::isfinite(theCoefficient)
+					|| !std::isfinite(theParameterOrigin)) {
+					return false;
+				}
+				// A direction component is dimensionless. Precision::Confusion()
+				// is a length tolerance and cannot classify it as zero: even a
+				// very small nonzero component can cross the coordinate boundary
+				// over the advertised offset span. Solve every representable
+				// nonzero coefficient so every returned endpoint remains valid.
+				if (theCoefficient == 0.0) {
+					return std::abs(theValue) <= aLimit;
+				}
+				Standard_Real aFirst = theParameterOrigin
+					+ (-aLimit - theValue) / theCoefficient;
+				Standard_Real aLast = theParameterOrigin
+					+ (aLimit - theValue) / theCoefficient;
+				if (aFirst > aLast) {
+					std::swap(aFirst, aLast);
+				}
+				aMinimum = std::max(aMinimum, aFirst);
+				aMaximum = std::min(aMaximum, aLast);
+				return aMinimum < aMaximum;
+			};
+			auto intersectBox = [&](
+					const Bnd_Box& theBox,
+					const gp_Dir& theNormal,
+					const Standard_Real theMotionMultiplier,
+					const Standard_Real theParameterOrigin) {
+				if (theBox.IsVoid() || theBox.IsOpen()) {
+					return false;
+				}
+				const gp_Pnt aLow = theBox.CornerMin();
+				const gp_Pnt aHigh = theBox.CornerMax();
+				const std::array<Standard_Real, 3> aCoefficients = {
+					theMotionMultiplier * theNormal.X(),
+					theMotionMultiplier * theNormal.Y(),
+					theMotionMultiplier * theNormal.Z(),
+				};
+				const std::array<Standard_Real, 3> aLows = {
+					aLow.X(), aLow.Y(), aLow.Z()};
+				const std::array<Standard_Real, 3> aHighs = {
+					aHigh.X(), aHigh.Y(), aHigh.Z()};
+				for (std::size_t anAxis = 0; anAxis < 3; ++anAxis) {
+					if (!intersectCoordinate(
+							aLows[anAxis],
+							aCoefficients[anAxis],
+							theParameterOrigin)
+						|| !intersectCoordinate(
+							aHighs[anAxis],
+							aCoefficients[anAxis],
+							theParameterOrigin)) {
+						return false;
+					}
+				}
+				return true;
+			};
+
+			for (const Handle(AIS_Shape)& aPreview : _trialMirrorObjects) {
+				if (aPreview.IsNull() || aPreview->Shape().IsNull()) {
+					return anUnavailable;
+				}
+				Bnd_Box aPreviewBox;
+				BRepBndLib::Add(
+					aPreview->Shape(), aPreviewBox, Standard_False);
+				// Moving a reflection plane by t moves the reflected result by
+				// 2*t along its normal. The current preview supplies the exact
+				// reference AABB at _mirrorPlaneOffset.
+				if (!intersectBox(
+						aPreviewBox,
+						aCurrentPlane.Direction(),
+						2.0,
+						_mirrorPlaneOffset)) {
+					return anUnavailable;
+				}
+			}
+
+			Bnd_Box aReferenceBox;
+			BRepBndLib::Add(
+				_customMirrorPlane->face, aReferenceBox, Standard_False);
+			aReferenceBox = aReferenceBox.Transformed(
+				_customMirrorPlane->presentationTransform);
+			if (!intersectBox(
+					aReferenceBox,
+					aCurrentPlane.Direction(),
+					1.0,
+					0.0)) {
+				return anUnavailable;
+			}
+			const gp_Pnt aStoredPlaneOrigin =
+				_customMirrorPlane->worldOrigin;
+			const std::array<Standard_Real, 3> aPlaneOriginValues = {
+				aStoredPlaneOrigin.X(),
+				aStoredPlaneOrigin.Y(),
+				aStoredPlaneOrigin.Z(),
+			};
+			const std::array<Standard_Real, 3> aPlaneOriginMotion = {
+				aCurrentPlane.Direction().X(),
+				aCurrentPlane.Direction().Y(),
+				aCurrentPlane.Direction().Z(),
+			};
+			for (std::size_t anAxis = 0; anAxis < 3; ++anAxis) {
+				if (!intersectCoordinate(
+						aPlaneOriginValues[anAxis],
+						aPlaneOriginMotion[anAxis],
+						0.0)) {
+					return anUnavailable;
+				}
+			}
+
+			Bnd_Box anErgonomicBox = aReferenceBox;
+			for (const MirrorSourceSnapshot& aSource : _trialMirrorSources) {
+				Bnd_Box aSourceBox;
+				BRepBndLib::Add(
+					aSource.storedShape, aSourceBox, Standard_False);
+				if (aSourceBox.IsVoid() || aSourceBox.IsOpen()) {
+					return anUnavailable;
+				}
+				anErgonomicBox.Add(aSourceBox.Transformed(aSource.transform));
+			}
+			if (anErgonomicBox.IsVoid() || anErgonomicBox.IsOpen()) {
+				return anUnavailable;
+			}
+			const gp_Pnt anErgonomicLow = anErgonomicBox.CornerMin();
+			const gp_Pnt anErgonomicHigh = anErgonomicBox.CornerMax();
+			const Standard_Real aDiagonal =
+				anErgonomicLow.Distance(anErgonomicHigh);
+			if (!std::isfinite(aDiagonal)) {
+				return anUnavailable;
+			}
+			const Standard_Real anErgonomicSpan = std::min(
+				10'000.0,
+				std::max(
+					2.0 * aDiagonal,
+					128.0 * Precision::Confusion()));
+			aMinimum = std::max(aMinimum, -anErgonomicSpan);
+			aMaximum = std::min(aMaximum, anErgonomicSpan);
+			const Standard_Real aZeroTolerance =
+				16.0 * Precision::Confusion();
+			if (!std::isfinite(aMinimum) || !std::isfinite(aMaximum)
+				|| aMinimum >= -aZeroTolerance
+				|| aMaximum <= aZeroTolerance
+				|| _mirrorPlaneOffset < aMinimum
+				|| _mirrorPlaneOffset > aMaximum) {
+				return anUnavailable;
+			}
+			return {aMinimum, aMaximum};
+		} catch (...) {
+			return anUnavailable;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::captureMirrorPlaneReference(
+		const Handle(AIS_Shape)& thePresentation,
+		const TopoDS_Face& theFace,
+		MirrorPlaneReferenceSnapshot& theSnapshot) const {
+		if (thePresentation.IsNull() || thePresentation->Shape().IsNull()
+			|| theFace.IsNull() || myDoc.IsNull()) {
+			return Standard_False;
+		}
+		const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
+		const TDF_Label aLabel = myDoc->ShapeLabel(thePresentation);
+		const TopoDS_Shape aStoredShape = aLabel.IsNull()
+			? TopoDS_Shape()
+			: XCAFDoc_ShapeTool::GetShape(aLabel);
+		const OcctGeometryRepresentation aRepresentation =
+			myDoc->GeometryRepresentationForLabel(aLabel);
+		if (aDocument.IsNull() || aDocument->HasOpenCommand()
+			|| !myDoc->IsPresentationEditable(thePresentation)
+			|| aLabel.IsNull()
+			|| aLabel.Data() != aDocument->GetData()
+			|| !myDoc->IsEditableFreeSimpleDefinitionLabel(aLabel)
+			|| !IsBRepModelingRepresentation(aRepresentation)
+			|| aStoredShape.IsNull()
+			|| !aStoredShape.IsEqual(thePresentation->Shape())) {
+			return Standard_False;
+		}
+
+		Standard_Size aMaximumTopologyNodes =
+			kMaxMirrorReferenceTopologyNodesPerPresentation;
+		Standard_Size aMaximumFaces =
+			kMaxMirrorReferenceFacesPerPresentation;
+#ifdef DEBUG
+		aMaximumTopologyNodes = std::min(
+			aMaximumTopologyNodes,
+			_debugMaximumMirrorReferenceTopologyNodes);
+		aMaximumFaces = std::min(
+			aMaximumFaces,
+			_debugMaximumMirrorReferenceFaces);
+#endif
+		if (aMaximumTopologyNodes == 0 || aMaximumFaces == 0) {
+			return Standard_False;
+		}
+		Standard_Size aTopologyNodeCount = 0;
+		TopTools_IndexedMapOfShape aFaces;
+		if (!MapBoundedMirrorReferenceFaces(
+				aStoredShape,
+				aMaximumTopologyNodes,
+				aMaximumFaces,
+				aTopologyNodeCount,
+				aFaces)) {
+			return Standard_False;
+		}
+		const Standard_Integer aFaceIndex = aFaces.FindIndex(theFace);
+		if (aFaceIndex <= 0) {
+			return Standard_False;
+		}
+		gp_Pnt aWorldOrigin;
+		gp_Dir aWorldNormal;
+		gp_Dir aWorldXDirection;
+		const gp_Trsf aPresentationTransform =
+			thePresentation->Transformation();
+		if (!BuildOrientedWorldPlane(
+				theFace,
+				aPresentationTransform,
+				aWorldOrigin,
+				aWorldNormal,
+				aWorldXDirection)) {
+			return Standard_False;
+		}
+		const std::string anEntityIdentifier =
+			myDoc->EntityIdentifierForLabel(aLabel);
+		const std::string aDefinitionIdentifier =
+			myDoc->DefinitionIdentifierForLabel(aLabel);
+		if (anEntityIdentifier.empty() || aDefinitionIdentifier.empty()
+			|| TransformDiffers(
+				myDoc->ObjectTransformForLabel(aLabel),
+				aPresentationTransform)) {
+			return Standard_False;
+		}
+
+		theSnapshot = {
+			aDocument,
+			thePresentation,
+			aLabel,
+			anEntityIdentifier,
+			aDefinitionIdentifier,
+			aRepresentation,
+			aStoredShape,
+			theFace,
+			aFaceIndex - 1,
+			aTopologyNodeCount,
+			static_cast<Standard_Size>(aFaces.Extent()),
+			aPresentationTransform,
+			aWorldOrigin,
+			aWorldNormal,
+			aWorldXDirection,
+		};
+		return Standard_True;
+	}
+
+	Standard_Boolean ObjectInteractor::customMirrorPlaneIsCurrent(
+		const MirrorPlaneReferenceSnapshot& theSnapshot,
+		gp_Ax2& theWorldPlane,
+		const Standard_Real theOffset) const {
+		if (!std::isfinite(theOffset)
+			|| std::abs(theOffset)
+				> limits::kMaximumModelCoordinateMagnitude
+			|| myDoc.IsNull() || theSnapshot.document.IsNull()
+			|| theSnapshot.presentation.IsNull()
+			|| theSnapshot.face.IsNull()
+			|| theSnapshot.faceTopologyIndex < 0) {
+			return Standard_False;
+		}
+		const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
+		const TDF_Label aCurrentLabel =
+			myDoc->ShapeLabel(theSnapshot.presentation);
+		const TopoDS_Shape aCurrentShape = aCurrentLabel.IsNull()
+			? TopoDS_Shape()
+			: XCAFDoc_ShapeTool::GetShape(aCurrentLabel);
+		if (aDocument.IsNull() || aDocument != theSnapshot.document
+			|| aDocument->HasOpenCommand()
+			|| !myDoc->IsPresentationEditable(theSnapshot.presentation)
+			|| aCurrentLabel.IsNull()
+			|| !aCurrentLabel.IsEqual(theSnapshot.label)
+			|| aCurrentLabel.Data() != aDocument->GetData()
+			|| !myDoc->IsEditableFreeSimpleDefinitionLabel(aCurrentLabel)
+			|| myDoc->GeometryRepresentationForLabel(aCurrentLabel)
+				!= theSnapshot.representation
+			|| !IsBRepModelingRepresentation(theSnapshot.representation)
+			|| myDoc->EntityIdentifierForLabel(aCurrentLabel)
+				!= theSnapshot.entityIdentifier
+			|| myDoc->DefinitionIdentifierForLabel(aCurrentLabel)
+				!= theSnapshot.definitionIdentifier
+			|| aCurrentShape.IsNull()
+			|| !aCurrentShape.IsEqual(theSnapshot.storedShape)
+			|| !theSnapshot.presentation->Shape().IsEqual(aCurrentShape)
+			|| TransformDiffers(
+				theSnapshot.presentation->Transformation(),
+				theSnapshot.presentationTransform)
+			|| TransformDiffers(
+				myDoc->ObjectTransformForLabel(aCurrentLabel),
+				theSnapshot.presentationTransform)) {
+			return Standard_False;
+		}
+
+		Standard_Size aMaximumTopologyNodes =
+			kMaxMirrorReferenceTopologyNodesPerPresentation;
+		Standard_Size aMaximumFaces =
+			kMaxMirrorReferenceFacesPerPresentation;
+#ifdef DEBUG
+		aMaximumTopologyNodes = std::min(
+			aMaximumTopologyNodes,
+			_debugMaximumMirrorReferenceTopologyNodes);
+		aMaximumFaces = std::min(
+			aMaximumFaces,
+			_debugMaximumMirrorReferenceFaces);
+#endif
+		Standard_Size aTopologyNodeCount = 0;
+		TopTools_IndexedMapOfShape aFaces;
+		if (aMaximumTopologyNodes == 0 || aMaximumFaces == 0
+			|| !MapBoundedMirrorReferenceFaces(
+				aCurrentShape,
+				aMaximumTopologyNodes,
+				aMaximumFaces,
+				aTopologyNodeCount,
+				aFaces)
+			|| aTopologyNodeCount != theSnapshot.topologyNodeCount
+			|| static_cast<Standard_Size>(aFaces.Extent())
+				!= theSnapshot.faceCount) {
+			return Standard_False;
+		}
+		const Standard_Integer aOneBasedIndex =
+			theSnapshot.faceTopologyIndex + 1;
+		if (aOneBasedIndex <= 0 || aOneBasedIndex > aFaces.Extent()
+			|| !aFaces(aOneBasedIndex).IsEqual(theSnapshot.face)) {
+			return Standard_False;
+		}
+		gp_Pnt aWorldOrigin;
+		gp_Dir aWorldNormal;
+		gp_Dir aWorldXDirection;
+		if (!BuildOrientedWorldPlane(
+				TopoDS::Face(aFaces(aOneBasedIndex)),
+				theSnapshot.presentationTransform,
+				aWorldOrigin,
+				aWorldNormal,
+				aWorldXDirection)
+			|| !aWorldOrigin.IsEqual(
+				theSnapshot.worldOrigin, Precision::Confusion())
+			|| !aWorldNormal.IsEqual(
+				theSnapshot.worldNormal, Precision::Angular())
+			|| !aWorldXDirection.IsEqual(
+				theSnapshot.worldXDirection, Precision::Angular())) {
+			return Standard_False;
+		}
+		aWorldOrigin.Translate(gp_Vec(aWorldNormal) * theOffset);
+		if (!IsFiniteBoundedPoint(aWorldOrigin)) {
+			return Standard_False;
+		}
+		gp_Trsf anOffsetTransform;
+		anOffsetTransform.SetTranslation(gp_Vec(aWorldNormal) * theOffset);
+		if (!IsShapeWithinModelCoordinates(
+				theSnapshot.face,
+				anOffsetTransform * theSnapshot.presentationTransform)) {
+			return Standard_False;
+		}
+		theWorldPlane = gp_Ax2(
+			aWorldOrigin, aWorldNormal, aWorldXDirection);
+		return Standard_True;
+	}
+
+	Standard_Boolean ObjectInteractor::clearMirrorReferencePresentation()
+		noexcept {
+		std::vector<Handle(AIS_Shape)> anUnresolved;
+		try {
+			anUnresolved.reserve(_mirrorReferencePresentations.size());
+			for (const Handle(AIS_Shape)& aPresentation :
+				 _mirrorReferencePresentations) {
+				if (aPresentation.IsNull()) {
+					continue;
+				}
+				bool shouldErase = true;
+#ifdef DEBUG
+				if (_debugMirrorReferenceEraseFailureCount > 0) {
+					--_debugMirrorReferenceEraseFailureCount;
+					shouldErase = false;
+				}
+#endif
+				if (shouldErase) {
+					myContext->Erase(aPresentation, Standard_False);
+				}
+				if (myContext->IsDisplayed(aPresentation)) {
+					anUnresolved.push_back(aPresentation);
+				}
+			}
+		} catch (...) {
+			// Preserve every still-owned handle; a later cleanup can retry.
+			anUnresolved = _mirrorReferencePresentations;
+		}
+		_mirrorReferencePresentations = std::move(anUnresolved);
+		return _mirrorReferencePresentations.empty();
+	}
+
+	Standard_Boolean ObjectInteractor::clearCustomMirrorPlaneState() noexcept {
+		if (!clearMirrorReferencePresentation()) {
+			return Standard_False;
+		}
+		_customMirrorPlane.reset();
+		_mirrorPlaneOffset = 0.0;
+		return Standard_True;
+	}
+
+	Standard_Boolean ObjectInteractor::replaceMirrorReferencePresentation(
+		const MirrorPlaneReferenceSnapshot& theSnapshot,
+		const Standard_Real theOffset) noexcept {
+		try {
+			OCC_CATCH_SIGNALS
+			gp_Ax2 aWorldPlane;
+			if (!customMirrorPlaneIsCurrent(
+					theSnapshot, aWorldPlane, theOffset)) {
+				return Standard_False;
+			}
+			gp_Trsf anOffsetTransform;
+			anOffsetTransform.SetTranslation(
+				gp_Vec(aWorldPlane.Direction()) * theOffset);
+			BRepBuilderAPI_Transform aWorldFace(
+				theSnapshot.face,
+				anOffsetTransform * theSnapshot.presentationTransform,
+				Standard_False,
+				Standard_False);
+			if (!aWorldFace.IsDone() || aWorldFace.Shape().IsNull()) {
+				return Standard_False;
+			}
+			Handle(AIS_Shape) aReplacement =
+				new AIS_Shape(aWorldFace.Shape());
+			aReplacement->SetColor(Quantity_NOC_YELLOW);
+			aReplacement->SetTransparency(0.35);
+			aReplacement->SetZLayer(Graphic3d_ZLayerId_Topmost);
+			const Handle(Prs3d_Drawer)& aDrawer =
+				aReplacement->Attributes();
+			if (aDrawer.IsNull()) {
+				return Standard_False;
+			}
+			aDrawer->SetFaceBoundaryDraw(Standard_True);
+			(void)aDrawer->SetupOwnFaceBoundaryAspect();
+			const Handle(Prs3d_LineAspect)& aBoundary =
+				aDrawer->FaceBoundaryAspect();
+			if (aBoundary.IsNull()) {
+				return Standard_False;
+			}
+			aBoundary->SetColor(Quantity_Color(Quantity_NOC_ORANGE));
+			aBoundary->SetWidth(3.0);
+			const std::vector<Handle(AIS_Shape)> aPrevious =
+				_mirrorReferencePresentations;
+			_mirrorReferencePresentations = aPrevious;
+			_mirrorReferencePresentations.push_back(aReplacement);
+			myContext->Display(
+				aReplacement, AIS_Shaded, 0, Standard_False);
+			myContext->Deactivate(aReplacement);
+			if (!myContext->IsDisplayed(aReplacement)) {
+				return Standard_False;
+			}
+			for (const Handle(AIS_Shape)& anOld : aPrevious) {
+				bool shouldErase = true;
+#ifdef DEBUG
+				if (_debugMirrorReferenceEraseFailureCount > 0) {
+					--_debugMirrorReferenceEraseFailureCount;
+					shouldErase = false;
+				}
+#endif
+				if (shouldErase) {
+					myContext->Erase(anOld, Standard_False);
+				}
+				if (myContext->IsDisplayed(anOld)) {
+					// Keep both old and replacement handles owned. Reset/Cancel can
+					// retry cleanup; Apply remains disabled while the swap is partial.
+					return Standard_False;
+				}
+			}
+			_mirrorReferencePresentations = {aReplacement};
+			return Standard_True;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::completeMirrorPlanePick(
+		MirrorPlaneReferenceSnapshot&& theSnapshot,
+		const Standard_Real theOffset) {
+		gp_Ax2 aWorldPlane;
+		if (!customMirrorPlaneIsCurrent(
+				theSnapshot, aWorldPlane, theOffset)) {
+			return Standard_False;
+		}
+		if (_mirrorPlanePicking && !restoreMirrorPlanePickingModes()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+		++_mirrorPreviewGeneration;
+		// Claim custom provenance before the shared builder can publish a
+		// combined old/new ownership set. Even a partial display/erase failure
+		// must route Reset and lifecycle cleanup through clearTrialMirrorObjects.
+		_trialMirrorUsesCustomPlane = true;
+		if (!tryMirrorWorldPlaneImpl(aWorldPlane)) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+		if (!replaceMirrorReferencePresentation(theSnapshot, theOffset)) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+		_customMirrorPlane = std::move(theSnapshot);
+		_mirrorPlaneOffset = theOffset;
+		_mirrorPreviewState = MirrorPreviewState::Ready;
+		myContext->UpdateCurrentViewer();
+		return Standard_True;
+	}
+
+	Standard_Boolean ObjectInteractor::pickMirrorPlaneAt(
+		const Standard_Integer theX,
+		const Standard_Integer theY) noexcept {
+		if (!_mirrorPlanePicking || myContext.IsNull() || myView.IsNull()) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			if (myContext->MoveTo(theX, theY, myView, Standard_False)
+				== AIS_SOD_Nothing) {
+				return Standard_False;
+			}
+			myContext->InitDetected();
+			for (; myContext->MoreDetected(); myContext->NextDetected()) {
+				const Handle(StdSelect_BRepOwner) anOwner =
+					Handle(StdSelect_BRepOwner)::DownCast(
+						myContext->DetectedCurrentOwner());
+				if (anOwner.IsNull() || !anOwner->HasShape()
+					|| anOwner->Shape().ShapeType() != TopAbs_FACE) {
+					continue;
+				}
+				const Handle(AIS_Shape) aPresentation =
+					Handle(AIS_Shape)::DownCast(anOwner->Selectable());
+				MirrorPlaneReferenceSnapshot aSnapshot;
+				if (!captureMirrorPlaneReference(
+						aPresentation,
+						TopoDS::Face(anOwner->Shape()),
+						aSnapshot)) {
+					continue;
+				}
+				return completeMirrorPlanePick(std::move(aSnapshot), 0.0);
+			}
+			return Standard_False;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::setMirrorPlaneOffset(
+		const Standard_Real theOffset) noexcept {
+		if (_mirrorPlanePicking || !_customMirrorPlane.has_value()
+			|| !_trialMirrorUsesCustomPlane
+			|| _mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown) {
+			return Standard_False;
+		}
+		try {
+			const auto anOffsetRange = mirrorPlaneOffsetRange();
+			if (anOffsetRange.first >= anOffsetRange.second
+				|| theOffset < anOffsetRange.first
+				|| theOffset > anOffsetRange.second) {
+				return Standard_False;
+			}
+			gp_Ax2 aWorldPlane;
+			if (!customMirrorPlaneIsCurrent(
+					*_customMirrorPlane, aWorldPlane, theOffset)) {
+				return Standard_False;
+			}
+			++_mirrorPreviewGeneration;
+			if (!tryMirrorWorldPlaneImpl(aWorldPlane)
+				|| !replaceMirrorReferencePresentation(
+					*_customMirrorPlane, theOffset)) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+				return Standard_False;
+			}
+			_mirrorPlaneOffset = theOffset;
+			_trialMirrorUsesCustomPlane = true;
+			_mirrorPreviewState = MirrorPreviewState::Ready;
+			myContext->UpdateCurrentViewer();
+			return Standard_True;
+		} catch (...) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::resetMirrorPlane() noexcept {
+		if (_manipulatorType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			|| _mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown) {
+			return Standard_False;
+		}
+		if (_mirrorPlanePicking && !cancelMirrorPlanePicking()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+		if (_trialMirrorUsesCustomPlane && !clearTrialMirrorObjects()) {
+			return Standard_False;
+		}
+		if (!clearCustomMirrorPlaneState()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+		_trialMirrorUsesCustomPlane = false;
+		_mirrorPreviewState = MirrorPreviewState::Selecting;
+		++_mirrorPreviewGeneration;
+		try {
+			myContext->UpdateCurrentViewer();
+		} catch (...) {
+			return Standard_False;
+		}
+		return Standard_True;
+	}
+
 	Standard_Boolean ObjectInteractor::clearTrialMirrorObjects() noexcept {
 		if (_mirrorPreviewState == MirrorPreviewState::Committing
 			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
@@ -2051,7 +3211,10 @@ namespace core3d {
 	const bool ObjectInteractor::hasUnresolvedMirrorObjects() const {
 		return !_trialMirrorObjects.empty()
 			|| !_pendingMirrorResults.empty()
-			|| _mirrorOwnsDocumentCommand;
+			|| !_mirrorReferencePresentations.empty()
+			|| hasCustomMirrorPlaneState()
+			|| _mirrorOwnsDocumentCommand
+			|| _mirrorPlanePicking;
 	}
 
 	const bool ObjectInteractor::hasActiveMirror() const noexcept {
@@ -2060,17 +3223,27 @@ namespace core3d {
 	}
 
 	const bool ObjectInteractor::canApplyMirror() const noexcept {
-		return (_mirrorPreviewState == MirrorPreviewState::Ready
-				&& _trialMirrorObjectsValid
-				&& !_trialMirrorObjects.empty()
-				&& _trialMirrorObjects.size() == _trialMirrorSources.size())
-			|| (_mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
-				&& (_mirrorOwnsDocumentCommand
-					|| !_pendingMirrorResults.empty()));
+		return !_mirrorPlanePicking
+			&& ((_mirrorPreviewState == MirrorPreviewState::Ready
+					&& _trialMirrorObjectsValid
+					&& !_trialMirrorObjects.empty()
+					&& _trialMirrorObjects.size()
+						== _trialMirrorSources.size()
+					&& (_trialMirrorUsesCustomPlane
+						? _customMirrorPlane.has_value()
+							&& _mirrorReferencePresentations.size() == 1
+						: !_customMirrorPlane.has_value()
+							&& _mirrorReferencePresentations.empty()))
+				|| (_mirrorPreviewState
+						== MirrorPreviewState::OutcomeUnknown
+					&& (_mirrorOwnsDocumentCommand
+						|| !_pendingMirrorResults.empty())));
 	}
 
 	MirrorPreviewState ObjectInteractor::mirrorPreviewState() const noexcept {
-		return _mirrorPreviewState;
+		return _mirrorPlanePicking
+			? MirrorPreviewState::Selecting
+			: _mirrorPreviewState;
 	}
 
 	std::uint64_t ObjectInteractor::mirrorPreviewGeneration() const noexcept {
@@ -2087,6 +3260,23 @@ namespace core3d {
 		try {
 			const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
 			if (aDocument.IsNull()) {
+				return Standard_False;
+			}
+			if (_trialMirrorUsesCustomPlane) {
+				gp_Ax2 aCustomPlane;
+				if (!_customMirrorPlane.has_value()
+					|| _mirrorReferencePresentations.size() != 1
+					|| _mirrorReferencePresentations.front().IsNull()
+					|| !myContext->IsDisplayed(
+						_mirrorReferencePresentations.front())
+					|| !customMirrorPlaneIsCurrent(
+						*_customMirrorPlane,
+						aCustomPlane,
+						_mirrorPlaneOffset)) {
+					return Standard_False;
+				}
+			} else if (_customMirrorPlane.has_value()
+				|| !_mirrorReferencePresentations.empty()) {
 				return Standard_False;
 			}
 #ifdef DEBUG
@@ -2259,6 +3449,15 @@ namespace core3d {
 	}
 
 	MirrorApplyResult ObjectInteractor::finishCommittedMirror() noexcept {
+		// The result labels are the only durable evidence needed to reconcile a
+		// commit whose transient custom reference could not be erased. Retain
+		// them and enter Apply-only recovery until cleanup is proven; a later
+		// Apply re-inspects the same labels and retries without opening a command.
+		if (!clearCustomMirrorPlaneState()) {
+			_mirrorOwnsDocumentCommand = false;
+			_mirrorPreviewState = MirrorPreviewState::OutcomeUnknown;
+			return MirrorApplyResult::NoChange;
+		}
 		try {
 			myDoc->NotifyChanges();
 		} catch (...) {
@@ -2270,6 +3469,7 @@ namespace core3d {
 		_pendingMirrorResults.clear();
 		_trialMirrorObjectsValid = false;
 		_mirrorOwnsDocumentCommand = false;
+		_trialMirrorUsesCustomPlane = false;
 		_mirrorPreviewState = MirrorPreviewState::Unavailable;
 		++_mirrorPreviewGeneration;
 		return MirrorApplyResult::AppliedNeedsDocumentRedraw;
@@ -2277,6 +3477,10 @@ namespace core3d {
 
 	MirrorApplyResult ObjectInteractor::applyMirror() noexcept {
 		if (!hasActiveMirror()) {
+			return MirrorApplyResult::NoChange;
+		}
+		if (_mirrorPlanePicking && !cancelMirrorPlanePicking()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
 			return MirrorApplyResult::NoChange;
 		}
 
@@ -2462,6 +3666,10 @@ namespace core3d {
 		if (!hasActiveMirror()) {
 			return Standard_True;
 		}
+		if (_mirrorPlanePicking && !cancelMirrorPlanePicking()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
 		if (_mirrorPreviewState == MirrorPreviewState::Committing
 			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
 			|| _mirrorOwnsDocumentCommand
@@ -2472,6 +3680,11 @@ namespace core3d {
 		if (!clearTrialMirrorObjects()) {
 			return Standard_False;
 		}
+		if (!clearCustomMirrorPlaneState()) {
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+		_trialMirrorUsesCustomPlane = false;
 		_mirrorPreviewState = MirrorPreviewState::Unavailable;
 		++_mirrorPreviewGeneration;
 		return Standard_True;
@@ -2481,7 +3694,7 @@ namespace core3d {
 	MirrorPreviewDebugState
 	ObjectInteractor::debugMirrorPreviewState() const noexcept {
 		MirrorPreviewDebugState aState;
-		aState.state = _mirrorPreviewState;
+		aState.state = mirrorPreviewState();
 		aState.generation = _mirrorPreviewGeneration;
 		aState.previewBodyCount = _trialMirrorObjects.size();
 		aState.pendingResultCount = _pendingMirrorResults.size();
@@ -2489,6 +3702,16 @@ namespace core3d {
 		aState.previewValid = _trialMirrorObjectsValid;
 		aState.canApply = canApplyMirror();
 		aState.ownsDocumentCommand = _mirrorOwnsDocumentCommand;
+		aState.pickingCustomPlane = _mirrorPlanePicking;
+		aState.hasCustomPlane = hasCustomMirrorPlane();
+		aState.previewUsesCustomPlane = _trialMirrorUsesCustomPlane;
+		aState.manipulatorAttached = isManipulatorAttached();
+		aState.referencePresentationCount =
+			_mirrorReferencePresentations.size();
+		aState.customPlaneOffset = _mirrorPlaneOffset;
+		const auto anOffsetRange = mirrorPlaneOffsetRange();
+		aState.customPlaneMinimumOffset = anOffsetRange.first;
+		aState.customPlaneMaximumOffset = anOffsetRange.second;
 		try {
 			const Handle(TDocStd_Document) aDocument = myDoc.IsNull()
 				? Handle(TDocStd_Document)()
@@ -2516,6 +3739,11 @@ namespace core3d {
 		_debugMirrorEraseFailureCount = count;
 	}
 
+	void ObjectInteractor::debugSetMirrorReferenceEraseFailureCount(
+		const Standard_Size count) noexcept {
+		_debugMirrorReferenceEraseFailureCount = count;
+	}
+
 	void ObjectInteractor::debugSetMirrorCommitMode(
 		const Standard_Integer mode) noexcept {
 		_debugMirrorCommitMode = mode >= 0 && mode <= 2 ? mode : 0;
@@ -2530,6 +3758,22 @@ namespace core3d {
 		const Standard_Size limit) noexcept {
 		_debugMaximumMirrorTopologyNodes = std::max<Standard_Size>(
 			1, std::min(limit, kMaxMirrorTopologyNodes));
+	}
+
+	void ObjectInteractor::debugSetMaximumMirrorReferenceTopologyNodes(
+		const Standard_Size limit) noexcept {
+		_debugMaximumMirrorReferenceTopologyNodes =
+			std::max<Standard_Size>(
+				1,
+				std::min(
+					limit,
+					kMaxMirrorReferenceTopologyNodes));
+	}
+
+	void ObjectInteractor::debugSetMaximumMirrorReferenceFaces(
+		const Standard_Size limit) noexcept {
+		_debugMaximumMirrorReferenceFaces = std::max<Standard_Size>(
+			1, std::min(limit, kMaxMirrorReferenceFaces));
 	}
 
 	Standard_Boolean
@@ -2583,6 +3827,72 @@ namespace core3d {
 				}
 			} catch (...) {
 			}
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::debugTryMirrorPlane(
+		const std::string& theEntityIdentifier,
+		const Standard_Integer theFaceTopologyIndex,
+		const Standard_Real theOffset) noexcept {
+		if (theEntityIdentifier.empty() || theFaceTopologyIndex < 0
+			|| _manipulatorType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			|| !std::isfinite(theOffset)) {
+			return Standard_False;
+		}
+		if (!_mirrorPlanePicking && !beginMirrorPlanePicking()) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			AIS_ListOfInteractive aDisplayed;
+			myContext->DisplayedObjects(aDisplayed);
+			for (AIS_ListIteratorOfListOfInteractive anIterator(aDisplayed);
+				 anIterator.More(); anIterator.Next()) {
+				const Handle(AIS_Shape) aPresentation =
+					Handle(AIS_Shape)::DownCast(anIterator.Value());
+				const TDF_Label aLabel =
+					myDoc->ShapeLabel(aPresentation);
+				if (aPresentation.IsNull() || aLabel.IsNull()
+					|| myDoc->EntityIdentifierForLabel(aLabel)
+						!= theEntityIdentifier) {
+					continue;
+				}
+				const Standard_Size aMaximumTopologyNodes = std::min(
+					kMaxMirrorReferenceTopologyNodesPerPresentation,
+					_debugMaximumMirrorReferenceTopologyNodes);
+				const Standard_Size aMaximumFaces = std::min(
+					kMaxMirrorReferenceFacesPerPresentation,
+					_debugMaximumMirrorReferenceFaces);
+				Standard_Size aTopologyNodeCount = 0;
+				TopTools_IndexedMapOfShape aFaces;
+				if (aMaximumTopologyNodes == 0 || aMaximumFaces == 0
+					|| !MapBoundedMirrorReferenceFaces(
+						aPresentation->Shape(),
+						aMaximumTopologyNodes,
+						aMaximumFaces,
+						aTopologyNodeCount,
+						aFaces)) {
+					return Standard_False;
+				}
+				const Standard_Integer aFaceIndex =
+					theFaceTopologyIndex + 1;
+				if (aFaceIndex <= 0 || aFaceIndex > aFaces.Extent()) {
+					return Standard_False;
+				}
+				MirrorPlaneReferenceSnapshot aSnapshot;
+				if (!captureMirrorPlaneReference(
+						aPresentation,
+						TopoDS::Face(aFaces(aFaceIndex)),
+						aSnapshot)) {
+					return Standard_False;
+				}
+				return completeMirrorPlanePick(
+					std::move(aSnapshot), theOffset);
+			}
+			return Standard_False;
+		} catch (...) {
 			return Standard_False;
 		}
 	}

@@ -93,6 +93,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)canApplyExtrusion;
 - (BOOL) applyMirror;
 - (BOOL) cancelMirror;
+- (BOOL)beginMirrorPlanePicking;
+- (BOOL)cancelMirrorPlanePicking;
+- (BOOL)isPickingMirrorPlane;
+- (BOOL)hasCustomMirrorPlane;
+- (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
+- (Boundaries)getMirrorPlaneOffsetBoundaries;
+- (BOOL)resetMirrorPlane;
 - (BOOL) applySubtract;
 - (BOOL) cancelSubtract;
 - (BOOL) applyUnion;
@@ -115,10 +122,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetMirrorTransactionFailureCount:(NSUInteger)count;
 - (void)debugSetMirrorAbortFailureCount:(NSUInteger)count;
 - (void)debugSetMirrorEraseFailureCount:(NSUInteger)count;
+- (void)debugSetMirrorReferenceEraseFailureCount:(NSUInteger)count;
 - (void)debugSetMirrorCommitMode:(NSInteger)mode;
 - (void)debugSetMirrorPostCommitInspectFailureCount:(NSUInteger)count;
 - (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumMirrorReferenceTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumMirrorReferenceFaces:(NSUInteger)limit;
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform;
+- (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
+                              faceTopologyIndex:(NSInteger)faceTopologyIndex
+                                         offset:(CGFloat)offset;
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;

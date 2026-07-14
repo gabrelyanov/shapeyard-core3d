@@ -30,6 +30,7 @@
 #include "ConstructorManipulator.hpp"
 #include "CafShapePrs.h"
 #include "OcctDocument.h"
+#include "../Common/Core3DMobileResourceLimits.h"
 
 #include <Graphic3d_TextureParams.hxx>
 #include <Image_PixMap.hxx>
@@ -488,7 +489,27 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _viewer->CancelInteraction(0, 0);
     }
     if (hadUnresolvedMirrorObjects) {
-        _viewer->getObjectInteractor()->clearTrialMirrorObjects();
+		const std::shared_ptr<ObjectInteractor> aMirrorInteractor =
+			_viewer->getObjectInteractor();
+		const BOOL hadCustomPlane =
+			aMirrorInteractor->hasCustomMirrorPlaneState();
+		if (aMirrorInteractor->isPickingMirrorPlane()) {
+			(void)aMirrorInteractor->cancelMirrorPlanePicking();
+		}
+		if (hadCustomPlane
+			|| aMirrorInteractor->hasCustomMirrorPlaneState()) {
+			(void)aMirrorInteractor->resetMirrorPlane();
+		} else {
+			(void)aMirrorInteractor->clearTrialMirrorObjects();
+		}
+		if (aMirrorInteractor->hasCustomMirrorPlaneState()
+			&& aMirrorInteractor->mirrorPreviewState()
+				!= MirrorPreviewState::OutcomeUnknown) {
+			// A transient graphics erase may be retryable. Retry the same reset
+			// so a retained Mirror gizmo converges to Selecting; cancelMirror()
+			// would instead leave the public gizmo paired with Unavailable state.
+			(void)aMirrorInteractor->resetMirrorPlane();
+		}
     }
     if (hadBooleanOperation) {
         _viewer->getObjectInteractor()->cancelActiveBoolean();
@@ -536,7 +557,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || hadBooleanOperation || hadExtrusion || hadBevel) {
         [self requestRender];
     }
-    if (hadBooleanOperation || hadExtrusion || hadBevel) {
+    if (hadUnresolvedMirrorObjects || hadBooleanOperation
+		|| hadExtrusion || hadBevel) {
         // Selection notification is also the renderer-neutral presentation
         // invalidation and Apply-state refresh for lifecycle cancellation.
         [self checkSelections];
@@ -1607,6 +1629,74 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	return didCancel;
 }
 
+- (BOOL)beginMirrorPlanePicking {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+		|| [self getGizmoType] != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	const BOOL didBegin =
+		_viewer->getObjectInteractor()->beginMirrorPlanePicking();
+	[self checkSelections];
+	[self requestRender];
+	return didBegin;
+}
+
+- (BOOL)cancelMirrorPlanePicking {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+		return NO;
+	}
+	const BOOL didCancel =
+		_viewer->getObjectInteractor()->cancelMirrorPlanePicking();
+	[self checkSelections];
+	[self requestRender];
+	return didCancel;
+}
+
+- (BOOL)isPickingMirrorPlane {
+	return _viewer != nullptr
+		&& _viewer->getObjectInteractor() != nullptr
+		&& _viewer->getObjectInteractor()->isPickingMirrorPlane();
+}
+
+- (BOOL)hasCustomMirrorPlane {
+	return _viewer != nullptr
+		&& _viewer->getObjectInteractor() != nullptr
+		&& _viewer->getObjectInteractor()->hasCustomMirrorPlane();
+}
+
+- (BOOL)setMirrorPlaneOffset:(CGFloat)offset {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+		|| [self getGizmoType] != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	const BOOL didSet = _viewer->getObjectInteractor()
+		->setMirrorPlaneOffset(static_cast<Standard_Real>(offset));
+	[self checkSelections];
+	[self requestRender];
+	return didSet;
+}
+
+- (Boundaries)getMirrorPlaneOffsetBoundaries {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+		return {.min = 0.0, .max = 0.0};
+	}
+	const auto aRange =
+		_viewer->getObjectInteractor()->mirrorPlaneOffsetRange();
+	return {.min = aRange.first, .max = aRange.second};
+}
+
+- (BOOL)resetMirrorPlane {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+		|| [self getGizmoType] != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	const BOOL didReset =
+		_viewer->getObjectInteractor()->resetMirrorPlane();
+	[self checkSelections];
+	[self requestRender];
+	return didReset;
+}
+
 - (BOOL) applySubtract {
 	const BooleanApplyResult result =
 		_viewer->getObjectInteractor()->applyBoolean(BooleanAction::BooleanSubtract);
@@ -1814,6 +1904,20 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             state.ownsDocumentCommand != Standard_False),
         @"documentCommandOpen": @(
             state.documentCommandOpen != Standard_False),
+		@"pickingCustomPlane": @(
+			state.pickingCustomPlane != Standard_False),
+		@"hasCustomPlane": @(state.hasCustomPlane != Standard_False),
+		@"previewUsesCustomPlane": @(
+			state.previewUsesCustomPlane != Standard_False),
+		@"manipulatorAttached": @(
+			state.manipulatorAttached != Standard_False),
+		@"referencePresentationCount": @(
+			state.referencePresentationCount),
+		@"customPlaneOffset": @(state.customPlaneOffset),
+		@"customPlaneMinimumOffset": @(
+			state.customPlaneMinimumOffset),
+		@"customPlaneMaximumOffset": @(
+			state.customPlaneMaximumOffset),
     };
 }
 
@@ -1839,6 +1943,14 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     }
 }
 
+- (void)debugSetMirrorReferenceEraseFailureCount:(NSUInteger)count {
+	if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+		_viewer->getObjectInteractor()
+			->debugSetMirrorReferenceEraseFailureCount(
+				static_cast<Standard_Size>(count));
+	}
+}
+
 - (void)debugSetMirrorCommitMode:(NSInteger)mode {
     if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
         _viewer->getObjectInteractor()->debugSetMirrorCommitMode(
@@ -1861,11 +1973,44 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     }
 }
 
+- (void)debugSetMaximumMirrorReferenceTopologyNodes:(NSUInteger)limit {
+	if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+		_viewer->getObjectInteractor()
+			->debugSetMaximumMirrorReferenceTopologyNodes(
+				static_cast<Standard_Size>(limit));
+	}
+}
+
+- (void)debugSetMaximumMirrorReferenceFaces:(NSUInteger)limit {
+	if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+		_viewer->getObjectInteractor()
+			->debugSetMaximumMirrorReferenceFaces(
+				static_cast<Standard_Size>(limit));
+	}
+}
+
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform {
     return _viewer != nullptr
         && _viewer->getObjectInteractor() != nullptr
         && _viewer->getObjectInteractor()
             ->debugMutateFirstMirrorSourcePersistedTransform();
+}
+
+- (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
+                              faceTopologyIndex:(NSInteger)faceTopologyIndex
+                                         offset:(CGFloat)offset {
+	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+		|| entityIdentifier.length == 0 || faceTopologyIndex < 0) {
+		return NO;
+	}
+	const BOOL didCreate = _viewer->getObjectInteractor()
+		->debugTryMirrorPlane(
+			entityIdentifier.UTF8String,
+			static_cast<Standard_Integer>(faceTopologyIndex),
+			static_cast<Standard_Real>(offset));
+	[self checkSelections];
+	[self requestRender];
+	return didCreate;
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {

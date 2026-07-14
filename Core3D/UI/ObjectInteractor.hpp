@@ -17,11 +17,15 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include <gp_Ax2.hxx>
 #include <gp_Trsf.hxx>
+#include <TopoDS_Face.hxx>
 
 namespace core3d {
 
@@ -69,6 +73,14 @@ namespace core3d {
         Standard_Boolean canApply = Standard_False;
         Standard_Boolean ownsDocumentCommand = Standard_False;
         Standard_Boolean documentCommandOpen = Standard_False;
+		Standard_Boolean pickingCustomPlane = Standard_False;
+		Standard_Boolean hasCustomPlane = Standard_False;
+		Standard_Boolean previewUsesCustomPlane = Standard_False;
+		Standard_Boolean manipulatorAttached = Standard_False;
+		Standard_Size referencePresentationCount = 0;
+		Standard_Real customPlaneOffset = 0.0;
+		Standard_Real customPlaneMinimumOffset = 0.0;
+		Standard_Real customPlaneMaximumOffset = 0.0;
     };
 #endif
 
@@ -83,6 +95,15 @@ namespace core3d {
         static constexpr std::size_t kMaxMirrorPreviewBodies = 8;
 		static constexpr Standard_Size kMaxMirrorSourceTopologyNodes = 1'024;
 		static constexpr Standard_Size kMaxMirrorTopologyNodes = 8'192;
+		//! Face picking has a separate, conservative budget. It must never ask
+		//! OCCT to materialize selection owners for the project's full topology.
+		static constexpr Standard_Size
+			kMaxMirrorReferenceTopologyNodesPerPresentation = 1'024;
+		static constexpr Standard_Size
+			kMaxMirrorReferenceFacesPerPresentation = 256;
+		static constexpr Standard_Size
+			kMaxMirrorReferenceTopologyNodes = 8'192;
+		static constexpr Standard_Size kMaxMirrorReferenceFaces = 1'024;
         
         ObjectInteractor() = delete;
         ObjectInteractor(Handle(Core3DContext), Handle(Core3DView), Handle(OcctDocument) doc, Standard_ShortReal manipulatorSide = 300);
@@ -166,11 +187,29 @@ namespace core3d {
 		void debugSetBooleanAbortFailureCount(
 			Standard_Size count) noexcept;
 #endif
-		MirrorApplyResult applyMirror() noexcept;
+        MirrorApplyResult applyMirror() noexcept;
 		Standard_Boolean cancelMirror() noexcept;
 		Standard_Boolean tryMirror(
 			Standard_Integer axisIndex,
 			bool backward) noexcept;
+		//! Enter a one-tap, non-mutating planar-face detector for Mirror.
+		Standard_Boolean beginMirrorPlanePicking() noexcept;
+		//! Exit face picking and restore the exact selection modes captured on entry.
+		Standard_Boolean cancelMirrorPlanePicking() noexcept;
+		//! Consume one viewport tap while face picking is active.
+		Standard_Boolean pickMirrorPlaneAt(
+			Standard_Integer theX,
+			Standard_Integer theY) noexcept;
+		const bool isPickingMirrorPlane() const noexcept;
+		const bool hasCustomMirrorPlane() const noexcept;
+		const bool hasCustomMirrorPlaneState() const noexcept;
+		Standard_Boolean setMirrorPlaneOffset(
+			Standard_Real theOffset) noexcept;
+		Standard_Real mirrorPlaneOffset() const noexcept;
+		std::pair<Standard_Real, Standard_Real>
+			mirrorPlaneOffsetRange() const noexcept;
+		//! Remove only the custom reference/preview and retain Mirror selection mode.
+		Standard_Boolean resetMirrorPlane() noexcept;
 		//! Discard only transient preview geometry while retaining Mirror mode.
 		//! False means owned state remains and every caller must stop transitioning.
 		Standard_Boolean clearTrialMirrorObjects() noexcept;
@@ -186,13 +225,24 @@ namespace core3d {
 			Standard_Size count) noexcept;
 		void debugSetMirrorAbortFailureCount(Standard_Size count) noexcept;
 		void debugSetMirrorEraseFailureCount(Standard_Size count) noexcept;
+		void debugSetMirrorReferenceEraseFailureCount(
+			Standard_Size count) noexcept;
 		void debugSetMirrorCommitMode(Standard_Integer mode) noexcept;
 		void debugSetMirrorPostCommitInspectFailureCount(
 			Standard_Size count) noexcept;
 		void debugSetMaximumMirrorTopologyNodes(
 			Standard_Size limit) noexcept;
+		void debugSetMaximumMirrorReferenceTopologyNodes(
+			Standard_Size limit) noexcept;
+		void debugSetMaximumMirrorReferenceFaces(
+			Standard_Size limit) noexcept;
 		Standard_Boolean
 			debugMutateFirstMirrorSourcePersistedTransform() noexcept;
+		//! Test the same custom-plane admission path without viewport projection.
+		Standard_Boolean debugTryMirrorPlane(
+			const std::string& theEntityIdentifier,
+			Standard_Integer theFaceTopologyIndex,
+			Standard_Real theOffset) noexcept;
 #endif
 		
 		void setManipulator(Handle(Core3DManipulator) manipulator) {
@@ -210,6 +260,25 @@ namespace core3d {
 		Standard_Boolean tryMirrorImpl(
 			Standard_Integer axisIndex,
 			bool backward);
+		Standard_Boolean tryMirrorWorldPlaneImpl(const gp_Ax2& theWorldPlane);
+		struct MirrorPlaneReferenceSnapshot;
+		Standard_Boolean captureMirrorPlaneReference(
+			const Handle(AIS_Shape)& thePresentation,
+			const TopoDS_Face& theFace,
+			MirrorPlaneReferenceSnapshot& theSnapshot) const;
+		Standard_Boolean completeMirrorPlanePick(
+			MirrorPlaneReferenceSnapshot&& theSnapshot,
+			Standard_Real theOffset);
+		Standard_Boolean customMirrorPlaneIsCurrent(
+			const MirrorPlaneReferenceSnapshot& theSnapshot,
+			gp_Ax2& theWorldPlane,
+			Standard_Real theOffset) const;
+		Standard_Boolean restoreMirrorPlanePickingModes() noexcept;
+		Standard_Boolean replaceMirrorReferencePresentation(
+			const MirrorPlaneReferenceSnapshot& theSnapshot,
+			Standard_Real theOffset) noexcept;
+		Standard_Boolean clearMirrorReferencePresentation() noexcept;
+		Standard_Boolean clearCustomMirrorPlaneState() noexcept;
 		Standard_Boolean mirrorSourcesAreCurrent() const noexcept;
 		Standard_Boolean abortOwnedMirrorCommand() noexcept;
 		MirrorApplyResult finishCommittedMirror() noexcept;
@@ -243,8 +312,36 @@ namespace core3d {
 			std::string definitionIdentifier;
 			TopoDS_Shape expectedShape;
 		};
+		struct MirrorPlaneReferenceSnapshot {
+			Handle(TDocStd_Document) document;
+			Handle(AIS_Shape) presentation;
+			TDF_Label label;
+			std::string entityIdentifier;
+			std::string definitionIdentifier;
+			OcctGeometryRepresentation representation =
+				OcctGeometryRepresentation::Invalid;
+			TopoDS_Shape storedShape;
+			TopoDS_Face face;
+			Standard_Integer faceTopologyIndex = -1;
+			Standard_Size topologyNodeCount = 0;
+			Standard_Size faceCount = 0;
+			gp_Trsf presentationTransform;
+			gp_Pnt worldOrigin;
+			gp_Dir worldNormal;
+			gp_Dir worldXDirection;
+		};
+		struct MirrorPlanePickSelectionModes {
+			Handle(AIS_InteractiveObject) presentation;
+			std::vector<Standard_Integer> modes;
+		};
 		std::vector<MirrorSourceSnapshot> _trialMirrorSources;
 		std::vector<MirrorPendingResult> _pendingMirrorResults;
+		std::optional<MirrorPlaneReferenceSnapshot> _customMirrorPlane;
+		std::vector<Handle(AIS_Shape)> _mirrorReferencePresentations;
+		std::vector<MirrorPlanePickSelectionModes> _mirrorPlanePickModes;
+		Standard_Real _mirrorPlaneOffset = 0.0;
+		bool _mirrorPlanePicking = false;
+		bool _trialMirrorUsesCustomPlane = false;
 		bool _trialMirrorObjectsValid = false;
 		bool _mirrorOwnsDocumentCommand = false;
 		MirrorPreviewState _mirrorPreviewState =
@@ -255,9 +352,12 @@ namespace core3d {
 		Standard_Size _debugMirrorTransactionFailureCount = 0;
 		Standard_Size _debugMirrorAbortFailureCount = 0;
 		Standard_Size _debugMirrorEraseFailureCount = 0;
+		Standard_Size _debugMirrorReferenceEraseFailureCount = 0;
 		Standard_Integer _debugMirrorCommitMode = 0;
 		Standard_Size _debugMirrorPostCommitInspectFailureCount = 0;
 		Standard_Size _debugMaximumMirrorTopologyNodes = 8'192;
+		Standard_Size _debugMaximumMirrorReferenceTopologyNodes = 8'192;
+		Standard_Size _debugMaximumMirrorReferenceFaces = 1'024;
 #endif
     };
 }

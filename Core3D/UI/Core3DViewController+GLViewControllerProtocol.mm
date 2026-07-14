@@ -189,6 +189,11 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
             case PrimitiveGizmoTypeExtrude:
                 self.can_apply = [GLController canApplyExtrusion];
                 break;
+			case PrimitiveGizmoTypeMirror:
+				self.can_apply =
+					[self modelingPreviewStatusForGizmoType:
+						PrimitiveGizmoTypeMirror].canApply;
+				break;
             default:
                 break;
         }
@@ -234,6 +239,13 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 // so empty AIS selection does not mean the operation ended.
                 self.can_apply = [GLController canApplyChamfer];
                 break;
+			case PrimitiveGizmoTypeMirror:
+				// Plane picking intentionally preserves the source selection and
+				// manipulator; refresh Apply from typed Mirror state after the tap.
+				self.can_apply =
+					[self modelingPreviewStatusForGizmoType:
+						PrimitiveGizmoTypeMirror].canApply;
+				break;
 
             default:
                 _availableGizmoTypes = @[];

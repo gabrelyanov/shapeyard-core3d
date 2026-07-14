@@ -991,6 +991,13 @@ void Core3DViewer::release() noexcept {
     _interactiveCallback = {};
     _booleanPreviewStateChangedCallback = {};
     _bevelPreviewStateChangedCallback = {};
+	if (_objectInteractor != nullptr) {
+		// Close any temporary face selection modes while their presentations
+		// and the AIS context are still alive. Full Mirror cancellation then
+		// retires the owned reference/preview handles before graphics teardown.
+		(void)_objectInteractor->cancelMirrorPlanePicking();
+		(void)_objectInteractor->cancelMirror();
+	}
     if (_transformInspectorMeasurementController != nullptr) {
         _transformInspectorMeasurementController->shutdown();
         _transformInspectorMeasurementController.reset();
@@ -1762,6 +1769,18 @@ DebugSetTransformInspectorPositionPublicationFallbackMode(
 
 AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     assert(!myContext.IsNull());
+	if (_objectInteractor != nullptr
+		&& _objectInteractor->isPickingMirrorPlane()
+		&& !_objectInteractor->cancelMirrorPlanePicking()) {
+		return AssetImportResult::Busy;
+	}
+	if (_objectInteractor != nullptr
+		&& _objectInteractor->hasUnresolvedMirrorObjects()) {
+		// Never clear the context or replace the document while a trial,
+		// committed-result reconciliation, or custom reference presentation
+		// still has retryable ownership in the current interactor.
+		return AssetImportResult::Busy;
+	}
 
     Handle(TDocStd_Document) previous = myDoc->Document();
     if (previous.IsNull()) {
@@ -1966,6 +1985,15 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 }
 
 bool Core3DViewer::redrawDocument() noexcept {
+	if (_objectInteractor != nullptr
+		&& _objectInteractor->isPickingMirrorPlane()
+		&& !_objectInteractor->cancelMirrorPlanePicking()) {
+		return false;
+	}
+	if (_objectInteractor != nullptr
+		&& _objectInteractor->hasUnresolvedMirrorObjects()) {
+		return false;
+	}
 #ifdef DEBUG
     const Standard_Boolean shouldForceTraversalFailure = std::exchange(
         _debugForceNextTransformInspectorRedrawFailure,
@@ -2084,6 +2112,12 @@ void Core3DViewer::StartRotation(int theX, int theY) {
     if(_objectInteractor == nullptr) {
         return;
     }
+	if (_objectInteractor->isPickingMirrorPlane()) {
+		// Keep the raw touch lifecycle from activating the Mirror gizmo or
+		// rotating the camera. The tap recognizer will deliver the final point
+		// to Select(), which consumes it without touching AIS selection.
+		return;
+	}
     if(!_objectInteractor->startTransformManipulator(theX, theY)) {
         OcctViewer::StartRotation(theX, theY);
     }
@@ -2515,6 +2549,9 @@ void Core3DViewer::Rotation(int theX, int theY) {
     if(_objectInteractor == nullptr) {
         return;
     }
+	if (_objectInteractor->isPickingMirrorPlane()) {
+		return;
+	}
     if(!_objectInteractor->transformManipulator(theX, theY)){
         OcctViewer::Rotation(theX, theY);
         myContext->UpdateCurrentViewer();
@@ -2527,12 +2564,18 @@ void Core3DViewer::Rotation(int theX, int theY) {
 
 void Core3DViewer::FinishInteraction(int theX, int theY) {
     if(_objectInteractor != nullptr) {
+		if (_objectInteractor->isPickingMirrorPlane()) {
+			return;
+		}
         _objectInteractor->finishInteraction();
     }
 }
 
 void Core3DViewer::CancelInteraction(int theX, int theY) {
     if(_objectInteractor != nullptr) {
+		if (_objectInteractor->isPickingMirrorPlane()) {
+			return;
+		}
 		_objectInteractor->cancelInteraction();
     }
 }
@@ -2550,6 +2593,11 @@ void Core3DViewer::Select(int theX, int theY) {
         printf("ERROR with Select\n");
         return;
     }
+	if (_objectInteractor->isPickingMirrorPlane()) {
+		(void)_objectInteractor->pickMirrorPlaneAt(theX, theY);
+		redraw();
+		return;
+	}
     if (_objectInteractor->isBooleanSelectionFrozen()) {
         return;
     }

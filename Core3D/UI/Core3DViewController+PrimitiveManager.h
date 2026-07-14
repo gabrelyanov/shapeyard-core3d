@@ -37,6 +37,13 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(tryCancelMirror());
 - (void)applyMirror;
 - (void)cancelMirror;
+- (BOOL)beginMirrorPlanePicking;
+- (BOOL)cancelMirrorPlanePicking;
+- (BOOL)isPickingMirrorPlane;
+- (BOOL)hasCustomMirrorPlane;
+- (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
+- (Boundaries)getMirrorPlaneOffsetBoundaries;
+- (BOOL)resetMirrorPlane;
 - (Core3DModelingOperationResult)tryApplySubtract
     NS_SWIFT_NAME(tryApplySubtract());
 - (Core3DModelingOperationResult)tryCancelSubtract

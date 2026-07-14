@@ -142,6 +142,13 @@ typedef struct {
     NS_SWIFT_NAME(tryCancelMirror());
 - (void)applyMirror;
 - (void)cancelMirror;
+- (BOOL)beginMirrorPlanePicking;
+- (BOOL)cancelMirrorPlanePicking;
+- (BOOL)isPickingMirrorPlane;
+- (BOOL)hasCustomMirrorPlane;
+- (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
+- (Boundaries)getMirrorPlaneOffsetBoundaries;
+- (BOOL)resetMirrorPlane;
 - (void)applySubtract;
 - (void)cancelSubtract;
 - (Core3DModelingOperationResult)tryApplyUnion
@@ -380,6 +387,7 @@ typedef struct {
 - (void)debugSetMirrorAbortFailureCount:(NSUInteger)count;
 //! Make the next N transient Mirror erases retain their owned presentation.
 - (void)debugSetMirrorEraseFailureCount:(NSUInteger)count;
+- (void)debugSetMirrorReferenceEraseFailureCount:(NSUInteger)count;
 //! Inject CommitCommand behavior after a real close: 0 normal,
 //! 1 false-after-close, and 2 throw-after-close.
 - (void)debugSetMirrorCommitMode:(NSInteger)mode;
@@ -387,9 +395,16 @@ typedef struct {
 - (void)debugSetMirrorPostCommitInspectFailureCount:(NSUInteger)count;
 //! Lower Mirror's aggregate source-and-result topology ceiling.
 - (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit;
+//! Lower only custom reference face-picking admission budgets.
+- (void)debugSetMaximumMirrorReferenceTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumMirrorReferenceFaces:(NSUInteger)limit;
 //! Commit a persisted transform change behind the active Mirror snapshot while
 //! leaving its presentation untouched, proving Apply rejects stale sources.
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform;
+- (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
+                              faceTopologyIndex:(NSInteger)faceTopologyIndex
+                                         offset:(CGFloat)offset
+    NS_SWIFT_NAME(debugTryMirrorPlane(entityIdentifier:faceTopologyIndex:offset:));
 //! Test-only deterministic Boolean seam. Identifiers must name committed
 //! one-occurrence bodies; production selection, ownership, validation, preview,
 //! transaction, and renderer publication paths remain authoritative.

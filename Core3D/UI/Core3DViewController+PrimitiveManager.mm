@@ -562,6 +562,43 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     (void)[self tryCancelMirror];
 }
 
+- (BOOL)beginMirrorPlanePicking {
+	if (_currentGizmoType != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	return [GLController beginMirrorPlanePicking];
+}
+
+- (BOOL)cancelMirrorPlanePicking {
+	return [GLController cancelMirrorPlanePicking];
+}
+
+- (BOOL)isPickingMirrorPlane {
+	return [GLController isPickingMirrorPlane];
+}
+
+- (BOOL)hasCustomMirrorPlane {
+	return [GLController hasCustomMirrorPlane];
+}
+
+- (BOOL)setMirrorPlaneOffset:(CGFloat)offset {
+	if (_currentGizmoType != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	return [GLController setMirrorPlaneOffset:offset];
+}
+
+- (Boundaries)getMirrorPlaneOffsetBoundaries {
+	return [GLController getMirrorPlaneOffsetBoundaries];
+}
+
+- (BOOL)resetMirrorPlane {
+	if (_currentGizmoType != PrimitiveGizmoTypeMirror) {
+		return NO;
+	}
+	return [GLController resetMirrorPlane];
+}
+
 - (Core3DModelingOperationResult)tryApplySubtract {
     return [self core3d_tryApplyOperation:PrimitiveGizmoTypeSubtract
         attempt:^BOOL {

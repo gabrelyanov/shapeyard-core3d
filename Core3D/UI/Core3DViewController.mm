@@ -4104,6 +4104,22 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
+                              faceTopologyIndex:(NSInteger)faceTopologyIndex
+                                         offset:(CGFloat)offset {
+	if (![NSThread isMainThread] || !_isSetuped
+		|| _currentGizmoType != PrimitiveGizmoTypeMirror
+		|| entityIdentifier.length == 0 || faceTopologyIndex < 0) {
+		return NO;
+	}
+	const BOOL didCreate =
+		[GLController debugTryMirrorPlaneWithEntityIdentifier:entityIdentifier
+		                                      faceTopologyIndex:faceTopologyIndex
+		                                                 offset:offset];
+	[self viewDidEndPrimaryInteractionCancelled:NO];
+	return didCreate;
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugMirrorState {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return @{};
@@ -4123,6 +4139,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController debugSetMirrorEraseFailureCount:count];
 }
 
+- (void)debugSetMirrorReferenceEraseFailureCount:(NSUInteger)count {
+	[GLController debugSetMirrorReferenceEraseFailureCount:count];
+}
+
 - (void)debugSetMirrorCommitMode:(NSInteger)mode {
     [GLController debugSetMirrorCommitMode:mode];
 }
@@ -4133,6 +4153,14 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (void)debugSetMaximumMirrorTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumMirrorTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumMirrorReferenceTopologyNodes:(NSUInteger)limit {
+	[GLController debugSetMaximumMirrorReferenceTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumMirrorReferenceFaces:(NSUInteger)limit {
+	[GLController debugSetMaximumMirrorReferenceFaces:limit];
 }
 
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform {
