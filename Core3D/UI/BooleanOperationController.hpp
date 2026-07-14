@@ -144,6 +144,36 @@ public:
 #endif
 
 private:
+    enum class DocumentState : std::uint8_t {
+        None = 0,
+        AllCommitted,
+        OpenCommand,
+        PartialOrMismatched,
+        Unavailable,
+    };
+    struct PendingSource {
+        TDF_Label label;
+        std::string entityIdentifier;
+        std::string definitionIdentifier;
+        OcctGeometryRepresentation representation =
+            OcctGeometryRepresentation::Invalid;
+        TopoDS_Shape expectedShape;
+        gp_Trsf expectedTransform;
+        OcctReferenceAxisReadState expectedReferenceAxisState =
+            OcctReferenceAxisReadState::Invalid;
+        OcctReferenceAxis expectedReferenceAxis;
+    };
+    struct PendingResult {
+        TDF_Label label;
+        std::string entityIdentifier;
+        std::string definitionIdentifier;
+        TopoDS_Shape expectedShape;
+        gp_Trsf expectedTransform;
+        OcctReferenceAxisReadState expectedReferenceAxisState =
+            OcctReferenceAxisReadState::Invalid;
+        OcctReferenceAxis expectedReferenceAxis;
+    };
+
     Standard_Boolean actionMatches(BooleanAction action) const noexcept;
     Standard_Boolean enqueuePreviewRequest(BooleanAction action) noexcept;
     void acceptWorkerResult(BooleanPreviewWorkerResult result) noexcept;
@@ -165,6 +195,8 @@ private:
         const Handle(AIS_InteractiveObject)& presentation) noexcept;
     Standard_Boolean cleanupOwnedPresentations() noexcept;
     Standard_Boolean pruneOwnedPresentations() noexcept;
+    DocumentState inspectPendingTransaction() const noexcept;
+    BooleanApplyResult finishCommittedApply(BooleanAction action) noexcept;
     void rollbackFailedTransaction(
         const Handle(TDocStd_Document)& document) noexcept;
     Standard_Boolean abortDocumentCommandNoThrow(
@@ -182,9 +214,11 @@ private:
     void applyStyle(
         Handle(AIS_InteractiveObject)& object,
         const TemporalBooleanObject& style);
-    void persistStyle(
+    void persistResultMetadata(
         const TDF_Label& label,
-        const TemporalBooleanObject& style);
+        const TemporalBooleanObject& style,
+        OcctReferenceAxisReadState& expectedReferenceAxisState,
+        OcctReferenceAxis& expectedReferenceAxis);
     Handle(AIS_InteractiveObject) ioCopyWithStyle(
         const Handle(AIS_InteractiveObject)& original,
         const TemporalBooleanObject& style);
@@ -193,6 +227,8 @@ private:
     std::vector<Handle(AIS_InteractiveObject)> _actedIOArray;
     std::vector<Handle(AIS_InteractiveObject)> _actorIOArray;
     std::vector<TDF_Label> _subjectSelectionOrder;
+    std::vector<PendingSource> _pendingSources;
+    std::vector<PendingResult> _pendingResults;
     Handle(AIS_Shape) _singleTrialResult;
     std::vector<Handle(AIS_InteractiveObject)> _ownedPresentations;
     std::optional<BooleanAction> _activeAction;

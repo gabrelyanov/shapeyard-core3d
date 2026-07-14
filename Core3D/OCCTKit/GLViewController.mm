@@ -1243,6 +1243,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)duplicateSelected {
+    if (![NSThread isMainThread]) {
+        return;
+    }
     _viewer->getObjectInteractor()->duplicateSelected();
     [self requestRender];
 }
@@ -2244,6 +2247,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 #ifdef DEBUG
+- (void)debugSetDuplicateCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetDuplicateCommitMode(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit {
     if (_viewer != nullptr) {
         _viewer->SetDebugMaximumDisplayTraversalNodes(

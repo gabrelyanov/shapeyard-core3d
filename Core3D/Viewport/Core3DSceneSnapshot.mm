@@ -8,6 +8,7 @@
 #import "Core3DSceneSnapshotFactory.hpp"
 #import <ImageIO/ImageIO.h>
 
+#include "../Common/Core3DMobileResourceLimits.h"
 #include "../Scene/SceneSnapshot.hpp"
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
@@ -119,6 +120,12 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithEntityIdentifier:(NSString *)entityIdentifier
                                 meshIndex:(uint32_t)meshIndex
                            worldTransform:(simd_double4x4)worldTransform
+                         hasReferenceAxis:(BOOL)hasReferenceAxis
+                      referencePivotWorld:(simd_double3)referencePivotWorld
+                  referenceDirectionWorld:(simd_double3)referenceDirectionWorld
+                      referencePivotSpace:(Core3DSceneReferenceSpace)referencePivotSpace
+                  referenceDirectionSpace:(Core3DSceneReferenceSpace)referenceDirectionSpace
+                    referenceAxisAuthored:(BOOL)referenceAxisAuthored
                                   winding:(Core3DSceneWinding)winding
                                   visible:(BOOL)visible
                                selectable:(BOOL)selectable
@@ -381,6 +388,12 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithEntityIdentifier:(NSString *)entityIdentifier
                                 meshIndex:(uint32_t)meshIndex
                            worldTransform:(simd_double4x4)worldTransform
+                         hasReferenceAxis:(BOOL)hasReferenceAxis
+                      referencePivotWorld:(simd_double3)referencePivotWorld
+                  referenceDirectionWorld:(simd_double3)referenceDirectionWorld
+                      referencePivotSpace:(Core3DSceneReferenceSpace)referencePivotSpace
+                  referenceDirectionSpace:(Core3DSceneReferenceSpace)referenceDirectionSpace
+                    referenceAxisAuthored:(BOOL)referenceAxisAuthored
                                   winding:(Core3DSceneWinding)winding
                                   visible:(BOOL)visible
                                selectable:(BOOL)selectable
@@ -396,6 +409,12 @@ static_assert(sizeof(std::uint32_t) == 4,
         _entityIdentifier = [entityIdentifier copy];
         _meshIndex = meshIndex;
         _worldTransform = worldTransform;
+        _hasReferenceAxis = hasReferenceAxis;
+        _referencePivotWorld = referencePivotWorld;
+        _referenceDirectionWorld = referenceDirectionWorld;
+        _referencePivotSpace = referencePivotSpace;
+        _referenceDirectionSpace = referenceDirectionSpace;
+        _referenceAxisAuthored = referenceAxisAuthored;
         _winding = winding;
         _visible = visible;
         _selectable = selectable;
@@ -551,6 +570,8 @@ constexpr std::size_t kMaximumDTOSelectedElements = 50'000;
 constexpr std::size_t kMaximumDTOVertices = 1'500'000;
 constexpr std::size_t kMaximumDTOIndices = 4'500'000;
 constexpr std::size_t kMaximumDTONumericBytes = 96ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kReferenceAxisInstanceNumericBytes =
+    sizeof(Matrix4d) + sizeof(ReferenceAxisSnapshot);
 constexpr std::size_t kMaximumDTOTextureBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumDTOPerTextureBytes = 32ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumDTODecodedTextureBytes =
@@ -922,6 +943,32 @@ bool IsValid(const CoordinateSpace value) noexcept {
     return false;
 }
 
+bool IsValid(const ReferenceSpace value) noexcept {
+    switch (value) {
+        case ReferenceSpace::Object:
+        case ReferenceSpace::World:
+            return true;
+    }
+    return false;
+}
+
+bool IsValid(const ReferenceAxisSnapshot& value) noexcept {
+    const double directionSquared =
+        value.worldDirection.x * value.worldDirection.x
+        + value.worldDirection.y * value.worldDirection.y
+        + value.worldDirection.z * value.worldDirection.z;
+    return IsValid(value.pivotSpace) && IsValid(value.directionSpace)
+        && IsFinite(value.worldPivot) && IsFinite(value.worldDirection)
+        && std::abs(value.worldPivot.x)
+            <= core3d::limits::kMaximumModelCoordinateMagnitude
+        && std::abs(value.worldPivot.y)
+            <= core3d::limits::kMaximumModelCoordinateMagnitude
+        && std::abs(value.worldPivot.z)
+            <= core3d::limits::kMaximumModelCoordinateMagnitude
+        && IsFinite(directionSquared)
+        && std::abs(directionSquared - 1.0) <= 1.0e-10;
+}
+
 bool IsValid(const DepthPolicy value) noexcept {
     switch (value) {
         case DepthPolicy::Scene:
@@ -1218,11 +1265,17 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !IsValid(instance.coordinateSpace)
             || !IsValid(instance.depthPolicy)
             || !IsValid(instance.renderStyle)
+            || !instance.referenceAxis.has_value()
+            || !IsValid(*instance.referenceAxis)
             || (!instance.visible && instance.selectable)
             || !CheckedAdd(totalBindings,
                            instance.primitiveBindings.size(),
                            totalBindings)
-            || totalBindings > kMaximumDTOBindings) {
+            || totalBindings > kMaximumDTOBindings
+            || !CheckedAdd(totalNumericBytes,
+                           kReferenceAxisInstanceNumericBytes,
+                           totalNumericBytes)
+            || totalNumericBytes > kMaximumDTONumericBytes) {
             return false;
         }
         for (const double value : instance.worldFromObject.values) {
@@ -1930,6 +1983,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || instance.meshIndex >= snapshot.meshes.size()
             || instance.reversesWinding || !instance.visible
             || instance.selectable || instance.selected
+            || instance.referenceAxis.has_value()
             || !hasExpectedSemantics
             || (!isBooleanItem && !isChamferItem && !isShellItem
                 && instance.renderStyle != RenderStyle::Shaded)
@@ -2160,6 +2214,19 @@ Core3DSceneCoordinateSpace CoordinateSpaceFromScene(CoordinateSpace value) {
     return Core3DSceneCoordinateSpaceWorld;
 }
 
+Core3DSceneReferenceSpace ReferenceSpaceFromScene(ReferenceSpace value) {
+    switch (value) {
+        case ReferenceSpace::Object:
+            return Core3DSceneReferenceSpaceObject;
+        case ReferenceSpace::World:
+            return Core3DSceneReferenceSpaceWorld;
+    }
+
+    NSCAssert(NO, @"Unknown reference-space value: %u",
+              static_cast<unsigned>(value));
+    return Core3DSceneReferenceSpaceObject;
+}
+
 Core3DSceneDepthPolicy DepthPolicyFromScene(DepthPolicy value) {
     switch (value) {
         case DepthPolicy::Scene:
@@ -2362,10 +2429,21 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
         ObjectArrayFromVector<PrimitiveBinding, Core3DScenePrimitiveBindingSnapshot>(
             value.primitiveBindings,
             PrimitiveBindingFromScene);
+    const ReferenceAxisSnapshot referenceAxis = value.referenceAxis.value_or(
+        ReferenceAxisSnapshot());
     return [[Core3DSceneRenderItemSnapshot alloc]
         initWithEntityIdentifier:StringFromUTF8(value.entityIdentifier)
                        meshIndex:value.meshIndex
                   worldTransform:MatrixFromScene(value.worldFromObject)
+                hasReferenceAxis:value.referenceAxis.has_value()
+             referencePivotWorld:Double3FromScene(referenceAxis.worldPivot)
+         referenceDirectionWorld:Double3FromScene(
+             referenceAxis.worldDirection)
+             referencePivotSpace:ReferenceSpaceFromScene(
+                 referenceAxis.pivotSpace)
+         referenceDirectionSpace:ReferenceSpaceFromScene(
+             referenceAxis.directionSpace)
+           referenceAxisAuthored:referenceAxis.authored
                          winding:value.reversesWinding
                              ? Core3DSceneWindingReversed
                              : Core3DSceneWindingAsDefined

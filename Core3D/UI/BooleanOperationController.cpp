@@ -5,12 +5,15 @@
 
 #include "BooleanOperationController.hpp"
 
+#include "../Common/Core3DMobileResourceLimits.h"
+
 #include <AIS_Shape.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <gp_Vec.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -24,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -118,6 +122,112 @@ Standard_Boolean IsCurrentBRepSelection(
             && theDocument->ShapeLabel(theSelection.original)
                 .IsEqual(theSelection.documentLabel);
     } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean ReferenceAxisDiffers(
+    const OcctReferenceAxis& theLeft,
+    const OcctReferenceAxis& theRight) noexcept
+{
+    constexpr Standard_Real aTolerance = 1.0e-12;
+    try {
+        return theLeft.pivotSpace != theRight.pivotSpace
+            || theLeft.directionSpace != theRight.directionSpace
+            || !theLeft.pivot.IsEqual(theRight.pivot, aTolerance)
+            || !theLeft.direction.IsEqual(
+                theRight.direction, aTolerance);
+    } catch (...) {
+        return Standard_True;
+    }
+}
+
+Standard_Boolean TransformDiffers(
+    const gp_Trsf& theLeft,
+    const gp_Trsf& theRight) noexcept
+{
+    constexpr Standard_Real aTolerance = 1.0e-12;
+    try {
+        for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+            for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+                if (std::abs(theLeft.Value(aRow, aColumn)
+                        - theRight.Value(aRow, aColumn))
+                    > aTolerance) {
+                    return Standard_True;
+                }
+            }
+        }
+        return Standard_False;
+    } catch (...) {
+        return Standard_True;
+    }
+}
+
+Standard_Boolean TryExpectedBakedReferenceAxis(
+    const OcctReferenceAxisReadState theSourceState,
+    const OcctReferenceAxis& theSource,
+    const gp_Trsf& theBakeTransform,
+    OcctReferenceAxisReadState& theExpectedState,
+    OcctReferenceAxis& theExpected) noexcept
+{
+    theExpectedState = OcctReferenceAxisReadState::Invalid;
+    theExpected = theSource;
+    if (theSourceState == OcctReferenceAxisReadState::Invalid) {
+        return Standard_False;
+    }
+    try {
+        for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+            for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+                if (!std::isfinite(
+                        theBakeTransform.Value(aRow, aColumn))) {
+                    return Standard_False;
+                }
+            }
+        }
+        if (theExpected.pivotSpace == OcctReferenceSpace::Object) {
+            theExpected.pivot.Transform(theBakeTransform);
+        }
+        if (!std::isfinite(theExpected.pivot.X())
+            || !std::isfinite(theExpected.pivot.Y())
+            || !std::isfinite(theExpected.pivot.Z())
+            || std::abs(theExpected.pivot.X())
+                > limits::kMaximumModelCoordinateMagnitude
+            || std::abs(theExpected.pivot.Y())
+                > limits::kMaximumModelCoordinateMagnitude
+            || std::abs(theExpected.pivot.Z())
+                > limits::kMaximumModelCoordinateMagnitude) {
+            return Standard_False;
+        }
+        if (theExpected.directionSpace == OcctReferenceSpace::Object) {
+            gp_Vec aDirection(theExpected.direction);
+            aDirection.Transform(theBakeTransform);
+            const Standard_Real aSquaredMagnitude =
+                aDirection.SquareMagnitude();
+            if (!std::isfinite(aDirection.X())
+                || !std::isfinite(aDirection.Y())
+                || !std::isfinite(aDirection.Z())
+                || !std::isfinite(aSquaredMagnitude)
+                || aSquaredMagnitude
+                    <= std::numeric_limits<Standard_Real>::epsilon()) {
+                return Standard_False;
+            }
+            theExpected.direction = gp_Dir(aDirection);
+        }
+        if (!std::isfinite(theExpected.direction.X())
+            || !std::isfinite(theExpected.direction.Y())
+            || !std::isfinite(theExpected.direction.Z())) {
+            return Standard_False;
+        }
+
+        const OcctReferenceAxis aDefault;
+        theExpectedState =
+            theSourceState == OcctReferenceAxisReadState::ImplicitDefault
+                && !ReferenceAxisDiffers(theExpected, aDefault)
+            ? OcctReferenceAxisReadState::ImplicitDefault
+            : OcctReferenceAxisReadState::Authored;
+        return Standard_True;
+    } catch (...) {
+        theExpectedState = OcctReferenceAxisReadState::Invalid;
         return Standard_False;
     }
 }
@@ -856,6 +966,8 @@ BooleanOperationController::BooleanOperationController(
     try {
         _ownedPresentations.reserve(kMaxSourceOperands * 3);
         _subjectSelectionOrder.reserve(kMaxSourceOperands);
+        _pendingSources.reserve(kMaxSourceOperands);
+        _pendingResults.reserve(kMaxSourceOperands);
     } catch (...) {
         _stateValid = Standard_False;
     }
@@ -1173,21 +1285,153 @@ Standard_Boolean BooleanOperationController::pruneOwnedPresentations() noexcept
     return didPruneAll;
 }
 
+BooleanOperationController::DocumentState
+BooleanOperationController::inspectPendingTransaction() const noexcept
+{
+    if (myDoc.IsNull()) {
+        return DocumentState::Unavailable;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        if (aDocument.IsNull() || aDocument->GetData().IsNull()) {
+            return DocumentState::Unavailable;
+        }
+        if (aDocument->HasOpenCommand()) {
+            return DocumentState::OpenCommand;
+        }
+        if (_pendingSources.empty() || _pendingResults.empty()) {
+            return DocumentState::None;
+        }
+
+        Standard_Size aPresentSourceCount = 0;
+        Standard_Size anAbsentSourceCount = 0;
+        for (const PendingSource& aSource : _pendingSources) {
+            if (aSource.label.IsNull()
+                || aSource.label.Data() != aDocument->GetData()) {
+                return DocumentState::PartialOrMismatched;
+            }
+            const TopoDS_Shape aStored =
+                XCAFDoc_ShapeTool::GetShape(aSource.label);
+            if (aStored.IsNull()) {
+                ++anAbsentSourceCount;
+                continue;
+            }
+            gp_Trsf aTransform;
+            OcctReferenceAxis aReferenceAxis;
+            const OcctReferenceAxisReadState aReferenceAxisState =
+                myDoc->ReadReferenceAxisForLabel(
+                    aSource.label, aReferenceAxis);
+            if (aSource.expectedShape.IsNull()
+                || !aStored.IsEqual(aSource.expectedShape)
+                || aSource.entityIdentifier.empty()
+                || aSource.definitionIdentifier.empty()
+                || myDoc->EntityIdentifierForLabel(aSource.label)
+                    != aSource.entityIdentifier
+                || myDoc->DefinitionIdentifierForLabel(aSource.label)
+                    != aSource.definitionIdentifier
+                || myDoc->GeometryRepresentationForLabel(aSource.label)
+                    != aSource.representation
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(
+                    aSource.label)
+                || !myDoc->TryObjectTransformForLabel(
+                    aSource.label, aTransform)
+                || TransformDiffers(
+                    aTransform, aSource.expectedTransform)
+                || aReferenceAxisState
+                    != aSource.expectedReferenceAxisState
+                || aReferenceAxisState
+                    == OcctReferenceAxisReadState::Invalid
+                || ReferenceAxisDiffers(
+                    aReferenceAxis,
+                    aSource.expectedReferenceAxis)) {
+                return DocumentState::PartialOrMismatched;
+            }
+            ++aPresentSourceCount;
+        }
+
+        Standard_Size aPresentResultCount = 0;
+        Standard_Size anAbsentResultCount = 0;
+        for (const PendingResult& aResult : _pendingResults) {
+            if (aResult.label.IsNull()
+                || aResult.label.Data() != aDocument->GetData()) {
+                return DocumentState::PartialOrMismatched;
+            }
+            const TopoDS_Shape aStored =
+                XCAFDoc_ShapeTool::GetShape(aResult.label);
+            if (aStored.IsNull()) {
+                ++anAbsentResultCount;
+                continue;
+            }
+            OcctReferenceAxis aReferenceAxis;
+            const OcctReferenceAxisReadState aReferenceAxisState =
+                myDoc->ReadReferenceAxisForLabel(
+                    aResult.label, aReferenceAxis);
+            if (aResult.expectedShape.IsNull()
+                || !aStored.IsEqual(aResult.expectedShape)
+                || aResult.entityIdentifier.empty()
+                || aResult.definitionIdentifier.empty()
+                || myDoc->EntityIdentifierForLabel(aResult.label)
+                    != aResult.entityIdentifier
+                || myDoc->DefinitionIdentifierForLabel(aResult.label)
+                    != aResult.definitionIdentifier
+                || myDoc->GeometryRepresentationForLabel(aResult.label)
+                    != OcctGeometryRepresentation::BRep
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(
+                    aResult.label)
+                || TransformDiffers(
+                    myDoc->ObjectTransformForLabel(aResult.label),
+                    aResult.expectedTransform)
+                || aReferenceAxisState
+                    != aResult.expectedReferenceAxisState
+                || aReferenceAxisState
+                    == OcctReferenceAxisReadState::Invalid
+                || ReferenceAxisDiffers(
+                    aReferenceAxis,
+                    aResult.expectedReferenceAxis)) {
+                return DocumentState::PartialOrMismatched;
+            }
+            ++aPresentResultCount;
+        }
+
+        const bool isCommitted =
+            aPresentResultCount == _pendingResults.size()
+            && anAbsentSourceCount == _pendingSources.size();
+        const bool isAbsent =
+            anAbsentResultCount == _pendingResults.size()
+            && aPresentSourceCount == _pendingSources.size();
+        if ((isCommitted || isAbsent)
+            && !myDoc->ValidateGeometryRepresentations()) {
+            return DocumentState::PartialOrMismatched;
+        }
+        if (isCommitted) {
+            return DocumentState::AllCommitted;
+        }
+        if (isAbsent) {
+            return DocumentState::None;
+        }
+        return DocumentState::PartialOrMismatched;
+    } catch (...) {
+        return DocumentState::Unavailable;
+    }
+}
+
 void BooleanOperationController::rollbackFailedTransaction(
     const Handle(TDocStd_Document)& theDocument) noexcept
 {
     const std::optional<BooleanAction> anAction = _activeAction;
     const Standard_Boolean didAbort =
         abortDocumentCommandNoThrow(theDocument);
-    cancelImpl();
-    if (!didAbort) {
-        // Visual state can still be restored, but keep the controller
-        // unresolved until a later cancel retries and confirms that OCAF no
-        // longer has the Boolean command open.
-        _activeAction = anAction;
-        _documentCommandUnresolved = Standard_True;
-        markInvalid();
+    if (didAbort) {
+        (void)cancelImpl();
+        return;
     }
+    // The command may still be open, may have closed without reporting, or
+    // may have partially persisted. Retain every source/result token and the
+    // transient presentations until Apply/Cancel can inspect document truth.
+    _activeAction = anAction;
+    _documentCommandUnresolved = Standard_True;
+    markInvalid();
 }
 
 Standard_Boolean BooleanOperationController::abortDocumentCommandNoThrow(
@@ -1534,6 +1778,7 @@ std::string BooleanOperationController::currentSelectionFingerprint(
         struct Entry {
             std::string identifier;
             BooleanSelectionType role = BooleanSelectionType::Undefined;
+            TDF_Label label;
             Handle(AIS_InteractiveObject) presentation;
         };
         std::vector<Entry> anActors;
@@ -1542,7 +1787,8 @@ std::string BooleanOperationController::currentSelectionFingerprint(
             const std::string anIdentifier =
                 myDoc->EntityIdentifierForLabel(
                     aSelection.second.documentLabel);
-            if (anIdentifier.empty()
+            if (aSelection.second.documentLabel.IsNull()
+                || anIdentifier.empty()
                 || aSelection.first.IsNull()
                 || Handle(AIS_Shape)::DownCast(
                     aSelection.first).IsNull()) {
@@ -1553,6 +1799,7 @@ std::string BooleanOperationController::currentSelectionFingerprint(
                 anActors.push_back({
                     anIdentifier,
                     BooleanSelectionType::Actor,
+                    aSelection.second.documentLabel,
                     aSelection.second.original,
                 });
             }
@@ -1578,6 +1825,7 @@ std::string BooleanOperationController::currentSelectionFingerprint(
                 aMatch.identifier =
                     myDoc->EntityIdentifierForLabel(aSubjectLabel);
                 aMatch.role = BooleanSelectionType::Subject;
+                aMatch.label = aSubjectLabel;
                 aMatch.presentation = aSelection.second.original;
                 hasMatch = true;
             }
@@ -1603,7 +1851,14 @@ std::string BooleanOperationController::currentSelectionFingerprint(
         const auto append = [&](const Entry& theEntry) {
             const Handle(AIS_Shape) aShape =
                 Handle(AIS_Shape)::DownCast(theEntry.presentation);
-            if (aShape.IsNull() || aShape->Shape().IsNull()) {
+            OcctReferenceAxis aReferenceAxis;
+            const OcctReferenceAxisReadState aReferenceAxisState =
+                myDoc->ReadReferenceAxisForLabel(
+                    theEntry.label, aReferenceAxis);
+            if (theEntry.label.IsNull()
+                || aShape.IsNull() || aShape->Shape().IsNull()
+                || aReferenceAxisState
+                    == OcctReferenceAxisReadState::Invalid) {
                 return false;
             }
             aFingerprint << '|' << static_cast<int>(theEntry.role)
@@ -1620,6 +1875,16 @@ std::string BooleanOperationController::currentSelectionFingerprint(
                         << aTransform.Value(aRow, aColumn);
                 }
             }
+            aFingerprint
+                << ":axis:" << static_cast<int>(aReferenceAxisState)
+                << ':' << static_cast<int>(aReferenceAxis.pivotSpace)
+                << ':' << aReferenceAxis.pivot.X()
+                << ':' << aReferenceAxis.pivot.Y()
+                << ':' << aReferenceAxis.pivot.Z()
+                << ':' << static_cast<int>(aReferenceAxis.directionSpace)
+                << ':' << aReferenceAxis.direction.X()
+                << ':' << aReferenceAxis.direction.Y()
+                << ':' << aReferenceAxis.direction.Z();
             return true;
         };
         for (const Entry& anActor : anActors) {
@@ -2306,16 +2571,56 @@ void BooleanOperationController::applyStyle(
     }
 }
 
-void BooleanOperationController::persistStyle(
+void BooleanOperationController::persistResultMetadata(
     const TDF_Label& theLabel,
-    const TemporalBooleanObject& theStyle)
+    const TemporalBooleanObject& theStyle,
+    OcctReferenceAxisReadState& theExpectedReferenceAxisState,
+    OcctReferenceAxis& theExpectedReferenceAxis)
 {
-    if (theLabel.IsNull() || theStyle.documentLabel.IsNull()) {
-        throw Standard_Failure("Boolean appearance label is null");
+    theExpectedReferenceAxisState =
+        OcctReferenceAxisReadState::Invalid;
+    theExpectedReferenceAxis = OcctReferenceAxis();
+    if (theLabel.IsNull() || theStyle.documentLabel.IsNull()
+        || theStyle.original.IsNull()
+        || !myDoc->ShapeLabel(theStyle.original).IsEqual(
+            theStyle.documentLabel)) {
+        throw Standard_Failure("Boolean metadata source is invalid");
+    }
+    // Boolean capture bakes this original presentation into world geometry.
+    // Use that exact source-local -> result-local transform for the axis, and
+    // the same definition label that authoritatively supplies appearance.
+    const gp_Trsf aBakeTransform =
+        theStyle.original->LocalTransformation();
+    OcctReferenceAxis aSourceReferenceAxis;
+    const OcctReferenceAxisReadState aSourceReferenceAxisState =
+        myDoc->ReadReferenceAxisForLabel(
+            theStyle.documentLabel, aSourceReferenceAxis);
+    if (!TryExpectedBakedReferenceAxis(
+            aSourceReferenceAxisState,
+            aSourceReferenceAxis,
+            aBakeTransform,
+            theExpectedReferenceAxisState,
+            theExpectedReferenceAxis)) {
+        throw Standard_Failure("Boolean reference axis source is invalid");
     }
     if (!myDoc->CopyObjectAppearance(
-            theStyle.documentLabel, theLabel)) {
-        throw Standard_Failure("Unable to preserve Boolean appearance");
+            theStyle.documentLabel, theLabel)
+        || !myDoc->CopyReferenceAxisThroughBakedTransform(
+            theStyle.documentLabel,
+            theLabel,
+            aBakeTransform)) {
+        throw Standard_Failure("Unable to preserve Boolean metadata");
+    }
+    OcctReferenceAxis aStoredReferenceAxis;
+    const OcctReferenceAxisReadState aStoredReferenceAxisState =
+        myDoc->ReadReferenceAxisForLabel(
+            theLabel, aStoredReferenceAxis);
+    if (aStoredReferenceAxisState != theExpectedReferenceAxisState
+        || aStoredReferenceAxisState
+            == OcctReferenceAxisReadState::Invalid
+        || ReferenceAxisDiffers(
+            aStoredReferenceAxis, theExpectedReferenceAxis)) {
+        throw Standard_Failure("Boolean reference axis did not round-trip");
     }
 }
 
@@ -2384,10 +2689,78 @@ void BooleanOperationController::showInteractiveByType(
     }
 }
 
+BooleanApplyResult BooleanOperationController::finishCommittedApply(
+    const BooleanAction theAction) noexcept
+{
+    if (!actionMatches(theAction)) {
+        return BooleanApplyResult::NoChange;
+    }
+    bool needsRedraw = false;
+    try {
+        if (theAction == BooleanAction::BooleanSubtract) {
+            for (const auto& aSelection : _selectionMap) {
+                if (aSelection.second.selectionType
+                    == BooleanSelectionType::Actor) {
+                    myContext->Remove(aSelection.first, Standard_False);
+                } else if (aSelection.second.selectionType
+                           == BooleanSelectionType::Subject) {
+                    showInteractiveByType(
+                        aSelection.first,
+                        BooleanSelectionType::Undefined);
+                }
+            }
+        } else {
+            showInteractiveByType(
+                _singleTrialResult,
+                BooleanSelectionType::Undefined);
+        }
+        myContext->ClearSelected(Standard_False);
+        myContext->UpdateCurrentViewer();
+        myDoc->NotifyChanges();
+    } catch (...) {
+        needsRedraw = true;
+        try {
+            myDoc->NotifyChanges();
+        } catch (...) {
+        }
+    }
+
+    // Every result is now document-owned. Do not remove it with transient
+    // cleanup; releasing these handles is safe because AIS/OCAF retain them.
+    clearOperationState();
+    return needsRedraw
+        ? BooleanApplyResult::AppliedNeedsDocumentRedraw
+        : BooleanApplyResult::Applied;
+}
+
 BooleanApplyResult BooleanOperationController::apply(
     const BooleanAction theAction) noexcept
 {
     if (!actionMatches(theAction)) {
+        return BooleanApplyResult::NoChange;
+    }
+    if (_documentCommandUnresolved && !_pendingResults.empty()) {
+        DocumentState aState = inspectPendingTransaction();
+        if (aState == DocumentState::OpenCommand) {
+            Handle(TDocStd_Document) aDocument;
+            try {
+                aDocument = myDoc->ChangeDocument();
+            } catch (...) {
+            }
+            if (abortDocumentCommandNoThrow(aDocument)) {
+                aState = inspectPendingTransaction();
+            }
+        }
+        if (aState == DocumentState::AllCommitted) {
+            return finishCommittedApply(theAction);
+        }
+        if (aState == DocumentState::None) {
+            _documentCommandUnresolved = Standard_False;
+            (void)cancelImpl();
+            return BooleanApplyResult::NoChange;
+        }
+        _documentCommandUnresolved = Standard_True;
+        markInvalid();
         return BooleanApplyResult::NoChange;
     }
     // Computing Apply is an intentional no-op. The worker and tool stay live;
@@ -2469,6 +2842,43 @@ BooleanApplyResult BooleanOperationController::apply(
             }
         }
 
+        std::vector<PendingSource> aPendingSources;
+        aPendingSources.reserve(aSourceLabels.size());
+        for (const TDF_Label& aSourceLabel : aSourceLabels) {
+            const TopoDS_Shape aStored =
+                XCAFDoc_ShapeTool::GetShape(aSourceLabel);
+            gp_Trsf aTransform;
+            OcctReferenceAxis aReferenceAxis;
+            const OcctReferenceAxisReadState aReferenceAxisState =
+                myDoc->ReadReferenceAxisForLabel(
+                    aSourceLabel, aReferenceAxis);
+            PendingSource aPending{
+                aSourceLabel,
+                myDoc->EntityIdentifierForLabel(aSourceLabel),
+                myDoc->DefinitionIdentifierForLabel(aSourceLabel),
+                myDoc->GeometryRepresentationForLabel(aSourceLabel),
+                aStored,
+                aTransform,
+                aReferenceAxisState,
+                aReferenceAxis,
+            };
+            if (aPending.label.IsNull() || aPending.expectedShape.IsNull()
+                || aPending.entityIdentifier.empty()
+                || aPending.definitionIdentifier.empty()
+                || aPending.representation
+                    == OcctGeometryRepresentation::Invalid
+                || !myDoc->TryObjectTransformForLabel(
+                    aSourceLabel, aPending.expectedTransform)
+                || aPending.expectedReferenceAxisState
+                    == OcctReferenceAxisReadState::Invalid) {
+                return failWithoutMutation();
+            }
+            aPendingSources.push_back(std::move(aPending));
+        }
+        _pendingSources = std::move(aPendingSources);
+        _pendingResults.clear();
+        _pendingResults.reserve(aResults.size());
+
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
             return failWithoutMutation();
@@ -2480,10 +2890,16 @@ BooleanApplyResult BooleanOperationController::apply(
             return BooleanApplyResult::NoChange;
         }
 #endif
-        // Persist result appearance while each source label is still present;
-        // removing a source first clears the XCAF material relationship that
-        // the result must inherit.
+        // Persist result metadata while each source label is still present;
+        // removing a source first clears both the XCAF material relationship
+        // and the definition-owned reference axis that the result inherits.
         for (const auto& aResult : aResults) {
+            const Handle(AIS_Shape) aResultShape =
+                Handle(AIS_Shape)::DownCast(aResult.first);
+            if (aResultShape.IsNull() || aResultShape->Shape().IsNull()) {
+                rollbackFailedTransaction(aDocument);
+                return BooleanApplyResult::NoChange;
+            }
             const TDF_Label aResultLabel = myDoc->AddShape(
                 aResult.first, OcctGeometryRepresentation::BRep);
             if (aResultLabel.IsNull()) {
@@ -2495,7 +2911,32 @@ BooleanApplyResult BooleanOperationController::apply(
 				rollbackFailedTransaction(aDocument);
 				return BooleanApplyResult::NoChange;
 			}
-            persistStyle(aResultLabel, aResult.second);
+            OcctReferenceAxisReadState anExpectedReferenceAxisState =
+                OcctReferenceAxisReadState::Invalid;
+            OcctReferenceAxis anExpectedReferenceAxis;
+            persistResultMetadata(
+                aResultLabel,
+                aResult.second,
+                anExpectedReferenceAxisState,
+                anExpectedReferenceAxis);
+            _pendingResults.push_back({
+                aResultLabel,
+                myDoc->EntityIdentifierForLabel(aResultLabel),
+                myDoc->DefinitionIdentifierForLabel(aResultLabel),
+                aResultShape->Shape(),
+                aResult.first->LocalTransformation(),
+                anExpectedReferenceAxisState,
+                anExpectedReferenceAxis,
+            });
+            const PendingResult& aPending = _pendingResults.back();
+            if (aPending.entityIdentifier.empty()
+                || aPending.definitionIdentifier.empty()
+                || TransformDiffers(
+                    myDoc->ObjectTransformForLabel(aResultLabel),
+                    aPending.expectedTransform)) {
+                rollbackFailedTransaction(aDocument);
+                return BooleanApplyResult::NoChange;
+            }
         }
         for (const TDF_Label& aLabel : aSourceLabels) {
             if (!myDoc->RemoveShape(aLabel)) {
@@ -2503,9 +2944,15 @@ BooleanApplyResult BooleanOperationController::apply(
                 return BooleanApplyResult::NoChange;
             }
         }
-        if (!aDocument->CommitCommand()) {
+        if (!myDoc->ValidateGeometryRepresentations()) {
             rollbackFailedTransaction(aDocument);
             return BooleanApplyResult::NoChange;
+        }
+        try {
+            (void)aDocument->CommitCommand();
+        } catch (...) {
+            // Document inspection below, not the API return/throw, is the
+            // authority for a command that may have closed before reporting.
         }
     } catch (const Standard_Failure& aFailure) {
         std::cout << "Boolean transaction failure: "
@@ -2517,42 +2964,21 @@ BooleanApplyResult BooleanOperationController::apply(
         return BooleanApplyResult::NoChange;
     }
 
-    bool needsRedraw = false;
-    try {
-        if (theAction == BooleanAction::BooleanSubtract) {
-            for (const auto& aSelection : _selectionMap) {
-                if (aSelection.second.selectionType
-                    == BooleanSelectionType::Actor) {
-                    myContext->Remove(aSelection.first, Standard_False);
-                } else if (aSelection.second.selectionType
-                           == BooleanSelectionType::Subject) {
-                    showInteractiveByType(
-                        aSelection.first,
-                        BooleanSelectionType::Undefined);
-                }
-            }
-        } else {
-            showInteractiveByType(
-                _singleTrialResult,
-                BooleanSelectionType::Undefined);
-        }
-        myContext->ClearSelected(Standard_False);
-        myContext->UpdateCurrentViewer();
-        myDoc->NotifyChanges();
-    } catch (...) {
-        needsRedraw = true;
-        try {
-            myDoc->NotifyChanges();
-        } catch (...) {
-        }
+    DocumentState aState = inspectPendingTransaction();
+    if (aState == DocumentState::OpenCommand) {
+        rollbackFailedTransaction(aDocument);
+        return BooleanApplyResult::NoChange;
     }
-
-    // Every result is now document-owned. Do not remove it with transient
-    // cleanup; releasing these handles is safe because AIS/OCAF retain them.
-    clearOperationState();
-    return needsRedraw
-        ? BooleanApplyResult::AppliedNeedsDocumentRedraw
-        : BooleanApplyResult::Applied;
+    if (aState == DocumentState::AllCommitted) {
+        return finishCommittedApply(theAction);
+    }
+    if (aState == DocumentState::None) {
+        (void)cancelImpl();
+        return BooleanApplyResult::NoChange;
+    }
+    _documentCommandUnresolved = Standard_True;
+    markInvalid();
+    return BooleanApplyResult::NoChange;
 }
 
 Standard_Boolean BooleanOperationController::cancelImpl() noexcept
@@ -2561,6 +2987,33 @@ Standard_Boolean BooleanOperationController::cancelImpl() noexcept
     _previewState = BooleanPreviewState::Selecting;
     _selectionFrozen = Standard_True;
     bool didRestoreAll = true;
+
+    if (_documentCommandUnresolved && !_pendingResults.empty()) {
+        DocumentState aState = inspectPendingTransaction();
+        if (aState == DocumentState::OpenCommand) {
+            Handle(TDocStd_Document) aDocument;
+            try {
+                if (!myDoc.IsNull()) {
+                    aDocument = myDoc->ChangeDocument();
+                }
+            } catch (...) {
+            }
+            if (abortDocumentCommandNoThrow(aDocument)) {
+                aState = inspectPendingTransaction();
+            }
+        }
+        if (aState == DocumentState::AllCommitted
+            && _activeAction.has_value()) {
+            return finishCommittedApply(*_activeAction)
+                != BooleanApplyResult::NoChange;
+        }
+        if (aState == DocumentState::None) {
+            _documentCommandUnresolved = Standard_False;
+        } else {
+            markInvalid();
+            return Standard_False;
+        }
+    }
 
     if (_documentCommandUnresolved) {
         Handle(TDocStd_Document) aDocument;
@@ -2648,6 +3101,8 @@ void BooleanOperationController::clearOperationState() noexcept
     _actedIOArray.clear();
     _actorIOArray.clear();
     _subjectSelectionOrder.clear();
+    _pendingSources.clear();
+    _pendingResults.clear();
     _ownedPresentations.clear();
     _singleTrialResult.Nullify();
     _activeAction.reset();

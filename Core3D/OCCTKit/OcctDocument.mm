@@ -73,6 +73,7 @@
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
+#include <gp_Vec.hxx>
 #include <GP_Quaternion.hxx>
 #include <TNaming.hxx>
 #include <TNaming_NamedShape.hxx>
@@ -104,6 +105,13 @@
 #include <vector>
 
 IMPLEMENT_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
+
+const Standard_GUID& Core3DDuplicateCommandOwnerAttributeID()
+{
+    static const Standard_GUID anId(
+        "D7598D08-A879-4E17-8D23-CC92568EAD5C");
+    return anId;
+}
 
 namespace {
 
@@ -1271,8 +1279,115 @@ const Standard_GUID& GeometryRepresentationAttributeID()
     return anId;
 }
 
-constexpr Standard_Size kMaximumGeometryDefinitionLabels = 4'096;
+//! A reference-axis record is seven custom scalar attributes on one free,
+//! simple definition label. These GUIDs and the encoded mode values are
+//! permanent serialized schema identifiers: never renumber or reuse them.
+const Standard_GUID& ReferenceAxisModeAttributeID()
+{
+    static const Standard_GUID anId("26128380-D69C-4530-B856-0C2AEEF47E60");
+    return anId;
+}
+
+const Standard_GUID& ReferenceAxisPivotXAttributeID()
+{
+    static const Standard_GUID anId("11531A1D-14DB-4F78-AD91-814981846842");
+    return anId;
+}
+
+const Standard_GUID& ReferenceAxisPivotYAttributeID()
+{
+    static const Standard_GUID anId("BA2AE804-64BD-480B-8910-B1144DA1AAD3");
+    return anId;
+}
+
+const Standard_GUID& ReferenceAxisPivotZAttributeID()
+{
+    static const Standard_GUID anId("7CDD4B6E-5375-48F2-BAA9-AD76ACF6D47A");
+    return anId;
+}
+
+const Standard_GUID& ReferenceAxisDirectionXAttributeID()
+{
+    static const Standard_GUID anId("CCEC34C3-8D3A-447A-8C70-EDB35A5B7E1C");
+    return anId;
+}
+
+const Standard_GUID& ReferenceAxisDirectionYAttributeID()
+{
+    static const Standard_GUID anId("1DDBE964-693E-460A-9095-E47713BA28C0");
+    return anId;
+}
+
+const Standard_GUID& ReferenceAxisDirectionZAttributeID()
+{
+    static const Standard_GUID anId("09CC9F05-9628-4C84-B214-2676C8BED8AA");
+    return anId;
+}
+
+constexpr Standard_Integer kReferenceAxisSchemaV1 = 0x0100;
+constexpr Standard_Integer kReferenceAxisPivotWorldBit = 0x0001;
+constexpr Standard_Integer kReferenceAxisDirectionWorldBit = 0x0002;
+constexpr Standard_Real kReferenceAxisUnitTolerance = 1.0e-10;
+
+const std::array<const Standard_GUID*, 7>& ReferenceAxisAttributeIDs()
+{
+    static const std::array<const Standard_GUID*, 7> anIds = {{
+        &ReferenceAxisModeAttributeID(),
+        &ReferenceAxisPivotXAttributeID(),
+        &ReferenceAxisPivotYAttributeID(),
+        &ReferenceAxisPivotZAttributeID(),
+        &ReferenceAxisDirectionXAttributeID(),
+        &ReferenceAxisDirectionYAttributeID(),
+        &ReferenceAxisDirectionZAttributeID(),
+    }};
+    return anIds;
+}
+
 constexpr Standard_Size kMaximumGeometryDocumentLabels = 100'000;
+
+Standard_Boolean ValidateDuplicateCommandOwnerSentinelDocument(
+    const Handle(TDocStd_Document)& theDocument)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) {
+            return Standard_False;
+        }
+        const TDF_Label aRoot = theDocument->GetData()->Root();
+        const TDF_Label aMain = theDocument->Main();
+        if (aRoot.IsNull() || aMain.IsNull()) {
+            return Standard_False;
+        }
+        const auto isValidLabel = [&](const TDF_Label& theLabel) {
+            Handle(TDF_Attribute) anAttribute;
+            if (!theLabel.FindAttribute(
+                    Core3DDuplicateCommandOwnerAttributeID(),
+                    anAttribute)) {
+                return true;
+            }
+            return theLabel.IsEqual(aMain)
+                && !anAttribute.IsNull()
+                && !Handle(TDataStd_Integer)::DownCast(
+                        anAttribute).IsNull();
+        };
+        if (!isValidLabel(aRoot)) {
+            return Standard_False;
+        }
+        Standard_Size aLabelCount = 0;
+        for (TDF_ChildIterator aLabel(aRoot, Standard_True);
+             aLabel.More(); aLabel.Next()) {
+            if (++aLabelCount > kMaximumGeometryDocumentLabels
+                || !isValidLabel(aLabel.Value())) {
+                return Standard_False;
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+constexpr Standard_Size kMaximumGeometryDefinitionLabels = 4'096;
 constexpr Standard_Size kMaximumSubshapesPerDefinition = 8'192;
 constexpr Standard_Size kMaximumSubshapesPerDocument = 131'072;
 constexpr Standard_Size kMaximumTopologyDepth = 128;
@@ -1353,6 +1468,440 @@ bool IsGeometryDefinitionLabel(
         && !XCAFDoc_ShapeTool::IsReference(theLabel)
         && !XCAFDoc_ShapeTool::IsComponent(theLabel)
         && !XCAFDoc_ShapeTool::IsSubShape(theLabel);
+}
+
+OcctReferenceAxis DefaultReferenceAxis()
+{
+    OcctReferenceAxis anAxis;
+    anAxis.pivotSpace = OcctReferenceSpace::Object;
+    anAxis.pivot = gp_Pnt(0.0, 0.0, 0.0);
+    anAxis.directionSpace = OcctReferenceSpace::World;
+    anAxis.direction = gp_Dir(0.0, 0.0, 1.0);
+    return anAxis;
+}
+
+bool IsReferenceSpace(const OcctReferenceSpace theSpace) noexcept
+{
+    return theSpace == OcctReferenceSpace::Object
+        || theSpace == OcctReferenceSpace::World;
+}
+
+bool IsFiniteBoundedReferencePoint(const gp_Pnt& thePoint) noexcept
+{
+    return IsFiniteBoundedMeshCoordinate(thePoint.X())
+        && IsFiniteBoundedMeshCoordinate(thePoint.Y())
+        && IsFiniteBoundedMeshCoordinate(thePoint.Z());
+}
+
+bool IsFiniteReferenceDirection(const gp_Dir& theDirection) noexcept
+{
+    const Standard_Real aSquaredLength =
+        theDirection.X() * theDirection.X()
+        + theDirection.Y() * theDirection.Y()
+        + theDirection.Z() * theDirection.Z();
+    return std::isfinite(theDirection.X())
+        && std::isfinite(theDirection.Y())
+        && std::isfinite(theDirection.Z())
+        && std::isfinite(aSquaredLength)
+        && std::abs(aSquaredLength - 1.0)
+            <= kReferenceAxisUnitTolerance;
+}
+
+Standard_Real CanonicalReferenceScalar(const Standard_Real theValue) noexcept
+{
+    return theValue == 0.0 ? 0.0 : theValue;
+}
+
+bool ReferenceAxesMatch(
+    const OcctReferenceAxis& theLeft,
+    const OcctReferenceAxis& theRight,
+    const Standard_Real theTolerance = 1.0e-12) noexcept
+{
+    return theLeft.pivotSpace == theRight.pivotSpace
+        && theLeft.directionSpace == theRight.directionSpace
+        && theLeft.pivot.IsEqual(theRight.pivot, theTolerance)
+        && theLeft.direction.IsEqual(theRight.direction, theTolerance);
+}
+
+Standard_Integer EncodedReferenceAxisMode(
+    const OcctReferenceAxis& theAxis) noexcept
+{
+    return kReferenceAxisSchemaV1
+        | (theAxis.pivotSpace == OcctReferenceSpace::World
+            ? kReferenceAxisPivotWorldBit : 0)
+        | (theAxis.directionSpace == OcctReferenceSpace::World
+            ? kReferenceAxisDirectionWorldBit : 0);
+}
+
+OcctReferenceAxisReadState ReadReferenceAxisRecord(
+    const TDF_Label& theLabel,
+    OcctReferenceAxis& theAxis)
+{
+    theAxis = DefaultReferenceAxis();
+    if (theLabel.IsNull()) {
+        return OcctReferenceAxisReadState::Invalid;
+    }
+
+    const auto& anIds = ReferenceAxisAttributeIDs();
+    std::array<Handle(TDF_Attribute), 7> anAttributes;
+    Standard_Size aPresentCount = 0;
+    for (std::size_t anIndex = 0; anIndex < anIds.size(); ++anIndex) {
+        if (theLabel.FindAttribute(*anIds[anIndex], anAttributes[anIndex])) {
+            ++aPresentCount;
+        }
+    }
+    if (aPresentCount == 0U) {
+        return OcctReferenceAxisReadState::ImplicitDefault;
+    }
+    if (aPresentCount != anIds.size()) {
+        return OcctReferenceAxisReadState::Invalid;
+    }
+
+    const Handle(TDataStd_Integer) aMode =
+        Handle(TDataStd_Integer)::DownCast(anAttributes[0]);
+    if (aMode.IsNull()) {
+        return OcctReferenceAxisReadState::Invalid;
+    }
+    const Standard_Integer aModeValue = aMode->Get();
+    if ((aModeValue & ~0x0003) != kReferenceAxisSchemaV1) {
+        return OcctReferenceAxisReadState::Invalid;
+    }
+
+    Standard_Real aValues[6] = {};
+    for (std::size_t anIndex = 0; anIndex < 6U; ++anIndex) {
+        const Handle(TDataStd_Real) aValue =
+            Handle(TDataStd_Real)::DownCast(anAttributes[anIndex + 1U]);
+        if (aValue.IsNull() || !std::isfinite(aValue->Get())) {
+            return OcctReferenceAxisReadState::Invalid;
+        }
+        aValues[anIndex] = aValue->Get();
+    }
+
+    const gp_Pnt aPivot(aValues[0], aValues[1], aValues[2]);
+    if (!IsFiniteBoundedReferencePoint(aPivot)) {
+        return OcctReferenceAxisReadState::Invalid;
+    }
+    const Standard_Real aDirectionSquaredLength =
+        aValues[3] * aValues[3]
+        + aValues[4] * aValues[4]
+        + aValues[5] * aValues[5];
+    if (!std::isfinite(aDirectionSquaredLength)
+        || std::abs(aDirectionSquaredLength - 1.0)
+            > kReferenceAxisUnitTolerance) {
+        return OcctReferenceAxisReadState::Invalid;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        theAxis.pivotSpace =
+            (aModeValue & kReferenceAxisPivotWorldBit) != 0
+            ? OcctReferenceSpace::World : OcctReferenceSpace::Object;
+        theAxis.pivot = aPivot;
+        theAxis.directionSpace =
+            (aModeValue & kReferenceAxisDirectionWorldBit) != 0
+            ? OcctReferenceSpace::World : OcctReferenceSpace::Object;
+        theAxis.direction = gp_Dir(aValues[3], aValues[4], aValues[5]);
+        return IsFiniteReferenceDirection(theAxis.direction)
+            ? OcctReferenceAxisReadState::Authored
+            : OcctReferenceAxisReadState::Invalid;
+    } catch (...) {
+        theAxis = DefaultReferenceAxis();
+        return OcctReferenceAxisReadState::Invalid;
+    }
+}
+
+bool WriteReferenceAxisRecord(
+    const TDF_Label& theLabel,
+    const OcctReferenceAxis& theAxis)
+{
+    if (theLabel.IsNull()
+        || !IsReferenceSpace(theAxis.pivotSpace)
+        || !IsReferenceSpace(theAxis.directionSpace)
+        || !IsFiniteBoundedReferencePoint(theAxis.pivot)
+        || !IsFiniteReferenceDirection(theAxis.direction)) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        TDataStd_Integer::Set(
+            theLabel,
+            ReferenceAxisModeAttributeID(),
+            EncodedReferenceAxisMode(theAxis));
+        TDataStd_Real::Set(
+            theLabel,
+            ReferenceAxisPivotXAttributeID(),
+            CanonicalReferenceScalar(theAxis.pivot.X()));
+        TDataStd_Real::Set(
+            theLabel,
+            ReferenceAxisPivotYAttributeID(),
+            CanonicalReferenceScalar(theAxis.pivot.Y()));
+        TDataStd_Real::Set(
+            theLabel,
+            ReferenceAxisPivotZAttributeID(),
+            CanonicalReferenceScalar(theAxis.pivot.Z()));
+        TDataStd_Real::Set(
+            theLabel,
+            ReferenceAxisDirectionXAttributeID(),
+            CanonicalReferenceScalar(theAxis.direction.X()));
+        TDataStd_Real::Set(
+            theLabel,
+            ReferenceAxisDirectionYAttributeID(),
+            CanonicalReferenceScalar(theAxis.direction.Y()));
+        TDataStd_Real::Set(
+            theLabel,
+            ReferenceAxisDirectionZAttributeID(),
+            CanonicalReferenceScalar(theAxis.direction.Z()));
+
+        OcctReferenceAxis aStored;
+        return ReadReferenceAxisRecord(theLabel, aStored)
+                == OcctReferenceAxisReadState::Authored
+            && ReferenceAxesMatch(theAxis, aStored);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool HasAnyReferenceAxisAttribute(const TDF_Label& theLabel)
+{
+    if (theLabel.IsNull()) {
+        return false;
+    }
+    for (const Standard_GUID* anId : ReferenceAxisAttributeIDs()) {
+        if (anId != nullptr && theLabel.IsAttribute(*anId)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TryReadObjectTransform(
+    const Handle(TDocStd_Document)& theDocument,
+    const Handle(XCAFDoc_ShapeTool)& theShapeTool,
+    const TDF_Label& theLabel,
+    gp_Trsf& theTransform)
+{
+    if (!IsGeometryDefinitionLabel(theDocument, theShapeTool, theLabel)) {
+        return false;
+    }
+
+    const Standard_Real aDefaults[8] = {
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+        1.0,
+    };
+    Standard_Real aValues[8] = {};
+    for (Standard_Integer anIndex = 0; anIndex < 8; ++anIndex) {
+        aValues[anIndex] = aDefaults[anIndex];
+        const TDF_Label aChild =
+            theLabel.FindChild(anIndex + 1, Standard_False);
+        if (!aChild.IsNull()) {
+            Handle(TDataStd_Real) anAttribute;
+            if (aChild.FindAttribute(TDataStd_Real::GetID(), anAttribute)) {
+                if (anAttribute.IsNull()) {
+                    return false;
+                }
+                aValues[anIndex] = anAttribute->Get();
+            }
+        }
+        if (!std::isfinite(aValues[anIndex])) {
+            return false;
+        }
+    }
+    for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+        if (std::abs(aValues[anAxis])
+            > core3d::limits::kMaximumModelCoordinateMagnitude) {
+            return false;
+        }
+    }
+    if (std::abs(aValues[7])
+        <= std::numeric_limits<Standard_Real>::epsilon()) {
+        return false;
+    }
+
+    const Standard_Real aMaximumQuaternionComponent = std::max({
+        std::abs(aValues[3]), std::abs(aValues[4]),
+        std::abs(aValues[5]), std::abs(aValues[6]),
+    });
+    if (!std::isfinite(aMaximumQuaternionComponent)
+        || aMaximumQuaternionComponent
+            <= std::numeric_limits<Standard_Real>::min()) {
+        return false;
+    }
+    Standard_Real aQuaternion[4] = {
+        aValues[3] / aMaximumQuaternionComponent,
+        aValues[4] / aMaximumQuaternionComponent,
+        aValues[5] / aMaximumQuaternionComponent,
+        aValues[6] / aMaximumQuaternionComponent,
+    };
+    const Standard_Real aQuaternionNorm = std::sqrt(
+        aQuaternion[0] * aQuaternion[0]
+        + aQuaternion[1] * aQuaternion[1]
+        + aQuaternion[2] * aQuaternion[2]
+        + aQuaternion[3] * aQuaternion[3]);
+    if (!std::isfinite(aQuaternionNorm)
+        || aQuaternionNorm
+            <= std::numeric_limits<Standard_Real>::epsilon()) {
+        return false;
+    }
+    for (Standard_Real& aComponent : aQuaternion) {
+        aComponent /= aQuaternionNorm;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        gp_Trsf aTransform;
+        aTransform.SetRotationPart(gp_Quaternion(
+            aQuaternion[0], aQuaternion[1],
+            aQuaternion[2], aQuaternion[3]));
+        aTransform.SetScaleFactor(aValues[7]);
+        aTransform.SetTranslationPart(
+            gp_XYZ(aValues[0], aValues[1], aValues[2]));
+        for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+            for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+                if (!std::isfinite(aTransform.Value(aRow, aColumn))) {
+                    return false;
+                }
+            }
+        }
+        theTransform = aTransform;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool TryResolveReferenceAxis(
+    const Handle(TDocStd_Document)& theDocument,
+    const Handle(XCAFDoc_ShapeTool)& theShapeTool,
+    const TDF_Label& theLabel,
+    const TopLoc_Location& theOccurrenceLocation,
+    gp_Ax1& theWorldAxis)
+{
+    OcctReferenceAxis aReference;
+    if (ReadReferenceAxisRecord(theLabel, aReference)
+            == OcctReferenceAxisReadState::Invalid
+        || !IsGeometryDefinitionLabel(
+            theDocument, theShapeTool, theLabel)) {
+        return false;
+    }
+
+    gp_Trsf anObjectTransform;
+    if (!TryReadObjectTransform(
+            theDocument, theShapeTool, theLabel, anObjectTransform)) {
+        return false;
+    }
+    const gp_Trsf anOccurrenceTransform =
+        theOccurrenceLocation.Transformation();
+    for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+        for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+            if (!std::isfinite(
+                    anOccurrenceTransform.Value(aRow, aColumn))) {
+                return false;
+            }
+        }
+    }
+    const gp_Trsf anObjectToWorld =
+        anObjectTransform.Multiplied(anOccurrenceTransform);
+
+    gp_Pnt aWorldPivot = aReference.pivot;
+    if (aReference.pivotSpace == OcctReferenceSpace::Object) {
+        aWorldPivot.Transform(anObjectToWorld);
+    }
+    if (!IsFiniteBoundedReferencePoint(aWorldPivot)) {
+        return false;
+    }
+
+    gp_Vec aWorldDirection(aReference.direction);
+    if (aReference.directionSpace == OcctReferenceSpace::Object) {
+        aWorldDirection.Transform(anObjectToWorld);
+    }
+    const Standard_Real aSquaredMagnitude = aWorldDirection.SquareMagnitude();
+    if (!std::isfinite(aWorldDirection.X())
+        || !std::isfinite(aWorldDirection.Y())
+        || !std::isfinite(aWorldDirection.Z())
+        || !std::isfinite(aSquaredMagnitude)
+        || aSquaredMagnitude
+            <= std::numeric_limits<Standard_Real>::epsilon()) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const gp_Dir aWorldDirectionUnit(aWorldDirection);
+        if (!IsFiniteReferenceDirection(aWorldDirectionUnit)) {
+            return false;
+        }
+        theWorldAxis = gp_Ax1(aWorldPivot, aWorldDirectionUnit);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+Standard_Boolean ValidateReferenceAxisDocument(
+    const Handle(TDocStd_Document)& theDocument)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) {
+            return Standard_False;
+        }
+        const TDF_Label aRoot = theDocument->GetData()->Root();
+        if (HasAnyReferenceAxisAttribute(aRoot)) {
+            return Standard_False;
+        }
+
+        const bool hasShapeTool =
+            XCAFDoc_DocumentTool::CheckShapeTool(theDocument->Main());
+        const Handle(XCAFDoc_ShapeTool) aShapeTool = hasShapeTool
+            ? XCAFDoc_DocumentTool::ShapeTool(theDocument->Main())
+            : Handle(XCAFDoc_ShapeTool)();
+        if (hasShapeTool && aShapeTool.IsNull()) {
+            return Standard_False;
+        }
+
+        Standard_Size aLabelCount = 0;
+        for (TDF_ChildIterator aLabel(aRoot, Standard_True);
+             aLabel.More(); aLabel.Next()) {
+            if (++aLabelCount > kMaximumGeometryDocumentLabels) {
+                return Standard_False;
+            }
+            const TDF_Label& aValue = aLabel.Value();
+            const bool hasReferenceAxis =
+                HasAnyReferenceAxisAttribute(aValue);
+            const bool isGeometryDefinition = !aShapeTool.IsNull()
+                && IsGeometryDefinitionLabel(
+                    theDocument, aShapeTool, aValue);
+            if (hasReferenceAxis) {
+                if (!isGeometryDefinition
+                    || !XCAFDoc_ShapeTool::IsFree(aValue)) {
+                    return Standard_False;
+                }
+                OcctReferenceAxis anAxis;
+                if (ReadReferenceAxisRecord(aValue, anAxis)
+                        != OcctReferenceAxisReadState::Authored) {
+                    return Standard_False;
+                }
+            }
+            if (isGeometryDefinition) {
+                // The implicit Object-Origin / World-Z axis is authority too.
+                // Resolve every definition, not only definitions carrying an
+                // authored record, so a malformed persisted object transform
+                // cannot pass open/save admission and fail later publication.
+                gp_Ax1 aResolved;
+                if (!TryResolveReferenceAxis(
+                        theDocument,
+                        aShapeTool,
+                        aValue,
+                        TopLoc_Location(),
+                        aResolved)) {
+                    return Standard_False;
+                }
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
 }
 
 bool ReadGeometryRepresentation(
@@ -2298,6 +2847,64 @@ OcctDocument::StoredGeometryRepresentationForLabel(
     }
 }
 
+OcctReferenceAxisReadState OcctDocument::ReadReferenceAxisForLabel(
+    const TDF_Label& label,
+    OcctReferenceAxis& axis) const
+{
+    axis = DefaultReferenceAxis();
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return OcctReferenceAxisReadState::Invalid;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (!IsGeometryDefinitionLabel(myOcafDoc, aShapeTool, label)) {
+            return OcctReferenceAxisReadState::Invalid;
+        }
+        const OcctReferenceAxisReadState aState =
+            ReadReferenceAxisRecord(label, axis);
+        if (aState == OcctReferenceAxisReadState::Authored
+            && !XCAFDoc_ShapeTool::IsFree(label)) {
+            axis = DefaultReferenceAxis();
+            return OcctReferenceAxisReadState::Invalid;
+        }
+        return aState;
+    } catch (...) {
+        axis = DefaultReferenceAxis();
+        return OcctReferenceAxisReadState::Invalid;
+    }
+}
+
+Standard_Boolean OcctDocument::ResolveReferenceAxisInWorld(
+    const TDF_Label& label,
+    const TopLoc_Location& occurrenceLocation,
+    gp_Ax1& axis) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        OcctReferenceAxis aReference;
+        const OcctReferenceAxisReadState aState =
+            ReadReferenceAxisForLabel(label, aReference);
+        if (aState == OcctReferenceAxisReadState::Invalid) {
+            return Standard_False;
+        }
+        return TryResolveReferenceAxis(
+            myOcafDoc, aShapeTool, label, occurrenceLocation, axis);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::ValidateGeometryRepresentationForLabel(
     const TDF_Label& label) const
 {
@@ -2327,7 +2934,9 @@ Standard_Boolean ValidateGeometryDocument(
 {
     try {
         OCC_CATCH_SIGNALS
-        if (document.IsNull() || document->GetData().IsNull()) {
+        if (document.IsNull() || document->GetData().IsNull()
+            || !ValidateDuplicateCommandOwnerSentinelDocument(document)
+            || !ValidateReferenceAxisDocument(document)) {
             return Standard_False;
         }
         const TDF_Label aRoot = document->GetData()->Root();
@@ -2517,6 +3126,10 @@ Standard_Boolean ValidateGeometryDocument(
                 // This path-relative traversal reaches one resolved leaf per
                 // occurrence, including repeated references to a shared
                 // definition. Geometry itself remains classified once below.
+				if (aLeafOccurrenceCount
+						>= core3d::limits::kMaximumLeafPresentations) {
+					return Standard_False;
+				}
                 ++aLeafOccurrenceCount;
                 if (!aDefinitionLabels.Contains(aLabel)) {
                     if (aDefinitionCount
@@ -2534,6 +3147,43 @@ Standard_Boolean ValidateGeometryDocument(
                 return Standard_False;
             }
         }
+
+		// The definition pass above validates authored and implicit axes at an
+		// identity occurrence. Schema v5 publishes the resolved world axis for
+		// every leaf, so admission must also prove each real cumulative XCAF
+		// occurrence location. Use the same explorer/location authority as the
+		// snapshot builder and cross-check its count against the bounded graph
+		// traversal so neither path can silently omit a leaf.
+		Standard_Size aResolvedReferenceOccurrenceCount = 0;
+		XCAFPrs_DocumentExplorer anOccurrenceExplorer(
+			document,
+			XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes,
+			XCAFPrs_Style());
+		for (; anOccurrenceExplorer.More(); anOccurrenceExplorer.Next()) {
+			if (aResolvedReferenceOccurrenceCount
+					>= core3d::limits::kMaximumLeafPresentations) {
+				return Standard_False;
+			}
+			const XCAFPrs_DocumentNode& aNode =
+				anOccurrenceExplorer.Current();
+			const TDF_Label aDefinitionLabel = aNode.RefLabel.IsNull()
+				? aNode.Label : aNode.RefLabel;
+			gp_Ax1 aResolvedReferenceAxis;
+			if (aDefinitionLabel.IsNull()
+				|| !aDefinitionLabels.Contains(aDefinitionLabel)
+				|| !TryResolveReferenceAxis(
+					document,
+					aShapeTool,
+					aDefinitionLabel,
+					aNode.Location,
+					aResolvedReferenceAxis)) {
+				return Standard_False;
+			}
+			++aResolvedReferenceOccurrenceCount;
+		}
+		if (aResolvedReferenceOccurrenceCount != aLeafOccurrenceCount) {
+			return Standard_False;
+		}
         for (TDF_MapIteratorOfLabelMap aTopLevel(
                  anAllTopLevelLabelSet);
              aTopLevel.More(); aTopLevel.Next()) {
@@ -2624,6 +3274,17 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
     const Handle(TDocStd_Document)& document) const
 {
     return ValidateGeometryDocument(document, nullptr);
+}
+
+Standard_Boolean OcctDocument::ValidateReferenceAxes() const
+{
+    return ValidateReferenceAxes(myOcafDoc);
+}
+
+Standard_Boolean OcctDocument::ValidateReferenceAxes(
+    const Handle(TDocStd_Document)& document) const
+{
+    return ValidateReferenceAxisDocument(document);
 }
 
 Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
@@ -3652,6 +4313,132 @@ Standard_Boolean OcctDocument::SetObjectPositionComponentForLabel(
         return child.FindAttribute(TDataStd_Real::GetID(), stored)
             && !stored.IsNull()
             && stored->Get() == value;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::SetReferenceAxisForLabel(
+    const TDF_Label& label,
+    const OcctReferenceAxis& axis)
+{
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull() || label.Data() != myOcafDoc->GetData()
+        || !IsEditableFreeSimpleDefinitionLabel(label)
+        || GeometryRepresentationForLabel(label)
+            == OcctGeometryRepresentation::Invalid) {
+        return Standard_False;
+    }
+    return WriteReferenceAxisRecord(label, axis)
+        ? Standard_True : Standard_False;
+}
+
+Standard_Boolean OcctDocument::ResetReferenceAxisForLabel(
+    const TDF_Label& label)
+{
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull() || label.Data() != myOcafDoc->GetData()
+        || !IsEditableFreeSimpleDefinitionLabel(label)
+        || GeometryRepresentationForLabel(label)
+            == OcctGeometryRepresentation::Invalid) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        for (const Standard_GUID* anId : ReferenceAxisAttributeIDs()) {
+            if (anId != nullptr) {
+                label.ForgetAttribute(*anId);
+            }
+        }
+        OcctReferenceAxis aStored;
+        return ReadReferenceAxisRecord(label, aStored)
+                == OcctReferenceAxisReadState::ImplicitDefault
+            && ReferenceAxesMatch(aStored, DefaultReferenceAxis());
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::CopyReferenceAxis(
+    const TDF_Label& source,
+    const TDF_Label& destination)
+{
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || source.IsNull() || destination.IsNull()
+        || source.Data() != myOcafDoc->GetData()
+        || destination.Data() != myOcafDoc->GetData()
+        || !IsEditableFreeSimpleDefinitionLabel(destination)) {
+        return Standard_False;
+    }
+    OcctReferenceAxis anAxis;
+    const OcctReferenceAxisReadState aState =
+        ReadReferenceAxisForLabel(source, anAxis);
+    if (aState == OcctReferenceAxisReadState::Invalid) {
+        return Standard_False;
+    }
+    return aState == OcctReferenceAxisReadState::ImplicitDefault
+        ? ResetReferenceAxisForLabel(destination)
+        : SetReferenceAxisForLabel(destination, anAxis);
+}
+
+Standard_Boolean OcctDocument::CopyReferenceAxisThroughBakedTransform(
+    const TDF_Label& source,
+    const TDF_Label& destination,
+    const gp_Trsf& sourceLocalToDestinationLocal)
+{
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || source.IsNull() || destination.IsNull()
+        || source.Data() != myOcafDoc->GetData()
+        || destination.Data() != myOcafDoc->GetData()
+        || !IsEditableFreeSimpleDefinitionLabel(destination)) {
+        return Standard_False;
+    }
+    for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+        for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+            if (!std::isfinite(
+                    sourceLocalToDestinationLocal.Value(aRow, aColumn))) {
+                return Standard_False;
+            }
+        }
+    }
+
+    OcctReferenceAxis anAxis;
+    const OcctReferenceAxisReadState aSourceState =
+        ReadReferenceAxisForLabel(source, anAxis);
+    if (aSourceState == OcctReferenceAxisReadState::Invalid) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        if (anAxis.pivotSpace == OcctReferenceSpace::Object) {
+            anAxis.pivot.Transform(sourceLocalToDestinationLocal);
+        }
+        if (!IsFiniteBoundedReferencePoint(anAxis.pivot)) {
+            return Standard_False;
+        }
+        if (anAxis.directionSpace == OcctReferenceSpace::Object) {
+            gp_Vec aDirection(anAxis.direction);
+            aDirection.Transform(sourceLocalToDestinationLocal);
+            const Standard_Real aSquaredMagnitude =
+                aDirection.SquareMagnitude();
+            if (!std::isfinite(aDirection.X())
+                || !std::isfinite(aDirection.Y())
+                || !std::isfinite(aDirection.Z())
+                || !std::isfinite(aSquaredMagnitude)
+                || aSquaredMagnitude
+                    <= std::numeric_limits<Standard_Real>::epsilon()) {
+                return Standard_False;
+            }
+            anAxis.direction = gp_Dir(aDirection);
+        }
+        if (!IsFiniteReferenceDirection(anAxis.direction)) {
+            return Standard_False;
+        }
+        if (aSourceState == OcctReferenceAxisReadState::ImplicitDefault
+            && ReferenceAxesMatch(anAxis, DefaultReferenceAxis())) {
+            return ResetReferenceAxisForLabel(destination);
+        }
+        return SetReferenceAxisForLabel(destination, anAxis);
     } catch (...) {
         return Standard_False;
     }
@@ -4870,6 +5657,27 @@ gp_Trsf OcctDocument::ObjectTransformForLabel(const TDF_Label& aRefLabel) const 
     t.SetRotationPart({rx, ry, rz, rw});
     t.SetScaleFactor(scale);
     return t;
+}
+
+Standard_Boolean OcctDocument::TryObjectTransformForLabel(
+    const TDF_Label& label,
+    gp_Trsf& transform) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(
+                myOcafDoc->Main())) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        return TryReadObjectTransform(
+            myOcafDoc, aShapeTool, label, transform)
+            ? Standard_True : Standard_False;
+    } catch (...) {
+        return Standard_False;
+    }
 }
 
 void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(AIS_Shape) anAis) {

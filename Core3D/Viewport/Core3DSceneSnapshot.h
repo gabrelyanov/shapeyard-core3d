@@ -75,6 +75,12 @@ typedef NS_ENUM(NSInteger, Core3DSceneCoordinateSpace) {
     Core3DSceneCoordinateSpaceWorldAnchorPixels,
 };
 
+//! Original coordinate authority of one persisted reference-axis component.
+typedef NS_ENUM(NSInteger, Core3DSceneReferenceSpace) {
+    Core3DSceneReferenceSpaceObject = 0,
+    Core3DSceneReferenceSpaceWorld = 1,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneDepthPolicy) {
     Core3DSceneDepthPolicyScene = 0,
     Core3DSceneDepthPolicyTopmost,
@@ -262,6 +268,16 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, copy, readonly) NSString *entityIdentifier;
 @property (nonatomic, assign, readonly) uint32_t meshIndex;
 @property (nonatomic, assign, readonly) simd_double4x4 worldTransform;
+//! True for committed full-scene model items. Transient overlay items do not
+//! claim persistent reference-axis authority.
+@property (nonatomic, assign, readonly) BOOL hasReferenceAxis;
+//! True-world values resolved before mesh recentering or render-origin shifts.
+@property (nonatomic, assign, readonly) simd_double3 referencePivotWorld;
+@property (nonatomic, assign, readonly) simd_double3 referenceDirectionWorld;
+//! Original persisted spaces, retained for mixed-space editing semantics.
+@property (nonatomic, assign, readonly) Core3DSceneReferenceSpace referencePivotSpace;
+@property (nonatomic, assign, readonly) Core3DSceneReferenceSpace referenceDirectionSpace;
+@property (nonatomic, assign, readonly, getter=isReferenceAxisAuthored) BOOL referenceAxisAuthored;
 @property (nonatomic, assign, readonly) Core3DSceneWinding winding;
 @property (nonatomic, assign, readonly, getter=isVisible) BOOL visible;
 @property (nonatomic, assign, readonly, getter=isSelectable) BOOL selectable;

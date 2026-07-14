@@ -268,6 +268,9 @@ namespace core3d {
 		MirrorPreviewState mirrorPreviewState() const noexcept;
 		std::uint64_t mirrorPreviewGeneration() const noexcept;
 #ifdef DEBUG
+		//! Inject Duplicate CommitCommand behavior after a real close:
+		//! 0 normal, 1 false-after-close, 2 throw-after-close.
+		void debugSetDuplicateCommitMode(Standard_Integer mode) noexcept;
 		MirrorPreviewDebugState debugMirrorPreviewState() const noexcept;
 		void debugSetMirrorTransactionFailureCount(
 			Standard_Size count) noexcept;
@@ -305,6 +308,19 @@ namespace core3d {
         void createManipulatorIfNeeded();
         void attachManipulator(Handle(AIS_InteractiveObject) toObject);
 		void detachManipulator(Handle(AIS_InteractiveObject) fromObject);
+		enum class DuplicateDocumentState : std::uint8_t {
+			None = 0,
+			AllCommitted,
+			OpenCommand,
+			PartialOrMismatched,
+			Unavailable,
+		};
+		DuplicateDocumentState
+			inspectPendingDuplicateResults() noexcept;
+		Standard_Boolean duplicateOwnedCommandIsCurrent(
+			const Handle(TDocStd_Document)& document) const noexcept;
+		Standard_Boolean abortOwnedDuplicateCommand() noexcept;
+		Standard_Boolean finishCommittedDuplicate() noexcept;
 		Standard_Boolean tryMirrorImpl(
 			Standard_Integer axisIndex,
 			bool backward);
@@ -343,6 +359,25 @@ namespace core3d {
 		
     private:
 		Standard_ShortReal _manipulatorSide;
+		struct DuplicatePendingResult {
+			Handle(AIS_Shape) presentation;
+			TDF_Label sourceLabel;
+			TDF_Label resultLabel;
+			OcctGeometryRepresentation representation =
+				OcctGeometryRepresentation::Invalid;
+			std::string entityIdentifier;
+			std::string definitionIdentifier;
+			TopoDS_Shape expectedShape;
+			gp_Trsf expectedTransform;
+			OcctReferenceAxisReadState expectedReferenceAxisState =
+				OcctReferenceAxisReadState::Invalid;
+			OcctReferenceAxis expectedReferenceAxis;
+		};
+		std::vector<DuplicatePendingResult> _pendingDuplicateResults;
+		bool _duplicateOwnsDocumentCommand = false;
+		Standard_Integer _duplicateOwnedTransaction = -1;
+		Standard_Integer _duplicateOwnedDocumentTime = -1;
+		Standard_Integer _duplicateOwnedMarkerValue = 0;
 		std::unordered_map<const AIS_InteractiveObject*, TDF_Label>
 			_manipulatorSourceLabels;
 		std::vector<Handle(AIS_Shape)> _trialMirrorObjects;
@@ -353,12 +388,20 @@ namespace core3d {
 			std::string definitionIdentifier;
 			TopoDS_Shape storedShape;
 			gp_Trsf transform;
+			gp_Trsf bakedTransform;
+			OcctReferenceAxisReadState referenceAxisState =
+				OcctReferenceAxisReadState::Invalid;
+			OcctReferenceAxis referenceAxis;
 		};
 		struct MirrorPendingResult {
 			TDF_Label label;
 			std::string entityIdentifier;
 			std::string definitionIdentifier;
 			TopoDS_Shape expectedShape;
+			gp_Trsf expectedTransform;
+			OcctReferenceAxisReadState expectedReferenceAxisState =
+				OcctReferenceAxisReadState::Invalid;
+			OcctReferenceAxis expectedReferenceAxis;
 		};
 		struct MirrorPlaneReferenceSnapshot {
 			Handle(TDocStd_Document) document;
@@ -397,6 +440,7 @@ namespace core3d {
 		std::uint64_t _mirrorPreviewGeneration = 0;
 		bool _manipulatorGestureActive = false;
 #ifdef DEBUG
+		Standard_Integer _debugDuplicateCommitMode = 0;
 		Standard_Size _debugMirrorTransactionFailureCount = 0;
 		Standard_Size _debugMirrorAbortFailureCount = 0;
 		Standard_Size _debugMirrorEraseFailureCount = 0;

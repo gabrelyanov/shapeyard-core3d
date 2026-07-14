@@ -133,6 +133,9 @@ private:
             OcctGeometryRepresentation::Invalid;
         TopoDS_Shape storedShape;
         gp_Trsf transform;
+        OcctReferenceAxisReadState referenceAxisState =
+            OcctReferenceAxisReadState::Invalid;
+        OcctReferenceAxis referenceAxis;
         Standard_Integer documentTime = 0;
         Standard_Size topologyNodeCount = 0;
         Standard_Real metersPerUnit = 0.0;
@@ -148,6 +151,9 @@ private:
             OcctGeometryRepresentation::Invalid;
         TopoDS_Shape expectedShape;
         gp_Trsf expectedTransform;
+        OcctReferenceAxisReadState expectedReferenceAxisState =
+            OcctReferenceAxisReadState::Invalid;
+        OcctReferenceAxis expectedReferenceAxis;
     };
 
     enum class DocumentState : std::uint8_t {

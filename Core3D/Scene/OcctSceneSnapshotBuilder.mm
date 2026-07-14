@@ -49,6 +49,7 @@
 #include <XCAFDoc_VisMaterialTool.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <V3d_View.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -451,6 +452,20 @@ bool MatrixFromTransform(const gp_Trsf& theTransform, Matrix4d& theMatrix)
     theMatrix.values[11] = 0.0;
     theMatrix.values[15] = 1.0;
     return true;
+}
+
+bool ReferenceSpaceFromOcct(const OcctReferenceSpace theSource,
+                            ReferenceSpace& theDestination)
+{
+    switch (theSource) {
+        case OcctReferenceSpace::Object:
+            theDestination = ReferenceSpace::Object;
+            return true;
+        case OcctReferenceSpace::World:
+            theDestination = ReferenceSpace::World;
+            return true;
+    }
+    return false;
 }
 
 bool TransformPoint(const Matrix4d& theMatrix,
@@ -1008,8 +1023,9 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
             && aVisualMaterial->HasPbrMaterial()) {
             const XCAFDoc_VisMaterialPBR& aPbr =
                 aVisualMaterial->PbrMaterial();
-            // Schema v4 represents base color and emissive. Preserve rendering
-            // fidelity by keeping OCCT active whenever another map matters.
+            // The scene schema represents base color and emissive. Preserve
+            // rendering fidelity by keeping OCCT active whenever another map
+            // matters.
             if (!aPbr.MetallicRoughnessTexture.IsNull()
                 || !aPbr.OcclusionTexture.IsNull()
                 || !aPbr.NormalTexture.IsNull()) {
@@ -2002,6 +2018,19 @@ std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
             aHash.AddDouble(aValue);
         }
         aHash.AddBool(anInstance.reversesWinding);
+        aHash.AddBool(anInstance.referenceAxis.has_value());
+        if (anInstance.referenceAxis.has_value()) {
+            const ReferenceAxisSnapshot& anAxis = *anInstance.referenceAxis;
+            aHash.AddDouble(anAxis.worldPivot.x);
+            aHash.AddDouble(anAxis.worldPivot.y);
+            aHash.AddDouble(anAxis.worldPivot.z);
+            aHash.AddDouble(anAxis.worldDirection.x);
+            aHash.AddDouble(anAxis.worldDirection.y);
+            aHash.AddDouble(anAxis.worldDirection.z);
+            aHash.AddInteger(static_cast<std::uint8_t>(anAxis.pivotSpace));
+            aHash.AddInteger(static_cast<std::uint8_t>(anAxis.directionSpace));
+            aHash.AddBool(anAxis.authored);
+        }
         aHash.AddString(anInstance.name);
     }
     return aHash.Value();
@@ -2567,6 +2596,7 @@ bool ValidatePresentationOverlayPayload(
             || anInstance.meshIndex >= theMeshes.size()
             || anInstance.reversesWinding || !anInstance.visible
             || anInstance.selectable || anInstance.selected
+			|| anInstance.referenceAxis.has_value()
             || !hasExpectedSemantics
             || (!isBooleanItem && !isChamferItem && !isShellItem
                 && anInstance.renderStyle != RenderStyle::Shaded)
@@ -2672,6 +2702,22 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
         aHash.AddBool(anInstance.visible);
         aHash.AddBool(anInstance.selectable);
         aHash.AddBool(anInstance.selected);
+		aHash.AddBool(anInstance.referenceAxis.has_value());
+		if (anInstance.referenceAxis.has_value()) {
+			const ReferenceAxisSnapshot& anAxis =
+				*anInstance.referenceAxis;
+			aHash.AddDouble(anAxis.worldPivot.x);
+			aHash.AddDouble(anAxis.worldPivot.y);
+			aHash.AddDouble(anAxis.worldPivot.z);
+			aHash.AddDouble(anAxis.worldDirection.x);
+			aHash.AddDouble(anAxis.worldDirection.y);
+			aHash.AddDouble(anAxis.worldDirection.z);
+			aHash.AddInteger(
+				static_cast<std::uint8_t>(anAxis.pivotSpace));
+			aHash.AddInteger(
+				static_cast<std::uint8_t>(anAxis.directionSpace));
+			aHash.AddBool(anAxis.authored);
+		}
         aHash.AddString(anInstance.name);
         aHash.AddInteger(static_cast<std::uint8_t>(anInstance.role));
         aHash.AddInteger(
@@ -4251,9 +4297,47 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 return {};
             }
 
-            gp_Trsf aWorldTransform =
-                theDocument->ObjectTransformForLabel(anOccurrence.definitionLabel)
-                    .Multiplied(anOccurrence.occurrenceLocation.Transformation());
+            // Resolve reference authority against the true object/occurrence
+            // transform before the mesh-centering translation is appended.
+            OcctReferenceAxis aStoredReferenceAxis;
+            const OcctReferenceAxisReadState aReferenceState =
+                theDocument->ReadReferenceAxisForLabel(
+                    anOccurrence.definitionLabel, aStoredReferenceAxis);
+            gp_Ax1 aWorldReferenceAxis;
+            ReferenceAxisSnapshot aReferenceAxis;
+            if (aReferenceState == OcctReferenceAxisReadState::Invalid
+                || !theDocument->ResolveReferenceAxisInWorld(
+                    anOccurrence.definitionLabel,
+                    anOccurrence.occurrenceLocation,
+                    aWorldReferenceAxis)
+                || !ReferenceSpaceFromOcct(
+                    aStoredReferenceAxis.pivotSpace,
+                    aReferenceAxis.pivotSpace)
+                || !ReferenceSpaceFromOcct(
+                    aStoredReferenceAxis.directionSpace,
+                    aReferenceAxis.directionSpace)) {
+                return {};
+            }
+            aReferenceAxis.worldPivot = {
+                aWorldReferenceAxis.Location().X(),
+                aWorldReferenceAxis.Location().Y(),
+                aWorldReferenceAxis.Location().Z(),
+            };
+            aReferenceAxis.worldDirection = {
+                aWorldReferenceAxis.Direction().X(),
+                aWorldReferenceAxis.Direction().Y(),
+                aWorldReferenceAxis.Direction().Z(),
+            };
+            aReferenceAxis.authored =
+                aReferenceState == OcctReferenceAxisReadState::Authored;
+
+            gp_Trsf anObjectTransform;
+            if (!theDocument->TryObjectTransformForLabel(
+                    anOccurrence.definitionLabel, anObjectTransform)) {
+                return {};
+            }
+            gp_Trsf aWorldTransform = anObjectTransform.Multiplied(
+                anOccurrence.occurrenceLocation.Transformation());
             gp_Trsf aMeshOrigin;
             aMeshOrigin.SetTranslation(gp_Vec(aDefinition.sourceOrigin.x,
                                                aDefinition.sourceOrigin.y,
@@ -4266,6 +4350,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (!MatrixFromTransform(aWorldTransform, anInstance.worldFromObject)) {
                 return {};
             }
+            anInstance.referenceAxis = aReferenceAxis;
             anInstance.reversesWinding = aWorldTransform.IsNegative();
             anInstance.visible = anOccurrence.visible;
             anInstance.selectable = anOccurrence.visible;
@@ -4428,8 +4513,10 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         std::size_t aTextureMetadataBytes = 0;
         std::size_t aPickBytes = 0;
         std::size_t anAuxiliaryBytes = 0;
+        constexpr std::size_t anInstanceNumericSize =
+            sizeof(Matrix4d) + sizeof(ReferenceAxisSnapshot);
         if (!CheckedMultiply(aScene.instances.size(),
-                             sizeof(Matrix4d),
+                             anInstanceNumericSize,
                              anInstanceBytes)
             || !CheckedMultiply(aBindingCount,
                                 sizeof(PrimitiveBinding),

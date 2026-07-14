@@ -52,6 +52,7 @@
 #include "XCAFPrs_DocumentExplorer.hxx"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -353,6 +354,103 @@ const Standard_GUID& Core3DDebugGeometryRepresentationAttributeID() {
     static const Standard_GUID identifier(
         "67E669F4-00C0-4C45-BC55-9CC5DA22A2B5");
     return identifier;
+}
+
+const std::array<Standard_GUID, 7>& Core3DDebugReferenceAxisAttributeIDs() {
+    // These duplicates deliberately lock the serialized production GUIDs.
+    static const std::array<Standard_GUID, 7> identifiers = {{
+        Standard_GUID("26128380-D69C-4530-B856-0C2AEEF47E60"),
+        Standard_GUID("11531A1D-14DB-4F78-AD91-814981846842"),
+        Standard_GUID("BA2AE804-64BD-480B-8910-B1144DA1AAD3"),
+        Standard_GUID("7CDD4B6E-5375-48F2-BAA9-AD76ACF6D47A"),
+        Standard_GUID("CCEC34C3-8D3A-447A-8C70-EDB35A5B7E1C"),
+        Standard_GUID("1DDBE964-693E-460A-9095-E47713BA28C0"),
+        Standard_GUID("09CC9F05-9628-4C84-B214-2676C8BED8AA"),
+    }};
+    return identifiers;
+}
+
+const Standard_GUID& Core3DDebugDuplicateCommandOwnerAttributeID() {
+    // Deliberately locks the private persistent recovery GUID in fixtures.
+    static const Standard_GUID identifier(
+        "D7598D08-A879-4E17-8D23-CC92568EAD5C");
+    return identifier;
+}
+
+void Core3DWriteDebugReferenceAxisRecord(
+    const TDF_Label& label,
+    const Core3DDebugReferenceAxisFixtureMode mode) {
+    if (label.IsNull()) {
+        throw Standard_Failure("Reference-axis fixture label is null");
+    }
+    const auto& identifiers = Core3DDebugReferenceAxisAttributeIDs();
+    if (mode == Core3DDebugReferenceAxisFixturePartialRecord) {
+        TDataStd_Integer::Set(label, identifiers[0], 0x0102);
+        return;
+    }
+
+    if (mode == Core3DDebugReferenceAxisFixtureWrongModeType) {
+        TDataStd_Real::Set(label, identifiers[0], 258.0);
+    } else {
+        TDataStd_Integer::Set(
+            label,
+            identifiers[0],
+            mode == Core3DDebugReferenceAxisFixtureUnknownMode
+                ? 0x0202 : 0x0102);
+    }
+
+    Standard_Real values[6] = {1.0, 2.0, 3.0, 0.0, 0.6, 0.8};
+    switch (mode) {
+        case Core3DDebugReferenceAxisFixtureNonFinitePivot:
+            values[0] = std::numeric_limits<Standard_Real>::quiet_NaN();
+            break;
+        case Core3DDebugReferenceAxisFixtureOversizedPivot:
+            values[0] = 1'000'001.0;
+            break;
+        case Core3DDebugReferenceAxisFixtureZeroDirection:
+            values[3] = 0.0;
+            values[4] = 0.0;
+            values[5] = 0.0;
+            break;
+        case Core3DDebugReferenceAxisFixtureNonUnitDirection:
+            values[3] = 0.0;
+            values[4] = 3.0;
+            values[5] = 4.0;
+            break;
+        default:
+            break;
+    }
+    for (std::size_t index = 0; index < 6U; ++index) {
+        TDataStd_Real::Set(label, identifiers[index + 1U], values[index]);
+    }
+}
+
+TDF_Label Core3DFirstFreeSimpleDefinition(
+    const Handle(TDocStd_Document)& document) {
+    if (document.IsNull()
+        || !XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
+        return {};
+    }
+    const Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    if (shapeTool.IsNull()) {
+        return {};
+    }
+    TDF_LabelSequence labels;
+    shapeTool->GetFreeShapes(labels);
+    for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+        const TDF_Label& label = labels.Value(index);
+        if (!label.IsNull() && shapeTool->IsShape(label)
+            && XCAFDoc_ShapeTool::IsFree(label)
+            && XCAFDoc_ShapeTool::IsSimpleShape(label)
+            && !XCAFDoc_ShapeTool::IsReference(label)
+            && !XCAFDoc_ShapeTool::IsComponent(label)
+            && !XCAFDoc_ShapeTool::IsAssembly(label)
+            && !XCAFDoc_ShapeTool::IsSubShape(label)) {
+            return label;
+        }
+    }
+    return {};
 }
 
 TopoDS_Face Core3DMakeDebugTriangleMeshFace(
@@ -1959,6 +2057,323 @@ void Core3DAddDebugOrphanVisualMaterial(
         return @[];
     }
     return states;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugFirstReferenceAxisState {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) {
+        return @{ @"readState": @(-1), @"valid": @NO };
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->ChangeDocument();
+    const TDF_Label label = Core3DFirstFreeSimpleDefinition(ocaf);
+    if (document.IsNull() || ocaf.IsNull() || label.IsNull()) {
+        return @{ @"readState": @(-1), @"valid": @NO };
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        OcctReferenceAxis reference;
+        const OcctReferenceAxisReadState readState =
+            document->ReadReferenceAxisForLabel(label, reference);
+        gp_Ax1 resolved;
+        const BOOL valid = readState != OcctReferenceAxisReadState::Invalid
+            && document->ResolveReferenceAxisInWorld(
+                label, TopLoc_Location(), resolved);
+        if (!valid) {
+            return @{
+                @"readState": @(
+                    static_cast<Standard_Integer>(readState)),
+                @"valid": @NO,
+                @"documentTime": @(ocaf->GetData()->Time()),
+                @"undoCount": @(ocaf->GetAvailableUndos()),
+            };
+        }
+        return @{
+            @"readState": @(
+                static_cast<Standard_Integer>(readState)),
+            @"valid": @YES,
+            @"pivotSpace": @(
+                static_cast<Standard_Integer>(reference.pivotSpace)),
+            @"directionSpace": @(
+                static_cast<Standard_Integer>(reference.directionSpace)),
+            @"pivotX": @(reference.pivot.X()),
+            @"pivotY": @(reference.pivot.Y()),
+            @"pivotZ": @(reference.pivot.Z()),
+            @"directionX": @(reference.direction.X()),
+            @"directionY": @(reference.direction.Y()),
+            @"directionZ": @(reference.direction.Z()),
+            @"worldPivotX": @(resolved.Location().X()),
+            @"worldPivotY": @(resolved.Location().Y()),
+            @"worldPivotZ": @(resolved.Location().Z()),
+            @"worldDirectionX": @(resolved.Direction().X()),
+            @"worldDirectionY": @(resolved.Direction().Y()),
+            @"worldDirectionZ": @(resolved.Direction().Z()),
+            @"documentTime": @(ocaf->GetData()->Time()),
+            @"undoCount": @(ocaf->GetAvailableUndos()),
+        };
+    } catch (...) {
+        return @{ @"readState": @(-1), @"valid": @NO };
+    }
+}
+
+- (BOOL)debugSetFirstReferenceAxis:
+    (NSDictionary<NSString *, NSNumber *> *)values {
+    if (![NSThread isMainThread] || values == nil || GLController == nil
+        || GLController.viewer == nullptr) {
+        return NO;
+    }
+    NSArray<NSString *> *keys = @[
+        @"pivotSpace", @"directionSpace",
+        @"pivotX", @"pivotY", @"pivotZ",
+        @"directionX", @"directionY", @"directionZ",
+    ];
+    for (NSString *key in keys) {
+        if (![values[key] isKindOfClass:NSNumber.class]) {
+            return NO;
+        }
+    }
+
+    const NSInteger pivotSpace = values[@"pivotSpace"].integerValue;
+    const NSInteger directionSpace =
+        values[@"directionSpace"].integerValue;
+    const Standard_Real pivotX = values[@"pivotX"].doubleValue;
+    const Standard_Real pivotY = values[@"pivotY"].doubleValue;
+    const Standard_Real pivotZ = values[@"pivotZ"].doubleValue;
+    const Standard_Real directionX = values[@"directionX"].doubleValue;
+    const Standard_Real directionY = values[@"directionY"].doubleValue;
+    const Standard_Real directionZ = values[@"directionZ"].doubleValue;
+    const Standard_Real directionSquared =
+        directionX * directionX + directionY * directionY
+        + directionZ * directionZ;
+    if ((pivotSpace != 0 && pivotSpace != 1)
+        || (directionSpace != 0 && directionSpace != 1)
+        || !std::isfinite(pivotX) || !std::isfinite(pivotY)
+        || !std::isfinite(pivotZ) || !std::isfinite(directionX)
+        || !std::isfinite(directionY) || !std::isfinite(directionZ)
+        || !std::isfinite(directionSquared)
+        || directionSquared
+            <= std::numeric_limits<Standard_Real>::epsilon()) {
+        return NO;
+    }
+
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->ChangeDocument();
+    const TDF_Label label = Core3DFirstFreeSimpleDefinition(ocaf);
+    if (document.IsNull() || ocaf.IsNull() || label.IsNull()
+        || ocaf->HasOpenCommand()) {
+        return NO;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+        OcctReferenceAxis candidate;
+        candidate.pivotSpace = pivotSpace == 0
+            ? OcctReferenceSpace::Object : OcctReferenceSpace::World;
+        candidate.pivot = gp_Pnt(pivotX, pivotY, pivotZ);
+        candidate.directionSpace = directionSpace == 0
+            ? OcctReferenceSpace::Object : OcctReferenceSpace::World;
+        candidate.direction = gp_Dir(
+            directionX, directionY, directionZ);
+
+        OcctReferenceAxis existing;
+        const OcctReferenceAxisReadState existingState =
+            document->ReadReferenceAxisForLabel(label, existing);
+        if (existingState == OcctReferenceAxisReadState::Authored
+            && existing.pivotSpace == candidate.pivotSpace
+            && existing.directionSpace == candidate.directionSpace
+            && existing.pivot.IsEqual(candidate.pivot, 1.0e-12)
+            && existing.direction.IsEqual(
+                candidate.direction, 1.0e-12)) {
+            return YES;
+        }
+
+        ocaf->NewCommand();
+        if (!ocaf->HasOpenCommand()
+            || !document->SetReferenceAxisForLabel(label, candidate)
+            || !document->ValidateReferenceAxes()
+            || !document->ValidateGeometryRepresentations()
+            || !ocaf->CommitCommand()) {
+            Core3DAbortCommandNoThrow(ocaf);
+            return NO;
+        }
+        document->NotifyChanges();
+        return YES;
+    } catch (...) {
+        Core3DAbortCommandNoThrow(ocaf);
+        return NO;
+    }
+}
+
+- (BOOL)debugResetFirstReferenceAxis {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) {
+        return NO;
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->ChangeDocument();
+    const TDF_Label label = Core3DFirstFreeSimpleDefinition(ocaf);
+    if (document.IsNull() || ocaf.IsNull() || label.IsNull()
+        || ocaf->HasOpenCommand()) {
+        return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        OcctReferenceAxis existing;
+        if (document->ReadReferenceAxisForLabel(label, existing)
+                == OcctReferenceAxisReadState::ImplicitDefault) {
+            return YES;
+        }
+        ocaf->NewCommand();
+        if (!ocaf->HasOpenCommand()
+            || !document->ResetReferenceAxisForLabel(label)
+            || !document->ValidateReferenceAxes()
+            || !document->ValidateGeometryRepresentations()
+            || !ocaf->CommitCommand()) {
+            Core3DAbortCommandNoThrow(ocaf);
+            return NO;
+        }
+        document->NotifyChanges();
+        return YES;
+    } catch (...) {
+        Core3DAbortCommandNoThrow(ocaf);
+        return NO;
+    }
+}
+
+- (BOOL)debugSetFirstReferenceAxisPersistedUniformScale:(CGFloat)scale {
+    if (![NSThread isMainThread] || !std::isfinite(scale)
+        || std::abs(scale)
+            <= std::numeric_limits<Standard_Real>::epsilon()
+        || GLController == nil || GLController.viewer == nullptr) {
+        return NO;
+    }
+    const Handle(OcctDocument) document =
+        GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->ChangeDocument();
+    const TDF_Label label = Core3DFirstFreeSimpleDefinition(ocaf);
+    if (document.IsNull() || ocaf.IsNull() || label.IsNull()
+        || ocaf->HasOpenCommand()) {
+        return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const TDF_Label scaleLabel = label.FindChild(8, Standard_True);
+        if (scaleLabel.IsNull()) {
+            return NO;
+        }
+        Handle(TDataStd_Real) existing;
+        if (scaleLabel.FindAttribute(TDataStd_Real::GetID(), existing)
+            && !existing.IsNull() && existing->Get() == scale) {
+            return YES;
+        }
+        ocaf->NewCommand();
+        if (!ocaf->HasOpenCommand()) {
+            return NO;
+        }
+        TDataStd_Real::Set(scaleLabel, scale);
+        gp_Trsf storedTransform;
+        if (!document->TryObjectTransformForLabel(label, storedTransform)
+            || storedTransform.ScaleFactor() != scale
+            || !document->ValidateReferenceAxes()
+            || !document->ValidateGeometryRepresentations()
+            || !ocaf->CommitCommand()) {
+            Core3DAbortCommandNoThrow(ocaf);
+            return NO;
+        }
+        document->NotifyChanges();
+        return YES;
+    } catch (...) {
+        Core3DAbortCommandNoThrow(ocaf);
+        return NO;
+    }
+}
+
+- (void)debugSetDuplicateCommitMode:(NSInteger)mode {
+    [GLController debugSetDuplicateCommitMode:mode];
+}
+
+- (NSData *_Nullable)debugReferenceAxisFixtureDataWithMode:
+    (Core3DDebugReferenceAxisFixtureMode)mode {
+    if (mode < Core3DDebugReferenceAxisFixtureValidMixedSpace
+        || mode
+            > Core3DDebugReferenceAxisFixtureDuplicateSentinelMisplaced) {
+        return nil;
+    }
+    return Core3DCreateDebugBinXCAFFixture(
+        [NSString stringWithFormat:@"reference-axis-%ld", (long)mode],
+        [mode](const Handle(TDocStd_Document)& document) {
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapeTool.IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create reference-axis fixture shape tool");
+            }
+            const TDF_Label label = Core3DAddDebugGeometryDefinition(
+                shapeTool,
+                BRepPrimAPI_MakeBox(
+                    gp_Pnt(-10.0, -10.0, -10.0),
+                    20.0, 20.0, 20.0).Shape());
+            Core3DSetDebugGeometryRepresentation(
+                label,
+                static_cast<Standard_Integer>(
+                    OcctGeometryRepresentation::BRep));
+            if (mode
+                == Core3DDebugReferenceAxisFixtureDuplicateSentinelWrongType) {
+                TDataStd_Real::Set(
+                    document->Main(),
+                    Core3DDebugDuplicateCommandOwnerAttributeID(),
+                    1.0);
+                return;
+            }
+            if (mode
+                == Core3DDebugReferenceAxisFixtureDuplicateSentinelMisplaced) {
+                TDataStd_Integer::Set(
+                    label,
+                    Core3DDebugDuplicateCommandOwnerAttributeID(),
+                    1);
+                return;
+            }
+            if (mode
+                == Core3DDebugReferenceAxisFixtureImplicitDefaultCorruptTransform) {
+                const TDF_Label scaleLabel =
+                    label.FindChild(8, Standard_True);
+                if (scaleLabel.IsNull()) {
+                    throw Standard_Failure(
+                        "Unable to create implicit-axis corrupt transform");
+                }
+                TDataStd_Real::Set(scaleLabel, 0.0);
+                return;
+            }
+            if (mode
+                == Core3DDebugReferenceAxisFixtureImplicitDefaultOversizedOccurrence) {
+                const TDF_Label rootAssembly = shapeTool->NewShape();
+                gp_Trsf oversizedLocation;
+                oversizedLocation.SetTranslation(
+                    gp_Vec(1'000'001.0, 0.0, 0.0));
+                const TDF_Label occurrence = shapeTool->AddComponent(
+                    rootAssembly,
+                    label,
+                    TopLoc_Location(oversizedLocation));
+                if (rootAssembly.IsNull() || occurrence.IsNull()) {
+                    throw Standard_Failure(
+                        "Unable to create oversized axis occurrence");
+                }
+                return;
+            }
+            const TDF_Label target =
+                mode == Core3DDebugReferenceAxisFixtureOrphanRecord
+                ? document->Main().FindChild(97, Standard_True)
+                : label;
+            Core3DWriteDebugReferenceAxisRecord(target, mode);
+        });
 }
 
 - (BOOL)debugImportSTEPAtURL:(NSURL *)url {

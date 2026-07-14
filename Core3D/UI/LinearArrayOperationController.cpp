@@ -88,6 +88,22 @@ Standard_Boolean TransformDiffers(
     return Standard_False;
 }
 
+Standard_Boolean ReferenceAxisDiffers(
+    const OcctReferenceAxis& theLeft,
+    const OcctReferenceAxis& theRight) noexcept
+{
+    constexpr Standard_Real aTolerance = 1.0e-12;
+    try {
+        return theLeft.pivotSpace != theRight.pivotSpace
+            || theLeft.directionSpace != theRight.directionSpace
+            || !theLeft.pivot.IsEqual(theRight.pivot, aTolerance)
+            || !theLeft.direction.IsEqual(
+                theRight.direction, aTolerance);
+    } catch (...) {
+        return Standard_True;
+    }
+}
+
 Standard_Boolean IsNearZero(const Standard_Real theValue) noexcept
 {
     return !std::isfinite(theValue)
@@ -482,6 +498,10 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
             _document->DefinitionIdentifierForLabel(aLabel);
         Standard_Size aTopologyNodeCount = 0;
         Standard_Real aMetersPerUnit = kLegacyMetersPerUnit;
+        OcctReferenceAxis aReferenceAxis;
+        const OcctReferenceAxisReadState aReferenceAxisState =
+            _document->ReadReferenceAxisForLabel(
+                aLabel, aReferenceAxis);
         Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
         Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
         if (aLabel.IsNull()
@@ -498,6 +518,8 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
                 _document->ObjectTransformForLabel(aLabel), aTransform)
             || anEntityIdentifier.empty()
             || aDefinitionIdentifier.empty()
+            || aReferenceAxisState
+                == OcctReferenceAxisReadState::Invalid
             || !TryReadMetersPerUnit(aDocument, aMetersPerUnit)
             || HasStyledSubshape(
                 aDocument, aLabel, kMaximumSourceTopologyNodes)
@@ -522,6 +544,8 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
         theSource.destinationRepresentation = aDestinationRepresentation;
         theSource.storedShape = aStored;
         theSource.transform = aTransform;
+        theSource.referenceAxisState = aReferenceAxisState;
+        theSource.referenceAxis = aReferenceAxis;
         theSource.documentTime = aDocument->GetData()->Time();
         theSource.topologyNodeCount = aTopologyNodeCount;
         theSource.metersPerUnit = aMetersPerUnit;
@@ -566,6 +590,10 @@ Standard_Boolean LinearArrayOperationController::sourceIsCurrent(
             XCAFDoc_ShapeTool::GetShape(theSource.label);
         Standard_Size aTopologyNodeCount = 0;
         Standard_Real aMetersPerUnit = kLegacyMetersPerUnit;
+        OcctReferenceAxis aReferenceAxis;
+        const OcctReferenceAxisReadState aReferenceAxisState =
+            _document->ReadReferenceAxisForLabel(
+                theSource.label, aReferenceAxis);
         Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
         Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
         if (aStored.IsNull() || theSource.storedShape.IsNull()
@@ -587,6 +615,11 @@ Standard_Boolean LinearArrayOperationController::sourceIsCurrent(
                 != theSource.representation
             || DestinationRepresentation(theSource.representation)
                 != theSource.destinationRepresentation
+            || aReferenceAxisState != theSource.referenceAxisState
+            || aReferenceAxisState
+                == OcctReferenceAxisReadState::Invalid
+            || ReferenceAxisDiffers(
+                aReferenceAxis, theSource.referenceAxis)
             || !TryReadMetersPerUnit(aDocument, aMetersPerUnit)
             || aMetersPerUnit != theSource.metersPerUnit
             || TransformDiffers(
@@ -1192,6 +1225,10 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
                 ++aMissingCount;
                 continue;
             }
+            OcctReferenceAxis aReferenceAxis;
+            const OcctReferenceAxisReadState aReferenceAxisState =
+                _document->ReadReferenceAxisForLabel(
+                    aResult.label, aReferenceAxis);
             if (aResult.expectedShape.IsNull()
                 || !aStored.IsEqual(aResult.expectedShape)
                 || aResult.entityIdentifier.empty()
@@ -1206,7 +1243,14 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
                     aResult.label)
                 || TransformDiffers(
                     _document->ObjectTransformForLabel(aResult.label),
-                    aResult.expectedTransform)) {
+                    aResult.expectedTransform)
+                || aReferenceAxisState
+                    != aResult.expectedReferenceAxisState
+                || aReferenceAxisState
+                    == OcctReferenceAxisReadState::Invalid
+                || ReferenceAxisDiffers(
+                    aReferenceAxis,
+                    aResult.expectedReferenceAxis)) {
                 return DocumentState::PartialOrMismatched;
             }
             ++aCommittedCount;
@@ -1462,6 +1506,8 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 _source->destinationRepresentation,
                 aResult.presentation->Shape(),
                 aResult.transform,
+                _source->referenceAxisState,
+                _source->referenceAxis,
             });
             PendingResult& aPending = _pendingResults.back();
             if (aPending.entityIdentifier.empty()
@@ -1474,7 +1520,22 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 || !_document->CopyGeometryRepresentation(
                     _source->label, aLabel)
                 || !_document->CopyObjectAppearance(
+                    _source->label, aLabel)
+                || !_document->CopyReferenceAxis(
                     _source->label, aLabel)) {
+                return retainRetryableOrUnknown();
+            }
+            OcctReferenceAxis aStoredReferenceAxis;
+            const OcctReferenceAxisReadState aStoredReferenceAxisState =
+                _document->ReadReferenceAxisForLabel(
+                    aLabel, aStoredReferenceAxis);
+            if (aStoredReferenceAxisState
+                    != aPending.expectedReferenceAxisState
+                || aStoredReferenceAxisState
+                    == OcctReferenceAxisReadState::Invalid
+                || ReferenceAxisDiffers(
+                    aStoredReferenceAxis,
+                    aPending.expectedReferenceAxis)) {
                 return retainRetryableOrUnknown();
             }
             _document->LoadObjectMeterial(

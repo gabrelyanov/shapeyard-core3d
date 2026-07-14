@@ -30,6 +30,11 @@
 #include <XCAFDoc_VisMaterialPBR.hxx>
 #include <Image_Texture.hxx>
 #include <NCollection_Buffer.hxx>
+#include <TopLoc_Location.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include <string>
 #include <unordered_map>
@@ -58,6 +63,42 @@ enum class OcctGeometryExportFormat : Standard_Integer
     Gltf = 1 << 2,
     Step = 1 << 3,
 };
+
+//! Coordinate authority for one component of a persisted reference axis.
+//! The non-negative values are serialized schema values: never renumber or
+//! reuse them.
+enum class OcctReferenceSpace : Standard_Integer
+{
+    Object = 0,
+    World = 1,
+};
+
+//! A definition-owned oriented line used by operations such as Radial Array.
+//! Pivot and direction deliberately have independent spaces so common mixed
+//! choices such as Object Origin + World Z remain representable. A full frame
+//! is intentionally absent because roll has no meaning for an oriented line.
+struct OcctReferenceAxis
+{
+    OcctReferenceSpace pivotSpace = OcctReferenceSpace::Object;
+    gp_Pnt pivot = gp_Pnt(0.0, 0.0, 0.0);
+    OcctReferenceSpace directionSpace = OcctReferenceSpace::World;
+    gp_Dir direction = gp_Dir(0.0, 0.0, 1.0);
+};
+
+//! Missing legacy metadata is one explicit, non-mutating default. Invalid is
+//! fail-closed and is never silently treated as missing.
+enum class OcctReferenceAxisReadState : Standard_Integer
+{
+    Invalid = -1,
+    ImplicitDefault = 0,
+    Authored = 1,
+};
+
+//! Persistent internal attribute used to prove ownership of one Duplicate
+//! OCAF command across fail-closed commit/abort reconciliation. It may exist
+//! only as TDataStd_Integer on TDocStd_Document::Main().
+Standard_EXPORT const Standard_GUID&
+Core3DDuplicateCommandOwnerAttributeID();
 
 //! Validate/canonicalize the narrow texture representation produced by the
 //! mobile material editor. Only complete, single-frame PNG/JPEG images within
@@ -230,6 +271,49 @@ public:
   //! Return Shapeyard's persisted object-local translation/rotation/uniform
   //! scale. This is independent of an XCAF assembly occurrence location.
   Standard_EXPORT gp_Trsf ObjectTransformForLabel(const TDF_Label& label) const;
+  //! Validate every persisted transform scalar before constructing OCCT
+  //! quaternion/transform values. Missing legacy scalars use the established
+  //! identity defaults; malformed finite, quaternion, scale, or coordinate
+  //! values fail closed.
+  Standard_EXPORT Standard_Boolean TryObjectTransformForLabel(
+      const TDF_Label& label,
+      gp_Trsf& transform) const;
+
+  //! Read the definition-owned oriented line without mutating OCAF. Seven
+  //! absent attributes return Object Origin + World Z as ImplicitDefault;
+  //! partial, unknown, misplaced, nonfinite, oversized, or non-unit records
+  //! return Invalid.
+  Standard_EXPORT OcctReferenceAxisReadState ReadReferenceAxisForLabel(
+      const TDF_Label& label,
+      OcctReferenceAxis& axis) const;
+  //! Resolve Object-bound components through the validated persisted object
+  //! transform and occurrence location. World-bound components remain fixed.
+  Standard_EXPORT Standard_Boolean ResolveReferenceAxisInWorld(
+      const TDF_Label& label,
+      const TopLoc_Location& occurrenceLocation,
+      gp_Ax1& axis) const;
+  //! Write/reset/copy a complete reference record inside the caller's already
+  //! open command. These methods never open, commit, or abort a command.
+  Standard_EXPORT Standard_Boolean SetReferenceAxisForLabel(
+      const TDF_Label& label,
+      const OcctReferenceAxis& axis);
+  Standard_EXPORT Standard_Boolean ResetReferenceAxisForLabel(
+      const TDF_Label& label);
+  Standard_EXPORT Standard_Boolean CopyReferenceAxis(
+      const TDF_Label& source,
+      const TDF_Label& destination);
+  //! Copy through the exact source-local to destination-local transform used
+  //! by a geometry bake. Object-bound components are transformed; World-bound
+  //! components are copied unchanged.
+  Standard_EXPORT Standard_Boolean CopyReferenceAxisThroughBakedTransform(
+      const TDF_Label& source,
+      const TDF_Label& destination,
+      const gp_Trsf& sourceLocalToDestinationLocal);
+  //! Validate reference attributes document-wide, including their placement.
+  //! This read-only check performs no topology, meshing, or AIS traversal.
+  Standard_EXPORT Standard_Boolean ValidateReferenceAxes() const;
+  Standard_EXPORT Standard_Boolean ValidateReferenceAxes(
+      const Handle(TDocStd_Document)& document) const;
 
   //! Assign identifiers to a legacy document before normal editing begins.
   //! Migration is atomic, leaves no undo/redo entry, and refuses to run over

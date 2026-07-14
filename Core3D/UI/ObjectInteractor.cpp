@@ -35,8 +35,10 @@
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <TDF_Attribute.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDataStd_Integer.hxx>
 #include <TDataStd_Real.hxx>
 #include <GP_Quaternion.hxx>
 #include <Graphic3d_ZLayerId.hxx>
@@ -533,6 +535,92 @@ namespace core3d {
 			return false;
 		}
 
+		bool ReferenceAxisDiffers(
+			const OcctReferenceAxis& theLeft,
+			const OcctReferenceAxis& theRight) noexcept {
+			constexpr Standard_Real aTolerance = 1.0e-12;
+			try {
+				return theLeft.pivotSpace != theRight.pivotSpace
+					|| theLeft.directionSpace != theRight.directionSpace
+					|| !theLeft.pivot.IsEqual(theRight.pivot, aTolerance)
+					|| !theLeft.direction.IsEqual(
+						theRight.direction, aTolerance);
+			} catch (...) {
+				return true;
+			}
+		}
+
+		bool TryExpectedBakedReferenceAxis(
+			const OcctReferenceAxisReadState theSourceState,
+			const OcctReferenceAxis& theSource,
+			const gp_Trsf& theBakeTransform,
+			OcctReferenceAxisReadState& theExpectedState,
+			OcctReferenceAxis& theExpected) noexcept {
+			theExpectedState = OcctReferenceAxisReadState::Invalid;
+			theExpected = theSource;
+			if (theSourceState == OcctReferenceAxisReadState::Invalid) {
+				return false;
+			}
+			try {
+				for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+					for (Standard_Integer aColumn = 1; aColumn <= 4;
+						 aColumn++) {
+						if (!std::isfinite(
+								theBakeTransform.Value(aRow, aColumn))) {
+							return false;
+						}
+					}
+				}
+				if (theExpected.pivotSpace == OcctReferenceSpace::Object) {
+					theExpected.pivot.Transform(theBakeTransform);
+				}
+				if (!std::isfinite(theExpected.pivot.X())
+					|| !std::isfinite(theExpected.pivot.Y())
+					|| !std::isfinite(theExpected.pivot.Z())
+					|| std::abs(theExpected.pivot.X())
+						> limits::kMaximumModelCoordinateMagnitude
+					|| std::abs(theExpected.pivot.Y())
+						> limits::kMaximumModelCoordinateMagnitude
+					|| std::abs(theExpected.pivot.Z())
+						> limits::kMaximumModelCoordinateMagnitude) {
+					return false;
+				}
+				if (theExpected.directionSpace
+						== OcctReferenceSpace::Object) {
+					gp_Vec aDirection(theExpected.direction);
+					aDirection.Transform(theBakeTransform);
+					const Standard_Real aSquaredMagnitude =
+						aDirection.SquareMagnitude();
+					if (!std::isfinite(aDirection.X())
+						|| !std::isfinite(aDirection.Y())
+						|| !std::isfinite(aDirection.Z())
+						|| !std::isfinite(aSquaredMagnitude)
+						|| aSquaredMagnitude
+							<= std::numeric_limits<Standard_Real>::epsilon()) {
+						return false;
+					}
+					theExpected.direction = gp_Dir(aDirection);
+				}
+				if (!std::isfinite(theExpected.direction.X())
+					|| !std::isfinite(theExpected.direction.Y())
+					|| !std::isfinite(theExpected.direction.Z())) {
+					return false;
+				}
+
+				const OcctReferenceAxis aDefault;
+				theExpectedState =
+					theSourceState
+							== OcctReferenceAxisReadState::ImplicitDefault
+						&& !ReferenceAxisDiffers(theExpected, aDefault)
+					? OcctReferenceAxisReadState::ImplicitDefault
+					: OcctReferenceAxisReadState::Authored;
+				return true;
+			} catch (...) {
+				theExpectedState = OcctReferenceAxisReadState::Invalid;
+				return false;
+			}
+		}
+
 		bool IsFiniteBoundedCoordinate(const Standard_Real theValue) noexcept {
 			return std::isfinite(theValue)
 				&& std::abs(theValue)
@@ -1008,14 +1096,247 @@ namespace core3d {
         myContext->UpdateCurrentViewer();
     }
 
+	ObjectInteractor::DuplicateDocumentState
+	ObjectInteractor::inspectPendingDuplicateResults() noexcept {
+		try {
+			if (myDoc.IsNull()) {
+				return DuplicateDocumentState::Unavailable;
+			}
+			const Handle(TDocStd_Document) document =
+				myDoc->ChangeDocument();
+			if (document.IsNull()) {
+				return DuplicateDocumentState::Unavailable;
+			}
+			if (document->HasOpenCommand()) {
+				if (duplicateOwnedCommandIsCurrent(document)) {
+					return DuplicateDocumentState::OpenCommand;
+				}
+				_duplicateOwnsDocumentCommand = false;
+				_duplicateOwnedTransaction = -1;
+				_duplicateOwnedDocumentTime = -1;
+				_duplicateOwnedMarkerValue = 0;
+				return DuplicateDocumentState::Unavailable;
+			}
+			// Ownership cannot survive an observed close. Retaining the result
+			// ledger is safe, but retaining this bit could later make Duplicate
+			// abort a different tool's newly opened transaction.
+			_duplicateOwnsDocumentCommand = false;
+			_duplicateOwnedTransaction = -1;
+			_duplicateOwnedDocumentTime = -1;
+			_duplicateOwnedMarkerValue = 0;
+			if (_pendingDuplicateResults.empty()) {
+				return DuplicateDocumentState::None;
+			}
+			Standard_Size missingCount = 0;
+			Standard_Size committedCount = 0;
+			for (const DuplicatePendingResult& duplicate :
+				 _pendingDuplicateResults) {
+				if (duplicate.resultLabel.IsNull()) {
+					++missingCount;
+					continue;
+				}
+				if (duplicate.resultLabel.Data() != document->GetData()) {
+					return DuplicateDocumentState::PartialOrMismatched;
+				}
+				const TopoDS_Shape stored = XCAFDoc_ShapeTool::GetShape(
+					duplicate.resultLabel);
+				if (stored.IsNull()) {
+					++missingCount;
+					continue;
+				}
+				OcctReferenceAxis storedReferenceAxis;
+				const OcctReferenceAxisReadState storedReferenceAxisState =
+					myDoc->ReadReferenceAxisForLabel(
+						duplicate.resultLabel,
+						storedReferenceAxis);
+				if (duplicate.expectedShape.IsNull()
+					|| !stored.IsEqual(duplicate.expectedShape)
+					|| duplicate.entityIdentifier.empty()
+					|| duplicate.definitionIdentifier.empty()
+					|| myDoc->EntityIdentifierForLabel(
+						duplicate.resultLabel)
+						!= duplicate.entityIdentifier
+					|| myDoc->DefinitionIdentifierForLabel(
+						duplicate.resultLabel)
+						!= duplicate.definitionIdentifier
+					|| myDoc->GeometryRepresentationForLabel(
+						duplicate.resultLabel)
+						!= duplicate.representation
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(
+						duplicate.resultLabel)
+					|| TransformDiffers(
+						myDoc->ObjectTransformForLabel(
+							duplicate.resultLabel),
+						duplicate.expectedTransform)
+					|| storedReferenceAxisState
+						!= duplicate.expectedReferenceAxisState
+					|| storedReferenceAxisState
+						== OcctReferenceAxisReadState::Invalid
+					|| ReferenceAxisDiffers(
+						storedReferenceAxis,
+						duplicate.expectedReferenceAxis)) {
+					return DuplicateDocumentState::PartialOrMismatched;
+				}
+				++committedCount;
+			}
+			if (committedCount == _pendingDuplicateResults.size()) {
+				return DuplicateDocumentState::AllCommitted;
+			}
+			if (missingCount == _pendingDuplicateResults.size()) {
+				return DuplicateDocumentState::None;
+			}
+			return DuplicateDocumentState::PartialOrMismatched;
+		} catch (...) {
+			return DuplicateDocumentState::Unavailable;
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::duplicateOwnedCommandIsCurrent(
+		const Handle(TDocStd_Document)& document) const noexcept {
+		try {
+			const Handle(TDF_Data) data = document.IsNull()
+				? Handle(TDF_Data)() : document->GetData();
+			Handle(TDataStd_Integer) marker;
+			return _duplicateOwnsDocumentCommand
+				&& !document.IsNull()
+				&& document->HasOpenCommand()
+				&& !data.IsNull()
+				&& _duplicateOwnedTransaction > 0
+				&& data->Transaction() == _duplicateOwnedTransaction
+				&& data->Time() == _duplicateOwnedDocumentTime
+				&& document->Main().FindAttribute(
+					Core3DDuplicateCommandOwnerAttributeID(), marker)
+				&& !marker.IsNull()
+				&& marker->Get() == _duplicateOwnedMarkerValue
+				? Standard_True : Standard_False;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean
+	ObjectInteractor::abortOwnedDuplicateCommand() noexcept {
+		if (!_duplicateOwnsDocumentCommand || myDoc.IsNull()) {
+			return Standard_False;
+		}
+		try {
+			const Handle(TDocStd_Document) document =
+				myDoc->ChangeDocument();
+			if (document.IsNull()
+				|| !duplicateOwnedCommandIsCurrent(document)) {
+				return Standard_False;
+			}
+			if (document->HasOpenCommand()) {
+				document->AbortCommand();
+			}
+			if (document->HasOpenCommand()) {
+				return Standard_False;
+			}
+			_duplicateOwnsDocumentCommand = false;
+			_duplicateOwnedTransaction = -1;
+			_duplicateOwnedDocumentTime = -1;
+			_duplicateOwnedMarkerValue = 0;
+			return Standard_True;
+		} catch (...) {
+			// OCCT may report an exception after it has already closed the
+			// command. Re-observe immediately so a closed owner token can never
+			// survive into another tool's future transaction.
+			try {
+				const Handle(TDocStd_Document) document =
+					myDoc.IsNull()
+					? Handle(TDocStd_Document)()
+					: myDoc->ChangeDocument();
+				if (!document.IsNull() && !document->HasOpenCommand()) {
+					_duplicateOwnsDocumentCommand = false;
+					_duplicateOwnedTransaction = -1;
+					_duplicateOwnedDocumentTime = -1;
+					_duplicateOwnedMarkerValue = 0;
+					return Standard_True;
+				}
+			} catch (...) {
+			}
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean
+	ObjectInteractor::finishCommittedDuplicate() noexcept {
+		if (inspectPendingDuplicateResults()
+				!= DuplicateDocumentState::AllCommitted
+			|| myContext.IsNull() || myDoc.IsNull()) {
+			return Standard_False;
+		}
+		_duplicateOwnsDocumentCommand = false;
+		_duplicateOwnedTransaction = -1;
+		_duplicateOwnedDocumentTime = -1;
+		_duplicateOwnedMarkerValue = 0;
+		try {
+			detachManipulator(false);
+			createManipulatorIfNeeded();
+			myContext->ClearSelected(Standard_False);
+			for (const DuplicatePendingResult& duplicate :
+				 _pendingDuplicateResults) {
+				if (duplicate.presentation.IsNull()
+					|| duplicate.resultLabel.IsNull()) {
+					return Standard_False;
+				}
+				myContext->Display(
+					duplicate.presentation,
+					AIS_Shaded,
+					0,
+					Standard_False);
+				myContext->AddSelect(duplicate.presentation);
+				_manipulator->Attach(duplicate.presentation);
+				_manipulatorSourceLabels[duplicate.presentation.get()] =
+					duplicate.resultLabel;
+			}
+			myContext->HilightSelected(Standard_True);
+			myDoc->NotifyChanges();
+			_manipulator->Redisplay();
+			myContext->UpdateCurrentViewer();
+			_pendingDuplicateResults.clear();
+			return Standard_True;
+		} catch (...) {
+			// The document is already authoritative. Retain the result ledger so
+			// the next Duplicate action can retry transient presentation repair.
+			try { myDoc->NotifyChanges(); } catch (...) {}
+			return Standard_False;
+		}
+	}
+
     void ObjectInteractor::duplicateSelected() {
         auto doc = myDoc->ChangeDocument();
-		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
+		if (doc.IsNull()) { return; }
+		if (_duplicateOwnsDocumentCommand
+			|| !_pendingDuplicateResults.empty()) {
+			DuplicateDocumentState state =
+				inspectPendingDuplicateResults();
+			if (state == DuplicateDocumentState::OpenCommand
+				&& abortOwnedDuplicateCommand()) {
+				state = inspectPendingDuplicateResults();
+			}
+			if (state == DuplicateDocumentState::AllCommitted) {
+				(void)finishCommittedDuplicate();
+			} else if (state == DuplicateDocumentState::None) {
+				_pendingDuplicateResults.clear();
+				_duplicateOwnsDocumentCommand = false;
+				_duplicateOwnedTransaction = -1;
+				_duplicateOwnedDocumentTime = -1;
+				_duplicateOwnedMarkerValue = 0;
+			} else if (state != DuplicateDocumentState::OpenCommand
+				&& !doc->HasOpenCommand()) {
+				try { myDoc->NotifyChanges(); } catch (...) {}
+			}
+			return;
+		}
+		if (doc->HasOpenCommand()) { return; }
         
         struct DuplicateSource {
             Handle(AIS_Shape) presentation;
             TDF_Label label;
 			OcctGeometryRepresentation representation;
+			OcctReferenceAxisReadState referenceAxisState;
+			OcctReferenceAxis referenceAxis;
         };
         std::vector<DuplicateSource> sources;
         for (myContext->InitSelected(); myContext->MoreSelected();
@@ -1035,6 +1356,9 @@ namespace core3d {
             const TopoDS_Shape storedShape = label.IsNull()
                 ? TopoDS_Shape()
                 : XCAFDoc_ShapeTool::GetShape(label);
+			OcctReferenceAxis referenceAxis;
+			const OcctReferenceAxisReadState referenceAxisState =
+				myDoc->ReadReferenceAxisForLabel(label, referenceAxis);
             if (selected.IsNull() || shape.IsNull()
                 || shape->Shape().IsNull()
                 || !myDoc->IsPresentationEditable(selected)
@@ -1046,7 +1370,9 @@ namespace core3d {
 					&& destinationRepresentation
 						!= OcctGeometryRepresentation::TriangleMesh)
                 || storedShape.IsNull()
-                || !storedShape.IsEqual(shape->Shape())) {
+                || !storedShape.IsEqual(shape->Shape())
+				|| referenceAxisState
+					== OcctReferenceAxisReadState::Invalid) {
                 return;
             }
             bool isDuplicateLabel = false;
@@ -1056,9 +1382,13 @@ namespace core3d {
                     break;
                 }
             }
-            if (!isDuplicateLabel) {
+			if (!isDuplicateLabel) {
 				sources.push_back({
-					shape, label, destinationRepresentation});
+					shape,
+					label,
+					destinationRepresentation,
+					referenceAxisState,
+					referenceAxis});
             }
         }
         if (sources.empty()) { return; }
@@ -1115,13 +1445,7 @@ namespace core3d {
 		}
 		minAxisDisplacement.SetTranslation(aDisplacement);
         
-		struct DuplicateRecord {
-			Handle(AIS_Shape) presentation;
-			TDF_Label sourceLabel;
-			TDF_Label resultLabel;
-			OcctGeometryRepresentation representation;
-		};
-		std::vector<DuplicateRecord> duplicates;
+		std::vector<DuplicatePendingResult> duplicates;
 		try {
 			for (const DuplicateSource& source : sources) {
 				BRepBuilderAPI_Copy shapeCopy;
@@ -1153,60 +1477,187 @@ namespace core3d {
 					copy,
 					source.label,
 					TDF_Label(),
-					source.representation});
+					source.representation,
+					{},
+					{},
+					copy->Shape(),
+					copy->LocalTransformation(),
+					source.referenceAxisState,
+					source.referenceAxis});
 			}
 		} catch (...) {
 			return;
 		}
 		if (duplicates.empty()) { return; }
+		_pendingDuplicateResults = std::move(duplicates);
 
+		const auto retainRetryableOrUnknown = [&]() noexcept {
+			if (abortOwnedDuplicateCommand()
+				&& inspectPendingDuplicateResults()
+					== DuplicateDocumentState::None) {
+				_pendingDuplicateResults.clear();
+				_duplicateOwnsDocumentCommand = false;
+				_duplicateOwnedTransaction = -1;
+				_duplicateOwnedDocumentTime = -1;
+				_duplicateOwnedMarkerValue = 0;
+			}
+		};
+
+		Standard_Integer duplicateMarkerValue = 0;
 		try {
+			Handle(TDF_Attribute) priorMarkerAttribute;
+			const Standard_Boolean hasPriorMarker =
+				doc->Main().FindAttribute(
+					Core3DDuplicateCommandOwnerAttributeID(),
+					priorMarkerAttribute);
+			const Handle(TDataStd_Integer) priorMarker =
+				Handle(TDataStd_Integer)::DownCast(priorMarkerAttribute);
+			if (hasPriorMarker && priorMarker.IsNull()) {
+				_pendingDuplicateResults.clear();
+				return;
+			}
+			const Standard_Integer priorMarkerValue =
+				priorMarker.IsNull() ? 0 : priorMarker->Get();
+			duplicateMarkerValue =
+				priorMarkerValue
+					== std::numeric_limits<Standard_Integer>::max()
+				? std::numeric_limits<Standard_Integer>::min()
+				: priorMarkerValue + 1;
+			_duplicateOwnsDocumentCommand = true;
 			doc->NewCommand();
-			if (!doc->HasOpenCommand()) { return; }
-			for (auto& duplicate : duplicates) {
+			if (!doc->HasOpenCommand()) {
+				_duplicateOwnsDocumentCommand = false;
+				_duplicateOwnedTransaction = -1;
+				_duplicateOwnedDocumentTime = -1;
+				_duplicateOwnedMarkerValue = 0;
+				_pendingDuplicateResults.clear();
+				return;
+			}
+			const Handle(TDF_Data) transactionData = doc->GetData();
+			if (transactionData.IsNull()
+				|| transactionData->Transaction() <= 0) {
+				try { doc->AbortCommand(); } catch (...) {}
+				_duplicateOwnsDocumentCommand = false;
+				_duplicateOwnedTransaction = -1;
+				_duplicateOwnedDocumentTime = -1;
+				_duplicateOwnedMarkerValue = 0;
+				_pendingDuplicateResults.clear();
+				return;
+			}
+			_duplicateOwnedTransaction = transactionData->Transaction();
+			_duplicateOwnedDocumentTime = transactionData->Time();
+			_duplicateOwnedMarkerValue = duplicateMarkerValue;
+			TDataStd_Integer::Set(
+				doc->Main(),
+				Core3DDuplicateCommandOwnerAttributeID(),
+				duplicateMarkerValue);
+			if (!duplicateOwnedCommandIsCurrent(doc)) {
+				try { doc->AbortCommand(); } catch (...) {}
+				_duplicateOwnsDocumentCommand = false;
+				_duplicateOwnedTransaction = -1;
+				_duplicateOwnedDocumentTime = -1;
+				_duplicateOwnedMarkerValue = 0;
+				_pendingDuplicateResults.clear();
+				return;
+			}
+			for (auto& duplicate : _pendingDuplicateResults) {
 				const TDF_Label label = myDoc->AddShape(
 					duplicate.presentation,
 					duplicate.representation);
 				if (label.IsNull()) {
-					doc->AbortCommand();
+					retainRetryableOrUnknown();
 					return;
 				}
 				if (!myDoc->CopyGeometryRepresentation(
 						duplicate.sourceLabel, label)
 					|| !myDoc->CopyObjectAppearance(
+						duplicate.sourceLabel, label)
+					|| !myDoc->CopyReferenceAxis(
 						duplicate.sourceLabel, label)) {
-					doc->AbortCommand();
+					retainRetryableOrUnknown();
 					return;
 				}
 				duplicate.resultLabel = label;
+				duplicate.entityIdentifier =
+					myDoc->EntityIdentifierForLabel(label);
+				duplicate.definitionIdentifier =
+					myDoc->DefinitionIdentifierForLabel(label);
+				OcctReferenceAxis storedReferenceAxis;
+				const OcctReferenceAxisReadState storedReferenceAxisState =
+					myDoc->ReadReferenceAxisForLabel(
+						label, storedReferenceAxis);
+				if (duplicate.entityIdentifier.empty()
+					|| duplicate.definitionIdentifier.empty()
+					|| myDoc->GeometryRepresentationForLabel(label)
+						!= duplicate.representation
+					|| TransformDiffers(
+						myDoc->ObjectTransformForLabel(label),
+						duplicate.expectedTransform)
+					|| storedReferenceAxisState
+						!= duplicate.expectedReferenceAxisState
+					|| storedReferenceAxisState
+						== OcctReferenceAxisReadState::Invalid
+					|| ReferenceAxisDiffers(
+						storedReferenceAxis,
+						duplicate.expectedReferenceAxis)) {
+					retainRetryableOrUnknown();
+					return;
+				}
 				myDoc->LoadObjectMeterial(label, duplicate.presentation);
 			}
 			if (!myDoc->ValidateGeometryRepresentations()) {
-				doc->AbortCommand();
+				retainRetryableOrUnknown();
 				return;
 			}
-			if (!doc->CommitCommand()) {
-				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-				return;
+			try {
+				Standard_Boolean commitReported = doc->CommitCommand();
+#ifdef DEBUG
+				const Standard_Integer commitMode =
+					_debugDuplicateCommitMode;
+				_debugDuplicateCommitMode = 0;
+				if (commitMode == 1) {
+					commitReported = Standard_False;
+				} else if (commitMode == 2) {
+					throw Standard_Failure(
+						"Injected Duplicate commit exception after close");
+				}
+#endif
+				(void)commitReported;
+			} catch (...) {
+				// Reconcile against OCAF below. A throw can happen before or
+				// after CommitCommand closes the transaction.
 			}
 		} catch (...) {
-			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+			retainRetryableOrUnknown();
 			return;
 		}
 
-		detachManipulator(false);
-		myContext->ClearSelected(Standard_False);
-		for (const auto& duplicate : duplicates) {
-			myContext->Display(duplicate.presentation, AIS_Shaded, 0, Standard_False);
-			myContext->AddSelect(duplicate.presentation);
-			_manipulator->Attach(duplicate.presentation);
-			_manipulatorSourceLabels[duplicate.presentation.get()] =
-				duplicate.resultLabel;
+		DuplicateDocumentState documentState =
+			inspectPendingDuplicateResults();
+		if (documentState == DuplicateDocumentState::OpenCommand) {
+			if (abortOwnedDuplicateCommand()) {
+				documentState = inspectPendingDuplicateResults();
+			}
 		}
-		myContext->HilightSelected(Standard_True);
-		myDoc->NotifyChanges();
-		_manipulator->Redisplay();
-		myContext->UpdateCurrentViewer();
+		if (documentState == DuplicateDocumentState::AllCommitted) {
+			(void)finishCommittedDuplicate();
+			return;
+		}
+		if (documentState == DuplicateDocumentState::None) {
+			_pendingDuplicateResults.clear();
+			_duplicateOwnsDocumentCommand = false;
+			_duplicateOwnedTransaction = -1;
+			_duplicateOwnedDocumentTime = -1;
+			_duplicateOwnedMarkerValue = 0;
+			return;
+		}
+		if (documentState != DuplicateDocumentState::OpenCommand
+			&& !doc->HasOpenCommand()) {
+			// If inspection itself is unavailable or detects an impossible
+			// partial state, publish document invalidation so renderer clients
+			// rebuild from OCAF instead of trusting stale transient UI state.
+			try { myDoc->NotifyChanges(); } catch (...) {}
+		}
     }
 
     const bool ObjectInteractor::isSelected() const {
@@ -2355,11 +2806,17 @@ namespace core3d {
 			const std::string sourceDefinitionIdentifier =
 				myDoc->DefinitionIdentifierForLabel(sourceLabel);
 			gp_Trsf aTrsfSelected = selected->Transformation();
+			OcctReferenceAxis aSourceReferenceAxis;
+			const OcctReferenceAxisReadState aSourceReferenceAxisState =
+				myDoc->ReadReferenceAxisForLabel(
+					sourceLabel, aSourceReferenceAxis);
 			Standard_Size sourceNodeCount = 0;
 			if (sourceStoredShape.IsNull()
 				|| !sourceStoredShape.IsEqual(shape->Shape())
 				|| sourceEntityIdentifier.empty()
 				|| sourceDefinitionIdentifier.empty()
+				|| aSourceReferenceAxisState
+					== OcctReferenceAxisReadState::Invalid
 				|| TransformDiffers(
 					myDoc->ObjectTransformForLabel(sourceLabel),
 					aTrsfSelected)
@@ -2388,6 +2845,8 @@ namespace core3d {
 
 			gp_Trsf aTrsfMirror;
 			aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
+			const gp_Trsf aBakedTransform =
+				aTrsfSelected * aTrsfMirror;
 			
 			// OCCT's negative-transform mesh-copy path corrupts allocator state
 			// when mirror previews are replaced repeatedly. Keep mesh copying
@@ -2395,7 +2854,7 @@ namespace core3d {
 			// renderer-neutral capture reads that cache.
 			BRepBuilderAPI_Transform aBRepTrsf(
 				shape->Shape(),
-				aTrsfSelected * aTrsfMirror,
+				aBakedTransform,
 				Standard_False,
 				Standard_False);
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
@@ -2420,6 +2879,9 @@ namespace core3d {
 				sourceDefinitionIdentifier,
 				sourceStoredShape,
 				aTrsfSelected,
+				aBakedTransform,
+				aSourceReferenceAxisState,
+				aSourceReferenceAxis,
 			});
 		}
 		std::vector<TDF_Label> aSourceLabels;
@@ -3551,6 +4013,10 @@ namespace core3d {
 				const TopoDS_Shape aStored = aSource.label.IsNull()
 					? TopoDS_Shape()
 					: XCAFDoc_ShapeTool::GetShape(aSource.label);
+				OcctReferenceAxis aReferenceAxis;
+				const OcctReferenceAxisReadState aReferenceAxisState =
+					myDoc->ReadReferenceAxisForLabel(
+						aSource.label, aReferenceAxis);
 				Standard_Size aSourceNodes = 0;
 				Standard_Size aResultNodes = 0;
 				if (aSource.presentation.IsNull()
@@ -3584,6 +4050,11 @@ namespace core3d {
 						!= aSource.entityIdentifier
 					|| myDoc->DefinitionIdentifierForLabel(aSource.label)
 						!= aSource.definitionIdentifier
+					|| aReferenceAxisState != aSource.referenceAxisState
+					|| aReferenceAxisState
+						== OcctReferenceAxisReadState::Invalid
+					|| ReferenceAxisDiffers(
+						aReferenceAxis, aSource.referenceAxis)
 					|| !myContext->IsDisplayed(aSource.presentation)
 					|| aResult.IsNull() || aResult->Shape().IsNull()
 					|| !CountBoundedMirrorTopology(
@@ -3642,6 +4113,10 @@ namespace core3d {
 					++aMissingCount;
 					continue;
 				}
+				OcctReferenceAxis aReferenceAxis;
+				const OcctReferenceAxisReadState aReferenceAxisState =
+					myDoc->ReadReferenceAxisForLabel(
+						aResult.label, aReferenceAxis);
 				if (aResult.expectedShape.IsNull()
 					|| !aStored.IsEqual(aResult.expectedShape)
 					|| aResult.entityIdentifier.empty()
@@ -3653,7 +4128,17 @@ namespace core3d {
 					|| myDoc->GeometryRepresentationForLabel(aResult.label)
 						!= OcctGeometryRepresentation::BRep
 					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(
-						aResult.label)) {
+						aResult.label)
+					|| TransformDiffers(
+						myDoc->ObjectTransformForLabel(aResult.label),
+						aResult.expectedTransform)
+					|| aReferenceAxisState
+						!= aResult.expectedReferenceAxisState
+					|| aReferenceAxisState
+						== OcctReferenceAxisReadState::Invalid
+					|| ReferenceAxisDiffers(
+						aReferenceAxis,
+						aResult.expectedReferenceAxis)) {
 					return MirrorDocumentState::PartialOrMismatched;
 				}
 				++aCommittedCount;
@@ -3843,6 +4328,17 @@ namespace core3d {
 					_trialMirrorObjects[anIndex];
 				const MirrorSourceSnapshot& aSource =
 					_trialMirrorSources[anIndex];
+				OcctReferenceAxisReadState anExpectedReferenceAxisState =
+					OcctReferenceAxisReadState::Invalid;
+				OcctReferenceAxis anExpectedReferenceAxis;
+				if (!TryExpectedBakedReferenceAxis(
+						aSource.referenceAxisState,
+						aSource.referenceAxis,
+						aSource.bakedTransform,
+						anExpectedReferenceAxisState,
+						anExpectedReferenceAxis)) {
+					return retainRetryableOrUnknown();
+				}
 				const TDF_Label aLabel = myDoc->AddShape(
 					aShape, OcctGeometryRepresentation::BRep);
 				if (aLabel.IsNull()) {
@@ -3853,16 +4349,41 @@ namespace core3d {
 					myDoc->EntityIdentifierForLabel(aLabel),
 					myDoc->DefinitionIdentifierForLabel(aLabel),
 					aShape->Shape(),
+					aShape->LocalTransformation(),
+					anExpectedReferenceAxisState,
+					anExpectedReferenceAxis,
 				});
 				if (_pendingMirrorResults.back().entityIdentifier.empty()
 					|| _pendingMirrorResults.back()
 						.definitionIdentifier.empty()
 					|| myDoc->GeometryRepresentationForLabel(aLabel)
 						!= OcctGeometryRepresentation::BRep
+					|| TransformDiffers(
+						myDoc->ObjectTransformForLabel(aLabel),
+						_pendingMirrorResults.back().expectedTransform)
 					|| !myDoc->CopyGeometryRepresentation(
 						aSource.label, aLabel)
 					|| !myDoc->CopyObjectAppearance(
-						aSource.label, aLabel)) {
+						aSource.label, aLabel)
+					|| !myDoc->CopyReferenceAxisThroughBakedTransform(
+						aSource.label,
+						aLabel,
+						aSource.bakedTransform)) {
+					return retainRetryableOrUnknown();
+				}
+				MirrorPendingResult& aPending =
+					_pendingMirrorResults.back();
+				OcctReferenceAxis aStoredReferenceAxis;
+				const OcctReferenceAxisReadState aStoredReferenceAxisState =
+					myDoc->ReadReferenceAxisForLabel(
+						aLabel, aStoredReferenceAxis);
+				if (aStoredReferenceAxisState
+						!= aPending.expectedReferenceAxisState
+					|| aStoredReferenceAxisState
+						== OcctReferenceAxisReadState::Invalid
+					|| ReferenceAxisDiffers(
+						aStoredReferenceAxis,
+						aPending.expectedReferenceAxis)) {
 					return retainRetryableOrUnknown();
 				}
 				myDoc->LoadObjectMeterial(aLabel, aShape);
@@ -3941,6 +4462,11 @@ namespace core3d {
 	}
 
 #ifdef DEBUG
+	void ObjectInteractor::debugSetDuplicateCommitMode(
+		const Standard_Integer mode) noexcept {
+		_debugDuplicateCommitMode = mode >= 0 && mode <= 2 ? mode : 0;
+	}
+
 	MirrorPreviewDebugState
 	ObjectInteractor::debugMirrorPreviewState() const noexcept {
 		MirrorPreviewDebugState aState;

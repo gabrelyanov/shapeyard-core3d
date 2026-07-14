@@ -19,7 +19,7 @@
 
 namespace core3d::scene {
 
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 4;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 5;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 9;
 
 struct Float2 {
@@ -110,6 +110,13 @@ enum class RenderRole : std::uint8_t {
 enum class CoordinateSpace : std::uint8_t {
     World = 0,
     WorldAnchorPixels,
+};
+
+//! Original coordinate authority of one persisted reference-axis component.
+//! This is deliberately separate from render-item CoordinateSpace.
+enum class ReferenceSpace : std::uint8_t {
+    Object = 0,
+    World = 1,
 };
 
 enum class DepthPolicy : std::uint8_t {
@@ -224,10 +231,24 @@ struct MeshSnapshot {
     std::vector<MeshPrimitive> primitives;
 };
 
+//! Definition-owned reference line resolved into true world space before mesh
+//! recentering. The original component spaces remain available to editors so
+//! Object Origin + World Z and the other mixed-space choices round-trip.
+struct ReferenceAxisSnapshot {
+    Double3 worldPivot;
+    Double3 worldDirection = {0.0, 0.0, 1.0};
+    ReferenceSpace pivotSpace = ReferenceSpace::Object;
+    ReferenceSpace directionSpace = ReferenceSpace::World;
+    bool authored = false;
+};
+
 struct InstanceSnapshot {
     std::string entityIdentifier;
     std::uint32_t meshIndex = 0;
     Matrix4d worldFromObject;
+    //! Present on every committed model instance in a full scene. Transient
+    //! presentation-overlay instances intentionally do not claim this authority.
+    std::optional<ReferenceAxisSnapshot> referenceAxis;
     bool reversesWinding = false;
     bool visible = true;
     bool selectable = true;

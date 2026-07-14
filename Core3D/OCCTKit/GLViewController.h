@@ -126,6 +126,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL) hasTrialMirrorObjects;
 #ifdef DEBUG
 - (void)debugRequestRender;
+- (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
 - (void)debugSetMaximumLeafPresentations:(NSUInteger)limit;
 - (void)debugSetMaximumProjectTopologyValidationNodes:(NSUInteger)limit;

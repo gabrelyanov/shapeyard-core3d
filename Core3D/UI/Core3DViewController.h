@@ -69,6 +69,31 @@ typedef NS_ENUM(NSInteger, Core3DDebugGeometryFixtureMode) {
     //! nonidentity TopLoc_Location that must be applied to every stored node.
     Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation,
 };
+
+//! Standalone BinXCAF fixtures for the all-or-nothing Reference Axis schema.
+typedef NS_ENUM(NSInteger, Core3DDebugReferenceAxisFixtureMode) {
+    Core3DDebugReferenceAxisFixtureValidMixedSpace = 0,
+    Core3DDebugReferenceAxisFixturePartialRecord,
+    Core3DDebugReferenceAxisFixtureUnknownMode,
+    Core3DDebugReferenceAxisFixtureWrongModeType,
+    Core3DDebugReferenceAxisFixtureNonFinitePivot,
+    Core3DDebugReferenceAxisFixtureOversizedPivot,
+    Core3DDebugReferenceAxisFixtureZeroDirection,
+    Core3DDebugReferenceAxisFixtureNonUnitDirection,
+    Core3DDebugReferenceAxisFixtureOrphanRecord,
+    //! No authored record: the implicit default must still reject a malformed
+    //! persisted object transform during production document admission.
+    Core3DDebugReferenceAxisFixtureImplicitDefaultCorruptTransform,
+    //! No authored record: a cumulative assembly location that pushes the
+    //! implicit Object Origin outside the model-coordinate bound.
+    Core3DDebugReferenceAxisFixtureImplicitDefaultOversizedOccurrence,
+    //! The private Duplicate ownership GUID is occupied by the wrong scalar
+    //! type on document Main and must fail production admission.
+    Core3DDebugReferenceAxisFixtureDuplicateSentinelWrongType,
+    //! Even the correct private Duplicate sentinel type is corrupt when it is
+    //! attached anywhere except document Main.
+    Core3DDebugReferenceAxisFixtureDuplicateSentinelMisplaced,
+};
 #endif
 
 typedef struct {
@@ -422,6 +447,28 @@ typedef struct {
 //! when the valid legacy definition has no marker.
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugGeometryRepresentationStates;
+//! Read the first free-simple definition's stored and resolved reference line.
+//! `readState` is Invalid=-1, ImplicitDefault=0, Authored=1.
+- (NSDictionary<NSString *, NSNumber *> *)debugFirstReferenceAxisState;
+//! Commit one complete reference record on the first free-simple definition.
+//! Required numeric keys are pivotSpace, directionSpace, pivotX/Y/Z, and
+//! directionX/Y/Z. A finite nonzero direction is normalized by native Core.
+- (BOOL)debugSetFirstReferenceAxis:
+    (NSDictionary<NSString *, NSNumber *> *)values;
+//! Commit removal of the complete authored record.
+- (BOOL)debugResetFirstReferenceAxis;
+//! Commit a test-only persisted uniform scale without touching camera,
+//! manipulator, or bounds authority. Negative values exercise oriented-axis
+//! reversal in the production resolver.
+- (BOOL)debugSetFirstReferenceAxisPersistedUniformScale:(CGFloat)scale;
+//! Create one deterministic XBF fixture. Only ValidMixedSpace may pass the
+//! production project-load gate; every malformed mode must fail closed.
+- (NSData *_Nullable)debugReferenceAxisFixtureDataWithMode:
+    (Core3DDebugReferenceAxisFixtureMode)mode
+    NS_SWIFT_NAME(debugReferenceAxisFixtureData(mode:));
+//! Inject Duplicate CommitCommand behavior after a real close: 0 normal,
+//! 1 false-after-close, and 2 throw-after-close.
+- (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis
@@ -658,7 +705,7 @@ typedef struct {
 //! Valid imported PBR material whose Common fallback owns an embedded PNG.
 //! Scalar authoring must remain read-only until that texture is app-owned.
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;
-//! Valid XCAF material with a normal map that schema v4 cannot represent.
+//! Valid XCAF material with a normal map that schema v5 cannot represent.
 //! Snapshot publication must fail closed so OCCT remains authoritative.
 - (NSData *_Nullable)debugUnsupportedPBRTextureBinXCAFFixtureData;
 //! Same fail-closed fixture shape with a metallic-roughness map.
