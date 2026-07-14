@@ -85,7 +85,24 @@ An uncatchable interruption between archive renames therefore leaves a stale
 manifest whose hashes reveal the incomplete pair rather than blessing it. No
 other vendored archive is staged or replaced.
 
-Set `OCCT_GLTF_WORK_DIR` to an empty directory to choose where source, build,
-validation, staged output, and rollback evidence are retained. Otherwise a new
-directory is created below `$TMPDIR`; it is intentionally retained and printed
-at the end of the run.
+The complete checkout, configure, compile, validation, staging, and atomic
+installation sequence runs as one worker inside Shapeyard's disk guard. This
+keeps every disk-writing phase under the same free-space and CoreSimulator-log
+monitor without nesting guard locks. Before writing, the worker verifies its
+live guard lock, parent/supervisor ancestry, process group, and UUID-bound root
+marker. `TMPDIR`, validation output, staging, rollback copies, and pending
+atomic-install files all remain below that root. An automatic work directory is
+created as a single `/tmp/shapeyard-*` root (canonically below `/private/tmp`)
+and is removed on exit only after its marker, canonical path, UUID token, owner,
+device, symlink, and mount checks pass. A removable root may not preexist the
+guard invocation. Cleanup failure is reported as a failed run rather than
+ignored. The guard writes a separate exact remove-on-exit marker before the
+worker starts. A later globally locked invocation waits for orphan-writer
+shutdown and reaps only strict UUID-named OCCT roots with both valid markers;
+the markers remain in place until recursive payload deletion is complete and
+the root has been proven empty.
+
+Set `OCCT_GLTF_KEEP_WORK_DIR=1` to retain an automatic work directory for
+diagnostics. Alternatively, set `OCCT_GLTF_WORK_DIR` to an empty,
+single-component `/tmp/shapeyard-*` directory to retain source, build,
+validation, staged output, and rollback evidence at that explicit location.

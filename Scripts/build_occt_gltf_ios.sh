@@ -16,12 +16,15 @@ readonly RAPIDJSON_ENABLED_TEXT="Invalid glTF syntax"
 
 SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/.." && pwd -P)"
+PROJECT_ROOT="$(cd "${REPOSITORY_ROOT}/.." && pwd -P)"
+DISK_GUARD="${PROJECT_ROOT}/Scripts/with_disk_budget.sh"
 VENDORED_INCLUDE_DIRECTORY="${REPOSITORY_ROOT}/Core3D/occt/inc"
 DEVICE_DESTINATION="${REPOSITORY_ROOT}/Core3D/occt/lib/libTKDEGLTF.a"
 SIMULATOR_DESTINATION="${REPOSITORY_ROOT}/Core3D/occt/lib_sim/libTKDEGLTF.a"
 NOTICES_DIRECTORY="${REPOSITORY_ROOT}/ThirdPartyNotices"
 MANIFEST_DESTINATION="${REPOSITORY_ROOT}/Core3D/occt/TKDEGLTF_BUILD_MANIFEST.txt"
 LOCK_DIRECTORY="${REPOSITORY_ROOT}/.occt-gltf-build.lock"
+WORK_DIRECTORY_IS_AUTOMATIC=0
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -75,21 +78,40 @@ check_cmake_version() {
 }
 
 prepare_work_directory() {
+  local work_token=$1
+  local requested_directory root_name
+  local parent_device root_device root_owner root_mode
   if [[ -n "${OCCT_GLTF_WORK_DIR:-}" ]]; then
-    WORK_DIRECTORY="${OCCT_GLTF_WORK_DIR}"
-    mkdir -p "${WORK_DIRECTORY}"
+    requested_directory="${OCCT_GLTF_WORK_DIR}"
+    [[ "${requested_directory}" =~ ^(/private)?/tmp/shapeyard-[A-Za-z0-9._-]+$ ]] \
+      || die "OCCT_GLTF_WORK_DIR must be a single /tmp/shapeyard-* directory"
+    root_name="${requested_directory##*/}"
+    WORK_DIRECTORY="/private/tmp/${root_name}"
+    if [[ ! -e "${WORK_DIRECTORY}" ]]; then
+      mkdir -m 700 "${WORK_DIRECTORY}"
+    fi
     [[ -z "$(find "${WORK_DIRECTORY}" -mindepth 1 -print -quit)" ]] \
       || die "OCCT_GLTF_WORK_DIR must be empty: ${WORK_DIRECTORY}"
-  else
-    WORK_DIRECTORY="$(mktemp -d "${TMPDIR:-/tmp}/shapeyard-occt-gltf-ios.XXXXXX")"
-  fi
-  WORK_DIRECTORY="$(cd "${WORK_DIRECTORY}" && pwd -P)"
+    [[ -d "${WORK_DIRECTORY}" && ! -L "${WORK_DIRECTORY}" ]] \
+      || die "work directory must be a real directory, not a symlink"
+    WORK_DIRECTORY="$(cd "${WORK_DIRECTORY}" && pwd -P)"
+    [[ "${WORK_DIRECTORY}" =~ ^/private/tmp/shapeyard-[A-Za-z0-9._-]+$ ]] \
+      || die "work directory must be a single /tmp/shapeyard-* directory: ${WORK_DIRECTORY}"
 
-  OCCT_SOURCE_DIRECTORY="${WORK_DIRECTORY}/occt"
-  RAPIDJSON_SOURCE_DIRECTORY="${WORK_DIRECTORY}/rapidjson"
-  STAGE_DIRECTORY="${WORK_DIRECTORY}/stage"
-  VALIDATION_DIRECTORY="${WORK_DIRECTORY}/validation"
-  mkdir -p "${STAGE_DIRECTORY}" "${VALIDATION_DIRECTORY}"
+    parent_device="$(stat -f %d /private/tmp)"
+    root_device="$(stat -f %d "${WORK_DIRECTORY}")"
+    root_owner="$(stat -f %u "${WORK_DIRECTORY}")"
+    root_mode="$(stat -f %Lp "${WORK_DIRECTORY}")"
+    [[ "${root_device}" == "${parent_device}" \
+        && "${root_owner}" == "$(id -u)" \
+        && "${root_mode}" == "700" ]] \
+      || die "work directory must be current-user-owned mode 0700 on /private/tmp"
+  else
+    WORK_DIRECTORY="/private/tmp/shapeyard-occt-gltf-ios.${work_token}"
+    [[ ! -e "${WORK_DIRECTORY}" && ! -L "${WORK_DIRECTORY}" ]] \
+      || die "automatic OCCT work directory already exists: ${WORK_DIRECTORY}"
+    WORK_DIRECTORY_IS_AUTOMATIC=1
+  fi
   note "Work directory: ${WORK_DIRECTORY}"
 }
 
@@ -466,7 +488,7 @@ restore_file_atomically() {
   backup="$1"
   destination="$2"
   restore=""
-  if ! restore="$(mktemp "${destination}.rollback.XXXXXX")"; then
+  if ! restore="$(mktemp "${TRANSACTION_DIRECTORY}/rollback.XXXXXX")"; then
     printf 'error: could not create rollback temp for %s\n' "${destination}" >&2
     return 1
   fi
@@ -531,9 +553,9 @@ install_archive_pair() {
     MANIFEST_PREEXISTED=1
   fi
 
-  DEVICE_PENDING="$(mktemp "${DEVICE_DESTINATION}.pending.XXXXXX")"
-  SIMULATOR_PENDING="$(mktemp "${SIMULATOR_DESTINATION}.pending.XXXXXX")"
-  MANIFEST_PENDING="$(mktemp "${MANIFEST_DESTINATION}.pending.XXXXXX")"
+  DEVICE_PENDING="$(mktemp "${TRANSACTION_DIRECTORY}/device.pending.XXXXXX")"
+  SIMULATOR_PENDING="$(mktemp "${TRANSACTION_DIRECTORY}/simulator.pending.XXXXXX")"
+  MANIFEST_PENDING="$(mktemp "${TRANSACTION_DIRECTORY}/manifest.pending.XXXXXX")"
   cp "${device_staged}" "${DEVICE_PENDING}"
   cp "${simulator_staged}" "${SIMULATOR_PENDING}"
   cp "${manifest_staged}" "${MANIFEST_PENDING}"
@@ -611,6 +633,47 @@ cleanup_pending_files() {
   fi
 }
 
+cleanup_legacy_transaction_files() {
+  local candidate destination_directory destination_device
+  local candidate_device candidate_owner
+  for candidate in \
+      "${DEVICE_DESTINATION}.pending."* \
+      "${SIMULATOR_DESTINATION}.pending."* \
+      "${MANIFEST_DESTINATION}.pending."* \
+      "${DEVICE_DESTINATION}.rollback."* \
+      "${SIMULATOR_DESTINATION}.rollback."* \
+      "${MANIFEST_DESTINATION}.rollback."*; do
+    [[ -e "${candidate}" || -L "${candidate}" ]] || continue
+    [[ -f "${candidate}" && ! -L "${candidate}" ]] \
+      || die "refusing unsafe legacy OCCT transaction path: ${candidate}"
+    case "${candidate}" in
+      "${DEVICE_DESTINATION}.pending."*|"${DEVICE_DESTINATION}.rollback."*)
+        destination_directory="${DEVICE_DESTINATION%/*}"
+        ;;
+      "${SIMULATOR_DESTINATION}.pending."*|"${SIMULATOR_DESTINATION}.rollback."*)
+        destination_directory="${SIMULATOR_DESTINATION%/*}"
+        ;;
+      "${MANIFEST_DESTINATION}.pending."*|"${MANIFEST_DESTINATION}.rollback."*)
+        destination_directory="${MANIFEST_DESTINATION%/*}"
+        ;;
+      *)
+        die "unexpected legacy OCCT transaction path: ${candidate}"
+        ;;
+    esac
+    [[ -d "${destination_directory}" && ! -L "${destination_directory}" ]] \
+      || die "legacy OCCT transaction destination is missing or unsafe: ${destination_directory}"
+    destination_device="$(stat -f %d "${destination_directory}")"
+    candidate_device="$(stat -f %d "${candidate}")"
+    candidate_owner="$(stat -f %u "${candidate}")"
+    [[ "${candidate_device}" == "${destination_device}" \
+        && "${candidate_owner}" == "$(id -u)" ]] \
+      || die "refusing unowned legacy OCCT transaction file: ${candidate}"
+    rm -f "${candidate}"
+    [[ ! -e "${candidate}" && ! -L "${candidate}" ]] \
+      || die "could not remove legacy OCCT transaction file: ${candidate}"
+  done
+}
+
 cleanup_all() {
   local lock_owner
   cleanup_pending_files
@@ -626,11 +689,145 @@ cleanup_all() {
   fi
 }
 
-main() {
+verify_disk_guard_ancestry() {
+  local protocol guard_pid supervisor_pid advertised_pgid
+  local worker_pgid supervisor_parent lock_owner guard_command
+
+  protocol="${SHAPEYARD_DISK_GUARD_PROTOCOL:-}"
+  guard_pid="${SHAPEYARD_DISK_GUARD_PID:-}"
+  supervisor_pid="${SHAPEYARD_DISK_GUARD_SUPERVISOR_PID:-}"
+  advertised_pgid="${SHAPEYARD_DISK_GUARD_PGID:-}"
+  [[ "${protocol}" == "v1" \
+      && "${guard_pid}" =~ ^[0-9]+$ \
+      && "${supervisor_pid}" =~ ^[0-9]+$ \
+      && "${advertised_pgid}" =~ ^[0-9]+$ ]] \
+    || die "the OCCT worker is missing live disk-guard provenance"
+  [[ "${supervisor_pid}" == "${advertised_pgid}" \
+      && "${PPID}" == "${supervisor_pid}" ]] \
+    || die "the OCCT worker is outside the expected guard supervisor"
+
+  worker_pgid="$(/bin/ps -o pgid= -p "$$")"
+  worker_pgid="${worker_pgid//[[:space:]]/}"
+  supervisor_parent="$(/bin/ps -o ppid= -p "${supervisor_pid}")"
+  supervisor_parent="${supervisor_parent//[[:space:]]/}"
+  [[ "${worker_pgid}" == "${advertised_pgid}" \
+      && "${supervisor_parent}" == "${guard_pid}" ]] \
+    || die "the OCCT worker process group or ancestry is not guard-owned"
+  kill -0 "${guard_pid}" 2>/dev/null \
+    && kill -0 "${supervisor_pid}" 2>/dev/null \
+    || die "the OCCT disk guard or supervisor is no longer alive"
+
+  lock_owner="$(sed -n '1p' /private/tmp/.shapeyard-disk-budget-global.lock 2>/dev/null || true)"
+  [[ "${lock_owner}" == "${guard_pid}" ]] \
+    || die "the live disk-guard lock does not match the OCCT worker ancestry"
+  guard_command="$(/bin/ps -o command= -p "${guard_pid}")"
+  [[ "${guard_command}" == *"with_disk_budget.sh"* ]] \
+    || die "the advertised OCCT guard process is not the canonical disk guard"
+
+  unset SHAPEYARD_DISK_GUARD_PROTOCOL
+  unset SHAPEYARD_DISK_GUARD_PID
+  unset SHAPEYARD_DISK_GUARD_SUPERVISOR_PID
+  unset SHAPEYARD_DISK_GUARD_PGID
+}
+
+initialize_guarded_worker() {
+  local requested_work_directory=$1
+  local automatic_flag=$2
+  local worker_token=$3
+  local marker marker_contents marker_owner marker_mode marker_device
+  local expected_marker_contents
+  local parent_device root_device root_owner root_mode
+  local directory directory_device directory_owner directory_mode
+  local destination_directory
+
+  [[ "${worker_token}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ \
+      && "${OCCT_GLTF_INTERNAL_WORKER_TOKEN:-}" == "${worker_token}" ]] \
+    || die "the guarded OCCT worker may only be launched by this script"
+  unset OCCT_GLTF_INTERNAL_WORKER_TOKEN
+  [[ "${automatic_flag}" == "0" || "${automatic_flag}" == "1" ]] \
+    || die "invalid guarded-worker ownership mode"
+  [[ "${requested_work_directory}" =~ ^/private/tmp/shapeyard-[A-Za-z0-9._-]+$ \
+      && -d "${requested_work_directory}" \
+      && ! -L "${requested_work_directory}" ]] \
+    || die "guarded worker received an unsafe work directory"
+
+  WORK_DIRECTORY="$(cd "${requested_work_directory}" && pwd -P)"
+  [[ "${WORK_DIRECTORY}" == "${requested_work_directory}" ]] \
+    || die "guarded worker work directory changed during launch"
+  WORK_DIRECTORY_IS_AUTOMATIC="${automatic_flag}"
+
+  parent_device="$(stat -f %d /private/tmp)"
+  root_device="$(stat -f %d "${WORK_DIRECTORY}")"
+  root_owner="$(stat -f %u "${WORK_DIRECTORY}")"
+  root_mode="$(stat -f %Lp "${WORK_DIRECTORY}")"
+  [[ "${root_device}" == "${parent_device}" \
+      && "${root_owner}" == "$(id -u)" \
+      && "${root_mode}" == "700" ]] \
+    || die "guarded worker work directory failed owner, mode, or device checks"
+
+  marker="${WORK_DIRECTORY}/.shapeyard-disk-budget-owned"
+  [[ -f "${marker}" && ! -L "${marker}" ]] \
+    || die "guarded worker ownership marker is missing or unsafe"
+  marker_contents="$(cat "${marker}")"
+  marker_owner="$(stat -f %u "${marker}")"
+  marker_mode="$(stat -f %Lp "${marker}")"
+  marker_device="$(stat -f %d "${marker}")"
+  expected_marker_contents="$(printf 'schema=shapeyard-disk-budget-owned-v2\nuid=%s\nroot=%s\ntoken=%s' \
+    "$(id -u)" "${WORK_DIRECTORY}" "${worker_token}")"
+  [[ "${marker_contents}" == "${expected_marker_contents}" \
+      && "${marker_owner}" == "$(id -u)" \
+      && "${marker_mode}" == "600" \
+      && "${marker_device}" == "${parent_device}" ]] \
+    || die "guarded worker ownership marker is invalid"
+
+  OCCT_SOURCE_DIRECTORY="${WORK_DIRECTORY}/occt"
+  RAPIDJSON_SOURCE_DIRECTORY="${WORK_DIRECTORY}/rapidjson"
+  STAGE_DIRECTORY="${WORK_DIRECTORY}/stage"
+  VALIDATION_DIRECTORY="${WORK_DIRECTORY}/validation"
+  TRANSACTION_DIRECTORY="${WORK_DIRECTORY}/transaction"
+  TMP_DIRECTORY="${WORK_DIRECTORY}/tmp"
+  for directory in "${STAGE_DIRECTORY}" "${VALIDATION_DIRECTORY}" \
+      "${TRANSACTION_DIRECTORY}" "${TMP_DIRECTORY}"; do
+    if [[ ! -e "${directory}" ]]; then
+      /bin/mkdir -m 700 "${directory}"
+    fi
+    [[ -d "${directory}" && ! -L "${directory}" ]] \
+      || die "guarded worker directory is missing or unsafe: ${directory}"
+    directory_device="$(stat -f %d "${directory}")"
+    directory_owner="$(stat -f %u "${directory}")"
+    directory_mode="$(stat -f %Lp "${directory}")"
+    [[ "${directory_device}" == "${root_device}" \
+        && "${directory_owner}" == "$(id -u)" \
+        && "${directory_mode}" == "700" ]] \
+      || die "guarded worker directory failed owner, mode, or device checks: ${directory}"
+  done
+  for destination_directory in \
+      "${DEVICE_DESTINATION%/*}" \
+      "${SIMULATOR_DESTINATION%/*}" \
+      "${MANIFEST_DESTINATION%/*}"; do
+    [[ -d "${destination_directory}" && ! -L "${destination_directory}" \
+        && "$(stat -f %d "${destination_directory}")" == "${root_device}" ]] \
+      || die "OCCT transaction destination is not on the guarded work-root device"
+  done
+  TMPDIR="${TMP_DIRECTORY}/"
+  export TMPDIR
+}
+
+guarded_worker_main() {
   local device_build simulator_build device_archive simulator_archive
   local staged_device staged_simulator staged_manifest
+  local requested_work_directory=$1
+  local automatic_flag=$2
+  local worker_token=$3
 
-  [[ "$#" == "0" ]] || die "this script accepts no arguments; use OCCT_GLTF_WORK_DIR to choose a work directory"
+  verify_disk_guard_ancestry
+  [[ "${OCCT_GLTF_KEEP_WORK_DIR:-0}" == "0" \
+      || "${OCCT_GLTF_KEEP_WORK_DIR:-0}" == "1" ]] \
+    || die "OCCT_GLTF_KEEP_WORK_DIR must be 0 or 1"
+
+  initialize_guarded_worker \
+    "${requested_work_directory}" "${automatic_flag}" "${worker_token}"
+  trap cleanup_all EXIT
 
   require_command awk
   require_command cmake
@@ -640,11 +837,14 @@ main() {
   require_command git
   require_command grep
   require_command hostname
+  require_command id
   require_command mktemp
   require_command sed
   require_command shasum
+  require_command stat
   require_command xcodebuild
   require_command xcrun
+  [[ -x "${DISK_GUARD}" ]] || die "disk guard is not executable: ${DISK_GUARD}"
   check_cmake_version
   xcrun --sdk iphoneos --show-sdk-path >/dev/null
   xcrun --sdk iphonesimulator --show-sdk-path >/dev/null
@@ -656,9 +856,8 @@ main() {
   require_file "${NOTICES_DIRECTORY}/OpenCASCADE/OCCT_LGPL_EXCEPTION.txt"
   require_file "${NOTICES_DIRECTORY}/RapidJSON/license.txt"
 
-  trap cleanup_all EXIT
-  prepare_work_directory
   acquire_build_lock
+  cleanup_legacy_transaction_files
   if [[ -f "${MANIFEST_DESTINATION}" ]]; then
     "${SCRIPT_DIRECTORY}/verify_occt_gltf_binary_pair.sh"
   fi
@@ -689,7 +888,65 @@ main() {
 
   note "Installed validated RapidJSON-enabled archive pair and manifest"
   shasum -a 256 "${DEVICE_DESTINATION}" "${SIMULATOR_DESTINATION}"
-  note "Build evidence and previous archives remain in ${WORK_DIRECTORY}"
+  if [[ "${WORK_DIRECTORY_IS_AUTOMATIC}" == "1" \
+        && "${OCCT_GLTF_KEEP_WORK_DIR:-0}" != "1" ]]; then
+    note "Automatic work directory will be removed on exit: ${WORK_DIRECTORY}"
+  else
+    note "Build evidence and previous archives remain in ${WORK_DIRECTORY}"
+  fi
 }
 
-main "$@"
+launch_guarded_worker() {
+  local worker_token=$1
+  local guard_arguments=()
+
+  [[ "${worker_token}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] \
+    || die "could not create a guarded-worker token"
+  if [[ "${WORK_DIRECTORY_IS_AUTOMATIC}" == "1" \
+        && "${OCCT_GLTF_KEEP_WORK_DIR:-0}" != "1" ]]; then
+    guard_arguments+=(--remove-artifact-roots-on-exit)
+  fi
+  guard_arguments+=(--artifact-root "${WORK_DIRECTORY}" "${worker_token}")
+
+  note "Launching the complete OCCT rebuild and installation under the disk guard"
+  export OCCT_GLTF_INTERNAL_WORKER_TOKEN="${worker_token}"
+  exec "${DISK_GUARD}" \
+    "${guard_arguments[@]}" \
+    -- \
+    "${SCRIPT_DIRECTORY}/build_occt_gltf_ios.sh" \
+    --guarded-worker \
+    "${WORK_DIRECTORY}" \
+    "${WORK_DIRECTORY_IS_AUTOMATIC}" \
+    "${worker_token}"
+}
+
+launcher_main() {
+  local worker_token
+  [[ "$#" == "0" ]] \
+    || die "this script accepts no arguments; use OCCT_GLTF_WORK_DIR to choose a work directory"
+  [[ "${OCCT_GLTF_KEEP_WORK_DIR:-0}" == "0" \
+      || "${OCCT_GLTF_KEEP_WORK_DIR:-0}" == "1" ]] \
+    || die "OCCT_GLTF_KEEP_WORK_DIR must be 0 or 1"
+  require_command find
+  require_command id
+  require_command stat
+  require_command uuidgen
+  [[ -x "${DISK_GUARD}" ]] \
+    || die "disk guard is not executable: ${DISK_GUARD}"
+
+  # The disk guard creates automatic roots itself. Nothing is left behind if
+  # this launcher fails before exec, and removal is bound to this UUID.
+  worker_token="$(uuidgen)"
+  [[ "${worker_token}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] \
+    || die "could not create a guarded-worker token"
+  prepare_work_directory "${worker_token}"
+  launch_guarded_worker "${worker_token}"
+}
+
+if [[ "${1:-}" == "--guarded-worker" ]]; then
+  shift
+  [[ "$#" == "3" ]] || die "invalid guarded-worker invocation"
+  guarded_worker_main "$@"
+else
+  launcher_main "$@"
+fi
