@@ -122,7 +122,8 @@ constexpr std::uint64_t kBRepModelCapabilities =
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportOBJ)
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportSTL)
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportGLB)
-    | static_cast<std::uint64_t>(Core3DModelCapabilityExportSTEP);
+    | static_cast<std::uint64_t>(Core3DModelCapabilityExportSTEP)
+    | static_cast<std::uint64_t>(Core3DModelCapabilityLinearArray);
 constexpr std::uint64_t kTriangleMeshModelCapabilities =
     static_cast<std::uint64_t>(Core3DModelCapabilityObjectSelection)
     | static_cast<std::uint64_t>(Core3DModelCapabilityTranslate)
@@ -132,7 +133,8 @@ constexpr std::uint64_t kTriangleMeshModelCapabilities =
     | static_cast<std::uint64_t>(Core3DModelCapabilityMaterial)
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportOBJ)
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportSTL)
-    | static_cast<std::uint64_t>(Core3DModelCapabilityExportGLB);
+    | static_cast<std::uint64_t>(Core3DModelCapabilityExportGLB)
+    | static_cast<std::uint64_t>(Core3DModelCapabilityLinearArray);
 constexpr double kQuaternionTolerance = 1.0e-8;
 constexpr double kDimensionTolerance = 1.0e-9;
 constexpr double kDegreesToRadians =

@@ -66,6 +66,7 @@ typedef NS_ENUM(NSInteger, Core3DSceneRenderRole) {
     Core3DSceneRenderRoleGizmo,
     Core3DSceneRenderRoleGrid,
     Core3DSceneRenderRoleTrihedron,
+    Core3DSceneRenderRoleLinearArrayPreview,
 };
 
 typedef NS_ENUM(NSInteger, Core3DSceneCoordinateSpace) {
@@ -93,6 +94,7 @@ typedef NS_ENUM(NSInteger, Core3DScenePresentationOverlayKind) {
     Core3DScenePresentationOverlayKindBooleanUnionPreview,
     Core3DScenePresentationOverlayKindBooleanIntersectPreview,
     Core3DScenePresentationOverlayKindChamferPreview,
+    Core3DScenePresentationOverlayKindLinearArrayPreview,
 };
 
 typedef NS_ENUM(NSInteger, Core3DSceneElementKind) {

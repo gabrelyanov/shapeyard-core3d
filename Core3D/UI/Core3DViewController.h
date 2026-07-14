@@ -76,6 +76,27 @@ typedef struct {
     double max;
 } Boundaries;
 
+//! Stable world-axis contract for a destructive Linear Array operation.
+typedef NS_ENUM(NSInteger, Core3DLinearArrayAxis) {
+    Core3DLinearArrayAxisX = 0,
+    Core3DLinearArrayAxisY,
+    Core3DLinearArrayAxisZ,
+};
+
+//! Native-authoritative parameters and bounds for one active Linear Array.
+//! Count is the total number of objects, including the unchanged source.
+typedef struct {
+    Core3DLinearArrayAxis axis;
+    NSInteger count;
+    NSInteger minimumCount;
+    NSInteger maximumCount;
+    CGFloat spacing;
+    CGFloat minimumSpacing;
+    CGFloat maximumSpacing;
+    //! Physical document scale used to present spacing in millimetres.
+    double metersPerUnit;
+} Core3DLinearArrayParameters;
+
 //! Truthful outcome for an explicit modeling Apply or Cancel request. An
 //! unknown outcome remains retained but must be reconciled with another Apply;
 //! a retryable failure retains the ordinary Apply/Cancel recovery controls.
@@ -149,6 +170,14 @@ typedef struct {
 - (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
 - (Boundaries)getMirrorPlaneOffsetBoundaries;
 - (BOOL)resetMirrorPlane;
+- (Core3DLinearArrayParameters)getLinearArrayParameters;
+- (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis;
+- (BOOL)setLinearArrayCount:(NSInteger)count;
+- (BOOL)setLinearArraySpacing:(CGFloat)spacing;
+- (Core3DModelingOperationResult)tryApplyLinearArray
+    NS_SWIFT_NAME(tryApplyLinearArray());
+- (Core3DModelingOperationResult)tryCancelLinearArray
+    NS_SWIFT_NAME(tryCancelLinearArray());
 - (void)applySubtract;
 - (void)cancelSubtract;
 - (Core3DModelingOperationResult)tryApplyUnion
@@ -213,9 +242,10 @@ typedef struct {
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
 //! Capture only committed exportable geometry. Unlike the presentation
-//! snapshot seam, this returns nil while a Boolean or Mirror trial is active,
-//! unresolved, or while the OCAF document owns an open command. Main-thread
-//! only; the returned value is an immutable deep copy safe for background I/O.
+//! snapshot seam, this returns nil while a Boolean, Mirror, or Linear Array
+//! trial is active or unresolved, or while the OCAF document owns an open
+//! command. Main-thread only; the returned value is an immutable deep copy safe
+//! for background I/O.
 - (Core3DSceneSnapshot *_Nullable)captureExportSceneSnapshot;
 
 @end
@@ -405,6 +435,16 @@ typedef struct {
                               faceTopologyIndex:(NSInteger)faceTopologyIndex
                                          offset:(CGFloat)offset
     NS_SWIFT_NAME(debugTryMirrorPlane(entityIdentifier:faceTopologyIndex:offset:));
+//! Linear Array state values mirror the public modeling preview state. Count
+//! is total occurrences including the unchanged source.
+- (NSDictionary<NSString *, NSNumber *> *)debugLinearArrayState;
+- (void)debugSetLinearArrayTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayAbortFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayEraseFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayCommitMode:(NSInteger)mode;
+- (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
+- (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
+- (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
 //! Test-only deterministic Boolean seam. Identifiers must name committed
 //! one-occurrence bodies; production selection, ownership, validation, preview,
 //! transaction, and renderer publication paths remain authoritative.
@@ -434,6 +474,8 @@ typedef struct {
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
 //! Deliver the viewport's production memory-warning cancellation path.
 - (void)debugSimulateBooleanMemoryWarning;
+//! Deliver the same production path for an active Linear Array regression.
+- (void)debugSimulateLinearArrayMemoryWarning;
 //! Deterministically capture a planar face by stable entity identifier and
 //! zero-based TopExp face index, using the production extrusion admission.
 - (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
@@ -610,6 +652,12 @@ typedef struct {
 //! clients should re-evaluate fallback policy and capture a full presentation
 //! snapshot rather than republishing a camera-only frame.
 - (void)viewDidChangeViewportPresentationState;
+//! Called on the main queue after a transient modeling parameter changes only
+//! its bounded presentation overlay. Delivery may occur after the current
+//! event turn. Renderer clients may republish that overlay against
+//! their last compatible committed-scene snapshot; if no compatible base
+//! exists, they should fall back to a full capture.
+- (void)viewDidChangeViewportPresentationOverlay;
 //! Called after the native viewport has been invalidated. Subclasses should
 //! coalesce work and must not synchronously recapture full geometry per call.
 - (void)viewDidInvalidateSceneSnapshot;

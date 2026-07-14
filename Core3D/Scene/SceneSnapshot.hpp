@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 4;
-inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 7;
+inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 8;
 
 struct Float2 {
     float x = 0.0f;
@@ -103,6 +103,7 @@ enum class RenderRole : std::uint8_t {
     Gizmo,
     Grid,
     Trihedron,
+    LinearArrayPreview,
 };
 
 enum class CoordinateSpace : std::uint8_t {
@@ -130,6 +131,7 @@ enum class PresentationOverlayKind : std::uint8_t {
     BooleanUnionPreview,
     BooleanIntersectPreview,
     ChamferPreview,
+    LinearArrayPreview,
 };
 
 enum class ElementKind : std::uint8_t {

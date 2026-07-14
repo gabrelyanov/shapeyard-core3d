@@ -56,6 +56,22 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 
 @implementation Core3DViewController(GLViewControllerProtocol)
 
+- (void)viewerDidChangeLinearArrayPresentationOverlay:(id)sender {
+    (void)sender;
+    if (_currentGizmoType != PrimitiveGizmoTypeLinearArray
+        || [GLController getGizmoType] != PrimitiveGizmoTypeLinearArray) {
+        return;
+    }
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:
+            PrimitiveGizmoTypeLinearArray];
+    if (!status.active) {
+        return;
+    }
+    self.can_apply = status.canApply;
+    [self viewDidChangeViewportPresentationOverlay];
+}
+
 - (void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selections {
 
     assert(_currentGizmoType == [GLController getGizmoType]);
@@ -139,6 +155,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
         case PrimitiveGizmoTypeUnion:
         case PrimitiveGizmoTypeIntersect:
         case PrimitiveGizmoTypeExtrude:
+        case PrimitiveGizmoTypeLinearArray:
             self.can_delete = false;
             self.can_duplicate = false;
             break;
@@ -167,6 +184,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                                          @(PrimitiveGizmoTypeScale),
                                          @(PrimitiveGizmoTypeChamfer),
                                          @(PrimitiveGizmoTypeMirror),
+                                         @(PrimitiveGizmoTypeLinearArray),
                                          @(PrimitiveGizmoTypeSubtract),
                                          @(PrimitiveGizmoTypeUnion),
                                          @(PrimitiveGizmoTypeIntersect),
@@ -194,6 +212,11 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 					[self modelingPreviewStatusForGizmoType:
 						PrimitiveGizmoTypeMirror].canApply;
 				break;
+            case PrimitiveGizmoTypeLinearArray:
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeLinearArray].canApply;
+                break;
             default:
                 break;
         }
@@ -246,6 +269,14 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 					[self modelingPreviewStatusForGizmoType:
 						PrimitiveGizmoTypeMirror].canApply;
 				break;
+            case PrimitiveGizmoTypeLinearArray:
+                // The source stays selected while the owned transient copies
+                // are nonselectable. Typed state remains authoritative if a
+                // lifecycle or recovery path briefly clears AIS selection.
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeLinearArray].canApply;
+                break;
 
             default:
                 _availableGizmoTypes = @[];

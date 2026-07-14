@@ -35,6 +35,8 @@ bool CanCaptureCommittedExport(
         && !objectInteractor->hasActiveBoolean()
         && !objectInteractor->hasUnresolvedBoolean()
         && !objectInteractor->hasUnresolvedMirrorObjects()
+        && !objectInteractor->hasActiveLinearArray()
+        && !objectInteractor->hasUnresolvedLinearArray()
         && !shapeInteractor->hasActiveExtrusion()
         && !shapeInteractor->hasActiveBevel();
 }

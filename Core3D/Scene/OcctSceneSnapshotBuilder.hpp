@@ -94,6 +94,22 @@ public:
         const std::vector<Handle(AIS_Shape)>& theResultShapes,
         const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept;
 
+    //! Publish one source mesh/material with one world-space instance per
+    //! explicitly owned Linear Array preview body. Geometry and appearance are
+    //! copied once from the first handle's existing cache; the committed source
+    //! remains unchanged and is never suppressed. Main-thread only.
+    OverlayPointer PublishLinearArrayPreviewOverlay(
+        const Handle(OcctDocument)& theDocument,
+        const std::vector<Handle(AIS_Shape)>& thePreviewShapes) noexcept;
+
+    //! Publish the exact-empty semantic Linear Array overlay used when a
+    //! retained operation has valid zero spacing. This is intentionally
+    //! separate from the generic empty overlay so renderers can distinguish a
+    //! deliberate zero-copy preview from a missing selection gizmo.
+    //! Main-thread only.
+    OverlayPointer PublishEmptyLinearArrayPreviewOverlay(
+        const Handle(OcctDocument)& theDocument) noexcept;
+
 #ifdef DEBUG
     enum class DebugTriangulationFailure : std::uint8_t {
         None = 0,
@@ -118,7 +134,8 @@ private:
         PresentationOverlayContent&& theContent,
         bool theAllowsMirrorPreview,
         bool theAllowsBooleanPreview,
-        bool theAllowsChamferPreview) noexcept;
+        bool theAllowsChamferPreview,
+        bool theAllowsLinearArrayPreview) noexcept;
 
     struct State;
     std::unique_ptr<State> myState;

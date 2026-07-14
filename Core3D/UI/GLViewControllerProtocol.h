@@ -28,6 +28,9 @@
 //! Synchronize the public tool state when native Boolean cleanup cannot
 //! establish a fresh action for a manipulator that would otherwise be inert.
 -(void)viewerDidFailToRetainBooleanMode:(id)sender;
+//! A Linear Array state change modified only its bounded transient overlay;
+//! committed scene geometry and selection are unchanged.
+-(void)viewerDidChangeLinearArrayPresentationOverlay:(id)sender;
 
 @required
 -(void)didSetupViewer:(id)sender;

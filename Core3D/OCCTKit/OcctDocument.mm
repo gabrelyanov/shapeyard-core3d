@@ -1323,6 +1323,22 @@ bool AddWithinLimit(Standard_Size& theAggregate,
     return true;
 }
 
+bool AddMultipliedWithinLimit(Standard_Size& theAggregate,
+                              const Standard_Size theValue,
+                              const Standard_Size theMultiplier,
+                              const Standard_Size theMaximum) noexcept
+{
+    if (theAggregate > theMaximum) {
+        return false;
+    }
+    const Standard_Size aRemaining = theMaximum - theAggregate;
+    if (theValue != 0U && theMultiplier > aRemaining / theValue) {
+        return false;
+    }
+    theAggregate += theValue * theMultiplier;
+    return true;
+}
+
 bool IsGeometryDefinitionLabel(
     const Handle(TDocStd_Document)& theDocument,
     const Handle(XCAFDoc_ShapeTool)& theShapeTool,
@@ -2302,6 +2318,7 @@ struct GeometryDocumentUsage
     Standard_Size definitions = 0;
     Standard_Size labels = 0;
     Standard_Size graphVisits = 0;
+    Standard_Size leafOccurrences = 0;
 };
 
 Standard_Boolean ValidateGeometryDocument(
@@ -2391,6 +2408,7 @@ Standard_Boolean ValidateGeometryDocument(
         GeometryValidationBudget aBudget;
         Standard_Size aDefinitionCount = 0;
         Standard_Size anAggregateGraphVisitCount = 0;
+        Standard_Size aLeafOccurrenceCount = 0;
         for (Standard_Integer aRootIndex = 1;
              aRootIndex <= aFreeRootLabels.Length(); ++aRootIndex) {
             const TDF_Label& aRootLabel =
@@ -2496,6 +2514,10 @@ Standard_Boolean ValidateGeometryDocument(
                         document, aShapeTool, aLabel)) {
                     return Standard_False;
                 }
+                // This path-relative traversal reaches one resolved leaf per
+                // occurrence, including repeated references to a shared
+                // definition. Geometry itself remains classified once below.
+                ++aLeafOccurrenceCount;
                 if (!aDefinitionLabels.Contains(aLabel)) {
                     if (aDefinitionCount
                             >= kMaximumGeometryDefinitionLabels
@@ -2587,6 +2609,7 @@ Standard_Boolean ValidateGeometryDocument(
             usage.definitions = aDefinitionCount;
             usage.labels = aLabelCount;
             usage.graphVisits = anAggregateGraphVisitCount;
+            usage.leafOccurrences = aLeafOccurrenceCount;
             *output = usage;
         }
         return Standard_True;
@@ -2608,9 +2631,32 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
 {
     try {
         OCC_CATCH_SIGNALS
-        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-            || sourceDefinitionLabels.empty()
+        if (sourceDefinitionLabels.empty()
             || sourceDefinitionLabels.size()
+                > static_cast<std::size_t>(
+                    kMaximumGeometryDefinitionLabels)) {
+            return Standard_False;
+        }
+
+        std::vector<OcctGeometryDuplicationRequest> requests;
+        requests.reserve(sourceDefinitionLabels.size());
+        for (const TDF_Label& source : sourceDefinitionLabels) {
+            requests.push_back({source, 1U});
+        }
+        return CanDuplicateGeometryDefinitions(requests);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
+    const std::vector<OcctGeometryDuplicationRequest>& requests) const
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || requests.empty()
+            || requests.size()
                 > static_cast<std::size_t>(
                     kMaximumGeometryDefinitionLabels)
             || !XCAFDoc_DocumentTool::CheckShapeTool(
@@ -2632,25 +2678,23 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
         Standard_Size projectedDefinitions = current.definitions;
         Standard_Size projectedLabels = current.labels;
         Standard_Size projectedGraphVisits = current.graphVisits;
+        Standard_Size projectedLeafOccurrences = current.leafOccurrences;
         TDF_LabelMap uniqueSources;
-        for (const TDF_Label& source : sourceDefinitionLabels) {
+        for (const OcctGeometryDuplicationRequest& request : requests) {
+            const TDF_Label& source = request.sourceDefinition;
+            const Standard_Size destinationCount =
+                request.destinationCount;
             if (source.IsNull()
                 || source.Data() != myOcafDoc->GetData()
+                || destinationCount == 0U
                 || !IsEditableFreeSimpleDefinitionLabel(source)
-                || !uniqueSources.Add(source)
-                || !AddWithinLimit(
-                    projectedDefinitions,
-                    1U,
-                    kMaximumGeometryDefinitionLabels)
-                || !AddWithinLimit(
-                    projectedGraphVisits,
-                    1U,
-                    kMaximumGeometryDocumentLabels)
-                || ValidatedGeometryRepresentation(
-                    myOcafDoc,
-                    shapeTool,
-                    source,
-                    &projectedGeometry)
+                || !uniqueSources.Add(source)) {
+                return Standard_False;
+            }
+
+            GeometryValidationBudget sourceGeometry;
+            if (ValidatedGeometryRepresentation(
+                    myOcafDoc, shapeTool, source, &sourceGeometry)
                     == OcctGeometryRepresentation::Invalid) {
                 return Standard_False;
             }
@@ -2676,9 +2720,41 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                     ++destinationLabels;
                 }
             }
-            if (!AddWithinLimit(
+            if (!AddMultipliedWithinLimit(
+                    projectedDefinitions,
+                    1U,
+                    destinationCount,
+                    kMaximumGeometryDefinitionLabels)
+                || !AddMultipliedWithinLimit(
+                    projectedGraphVisits,
+                    1U,
+                    destinationCount,
+                    kMaximumGeometryDocumentLabels)
+                || !AddMultipliedWithinLimit(
+                    projectedLeafOccurrences,
+                    1U,
+                    destinationCount,
+                    static_cast<Standard_Size>(
+                        core3d::limits::kMaximumLeafPresentations))
+                || !AddMultipliedWithinLimit(
+                    projectedGeometry.subshapes,
+                    sourceGeometry.subshapes,
+                    destinationCount,
+                    kMaximumSubshapesPerDocument)
+                || !AddMultipliedWithinLimit(
+                    projectedGeometry.meshVertices,
+                    sourceGeometry.meshVertices,
+                    destinationCount,
+                    kMaximumMeshVerticesPerDocument)
+                || !AddMultipliedWithinLimit(
+                    projectedGeometry.meshIndices,
+                    sourceGeometry.meshIndices,
+                    destinationCount,
+                    kMaximumMeshIndicesPerDocument)
+                || !AddMultipliedWithinLimit(
                     projectedLabels,
                     destinationLabels,
+                    destinationCount,
                     kMaximumGeometryDocumentLabels)) {
                 return Standard_False;
             }

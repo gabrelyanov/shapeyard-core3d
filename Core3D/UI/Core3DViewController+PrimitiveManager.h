@@ -44,6 +44,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
 - (Boundaries)getMirrorPlaneOffsetBoundaries;
 - (BOOL)resetMirrorPlane;
+- (Core3DLinearArrayParameters)getLinearArrayParameters;
+- (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis;
+- (BOOL)setLinearArrayCount:(NSInteger)count;
+- (BOOL)setLinearArraySpacing:(CGFloat)spacing;
+- (Core3DModelingOperationResult)tryApplyLinearArray
+    NS_SWIFT_NAME(tryApplyLinearArray());
+- (Core3DModelingOperationResult)tryCancelLinearArray
+    NS_SWIFT_NAME(tryCancelLinearArray());
 - (Core3DModelingOperationResult)tryApplySubtract
     NS_SWIFT_NAME(tryApplySubtract());
 - (Core3DModelingOperationResult)tryCancelSubtract

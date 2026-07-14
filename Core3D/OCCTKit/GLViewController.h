@@ -73,6 +73,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)deleteSelected;
 - (void)duplicateSelected;
 - (void)deselectAll;
+- (void)refreshSelectionState;
 - (BOOL)isSelected;
 
 - (void)fitAll;
@@ -100,6 +101,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
 - (Boundaries)getMirrorPlaneOffsetBoundaries;
 - (BOOL)resetMirrorPlane;
+- (Core3DLinearArrayParameters)getLinearArrayParameters;
+- (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis;
+- (BOOL)setLinearArrayCount:(NSInteger)count;
+- (BOOL)setLinearArraySpacing:(CGFloat)spacing;
+- (BOOL)applyLinearArray;
+- (BOOL)cancelLinearArray;
+- (BOOL)canApplyLinearArray;
+- (BOOL)hasActiveLinearArray;
 - (BOOL) applySubtract;
 - (BOOL) cancelSubtract;
 - (BOOL) applyUnion;
@@ -132,6 +141,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
                               faceTopologyIndex:(NSInteger)faceTopologyIndex
                                          offset:(CGFloat)offset;
+- (NSDictionary<NSString *, NSNumber *> *)debugLinearArrayState;
+- (void)debugSetLinearArrayTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayAbortFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayEraseFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayCommitMode:(NSInteger)mode;
+- (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
+- (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
+- (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;

@@ -55,6 +55,8 @@
 		18665F042CA2DA8500141E05 /* ModelPart.mm in Sources */ = {isa = PBXBuildFile; fileRef = 18665F022CA2DA8500141E05 /* ModelPart.mm */; };
 		18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A006282BD2A23C004931B1 /* ObjectInteractor.cpp */; };
 		18A0062B2BD2A23C004931B1 /* ObjectInteractor.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18A006292BD2A23C004931B1 /* ObjectInteractor.hpp */; };
+		1A2200012F50000100000001 /* LinearArrayOperationController.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 1A2200112F50000100000011 /* LinearArrayOperationController.hpp */; };
+		1A2200022F50000100000002 /* LinearArrayOperationController.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1A2200122F50000100000012 /* LinearArrayOperationController.cpp */; };
 		18A0062E2BD2A2E5004931B1 /* Interactor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A0062C2BD2A2E5004931B1 /* Interactor.cpp */; };
 		18A0062F2BD2A2E5004931B1 /* Interactor.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 18A0062D2BD2A2E5004931B1 /* Interactor.hpp */; };
 		18A006322BD2B306004931B1 /* ShapeInteractor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 18A006302BD2B305004931B1 /* ShapeInteractor.cpp */; };
@@ -238,6 +240,8 @@
 		18665F022CA2DA8500141E05 /* ModelPart.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ModelPart.mm; sourceTree = "<group>"; };
 		18A006282BD2A23C004931B1 /* ObjectInteractor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ObjectInteractor.cpp; sourceTree = "<group>"; };
 		18A006292BD2A23C004931B1 /* ObjectInteractor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ObjectInteractor.hpp; sourceTree = "<group>"; };
+		1A2200112F50000100000011 /* LinearArrayOperationController.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LinearArrayOperationController.hpp; sourceTree = "<group>"; };
+		1A2200122F50000100000012 /* LinearArrayOperationController.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LinearArrayOperationController.cpp; sourceTree = "<group>"; };
 		18A0062C2BD2A2E5004931B1 /* Interactor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Interactor.cpp; sourceTree = "<group>"; };
 		18A0062D2BD2A2E5004931B1 /* Interactor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Interactor.hpp; sourceTree = "<group>"; };
 		18A006302BD2B305004931B1 /* ShapeInteractor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ShapeInteractor.cpp; sourceTree = "<group>"; };
@@ -674,6 +678,8 @@
 				32ECC7D92BC9603700770594 /* UIStateChanging.h */,
 				18A006282BD2A23C004931B1 /* ObjectInteractor.cpp */,
 				18A006292BD2A23C004931B1 /* ObjectInteractor.hpp */,
+				1A2200112F50000100000011 /* LinearArrayOperationController.hpp */,
+				1A2200122F50000100000012 /* LinearArrayOperationController.cpp */,
 				18A006302BD2B305004931B1 /* ShapeInteractor.cpp */,
 				18A006312BD2B305004931B1 /* ShapeInteractor.hpp */,
 				18A0062C2BD2A2E5004931B1 /* Interactor.cpp */,
@@ -802,6 +808,7 @@
 				3240475B2C00C8C9009E4B86 /* Core3DViewController+ExportManager.h in Headers */,
 				322185752BB5CC1500040E84 /* GLView.h in Headers */,
 				18A0062B2BD2A23C004931B1 /* ObjectInteractor.hpp in Headers */,
+				1A2200012F50000100000001 /* LinearArrayOperationController.hpp in Headers */,
 				329B2ED22C1AF53900F3A763 /* vectornd.h in Headers */,
 				323E89E22BD13F3F0035FF45 /* GLViewControllerProtocol.h in Headers */,
 				185552D22D01BE8000CCFA2B /* SimpleSingleton.hpp in Headers */,
@@ -966,6 +973,7 @@
 				C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */,
 				C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */,
 				18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */,
+				1A2200022F50000100000002 /* LinearArrayOperationController.cpp in Sources */,
 				71E871532C906DBE000112D8 /* ConstructorManipulator.cpp in Sources */,
 				322185782BB5CC1500040E84 /* CafShapePrs.mm in Sources */,
 				186250012C21DCFC00F86ADD /* Core3DCocoa_Window.mm in Sources */,

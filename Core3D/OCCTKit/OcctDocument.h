@@ -123,6 +123,15 @@ struct OcctPBRMaterialUpdate
     Handle(Image_Texture) prevalidatedEmissiveTexture;
 };
 
+//! Multiplicity-aware projection for operations that create independent free
+//! definitions. A source may appear at most once in one admission request;
+//! destinationCount is the number of complete geometry/appearance copies.
+struct OcctGeometryDuplicationRequest
+{
+    TDF_Label sourceDefinition;
+    Standard_Size destinationCount = 0;
+};
+
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
 //! fail-closed attribute schema and bounded visual-material/string readers.
 //! This is defense in depth for trusted Shapeyard project packages; raw XBF/CBF
@@ -176,13 +185,16 @@ public:
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations() const;
   Standard_EXPORT Standard_Boolean ValidateGeometryRepresentations(
       const Handle(TDocStd_Document)& document) const;
-  //! Read-only preallocation gate for creating one independent free
-  //! definition per unique source label. The current closed document and the
-  //! projected result must remain inside every aggregate geometry, graph, and
-  //! OCAF-label budget. Callers must still validate the mutated document
-  //! before committing its command.
+  //! Source-compatible count-one wrapper for existing duplication callers.
   Standard_EXPORT Standard_Boolean CanDuplicateGeometryDefinitions(
       const std::vector<TDF_Label>& sourceDefinitionLabels) const;
+  //! Read-only preallocation gate for creating the requested number of
+  //! independent free definitions per unique source label. The current closed
+  //! document and projected result must remain inside every aggregate
+  //! geometry, graph, mobile-leaf, and OCAF-label budget. Callers must still
+  //! validate the mutated document before committing its command.
+  Standard_EXPORT Standard_Boolean CanDuplicateGeometryDefinitions(
+      const std::vector<OcctGeometryDuplicationRequest>& requests) const;
   //! Return the document-wide intersection of safe export formats. Invalid or
   //! empty documents return zero; any TriangleMesh definition removes STEP.
   Standard_EXPORT Standard_Integer SupportedGeometryExportFormats() const;

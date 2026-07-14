@@ -207,6 +207,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeNone:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
 					return false;
 			}
 			return true;
@@ -230,6 +231,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeScale:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
 					return false;
 			}
 			return false;
@@ -657,7 +659,9 @@ namespace core3d {
         : Interactor(context, view, doc)
         , _manipulatorSide(manipulatorSide)
         , _booleanOpController(
-            std::make_shared<BooleanOperationController>(context, doc)) {
+            std::make_shared<BooleanOperationController>(context, doc))
+        , _linearArrayController(
+            std::make_shared<LinearArrayOperationController>(context, doc)) {
     }
 
     void ObjectInteractor::selectLastObject() {
@@ -688,6 +692,12 @@ namespace core3d {
     }
 
     void ObjectInteractor::attachManipulator(Handle(AIS_InteractiveObject) toObject) {
+		if (_manipulatorType
+			== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) {
+			// Linear Array is parameter-panel driven. Its source is captured by
+			// the operation controller and owns no draggable viewport gizmo.
+			return;
+		}
         const TDF_Label aLabel = myDoc->ShapeLabel(toObject);
 		const OcctGeometryRepresentation aRepresentation =
 			myDoc->GeometryRepresentationForLabel(aLabel);
@@ -1202,6 +1212,11 @@ namespace core3d {
 
     void ObjectInteractor::attachManipulatorToSelection(bool detach) {
         if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { return; }
+		if (_manipulatorType
+			== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) {
+			detachManipulator(false);
+			return;
+		}
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !SelectionSupportsBRepModeling(myContext, myDoc)) {
 			detachManipulator(false);
@@ -1263,8 +1278,16 @@ namespace core3d {
 		myContext->SetMaterial(selected, mat, Standard_True);
 	}
 
-    void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
+	void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
 		const PrimitiveManipulatorType aPreviousType = _manipulatorType;
+		if (type
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			&& hasActiveLinearArray()
+			&& !cancelLinearArray()) {
+			// A closed/unknown OCAF outcome is an exactly-once recovery token.
+			// Never hide it by allowing another tool to replace the retained UI.
+			return;
+		}
 		if (type != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
 			&& hasActiveMirror()
 			&& !cancelMirror()) {
@@ -1284,7 +1307,23 @@ namespace core3d {
 				|| !SelectionIsEmpty(myContext))) {
 			type = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
 		}
-        _manipulatorType = type;
+		_manipulatorType = type;
+		if (_manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			&& (aPreviousType
+					!= PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+					|| !hasActiveLinearArray())
+				&& !beginLinearArray()) {
+				// Admission failures leave no retained operation and may safely
+				// fall back to None. A preview/display failure can retain owned AIS
+				// presentations for recovery; keep Array selected so its recovery
+				// controls and transition barrier remain visible.
+				if (!hasActiveLinearArray()) {
+					_manipulatorType =
+						PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+					type = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+				}
+			}
 		if (_manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
 			&& aPreviousType
@@ -1351,8 +1390,9 @@ namespace core3d {
                 _manipulator->Detach();
             }
 			_manipulatorSourceLabels.clear();
-            if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
+			if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude
+				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
 				&& canReattach
 				&& sources.size()
@@ -1367,7 +1407,9 @@ namespace core3d {
 
 		_manipulator->Redisplay();
 
-        if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { // this trick: remove manipulator after operation finished
+        if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+			|| type
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) { // remove gizmo when the operation owns only AIS previews
             _manipulator->DeactivateCurrentMode();
             myContext->Remove(_manipulator, Standard_True);
         }
@@ -1919,6 +1961,205 @@ namespace core3d {
 	void ObjectInteractor::debugSetBooleanAbortFailureCount(
 		const Standard_Size count) noexcept {
 		_booleanOpController->debugSetAbortFailureCount(count);
+	}
+#endif
+
+	Standard_Boolean ObjectInteractor::beginLinearArray() noexcept {
+		if (_linearArrayController == nullptr) {
+			return Standard_False;
+		}
+		const Standard_Boolean didBegin =
+			_linearArrayController->begin();
+		if (!didBegin
+			&& !_linearArrayController->hasActiveOperation()
+			&& _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) {
+			_manipulatorType =
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+		}
+		return didBegin;
+	}
+
+	LinearArrayApplyResult ObjectInteractor::applyLinearArray() noexcept {
+		return _linearArrayController == nullptr
+			? LinearArrayApplyResult::NoChange
+			: _linearArrayController->apply();
+	}
+
+	Standard_Boolean ObjectInteractor::cancelLinearArray() noexcept {
+		return _linearArrayController == nullptr
+			|| _linearArrayController->cancel();
+	}
+
+	Standard_Boolean ObjectInteractor::setLinearArrayAxis(
+		const LinearArrayAxis axis) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			&& _linearArrayController != nullptr
+			&& _linearArrayController->setAxis(axis);
+	}
+
+	Standard_Boolean ObjectInteractor::setLinearArrayCount(
+		const Standard_Integer count) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			&& _linearArrayController != nullptr
+			&& _linearArrayController->setCount(count);
+	}
+
+	Standard_Boolean ObjectInteractor::setLinearArraySpacing(
+		const Standard_Real spacing) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			&& _linearArrayController != nullptr
+			&& _linearArrayController->setSpacing(spacing);
+	}
+
+	LinearArrayAxis ObjectInteractor::linearArrayAxis() const noexcept {
+		return _linearArrayController == nullptr
+			? LinearArrayAxis::X
+			: _linearArrayController->axis();
+	}
+
+	Standard_Integer ObjectInteractor::linearArrayCount() const noexcept {
+		return _linearArrayController == nullptr
+			? LinearArrayOperationController::kDefaultCount
+			: _linearArrayController->count();
+	}
+
+	Standard_Real ObjectInteractor::linearArraySpacing() const noexcept {
+		return _linearArrayController == nullptr
+			? 0.0
+			: _linearArrayController->spacing();
+	}
+
+	Standard_Real ObjectInteractor::linearArrayMetersPerUnit() const noexcept {
+		return _linearArrayController == nullptr
+			? 0.0
+			: _linearArrayController->metersPerUnit();
+	}
+
+	std::pair<Standard_Integer, Standard_Integer>
+	ObjectInteractor::linearArrayCountRange() const noexcept {
+		return _linearArrayController == nullptr
+			? std::pair<Standard_Integer, Standard_Integer>{
+				LinearArrayOperationController::kMinimumCount,
+				LinearArrayOperationController::kMaximumCount}
+			: _linearArrayController->countRange();
+	}
+
+	std::pair<Standard_Real, Standard_Real>
+	ObjectInteractor::linearArraySpacingRange() const noexcept {
+		return _linearArrayController == nullptr
+			? std::pair<Standard_Real, Standard_Real>{0.0, 0.0}
+			: _linearArrayController->spacingRange();
+	}
+
+	Standard_Boolean ObjectInteractor::canApplyLinearArray() const noexcept {
+		return _linearArrayController != nullptr
+			&& _linearArrayController->canApply();
+	}
+
+	Standard_Boolean ObjectInteractor::hasActiveLinearArray() const noexcept {
+		return _linearArrayController != nullptr
+			&& _linearArrayController->hasActiveOperation();
+	}
+
+	Standard_Boolean ObjectInteractor::hasUnresolvedLinearArray() const noexcept {
+		return _linearArrayController != nullptr
+			&& _linearArrayController->hasUnresolvedState();
+	}
+
+	LinearArrayPreviewState
+	ObjectInteractor::linearArrayPreviewState() const noexcept {
+		return _linearArrayController == nullptr
+			? LinearArrayPreviewState::Unavailable
+			: _linearArrayController->previewState();
+	}
+
+	std::uint64_t ObjectInteractor::linearArrayPreviewGeneration() const noexcept {
+		return _linearArrayController == nullptr
+			? 0
+			: _linearArrayController->previewGeneration();
+	}
+
+	Standard_Boolean ObjectInteractor::captureLinearArrayPreview(
+		std::vector<Handle(AIS_Shape)>& previewObjects) const noexcept {
+		previewObjects.clear();
+		return _linearArrayController != nullptr
+			&& _linearArrayController->capturePreview(previewObjects);
+	}
+
+	Standard_Boolean
+	ObjectInteractor::canPublishEmptyLinearArrayPreview() const noexcept {
+		return _linearArrayController != nullptr
+			&& _linearArrayController->canPublishEmptyPreview();
+	}
+
+	void ObjectInteractor::setLinearArrayPreviewStateChangedCallback(
+		std::function<void()> callback) {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController->setPreviewStateChangedCallback(
+				std::move(callback));
+		}
+	}
+
+#ifdef DEBUG
+	LinearArrayPreviewDebugState
+	ObjectInteractor::debugLinearArrayPreviewState() const noexcept {
+		return _linearArrayController == nullptr
+			? LinearArrayPreviewDebugState{}
+			: _linearArrayController->debugPreviewState();
+	}
+
+	void ObjectInteractor::debugSetLinearArrayTransactionFailureCount(
+		const Standard_Size count) noexcept {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController->debugSetTransactionFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetLinearArrayAbortFailureCount(
+		const Standard_Size count) noexcept {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController->debugSetAbortFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetLinearArrayEraseFailureCount(
+		const Standard_Size count) noexcept {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController->debugSetEraseFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetLinearArrayCommitMode(
+		const Standard_Integer mode) noexcept {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController->debugSetCommitMode(mode);
+		}
+	}
+
+	void ObjectInteractor::debugSetLinearArrayPostCommitInspectFailureCount(
+		const Standard_Size count) noexcept {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController
+				->debugSetPostCommitInspectFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetMaximumLinearArrayTopologyNodes(
+		const Standard_Size limit) noexcept {
+		if (_linearArrayController != nullptr) {
+			_linearArrayController->debugSetMaximumTopologyNodes(limit);
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::
+	debugMutateFirstLinearArraySourcePersistedTransform() noexcept {
+		return _linearArrayController != nullptr
+			&& _linearArrayController
+				->debugMutateFirstSourcePersistedTransform();
 	}
 #endif
 

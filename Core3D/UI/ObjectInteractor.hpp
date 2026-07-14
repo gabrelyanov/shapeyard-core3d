@@ -12,6 +12,7 @@
 #include "Core3DManipulator.hpp"
 #include <AIS_Shape.hxx>
 #include "BooleanOperationController.hpp"
+#include "LinearArrayOperationController.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,7 @@ namespace core3d {
         PrimitiveGizmoTypeMaterial,
         PrimitiveGizmoTypeExtrude,
         PrimitiveGizmoTypeIntersect,
+        PrimitiveGizmoTypeLinearArray,
     };
 
     enum class PresentationOverlayCaptureStatus : std::uint8_t {
@@ -88,6 +90,8 @@ namespace core3d {
         
 		PrimitiveManipulatorType _manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
         std::shared_ptr<BooleanOperationController> _booleanOpController;
+        std::shared_ptr<LinearArrayOperationController>
+            _linearArrayController;
         Handle(Core3DManipulator) _manipulator;
 //        std::vector<TopoDS_Shape> _beforeTransformObjects;
     public:
@@ -186,6 +190,49 @@ namespace core3d {
 			Standard_Size count) noexcept;
 		void debugSetBooleanAbortFailureCount(
 			Standard_Size count) noexcept;
+#endif
+        Standard_Boolean beginLinearArray() noexcept;
+        LinearArrayApplyResult applyLinearArray() noexcept;
+        Standard_Boolean cancelLinearArray() noexcept;
+        Standard_Boolean setLinearArrayAxis(LinearArrayAxis axis) noexcept;
+        Standard_Boolean setLinearArrayCount(
+            Standard_Integer count) noexcept;
+        Standard_Boolean setLinearArraySpacing(
+            Standard_Real spacing) noexcept;
+        LinearArrayAxis linearArrayAxis() const noexcept;
+        Standard_Integer linearArrayCount() const noexcept;
+        Standard_Real linearArraySpacing() const noexcept;
+        Standard_Real linearArrayMetersPerUnit() const noexcept;
+        std::pair<Standard_Integer, Standard_Integer>
+            linearArrayCountRange() const noexcept;
+        std::pair<Standard_Real, Standard_Real>
+            linearArraySpacingRange() const noexcept;
+        Standard_Boolean canApplyLinearArray() const noexcept;
+        Standard_Boolean hasActiveLinearArray() const noexcept;
+        Standard_Boolean hasUnresolvedLinearArray() const noexcept;
+        LinearArrayPreviewState linearArrayPreviewState() const noexcept;
+        std::uint64_t linearArrayPreviewGeneration() const noexcept;
+        Standard_Boolean captureLinearArrayPreview(
+            std::vector<Handle(AIS_Shape)>& previewObjects) const noexcept;
+        Standard_Boolean canPublishEmptyLinearArrayPreview() const noexcept;
+        void setLinearArrayPreviewStateChangedCallback(
+            std::function<void()> callback);
+#ifdef DEBUG
+        LinearArrayPreviewDebugState
+            debugLinearArrayPreviewState() const noexcept;
+        void debugSetLinearArrayTransactionFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetLinearArrayAbortFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetLinearArrayEraseFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetLinearArrayCommitMode(Standard_Integer mode) noexcept;
+        void debugSetLinearArrayPostCommitInspectFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetMaximumLinearArrayTopologyNodes(
+            Standard_Size limit) noexcept;
+        Standard_Boolean
+            debugMutateFirstLinearArraySourcePersistedTransform() noexcept;
 #endif
         MirrorApplyResult applyMirror() noexcept;
 		Standard_Boolean cancelMirror() noexcept;

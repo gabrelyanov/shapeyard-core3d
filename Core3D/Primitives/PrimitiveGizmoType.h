@@ -19,6 +19,7 @@ typedef NS_ENUM(NSUInteger, PrimitiveGizmoType) {
     PrimitiveGizmoTypeMaterial = 7,
     PrimitiveGizmoTypeExtrude = 8,
     PrimitiveGizmoTypeIntersect = 9,
+    PrimitiveGizmoTypeLinearArray = 10,
 };
 
 #endif /* PrimitiveGizmoType_h */

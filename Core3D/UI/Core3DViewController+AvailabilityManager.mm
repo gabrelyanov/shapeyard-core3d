@@ -31,6 +31,7 @@ constexpr Core3DModelCapability kBRepCapabilities =
         | Core3DModelCapabilityBoolean
         | Core3DModelCapabilityChamfer
         | Core3DModelCapabilityExtrusion
+        | Core3DModelCapabilityLinearArray
         | Core3DModelCapabilityMaterial
         | Core3DModelCapabilityExportOBJ
         | Core3DModelCapabilityExportSTL
@@ -44,6 +45,7 @@ constexpr Core3DModelCapability kTriangleMeshCapabilities =
         | Core3DModelCapabilityRotate
         | Core3DModelCapabilityDelete
         | Core3DModelCapabilityDuplicate
+        | Core3DModelCapabilityLinearArray
         | Core3DModelCapabilityMaterial
         | Core3DModelCapabilityExportOBJ
         | Core3DModelCapabilityExportSTL
@@ -113,6 +115,8 @@ bool CapabilitiesAllowGizmo(
             return has(Core3DModelCapabilityMaterial);
         case PrimitiveGizmoTypeExtrude:
             return has(Core3DModelCapabilityExtrusion);
+        case PrimitiveGizmoTypeLinearArray:
+            return has(Core3DModelCapabilityLinearArray);
         case PrimitiveGizmoTypeNone:
             return false;
     }
@@ -258,9 +262,19 @@ Core3DModelCapability DocumentExportCapabilities(
             capabilities = static_cast<Core3DModelCapability>(
                 capabilities & definitionCapabilities);
         }
-        return hasSelection
-            ? capabilities
-            : Core3DModelCapabilityNone;
+        if (!hasSelection) {
+            return Core3DModelCapabilityNone;
+        }
+        // Linear Array deliberately has single-source semantics in its first
+        // touch contract. Other common capabilities remain intersection-based
+        // for multi-selection.
+        if (selectedDefinitionCount != 1) {
+            capabilities = static_cast<Core3DModelCapability>(
+                static_cast<NSUInteger>(capabilities)
+                & ~static_cast<NSUInteger>(
+                    Core3DModelCapabilityLinearArray));
+        }
+        return capabilities;
     } catch (...) {
         return Core3DModelCapabilityNone;
     }
@@ -285,10 +299,24 @@ Core3DModelCapability DocumentExportCapabilities(
         && viewer != nullptr
         && viewer->getShapeInteractor() != nullptr
         && viewer->getShapeInteractor()->hasActiveExtrusion();
-    const Core3DModelCapability capabilities =
-        hasRetainedBoolean || hasRetainedChamfer || hasRetainedExtrusion
-        ? kBRepCapabilities
-        : self.selectedModelCapabilities;
+    const BOOL hasRetainedLinearArray =
+        _currentGizmoType == PrimitiveGizmoTypeLinearArray
+        && viewer != nullptr
+        && viewer->getObjectInteractor() != nullptr
+        && viewer->getObjectInteractor()->hasActiveLinearArray();
+    const BOOL hasRetainedBRepOperation =
+        hasRetainedBoolean || hasRetainedChamfer || hasRetainedExtrusion;
+    Core3DModelCapability capabilities = self.selectedModelCapabilities;
+    if (hasRetainedBRepOperation) {
+        capabilities = kBRepCapabilities;
+    } else if (hasRetainedLinearArray
+               && capabilities == Core3DModelCapabilityNone) {
+        // Array normally keeps its one admitted source selected. If selection
+        // publication is momentarily unavailable, expose only Array itself so
+        // Apply/Cancel stays reachable without leaking BRep-only tools to a
+        // retained TriangleMesh source.
+        capabilities = Core3DModelCapabilityLinearArray;
+    }
     if (capabilities == Core3DModelCapabilityNone
         || _availableGizmoTypes.count == 0) {
         return @[];

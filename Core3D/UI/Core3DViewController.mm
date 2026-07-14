@@ -4120,6 +4120,41 @@ void Core3DAddDebugOrphanVisualMaterial(
 	return didCreate;
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)debugLinearArrayState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugLinearArrayState];
+}
+
+- (void)debugSetLinearArrayTransactionFailureCount:(NSUInteger)count {
+    [GLController debugSetLinearArrayTransactionFailureCount:count];
+}
+
+- (void)debugSetLinearArrayAbortFailureCount:(NSUInteger)count {
+    [GLController debugSetLinearArrayAbortFailureCount:count];
+}
+
+- (void)debugSetLinearArrayEraseFailureCount:(NSUInteger)count {
+    [GLController debugSetLinearArrayEraseFailureCount:count];
+}
+
+- (void)debugSetLinearArrayCommitMode:(NSInteger)mode {
+    [GLController debugSetLinearArrayCommitMode:mode];
+}
+
+- (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count {
+    [GLController debugSetLinearArrayPostCommitInspectFailureCount:count];
+}
+
+- (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumLinearArrayTopologyNodes:limit];
+}
+
+- (BOOL)debugMutateFirstLinearArraySourcePersistedTransform {
+    return [GLController debugMutateFirstLinearArraySourcePersistedTransform];
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugMirrorState {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return @{};
@@ -4348,6 +4383,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController didReceiveMemoryWarning];
 }
 
+- (void)debugSimulateLinearArrayMemoryWarning {
+    [GLController didReceiveMemoryWarning];
+}
+
 - (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
                               faceTopologyIndex:(NSUInteger)faceTopologyIndex {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
@@ -4553,6 +4592,11 @@ void Core3DAddDebugOrphanVisualMaterial(
     // authoritative, while the UI notification remains deliberately debounced.
 }
 
+- (void)viewDidChangeViewportPresentationOverlay {
+    // Renderer-neutral observation point for bounded transient modeling
+    // overlays whose committed scene and selection remain unchanged.
+}
+
 - (void)viewWillSelectAtDrawablePoint:(CGPoint)point
                          drawableSize:(CGSize)drawableSize {
     (void)point;
@@ -4586,6 +4630,18 @@ void Core3DAddDebugOrphanVisualMaterial(
         [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply];
     }
+    if (_currentGizmoType == PrimitiveGizmoTypeLinearArray) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeLinearArray];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationState];
+            [self sendNotifyUIState:UIStateChangingApply];
+        }
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeChamfer
         && ![GLController hasActiveBevel]) {
         [self completeOperationInteraction];
@@ -4596,10 +4652,12 @@ void Core3DAddDebugOrphanVisualMaterial(
 	if (_currentSelectionType != type) {
 		[GLController setSelectionType:type];
 		if ([GLController getSelectionType] != type) {
-			if (_currentGizmoType == PrimitiveGizmoTypeMirror) {
+			if (_currentGizmoType == PrimitiveGizmoTypeMirror
+				|| _currentGizmoType
+					== PrimitiveGizmoTypeLinearArray) {
 				const Core3DModelingPreviewStatus aStatus =
 					[self modelingPreviewStatusForGizmoType:
-						PrimitiveGizmoTypeMirror];
+						_currentGizmoType];
 				self.can_apply = aStatus.canApply;
 				[self viewDidChangeViewportPresentationState];
 				[self sendNotifyUIState:UIStateChangingSelection
@@ -4618,6 +4676,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                                              @(PrimitiveGizmoTypeScale),
                                              @(PrimitiveGizmoTypeChamfer),
                                              @(PrimitiveGizmoTypeMirror),
+                                             @(PrimitiveGizmoTypeLinearArray),
                                              @(PrimitiveGizmoTypeSubtract),
                                              @(PrimitiveGizmoTypeUnion),
                                              @(PrimitiveGizmoTypeIntersect),
@@ -4697,6 +4756,14 @@ void Core3DAddDebugOrphanVisualMaterial(
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeMirror];
                 self.can_apply = aStatus.canApply;
+                break;
+            }
+            case PrimitiveGizmoTypeLinearArray:
+            {
+                const Core3DModelingPreviewStatus status =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeLinearArray];
+                self.can_apply = status.canApply;
                 break;
             }
             case PrimitiveGizmoTypeExtrude:

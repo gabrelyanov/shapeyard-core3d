@@ -93,6 +93,25 @@ Core3DModelingPreviewState Core3DPreviewState(
     return Core3DModelingPreviewStateFailed;
 }
 
+Core3DModelingPreviewState Core3DPreviewState(
+    const core3d::LinearArrayPreviewState theState) noexcept {
+    switch (theState) {
+        case core3d::LinearArrayPreviewState::Unavailable:
+            return Core3DModelingPreviewStateUnavailable;
+        case core3d::LinearArrayPreviewState::Selecting:
+            return Core3DModelingPreviewStateSelecting;
+        case core3d::LinearArrayPreviewState::Ready:
+            return Core3DModelingPreviewStateReady;
+        case core3d::LinearArrayPreviewState::Committing:
+            return Core3DModelingPreviewStateComputing;
+        case core3d::LinearArrayPreviewState::OutcomeUnknown:
+            return Core3DModelingPreviewStateOutcomeUnknown;
+        case core3d::LinearArrayPreviewState::Failed:
+            return Core3DModelingPreviewStateFailed;
+    }
+    return Core3DModelingPreviewStateFailed;
+}
+
 Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     GLViewController *theController,
     const PrimitiveGizmoType theOperation) {
@@ -157,6 +176,26 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
             aStatus.state = Core3DPreviewState(
                 anInteractor->mirrorPreviewState());
             aStatus.canApply = anInteractor->canApplyMirror()
+                && (aStatus.state == Core3DModelingPreviewStateReady
+                    || aStatus.state
+                        == Core3DModelingPreviewStateOutcomeUnknown);
+            return aStatus;
+        }
+        case PrimitiveGizmoTypeLinearArray: {
+            const std::shared_ptr<core3d::ObjectInteractor> anInteractor =
+                theController.viewer->getObjectInteractor();
+            if (anInteractor == nullptr) {
+                return aStatus;
+            }
+            aStatus.generation =
+                anInteractor->linearArrayPreviewGeneration();
+            aStatus.active = anInteractor->hasActiveLinearArray();
+            if (!aStatus.active) {
+                return aStatus;
+            }
+            aStatus.state = Core3DPreviewState(
+                anInteractor->linearArrayPreviewState());
+            aStatus.canApply = anInteractor->canApplyLinearArray()
                 && (aStatus.state == Core3DModelingPreviewStateReady
                     || aStatus.state
                         == Core3DModelingPreviewStateOutcomeUnknown);
@@ -234,6 +273,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                              @(PrimitiveGizmoTypeScale),
                              @(PrimitiveGizmoTypeChamfer),
                              @(PrimitiveGizmoTypeMirror),
+                             @(PrimitiveGizmoTypeLinearArray),
                              @(PrimitiveGizmoTypeSubtract),
                              @(PrimitiveGizmoTypeUnion),
                              @(PrimitiveGizmoTypeIntersect),
@@ -266,6 +306,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                              @(PrimitiveGizmoTypeScale),
                              @(PrimitiveGizmoTypeChamfer),
                              @(PrimitiveGizmoTypeMirror),
+                             @(PrimitiveGizmoTypeLinearArray),
                              @(PrimitiveGizmoTypeSubtract),
                              @(PrimitiveGizmoTypeUnion),
                              @(PrimitiveGizmoTypeIntersect),
@@ -303,6 +344,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 	if (_currentGizmoType == PrimitiveGizmoTypeChamfer
 		|| _currentGizmoType == PrimitiveGizmoTypeExtrude
 		|| _currentGizmoType == PrimitiveGizmoTypeMirror
+		|| _currentGizmoType == PrimitiveGizmoTypeLinearArray
 		|| _currentGizmoType == PrimitiveGizmoTypeSubtract
 		|| _currentGizmoType == PrimitiveGizmoTypeUnion
 		|| _currentGizmoType == PrimitiveGizmoTypeIntersect) {
@@ -359,6 +401,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         PrimitiveGizmoTypeChamfer,
         PrimitiveGizmoTypeExtrude,
         PrimitiveGizmoTypeMirror,
+        PrimitiveGizmoTypeLinearArray,
         PrimitiveGizmoTypeSubtract,
         PrimitiveGizmoTypeUnion,
         PrimitiveGizmoTypeIntersect,
@@ -533,10 +576,17 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     self.can_delete = NO;
     self.can_duplicate = NO;
     self.can_apply = NO;
+	// A successful document redraw can retire the native manipulator before
+	// this wrapper runs. setGizmoType above reconciles the public cache first;
+	// now publish one authoritative empty-selection/material update without
+	// weakening the normal cache/native invariant.
+	[GLController refreshSelectionState];
     [self sendNotifyUIState:UIStateChangingGizmo
+                             | UIStateChangingSelection
                              | UIStateChangingDuplicate
                              | UIStateChangingDelete
                              | UIStateChangingApply
+                             | UIStateChangingApplyMaterial
                              | UIStateChangingHistory];
 }
 
@@ -597,6 +647,63 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 		return NO;
 	}
 	return [GLController resetMirrorPlane];
+}
+
+- (Core3DLinearArrayParameters)getLinearArrayParameters {
+    return [GLController getLinearArrayParameters];
+}
+
+- (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis {
+    if (_currentGizmoType != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    const BOOL didSet = [GLController setLinearArrayAxis:axis];
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:
+            PrimitiveGizmoTypeLinearArray];
+    self.can_apply = status.canApply;
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
+}
+
+- (BOOL)setLinearArrayCount:(NSInteger)count {
+    if (_currentGizmoType != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    const BOOL didSet = [GLController setLinearArrayCount:count];
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:
+            PrimitiveGizmoTypeLinearArray];
+    self.can_apply = status.canApply;
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
+}
+
+- (BOOL)setLinearArraySpacing:(CGFloat)spacing {
+    if (_currentGizmoType != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    const BOOL didSet = [GLController setLinearArraySpacing:spacing];
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:
+            PrimitiveGizmoTypeLinearArray];
+    self.can_apply = status.canApply;
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
+}
+
+- (Core3DModelingOperationResult)tryApplyLinearArray {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeLinearArray
+        attempt:^BOOL {
+            return [GLController applyLinearArray];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelLinearArray {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeLinearArray
+        attempt:^BOOL {
+            return [GLController cancelLinearArray];
+        }];
 }
 
 - (Core3DModelingOperationResult)tryApplySubtract {
@@ -668,6 +775,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 - (void)undo {
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
+    const BOOL wasLinearArray =
+        _currentGizmoType == PrimitiveGizmoTypeLinearArray;
     [GLController undo];
     if (wasExtrusion) {
         _currentGizmoType = [GLController getGizmoType];
@@ -682,7 +791,23 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                                 | UIStateChangingHistory];
         return;
     }
+    if (wasLinearArray) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeLinearArray];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationState];
+        }
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
+        || _currentGizmoType == PrimitiveGizmoTypeLinearArray
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
         || _currentGizmoType == PrimitiveGizmoTypeUnion
         || _currentGizmoType == PrimitiveGizmoTypeIntersect
@@ -690,17 +815,25 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
             ? [self modelingPreviewStatusForGizmoType:
                 PrimitiveGizmoTypeMirror].canApply
+            : _currentGizmoType == PrimitiveGizmoTypeLinearArray
+                ? [self modelingPreviewStatusForGizmoType:
+                    PrimitiveGizmoTypeLinearArray].canApply
             : _currentGizmoType == PrimitiveGizmoTypeExtrude
                 ? [GLController canApplyExtrusion]
             : [GLController canApplyBoolean];
         [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
+        [self sendNotifyUIState:UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
     }
+    [self sendNotifyUIState:UIStateChangingHistory];
 }
 
 - (void)redo {
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
+    const BOOL wasLinearArray =
+        _currentGizmoType == PrimitiveGizmoTypeLinearArray;
     [GLController redo];
     if (wasExtrusion) {
         _currentGizmoType = [GLController getGizmoType];
@@ -715,7 +848,23 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                                 | UIStateChangingHistory];
         return;
     }
+    if (wasLinearArray) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeLinearArray];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationState];
+        }
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
+        || _currentGizmoType == PrimitiveGizmoTypeLinearArray
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
         || _currentGizmoType == PrimitiveGizmoTypeUnion
         || _currentGizmoType == PrimitiveGizmoTypeIntersect
@@ -723,12 +872,18 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         self.can_apply = _currentGizmoType == PrimitiveGizmoTypeMirror
             ? [self modelingPreviewStatusForGizmoType:
                 PrimitiveGizmoTypeMirror].canApply
+            : _currentGizmoType == PrimitiveGizmoTypeLinearArray
+                ? [self modelingPreviewStatusForGizmoType:
+                    PrimitiveGizmoTypeLinearArray].canApply
             : _currentGizmoType == PrimitiveGizmoTypeExtrude
                 ? [GLController canApplyExtrusion]
             : [GLController canApplyBoolean];
         [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
+        [self sendNotifyUIState:UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
     }
+    [self sendNotifyUIState:UIStateChangingHistory];
 }
 
 - (NSString *_Nullable)getCoreInfoText {

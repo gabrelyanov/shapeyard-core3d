@@ -163,7 +163,7 @@ private:
 // These are the serialization-stable Core3DModelCapability bits. Keeping the
 // representation policy here means the public bridge copies one authoritative
 // value instead of re-reading OCAF or reconstructing feature policy.
-constexpr std::uint64_t kBRepModelCapabilities = (1ull << 17) - 1ull;
+constexpr std::uint64_t kBRepModelCapabilities = (1ull << 18) - 1ull;
 constexpr std::uint64_t kTriangleMeshModelCapabilities =
     (1ull << 0)  // ObjectSelection
     | (1ull << 2)  // Translate
@@ -173,7 +173,8 @@ constexpr std::uint64_t kTriangleMeshModelCapabilities =
     | (1ull << 12) // Material
     | (1ull << 13) // ExportOBJ
     | (1ull << 14) // ExportSTL
-    | (1ull << 15); // ExportGLB
+    | (1ull << 15) // ExportGLB
+    | (1ull << 17); // LinearArray
 
 bool TryInspectorRepresentation(
     const OcctGeometryRepresentation theStoredRepresentation,
@@ -836,6 +837,8 @@ bool EnvironmentIsIdle(
             && !theObjectInteractor->hasUnresolvedBoolean()
             && !theObjectInteractor->hasTrialMirrorObjects()
             && !theObjectInteractor->hasUnresolvedMirrorObjects()
+            && !theObjectInteractor->hasActiveLinearArray()
+            && !theObjectInteractor->hasUnresolvedLinearArray()
             && !theShapeInteractor->hasActiveExtrusion()
             && !theShapeInteractor->hasActiveBevel();
     } catch (...) {

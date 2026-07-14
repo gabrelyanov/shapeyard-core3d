@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -474,6 +475,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         && _viewer->getObjectInteractor() != nullptr
         && (_viewer->getObjectInteractor()->hasActiveBoolean()
             || _viewer->getObjectInteractor()->hasUnresolvedBoolean());
+    const BOOL hadLinearArray =
+        _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && (_viewer->getObjectInteractor()->hasActiveLinearArray()
+            || _viewer->getObjectInteractor()->hasUnresolvedLinearArray());
     const PrimitiveGizmoType booleanGizmoType = hadBooleanOperation
         ? [self getGizmoType]
         : PrimitiveGizmoTypeNone;
@@ -534,6 +540,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             }
         }
     }
+    if (hadLinearArray) {
+        (void)_viewer->getObjectInteractor()->cancelLinearArray();
+    }
     if (hadExtrusion) {
         _viewer->getShapeInteractor()->cancelExtrusion();
     }
@@ -554,17 +563,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [view endInteractiveRendering];
     }
     if (hadActiveInteraction || hadUnresolvedMirrorObjects
-        || hadBooleanOperation || hadExtrusion || hadBevel) {
+        || hadBooleanOperation || hadLinearArray || hadExtrusion
+        || hadBevel) {
         [self requestRender];
     }
     if (hadUnresolvedMirrorObjects || hadBooleanOperation
-		|| hadExtrusion || hadBevel) {
+		|| hadLinearArray || hadExtrusion || hadBevel) {
         // Selection notification is also the renderer-neutral presentation
         // invalidation and Apply-state refresh for lifecycle cancellation.
         [self checkSelections];
     }
     if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects
-         || hadBooleanOperation || hadExtrusion || hadBevel)
+         || hadBooleanOperation || hadLinearArray || hadExtrusion
+         || hadBevel)
         && _delegate
         && [_delegate respondsToSelector:
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -621,6 +632,21 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             [strongSelf requestRender];
         });
     });
+    _viewer->setLinearArrayPreviewStateChangedCallback([weakSelf]() {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            if (strongSelf->_delegate
+                && [strongSelf->_delegate respondsToSelector:
+                    @selector(viewerDidChangeLinearArrayPresentationOverlay:)]) {
+                [strongSelf->_delegate
+                    viewerDidChangeLinearArrayPresentationOverlay:strongSelf];
+            }
+            [strongSelf requestRender];
+        });
+    });
 
     _didSetupViewer = YES;
     _viewer->showGrid(!_isPreviewMode);
@@ -647,6 +673,22 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         (void)[self restoreBooleanActionForRetainedGizmoType:currentType];
         [self checkSelections];
         [self requestRender];
+    }
+    if (_viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveLinearArray()) {
+        (void)_viewer->getObjectInteractor()->cancelLinearArray();
+        [self checkSelections];
+        [self requestRender];
+        // Publish both successful retirement and retryable cleanup failure.
+        // The parent resolves an inactive Array tool, or retains an active
+        // failed operation so the user can retry Cancel safely.
+        if (_delegate
+            && [_delegate respondsToSelector:
+                @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+            [_delegate viewer:self
+                didEndPrimaryInteractionCancelled:YES];
+        }
     }
     if (_viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr
@@ -1014,6 +1056,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (_isPreviewMode) {
         return;
     }
+    const std::shared_ptr<ObjectInteractor> objectInteractor =
+        _viewer == nullptr ? nullptr : _viewer->getObjectInteractor();
+    if (objectInteractor != nullptr
+        && objectInteractor->hasActiveLinearArray()) {
+        // Linear Array captures exactly one source. Keep viewport taps from
+        // changing the visible selection while Apply still targets that
+        // captured source; camera gestures remain available.
+        return;
+    }
 
     const CGPoint aTapPoint =
         [self drawablePointForPoint:[tapRecognizer locationInView:self.view]];
@@ -1156,8 +1207,18 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [self requestRender];
         return;
     }
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveLinearArray()
+        && !_viewer->getObjectInteractor()->cancelLinearArray()) {
+        [self requestRender];
+        return;
+    }
     _viewer->deselectAll();
     [self requestRender];
+}
+
+- (void)refreshSelectionState {
+    [self checkSelections];
 }
 
 - (BOOL)isSelected {
@@ -1214,6 +1275,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			[self requestRender];
 			return;
 		}
+	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
+		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+		[self checkSelections];
+		[self requestRender];
+		return;
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->canUndo()
@@ -1267,6 +1337,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			[self requestRender];
 			return;
 		}
+	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
+		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+		[self checkSelections];
+		[self requestRender];
+		return;
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->canRedo()
@@ -1297,6 +1376,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		}
 	} else if (currentType == PrimitiveGizmoTypeMirror) {
 		if (!_viewer->getObjectInteractor()->cancelMirror()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
+		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
 			[self checkSelections];
 			[self requestRender];
 			return;
@@ -1377,6 +1462,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		if (IsBooleanGizmo(type)) {
 			(void)[self restoreBooleanActionForRetainedGizmoType:type];
 		}
+		if (type == PrimitiveGizmoTypeLinearArray
+			&& _viewer != nullptr
+			&& _viewer->getObjectInteractor() != nullptr
+			&& !_viewer->getObjectInteractor()->hasActiveLinearArray()) {
+			(void)_viewer->getObjectInteractor()->beginLinearArray();
+		}
 		[self requestRender];
 		return;
 	}
@@ -1398,6 +1489,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		}
 	} else if (previousType == PrimitiveGizmoTypeMirror) {
 		if (!_viewer->getObjectInteractor()->cancelMirror()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+	} else if (previousType == PrimitiveGizmoTypeLinearArray) {
+		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
 			[self checkSelections];
 			[self requestRender];
 			return;
@@ -1440,6 +1537,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
         case PrimitiveGizmoTypeExtrude:
             manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude;
+            break;
+        case PrimitiveGizmoTypeLinearArray:
+            manipulatorType =
+                PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray;
             break;
         default:
             assert(false);
@@ -1506,6 +1607,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
             type = PrimitiveGizmoTypeExtrude;
+            break;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
+            type = PrimitiveGizmoTypeLinearArray;
             break;
         default:
             break;
@@ -1695,6 +1799,138 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	[self checkSelections];
 	[self requestRender];
 	return didReset;
+}
+
+- (Core3DLinearArrayParameters)getLinearArrayParameters {
+    Core3DLinearArrayParameters parameters = {
+        .axis = Core3DLinearArrayAxisX,
+        .count = 0,
+        .minimumCount = 0,
+        .maximumCount = 0,
+        .spacing = 0.0,
+		.minimumSpacing = 0.0,
+		.maximumSpacing = 0.0,
+		.metersPerUnit = 0.0,
+    };
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+        return parameters;
+    }
+    const std::shared_ptr<ObjectInteractor> interactor =
+        _viewer->getObjectInteractor();
+    switch (interactor->linearArrayAxis()) {
+        case LinearArrayAxis::X:
+            parameters.axis = Core3DLinearArrayAxisX;
+            break;
+        case LinearArrayAxis::Y:
+            parameters.axis = Core3DLinearArrayAxisY;
+            break;
+        case LinearArrayAxis::Z:
+            parameters.axis = Core3DLinearArrayAxisZ;
+            break;
+    }
+    const auto countRange = interactor->linearArrayCountRange();
+    const auto spacingRange = interactor->linearArraySpacingRange();
+    parameters.count = interactor->linearArrayCount();
+    parameters.minimumCount = countRange.first;
+    parameters.maximumCount = countRange.second;
+    parameters.spacing = interactor->linearArraySpacing();
+    parameters.minimumSpacing = spacingRange.first;
+	parameters.maximumSpacing = spacingRange.second;
+	parameters.metersPerUnit = interactor->linearArrayMetersPerUnit();
+	return parameters;
+}
+
+- (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    LinearArrayAxis nativeAxis = LinearArrayAxis::X;
+    switch (axis) {
+        case Core3DLinearArrayAxisX:
+            nativeAxis = LinearArrayAxis::X;
+            break;
+        case Core3DLinearArrayAxisY:
+            nativeAxis = LinearArrayAxis::Y;
+            break;
+        case Core3DLinearArrayAxisZ:
+            nativeAxis = LinearArrayAxis::Z;
+            break;
+        default:
+            return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setLinearArrayAxis(nativeAxis);
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)setLinearArrayCount:(NSInteger)count {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeLinearArray
+        || count < 0
+        || count > std::numeric_limits<Standard_Integer>::max()) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setLinearArrayCount(static_cast<Standard_Integer>(count));
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)setLinearArraySpacing:(CGFloat)spacing {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setLinearArraySpacing(static_cast<Standard_Real>(spacing));
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)applyLinearArray {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    const LinearArrayApplyResult result =
+        _viewer->getObjectInteractor()->applyLinearArray();
+	if (result == LinearArrayApplyResult::AppliedNeedsDocumentRedraw) {
+		_viewer->redrawDocument();
+	}
+	// A committed redraw recreates the native interactor as None before the
+	// Objective-C operation wrapper has reconciled its retained Array tool. Do
+	// not emit a selection callback across that deliberate one-stack-frame gap;
+	// every non-commit result must still exercise the normal invariant.
+	if (result != LinearArrayApplyResult::AppliedNeedsDocumentRedraw) {
+		[self checkSelections];
+	}
+	[self requestRender];
+    return result != LinearArrayApplyResult::NoChange;
+}
+
+- (BOOL)cancelLinearArray {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL didCancel =
+        _viewer->getObjectInteractor()->cancelLinearArray();
+    [self checkSelections];
+    [self requestRender];
+    return didCancel;
+}
+
+- (BOOL)canApplyLinearArray {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->canApplyLinearArray();
+}
+
+- (BOOL)hasActiveLinearArray {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveLinearArray();
 }
 
 - (BOOL) applySubtract {
@@ -2011,6 +2247,84 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	[self checkSelections];
 	[self requestRender];
 	return didCreate;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugLinearArrayState {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+        return @{};
+    }
+    const LinearArrayPreviewDebugState state =
+        _viewer->getObjectInteractor()->debugLinearArrayPreviewState();
+    return @{
+        @"state": @(static_cast<NSUInteger>(state.state)),
+        @"generation": @(
+            static_cast<unsigned long long>(state.generation)),
+        @"previewBodyCount": @(state.previewBodyCount),
+        @"pendingResultCount": @(state.pendingResultCount),
+        @"activeOperation": @(
+            state.activeOperation != Standard_False),
+        @"previewValid": @(state.previewValid != Standard_False),
+        @"canApply": @(state.canApply != Standard_False),
+        @"ownsDocumentCommand": @(
+            state.ownsDocumentCommand != Standard_False),
+        @"documentCommandOpen": @(
+            state.documentCommandOpen != Standard_False),
+        @"axis": @(static_cast<NSUInteger>(state.axis)),
+        @"count": @(state.count),
+        @"spacing": @(state.spacing),
+    };
+}
+
+- (void)debugSetLinearArrayTransactionFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetLinearArrayTransactionFailureCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetLinearArrayAbortFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetLinearArrayAbortFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetLinearArrayEraseFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetLinearArrayEraseFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetLinearArrayCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetLinearArrayCommitMode(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetLinearArrayPostCommitInspectFailureCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetMaximumLinearArrayTopologyNodes(
+                static_cast<Standard_Size>(limit));
+    }
+}
+
+- (BOOL)debugMutateFirstLinearArraySourcePersistedTransform {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()
+            ->debugMutateFirstLinearArraySourcePersistedTransform();
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {
@@ -2790,6 +3104,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                         || objectInteractor->hasActiveBoolean()
                         || objectInteractor->hasUnresolvedBoolean()
                         || objectInteractor->hasUnresolvedMirrorObjects()
+                        || objectInteractor->hasActiveLinearArray()
+                        || objectInteractor->hasUnresolvedLinearArray()
                         || shapeInteractor->hasActiveExtrusion();
                     // Bevel previews own only transient AIS presentations and
                     // never retain an open OCAF command. Apply is synchronous
@@ -3013,6 +3329,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || objectInteractor->hasActiveBoolean()
         || objectInteractor->hasUnresolvedBoolean()
         || objectInteractor->hasUnresolvedMirrorObjects()
+        || objectInteractor->hasActiveLinearArray()
+        || objectInteractor->hasUnresolvedLinearArray()
         || shapeInteractor->hasActiveExtrusion()
         || shapeInteractor->hasActiveBevel()) {
         return nil;

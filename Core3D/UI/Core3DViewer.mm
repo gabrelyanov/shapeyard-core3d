@@ -990,6 +990,7 @@ void Core3DViewer::release() noexcept {
     // restored. Repeated calls are intentionally harmless.
     _interactiveCallback = {};
     _booleanPreviewStateChangedCallback = {};
+    _linearArrayPreviewStateChangedCallback = {};
     _bevelPreviewStateChangedCallback = {};
 	if (_objectInteractor != nullptr) {
 		// Close any temporary face selection modes while their presentations
@@ -1062,6 +1063,8 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
             _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, device_independent_side);
             _objectInteractor->setBooleanPreviewStateChangedCallback(
                 _booleanPreviewStateChangedCallback);
+            _objectInteractor->setLinearArrayPreviewStateChangedCallback(
+                _linearArrayPreviewStateChangedCallback);
         }
         if(_shapeInteractor == nullptr) {
             _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
@@ -1094,6 +1097,8 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, manipulatorSide);
     _objectInteractor->setBooleanPreviewStateChangedCallback(
         _booleanPreviewStateChangedCallback);
+    _objectInteractor->setLinearArrayPreviewStateChangedCallback(
+        _linearArrayPreviewStateChangedCallback);
     _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
     _shapeInteractor->setBevelPreviewStateChangedCallback(
         _bevelPreviewStateChangedCallback);
@@ -1118,6 +1123,16 @@ void Core3DViewer::setBooleanPreviewStateChangedCallback(
     if (_objectInteractor != nullptr) {
         _objectInteractor->setBooleanPreviewStateChangedCallback(
             _booleanPreviewStateChangedCallback);
+    }
+}
+
+void Core3DViewer::setLinearArrayPreviewStateChangedCallback(
+    std::function<void()> theCallback)
+{
+    _linearArrayPreviewStateChangedCallback = std::move(theCallback);
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->setLinearArrayPreviewStateChangedCallback(
+            _linearArrayPreviewStateChangedCallback);
     }
 }
 
@@ -1781,6 +1796,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 		// still has retryable ownership in the current interactor.
 		return AssetImportResult::Busy;
 	}
+	if (_objectInteractor != nullptr
+		&& (_objectInteractor->hasActiveLinearArray()
+			|| _objectInteractor->hasUnresolvedLinearArray())) {
+		return AssetImportResult::Busy;
+	}
 
     Handle(TDocStd_Document) previous = myDoc->Document();
     if (previous.IsNull()) {
@@ -1994,6 +2014,11 @@ bool Core3DViewer::redrawDocument() noexcept {
 		&& _objectInteractor->hasUnresolvedMirrorObjects()) {
 		return false;
 	}
+	if (_objectInteractor != nullptr
+		&& (_objectInteractor->hasActiveLinearArray()
+			|| _objectInteractor->hasUnresolvedLinearArray())) {
+		return false;
+	}
 #ifdef DEBUG
     const Standard_Boolean shouldForceTraversalFailure = std::exchange(
         _debugForceNextTransformInspectorRedrawFailure,
@@ -2161,6 +2186,24 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
     }
     if (_objectInteractor == nullptr) {
         return {};
+    }
+    if (_objectInteractor->hasActiveLinearArray()) {
+        std::vector<Handle(AIS_Shape)> aLinearArrayPreviewObjects;
+        if (!_objectInteractor->captureLinearArrayPreview(
+                aLinearArrayPreviewObjects)) {
+            if (!_objectInteractor
+                    ->canPublishEmptyLinearArrayPreview()) {
+                // Failed, committing, outcome-unknown, unresolved, and
+                // textured states stay exclusively in OCCT. Only a stable
+                // zero-spacing clear is renderer-neutral without geometry.
+                return {};
+            }
+            return _sceneSnapshotBuilder
+                .PublishEmptyLinearArrayPreviewOverlay(myDoc);
+        }
+        return _sceneSnapshotBuilder.PublishLinearArrayPreviewOverlay(
+            myDoc,
+            aLinearArrayPreviewObjects);
     }
     scene::PresentationOverlayContent aContent;
     std::vector<Handle(AIS_Shape)> aMirrorPreviewObjects;
@@ -2601,6 +2644,10 @@ void Core3DViewer::Select(int theX, int theY) {
     if (_objectInteractor->isBooleanSelectionFrozen()) {
         return;
     }
+    if (_objectInteractor->hasActiveLinearArray()
+        || _objectInteractor->hasUnresolvedLinearArray()) {
+        return;
+    }
     if (_shapeInteractor->hasActiveExtrusion()) {
         return;
     }
@@ -2678,6 +2725,11 @@ void Core3DViewer::Select(int theX, int theY) {
 			return;
 		}
 		if (_objectInteractor != nullptr) {
+			if ((_objectInteractor->hasActiveLinearArray()
+					|| _objectInteractor->hasUnresolvedLinearArray())
+				&& !_objectInteractor->cancelLinearArray()) {
+				return;
+			}
 			_objectInteractor->cancelInteraction();
 		}
         myContext->SelectDetected(AIS_SelectionScheme::AIS_SelectionScheme_Remove);

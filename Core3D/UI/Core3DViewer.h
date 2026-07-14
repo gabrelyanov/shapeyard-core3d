@@ -96,6 +96,8 @@ namespace core3d {
         }
         void setBooleanPreviewStateChangedCallback(
             std::function<void()> callback);
+        void setLinearArrayPreviewStateChangedCallback(
+            std::function<void()> callback);
         void setBevelPreviewStateChangedCallback(
             std::function<void()> callback);
 
@@ -233,6 +235,7 @@ namespace core3d {
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;
+        std::function<void()> _linearArrayPreviewStateChangedCallback;
         std::function<void()> _bevelPreviewStateChangedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
 #ifdef DEBUG
