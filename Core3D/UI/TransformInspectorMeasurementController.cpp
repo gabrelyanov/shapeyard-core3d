@@ -163,7 +163,7 @@ private:
 // These are the serialization-stable Core3DModelCapability bits. Keeping the
 // representation policy here means the public bridge copies one authoritative
 // value instead of re-reading OCAF or reconstructing feature policy.
-constexpr std::uint64_t kBRepModelCapabilities = (1ull << 18) - 1ull;
+constexpr std::uint64_t kBRepModelCapabilities = (1ull << 19) - 1ull;
 constexpr std::uint64_t kTriangleMeshModelCapabilities =
     (1ull << 0)  // ObjectSelection
     | (1ull << 2)  // Translate

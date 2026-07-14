@@ -94,6 +94,15 @@ public:
         const std::vector<Handle(AIS_Shape)>& theResultShapes,
         const std::vector<TDF_Label>& theSuppressedSourceLabels) noexcept;
 
+    //! Publish exactly one explicitly owned Shell result replacing exactly one
+    //! committed source occurrence. Textured or subshape-styled definitions
+    //! fail closed so the OCCT viewport remains appearance-authoritative.
+    //! Main-thread only.
+    OverlayPointer PublishShellPreviewOverlay(
+        const Handle(OcctDocument)& theDocument,
+        const Handle(AIS_Shape)& theResultShape,
+        const TDF_Label& theSuppressedSourceLabel) noexcept;
+
     //! Publish one source mesh/material with one world-space instance per
     //! explicitly owned Linear Array preview body. Geometry and appearance are
     //! copied once from the first handle's existing cache; the committed source
@@ -135,7 +144,8 @@ private:
         bool theAllowsMirrorPreview,
         bool theAllowsBooleanPreview,
         bool theAllowsChamferPreview,
-        bool theAllowsLinearArrayPreview) noexcept;
+        bool theAllowsLinearArrayPreview,
+        bool theAllowsShellPreview) noexcept;
 
     struct State;
     std::unique_ptr<State> myState;

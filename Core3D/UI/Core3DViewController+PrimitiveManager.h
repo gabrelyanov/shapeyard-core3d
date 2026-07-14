@@ -31,6 +31,14 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(tryCancelExtrusion());
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+- (Core3DShellParameters)getShellParameters;
+- (BOOL)setShellThickness:(CGFloat)thickness;
+- (Core3DModelingOperationResult)tryApplyShell
+    NS_SWIFT_NAME(tryApplyShell());
+- (Core3DModelingOperationResult)tryCancelShell
+    NS_SWIFT_NAME(tryCancelShell());
+- (BOOL)applyShell;
+- (BOOL)cancelShell;
 - (Core3DModelingOperationResult)tryApplyMirror
     NS_SWIFT_NAME(tryApplyMirror());
 - (Core3DModelingOperationResult)tryCancelMirror

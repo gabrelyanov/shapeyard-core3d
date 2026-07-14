@@ -100,6 +100,8 @@ namespace core3d {
             std::function<void()> callback);
         void setBevelPreviewStateChangedCallback(
             std::function<void()> callback);
+        void setShellPreviewStateChangedCallback(
+            std::function<void()> callback);
 
         //! Capture the document-authoritative single-selection transform and
         //! hybrid exact local bounds. A BRep cache miss returns Measuring and
@@ -131,8 +133,8 @@ namespace core3d {
             std::uint32_t viewportHeight) noexcept;
 
         //! Capture an immutable idle tool presentation paired with the most
-        //! recent full scene. Ready Bevel previews replace their committed
-        //! sources; empty generic content is a valid explicit clear.
+        //! recent full scene. Ready Bevel and Shell previews replace their
+        //! committed sources; empty generic content is a valid explicit clear.
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
 #ifdef DEBUG
@@ -156,6 +158,27 @@ namespace core3d {
         Standard_Boolean debugBeginExtrusionSelection(
             const std::string& entityIdentifier,
             Standard_Size faceTopologyIndex) noexcept;
+        Standard_Boolean debugBeginShellSelection(
+            const std::string& entityIdentifier,
+            Standard_Size faceTopologyIndex) noexcept;
+        ShellPreviewDebugState DebugShellPreviewState() const noexcept;
+        void DebugSetShellPreviewWorkerBlocked(
+            Standard_Boolean blocked) noexcept;
+        void DebugSetMaximumShellCaptureTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetMaximumShellResultTopologyNodes(
+            Standard_Size limit) noexcept;
+        void DebugSetShellTransactionFailureCount(
+            Standard_Size count) noexcept;
+        void DebugSetShellAbortFailureCount(
+            Standard_Size count) noexcept;
+        void DebugSetShellPreviewEraseFailureCount(
+            Standard_Size count) noexcept;
+        void DebugSetShellCommitMode(Standard_Integer mode) noexcept;
+        void DebugSetShellPostCommitInspectFailureCount(
+            Standard_Size count) noexcept;
+        Standard_Boolean
+            DebugMutateShellSourcePersistedTransform() noexcept;
         Standard_Boolean debugBeginBevelSelection(
             const std::string& entityIdentifier,
             const std::vector<Standard_Size>& edgeTopologyIndices) noexcept;
@@ -237,6 +260,7 @@ namespace core3d {
         std::function<void()> _booleanPreviewStateChangedCallback;
         std::function<void()> _linearArrayPreviewStateChangedCallback;
         std::function<void()> _bevelPreviewStateChangedCallback;
+        std::function<void()> _shellPreviewStateChangedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
 #ifdef DEBUG
         Standard_Integer

@@ -112,6 +112,26 @@ Core3DModelingPreviewState Core3DPreviewState(
     return Core3DModelingPreviewStateFailed;
 }
 
+Core3DModelingPreviewState Core3DPreviewState(
+    const core3d::ShellPreviewState theState) noexcept {
+    switch (theState) {
+        case core3d::ShellPreviewState::Unavailable:
+            return Core3DModelingPreviewStateUnavailable;
+        case core3d::ShellPreviewState::Selecting:
+            return Core3DModelingPreviewStateSelecting;
+        case core3d::ShellPreviewState::Computing:
+        case core3d::ShellPreviewState::Committing:
+            return Core3DModelingPreviewStateComputing;
+        case core3d::ShellPreviewState::Ready:
+            return Core3DModelingPreviewStateReady;
+        case core3d::ShellPreviewState::OutcomeUnknown:
+            return Core3DModelingPreviewStateOutcomeUnknown;
+        case core3d::ShellPreviewState::Failed:
+            return Core3DModelingPreviewStateFailed;
+    }
+    return Core3DModelingPreviewStateFailed;
+}
+
 Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     GLViewController *theController,
     const PrimitiveGizmoType theOperation) {
@@ -196,6 +216,25 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
             aStatus.state = Core3DPreviewState(
                 anInteractor->linearArrayPreviewState());
             aStatus.canApply = anInteractor->canApplyLinearArray()
+                && (aStatus.state == Core3DModelingPreviewStateReady
+                    || aStatus.state
+                        == Core3DModelingPreviewStateOutcomeUnknown);
+            return aStatus;
+        }
+        case PrimitiveGizmoTypeShell: {
+            const std::shared_ptr<core3d::ShapeInteractor> anInteractor =
+                theController.viewer->getShapeInteractor();
+            if (anInteractor == nullptr) {
+                return aStatus;
+            }
+            aStatus.generation = anInteractor->shellPreviewGeneration();
+            aStatus.active = anInteractor->hasActiveShell();
+            if (!aStatus.active) {
+                return aStatus;
+            }
+            aStatus.state = Core3DPreviewState(
+                anInteractor->shellPreviewState());
+            aStatus.canApply = anInteractor->canApplyShell()
                 && (aStatus.state == Core3DModelingPreviewStateReady
                     || aStatus.state
                         == Core3DModelingPreviewStateOutcomeUnknown);
@@ -343,6 +382,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 - (void)selectAll {
 	if (_currentGizmoType == PrimitiveGizmoTypeChamfer
 		|| _currentGizmoType == PrimitiveGizmoTypeExtrude
+		|| _currentGizmoType == PrimitiveGizmoTypeShell
 		|| _currentGizmoType == PrimitiveGizmoTypeMirror
 		|| _currentGizmoType == PrimitiveGizmoTypeLinearArray
 		|| _currentGizmoType == PrimitiveGizmoTypeSubtract
@@ -400,6 +440,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const PrimitiveGizmoType modelingOperations[] = {
         PrimitiveGizmoTypeChamfer,
         PrimitiveGizmoTypeExtrude,
+        PrimitiveGizmoTypeShell,
         PrimitiveGizmoTypeMirror,
         PrimitiveGizmoTypeLinearArray,
         PrimitiveGizmoTypeSubtract,
@@ -539,6 +580,47 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 
 - (BOOL)cancelExtrusion {
     return [self tryCancelExtrusion]
+        == Core3DModelingOperationResultSucceeded;
+}
+
+- (Core3DShellParameters)getShellParameters {
+    return [GLController getShellParameters];
+}
+
+- (BOOL)setShellThickness:(CGFloat)thickness {
+    if (_currentGizmoType != PrimitiveGizmoTypeShell) {
+        self.can_apply = NO;
+        [self sendNotifyUIState:UIStateChangingApply];
+        return NO;
+    }
+    const BOOL didSet = [GLController setShellThickness:thickness];
+    self.can_apply = [GLController canApplyShell];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
+}
+
+- (Core3DModelingOperationResult)tryApplyShell {
+    return [self core3d_tryApplyOperation:PrimitiveGizmoTypeShell
+        attempt:^BOOL {
+            return [GLController applyShell];
+        }];
+}
+
+- (Core3DModelingOperationResult)tryCancelShell {
+    return [self core3d_tryCancelOperation:PrimitiveGizmoTypeShell
+        attempt:^BOOL {
+            return [GLController cancelShell];
+        }];
+}
+
+- (BOOL)applyShell {
+    return [self tryApplyShell]
+        == Core3DModelingOperationResultSucceeded;
+}
+
+- (BOOL)cancelShell {
+    return [self tryCancelShell]
         == Core3DModelingOperationResultSucceeded;
 }
 
@@ -775,6 +857,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 - (void)undo {
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
+    const BOOL wasShell =
+        _currentGizmoType == PrimitiveGizmoTypeShell;
     const BOOL wasLinearArray =
         _currentGizmoType == PrimitiveGizmoTypeLinearArray;
     [GLController undo];
@@ -806,8 +890,24 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                                 | UIStateChangingHistory];
         return;
     }
+    if (wasShell) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeShell];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationOverlay];
+        }
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
         || _currentGizmoType == PrimitiveGizmoTypeLinearArray
+        || _currentGizmoType == PrimitiveGizmoTypeShell
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
         || _currentGizmoType == PrimitiveGizmoTypeUnion
         || _currentGizmoType == PrimitiveGizmoTypeIntersect
@@ -820,6 +920,9 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                     PrimitiveGizmoTypeLinearArray].canApply
             : _currentGizmoType == PrimitiveGizmoTypeExtrude
                 ? [GLController canApplyExtrusion]
+            : _currentGizmoType == PrimitiveGizmoTypeShell
+                ? [self modelingPreviewStatusForGizmoType:
+                    PrimitiveGizmoTypeShell].canApply
             : [GLController canApplyBoolean];
         [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply
@@ -832,6 +935,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 - (void)redo {
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
+    const BOOL wasShell =
+        _currentGizmoType == PrimitiveGizmoTypeShell;
     const BOOL wasLinearArray =
         _currentGizmoType == PrimitiveGizmoTypeLinearArray;
     [GLController redo];
@@ -863,8 +968,24 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                                 | UIStateChangingHistory];
         return;
     }
+    if (wasShell) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeShell];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationOverlay];
+        }
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeMirror
         || _currentGizmoType == PrimitiveGizmoTypeLinearArray
+        || _currentGizmoType == PrimitiveGizmoTypeShell
         || _currentGizmoType == PrimitiveGizmoTypeSubtract
         || _currentGizmoType == PrimitiveGizmoTypeUnion
         || _currentGizmoType == PrimitiveGizmoTypeIntersect
@@ -877,6 +998,9 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                     PrimitiveGizmoTypeLinearArray].canApply
             : _currentGizmoType == PrimitiveGizmoTypeExtrude
                 ? [GLController canApplyExtrusion]
+            : _currentGizmoType == PrimitiveGizmoTypeShell
+                ? [self modelingPreviewStatusForGizmoType:
+                    PrimitiveGizmoTypeShell].canApply
             : [GLController canApplyBoolean];
         [self viewDidChangeViewportPresentationState];
         [self sendNotifyUIState:UIStateChangingApply

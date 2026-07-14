@@ -38,7 +38,9 @@ bool CanCaptureCommittedExport(
         && !objectInteractor->hasActiveLinearArray()
         && !objectInteractor->hasUnresolvedLinearArray()
         && !shapeInteractor->hasActiveExtrusion()
-        && !shapeInteractor->hasActiveBevel();
+        && !shapeInteractor->hasActiveBevel()
+        && !shapeInteractor->hasActiveShell()
+        && !shapeInteractor->hasUnresolvedShell();
 }
 
 } // namespace

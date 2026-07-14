@@ -92,6 +92,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
 - (BOOL)canApplyExtrusion;
+- (Core3DShellParameters)getShellParameters;
+- (BOOL)setShellThickness:(CGFloat)thickness;
+- (BOOL)applyShell;
+- (BOOL)cancelShell;
+- (BOOL)canApplyShell;
+- (BOOL)hasActiveShell;
 - (BOOL) applyMirror;
 - (BOOL) cancelMirror;
 - (BOOL)beginMirrorPlanePicking;
@@ -153,6 +159,18 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;
 - (NSDictionary<NSString *, NSNumber *> *)debugExtrusionState;
+- (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
+                          faceTopologyIndex:(NSUInteger)faceTopologyIndex;
+- (NSDictionary<NSString *, NSNumber *> *)debugShellState;
+- (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked;
+- (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit;
+- (void)debugSetShellTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetShellAbortFailureCount:(NSUInteger)count;
+- (void)debugSetShellPreviewEraseFailureCount:(NSUInteger)count;
+- (void)debugSetShellCommitMode:(NSInteger)mode;
+- (void)debugSetShellPostCommitInspectFailureCount:(NSUInteger)count;
+- (BOOL)debugMutateShellSourcePersistedTransform;
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;

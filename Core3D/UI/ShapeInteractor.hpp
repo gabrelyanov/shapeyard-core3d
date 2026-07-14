@@ -10,6 +10,7 @@
 
 #include "Interactor.hpp"
 #include "BevelOperationController.hpp"
+#include "ShellOperationController.hpp"
 #include <AIS_Shape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
@@ -92,6 +93,7 @@ namespace core3d {
 		Handle(AIS_InteractiveObject) _subtractorObjectPrs;
 			std::vector<EdgesSelection> _detectedEdges;
 			std::shared_ptr<BevelOperationController> _bevelController;
+			std::shared_ptr<ShellOperationController> _shellController;
 
         struct ExtrusionSelection {
             TDF_Label label;
@@ -162,6 +164,28 @@ namespace core3d {
 				Standard_Boolean resetWireframeTemplateShape() noexcept;
 			Standard_Boolean cancelChamfer() noexcept;
 
+        //! Capture exactly one selected planar face for transient hollowing.
+        Standard_Boolean beginShellSelection() noexcept;
+        Standard_Boolean setShellThickness(
+            Standard_Real thickness) noexcept;
+        ShellApplyResult applyShell() noexcept;
+        Standard_Boolean cancelShell() noexcept;
+        Standard_Boolean canApplyShell() const noexcept;
+        Standard_Boolean hasActiveShell() const noexcept;
+        Standard_Boolean hasUnresolvedShell() const noexcept;
+        Standard_Boolean isShellSelectionFrozen() const noexcept;
+        ShellPreviewState shellPreviewState() const noexcept;
+        std::uint64_t shellPreviewGeneration() const noexcept;
+        Standard_Real shellThickness() const noexcept;
+        Standard_Real shellDefaultThickness() const noexcept;
+        Standard_Real shellMetersPerUnit() const noexcept;
+        std::pair<Standard_Real, Standard_Real>
+            shellThicknessRange() const noexcept;
+        Standard_Boolean captureShellPreview(
+            ShellPreviewCapture& capture) const noexcept;
+        void setShellPreviewStateChangedCallback(
+            std::function<void()> callback);
+
         //! Capture one selected planar face on one editable free solid.
         //! No document command is opened until a nonzero preview succeeds.
         Standard_Boolean beginExtrusionSelection() noexcept;
@@ -182,6 +206,27 @@ namespace core3d {
         //! confirmed aborted; state remains intact so cancellation can retry.
         Standard_Boolean cancelExtrusion() noexcept;
 #ifdef DEBUG
+        Standard_Boolean debugBeginShellSelection(
+            const Handle(AIS_Shape)& presentation,
+            const TopoDS_Face& face) noexcept;
+        ShellPreviewDebugState debugShellState() const noexcept;
+        void debugSetShellWorkerBlocked(
+            Standard_Boolean blocked) noexcept;
+        void debugSetMaximumShellCaptureTopologyNodes(
+            Standard_Size limit) noexcept;
+        void debugSetMaximumShellResultTopologyNodes(
+            Standard_Size limit) noexcept;
+        void debugSetShellTransactionFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetShellAbortFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetShellPreviewEraseFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetShellCommitMode(Standard_Integer mode) noexcept;
+        void debugSetShellPostCommitInspectFailureCount(
+            Standard_Size count) noexcept;
+        Standard_Boolean
+            debugMutateShellSourcePersistedTransform() noexcept;
         Standard_Boolean debugBeginExtrusionSelection(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;
@@ -229,6 +274,9 @@ namespace core3d {
 	private:
 		void setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio);
 			Standard_Boolean beginBevelSelectionFromDetectedEdges() noexcept;
+        Standard_Boolean beginShellSelectionImpl(
+            const Handle(AIS_Shape)& presentation,
+            const TopoDS_Face& face) noexcept;
         Standard_Boolean beginExtrusionSelectionImpl(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;

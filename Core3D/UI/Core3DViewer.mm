@@ -992,6 +992,7 @@ void Core3DViewer::release() noexcept {
     _booleanPreviewStateChangedCallback = {};
     _linearArrayPreviewStateChangedCallback = {};
     _bevelPreviewStateChangedCallback = {};
+    _shellPreviewStateChangedCallback = {};
 	if (_objectInteractor != nullptr) {
 		// Close any temporary face selection modes while their presentations
 		// and the AIS context are still alive. Full Mirror cancellation then
@@ -1070,6 +1071,8 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
             _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
             _shapeInteractor->setBevelPreviewStateChangedCallback(
                 _bevelPreviewStateChangedCallback);
+            _shapeInteractor->setShellPreviewStateChangedCallback(
+                _shellPreviewStateChangedCallback);
         }
         if (_transformInspectorMeasurementController == nullptr) {
             try {
@@ -1102,6 +1105,8 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
     _shapeInteractor->setBevelPreviewStateChangedCallback(
         _bevelPreviewStateChangedCallback);
+    _shapeInteractor->setShellPreviewStateChangedCallback(
+        _shellPreviewStateChangedCallback);
 
     if (theSelectionMode != ShapeSelectionMode::WholeShape) {
         _shapeInteractor->setSelectionMode(theSelectionMode);
@@ -1143,6 +1148,16 @@ void Core3DViewer::setBevelPreviewStateChangedCallback(
     if (_shapeInteractor != nullptr) {
         _shapeInteractor->setBevelPreviewStateChangedCallback(
             _bevelPreviewStateChangedCallback);
+    }
+}
+
+void Core3DViewer::setShellPreviewStateChangedCallback(
+    std::function<void()> theCallback)
+{
+    _shellPreviewStateChangedCallback = std::move(theCallback);
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->setShellPreviewStateChangedCallback(
+            _shellPreviewStateChangedCallback);
     }
 }
 
@@ -1801,6 +1816,15 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 			|| _objectInteractor->hasUnresolvedLinearArray())) {
 		return AssetImportResult::Busy;
 	}
+	if (_shapeInteractor != nullptr
+		&& (_shapeInteractor->hasActiveShell()
+			|| _shapeInteractor->hasUnresolvedShell())) {
+		// Shell cancellation is intentionally retryable. In particular, an
+		// OutcomeUnknown result may already be committed while its controller
+		// still owns the only authoritative reconciliation state. Never replace
+		// the document or recreate interactors until that state is resolved.
+		return AssetImportResult::Busy;
+	}
 
     Handle(TDocStd_Document) previous = myDoc->Document();
     if (previous.IsNull()) {
@@ -2152,6 +2176,15 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer
 Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
+    if (_shapeInteractor != nullptr
+        && _shapeInteractor->shellPreviewState()
+            == ShellPreviewState::OutcomeUnknown) {
+        // The candidate may already be committed, but the Shell controller
+        // still owns the only authoritative reconciliation token. Publishing
+        // here would expose an outcome that the operation cannot yet prove and
+        // would also advance the snapshot builder's committed revision state.
+        return {};
+    }
     return _sceneSnapshotBuilder.Build(
         myDoc,
         myContext,
@@ -2171,6 +2204,19 @@ Core3DViewer::captureSceneFrameSnapshot(
 
 scene::OcctSceneSnapshotBuilder::OverlayPointer
 Core3DViewer::captureScenePresentationOverlay() noexcept {
+    if (_shapeInteractor != nullptr
+        && _shapeInteractor->hasActiveShell()) {
+        ShellPreviewCapture aShellPreview;
+        if (!_shapeInteractor->captureShellPreview(aShellPreview)) {
+            // Computing, committing, failed, or otherwise unsafe Shell state
+            // remains exclusively owned by the OCCT viewport.
+            return {};
+        }
+        return _sceneSnapshotBuilder.PublishShellPreviewOverlay(
+            myDoc,
+            aShellPreview.result,
+            aShellPreview.suppressedSourceLabel);
+    }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->hasActiveBevel()) {
         BevelPreviewCapture aBevelPreview;
@@ -2427,6 +2473,151 @@ Standard_Boolean Core3DViewer::debugBeginExtrusionSelection(
         _shapeInteractor->cancelExtrusion();
         return Standard_False;
     }
+}
+
+Standard_Boolean Core3DViewer::debugBeginShellSelection(
+    const std::string& theEntityIdentifier,
+    const Standard_Size theFaceTopologyIndex) noexcept
+{
+    if (_shapeInteractor == nullptr || myContext.IsNull() || myDoc.IsNull()
+        || theEntityIdentifier.empty()
+        || theFaceTopologyIndex
+            > static_cast<Standard_Size>(
+                std::numeric_limits<Standard_Integer>::max() - 1)) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        if (_shapeInteractor->hasActiveShell()
+            && !_shapeInteractor->cancelShell()) {
+            return Standard_False;
+        }
+
+        Handle(AIS_Shape) aPresentation;
+        AIS_ListOfInteractive aDisplayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
+        for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
+             anObject.More(); anObject.Next()) {
+            const Handle(AIS_InteractiveObject)& anInteractive =
+                anObject.Value();
+            const TDF_Label aLabel = myDoc->ShapeLabel(anInteractive);
+            if (aLabel.IsNull()
+                || myDoc->EntityIdentifierForLabel(aLabel)
+                    != theEntityIdentifier) {
+                continue;
+            }
+            const Handle(AIS_Shape) aCandidate =
+                Handle(AIS_Shape)::DownCast(anInteractive);
+            if (!aPresentation.IsNull() || aCandidate.IsNull()
+                || aCandidate->Shape().IsNull()
+                || !myDoc->IsPresentationEditable(aCandidate)) {
+                return Standard_False;
+            }
+            aPresentation = aCandidate;
+        }
+        if (aPresentation.IsNull()) {
+            return Standard_False;
+        }
+
+        TopTools_IndexedMapOfShape aFaces;
+        TopExp::MapShapes(aPresentation->Shape(), TopAbs_FACE, aFaces);
+        if (theFaceTopologyIndex
+            >= static_cast<Standard_Size>(aFaces.Extent())) {
+            return Standard_False;
+        }
+        const TopoDS_Shape& aFace = aFaces.FindKey(
+            static_cast<Standard_Integer>(theFaceTopologyIndex) + 1);
+        return !aFace.IsNull() && aFace.ShapeType() == TopAbs_FACE
+            && _shapeInteractor->debugBeginShellSelection(
+                aPresentation, TopoDS::Face(aFace));
+    } catch (...) {
+        (void)_shapeInteractor->cancelShell();
+        return Standard_False;
+    }
+}
+
+ShellPreviewDebugState
+Core3DViewer::DebugShellPreviewState() const noexcept
+{
+    return _shapeInteractor == nullptr
+        ? ShellPreviewDebugState()
+        : _shapeInteractor->debugShellState();
+}
+
+void Core3DViewer::DebugSetShellPreviewWorkerBlocked(
+    const Standard_Boolean theBlocked) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetShellWorkerBlocked(theBlocked);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumShellCaptureTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetMaximumShellCaptureTopologyNodes(
+            theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetMaximumShellResultTopologyNodes(
+    const Standard_Size theLimit) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetMaximumShellResultTopologyNodes(
+            theLimit);
+    }
+}
+
+void Core3DViewer::DebugSetShellTransactionFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetShellTransactionFailureCount(
+            theCount);
+    }
+}
+
+void Core3DViewer::DebugSetShellAbortFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetShellAbortFailureCount(theCount);
+    }
+}
+
+void Core3DViewer::DebugSetShellPreviewEraseFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetShellPreviewEraseFailureCount(
+            theCount);
+    }
+}
+
+void Core3DViewer::DebugSetShellCommitMode(
+    const Standard_Integer theMode) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetShellCommitMode(theMode);
+    }
+}
+
+void Core3DViewer::DebugSetShellPostCommitInspectFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_shapeInteractor != nullptr) {
+        _shapeInteractor->debugSetShellPostCommitInspectFailureCount(
+            theCount);
+    }
+}
+
+Standard_Boolean
+Core3DViewer::DebugMutateShellSourcePersistedTransform() noexcept
+{
+    return _shapeInteractor != nullptr
+        && _shapeInteractor->debugMutateShellSourcePersistedTransform();
 }
 
 Standard_Boolean Core3DViewer::debugBeginBevelSelection(

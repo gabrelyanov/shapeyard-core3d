@@ -473,16 +473,187 @@ namespace core3d {
 	    ShapeInteractor::ShapeInteractor(Handle(Core3DContext) context, Handle(Core3DView) view, Handle(OcctDocument) doc)
 	    : Interactor(context, view, doc),
 	      _bevelController(std::make_shared<BevelOperationController>(
+	          context, doc)),
+	      _shellController(std::make_shared<ShellOperationController>(
 	          context, doc)) {
 	    }
 
 	ShapeInteractor::~ShapeInteractor() noexcept {
+		if (!cancelShell()) {
+			(void)cancelShell();
+		}
 		if (!cancelExtrusion()) {
 			(void)cancelExtrusion();
 		}
 		try {
 			cancelChamfer();
 		} catch (...) {
+		}
+	}
+
+	Standard_Boolean ShapeInteractor::beginShellSelection() noexcept {
+		if (myContext.IsNull() || _shellController == nullptr) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			Handle(AIS_Shape) presentation;
+			TopoDS_Face face;
+			Standard_Size selectedCount = 0;
+			for (myContext->InitSelected(); myContext->MoreSelected();
+				 myContext->NextSelected()) {
+				if (++selectedCount != 1) {
+					(void)cancelShell();
+					return Standard_False;
+				}
+				const Handle(SelectMgr_EntityOwner) owner =
+					myContext->SelectedOwner();
+				const Handle(StdSelect_BRepOwner) brepOwner =
+					Handle(StdSelect_BRepOwner)::DownCast(owner);
+				presentation = Handle(AIS_Shape)::DownCast(
+					myContext->SelectedInteractive());
+				if (owner.IsNull() || !owner->HasSelectable()
+					|| brepOwner.IsNull() || !brepOwner->HasShape()
+					|| brepOwner->Shape().ShapeType() != TopAbs_FACE
+					|| presentation.IsNull()
+					|| owner->Selectable() != presentation) {
+					(void)cancelShell();
+					return Standard_False;
+				}
+				face = TopoDS::Face(brepOwner->Shape());
+			}
+			if (selectedCount != 1) {
+				(void)cancelShell();
+				return Standard_False;
+			}
+			return beginShellSelectionImpl(presentation, face);
+		} catch (...) {
+			(void)cancelShell();
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ShapeInteractor::beginShellSelectionImpl(
+		const Handle(AIS_Shape)& presentation,
+		const TopoDS_Face& face) noexcept {
+		if (_shellController == nullptr || myDoc.IsNull()
+			|| presentation.IsNull() || presentation->Shape().IsNull()
+			|| face.IsNull()) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			const BRepAdaptor_Surface surface(face, Standard_True);
+			if (surface.GetType() != GeomAbs_Plane
+				|| (face.Orientation() != TopAbs_FORWARD
+					&& face.Orientation() != TopAbs_REVERSED)) {
+				return Standard_False;
+			}
+
+			TopTools_IndexedMapOfShape faces;
+			TopExp::MapShapes(presentation->Shape(), TopAbs_FACE, faces);
+			const Standard_Integer faceIndex = faces.FindIndex(face);
+			if (faceIndex <= 0) {
+				return Standard_False;
+			}
+
+			ShellSourceSelection selection;
+			selection.original = presentation;
+			selection.documentLabel = myDoc->ShapeLabel(presentation);
+			selection.openingFace = face;
+			selection.faceTopologyIndex =
+				static_cast<Standard_Size>(faceIndex - 1);
+			selection.selectionMode =
+				AIS_Shape::SelectionMode(_topAbsSelMode);
+			return _shellController->begin(selection);
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ShapeInteractor::setShellThickness(
+		const Standard_Real thickness) noexcept {
+		return _shellController != nullptr
+			&& _shellController->setThickness(thickness);
+	}
+
+	ShellApplyResult ShapeInteractor::applyShell() noexcept {
+		return _shellController == nullptr
+			? ShellApplyResult::NoChange
+			: _shellController->apply();
+	}
+
+	Standard_Boolean ShapeInteractor::cancelShell() noexcept {
+		return _shellController == nullptr || _shellController->cancel();
+	}
+
+	Standard_Boolean ShapeInteractor::canApplyShell() const noexcept {
+		return _shellController != nullptr && _shellController->canApply();
+	}
+
+	Standard_Boolean ShapeInteractor::hasActiveShell() const noexcept {
+		return _shellController != nullptr
+			&& _shellController->hasActiveOperation();
+	}
+
+	Standard_Boolean ShapeInteractor::hasUnresolvedShell() const noexcept {
+		return _shellController != nullptr
+			&& _shellController->hasUnresolvedState();
+	}
+
+	Standard_Boolean ShapeInteractor::isShellSelectionFrozen() const noexcept {
+		return _shellController != nullptr
+			&& _shellController->isSelectionFrozen();
+	}
+
+	ShellPreviewState ShapeInteractor::shellPreviewState() const noexcept {
+		return _shellController == nullptr
+			? ShellPreviewState::Unavailable
+			: _shellController->previewState();
+	}
+
+	std::uint64_t ShapeInteractor::shellPreviewGeneration() const noexcept {
+		return _shellController == nullptr
+			? 0
+			: _shellController->previewGeneration();
+	}
+
+	Standard_Real ShapeInteractor::shellThickness() const noexcept {
+		return _shellController == nullptr
+			? 0.0
+			: _shellController->thickness();
+	}
+
+	Standard_Real ShapeInteractor::shellDefaultThickness() const noexcept {
+		return _shellController == nullptr
+			? 0.0
+			: _shellController->defaultThickness();
+	}
+
+	Standard_Real ShapeInteractor::shellMetersPerUnit() const noexcept {
+		return _shellController == nullptr
+			? 0.0
+			: _shellController->metersPerUnit();
+	}
+
+	std::pair<Standard_Real, Standard_Real>
+	ShapeInteractor::shellThicknessRange() const noexcept {
+		return _shellController == nullptr
+			? std::make_pair(0.0, 0.0)
+			: _shellController->thicknessRange();
+	}
+
+	Standard_Boolean ShapeInteractor::captureShellPreview(
+		ShellPreviewCapture& capture) const noexcept {
+		return _shellController != nullptr
+			&& _shellController->capturePreview(capture);
+	}
+
+	void ShapeInteractor::setShellPreviewStateChangedCallback(
+		std::function<void()> callback) {
+		if (_shellController != nullptr) {
+			_shellController->setPreviewStateChangedCallback(
+				std::move(callback));
 		}
 	}
 
@@ -1062,6 +1233,80 @@ namespace core3d {
 	}
 
 #ifdef DEBUG
+	Standard_Boolean ShapeInteractor::debugBeginShellSelection(
+		const Handle(AIS_Shape)& presentation,
+		const TopoDS_Face& face) noexcept {
+		return beginShellSelectionImpl(presentation, face);
+	}
+
+	ShellPreviewDebugState ShapeInteractor::debugShellState() const noexcept {
+		return _shellController == nullptr
+			? ShellPreviewDebugState()
+			: _shellController->debugPreviewState();
+	}
+
+	void ShapeInteractor::debugSetShellWorkerBlocked(
+		const Standard_Boolean blocked) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetWorkerBlocked(blocked);
+		}
+	}
+
+	void ShapeInteractor::debugSetMaximumShellCaptureTopologyNodes(
+		const Standard_Size limit) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetMaximumCaptureTopologyNodes(limit);
+		}
+	}
+
+	void ShapeInteractor::debugSetMaximumShellResultTopologyNodes(
+		const Standard_Size limit) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetMaximumResultTopologyNodes(limit);
+		}
+	}
+
+	void ShapeInteractor::debugSetShellTransactionFailureCount(
+		const Standard_Size count) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetTransactionFailureCount(count);
+		}
+	}
+
+	void ShapeInteractor::debugSetShellAbortFailureCount(
+		const Standard_Size count) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetAbortFailureCount(count);
+		}
+	}
+
+	void ShapeInteractor::debugSetShellPreviewEraseFailureCount(
+		const Standard_Size count) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetPreviewEraseFailureCount(count);
+		}
+	}
+
+	void ShapeInteractor::debugSetShellCommitMode(
+		const Standard_Integer mode) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetCommitMode(mode);
+		}
+	}
+
+	void ShapeInteractor::debugSetShellPostCommitInspectFailureCount(
+		const Standard_Size count) noexcept {
+		if (_shellController != nullptr) {
+			_shellController->debugSetPostCommitInspectFailureCount(count);
+		}
+	}
+
+	Standard_Boolean
+	ShapeInteractor::debugMutateShellSourcePersistedTransform() noexcept {
+		return _shellController != nullptr
+			&& _shellController->debugMutateSourcePersistedTransform();
+	}
+
 	Standard_Boolean ShapeInteractor::debugBeginExtrusionSelection(
 		const Handle(AIS_Shape)& presentation,
 		const TopoDS_Face& face) noexcept {
@@ -1589,7 +1834,8 @@ namespace core3d {
 					myDoc,
 					filename,
 					OcctGeometryExportFormat::Stl,
-					hasActiveBevel() || hasActiveExtrusion())) {
+					hasActiveBevel() || hasActiveExtrusion()
+						|| hasActiveShell())) {
             return;
         }
         AIS_ListOfInteractive objects;
@@ -1619,7 +1865,8 @@ namespace core3d {
 					myDoc,
 					filename,
 					OcctGeometryExportFormat::Obj,
-					hasActiveBevel() || hasActiveExtrusion())) {
+					hasActiveBevel() || hasActiveExtrusion()
+						|| hasActiveShell())) {
             return;
         }
 //#define converter2obj
@@ -1721,7 +1968,8 @@ namespace core3d {
 					myDoc,
 					filename,
 					OcctGeometryExportFormat::Gltf,
-					hasActiveBevel() || hasActiveExtrusion())) {
+					hasActiveBevel() || hasActiveExtrusion()
+						|| hasActiveShell())) {
             return;
         }
         bool exportSucceeded = false;
@@ -1790,7 +2038,8 @@ namespace core3d {
 					myDoc,
 					filename,
 					OcctGeometryExportFormat::Step,
-					hasActiveBevel() || hasActiveExtrusion())) {
+					hasActiveBevel() || hasActiveExtrusion()
+						|| hasActiveShell())) {
             return;
         }
         AIS_ListOfInteractive objects;

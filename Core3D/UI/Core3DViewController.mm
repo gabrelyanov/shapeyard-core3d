@@ -4387,6 +4387,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController didReceiveMemoryWarning];
 }
 
+- (void)debugSimulateShellMemoryWarning {
+    [GLController didReceiveMemoryWarning];
+}
+
 - (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
                               faceTopologyIndex:(NSUInteger)faceTopologyIndex {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
@@ -4446,6 +4450,87 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count {
     [GLController debugSetExtrusionPostCommitInspectFailureCount:count];
+}
+
+- (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
+                          faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0
+        || entityIdentifier.UTF8String == nullptr) {
+        return NO;
+    }
+    try {
+        const BOOL didBegin =
+            [GLController debugBeginShellWithEntityIdentifier:
+                entityIdentifier
+                faceTopologyIndex:faceTopologyIndex];
+        _currentGizmoType = [GLController getGizmoType];
+        if (didBegin) {
+            _availableGizmoTypes = @[
+                @(PrimitiveGizmoTypeChamfer),
+                @(PrimitiveGizmoTypeExtrude),
+                @(PrimitiveGizmoTypeShell)
+            ];
+        }
+        self.can_apply = didBegin && [GLController canApplyShell];
+        [GLController debugRequestRender];
+        [self viewDidChangeViewportPresentationOverlay];
+        [self sendNotifyUIState:(UIStateChangingGizmo
+            | UIStateChangingSelection
+            | UIStateChangingApply)];
+        return didBegin;
+    } catch (...) {
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationOverlay];
+        [self sendNotifyUIState:(UIStateChangingGizmo
+            | UIStateChangingSelection
+            | UIStateChangingApply)];
+        return NO;
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugShellState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugShellState];
+}
+
+- (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked {
+    [GLController debugSetShellPreviewWorkerBlocked:blocked];
+}
+
+- (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumShellCaptureTopologyNodes:limit];
+}
+
+- (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumShellResultTopologyNodes:limit];
+}
+
+- (void)debugSetShellTransactionFailureCount:(NSUInteger)count {
+    [GLController debugSetShellTransactionFailureCount:count];
+}
+
+- (void)debugSetShellAbortFailureCount:(NSUInteger)count {
+    [GLController debugSetShellAbortFailureCount:count];
+}
+
+- (void)debugSetShellPreviewEraseFailureCount:(NSUInteger)count {
+    [GLController debugSetShellPreviewEraseFailureCount:count];
+}
+
+- (void)debugSetShellCommitMode:(NSInteger)mode {
+    [GLController debugSetShellCommitMode:mode];
+}
+
+- (void)debugSetShellPostCommitInspectFailureCount:(NSUInteger)count {
+    [GLController debugSetShellPostCommitInspectFailureCount:count];
+}
+
+- (BOOL)debugMutateShellSourcePersistedTransform {
+    return [GLController debugMutateShellSourcePersistedTransform];
 }
 
 - (BOOL)debugBeginBevelWithEntityIdentifier:(NSString *)entityIdentifier
@@ -4642,6 +4727,18 @@ void Core3DAddDebugOrphanVisualMaterial(
             [self sendNotifyUIState:UIStateChangingApply];
         }
     }
+    if (_currentGizmoType == PrimitiveGizmoTypeShell) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeShell];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationOverlay];
+            [self sendNotifyUIState:UIStateChangingApply];
+        }
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeChamfer
         && ![GLController hasActiveBevel]) {
         [self completeOperationInteraction];
@@ -4654,7 +4751,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 		if ([GLController getSelectionType] != type) {
 			if (_currentGizmoType == PrimitiveGizmoTypeMirror
 				|| _currentGizmoType
-					== PrimitiveGizmoTypeLinearArray) {
+					== PrimitiveGizmoTypeLinearArray
+				|| _currentGizmoType == PrimitiveGizmoTypeShell) {
 				const Core3DModelingPreviewStatus aStatus =
 					[self modelingPreviewStatusForGizmoType:
 						_currentGizmoType];
@@ -4711,7 +4809,8 @@ void Core3DAddDebugOrphanVisualMaterial(
                 if (!isEmptyOfDisplayedObjects && isSelected) {
                     _availableGizmoTypes = @[
                         @(PrimitiveGizmoTypeChamfer),
-                        @(PrimitiveGizmoTypeExtrude)
+                        @(PrimitiveGizmoTypeExtrude),
+                        @(PrimitiveGizmoTypeShell)
                     ];
                 }
                 [GLController deselectAll];
@@ -4763,6 +4862,14 @@ void Core3DAddDebugOrphanVisualMaterial(
                 const Core3DModelingPreviewStatus status =
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeLinearArray];
+                self.can_apply = status.canApply;
+                break;
+            }
+            case PrimitiveGizmoTypeShell:
+            {
+                const Core3DModelingPreviewStatus status =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeShell];
                 self.can_apply = status.canApply;
                 break;
             }

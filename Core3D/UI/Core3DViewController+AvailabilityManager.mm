@@ -32,6 +32,7 @@ constexpr Core3DModelCapability kBRepCapabilities =
         | Core3DModelCapabilityChamfer
         | Core3DModelCapabilityExtrusion
         | Core3DModelCapabilityLinearArray
+        | Core3DModelCapabilityShell
         | Core3DModelCapabilityMaterial
         | Core3DModelCapabilityExportOBJ
         | Core3DModelCapabilityExportSTL
@@ -117,6 +118,8 @@ bool CapabilitiesAllowGizmo(
             return has(Core3DModelCapabilityExtrusion);
         case PrimitiveGizmoTypeLinearArray:
             return has(Core3DModelCapabilityLinearArray);
+        case PrimitiveGizmoTypeShell:
+            return has(Core3DModelCapabilityShell);
         case PrimitiveGizmoTypeNone:
             return false;
     }
@@ -265,14 +268,15 @@ Core3DModelCapability DocumentExportCapabilities(
         if (!hasSelection) {
             return Core3DModelCapabilityNone;
         }
-        // Linear Array deliberately has single-source semantics in its first
-        // touch contract. Other common capabilities remain intersection-based
-        // for multi-selection.
+        // Linear Array and Shell deliberately have single-source semantics in
+        // their first touch contracts. Other common capabilities remain
+        // intersection-based for multi-selection.
         if (selectedDefinitionCount != 1) {
             capabilities = static_cast<Core3DModelCapability>(
                 static_cast<NSUInteger>(capabilities)
                 & ~static_cast<NSUInteger>(
-                    Core3DModelCapabilityLinearArray));
+                    Core3DModelCapabilityLinearArray
+                    | Core3DModelCapabilityShell));
         }
         return capabilities;
     } catch (...) {
@@ -281,9 +285,9 @@ Core3DModelCapability DocumentExportCapabilities(
 }
 
 - (NSArray<NSNumber *> *)availableGizmoTypes {
-    // Boolean, Bevel, and Extrusion previews can suppress or consume their live
-    // AIS selection while retaining an admitted BRep-only operation. Keep the
-    // tool rail (and, critically, Apply/Cancel) available until it resolves.
+    // Topology-changing previews can suppress or consume their live AIS
+    // selection while retaining an admitted BRep-only operation. Keep the tool
+    // rail (and, critically, Apply/Cancel) available until it resolves.
     const BOOL hasRetainedBoolean =
         Core3DIsBooleanGizmo(_currentGizmoType)
         && GLController != nil
@@ -299,13 +303,19 @@ Core3DModelCapability DocumentExportCapabilities(
         && viewer != nullptr
         && viewer->getShapeInteractor() != nullptr
         && viewer->getShapeInteractor()->hasActiveExtrusion();
+    const BOOL hasRetainedShell =
+        _currentGizmoType == PrimitiveGizmoTypeShell
+        && viewer != nullptr
+        && viewer->getShapeInteractor() != nullptr
+        && viewer->getShapeInteractor()->hasActiveShell();
     const BOOL hasRetainedLinearArray =
         _currentGizmoType == PrimitiveGizmoTypeLinearArray
         && viewer != nullptr
         && viewer->getObjectInteractor() != nullptr
         && viewer->getObjectInteractor()->hasActiveLinearArray();
     const BOOL hasRetainedBRepOperation =
-        hasRetainedBoolean || hasRetainedChamfer || hasRetainedExtrusion;
+        hasRetainedBoolean || hasRetainedChamfer || hasRetainedExtrusion
+        || hasRetainedShell;
     Core3DModelCapability capabilities = self.selectedModelCapabilities;
     if (hasRetainedBRepOperation) {
         capabilities = kBRepCapabilities;

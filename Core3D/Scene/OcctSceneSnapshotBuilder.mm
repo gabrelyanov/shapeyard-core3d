@@ -33,13 +33,17 @@
 #include <StdPrs_ToolTriangulatedShape.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDF_ChildIterator.hxx>
 #include <TDF_Data.hxx>
+#include <TDF_LabelSequence.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
@@ -112,6 +116,7 @@ constexpr std::size_t kMaxMirrorPreviewBodies = 8;
 constexpr std::size_t kMaxBooleanSourceOperands = 8;
 constexpr std::size_t kMaxChamferPreviewBodies = 8;
 constexpr std::size_t kMaxLinearArrayPreviewBodies = 15;
+constexpr std::size_t kMaxShellStyledSubshapeLabels = 1'024;
 constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
     "gizmo/mirroring/x/negative",
     "gizmo/mirroring/y/negative",
@@ -1191,6 +1196,88 @@ bool HasUnsupportedPresentationTexture(
             && !anAspect->TextureSet()->IsEmpty());
 }
 
+bool HasUnsupportedVisualMaterialTexture(const TDF_Label& theLabel) noexcept
+{
+    if (theLabel.IsNull()) {
+        return true;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(XCAFDoc_VisMaterial) aMaterial =
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(theLabel);
+        if (aMaterial.IsNull()) {
+            return false;
+        }
+        if (aMaterial->HasPbrMaterial()) {
+            const XCAFDoc_VisMaterialPBR& aPbr =
+                aMaterial->PbrMaterial();
+            if (!aPbr.BaseColorTexture.IsNull()
+                || !aPbr.EmissiveTexture.IsNull()
+                || !aPbr.MetallicRoughnessTexture.IsNull()
+                || !aPbr.OcclusionTexture.IsNull()
+                || !aPbr.NormalTexture.IsNull()) {
+                return true;
+            }
+        }
+        return aMaterial->HasCommonMaterial()
+            && !aMaterial->CommonMaterial().DiffuseTexture.IsNull();
+    } catch (...) {
+        return true;
+    }
+}
+
+//! Shell replaces topology, so a source subshape style cannot be reproduced
+//! by the scalar-only transient overlay. Bound the defensive label walk and
+//! fail closed on absent tools, malformed labels, or OCCT failures.
+bool HasStyledShellSubshape(
+    const Handle(TDocStd_Document)& theDocument,
+    const TDF_Label& theDefinition) noexcept
+{
+    if (theDocument.IsNull() || theDefinition.IsNull()
+        || theDefinition.Data() != theDocument->GetData()) {
+        return true;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(XCAFDoc_ColorTool) aColorTool =
+            XCAFDoc_DocumentTool::CheckColorTool(theDocument->Main())
+                ? XCAFDoc_DocumentTool::ColorTool(theDocument->Main())
+                : Handle(XCAFDoc_ColorTool)();
+        const Handle(XCAFDoc_LayerTool) aLayerTool =
+            XCAFDoc_DocumentTool::CheckLayerTool(theDocument->Main())
+                ? XCAFDoc_DocumentTool::LayerTool(theDocument->Main())
+                : Handle(XCAFDoc_LayerTool)();
+        std::size_t aLabelCount = 0;
+        for (TDF_ChildIterator anItem(theDefinition, Standard_False);
+             anItem.More(); anItem.Next()) {
+            if (++aLabelCount > kMaxShellStyledSubshapeLabels) {
+                return true;
+            }
+            const TDF_Label& aLabel = anItem.Value();
+            if (!XCAFDoc_ShapeTool::IsSubShape(aLabel)) {
+                continue;
+            }
+            TDF_LabelSequence aLayers;
+            if (aLabel.IsNull()
+                || (!aColorTool.IsNull()
+                    && (aColorTool->IsSet(aLabel, XCAFDoc_ColorGen)
+                        || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
+                        || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
+                        || !XCAFDoc_ColorTool::IsVisible(aLabel)))
+                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(
+                        aLabel).IsNull()
+                || (!aLayerTool.IsNull()
+                    && aLayerTool->GetLayers(aLabel, aLayers)
+                    && !aLayers.IsEmpty())) {
+                return true;
+            }
+        }
+        return false;
+    } catch (...) {
+        return true;
+    }
+}
+
 bool HasCompatibleLinearArrayStyle(
     const Handle(AIS_Shape)& theFirst,
     const Handle(AIS_Shape)& theCandidate)
@@ -2088,6 +2175,13 @@ bool ValidatePresentationOverlayPayload(
                 return false;
             }
             break;
+        case PresentationOverlayKind::ShellPreview:
+            if (theMeshes.size() != 1 || theInstances.size() != 1
+                || theMaterials.size() != 1
+                || theSuppressedEntityIdentifiers.size() != 1) {
+                return false;
+            }
+            break;
         default:
             return false;
     }
@@ -2100,7 +2194,9 @@ bool ValidatePresentationOverlayPayload(
         theKind == PresentationOverlayKind::ChamferPreview;
     const bool isLinearArrayPreview =
         theKind == PresentationOverlayKind::LinearArrayPreview;
-    if (!isBooleanPreview && !isChamferPreview
+    const bool isShellPreview =
+        theKind == PresentationOverlayKind::ShellPreview;
+    if (!isBooleanPreview && !isChamferPreview && !isShellPreview
         && !theSuppressedEntityIdentifiers.empty()) {
         return false;
     }
@@ -2144,6 +2240,7 @@ bool ValidatePresentationOverlayPayload(
     const auto aChamferEntityIdentifier = [](const std::size_t theIndex) {
         return std::string("chamfer/preview/") + std::to_string(theIndex);
     };
+    constexpr const char* kShellPreviewIdentifier = "shell/preview/0";
 
     std::unordered_set<std::string> aMaterialIdentifiers;
     aMaterialIdentifiers.reserve(theMaterials.size());
@@ -2160,6 +2257,7 @@ bool ValidatePresentationOverlayPayload(
             && aMaterialIndex >= 6;
         const bool isChamferMaterial = isChamferPreview;
         const bool isLinearArrayMaterial = isLinearArrayPreview;
+        const bool isShellMaterial = isShellPreview;
         bool hasExpectedIdentifier = true;
         bool hasExpectedAlpha = true;
         bool hasExpectedColor = true;
@@ -2208,6 +2306,12 @@ bool ValidatePresentationOverlayPayload(
                     == "linear-array/source/0/material";
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
+        } else if (isShellMaterial) {
+            hasExpectedIdentifier = aMaterialIndex == 0
+                && aMaterial.identifier
+                    == std::string(kShellPreviewIdentifier) + "/material";
+            hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
+                && aMaterial.baseColor.w == 1.0f;
         } else {
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
@@ -2219,7 +2323,8 @@ bool ValidatePresentationOverlayPayload(
             || !isUnit(aMaterial.baseColor.y)
             || !isUnit(aMaterial.baseColor.z)
             || !hasExpectedAlpha
-            || ((isChamferMaterial || isLinearArrayMaterial)
+            || ((isChamferMaterial || isLinearArrayMaterial
+                    || isShellMaterial)
                 && (aMaterial.baseColorTextureIndex != -1
                     || aMaterial.emissiveTextureIndex != -1))
             || !IsFinite(aMaterial.emission.x)
@@ -2253,6 +2358,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isBooleanMesh = isBooleanPreview;
         const bool isChamferMesh = isChamferPreview;
         const bool isLinearArrayMesh = isLinearArrayPreview;
+        const bool isShellMesh = isShellPreview;
         const std::string anExpectedPreviewIdentifier = isMirrorPreview
             ? "mirror/preview/" + std::to_string(aMeshIndex - 6) + "/mesh"
             : std::string();
@@ -2272,6 +2378,10 @@ bool ValidatePresentationOverlayPayload(
                 && (aMeshIndex != 0
                     || aMesh.definitionIdentifier
                         != "linear-array/source/0/mesh"))
+            || (isShellMesh
+                && (aMeshIndex != 0
+                    || aMesh.definitionIdentifier
+                        != std::string(kShellPreviewIdentifier) + "/mesh"))
             || !IsValidIdentifier(aMesh.definitionIdentifier)
             || !aDefinitionIdentifiers.insert(
                 aMesh.definitionIdentifier).second
@@ -2280,12 +2390,12 @@ bool ValidatePresentationOverlayPayload(
                     : aMesh.geometryRevision != 0)
             || !IsValid(aMesh.localBounds)
             || ((isMirrorPreview || isBooleanMesh || isChamferMesh
-                    || isLinearArrayMesh)
+                    || isLinearArrayMesh || isShellMesh)
                 && !IsCenteredLocalBounds(aMesh.localBounds))
             || aMesh.vertices.empty() || aMesh.indices.empty()
             || aMesh.primitives.empty()
             || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
-                    && !isLinearArrayMesh
+                    && !isLinearArrayMesh && !isShellMesh
                 && aMesh.primitives.size() != 1)
             || !CheckedAdd(aPrimitiveCount,
                            aMesh.primitives.size(),
@@ -2376,6 +2486,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isBooleanItem = isBooleanPreview;
         const bool isChamferItem = isChamferPreview;
         const bool isLinearArrayItem = isLinearArrayPreview;
+        const bool isShellItem = isShellPreview;
         const std::size_t aPreviewIndex = isMirrorPreview
             ? anInstanceIndex - 6
             : 0;
@@ -2413,6 +2524,11 @@ bool ValidatePresentationOverlayPayload(
                                 == "Linear array preview "
                                     + std::to_string(anInstanceIndex + 1U)
                             && anInstance.meshIndex == 0
+                    : isShellItem
+                        ? anInstance.entityIdentifier
+                                == kShellPreviewIdentifier
+                            && anInstance.name == "Shell preview 0"
+                            && anInstance.meshIndex == 0
                     : true;
         const bool hasExpectedSemantics = isBooleanItem
             ? anInstance.coordinateSpace == CoordinateSpace::World
@@ -2422,11 +2538,14 @@ bool ValidatePresentationOverlayPayload(
                         && anInstance.renderStyle == RenderStyle::Wireframe
                     : anInstance.role == RenderRole::BooleanSubject
                         && anInstance.renderStyle == RenderStyle::Shaded)
-            : (isMirrorPreview || isChamferItem || isLinearArrayItem)
+            : (isMirrorPreview || isChamferItem || isLinearArrayItem
+                    || isShellItem)
                 ? anInstance.role == (isChamferItem
                         ? RenderRole::ChamferPreview
                         : isLinearArrayItem
                             ? RenderRole::LinearArrayPreview
+                            : isShellItem
+                                ? RenderRole::ShellPreview
                             : RenderRole::MirrorPreview)
                     && anInstance.coordinateSpace == CoordinateSpace::World
                     && anInstance.depthPolicy == DepthPolicy::Scene
@@ -2436,7 +2555,7 @@ bool ValidatePresentationOverlayPayload(
                     && anInstance.depthPolicy == DepthPolicy::Topmost;
         const std::size_t anExpectedBindingCount =
             (isMirrorPreview || isBooleanItem || isChamferItem
-                || isLinearArrayItem)
+                || isLinearArrayItem || isShellItem)
             ? theMeshes[isLinearArrayItem ? 0 : anInstanceIndex]
                 .primitives.size()
             : 1;
@@ -2449,12 +2568,12 @@ bool ValidatePresentationOverlayPayload(
             || anInstance.reversesWinding || !anInstance.visible
             || anInstance.selectable || anInstance.selected
             || !hasExpectedSemantics
-            || (!isBooleanItem && !isChamferItem
+            || (!isBooleanItem && !isChamferItem && !isShellItem
                 && anInstance.renderStyle != RenderStyle::Shaded)
-            || (isChamferItem
+            || ((isChamferItem || isShellItem)
                 && anInstance.renderStyle != RenderStyle::Shaded)
             || ((isMirrorPreview || isBooleanItem || isChamferItem
-                    || isLinearArrayItem)
+                    || isLinearArrayItem || isShellItem)
                 ? !IsTranslationOnlyWorldTransform(
                     anInstance.worldFromObject)
                 : !IsRigidWorldAnchorTransform(
@@ -2476,7 +2595,7 @@ bool ValidatePresentationOverlayPayload(
              anInstance.primitiveBindings) {
             if (((isMirrorPlane || isMirrorPreview
                     || isBooleanItem || isChamferItem
-                    || isLinearArrayItem)
+                    || isLinearArrayItem || isShellItem)
                     && aBinding.materialIndex
                         != (isLinearArrayItem ? 0 : anInstanceIndex))
                 || aBinding.materialIndex >= theMaterials.size()
@@ -2738,6 +2857,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
         false,
         false,
         false,
+        false,
         false);
 }
 
@@ -2748,7 +2868,8 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
     const bool theAllowsMirrorPreview,
     const bool theAllowsBooleanPreview,
     const bool theAllowsChamferPreview,
-    const bool theAllowsLinearArrayPreview) noexcept
+    const bool theAllowsLinearArrayPreview,
+    const bool theAllowsShellPreview) noexcept
 {
     if (![NSThread isMainThread]
         || theDocument.IsNull()
@@ -2766,6 +2887,8 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
         || (theContent.kind
                 == PresentationOverlayKind::LinearArrayPreview
             && !theAllowsLinearArrayPreview)
+        || (theContent.kind == PresentationOverlayKind::ShellPreview
+            && !theAllowsShellPreview)
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
         || myState->documentObject.IsNull()
@@ -3050,6 +3173,7 @@ OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
             true,
             false,
             false,
+            false,
             false);
     } catch (const Standard_Failure&) {
         return {};
@@ -3271,6 +3395,7 @@ OcctSceneSnapshotBuilder::PublishBooleanPreviewOverlay(
             false,
             true,
             false,
+            false,
             false);
     } catch (const Standard_Failure&) {
         return {};
@@ -3490,7 +3615,123 @@ OcctSceneSnapshotBuilder::PublishChamferPreviewOverlay(
             false,
             false,
             true,
+            false,
             false);
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishShellPreviewOverlay(
+    const Handle(OcctDocument)& theDocument,
+    const Handle(AIS_Shape)& theResultShape,
+    const TDF_Label& theSuppressedSourceLabel) noexcept
+{
+    if (![NSThread isMainThread] || theDocument.IsNull()
+        || myState == nullptr || theResultShape.IsNull()
+        || theResultShape->Shape().IsNull()
+        || theResultShape->Shape().ShapeType() != TopAbs_SOLID
+        || theSuppressedSourceLabel.IsNull()) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument =
+            theDocument->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier()
+                != myState->documentIdentifier
+            || myState->lastFullLabelToInstances == nullptr
+            || myState->lastFullEntityIdentifiers == nullptr) {
+            return {};
+        }
+        const Handle(TDF_Data)& aData = aDocument->GetData();
+        if (aData.IsNull()
+            || aData->Time() != myState->lastFullDocumentTime
+            || theSuppressedSourceLabel.Data() != aData
+            || !theDocument->IsEditableFreeSimpleDefinitionLabel(
+                theSuppressedSourceLabel)
+            || HasUnsupportedVisualMaterialTexture(
+                theSuppressedSourceLabel)
+            || HasStyledShellSubshape(
+                aDocument, theSuppressedSourceLabel)
+            || HasUnsupportedPresentationTexture(theResultShape)) {
+            return {};
+        }
+        const OcctGeometryRepresentation aRepresentation =
+            theDocument->GeometryRepresentationForLabel(
+                theSuppressedSourceLabel);
+        if (aRepresentation != OcctGeometryRepresentation::LegacyUnknown
+            && aRepresentation != OcctGeometryRepresentation::BRep) {
+            return {};
+        }
+
+        const std::string aLabelIdentifier =
+            theDocument->EntityIdentifierForLabel(
+                theSuppressedSourceLabel);
+        if (!IsValidIdentifier(aLabelIdentifier)) {
+            return {};
+        }
+        const auto aMapping =
+            myState->lastFullLabelToInstances->find(aLabelIdentifier);
+        // A Shell result has one source definition and can replace only one
+        // committed occurrence. Shared assembly definitions remain on OCCT.
+        if (aMapping == myState->lastFullLabelToInstances->end()
+            || aMapping->second.size() != 1) {
+            return {};
+        }
+        const std::size_t anInstanceIndex = aMapping->second.front();
+        if (anInstanceIndex
+                >= myState->lastFullEntityIdentifiers->size()) {
+            return {};
+        }
+        const std::string& aSuppressedEntityIdentifier =
+            (*myState->lastFullEntityIdentifiers)[anInstanceIndex];
+        if (!IsValidIdentifier(aSuppressedEntityIdentifier)
+            || aSuppressedEntityIdentifier == "shell/preview/0") {
+            return {};
+        }
+
+        WorldPreviewItem anItem;
+        if (!ExtractWorldPreviewItem(
+                theResultShape,
+                "shell/preview/0",
+                "Shell preview 0",
+                0,
+                RenderRole::ShellPreview,
+                RenderStyle::Shaded,
+                std::nullopt,
+                kMaxOverlayVertices,
+                kMaxOverlayIndices,
+                std::min(kMaxOverlayPrimitives,
+                         kMaxOverlayPrimitiveBindings),
+                anItem)
+            || anItem.material.baseColorTextureIndex != -1
+            || anItem.material.emissiveTextureIndex != -1) {
+            return {};
+        }
+
+        PresentationOverlayContent aContent;
+        aContent.kind = PresentationOverlayKind::ShellPreview;
+        aContent.meshes.push_back(std::move(anItem.mesh));
+        aContent.instances.push_back(std::move(anItem.instance));
+        aContent.materials.push_back(std::move(anItem.material));
+        aContent.suppressedEntityIdentifiers.push_back(
+            aSuppressedEntityIdentifier);
+        return PublishPresentationOverlayImpl(
+            theDocument,
+            std::move(aContent),
+            false,
+            false,
+            false,
+            false,
+            true);
     } catch (const Standard_Failure&) {
         return {};
     } catch (...) {
@@ -3510,7 +3751,8 @@ OcctSceneSnapshotBuilder::PublishEmptyLinearArrayPreviewOverlay(
         false,
         false,
         false,
-        true);
+        true,
+        false);
 }
 
 OcctSceneSnapshotBuilder::OverlayPointer
@@ -3663,7 +3905,8 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
             false,
             false,
             false,
-            true);
+            true,
+            false);
     } catch (const Standard_Failure&) {
         return {};
     } catch (...) {

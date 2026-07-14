@@ -31,6 +31,9 @@
 //! A Linear Array state change modified only its bounded transient overlay;
 //! committed scene geometry and selection are unchanged.
 -(void)viewerDidChangeLinearArrayPresentationOverlay:(id)sender;
+//! A Shell state change modified only its bounded transient overlay; committed
+//! scene geometry and the captured opening-face selection are unchanged.
+-(void)viewerDidChangeShellPresentationOverlay:(id)sender;
 
 @required
 -(void)didSetupViewer:(id)sender;

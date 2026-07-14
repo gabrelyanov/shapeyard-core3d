@@ -72,6 +72,23 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
     [self viewDidChangeViewportPresentationOverlay];
 }
 
+- (void)viewerDidChangeShellPresentationOverlay:(id)sender {
+    (void)sender;
+    if (_currentGizmoType != PrimitiveGizmoTypeShell
+        || [GLController getGizmoType] != PrimitiveGizmoTypeShell) {
+        return;
+    }
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:PrimitiveGizmoTypeShell];
+    if (!status.active) {
+        [self completeOperationInteraction];
+        return;
+    }
+    self.can_apply = status.canApply;
+    [self viewDidChangeViewportPresentationOverlay];
+    [self sendNotifyUIState:UIStateChangingApply];
+}
+
 - (void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selections {
 
     assert(_currentGizmoType == [GLController getGizmoType]);
@@ -156,6 +173,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
         case PrimitiveGizmoTypeIntersect:
         case PrimitiveGizmoTypeExtrude:
         case PrimitiveGizmoTypeLinearArray:
+        case PrimitiveGizmoTypeShell:
             self.can_delete = false;
             self.can_duplicate = false;
             break;
@@ -176,7 +194,8 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
             case PrimitiveSelectionTypeFace:
                 _availableGizmoTypes = @[
                     @(PrimitiveGizmoTypeChamfer),
-                    @(PrimitiveGizmoTypeExtrude)
+                    @(PrimitiveGizmoTypeExtrude),
+                    @(PrimitiveGizmoTypeShell)
                 ];
                 break;
             case PrimitiveSelectionTypeShape:
@@ -216,6 +235,11 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply =
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeLinearArray].canApply;
+                break;
+            case PrimitiveGizmoTypeShell:
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeShell].canApply;
                 break;
             default:
                 break;
@@ -276,6 +300,13 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply =
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeLinearArray].canApply;
+                break;
+            case PrimitiveGizmoTypeShell:
+                // The captured opening face remains authoritative while the
+                // source presentation is suppressed by a ready preview.
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeShell].canApply;
                 break;
 
             default:

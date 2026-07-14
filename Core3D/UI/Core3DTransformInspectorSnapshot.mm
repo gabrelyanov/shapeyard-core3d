@@ -123,7 +123,8 @@ constexpr std::uint64_t kBRepModelCapabilities =
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportSTL)
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportGLB)
     | static_cast<std::uint64_t>(Core3DModelCapabilityExportSTEP)
-    | static_cast<std::uint64_t>(Core3DModelCapabilityLinearArray);
+    | static_cast<std::uint64_t>(Core3DModelCapabilityLinearArray)
+    | static_cast<std::uint64_t>(Core3DModelCapabilityShell);
 constexpr std::uint64_t kTriangleMeshModelCapabilities =
     static_cast<std::uint64_t>(Core3DModelCapabilityObjectSelection)
     | static_cast<std::uint64_t>(Core3DModelCapabilityTranslate)

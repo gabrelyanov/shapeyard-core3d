@@ -907,6 +907,7 @@ bool IsValid(const RenderRole value) noexcept {
         case RenderRole::Grid:
         case RenderRole::Trihedron:
         case RenderRole::LinearArrayPreview:
+        case RenderRole::ShellPreview:
             return true;
     }
     return false;
@@ -1538,6 +1539,14 @@ bool IsValidPresentationOverlaySnapshotImpl(
                 return false;
             }
             break;
+        case PresentationOverlayKind::ShellPreview:
+            if (snapshot.meshes.size() != 1
+                || snapshot.instances.size() != 1
+                || snapshot.materials.size() != 1
+                || snapshot.suppressedEntityIdentifiers.size() != 1) {
+                return false;
+            }
+            break;
         default:
             return false;
     }
@@ -1550,6 +1559,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
         snapshot.kind == PresentationOverlayKind::ChamferPreview;
     const bool isLinearArrayPreview =
         snapshot.kind == PresentationOverlayKind::LinearArrayPreview;
+    const bool isShellPreview =
+        snapshot.kind == PresentationOverlayKind::ShellPreview;
     const auto booleanEntityIdentifier = [&](const std::size_t index) {
         if (snapshot.kind == PresentationOverlayKind::BooleanUnionPreview) {
             return std::string("boolean/union/result/0");
@@ -1583,7 +1594,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
     const auto chamferEntityIdentifier = [](const std::size_t index) {
         return std::string("chamfer/preview/") + std::to_string(index);
     };
-    if (!isBooleanPreview && !isChamferPreview
+    constexpr const char* kShellPreviewIdentifier = "shell/preview/0";
+    if (!isBooleanPreview && !isChamferPreview && !isShellPreview
         && !snapshot.suppressedEntityIdentifiers.empty()) {
         return false;
     }
@@ -1616,6 +1628,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         const bool isBooleanMaterial = isBooleanPreview;
         const bool isChamferMaterial = isChamferPreview;
         const bool isLinearArrayMaterial = isLinearArrayPreview;
+        const bool isShellMaterial = isShellPreview;
         bool hasExpectedIdentifier = true;
         bool hasExpectedAlpha = true;
         bool hasExpectedColor = true;
@@ -1664,6 +1677,12 @@ bool IsValidPresentationOverlaySnapshotImpl(
                     == "linear-array/source/0/material";
             hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
                 && material.baseColor.w == 1.0f;
+        } else if (isShellMaterial) {
+            hasExpectedIdentifier = materialIndex == 0
+                && material.identifier
+                    == std::string(kShellPreviewIdentifier) + "/material";
+            hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
+                && material.baseColor.w == 1.0f;
         } else {
             hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
                 && material.baseColor.w == 1.0f;
@@ -1704,6 +1723,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         const bool isBooleanMesh = isBooleanPreview;
         const bool isChamferMesh = isChamferPreview;
         const bool isLinearArrayMesh = isLinearArrayPreview;
+        const bool isShellMesh = isShellPreview;
         const std::string expectedPreviewIdentifier = isMirrorPreview
             ? "mirror/preview/" + std::to_string(meshIndex - 6) + "/mesh"
             : std::string();
@@ -1723,18 +1743,22 @@ bool IsValidPresentationOverlaySnapshotImpl(
                 && (meshIndex != 0
                     || mesh.definitionIdentifier
                         != "linear-array/source/0/mesh"))
+            || (isShellMesh
+                && (meshIndex != 0
+                    || mesh.definitionIdentifier
+                        != std::string(kShellPreviewIdentifier) + "/mesh"))
             || !IsValidIdentifier(mesh.definitionIdentifier)
             || !definitionIdentifiers.insert(
                 mesh.definitionIdentifier).second
             || mesh.geometryRevision == 0
             || !mesh.localBounds.valid || !IsValid(mesh.localBounds)
             || ((isMirrorPreview || isBooleanMesh || isChamferMesh
-                    || isLinearArrayMesh)
+                    || isLinearArrayMesh || isShellMesh)
                 && !IsCenteredLocalBounds(mesh.localBounds))
             || mesh.vertices.empty() || mesh.indices.empty()
             || mesh.primitives.empty()
             || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
-                    && !isLinearArrayMesh
+                    && !isLinearArrayMesh && !isShellMesh
                 && mesh.primitives.size() != 1)
             || !CheckedAdd(totalPrimitives,
                            mesh.primitives.size(),
@@ -1828,6 +1852,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         const bool isBooleanItem = isBooleanPreview;
         const bool isChamferItem = isChamferPreview;
         const bool isLinearArrayItem = isLinearArrayPreview;
+        const bool isShellItem = isShellPreview;
         const std::size_t previewIndex = isMirrorPreview
             ? instanceIndex - 6
             : 0;
@@ -1864,6 +1889,11 @@ bool IsValidPresentationOverlaySnapshotImpl(
                                 == "Linear array preview "
                                     + std::to_string(instanceIndex + 1U)
                             && instance.meshIndex == 0
+                    : isShellItem
+                        ? instance.entityIdentifier
+                                == kShellPreviewIdentifier
+                            && instance.name == "Shell preview 0"
+                            && instance.meshIndex == 0
                     : true;
         const bool hasExpectedSemantics = isBooleanItem
             ? instance.coordinateSpace == CoordinateSpace::World
@@ -1873,11 +1903,14 @@ bool IsValidPresentationOverlaySnapshotImpl(
                         && instance.renderStyle == RenderStyle::Wireframe
                     : instance.role == RenderRole::BooleanSubject
                         && instance.renderStyle == RenderStyle::Shaded)
-            : (isMirrorPreview || isChamferItem || isLinearArrayItem)
+            : (isMirrorPreview || isChamferItem || isLinearArrayItem
+                    || isShellItem)
                 ? instance.role == (isChamferItem
                         ? RenderRole::ChamferPreview
                         : isLinearArrayItem
                             ? RenderRole::LinearArrayPreview
+                            : isShellItem
+                                ? RenderRole::ShellPreview
                             : RenderRole::MirrorPreview)
                     && instance.coordinateSpace == CoordinateSpace::World
                     && instance.depthPolicy == DepthPolicy::Scene
@@ -1887,7 +1920,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
                     && instance.depthPolicy == DepthPolicy::Topmost;
         const std::size_t expectedBindingCount =
             (isMirrorPreview || isBooleanItem || isChamferItem
-                || isLinearArrayItem)
+                || isLinearArrayItem || isShellItem)
             ? snapshot.meshes[isLinearArrayItem ? 0 : instanceIndex]
                 .primitives.size()
             : 1;
@@ -1898,9 +1931,9 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || instance.reversesWinding || !instance.visible
             || instance.selectable || instance.selected
             || !hasExpectedSemantics
-            || (!isBooleanItem && !isChamferItem
+            || (!isBooleanItem && !isChamferItem && !isShellItem
                 && instance.renderStyle != RenderStyle::Shaded)
-            || (isChamferItem
+            || ((isChamferItem || isShellItem)
                 && instance.renderStyle != RenderStyle::Shaded)
             || instance.name.size() > kMaximumNameBytes
             || !CheckedAdd(stringBytes,
@@ -1911,7 +1944,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
                            stringBytes)
             || stringBytes > kMaximumDTOStringBytes
             || ((isMirrorPreview || isBooleanItem || isChamferItem
-                    || isLinearArrayItem)
+                    || isLinearArrayItem || isShellItem)
                 ? !IsTranslationOnlyWorldTransform(
                     instance.worldFromObject)
                 : !IsRigidWorldAnchorTransform(
@@ -1932,7 +1965,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
              instance.primitiveBindings) {
             if (((isMirrorPlane || isMirrorPreview
                     || isBooleanItem || isChamferItem
-                    || isLinearArrayItem)
+                    || isLinearArrayItem || isShellItem)
                     && binding.materialIndex
                         != (isLinearArrayItem ? 0 : instanceIndex))
                 || binding.materialIndex >= snapshot.materials.size()
@@ -2106,6 +2139,8 @@ Core3DSceneRenderRole RenderRoleFromScene(RenderRole value) {
             return Core3DSceneRenderRoleTrihedron;
         case RenderRole::LinearArrayPreview:
             return Core3DSceneRenderRoleLinearArrayPreview;
+        case RenderRole::ShellPreview:
+            return Core3DSceneRenderRoleShellPreview;
     }
 
     NSCAssert(NO, @"Unknown scene render role value: %u", static_cast<unsigned>(value));
@@ -2174,6 +2209,8 @@ Core3DScenePresentationOverlayKind PresentationOverlayKindFromScene(
             return Core3DScenePresentationOverlayKindChamferPreview;
         case PresentationOverlayKind::LinearArrayPreview:
             return Core3DScenePresentationOverlayKindLinearArrayPreview;
+        case PresentationOverlayKind::ShellPreview:
+            return Core3DScenePresentationOverlayKindShellPreview;
     }
 
     NSCAssert(NO, @"Unknown presentation-overlay kind: %u",

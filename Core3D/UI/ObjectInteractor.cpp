@@ -203,6 +203,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeShell:
 					return true;
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeNone:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
@@ -221,6 +222,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeShell:
 					// These modes acquire and validate their BRep source after
 					// the tool is entered.  Empty selection is therefore a valid
 					// idle state, while an existing mesh/unsafe selection must
@@ -693,9 +695,11 @@ namespace core3d {
 
     void ObjectInteractor::attachManipulator(Handle(AIS_InteractiveObject) toObject) {
 		if (_manipulatorType
-			== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) {
-			// Linear Array is parameter-panel driven. Its source is captured by
-			// the operation controller and owns no draggable viewport gizmo.
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			|| _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeShell) {
+			// Parameter-panel tools capture immutable source leases in their
+			// operation controllers and own no draggable viewport gizmo.
 			return;
 		}
         const TDF_Label aLabel = myDoc->ShapeLabel(toObject);
@@ -1213,7 +1217,9 @@ namespace core3d {
     void ObjectInteractor::attachManipulatorToSelection(bool detach) {
         if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { return; }
 		if (_manipulatorType
-			== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) {
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			|| _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeShell) {
 			detachManipulator(false);
 			return;
 		}
@@ -1393,6 +1399,7 @@ namespace core3d {
 			if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeShell
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
 				&& canReattach
 				&& sources.size()
@@ -1409,7 +1416,9 @@ namespace core3d {
 
         if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeNone
 			|| type
-				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) { // remove gizmo when the operation owns only AIS previews
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			|| type
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeShell) { // remove gizmo when the operation owns only AIS previews
             _manipulator->DeactivateCurrentMode();
             myContext->Remove(_manipulator, Standard_True);
         }

@@ -97,6 +97,16 @@ typedef struct {
     double metersPerUnit;
 } Core3DLinearArrayParameters;
 
+//! Native-authoritative model-unit thickness for one active Shell preview.
+//! Swift converts these values through metersPerUnit for millimetre display.
+typedef struct {
+    CGFloat thickness;
+    CGFloat defaultThickness;
+    CGFloat minimumThickness;
+    CGFloat maximumThickness;
+    double metersPerUnit;
+} Core3DShellParameters;
+
 //! Truthful outcome for an explicit modeling Apply or Cancel request. An
 //! unknown outcome remains retained but must be reconciled with another Apply;
 //! a retryable failure retains the ordinary Apply/Cancel recovery controls.
@@ -153,6 +163,14 @@ typedef struct {
     NS_SWIFT_NAME(tryCancelExtrusion());
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+- (Core3DShellParameters)getShellParameters;
+- (BOOL)setShellThickness:(CGFloat)thickness;
+- (Core3DModelingOperationResult)tryApplyShell
+    NS_SWIFT_NAME(tryApplyShell());
+- (Core3DModelingOperationResult)tryCancelShell
+    NS_SWIFT_NAME(tryCancelShell());
+- (BOOL)applyShell;
+- (BOOL)cancelShell;
 - (Core3DModelingOperationResult)tryApplySubtract
     NS_SWIFT_NAME(tryApplySubtract());
 - (Core3DModelingOperationResult)tryCancelSubtract
@@ -242,10 +260,10 @@ typedef struct {
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
 //! Capture only committed exportable geometry. Unlike the presentation
-//! snapshot seam, this returns nil while a Boolean, Mirror, or Linear Array
-//! trial is active or unresolved, or while the OCAF document owns an open
-//! command. Main-thread only; the returned value is an immutable deep copy safe
-//! for background I/O.
+//! snapshot seam, this returns nil while a Boolean, Mirror, Linear Array, or
+//! Shell trial is active or unresolved, or while the OCAF document owns an open
+//! command. Main-thread only; the returned value is an immutable deep copy
+//! safe for background I/O.
 - (Core3DSceneSnapshot *_Nullable)captureExportSceneSnapshot;
 
 @end
@@ -314,8 +332,9 @@ typedef struct {
 - (void)saveSnapshot;
 
 //! Deep-copy the committed model and semantic camera into renderer-neutral,
-//! immutable values. Returns nil while a model transaction is open or before
-//! the native viewer has finished setup. Main-thread only.
+//! immutable values. Returns nil while a model transaction is open, while a
+//! committed Shell result remains indeterminate, or before the native viewer
+//! has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
 
 //! Capture the current semantic camera and revision vector without traversing
@@ -476,6 +495,8 @@ typedef struct {
 - (void)debugSimulateBooleanMemoryWarning;
 //! Deliver the same production path for an active Linear Array regression.
 - (void)debugSimulateLinearArrayMemoryWarning;
+//! Deliver the same production path for an active Shell regression.
+- (void)debugSimulateShellMemoryWarning;
 //! Deterministically capture a planar face by stable entity identifier and
 //! zero-based TopExp face index, using the production extrusion admission.
 - (BOOL)debugBeginExtrusionWithEntityIdentifier:(NSString *)entityIdentifier
@@ -513,6 +534,30 @@ typedef struct {
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 //! Make the next N post-Commit label inspections report unavailable.
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;
+//! Deterministically capture a planar opening by stable entity identifier and
+//! zero-based TopExp face index. Production Shell admission remains
+//! authoritative.
+- (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
+                          faceTopologyIndex:(NSUInteger)faceTopologyIndex
+    NS_SWIFT_NAME(debugBeginShell(entityIdentifier:faceTopologyIndex:));
+//! Shell state values are Unavailable=0, Selecting=1, Computing=2, Ready=3,
+//! Committing=4, OutcomeUnknown=5, and Failed=6. Worker and result counters
+//! expose latest-wins behavior without changing production scheduling.
+- (NSDictionary<NSString *, NSNumber *> *)debugShellState;
+- (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked;
+- (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit;
+- (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit;
+- (void)debugSetShellTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetShellAbortFailureCount:(NSUInteger)count;
+- (void)debugSetShellPreviewEraseFailureCount:(NSUInteger)count;
+//! Inject CommitCommand reporting/throw behavior after a real close: 0 normal,
+//! 1 false-after-close, 2 throw-after-close.
+- (void)debugSetShellCommitMode:(NSInteger)mode;
+//! Make the next N post-Commit stable-label inspections report unavailable.
+- (void)debugSetShellPostCommitInspectFailureCount:(NSUInteger)count;
+//! Commit a real persisted transform change behind the active Shell snapshot
+//! without updating its retained AIS presentation.
+- (BOOL)debugMutateShellSourcePersistedTransform;
 //! Build a standalone pre-schema BinOcaf fixture with geometry and legacy
 //! child-11/12 appearance, but no identity or visual-material infrastructure.
 - (NSData *_Nullable)debugLegacyBinOcafFixtureData;

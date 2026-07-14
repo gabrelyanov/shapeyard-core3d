@@ -487,6 +487,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         _viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr
         && _viewer->getShapeInteractor()->hasActiveExtrusion();
+    const BOOL hadShell =
+        _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && (_viewer->getShapeInteractor()->hasActiveShell()
+            || _viewer->getShapeInteractor()->hasUnresolvedShell());
     const BOOL hadBevel =
         _viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr
@@ -546,6 +551,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (hadExtrusion) {
         _viewer->getShapeInteractor()->cancelExtrusion();
     }
+    if (hadShell) {
+        (void)_viewer->getShapeInteractor()->cancelShell();
+    }
     if (hadBevel) {
         (void)_viewer->getShapeInteractor()->cancelChamfer();
     }
@@ -563,18 +571,18 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [view endInteractiveRendering];
     }
     if (hadActiveInteraction || hadUnresolvedMirrorObjects
-        || hadBooleanOperation || hadLinearArray || hadExtrusion
+        || hadBooleanOperation || hadLinearArray || hadExtrusion || hadShell
         || hadBevel) {
         [self requestRender];
     }
     if (hadUnresolvedMirrorObjects || hadBooleanOperation
-		|| hadLinearArray || hadExtrusion || hadBevel) {
+		|| hadLinearArray || hadExtrusion || hadShell || hadBevel) {
         // Selection notification is also the renderer-neutral presentation
         // invalidation and Apply-state refresh for lifecycle cancellation.
         [self checkSelections];
     }
     if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects
-         || hadBooleanOperation || hadLinearArray || hadExtrusion
+         || hadBooleanOperation || hadLinearArray || hadExtrusion || hadShell
          || hadBevel)
         && _delegate
         && [_delegate respondsToSelector:
@@ -629,6 +637,23 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 return;
             }
             [strongSelf checkSelections];
+            [strongSelf requestRender];
+        });
+    });
+    _viewer->setShellPreviewStateChangedCallback([weakSelf]() {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            if (strongSelf->_delegate
+                && [strongSelf->_delegate respondsToSelector:
+                    @selector(viewerDidChangeShellPresentationOverlay:)]) {
+                [strongSelf->_delegate
+                    viewerDidChangeShellPresentationOverlay:strongSelf];
+            } else {
+                [strongSelf checkSelections];
+            }
             [strongSelf requestRender];
         });
     });
@@ -694,6 +719,19 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         && _viewer->getShapeInteractor() != nullptr
         && _viewer->getShapeInteractor()->hasActiveBevel()) {
         (void)_viewer->getShapeInteractor()->cancelChamfer();
+        [self checkSelections];
+        [self requestRender];
+        if (_delegate
+            && [_delegate respondsToSelector:
+                @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+            [_delegate viewer:self
+                didEndPrimaryInteractionCancelled:YES];
+        }
+    }
+    if (_viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->hasActiveShell()) {
+        (void)_viewer->getShapeInteractor()->cancelShell();
         [self checkSelections];
         [self requestRender];
         if (_delegate
@@ -1065,6 +1103,14 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         // captured source; camera gestures remain available.
         return;
     }
+    const std::shared_ptr<ShapeInteractor> shapeInteractor =
+        _viewer == nullptr ? nullptr : _viewer->getShapeInteractor();
+    if (shapeInteractor != nullptr
+        && shapeInteractor->isShellSelectionFrozen()) {
+        // Shell owns exactly one source and opening face. Camera gestures stay
+        // available, but a tap cannot retarget the immutable preview lease.
+        return;
+    }
 
     const CGPoint aTapPoint =
         [self drawablePointForPoint:[tapRecognizer locationInView:self.view]];
@@ -1207,6 +1253,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [self requestRender];
         return;
     }
+    if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr
+        && !_viewer->getShapeInteractor()->cancelShell()) {
+        [self requestRender];
+        return;
+    }
     if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr
         && _viewer->getObjectInteractor()->hasActiveLinearArray()
         && !_viewer->getObjectInteractor()->cancelLinearArray()) {
@@ -1260,6 +1311,17 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			_viewer->getObjectInteractor()->setManipulatorType(
 				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
 		}
+		[self requestRender];
+		return;
+	}
+	if (shapeInteractor != nullptr
+		&& (currentType == PrimitiveGizmoTypeShell
+			|| shapeInteractor->hasActiveShell())) {
+		if (shapeInteractor->cancelShell()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
+		[self checkSelections];
 		[self requestRender];
 		return;
 	}
@@ -1322,6 +1384,17 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			_viewer->getObjectInteractor()->setManipulatorType(
 				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
 		}
+		[self requestRender];
+		return;
+	}
+	if (shapeInteractor != nullptr
+		&& (currentType == PrimitiveGizmoTypeShell
+			|| shapeInteractor->hasActiveShell())) {
+		if (shapeInteractor->cancelShell()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
+		[self checkSelections];
 		[self requestRender];
 		return;
 	}
@@ -1388,6 +1461,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		}
 	} else if (currentType == PrimitiveGizmoTypeExtrude) {
 		if (!_viewer->getShapeInteractor()->cancelExtrusion()) {
+			[self requestRender];
+			return;
+		}
+	} else if (currentType == PrimitiveGizmoTypeShell) {
+		if (!_viewer->getShapeInteractor()->cancelShell()) {
 			[self requestRender];
 			return;
 		}
@@ -1459,6 +1537,14 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			_viewer->getObjectInteractor()->setManipulatorType(
 				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
 		}
+		if (type == PrimitiveGizmoTypeShell
+			&& _viewer != nullptr
+			&& _viewer->getShapeInteractor() != nullptr
+			&& !_viewer->getShapeInteractor()->hasActiveShell()
+			&& !_viewer->getShapeInteractor()->beginShellSelection()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
 		if (IsBooleanGizmo(type)) {
 			(void)[self restoreBooleanActionForRetainedGizmoType:type];
 		}
@@ -1504,6 +1590,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			[self requestRender];
 			return;
 		}
+	} else if (previousType == PrimitiveGizmoTypeShell) {
+		if (!_viewer->getShapeInteractor()->cancelShell()) {
+			[self requestRender];
+			return;
+		}
 	}
 
     PrimitiveManipulatorType manipulatorType;
@@ -1542,6 +1633,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             manipulatorType =
                 PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray;
             break;
+        case PrimitiveGizmoTypeShell:
+            manipulatorType =
+                PrimitiveManipulatorType::PrimitiveGizmoTypeShell;
+            break;
         default:
             assert(false);
             break;
@@ -1568,6 +1663,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			}
 	} else if (type == PrimitiveGizmoTypeExtrude) {
 		if (!_viewer->getShapeInteractor()->beginExtrusionSelection()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
+	} else if (type == PrimitiveGizmoTypeShell) {
+		if (!_viewer->getShapeInteractor()->beginShellSelection()) {
 			_viewer->getObjectInteractor()->setManipulatorType(
 				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
 		}
@@ -1610,6 +1710,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
             type = PrimitiveGizmoTypeLinearArray;
+            break;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeShell:
+            type = PrimitiveGizmoTypeShell;
             break;
         default:
             break;
@@ -1706,6 +1809,72 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         && (_viewer->getShapeInteractor()->canApplyExtrusion()
             || _viewer->getShapeInteractor()
                 ->canRetryExtrusionResolution());
+}
+
+- (Core3DShellParameters)getShellParameters {
+    Core3DShellParameters parameters = {};
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return parameters;
+    }
+    const std::shared_ptr<ShapeInteractor> interactor =
+        _viewer->getShapeInteractor();
+    const std::pair<Standard_Real, Standard_Real> range =
+        interactor->shellThicknessRange();
+    parameters.thickness = interactor->shellThickness();
+    parameters.defaultThickness = interactor->shellDefaultThickness();
+    parameters.minimumThickness = range.first;
+    parameters.maximumThickness = range.second;
+    parameters.metersPerUnit = interactor->shellMetersPerUnit();
+    return parameters;
+}
+
+- (BOOL)setShellThickness:(CGFloat)thickness {
+    if ([self getGizmoType] != PrimitiveGizmoTypeShell
+        || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getShapeInteractor()->setShellThickness(
+        static_cast<Standard_Real>(thickness));
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)applyShell {
+    if ([self getGizmoType] != PrimitiveGizmoTypeShell
+        || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const ShellApplyResult result =
+        _viewer->getShapeInteractor()->applyShell();
+    if (result == ShellApplyResult::AppliedNeedsDocumentRedraw) {
+        _viewer->redrawDocument();
+    }
+    [self checkSelections];
+    [self requestRender];
+    return result != ShellApplyResult::NoChange;
+}
+
+- (BOOL)cancelShell {
+    const BOOL didCancel = _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr
+        || _viewer->getShapeInteractor()->cancelShell();
+    [self checkSelections];
+    [self requestRender];
+    return didCancel;
+}
+
+- (BOOL)canApplyShell {
+    return _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->canApplyShell();
+}
+
+- (BOOL)hasActiveShell {
+    return _viewer != nullptr
+        && _viewer->getShapeInteractor() != nullptr
+        && _viewer->getShapeInteractor()->hasActiveShell();
 }
 
 - (BOOL) applyMirror {
@@ -2460,6 +2629,170 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     };
 }
 
+- (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
+                          faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0
+        || entityIdentifier.UTF8String == nullptr) {
+        return NO;
+    }
+    try {
+        const BOOL didBegin = _viewer->debugBeginShellSelection(
+            std::string(entityIdentifier.UTF8String),
+            static_cast<Standard_Size>(faceTopologyIndex));
+        if (!didBegin) {
+            [self requestRender];
+            return NO;
+        }
+        _viewer->getObjectInteractor()->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeShell);
+        if (_viewer->getObjectInteractor()->getManipulatorType()
+            != PrimitiveManipulatorType::PrimitiveGizmoTypeShell) {
+            (void)_viewer->getShapeInteractor()->cancelShell();
+            [self requestRender];
+            return NO;
+        }
+        // Core3DViewController synchronizes its public gizmo mirror after this
+        // DEBUG seam returns, then emits the selection/UI-state notification.
+        // Calling checkSelections here would re-enter the delegate while the
+        // wrapper still reflects the previous gizmo and violate that invariant.
+        [self requestRender];
+        return YES;
+    } catch (...) {
+        (void)_viewer->getShapeInteractor()->cancelShell();
+        [self requestRender];
+        return NO;
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugShellState {
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return @{};
+    }
+    const ShellPreviewDebugState state =
+        _viewer->DebugShellPreviewState();
+    const BOOL previewActive =
+        state.state == ShellPreviewState::Ready
+        && state.canApply != Standard_False;
+    return @{
+        @"state": @(static_cast<NSUInteger>(state.state)),
+        @"generation": @(
+            static_cast<unsigned long long>(state.generation)),
+        @"selectionReady": @(state.activeOperation != Standard_False),
+        @"activeOperation": @(state.activeOperation != Standard_False),
+        @"previewActive": @(previewActive),
+        @"canApply": @(state.canApply != Standard_False),
+        @"selectionFrozen": @(state.selectionFrozen != Standard_False),
+        @"ownsDocumentCommand": @(
+            state.ownsDocumentCommand != Standard_False),
+        @"commandOpen": @(state.documentCommandOpen != Standard_False),
+        @"documentCommandOpen": @(
+            state.documentCommandOpen != Standard_False),
+        @"workerActive": @(state.workerActive != Standard_False),
+        @"workerPending": @(state.workerPending != Standard_False),
+        @"lastComputeWasMainThread": @(
+            state.lastComputeWasMainThread != Standard_False),
+        @"submittedCount": @(
+            static_cast<unsigned long long>(state.submittedCount)),
+        @"startedCount": @(
+            static_cast<unsigned long long>(state.startedCount)),
+        @"completedCount": @(
+            static_cast<unsigned long long>(state.completedCount)),
+        @"cancelledCount": @(
+            static_cast<unsigned long long>(state.cancelledCount)),
+        @"pendingReplacementCount": @(
+            static_cast<unsigned long long>(
+                state.pendingReplacementCount)),
+        @"acceptedCount": @(
+            static_cast<unsigned long long>(state.acceptedCount)),
+        @"staleSuppressionCount": @(
+            static_cast<unsigned long long>(
+                state.staleSuppressionCount)),
+        @"thickness": @(state.thickness),
+        @"minimumThickness": @(state.minimumThickness),
+        @"maximumThickness": @(state.maximumThickness),
+        @"metersPerUnit": @(state.metersPerUnit),
+        @"capturedFaceTopologyIndex": @(
+            state.capturedFaceTopologyIndex),
+        @"sourceTopologyNodeCount": @(
+            state.sourceTopologyNodeCount),
+        @"candidateTopologyNodeCount": @(
+            state.candidateTopologyNodeCount),
+        @"candidateSolidCount": @(state.candidateSolidCount),
+        @"sourceVolume": @(state.sourceVolume),
+        @"candidateVolume": @(state.candidateVolume),
+        @"candidateMinX": @(state.candidateBounds[0]),
+        @"candidateMinY": @(state.candidateBounds[1]),
+        @"candidateMinZ": @(state.candidateBounds[2]),
+        @"candidateMaxX": @(state.candidateBounds[3]),
+        @"candidateMaxY": @(state.candidateBounds[4]),
+        @"candidateMaxZ": @(state.candidateBounds[5]),
+    };
+}
+
+- (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetShellPreviewWorkerBlocked(blocked);
+    }
+}
+
+- (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumShellCaptureTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetMaximumShellResultTopologyNodes(
+            static_cast<Standard_Size>(limit));
+    }
+}
+
+- (void)debugSetShellTransactionFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetShellTransactionFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetShellAbortFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetShellAbortFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetShellPreviewEraseFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetShellPreviewEraseFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetShellCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetShellCommitMode(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetShellPostCommitInspectFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetShellPostCommitInspectFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (BOOL)debugMutateShellSourcePersistedTransform {
+    return _viewer != nullptr
+        && _viewer->DebugMutateShellSourcePersistedTransform();
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState {
     if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
         return @{};
@@ -3106,7 +3439,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                         || objectInteractor->hasUnresolvedMirrorObjects()
                         || objectInteractor->hasActiveLinearArray()
                         || objectInteractor->hasUnresolvedLinearArray()
-                        || shapeInteractor->hasActiveExtrusion();
+                        || shapeInteractor->hasActiveExtrusion()
+                        || shapeInteractor->hasActiveShell()
+                        || shapeInteractor->hasUnresolvedShell();
                     // Bevel previews own only transient AIS presentations and
                     // never retain an open OCAF command. Apply is synchronous
                     // on this main queue, so serializing here always captures
@@ -3332,7 +3667,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || objectInteractor->hasActiveLinearArray()
         || objectInteractor->hasUnresolvedLinearArray()
         || shapeInteractor->hasActiveExtrusion()
-        || shapeInteractor->hasActiveBevel()) {
+        || shapeInteractor->hasActiveBevel()
+        || shapeInteractor->hasActiveShell()
+        || shapeInteractor->hasUnresolvedShell()) {
         return nil;
     }
     NSString *pathExtension = NULL;
