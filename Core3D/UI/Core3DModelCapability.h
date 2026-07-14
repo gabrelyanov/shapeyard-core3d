@@ -30,4 +30,5 @@ typedef NS_OPTIONS(NSUInteger, Core3DModelCapability) {
     Core3DModelCapabilityExportSTEP = 1UL << 16,
     Core3DModelCapabilityLinearArray = 1UL << 17,
     Core3DModelCapabilityShell = 1UL << 18,
+    Core3DModelCapabilityRadialArray = 1UL << 19,
 };

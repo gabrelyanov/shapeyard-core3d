@@ -93,6 +93,12 @@ typedef NS_ENUM(NSInteger, Core3DDebugReferenceAxisFixtureMode) {
     //! Even the correct private Duplicate sentinel type is corrupt when it is
     //! attached anywhere except document Main.
     Core3DDebugReferenceAxisFixtureDuplicateSentinelMisplaced,
+    //! The private Radial Array ownership GUID is occupied by the wrong
+    //! scalar type on document Main and must fail production admission.
+    Core3DDebugReferenceAxisFixtureRadialSentinelWrongType,
+    //! Even the correct private Radial Array sentinel type is corrupt when it
+    //! is attached anywhere except document Main.
+    Core3DDebugReferenceAxisFixtureRadialSentinelMisplaced,
 };
 #endif
 
@@ -121,6 +127,67 @@ typedef struct {
     //! Physical document scale used to present spacing in millimetres.
     double metersPerUnit;
 } Core3DLinearArrayParameters;
+
+//! Coordinate authority for one Reference Axis component. Numeric values are
+//! deliberately identical to the persistent native schema and must not be
+//! renumbered or reused.
+typedef NS_ENUM(NSInteger, Core3DReferenceSpace) {
+    Core3DReferenceSpaceObject = 0,
+    Core3DReferenceSpaceWorld = 1,
+};
+
+//! Whether the active Radial Array source owns an authored Reference Axis or
+//! is using the explicit, non-mutating Object-Origin + World-Z default.
+typedef NS_ENUM(NSInteger, Core3DReferenceAxisReadState) {
+    Core3DReferenceAxisReadStateInvalid = -1,
+    Core3DReferenceAxisReadStateImplicitDefault = 0,
+    Core3DReferenceAxisReadStateAuthored = 1,
+};
+
+//! Complete finite oriented line. Pivot and direction have independent
+//! coordinate spaces; native Core normalizes every accepted direction.
+typedef struct {
+    Core3DReferenceSpace pivotSpace;
+    double pivotX;
+    double pivotY;
+    double pivotZ;
+    Core3DReferenceSpace directionSpace;
+    double directionX;
+    double directionY;
+    double directionZ;
+} Core3DReferenceAxisValue;
+
+//! One immutable compare-and-swap lease for editing the active Radial Array
+//! source's persistent Reference Axis. Token zero is unavailable, never a
+//! wildcard. Callers must submit this exact token to Set or Reset.
+typedef struct {
+    Core3DReferenceAxisReadState readState;
+    Core3DReferenceAxisValue value;
+    uint64_t authorityToken;
+} Core3DRadialArrayReferenceAuthority;
+
+//! Native-authoritative parameters and bounds for one active Radial Array.
+//! Count includes the unchanged source; signed sweep is expressed in degrees.
+typedef struct {
+    NSInteger count;
+    NSInteger minimumCount;
+    NSInteger maximumCount;
+    double sweepDegrees;
+    double minimumSweepDegrees;
+    double maximumSweepDegrees;
+    //! Physical document scale used to present custom pivot coordinates.
+    double metersPerUnit;
+} Core3DRadialArrayParameters;
+
+//! Truthful result for an atomic persistent Reference Axis edit. An unknown
+//! outcome retains the same operation and recovery controls; retryable failure
+//! means the edit was not accepted and may be attempted again with fresh state.
+typedef NS_ENUM(NSInteger, Core3DRadialArrayReferenceEditResult) {
+    Core3DRadialArrayReferenceEditResultNoChange = 0,
+    Core3DRadialArrayReferenceEditResultApplied,
+    Core3DRadialArrayReferenceEditResultOutcomeUnknown,
+    Core3DRadialArrayReferenceEditResultRetryableFailure,
+};
 
 //! Native-authoritative model-unit thickness for one active Shell preview.
 //! Swift converts these values through metersPerUnit for millimetre display.
@@ -221,6 +288,31 @@ typedef struct {
     NS_SWIFT_NAME(tryApplyLinearArray());
 - (Core3DModelingOperationResult)tryCancelLinearArray
     NS_SWIFT_NAME(tryCancelLinearArray());
+- (Core3DRadialArrayParameters)getRadialArrayParameters;
+- (Core3DRadialArrayReferenceAuthority)getRadialArrayReferenceAuthority;
+//! Read the same captured world reference line expressed in the requested
+//! pivot/direction spaces. This is non-mutating and token-checked; failure is
+//! returned as Invalid with authorityToken zero.
+- (Core3DRadialArrayReferenceAuthority)
+    getRadialArrayReferenceAuthorityWithPivotSpace:
+        (Core3DReferenceSpace)pivotSpace
+    directionSpace:(Core3DReferenceSpace)directionSpace
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken
+    NS_SWIFT_NAME(getRadialArrayReferenceAuthority(pivotSpace:directionSpace:expectedAuthorityToken:));
+- (BOOL)setRadialArrayCount:(NSInteger)count;
+- (BOOL)setRadialArraySweepDegrees:(double)sweepDegrees;
+- (Core3DRadialArrayReferenceEditResult)setRadialArrayReferenceAxis:
+    (Core3DReferenceAxisValue)axis
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken
+    NS_SWIFT_NAME(setRadialArrayReferenceAxis(_:expectedAuthorityToken:));
+- (Core3DRadialArrayReferenceEditResult)
+    resetRadialArrayReferenceAxisWithExpectedAuthorityToken:
+        (uint64_t)expectedAuthorityToken
+    NS_SWIFT_NAME(resetRadialArrayReferenceAxis(expectedAuthorityToken:));
+- (Core3DModelingOperationResult)tryApplyRadialArray
+    NS_SWIFT_NAME(tryApplyRadialArray());
+- (Core3DModelingOperationResult)tryCancelRadialArray
+    NS_SWIFT_NAME(tryCancelRadialArray());
 - (void)applySubtract;
 - (void)cancelSubtract;
 - (Core3DModelingOperationResult)tryApplyUnion
@@ -285,10 +377,10 @@ typedef struct {
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
 //! Capture only committed exportable geometry. Unlike the presentation
-//! snapshot seam, this returns nil while a Boolean, Mirror, Linear Array, or
-//! Shell trial is active or unresolved, or while the OCAF document owns an open
-//! command. Main-thread only; the returned value is an immutable deep copy
-//! safe for background I/O.
+//! snapshot seam, this returns nil while a Boolean, Mirror, Linear Array,
+//! Radial Array, or Shell trial is active or unresolved, or while the OCAF
+//! document owns an open command. Main-thread only; the returned value is an
+//! immutable deep copy safe for background I/O.
 - (Core3DSceneSnapshot *_Nullable)captureExportSceneSnapshot;
 
 @end
@@ -511,6 +603,28 @@ typedef struct {
 - (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
+//! Radial Array state values are Unavailable=0, Selecting=1, Ready=2,
+//! Committing=3, OutcomeUnknown=4, and Failed=5. Count includes the source.
+- (NSDictionary<NSString *, NSNumber *> *)debugRadialArrayState;
+//! Make the next N begins observe an open command not owned by Radial Array.
+- (void)debugSetRadialArrayBeginOwnedCommandMismatchCount:(NSUInteger)count;
+//! Fail the next N applies after Radial has proven command ownership.
+- (void)debugSetRadialArrayTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetRadialArrayAbortFailureCount:(NSUInteger)count;
+- (void)debugSetRadialArrayEraseFailureCount:(NSUInteger)count;
+//! Apply CommitCommand modes: 0 normal, 1 false-after-close, 2 throw-after-close.
+- (void)debugSetRadialArrayApplyCommitMode:(NSInteger)mode;
+//! Post-commit inspect modes: 0 normal, 1 unavailable, 2 partial/mismatched.
+- (void)debugSetRadialArrayPostCommitInspectMode:(NSInteger)mode;
+- (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit;
+- (BOOL)debugMutateRadialArraySourcePersistedTransform;
+//! Reference-edit CommitCommand modes: 0 normal, 1 false-after-close,
+//! 2 throw-after-close.
+- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode;
+//! Read-only identity proof over every committed free-simple definition.
+//! Pairwise shape partnership and TriangleMesh triangulation handle identity
+//! are intentionally unavailable in renderer-neutral scene snapshots.
+- (NSDictionary<NSString *, NSNumber *> *)debugGeometryCopyIndependenceState;
 //! Test-only deterministic Boolean seam. Identifiers must name committed
 //! one-occurrence bodies; production selection, ownership, validation, preview,
 //! transaction, and renderer publication paths remain authoritative.

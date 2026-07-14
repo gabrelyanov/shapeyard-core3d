@@ -115,6 +115,25 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)cancelLinearArray;
 - (BOOL)canApplyLinearArray;
 - (BOOL)hasActiveLinearArray;
+- (Core3DRadialArrayParameters)getRadialArrayParameters;
+- (Core3DRadialArrayReferenceAuthority)getRadialArrayReferenceAuthority;
+- (Core3DRadialArrayReferenceAuthority)
+    getRadialArrayReferenceAuthorityWithPivotSpace:
+        (Core3DReferenceSpace)pivotSpace
+    directionSpace:(Core3DReferenceSpace)directionSpace
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken;
+- (BOOL)setRadialArrayCount:(NSInteger)count;
+- (BOOL)setRadialArraySweepDegrees:(double)sweepDegrees;
+- (Core3DRadialArrayReferenceEditResult)setRadialArrayReferenceAxis:
+    (Core3DReferenceAxisValue)axis
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken;
+- (Core3DRadialArrayReferenceEditResult)
+    resetRadialArrayReferenceAxisWithExpectedAuthorityToken:
+        (uint64_t)expectedAuthorityToken;
+- (BOOL)applyRadialArray;
+- (BOOL)cancelRadialArray;
+- (BOOL)canApplyRadialArray;
+- (BOOL)hasActiveRadialArray;
 - (BOOL) applySubtract;
 - (BOOL) cancelSubtract;
 - (BOOL) applyUnion;
@@ -156,6 +175,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
+- (NSDictionary<NSString *, NSNumber *> *)debugRadialArrayState;
+- (void)debugSetRadialArrayBeginOwnedCommandMismatchCount:(NSUInteger)count;
+- (void)debugSetRadialArrayTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetRadialArrayAbortFailureCount:(NSUInteger)count;
+- (void)debugSetRadialArrayEraseFailureCount:(NSUInteger)count;
+- (void)debugSetRadialArrayApplyCommitMode:(NSInteger)mode;
+- (void)debugSetRadialArrayPostCommitInspectMode:(NSInteger)mode;
+- (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit;
+- (BOOL)debugMutateRadialArraySourcePersistedTransform;
+- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode;
 - (void)debugSetExtrusionAbortFailureCount:(NSUInteger)count;
 - (void)debugSetExtrusionPostCommitInspectFailureCount:(NSUInteger)count;

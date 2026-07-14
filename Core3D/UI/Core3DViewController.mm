@@ -36,7 +36,10 @@
 #include "TopoDS.hxx"
 #include "TopoDS_Face.hxx"
 #include "Poly_Triangle.hxx"
+#include "Poly_ListOfTriangulation.hxx"
 #include "Poly_Triangulation.hxx"
+#include "Standard_ErrorHandler.hxx"
+#include "Standard_Failure.hxx"
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
 #include "TDataStd_Real.hxx"
@@ -374,6 +377,13 @@ const Standard_GUID& Core3DDebugDuplicateCommandOwnerAttributeID() {
     // Deliberately locks the private persistent recovery GUID in fixtures.
     static const Standard_GUID identifier(
         "D7598D08-A879-4E17-8D23-CC92568EAD5C");
+    return identifier;
+}
+
+const Standard_GUID& Core3DDebugRadialArrayCommandOwnerAttributeID() {
+    // Deliberately locks the private persistent recovery GUID in fixtures.
+    static const Standard_GUID identifier(
+        "2DF9F8BE-F297-4CFD-8D93-A40346EBEF3A");
     return identifier;
 }
 
@@ -2304,7 +2314,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     (Core3DDebugReferenceAxisFixtureMode)mode {
     if (mode < Core3DDebugReferenceAxisFixtureValidMixedSpace
         || mode
-            > Core3DDebugReferenceAxisFixtureDuplicateSentinelMisplaced) {
+            > Core3DDebugReferenceAxisFixtureRadialSentinelMisplaced) {
         return nil;
     }
     return Core3DCreateDebugBinXCAFFixture(
@@ -2338,6 +2348,22 @@ void Core3DAddDebugOrphanVisualMaterial(
                 TDataStd_Integer::Set(
                     label,
                     Core3DDebugDuplicateCommandOwnerAttributeID(),
+                    1);
+                return;
+            }
+            if (mode
+                == Core3DDebugReferenceAxisFixtureRadialSentinelWrongType) {
+                TDataStd_Real::Set(
+                    document->Main(),
+                    Core3DDebugRadialArrayCommandOwnerAttributeID(),
+                    1.0);
+                return;
+            }
+            if (mode
+                == Core3DDebugReferenceAxisFixtureRadialSentinelMisplaced) {
+                TDataStd_Integer::Set(
+                    label,
+                    Core3DDebugRadialArrayCommandOwnerAttributeID(),
                     1);
                 return;
             }
@@ -4570,6 +4596,171 @@ void Core3DAddDebugOrphanVisualMaterial(
     return [GLController debugMutateFirstLinearArraySourcePersistedTransform];
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)debugRadialArrayState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return @{};
+    }
+    return [GLController debugRadialArrayState];
+}
+
+- (void)debugSetRadialArrayBeginOwnedCommandMismatchCount:(NSUInteger)count {
+    [GLController debugSetRadialArrayBeginOwnedCommandMismatchCount:count];
+}
+
+- (void)debugSetRadialArrayTransactionFailureCount:(NSUInteger)count {
+    [GLController debugSetRadialArrayTransactionFailureCount:count];
+}
+
+- (void)debugSetRadialArrayAbortFailureCount:(NSUInteger)count {
+    [GLController debugSetRadialArrayAbortFailureCount:count];
+}
+
+- (void)debugSetRadialArrayEraseFailureCount:(NSUInteger)count {
+    [GLController debugSetRadialArrayEraseFailureCount:count];
+}
+
+- (void)debugSetRadialArrayApplyCommitMode:(NSInteger)mode {
+    [GLController debugSetRadialArrayApplyCommitMode:mode];
+}
+
+- (void)debugSetRadialArrayPostCommitInspectMode:(NSInteger)mode {
+    [GLController debugSetRadialArrayPostCommitInspectMode:mode];
+}
+
+- (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit {
+    [GLController debugSetMaximumRadialArrayTopologyNodes:limit];
+}
+
+- (BOOL)debugMutateRadialArraySourcePersistedTransform {
+    return [GLController debugMutateRadialArraySourcePersistedTransform];
+}
+
+- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode {
+    [GLController debugSetRadialArrayReferenceEditCommitMode:mode];
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugGeometryCopyIndependenceState {
+    Standard_Size definitionCount = 0;
+    Standard_Size triangleMeshDefinitionCount = 0;
+    Standard_Size triangleMeshHandleCount = 0;
+    Standard_Size uniqueTriangleMeshHandleCount = 0;
+    Standard_Boolean pairwiseNonPartner = Standard_True;
+    Standard_Boolean pairwiseDistinctTriangleMeshHandles = Standard_True;
+    Standard_Boolean valid = Standard_False;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) {
+        return @{
+            @"definitionCount": @0,
+            @"pairwiseNonPartner": @NO,
+            @"triangleMeshDefinitionCount": @0,
+            @"triangleMeshHandleCount": @0,
+            @"uniqueTriangleMeshHandleCount": @0,
+            @"pairwiseDistinctTriangleMeshHandles": @NO,
+            @"valid": @NO,
+        };
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(OcctDocument) occtDocument =
+            GLController.viewer->getDocument();
+        const Handle(TDocStd_Document) document = occtDocument.IsNull()
+            ? Handle(TDocStd_Document)() : occtDocument->Document();
+        if (document.IsNull() || document->HasOpenCommand()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
+            throw Standard_Failure("Copy identity document is unavailable");
+        }
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapeTool.IsNull()) {
+            throw Standard_Failure("Copy identity shape tool is unavailable");
+        }
+        TDF_LabelSequence freeShapes;
+        shapeTool->GetFreeShapes(freeShapes);
+        std::vector<TopoDS_Shape> definitions;
+        std::unordered_set<const Poly_Triangulation*>
+            uniqueTriangleMeshHandles;
+        for (Standard_Integer index = 1;
+             index <= freeShapes.Length(); ++index) {
+            const TDF_Label& label = freeShapes.Value(index);
+            if (label.IsNull() || !shapeTool->IsShape(label)
+                || !XCAFDoc_ShapeTool::IsFree(label)
+                || !XCAFDoc_ShapeTool::IsSimpleShape(label)
+                || XCAFDoc_ShapeTool::IsReference(label)
+                || XCAFDoc_ShapeTool::IsComponent(label)
+                || XCAFDoc_ShapeTool::IsAssembly(label)
+                || XCAFDoc_ShapeTool::IsSubShape(label)) {
+                continue;
+            }
+            const OcctGeometryRepresentation representation =
+                occtDocument->GeometryRepresentationForLabel(label);
+            const TopoDS_Shape shape =
+                XCAFDoc_ShapeTool::GetShape(label);
+            if (representation == OcctGeometryRepresentation::Invalid
+                || shape.IsNull()) {
+                throw Standard_Failure(
+                    "Copy identity definition is malformed");
+            }
+            for (const TopoDS_Shape& existing : definitions) {
+                if (shape.IsPartner(existing)) {
+                    pairwiseNonPartner = Standard_False;
+                }
+            }
+            definitions.push_back(shape);
+            ++definitionCount;
+
+            if (representation
+                != OcctGeometryRepresentation::TriangleMesh) {
+                continue;
+            }
+            ++triangleMeshDefinitionCount;
+            Standard_Size faceCount = 0;
+            for (TopExp_Explorer faces(shape, TopAbs_FACE);
+                 faces.More(); faces.Next()) {
+                const TopoDS_Face face = TopoDS::Face(faces.Current());
+                TopLoc_Location location;
+                const Poly_ListOfTriangulation& triangulations =
+                    BRep_Tool::Triangulations(face, location);
+                const Handle(Poly_Triangulation)& triangulation =
+                    BRep_Tool::Triangulation(face, location);
+                if (triangulations.Size() != 1
+                    || triangulation.IsNull()) {
+                    throw Standard_Failure(
+                        "Copy identity TriangleMesh face is malformed");
+                }
+                ++faceCount;
+                ++triangleMeshHandleCount;
+                if (!uniqueTriangleMeshHandles.insert(
+                        triangulation.get()).second) {
+                    pairwiseDistinctTriangleMeshHandles = Standard_False;
+                }
+            }
+            if (faceCount == 0) {
+                throw Standard_Failure(
+                    "Copy identity TriangleMesh has no faces");
+            }
+        }
+        uniqueTriangleMeshHandleCount =
+            uniqueTriangleMeshHandles.size();
+        if (uniqueTriangleMeshHandleCount
+            != triangleMeshHandleCount) {
+            pairwiseDistinctTriangleMeshHandles = Standard_False;
+        }
+        valid = Standard_True;
+    } catch (...) {
+        valid = Standard_False;
+    }
+    return @{
+        @"definitionCount": @(definitionCount),
+        @"pairwiseNonPartner": @(pairwiseNonPartner),
+        @"triangleMeshDefinitionCount": @(triangleMeshDefinitionCount),
+        @"triangleMeshHandleCount": @(triangleMeshHandleCount),
+        @"uniqueTriangleMeshHandleCount": @(uniqueTriangleMeshHandleCount),
+        @"pairwiseDistinctTriangleMeshHandles":
+            @(pairwiseDistinctTriangleMeshHandles),
+        @"valid": @(valid),
+    };
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugMirrorState {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return @{};
@@ -5142,6 +5333,18 @@ void Core3DAddDebugOrphanVisualMaterial(
             [self sendNotifyUIState:UIStateChangingApply];
         }
     }
+    if (_currentGizmoType == PrimitiveGizmoTypeRadialArray) {
+        const Core3DModelingPreviewStatus status =
+            [self modelingPreviewStatusForGizmoType:
+                PrimitiveGizmoTypeRadialArray];
+        if (!status.active) {
+            [self completeOperationInteraction];
+        } else {
+            self.can_apply = status.canApply;
+            [self viewDidChangeViewportPresentationState];
+            [self sendNotifyUIState:UIStateChangingApply];
+        }
+    }
     if (_currentGizmoType == PrimitiveGizmoTypeShell) {
         const Core3DModelingPreviewStatus status =
             [self modelingPreviewStatusForGizmoType:
@@ -5167,6 +5370,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 			if (_currentGizmoType == PrimitiveGizmoTypeMirror
 				|| _currentGizmoType
 					== PrimitiveGizmoTypeLinearArray
+				|| _currentGizmoType
+					== PrimitiveGizmoTypeRadialArray
 				|| _currentGizmoType == PrimitiveGizmoTypeShell) {
 				const Core3DModelingPreviewStatus aStatus =
 					[self modelingPreviewStatusForGizmoType:
@@ -5190,6 +5395,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                                              @(PrimitiveGizmoTypeChamfer),
                                              @(PrimitiveGizmoTypeMirror),
                                              @(PrimitiveGizmoTypeLinearArray),
+                                             @(PrimitiveGizmoTypeRadialArray),
                                              @(PrimitiveGizmoTypeSubtract),
                                              @(PrimitiveGizmoTypeUnion),
                                              @(PrimitiveGizmoTypeIntersect),
@@ -5277,6 +5483,14 @@ void Core3DAddDebugOrphanVisualMaterial(
                 const Core3DModelingPreviewStatus status =
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeLinearArray];
+                self.can_apply = status.canApply;
+                break;
+            }
+            case PrimitiveGizmoTypeRadialArray:
+            {
+                const Core3DModelingPreviewStatus status =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeRadialArray];
                 self.can_apply = status.canApply;
                 break;
             }

@@ -79,6 +79,67 @@ bool IsBooleanGizmo(const PrimitiveGizmoType theType) noexcept
     return TryBooleanActionForGizmo(theType, anAction);
 }
 
+bool TryNativeReferenceSpace(
+    const Core3DReferenceSpace theSpace,
+    OcctReferenceSpace& theNativeSpace) noexcept
+{
+    switch (theSpace) {
+        case Core3DReferenceSpaceObject:
+            theNativeSpace = OcctReferenceSpace::Object;
+            return true;
+        case Core3DReferenceSpaceWorld:
+            theNativeSpace = OcctReferenceSpace::World;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool TryPublicReferenceSpace(
+    const OcctReferenceSpace theSpace,
+    Core3DReferenceSpace& thePublicSpace) noexcept
+{
+    switch (theSpace) {
+        case OcctReferenceSpace::Object:
+            thePublicSpace = Core3DReferenceSpaceObject;
+            return true;
+        case OcctReferenceSpace::World:
+            thePublicSpace = Core3DReferenceSpaceWorld;
+            return true;
+    }
+    return false;
+}
+
+Core3DReferenceAxisReadState PublicReferenceAxisReadState(
+    const OcctReferenceAxisReadState theState) noexcept
+{
+    switch (theState) {
+        case OcctReferenceAxisReadState::Invalid:
+            return Core3DReferenceAxisReadStateInvalid;
+        case OcctReferenceAxisReadState::ImplicitDefault:
+            return Core3DReferenceAxisReadStateImplicitDefault;
+        case OcctReferenceAxisReadState::Authored:
+            return Core3DReferenceAxisReadStateAuthored;
+    }
+    return Core3DReferenceAxisReadStateInvalid;
+}
+
+Core3DRadialArrayReferenceEditResult PublicRadialReferenceEditResult(
+    const RadialArrayReferenceEditResult theResult) noexcept
+{
+    switch (theResult) {
+        case RadialArrayReferenceEditResult::NoChange:
+            return Core3DRadialArrayReferenceEditResultNoChange;
+        case RadialArrayReferenceEditResult::Applied:
+            return Core3DRadialArrayReferenceEditResultApplied;
+        case RadialArrayReferenceEditResult::OutcomeUnknown:
+            return Core3DRadialArrayReferenceEditResultOutcomeUnknown;
+        case RadialArrayReferenceEditResult::RetryableFailure:
+            return Core3DRadialArrayReferenceEditResultRetryableFailure;
+    }
+    return Core3DRadialArrayReferenceEditResultRetryableFailure;
+}
+
 BOOL HasCbfMagic(NSData *data) {
     constexpr NSUInteger magicLength = sizeof(kCbfMagic) - 1;
     return data != nil
@@ -480,6 +541,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         && _viewer->getObjectInteractor() != nullptr
         && (_viewer->getObjectInteractor()->hasActiveLinearArray()
             || _viewer->getObjectInteractor()->hasUnresolvedLinearArray());
+    const BOOL hadRadialArray =
+        _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && (_viewer->getObjectInteractor()->hasActiveRadialArray()
+            || _viewer->getObjectInteractor()->hasUnresolvedRadialArray());
     const PrimitiveGizmoType booleanGizmoType = hadBooleanOperation
         ? [self getGizmoType]
         : PrimitiveGizmoTypeNone;
@@ -548,6 +614,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     if (hadLinearArray) {
         (void)_viewer->getObjectInteractor()->cancelLinearArray();
     }
+    if (hadRadialArray) {
+        (void)_viewer->getObjectInteractor()->cancelRadialArray();
+    }
     if (hadExtrusion) {
         _viewer->getShapeInteractor()->cancelExtrusion();
     }
@@ -571,19 +640,20 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [view endInteractiveRendering];
     }
     if (hadActiveInteraction || hadUnresolvedMirrorObjects
-        || hadBooleanOperation || hadLinearArray || hadExtrusion || hadShell
-        || hadBevel) {
+        || hadBooleanOperation || hadLinearArray || hadRadialArray
+        || hadExtrusion || hadShell || hadBevel) {
         [self requestRender];
     }
     if (hadUnresolvedMirrorObjects || hadBooleanOperation
-		|| hadLinearArray || hadExtrusion || hadShell || hadBevel) {
+		|| hadLinearArray || hadRadialArray || hadExtrusion || hadShell
+        || hadBevel) {
         // Selection notification is also the renderer-neutral presentation
         // invalidation and Apply-state refresh for lifecycle cancellation.
         [self checkSelections];
     }
     if ((hadRawPrimaryInteraction || hadUnresolvedMirrorObjects
-         || hadBooleanOperation || hadLinearArray || hadExtrusion || hadShell
-         || hadBevel)
+         || hadBooleanOperation || hadLinearArray || hadRadialArray
+         || hadExtrusion || hadShell || hadBevel)
         && _delegate
         && [_delegate respondsToSelector:
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -672,6 +742,21 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             [strongSelf requestRender];
         });
     });
+    _viewer->setRadialArrayPreviewStateChangedCallback([weakSelf]() {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            if (strongSelf->_delegate
+                && [strongSelf->_delegate respondsToSelector:
+                    @selector(viewerDidChangeRadialArrayPresentationOverlay:)]) {
+                [strongSelf->_delegate
+                    viewerDidChangeRadialArrayPresentationOverlay:strongSelf];
+            }
+            [strongSelf requestRender];
+        });
+    });
 
     _didSetupViewer = YES;
     _viewer->showGrid(!_isPreviewMode);
@@ -708,6 +793,21 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         // Publish both successful retirement and retryable cleanup failure.
         // The parent resolves an inactive Array tool, or retains an active
         // failed operation so the user can retry Cancel safely.
+        if (_delegate
+            && [_delegate respondsToSelector:
+                @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+            [_delegate viewer:self
+                didEndPrimaryInteractionCancelled:YES];
+        }
+    }
+    if (_viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveRadialArray()) {
+        (void)_viewer->getObjectInteractor()->cancelRadialArray();
+        [self checkSelections];
+        [self requestRender];
+        // Publish both successful retirement and retryable cleanup failure. The
+        // parent either closes an inactive tool or retains its recovery controls.
         if (_delegate
             && [_delegate respondsToSelector:
                 @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
@@ -1097,8 +1197,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     const std::shared_ptr<ObjectInteractor> objectInteractor =
         _viewer == nullptr ? nullptr : _viewer->getObjectInteractor();
     if (objectInteractor != nullptr
-        && objectInteractor->hasActiveLinearArray()) {
-        // Linear Array captures exactly one source. Keep viewport taps from
+        && (objectInteractor->hasActiveLinearArray()
+            || objectInteractor->hasActiveRadialArray())) {
+        // Array tools capture exactly one source. Keep viewport taps from
         // changing the visible selection while Apply still targets that
         // captured source; camera gestures remain available.
         return;
@@ -1267,6 +1368,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         [self requestRender];
         return;
     }
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveRadialArray()
+        && !_viewer->getObjectInteractor()->cancelRadialArray()) {
+        [self requestRender];
+        return;
+    }
     _viewer->deselectAll();
     [self requestRender];
 }
@@ -1349,6 +1456,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		[self checkSelections];
 		[self requestRender];
 		return;
+	} else if (currentType == PrimitiveGizmoTypeRadialArray) {
+		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+		[self checkSelections];
+		[self requestRender];
+		return;
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->canUndo()
@@ -1422,6 +1538,15 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		[self checkSelections];
 		[self requestRender];
 		return;
+	} else if (currentType == PrimitiveGizmoTypeRadialArray) {
+		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+		[self checkSelections];
+		[self requestRender];
+		return;
 	}
 	_viewer->getObjectInteractor()->detachManipulator(false);
 	if (_viewer->getDocument()->canRedo()
@@ -1458,6 +1583,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		}
 	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
 		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+	} else if (currentType == PrimitiveGizmoTypeRadialArray) {
+		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
 			[self checkSelections];
 			[self requestRender];
 			return;
@@ -1557,6 +1688,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 			&& !_viewer->getObjectInteractor()->hasActiveLinearArray()) {
 			(void)_viewer->getObjectInteractor()->beginLinearArray();
 		}
+		if (type == PrimitiveGizmoTypeRadialArray
+			&& _viewer != nullptr
+			&& _viewer->getObjectInteractor() != nullptr
+			&& !_viewer->getObjectInteractor()->hasActiveRadialArray()) {
+			(void)_viewer->getObjectInteractor()->beginRadialArray();
+		}
 		[self requestRender];
 		return;
 	}
@@ -1584,6 +1721,12 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		}
 	} else if (previousType == PrimitiveGizmoTypeLinearArray) {
 		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
+			[self checkSelections];
+			[self requestRender];
+			return;
+		}
+	} else if (previousType == PrimitiveGizmoTypeRadialArray) {
+		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
 			[self checkSelections];
 			[self requestRender];
 			return;
@@ -1639,6 +1782,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         case PrimitiveGizmoTypeShell:
             manipulatorType =
                 PrimitiveManipulatorType::PrimitiveGizmoTypeShell;
+            break;
+        case PrimitiveGizmoTypeRadialArray:
+            manipulatorType =
+                PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray;
             break;
         default:
             assert(false);
@@ -1716,6 +1863,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
             break;
         case PrimitiveManipulatorType::PrimitiveGizmoTypeShell:
             type = PrimitiveGizmoTypeShell;
+            break;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray:
+            type = PrimitiveGizmoTypeRadialArray;
             break;
         default:
             break;
@@ -2103,6 +2253,268 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     return _viewer != nullptr
         && _viewer->getObjectInteractor() != nullptr
         && _viewer->getObjectInteractor()->hasActiveLinearArray();
+}
+
+- (Core3DRadialArrayParameters)getRadialArrayParameters {
+    Core3DRadialArrayParameters parameters = {};
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr) {
+        return parameters;
+    }
+    const std::shared_ptr<ObjectInteractor> interactor =
+        _viewer->getObjectInteractor();
+    const auto countRange = interactor->radialArrayCountRange();
+    const auto sweepRange = interactor->radialArraySweepDegreesRange();
+    parameters.count = interactor->radialArrayCount();
+    parameters.minimumCount = countRange.first;
+    parameters.maximumCount = countRange.second;
+    parameters.sweepDegrees = interactor->radialArraySweepDegrees();
+    parameters.minimumSweepDegrees = sweepRange.first;
+    parameters.maximumSweepDegrees = sweepRange.second;
+    parameters.metersPerUnit = interactor->radialArrayMetersPerUnit();
+    return parameters;
+}
+
+- (Core3DRadialArrayReferenceAuthority)getRadialArrayReferenceAuthority {
+    Core3DRadialArrayReferenceAuthority authority = {
+        .readState = Core3DReferenceAxisReadStateInvalid,
+        .value = {
+            .pivotSpace = Core3DReferenceSpaceObject,
+            .pivotX = 0.0,
+            .pivotY = 0.0,
+            .pivotZ = 0.0,
+            .directionSpace = Core3DReferenceSpaceWorld,
+            .directionX = 0.0,
+            .directionY = 0.0,
+            .directionZ = 1.0,
+        },
+        .authorityToken = 0,
+    };
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr) {
+        return authority;
+    }
+
+    const std::shared_ptr<ObjectInteractor> interactor =
+        _viewer->getObjectInteractor();
+    OcctReferenceAxis axis;
+    const OcctReferenceAxisReadState state =
+        interactor->radialArrayReferenceAxis(axis);
+    Core3DReferenceSpace pivotSpace = Core3DReferenceSpaceObject;
+    Core3DReferenceSpace directionSpace = Core3DReferenceSpaceWorld;
+    if (state == OcctReferenceAxisReadState::Invalid
+        || !TryPublicReferenceSpace(axis.pivotSpace, pivotSpace)
+        || !TryPublicReferenceSpace(axis.directionSpace, directionSpace)) {
+        return authority;
+    }
+
+    authority.readState = PublicReferenceAxisReadState(state);
+    authority.value.pivotSpace = pivotSpace;
+    authority.value.pivotX = axis.pivot.X();
+    authority.value.pivotY = axis.pivot.Y();
+    authority.value.pivotZ = axis.pivot.Z();
+    authority.value.directionSpace = directionSpace;
+    authority.value.directionX = axis.direction.X();
+    authority.value.directionY = axis.direction.Y();
+    authority.value.directionZ = axis.direction.Z();
+    authority.authorityToken =
+        interactor->radialArrayReferenceAuthorityToken();
+    return authority;
+}
+
+- (Core3DRadialArrayReferenceAuthority)
+    getRadialArrayReferenceAuthorityWithPivotSpace:
+        (Core3DReferenceSpace)pivotSpace
+    directionSpace:(Core3DReferenceSpace)directionSpace
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken {
+    Core3DRadialArrayReferenceAuthority invalidAuthority = {
+        .readState = Core3DReferenceAxisReadStateInvalid,
+        .value = {
+            .pivotSpace = Core3DReferenceSpaceObject,
+            .pivotX = 0.0,
+            .pivotY = 0.0,
+            .pivotZ = 0.0,
+            .directionSpace = Core3DReferenceSpaceWorld,
+            .directionX = 0.0,
+            .directionY = 0.0,
+            .directionZ = 1.0,
+        },
+        .authorityToken = 0,
+    };
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeRadialArray
+        || expectedAuthorityToken == 0) {
+        return invalidAuthority;
+    }
+
+    OcctReferenceSpace nativePivotSpace = OcctReferenceSpace::Object;
+    OcctReferenceSpace nativeDirectionSpace = OcctReferenceSpace::World;
+    if (!TryNativeReferenceSpace(pivotSpace, nativePivotSpace)
+        || !TryNativeReferenceSpace(
+            directionSpace, nativeDirectionSpace)) {
+        return invalidAuthority;
+    }
+
+    const std::shared_ptr<ObjectInteractor> interactor =
+        _viewer->getObjectInteractor();
+    OcctReferenceAxis sourceAxis;
+    const OcctReferenceAxisReadState sourceState =
+        interactor->radialArrayReferenceAxis(sourceAxis);
+    if (sourceState == OcctReferenceAxisReadState::Invalid
+        || interactor->radialArrayReferenceAuthorityToken()
+            != expectedAuthorityToken) {
+        return invalidAuthority;
+    }
+
+    OcctReferenceAxis convertedAxis;
+    if (!interactor->convertRadialArrayReferenceAxisSpaces(
+            nativePivotSpace,
+            nativeDirectionSpace,
+            expectedAuthorityToken,
+            convertedAxis)) {
+        return invalidAuthority;
+    }
+
+    invalidAuthority.readState = PublicReferenceAxisReadState(sourceState);
+    invalidAuthority.value.pivotSpace = pivotSpace;
+    invalidAuthority.value.pivotX = convertedAxis.pivot.X();
+    invalidAuthority.value.pivotY = convertedAxis.pivot.Y();
+    invalidAuthority.value.pivotZ = convertedAxis.pivot.Z();
+    invalidAuthority.value.directionSpace = directionSpace;
+    invalidAuthority.value.directionX = convertedAxis.direction.X();
+    invalidAuthority.value.directionY = convertedAxis.direction.Y();
+    invalidAuthority.value.directionZ = convertedAxis.direction.Z();
+    invalidAuthority.authorityToken = expectedAuthorityToken;
+    return invalidAuthority;
+}
+
+- (BOOL)setRadialArrayCount:(NSInteger)count {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeRadialArray
+        || count < 0
+        || count > std::numeric_limits<Standard_Integer>::max()) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setRadialArrayCount(static_cast<Standard_Integer>(count));
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)setRadialArraySweepDegrees:(double)sweepDegrees {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeRadialArray
+        || !std::isfinite(sweepDegrees)) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setRadialArraySweepDegrees(
+            static_cast<Standard_Real>(sweepDegrees));
+    [self requestRender];
+    return didSet;
+}
+
+- (Core3DRadialArrayReferenceEditResult)setRadialArrayReferenceAxis:
+    (Core3DReferenceAxisValue)value
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeRadialArray
+        || expectedAuthorityToken == 0) {
+        return Core3DRadialArrayReferenceEditResultRetryableFailure;
+    }
+
+    OcctReferenceAxis axis;
+    if (!TryNativeReferenceSpace(value.pivotSpace, axis.pivotSpace)
+        || !TryNativeReferenceSpace(
+            value.directionSpace, axis.directionSpace)) {
+        return Core3DRadialArrayReferenceEditResultRetryableFailure;
+    }
+    try {
+        axis.pivot = gp_Pnt(value.pivotX, value.pivotY, value.pivotZ);
+        axis.direction = gp_Dir(
+            value.directionX, value.directionY, value.directionZ);
+    } catch (...) {
+        return Core3DRadialArrayReferenceEditResultRetryableFailure;
+    }
+
+    const RadialArrayReferenceEditResult nativeResult =
+        _viewer->getObjectInteractor()->setRadialArrayReferenceAxis(
+            axis, expectedAuthorityToken);
+    const Core3DRadialArrayReferenceEditResult result =
+        PublicRadialReferenceEditResult(nativeResult);
+    if (result != Core3DRadialArrayReferenceEditResultNoChange) {
+        [self checkSelections];
+        [self requestRender];
+    }
+    return result;
+}
+
+- (Core3DRadialArrayReferenceEditResult)
+    resetRadialArrayReferenceAxisWithExpectedAuthorityToken:
+        (uint64_t)expectedAuthorityToken {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeRadialArray
+        || expectedAuthorityToken == 0) {
+        return Core3DRadialArrayReferenceEditResultRetryableFailure;
+    }
+    const RadialArrayReferenceEditResult nativeResult =
+        _viewer->getObjectInteractor()->resetRadialArrayReferenceAxis(
+            expectedAuthorityToken);
+    const Core3DRadialArrayReferenceEditResult result =
+        PublicRadialReferenceEditResult(nativeResult);
+    if (result != Core3DRadialArrayReferenceEditResultNoChange) {
+        [self checkSelections];
+        [self requestRender];
+    }
+    return result;
+}
+
+- (BOOL)applyRadialArray {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeRadialArray) {
+        return NO;
+    }
+    const RadialArrayApplyResult result =
+        _viewer->getObjectInteractor()->applyRadialArray();
+    if (result == RadialArrayApplyResult::AppliedNeedsDocumentRedraw) {
+        _viewer->redrawDocument();
+    }
+    // A committed redraw recreates the interactor as None before the public
+    // operation wrapper reconciles its retained tool. Avoid that transient
+    // mismatch exactly as Linear Array does.
+    if (result != RadialArrayApplyResult::AppliedNeedsDocumentRedraw) {
+        [self checkSelections];
+    }
+    [self requestRender];
+    return result != RadialArrayApplyResult::NoChange;
+}
+
+- (BOOL)cancelRadialArray {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL didCancel =
+        _viewer->getObjectInteractor()->cancelRadialArray();
+    [self checkSelections];
+    [self requestRender];
+    return didCancel;
+}
+
+- (BOOL)canApplyRadialArray {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->canApplyRadialArray();
+}
+
+- (BOOL)hasActiveRadialArray {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveRadialArray();
 }
 
 - (BOOL) applySubtract {
@@ -2504,6 +2916,103 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         && _viewer->getObjectInteractor() != nullptr
         && _viewer->getObjectInteractor()
             ->debugMutateFirstLinearArraySourcePersistedTransform();
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugRadialArrayState {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr) {
+        return @{};
+    }
+    const RadialArrayPreviewDebugState state =
+        _viewer->getObjectInteractor()->debugRadialArrayPreviewState();
+    return @{
+        @"state": @(static_cast<NSUInteger>(state.state)),
+        @"generation": @(
+            static_cast<unsigned long long>(state.generation)),
+        @"referenceAuthorityToken": @(
+            static_cast<unsigned long long>(state.referenceAuthorityToken)),
+        @"previewBodyCount": @(state.previewBodyCount),
+        @"pendingResultCount": @(state.pendingResultCount),
+        @"hasPendingReferenceEdit": @(
+            state.hasPendingReferenceEdit != Standard_False),
+        @"activeOperation": @(
+            state.activeOperation != Standard_False),
+        @"previewValid": @(state.previewValid != Standard_False),
+        @"canApply": @(state.canApply != Standard_False),
+        @"ownsDocumentCommand": @(
+            state.ownsDocumentCommand != Standard_False),
+        @"documentCommandOpen": @(
+            state.documentCommandOpen != Standard_False),
+        @"count": @(state.count),
+        @"sweepDegrees": @(state.sweepDegrees),
+    };
+}
+
+- (void)debugSetRadialArrayBeginOwnedCommandMismatchCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetRadialArrayBeginOwnedCommandMismatchCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetRadialArrayTransactionFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetRadialArrayTransactionFailureCount(
+                static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetRadialArrayAbortFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetRadialArrayAbortFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetRadialArrayEraseFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetRadialArrayEraseFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
+- (void)debugSetRadialArrayApplyCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetRadialArrayApplyCommitMode(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetRadialArrayPostCommitInspectMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetRadialArrayPostCommitInspectMode(
+                static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetMaximumRadialArrayTopologyNodes(
+                static_cast<Standard_Size>(limit));
+    }
+}
+
+- (BOOL)debugMutateRadialArraySourcePersistedTransform {
+    return _viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()
+            ->debugMutateRadialArraySourcePersistedTransform();
+}
+
+- (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()
+            ->debugSetRadialArrayReferenceEditCommitMode(
+                static_cast<Standard_Integer>(mode));
+    }
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugBooleanPreviewState {
@@ -3449,6 +3958,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                         || objectInteractor->hasUnresolvedMirrorObjects()
                         || objectInteractor->hasActiveLinearArray()
                         || objectInteractor->hasUnresolvedLinearArray()
+                        || objectInteractor->hasActiveRadialArray()
+                        || objectInteractor->hasUnresolvedRadialArray()
                         || shapeInteractor->hasActiveExtrusion()
                         || shapeInteractor->hasActiveShell()
                         || shapeInteractor->hasUnresolvedShell();
@@ -3676,6 +4187,8 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || objectInteractor->hasUnresolvedMirrorObjects()
         || objectInteractor->hasActiveLinearArray()
         || objectInteractor->hasUnresolvedLinearArray()
+        || objectInteractor->hasActiveRadialArray()
+        || objectInteractor->hasUnresolvedRadialArray()
         || shapeInteractor->hasActiveExtrusion()
         || shapeInteractor->hasActiveBevel()
         || shapeInteractor->hasActiveShell()

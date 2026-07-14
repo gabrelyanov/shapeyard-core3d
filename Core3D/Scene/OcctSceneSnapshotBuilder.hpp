@@ -119,6 +119,21 @@ public:
     OverlayPointer PublishEmptyLinearArrayPreviewOverlay(
         const Handle(OcctDocument)& theDocument) noexcept;
 
+    //! Publish one source mesh/material with one proper-rigid world-space
+    //! instance per explicitly owned Radial Array preview body. Geometry and
+    //! appearance are copied once from the committed source presentation's
+    //! existing cache. Main-thread only; no AIS discovery or meshing occurs.
+    OverlayPointer PublishRadialArrayPreviewOverlay(
+        const Handle(OcctDocument)& theDocument,
+        const Handle(AIS_Shape)& theSourceShape,
+        const std::vector<Handle(AIS_Shape)>& thePreviewShapes) noexcept;
+
+    //! Publish the exact-empty semantic Radial Array overlay used for a stable
+    //! near-zero angular step. Unsafe or unresolved states must return null
+    //! instead, leaving the OCCT viewport authoritative.
+    OverlayPointer PublishEmptyRadialArrayPreviewOverlay(
+        const Handle(OcctDocument)& theDocument) noexcept;
+
 #ifdef DEBUG
     enum class DebugTriangulationFailure : std::uint8_t {
         None = 0,
@@ -145,7 +160,8 @@ private:
         bool theAllowsBooleanPreview,
         bool theAllowsChamferPreview,
         bool theAllowsLinearArrayPreview,
-        bool theAllowsShellPreview) noexcept;
+        bool theAllowsShellPreview,
+        bool theAllowsRadialArrayPreview) noexcept;
 
     struct State;
     std::unique_ptr<State> myState;

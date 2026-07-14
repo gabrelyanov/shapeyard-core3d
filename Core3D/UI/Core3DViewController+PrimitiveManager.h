@@ -60,6 +60,28 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(tryApplyLinearArray());
 - (Core3DModelingOperationResult)tryCancelLinearArray
     NS_SWIFT_NAME(tryCancelLinearArray());
+- (Core3DRadialArrayParameters)getRadialArrayParameters;
+- (Core3DRadialArrayReferenceAuthority)getRadialArrayReferenceAuthority;
+- (Core3DRadialArrayReferenceAuthority)
+    getRadialArrayReferenceAuthorityWithPivotSpace:
+        (Core3DReferenceSpace)pivotSpace
+    directionSpace:(Core3DReferenceSpace)directionSpace
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken
+    NS_SWIFT_NAME(getRadialArrayReferenceAuthority(pivotSpace:directionSpace:expectedAuthorityToken:));
+- (BOOL)setRadialArrayCount:(NSInteger)count;
+- (BOOL)setRadialArraySweepDegrees:(double)sweepDegrees;
+- (Core3DRadialArrayReferenceEditResult)setRadialArrayReferenceAxis:
+    (Core3DReferenceAxisValue)axis
+    expectedAuthorityToken:(uint64_t)expectedAuthorityToken
+    NS_SWIFT_NAME(setRadialArrayReferenceAxis(_:expectedAuthorityToken:));
+- (Core3DRadialArrayReferenceEditResult)
+    resetRadialArrayReferenceAxisWithExpectedAuthorityToken:
+        (uint64_t)expectedAuthorityToken
+    NS_SWIFT_NAME(resetRadialArrayReferenceAxis(expectedAuthorityToken:));
+- (Core3DModelingOperationResult)tryApplyRadialArray
+    NS_SWIFT_NAME(tryApplyRadialArray());
+- (Core3DModelingOperationResult)tryCancelRadialArray
+    NS_SWIFT_NAME(tryCancelRadialArray());
 - (Core3DModelingOperationResult)tryApplySubtract
     NS_SWIFT_NAME(tryApplySubtract());
 - (Core3DModelingOperationResult)tryCancelSubtract

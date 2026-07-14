@@ -211,6 +211,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray:
 					return false;
 			}
 			return true;
@@ -236,6 +237,7 @@ namespace core3d {
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
 				case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
+				case PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray:
 					return false;
 			}
 			return false;
@@ -751,7 +753,9 @@ namespace core3d {
         , _booleanOpController(
             std::make_shared<BooleanOperationController>(context, doc))
         , _linearArrayController(
-            std::make_shared<LinearArrayOperationController>(context, doc)) {
+            std::make_shared<LinearArrayOperationController>(context, doc))
+        , _radialArrayController(
+            std::make_shared<RadialArrayOperationController>(context, doc)) {
     }
 
     void ObjectInteractor::selectLastObject() {
@@ -784,6 +788,8 @@ namespace core3d {
     void ObjectInteractor::attachManipulator(Handle(AIS_InteractiveObject) toObject) {
 		if (_manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			|| _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
 			|| _manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeShell) {
 			// Parameter-panel tools capture immutable source leases in their
@@ -1670,6 +1676,8 @@ namespace core3d {
 		if (_manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
 			|| _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			|| _manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeShell) {
 			detachManipulator(false);
 			return;
@@ -1738,6 +1746,14 @@ namespace core3d {
 	void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
 		const PrimitiveManipulatorType aPreviousType = _manipulatorType;
 		if (type
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& hasActiveRadialArray()
+			&& !cancelRadialArray()) {
+			// Retain the radial recovery ledger and its visible controls until
+			// the command outcome can be proven exactly once.
+			return;
+		}
+		if (type
 				!= PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
 			&& hasActiveLinearArray()
 			&& !cancelLinearArray()) {
@@ -1776,6 +1792,18 @@ namespace core3d {
 				// presentations for recovery; keep Array selected so its recovery
 				// controls and transition barrier remain visible.
 				if (!hasActiveLinearArray()) {
+					_manipulatorType =
+						PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+					type = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+				}
+			}
+		if (_manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& (aPreviousType
+					!= PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+					|| !hasActiveRadialArray())
+			&& !beginRadialArray()) {
+				if (!hasActiveRadialArray()) {
 					_manipulatorType =
 						PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
 					type = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
@@ -1850,6 +1878,7 @@ namespace core3d {
 			if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeShell
 				&& _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
 				&& canReattach
@@ -1868,6 +1897,8 @@ namespace core3d {
         if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeNone
 			|| type
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+			|| type
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
 			|| type
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeShell) { // remove gizmo when the operation owns only AIS previews
             _manipulator->DeactivateCurrentMode();
@@ -2620,6 +2651,262 @@ namespace core3d {
 		return _linearArrayController != nullptr
 			&& _linearArrayController
 				->debugMutateFirstSourcePersistedTransform();
+	}
+#endif
+
+	Standard_Boolean ObjectInteractor::beginRadialArray() noexcept {
+		if (_radialArrayController == nullptr) {
+			return Standard_False;
+		}
+		const Standard_Boolean didBegin =
+			_radialArrayController->begin();
+		if (!didBegin
+			&& !_radialArrayController->hasActiveOperation()
+			&& _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray) {
+			_manipulatorType =
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+		}
+		return didBegin;
+	}
+
+	RadialArrayApplyResult ObjectInteractor::applyRadialArray() noexcept {
+		return _radialArrayController == nullptr
+			? RadialArrayApplyResult::NoChange
+			: _radialArrayController->apply();
+	}
+
+	Standard_Boolean ObjectInteractor::cancelRadialArray() noexcept {
+		return _radialArrayController == nullptr
+			|| _radialArrayController->cancel();
+	}
+
+	Standard_Boolean ObjectInteractor::setRadialArrayCount(
+		const Standard_Integer count) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& _radialArrayController != nullptr
+			&& _radialArrayController->setCount(count);
+	}
+
+	Standard_Boolean ObjectInteractor::setRadialArraySweepDegrees(
+		const Standard_Real sweepDegrees) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& _radialArrayController != nullptr
+			&& _radialArrayController->setSweepDegrees(sweepDegrees);
+	}
+
+	Standard_Integer ObjectInteractor::radialArrayCount() const noexcept {
+		return _radialArrayController == nullptr
+			? RadialArrayOperationController::kDefaultCount
+			: _radialArrayController->count();
+	}
+
+	Standard_Real
+	ObjectInteractor::radialArraySweepDegrees() const noexcept {
+		return _radialArrayController == nullptr
+			? RadialArrayOperationController::kDefaultSweepDegrees
+			: _radialArrayController->sweepDegrees();
+	}
+
+	Standard_Real ObjectInteractor::radialArrayMetersPerUnit() const noexcept {
+		return _radialArrayController == nullptr
+			? 0.0 : _radialArrayController->metersPerUnit();
+	}
+
+	std::pair<Standard_Integer, Standard_Integer>
+	ObjectInteractor::radialArrayCountRange() const noexcept {
+		return _radialArrayController == nullptr
+			? std::pair<Standard_Integer, Standard_Integer>{
+				RadialArrayOperationController::kMinimumCount,
+				RadialArrayOperationController::kMaximumCount}
+			: _radialArrayController->countRange();
+	}
+
+	std::pair<Standard_Real, Standard_Real>
+	ObjectInteractor::radialArraySweepDegreesRange() const noexcept {
+		return _radialArrayController == nullptr
+			? std::pair<Standard_Real, Standard_Real>{
+				RadialArrayOperationController::kMinimumSweepDegrees,
+				RadialArrayOperationController::kMaximumSweepDegrees}
+			: _radialArrayController->sweepDegreesRange();
+	}
+
+	OcctReferenceAxisReadState ObjectInteractor::radialArrayReferenceAxis(
+		OcctReferenceAxis& axis) const noexcept {
+		return _radialArrayController == nullptr
+			? OcctReferenceAxisReadState::Invalid
+			: _radialArrayController->referenceAxis(axis);
+	}
+
+	std::uint64_t
+	ObjectInteractor::radialArrayReferenceAuthorityToken() const noexcept {
+		return _radialArrayController == nullptr
+			? 0 : _radialArrayController->referenceAuthorityToken();
+	}
+
+	Standard_Boolean
+	ObjectInteractor::convertRadialArrayReferenceAxisSpaces(
+		const OcctReferenceSpace pivotSpace,
+		const OcctReferenceSpace directionSpace,
+		const std::uint64_t expectedAuthorityToken,
+		OcctReferenceAxis& axis) const noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& _radialArrayController != nullptr
+			&& _radialArrayController->convertReferenceAxisSpaces(
+				pivotSpace,
+				directionSpace,
+				expectedAuthorityToken,
+				axis);
+	}
+
+	RadialArrayReferenceEditResult
+	ObjectInteractor::setRadialArrayReferenceAxis(
+		const OcctReferenceAxis& axis,
+		const std::uint64_t expectedAuthorityToken) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& _radialArrayController != nullptr
+			? _radialArrayController->setReferenceAxis(
+				axis, expectedAuthorityToken)
+			: RadialArrayReferenceEditResult::RetryableFailure;
+	}
+
+	RadialArrayReferenceEditResult
+	ObjectInteractor::resetRadialArrayReferenceAxis(
+		const std::uint64_t expectedAuthorityToken) noexcept {
+		return _manipulatorType
+				== PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+			&& _radialArrayController != nullptr
+			? _radialArrayController->resetReferenceAxis(
+				expectedAuthorityToken)
+			: RadialArrayReferenceEditResult::RetryableFailure;
+	}
+
+	Standard_Boolean ObjectInteractor::canApplyRadialArray() const noexcept {
+		return _radialArrayController != nullptr
+			&& _radialArrayController->canApply();
+	}
+
+	Standard_Boolean ObjectInteractor::hasActiveRadialArray() const noexcept {
+		return _radialArrayController != nullptr
+			&& _radialArrayController->hasActiveOperation();
+	}
+
+	Standard_Boolean
+	ObjectInteractor::hasUnresolvedRadialArray() const noexcept {
+		return _radialArrayController != nullptr
+			&& _radialArrayController->hasUnresolvedState();
+	}
+
+	RadialArrayPreviewState
+	ObjectInteractor::radialArrayPreviewState() const noexcept {
+		return _radialArrayController == nullptr
+			? RadialArrayPreviewState::Unavailable
+			: _radialArrayController->previewState();
+	}
+
+	std::uint64_t
+	ObjectInteractor::radialArrayPreviewGeneration() const noexcept {
+		return _radialArrayController == nullptr
+			? 0 : _radialArrayController->previewGeneration();
+	}
+
+	Standard_Boolean ObjectInteractor::captureRadialArrayPreview(
+		RadialArrayPreviewCapture& capture) const noexcept {
+		capture = {};
+		return _radialArrayController != nullptr
+			&& _radialArrayController->capturePreview(capture);
+	}
+
+	Standard_Boolean
+	ObjectInteractor::canPublishEmptyRadialArrayPreview() const noexcept {
+		return _radialArrayController != nullptr
+			&& _radialArrayController->canPublishEmptyPreview();
+	}
+
+	void ObjectInteractor::setRadialArrayPreviewStateChangedCallback(
+		std::function<void()> callback) {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->setPreviewStateChangedCallback(
+				std::move(callback));
+		}
+	}
+
+#ifdef DEBUG
+	RadialArrayPreviewDebugState
+	ObjectInteractor::debugRadialArrayPreviewState() const noexcept {
+		return _radialArrayController == nullptr
+			? RadialArrayPreviewDebugState{}
+			: _radialArrayController->debugPreviewState();
+	}
+
+	void ObjectInteractor::
+	debugSetRadialArrayBeginOwnedCommandMismatchCount(
+		const Standard_Size count) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController
+				->debugSetBeginOwnedCommandMismatchCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetRadialArrayTransactionFailureCount(
+		const Standard_Size count) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->debugSetTransactionFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetRadialArrayAbortFailureCount(
+		const Standard_Size count) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->debugSetAbortFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetRadialArrayEraseFailureCount(
+		const Standard_Size count) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->debugSetEraseFailureCount(count);
+		}
+	}
+
+	void ObjectInteractor::debugSetRadialArrayApplyCommitMode(
+		const Standard_Integer mode) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->debugSetApplyCommitMode(mode);
+		}
+	}
+
+	void ObjectInteractor::debugSetRadialArrayPostCommitInspectMode(
+		const Standard_Integer mode) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->debugSetPostCommitInspectMode(mode);
+		}
+	}
+
+	void ObjectInteractor::debugSetMaximumRadialArrayTopologyNodes(
+		const Standard_Size limit) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController->debugSetMaximumTopologyNodes(limit);
+		}
+	}
+
+	Standard_Boolean ObjectInteractor::
+	debugMutateRadialArraySourcePersistedTransform() noexcept {
+		return _radialArrayController != nullptr
+			&& _radialArrayController
+				->debugMutateSourcePersistedTransform();
+	}
+
+	void ObjectInteractor::debugSetRadialArrayReferenceEditCommitMode(
+		const Standard_Integer mode) noexcept {
+		if (_radialArrayController != nullptr) {
+			_radialArrayController
+				->debugSetReferenceEditCommitMode(mode);
+		}
 	}
 #endif
 

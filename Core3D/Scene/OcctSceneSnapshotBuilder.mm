@@ -117,6 +117,7 @@ constexpr std::size_t kMaxMirrorPreviewBodies = 8;
 constexpr std::size_t kMaxBooleanSourceOperands = 8;
 constexpr std::size_t kMaxChamferPreviewBodies = 8;
 constexpr std::size_t kMaxLinearArrayPreviewBodies = 15;
+constexpr std::size_t kMaxRadialArrayPreviewBodies = 15;
 constexpr std::size_t kMaxShellStyledSubshapeLabels = 1'024;
 constexpr std::array<const char*, 6> kMirrorEntityIdentifiers = {
     "gizmo/mirroring/x/negative",
@@ -379,6 +380,20 @@ bool IsRigidWorldAnchorTransform(const Matrix4d& theMatrix)
         && std::abs(dot(anX, aZ)) <= aTolerance
         && std::abs(dot(aY, aZ)) <= aTolerance
         && std::abs(aDeterminant - 1.0) <= aTolerance;
+}
+
+//! Proper-rigid affine transform admitted by the Radial Array overlay. The
+//! determinant check rejects reflections; the translation ceiling keeps every
+//! renderer on the same mobile document-coordinate budget.
+bool IsProperRigidBoundedWorldTransform(const Matrix4d& theMatrix)
+{
+    return IsRigidWorldAnchorTransform(theMatrix)
+        && std::abs(theMatrix.values[12])
+            <= limits::kMaximumModelCoordinateMagnitude
+        && std::abs(theMatrix.values[13])
+            <= limits::kMaximumModelCoordinateMagnitude
+        && std::abs(theMatrix.values[14])
+            <= limits::kMaximumModelCoordinateMagnitude;
 }
 
 bool IsTranslationOnlyWorldTransform(const Matrix4d& theMatrix)
@@ -1294,7 +1309,7 @@ bool HasStyledShellSubshape(
     }
 }
 
-bool HasCompatibleLinearArrayStyle(
+bool HasCompatibleArrayPreviewStyle(
     const Handle(AIS_Shape)& theFirst,
     const Handle(AIS_Shape)& theCandidate)
 {
@@ -2204,6 +2219,15 @@ bool ValidatePresentationOverlayPayload(
                 return false;
             }
             break;
+        case PresentationOverlayKind::RadialArrayPreview:
+            if (!isEmpty
+                && (theMeshes.size() != 1 || theMaterials.size() != 1
+                    || theInstances.empty()
+                    || theInstances.size()
+                        > kMaxRadialArrayPreviewBodies)) {
+                return false;
+            }
+            break;
         case PresentationOverlayKind::ShellPreview:
             if (theMeshes.size() != 1 || theInstances.size() != 1
                 || theMaterials.size() != 1
@@ -2223,6 +2247,8 @@ bool ValidatePresentationOverlayPayload(
         theKind == PresentationOverlayKind::ChamferPreview;
     const bool isLinearArrayPreview =
         theKind == PresentationOverlayKind::LinearArrayPreview;
+    const bool isRadialArrayPreview =
+        theKind == PresentationOverlayKind::RadialArrayPreview;
     const bool isShellPreview =
         theKind == PresentationOverlayKind::ShellPreview;
     if (!isBooleanPreview && !isChamferPreview && !isShellPreview
@@ -2286,6 +2312,7 @@ bool ValidatePresentationOverlayPayload(
             && aMaterialIndex >= 6;
         const bool isChamferMaterial = isChamferPreview;
         const bool isLinearArrayMaterial = isLinearArrayPreview;
+        const bool isRadialArrayMaterial = isRadialArrayPreview;
         const bool isShellMaterial = isShellPreview;
         bool hasExpectedIdentifier = true;
         bool hasExpectedAlpha = true;
@@ -2335,6 +2362,12 @@ bool ValidatePresentationOverlayPayload(
                     == "linear-array/source/0/material";
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
+        } else if (isRadialArrayMaterial) {
+            hasExpectedIdentifier = aMaterialIndex == 0
+                && aMaterial.identifier
+                    == "radial-array/source/0/material";
+            hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
+                && aMaterial.baseColor.w == 1.0f;
         } else if (isShellMaterial) {
             hasExpectedIdentifier = aMaterialIndex == 0
                 && aMaterial.identifier
@@ -2353,6 +2386,7 @@ bool ValidatePresentationOverlayPayload(
             || !isUnit(aMaterial.baseColor.z)
             || !hasExpectedAlpha
             || ((isChamferMaterial || isLinearArrayMaterial
+                    || isRadialArrayMaterial
                     || isShellMaterial)
                 && (aMaterial.baseColorTextureIndex != -1
                     || aMaterial.emissiveTextureIndex != -1))
@@ -2387,6 +2421,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isBooleanMesh = isBooleanPreview;
         const bool isChamferMesh = isChamferPreview;
         const bool isLinearArrayMesh = isLinearArrayPreview;
+        const bool isRadialArrayMesh = isRadialArrayPreview;
         const bool isShellMesh = isShellPreview;
         const std::string anExpectedPreviewIdentifier = isMirrorPreview
             ? "mirror/preview/" + std::to_string(aMeshIndex - 6) + "/mesh"
@@ -2407,6 +2442,10 @@ bool ValidatePresentationOverlayPayload(
                 && (aMeshIndex != 0
                     || aMesh.definitionIdentifier
                         != "linear-array/source/0/mesh"))
+            || (isRadialArrayMesh
+                && (aMeshIndex != 0
+                    || aMesh.definitionIdentifier
+                        != "radial-array/source/0/mesh"))
             || (isShellMesh
                 && (aMeshIndex != 0
                     || aMesh.definitionIdentifier
@@ -2419,12 +2458,12 @@ bool ValidatePresentationOverlayPayload(
                     : aMesh.geometryRevision != 0)
             || !IsValid(aMesh.localBounds)
             || ((isMirrorPreview || isBooleanMesh || isChamferMesh
-                    || isLinearArrayMesh || isShellMesh)
+                    || isLinearArrayMesh || isRadialArrayMesh || isShellMesh)
                 && !IsCenteredLocalBounds(aMesh.localBounds))
             || aMesh.vertices.empty() || aMesh.indices.empty()
             || aMesh.primitives.empty()
             || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
-                    && !isLinearArrayMesh && !isShellMesh
+                    && !isLinearArrayMesh && !isRadialArrayMesh && !isShellMesh
                 && aMesh.primitives.size() != 1)
             || !CheckedAdd(aPrimitiveCount,
                            aMesh.primitives.size(),
@@ -2515,6 +2554,7 @@ bool ValidatePresentationOverlayPayload(
         const bool isBooleanItem = isBooleanPreview;
         const bool isChamferItem = isChamferPreview;
         const bool isLinearArrayItem = isLinearArrayPreview;
+        const bool isRadialArrayItem = isRadialArrayPreview;
         const bool isShellItem = isShellPreview;
         const std::size_t aPreviewIndex = isMirrorPreview
             ? anInstanceIndex - 6
@@ -2553,6 +2593,14 @@ bool ValidatePresentationOverlayPayload(
                                 == "Linear array preview "
                                     + std::to_string(anInstanceIndex + 1U)
                             && anInstance.meshIndex == 0
+                    : isRadialArrayItem
+                        ? anInstance.entityIdentifier
+                                == "radial-array/preview/0/"
+                                    + std::to_string(anInstanceIndex + 1U)
+                            && anInstance.name
+                                == "Radial array preview "
+                                    + std::to_string(anInstanceIndex + 1U)
+                            && anInstance.meshIndex == 0
                     : isShellItem
                         ? anInstance.entityIdentifier
                                 == kShellPreviewIdentifier
@@ -2568,11 +2616,14 @@ bool ValidatePresentationOverlayPayload(
                     : anInstance.role == RenderRole::BooleanSubject
                         && anInstance.renderStyle == RenderStyle::Shaded)
             : (isMirrorPreview || isChamferItem || isLinearArrayItem
+                    || isRadialArrayItem
                     || isShellItem)
                 ? anInstance.role == (isChamferItem
                         ? RenderRole::ChamferPreview
                         : isLinearArrayItem
                             ? RenderRole::LinearArrayPreview
+                            : isRadialArrayItem
+                                ? RenderRole::RadialArrayPreview
                             : isShellItem
                                 ? RenderRole::ShellPreview
                             : RenderRole::MirrorPreview)
@@ -2584,8 +2635,9 @@ bool ValidatePresentationOverlayPayload(
                     && anInstance.depthPolicy == DepthPolicy::Topmost;
         const std::size_t anExpectedBindingCount =
             (isMirrorPreview || isBooleanItem || isChamferItem
-                || isLinearArrayItem || isShellItem)
-            ? theMeshes[isLinearArrayItem ? 0 : anInstanceIndex]
+                || isLinearArrayItem || isRadialArrayItem || isShellItem)
+            ? theMeshes[(isLinearArrayItem || isRadialArrayItem)
+                    ? 0 : anInstanceIndex]
                 .primitives.size()
             : 1;
         if (!hasExpectedIdentity
@@ -2603,9 +2655,12 @@ bool ValidatePresentationOverlayPayload(
             || ((isChamferItem || isShellItem)
                 && anInstance.renderStyle != RenderStyle::Shaded)
             || ((isMirrorPreview || isBooleanItem || isChamferItem
-                    || isLinearArrayItem || isShellItem)
-                ? !IsTranslationOnlyWorldTransform(
-                    anInstance.worldFromObject)
+                    || isLinearArrayItem || isRadialArrayItem || isShellItem)
+                ? (isRadialArrayItem
+                    ? !IsProperRigidBoundedWorldTransform(
+                        anInstance.worldFromObject)
+                    : !IsTranslationOnlyWorldTransform(
+                        anInstance.worldFromObject))
                 : !IsRigidWorldAnchorTransform(
                     anInstance.worldFromObject))
             || anInstance.primitiveBindings.size()
@@ -2618,16 +2673,17 @@ bool ValidatePresentationOverlayPayload(
             return false;
         }
         if (++aMeshReferences[anInstance.meshIndex] != 1
-            && !isLinearArrayItem) {
+            && !isLinearArrayItem && !isRadialArrayItem) {
             return false;
         }
         for (const PrimitiveBinding& aBinding :
              anInstance.primitiveBindings) {
             if (((isMirrorPlane || isMirrorPreview
                     || isBooleanItem || isChamferItem
-                    || isLinearArrayItem || isShellItem)
+                    || isLinearArrayItem || isRadialArrayItem || isShellItem)
                     && aBinding.materialIndex
-                        != (isLinearArrayItem ? 0 : anInstanceIndex))
+                        != ((isLinearArrayItem || isRadialArrayItem)
+                            ? 0 : anInstanceIndex))
                 || aBinding.materialIndex >= theMaterials.size()
                 || aBinding.pickToken != 0 || !aBinding.visible) {
                 return false;
@@ -2650,7 +2706,7 @@ bool ValidatePresentationOverlayPayload(
             return false;
         }
     }
-    if (isLinearArrayPreview) {
+    if (isLinearArrayPreview || isRadialArrayPreview) {
         return isEmpty
             || (aMeshReferences.size() == 1
             && aMeshReferences[0] == theInstances.size()
@@ -2904,6 +2960,7 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlay(
         false,
         false,
         false,
+        false,
         false);
 }
 
@@ -2915,7 +2972,8 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
     const bool theAllowsBooleanPreview,
     const bool theAllowsChamferPreview,
     const bool theAllowsLinearArrayPreview,
-    const bool theAllowsShellPreview) noexcept
+    const bool theAllowsShellPreview,
+    const bool theAllowsRadialArrayPreview) noexcept
 {
     if (![NSThread isMainThread]
         || theDocument.IsNull()
@@ -2935,6 +2993,9 @@ OcctSceneSnapshotBuilder::PublishPresentationOverlayImpl(
             && !theAllowsLinearArrayPreview)
         || (theContent.kind == PresentationOverlayKind::ShellPreview
             && !theAllowsShellPreview)
+        || (theContent.kind
+                == PresentationOverlayKind::RadialArrayPreview
+            && !theAllowsRadialArrayPreview)
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
         || myState->documentObject.IsNull()
@@ -3220,6 +3281,7 @@ OcctSceneSnapshotBuilder::PublishMirrorPreviewOverlay(
             false,
             false,
             false,
+            false,
             false);
     } catch (const Standard_Failure&) {
         return {};
@@ -3442,6 +3504,7 @@ OcctSceneSnapshotBuilder::PublishBooleanPreviewOverlay(
             true,
             false,
             false,
+            false,
             false);
     } catch (const Standard_Failure&) {
         return {};
@@ -3662,6 +3725,7 @@ OcctSceneSnapshotBuilder::PublishChamferPreviewOverlay(
             false,
             true,
             false,
+            false,
             false);
     } catch (const Standard_Failure&) {
         return {};
@@ -3777,7 +3841,8 @@ OcctSceneSnapshotBuilder::PublishShellPreviewOverlay(
             false,
             false,
             false,
-            true);
+            true,
+            false);
     } catch (const Standard_Failure&) {
         return {};
     } catch (...) {
@@ -3798,6 +3863,7 @@ OcctSceneSnapshotBuilder::PublishEmptyLinearArrayPreviewOverlay(
         false,
         false,
         true,
+        false,
         false);
 }
 
@@ -3889,7 +3955,7 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
                 || aPresentation->Shape().IsNull()
                 || !aPresentation->Shape().IsPartner(aFirstShape)
                 || !aPresentation->Shape().IsEqual(aFirstShape)
-                || !HasCompatibleLinearArrayStyle(
+                || !HasCompatibleArrayPreviewStyle(
                     aFirstPresentation, aPresentation)) {
                 return {};
             }
@@ -3952,7 +4018,191 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
             false,
             false,
             true,
+            false,
             false);
+    } catch (const Standard_Failure&) {
+        return {};
+    } catch (...) {
+        return {};
+    }
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishEmptyRadialArrayPreviewOverlay(
+    const Handle(OcctDocument)& theDocument) noexcept
+{
+    PresentationOverlayContent aContent;
+    aContent.kind = PresentationOverlayKind::RadialArrayPreview;
+    return PublishPresentationOverlayImpl(
+        theDocument,
+        std::move(aContent),
+        false,
+        false,
+        false,
+        false,
+        false,
+        true);
+}
+
+OcctSceneSnapshotBuilder::OverlayPointer
+OcctSceneSnapshotBuilder::PublishRadialArrayPreviewOverlay(
+    const Handle(OcctDocument)& theDocument,
+    const Handle(AIS_Shape)& theSourceShape,
+    const std::vector<Handle(AIS_Shape)>& thePreviewShapes) noexcept
+{
+    const std::size_t anInstanceCount = thePreviewShapes.size();
+    if (![NSThread isMainThread] || theDocument.IsNull()
+        || theSourceShape.IsNull() || myState == nullptr
+        || anInstanceCount == 0
+        || anInstanceCount > kMaxRadialArrayPreviewBodies) {
+        return {};
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
+        const Handle(TDocStd_Document)& aDocument =
+            theDocument->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier()
+                != myState->documentIdentifier) {
+            return {};
+        }
+        const Handle(TDF_Data)& aData = aDocument->GetData();
+        if (aData.IsNull()
+            || aData->Time() != myState->lastFullDocumentTime
+            || theSourceShape->Shape().IsNull()
+            || HasUnsupportedPresentationTexture(theSourceShape)) {
+            return {};
+        }
+
+        const TopoDS_Shape& aSourceShape = theSourceShape->Shape();
+        const gp_Trsf aSourceTransform =
+            theSourceShape->Transformation();
+        Matrix4d aSourceTransformMatrix;
+        if (!MatrixFromTransform(
+                aSourceTransform, aSourceTransformMatrix)) {
+            return {};
+        }
+        const gp_Trsf anInverseSourceTransform =
+            aSourceTransform.Inverted();
+
+        const std::size_t aMaximumPrimitiveCount = std::min(
+            kMaxOverlayPrimitives,
+            kMaxOverlayPrimitiveBindings / anInstanceCount);
+        if (aMaximumPrimitiveCount == 0) {
+            return {};
+        }
+        WorldPreviewItem aSourceItem;
+        if (!ExtractWorldPreviewItem(
+                theSourceShape,
+                "radial-array/source/0",
+                "Radial array source 0",
+                0,
+                RenderRole::RadialArrayPreview,
+                RenderStyle::Shaded,
+                std::nullopt,
+                kMaxOverlayVertices,
+                kMaxOverlayIndices,
+                aMaximumPrimitiveCount,
+                aSourceItem)
+            || !IsTranslationOnlyWorldTransform(
+                aSourceItem.instance.worldFromObject)
+            || !IsProperRigidBoundedWorldTransform(
+                aSourceItem.instance.worldFromObject)
+            || aSourceItem.material.baseColorTextureIndex != -1
+            || aSourceItem.material.emissiveTextureIndex != -1) {
+            return {};
+        }
+
+        const gp_Vec aSourceCenter(
+            aSourceItem.instance.worldFromObject.values[12],
+            aSourceItem.instance.worldFromObject.values[13],
+            aSourceItem.instance.worldFromObject.values[14]);
+        gp_Trsf aSourceCenterTransform;
+        aSourceCenterTransform.SetTranslation(aSourceCenter);
+
+        PresentationOverlayContent aContent;
+        aContent.kind = PresentationOverlayKind::RadialArrayPreview;
+        aContent.meshes.reserve(1);
+        aContent.materials.reserve(1);
+        aContent.instances.reserve(anInstanceCount);
+        std::unordered_set<const AIS_Shape*> aSeenPresentations;
+        aSeenPresentations.reserve(anInstanceCount + 1U);
+        aSeenPresentations.insert(theSourceShape.get());
+        for (std::size_t anIndex = 0;
+             anIndex < anInstanceCount; ++anIndex) {
+            const Handle(AIS_Shape)& aPresentation =
+                thePreviewShapes[anIndex];
+            if (aPresentation.IsNull()
+                || !aSeenPresentations.insert(
+                    aPresentation.get()).second
+                || aPresentation->Shape().IsNull()
+                || !aPresentation->Shape().IsPartner(aSourceShape)
+                || !aPresentation->Shape().IsEqual(aSourceShape)
+                || !HasCompatibleArrayPreviewStyle(
+                    theSourceShape, aPresentation)) {
+                return {};
+            }
+
+            // Scene matrices are column-major and multiply column vectors. The
+            // source triangulation above is already baked through T and then
+            // centered about C. For Mi = R(P,A,theta_i) * T, the proper-rigid
+            // delta is Mi * inverse(T), and the final instance is delta * C.
+            const gp_Trsf aRelativeTransform =
+                aPresentation->Transformation().Multiplied(
+                    anInverseSourceTransform);
+            Matrix4d aRelativeMatrix;
+            if (!MatrixFromTransform(
+                    aRelativeTransform, aRelativeMatrix)
+                || !IsProperRigidBoundedWorldTransform(
+                    aRelativeMatrix)) {
+                return {};
+            }
+            const gp_Trsf anInstanceTransform =
+                aRelativeTransform.Multiplied(
+                    aSourceCenterTransform);
+
+            InstanceSnapshot anInstance = aSourceItem.instance;
+            const std::size_t anOrdinal = anIndex + 1U;
+            anInstance.entityIdentifier =
+                "radial-array/preview/0/"
+                + std::to_string(anOrdinal);
+            anInstance.name =
+                "Radial array preview " + std::to_string(anOrdinal);
+            anInstance.meshIndex = 0;
+            anInstance.role = RenderRole::RadialArrayPreview;
+            anInstance.coordinateSpace = CoordinateSpace::World;
+            anInstance.depthPolicy = DepthPolicy::Scene;
+            anInstance.renderStyle = RenderStyle::Shaded;
+            if (!MatrixFromTransform(
+                    anInstanceTransform,
+                    anInstance.worldFromObject)
+                || !IsProperRigidBoundedWorldTransform(
+                    anInstance.worldFromObject)) {
+                return {};
+            }
+            for (PrimitiveBinding& aBinding :
+                 anInstance.primitiveBindings) {
+                aBinding.materialIndex = 0;
+                aBinding.pickToken = 0;
+                aBinding.visible = true;
+            }
+            aContent.instances.push_back(std::move(anInstance));
+        }
+        aContent.meshes.push_back(std::move(aSourceItem.mesh));
+        aContent.materials.push_back(std::move(aSourceItem.material));
+
+        return PublishPresentationOverlayImpl(
+            theDocument,
+            std::move(aContent),
+            false,
+            false,
+            false,
+            false,
+            false,
+            true);
     } catch (const Standard_Failure&) {
         return {};
     } catch (...) {

@@ -1066,6 +1066,8 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
                 _booleanPreviewStateChangedCallback);
             _objectInteractor->setLinearArrayPreviewStateChangedCallback(
                 _linearArrayPreviewStateChangedCallback);
+            _objectInteractor->setRadialArrayPreviewStateChangedCallback(
+                _radialArrayPreviewStateChangedCallback);
         }
         if(_shapeInteractor == nullptr) {
             _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
@@ -1102,6 +1104,8 @@ void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
         _booleanPreviewStateChangedCallback);
     _objectInteractor->setLinearArrayPreviewStateChangedCallback(
         _linearArrayPreviewStateChangedCallback);
+    _objectInteractor->setRadialArrayPreviewStateChangedCallback(
+        _radialArrayPreviewStateChangedCallback);
     _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
     _shapeInteractor->setBevelPreviewStateChangedCallback(
         _bevelPreviewStateChangedCallback);
@@ -1138,6 +1142,16 @@ void Core3DViewer::setLinearArrayPreviewStateChangedCallback(
     if (_objectInteractor != nullptr) {
         _objectInteractor->setLinearArrayPreviewStateChangedCallback(
             _linearArrayPreviewStateChangedCallback);
+    }
+}
+
+void Core3DViewer::setRadialArrayPreviewStateChangedCallback(
+    std::function<void()> theCallback)
+{
+    _radialArrayPreviewStateChangedCallback = std::move(theCallback);
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->setRadialArrayPreviewStateChangedCallback(
+            _radialArrayPreviewStateChangedCallback);
     }
 }
 
@@ -1816,6 +1830,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 			|| _objectInteractor->hasUnresolvedLinearArray())) {
 		return AssetImportResult::Busy;
 	}
+	if (_objectInteractor != nullptr
+		&& (_objectInteractor->hasActiveRadialArray()
+			|| _objectInteractor->hasUnresolvedRadialArray())) {
+		return AssetImportResult::Busy;
+	}
 	if (_shapeInteractor != nullptr
 		&& (_shapeInteractor->hasActiveShell()
 			|| _shapeInteractor->hasUnresolvedShell())) {
@@ -2043,6 +2062,11 @@ bool Core3DViewer::redrawDocument() noexcept {
 			|| _objectInteractor->hasUnresolvedLinearArray())) {
 		return false;
 	}
+	if (_objectInteractor != nullptr
+		&& (_objectInteractor->hasActiveRadialArray()
+			|| _objectInteractor->hasUnresolvedRadialArray())) {
+		return false;
+	}
 #ifdef DEBUG
     const Standard_Boolean shouldForceTraversalFailure = std::exchange(
         _debugForceNextTransformInspectorRedrawFailure,
@@ -2176,6 +2200,14 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer
 Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
+    if (_objectInteractor != nullptr
+        && _objectInteractor->radialArrayPreviewState()
+            == RadialArrayPreviewState::OutcomeUnknown) {
+        // The geometry command or separate reference-axis edit may already
+        // have committed. Do not advance committed renderer revision state
+        // until the controller's retained ledger proves the exact outcome.
+        return {};
+    }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->shellPreviewState()
             == ShellPreviewState::OutcomeUnknown) {
@@ -2232,6 +2264,24 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
     }
     if (_objectInteractor == nullptr) {
         return {};
+    }
+    if (_objectInteractor->hasActiveRadialArray()) {
+        RadialArrayPreviewCapture aRadialArrayPreview;
+        if (!_objectInteractor->captureRadialArrayPreview(
+                aRadialArrayPreview)) {
+            if (!_objectInteractor
+                    ->canPublishEmptyRadialArrayPreview()) {
+                // Failed, committing, outcome-unknown, stale-reference, and
+                // textured states remain exclusively authoritative in OCCT.
+                return {};
+            }
+            return _sceneSnapshotBuilder
+                .PublishEmptyRadialArrayPreviewOverlay(myDoc);
+        }
+        return _sceneSnapshotBuilder.PublishRadialArrayPreviewOverlay(
+            myDoc,
+            aRadialArrayPreview.sourcePresentation,
+            aRadialArrayPreview.previewObjects);
     }
     if (_objectInteractor->hasActiveLinearArray()) {
         std::vector<Handle(AIS_Shape)> aLinearArrayPreviewObjects;
@@ -2839,6 +2889,10 @@ void Core3DViewer::Select(int theX, int theY) {
         || _objectInteractor->hasUnresolvedLinearArray()) {
         return;
     }
+    if (_objectInteractor->hasActiveRadialArray()
+        || _objectInteractor->hasUnresolvedRadialArray()) {
+        return;
+    }
     if (_shapeInteractor->hasActiveExtrusion()) {
         return;
     }
@@ -2916,6 +2970,11 @@ void Core3DViewer::Select(int theX, int theY) {
 			return;
 		}
 		if (_objectInteractor != nullptr) {
+			if ((_objectInteractor->hasActiveRadialArray()
+					|| _objectInteractor->hasUnresolvedRadialArray())
+				&& !_objectInteractor->cancelRadialArray()) {
+				return;
+			}
 			if ((_objectInteractor->hasActiveLinearArray()
 					|| _objectInteractor->hasUnresolvedLinearArray())
 				&& !_objectInteractor->cancelLinearArray()) {

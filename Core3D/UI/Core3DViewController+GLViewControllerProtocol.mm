@@ -72,6 +72,23 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
     [self viewDidChangeViewportPresentationOverlay];
 }
 
+- (void)viewerDidChangeRadialArrayPresentationOverlay:(id)sender {
+    (void)sender;
+    if (_currentGizmoType != PrimitiveGizmoTypeRadialArray
+        || [GLController getGizmoType] != PrimitiveGizmoTypeRadialArray) {
+        return;
+    }
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:
+            PrimitiveGizmoTypeRadialArray];
+    if (!status.active) {
+        return;
+    }
+    self.can_apply = status.canApply;
+    [self viewDidChangeViewportPresentationOverlay];
+    [self sendNotifyUIState:UIStateChangingApply];
+}
+
 - (void)viewerDidChangeShellPresentationOverlay:(id)sender {
     (void)sender;
     if (_currentGizmoType != PrimitiveGizmoTypeShell
@@ -173,6 +190,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
         case PrimitiveGizmoTypeIntersect:
         case PrimitiveGizmoTypeExtrude:
         case PrimitiveGizmoTypeLinearArray:
+        case PrimitiveGizmoTypeRadialArray:
         case PrimitiveGizmoTypeShell:
             self.can_delete = false;
             self.can_duplicate = false;
@@ -204,6 +222,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                                          @(PrimitiveGizmoTypeChamfer),
                                          @(PrimitiveGizmoTypeMirror),
                                          @(PrimitiveGizmoTypeLinearArray),
+                                         @(PrimitiveGizmoTypeRadialArray),
                                          @(PrimitiveGizmoTypeSubtract),
                                          @(PrimitiveGizmoTypeUnion),
                                          @(PrimitiveGizmoTypeIntersect),
@@ -235,6 +254,11 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply =
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeLinearArray].canApply;
+                break;
+            case PrimitiveGizmoTypeRadialArray:
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeRadialArray].canApply;
                 break;
             case PrimitiveGizmoTypeShell:
                 self.can_apply =
@@ -300,6 +324,14 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply =
                     [self modelingPreviewStatusForGizmoType:
                         PrimitiveGizmoTypeLinearArray].canApply;
+                break;
+            case PrimitiveGizmoTypeRadialArray:
+                // The source remains authoritative and selected while preview
+                // instances are nonselectable; retained typed state wins over
+                // a transiently empty AIS selection publication.
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeRadialArray].canApply;
                 break;
             case PrimitiveGizmoTypeShell:
                 // The captured opening face remains authoritative while the

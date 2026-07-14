@@ -113,6 +113,13 @@ const Standard_GUID& Core3DDuplicateCommandOwnerAttributeID()
     return anId;
 }
 
+const Standard_GUID& Core3DRadialArrayCommandOwnerAttributeID()
+{
+    static const Standard_GUID anId(
+        "2DF9F8BE-F297-4CFD-8D93-A40346EBEF3A");
+    return anId;
+}
+
 namespace {
 
 Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
@@ -1345,7 +1352,7 @@ const std::array<const Standard_GUID*, 7>& ReferenceAxisAttributeIDs()
 
 constexpr Standard_Size kMaximumGeometryDocumentLabels = 100'000;
 
-Standard_Boolean ValidateDuplicateCommandOwnerSentinelDocument(
+Standard_Boolean ValidateCommandOwnerSentinelsDocument(
     const Handle(TDocStd_Document)& theDocument)
 {
     try {
@@ -1359,16 +1366,23 @@ Standard_Boolean ValidateDuplicateCommandOwnerSentinelDocument(
             return Standard_False;
         }
         const auto isValidLabel = [&](const TDF_Label& theLabel) {
-            Handle(TDF_Attribute) anAttribute;
-            if (!theLabel.FindAttribute(
-                    Core3DDuplicateCommandOwnerAttributeID(),
-                    anAttribute)) {
-                return true;
+            const std::array<const Standard_GUID*, 2> anIds = {{
+                &Core3DDuplicateCommandOwnerAttributeID(),
+                &Core3DRadialArrayCommandOwnerAttributeID(),
+            }};
+            for (const Standard_GUID* anId : anIds) {
+                Handle(TDF_Attribute) anAttribute;
+                if (!theLabel.FindAttribute(*anId, anAttribute)) {
+                    continue;
+                }
+                if (!theLabel.IsEqual(aMain)
+                    || anAttribute.IsNull()
+                    || Handle(TDataStd_Integer)::DownCast(
+                        anAttribute).IsNull()) {
+                    return false;
+                }
             }
-            return theLabel.IsEqual(aMain)
-                && !anAttribute.IsNull()
-                && !Handle(TDataStd_Integer)::DownCast(
-                        anAttribute).IsNull();
+            return true;
         };
         if (!isValidLabel(aRoot)) {
             return Standard_False;
@@ -2935,7 +2949,7 @@ Standard_Boolean ValidateGeometryDocument(
     try {
         OCC_CATCH_SIGNALS
         if (document.IsNull() || document->GetData().IsNull()
-            || !ValidateDuplicateCommandOwnerSentinelDocument(document)
+            || !ValidateCommandOwnerSentinelsDocument(document)
             || !ValidateReferenceAxisDocument(document)) {
             return Standard_False;
         }

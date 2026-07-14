@@ -13,6 +13,7 @@
 #include <AIS_Shape.hxx>
 #include "BooleanOperationController.hpp"
 #include "LinearArrayOperationController.hpp"
+#include "RadialArrayOperationController.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +44,7 @@ namespace core3d {
         PrimitiveGizmoTypeIntersect,
         PrimitiveGizmoTypeLinearArray,
         PrimitiveGizmoTypeShell,
+        PrimitiveGizmoTypeRadialArray = 12,
     };
 
     enum class PresentationOverlayCaptureStatus : std::uint8_t {
@@ -93,6 +95,8 @@ namespace core3d {
         std::shared_ptr<BooleanOperationController> _booleanOpController;
         std::shared_ptr<LinearArrayOperationController>
             _linearArrayController;
+        std::shared_ptr<RadialArrayOperationController>
+            _radialArrayController;
         Handle(Core3DManipulator) _manipulator;
 //        std::vector<TopoDS_Shape> _beforeTransformObjects;
     public:
@@ -234,6 +238,65 @@ namespace core3d {
             Standard_Size limit) noexcept;
         Standard_Boolean
             debugMutateFirstLinearArraySourcePersistedTransform() noexcept;
+#endif
+        Standard_Boolean beginRadialArray() noexcept;
+        RadialArrayApplyResult applyRadialArray() noexcept;
+        Standard_Boolean cancelRadialArray() noexcept;
+        Standard_Boolean setRadialArrayCount(
+            Standard_Integer count) noexcept;
+        Standard_Boolean setRadialArraySweepDegrees(
+            Standard_Real sweepDegrees) noexcept;
+        Standard_Integer radialArrayCount() const noexcept;
+        Standard_Real radialArraySweepDegrees() const noexcept;
+        Standard_Real radialArrayMetersPerUnit() const noexcept;
+        std::pair<Standard_Integer, Standard_Integer>
+            radialArrayCountRange() const noexcept;
+        std::pair<Standard_Real, Standard_Real>
+            radialArraySweepDegreesRange() const noexcept;
+        OcctReferenceAxisReadState radialArrayReferenceAxis(
+            OcctReferenceAxis& axis) const noexcept;
+        std::uint64_t radialArrayReferenceAuthorityToken() const noexcept;
+        Standard_Boolean convertRadialArrayReferenceAxisSpaces(
+            OcctReferenceSpace pivotSpace,
+            OcctReferenceSpace directionSpace,
+            std::uint64_t expectedAuthorityToken,
+            OcctReferenceAxis& axis) const noexcept;
+        RadialArrayReferenceEditResult setRadialArrayReferenceAxis(
+            const OcctReferenceAxis& axis,
+            std::uint64_t expectedAuthorityToken) noexcept;
+        RadialArrayReferenceEditResult resetRadialArrayReferenceAxis(
+            std::uint64_t expectedAuthorityToken) noexcept;
+        Standard_Boolean canApplyRadialArray() const noexcept;
+        Standard_Boolean hasActiveRadialArray() const noexcept;
+        Standard_Boolean hasUnresolvedRadialArray() const noexcept;
+        RadialArrayPreviewState radialArrayPreviewState() const noexcept;
+        std::uint64_t radialArrayPreviewGeneration() const noexcept;
+        Standard_Boolean captureRadialArrayPreview(
+            RadialArrayPreviewCapture& capture) const noexcept;
+        Standard_Boolean canPublishEmptyRadialArrayPreview() const noexcept;
+        void setRadialArrayPreviewStateChangedCallback(
+            std::function<void()> callback);
+#ifdef DEBUG
+        RadialArrayPreviewDebugState
+            debugRadialArrayPreviewState() const noexcept;
+        void debugSetRadialArrayBeginOwnedCommandMismatchCount(
+            Standard_Size count) noexcept;
+        void debugSetRadialArrayTransactionFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetRadialArrayAbortFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetRadialArrayEraseFailureCount(
+            Standard_Size count) noexcept;
+        void debugSetRadialArrayApplyCommitMode(
+            Standard_Integer mode) noexcept;
+        void debugSetRadialArrayPostCommitInspectMode(
+            Standard_Integer mode) noexcept;
+        void debugSetMaximumRadialArrayTopologyNodes(
+            Standard_Size limit) noexcept;
+        Standard_Boolean
+            debugMutateRadialArraySourcePersistedTransform() noexcept;
+        void debugSetRadialArrayReferenceEditCommitMode(
+            Standard_Integer mode) noexcept;
 #endif
         MirrorApplyResult applyMirror() noexcept;
 		Standard_Boolean cancelMirror() noexcept;

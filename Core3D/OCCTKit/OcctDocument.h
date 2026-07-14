@@ -100,6 +100,12 @@ enum class OcctReferenceAxisReadState : Standard_Integer
 Standard_EXPORT const Standard_GUID&
 Core3DDuplicateCommandOwnerAttributeID();
 
+//! Persistent internal attribute used to prove ownership of one Radial Array
+//! OCAF command across fail-closed commit/abort reconciliation. Like the
+//! Duplicate sentinel, it may exist only as TDataStd_Integer on Main().
+Standard_EXPORT const Standard_GUID&
+Core3DRadialArrayCommandOwnerAttributeID();
+
 //! Validate/canonicalize the narrow texture representation produced by the
 //! mobile material editor. Only complete, single-frame PNG/JPEG images within
 //! the shared project/snapshot safety budgets are accepted. The returned
