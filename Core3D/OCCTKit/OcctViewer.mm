@@ -319,9 +319,11 @@ bool OcctViewer::RenderFrame()
     try {
         myView->RenderFrame();
         return true;
-    } catch (const Standard_Failure& failure) {
-        std::cout << "Viewport render failure: "
-                  << failure.GetMessageString() << std::endl;
+    } catch (const Standard_Failure&) {
+        // GLView owns the bounded consecutive-failure policy and emits one
+        // terminal pause diagnostic. Never log here per render attempt: a
+        // damaged graphics context can otherwise grow CoreSimulator.log at
+        // display-link frequency while recovery is being scheduled.
         return false;
     } catch (...) {
         return false;
