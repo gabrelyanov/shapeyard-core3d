@@ -7,6 +7,7 @@
 
 #import "GLViewController.h"
 #import "Core3DViewController.h"
+#import "Core3DViewController+AvailabilityManager.h"
 #import "Core3DViewController+PrimitiveManager.h"
 #import "Core3DViewController+GLViewControllerProtocol.h"
 #import <Core3D/AssetBundle.h>
@@ -25,6 +26,7 @@
 #include "XCAFDoc_VisMaterialTool.hxx"
 #include "Image_Texture.hxx"
 #include "BRep_Tool.hxx"
+#include "BRepCheck_Analyzer.hxx"
 #include "BRepTools.hxx"
 #include "BRepPrimAPI_MakeBox.hxx"
 #include "BRepPrimAPI_MakePrism.hxx"
@@ -35,6 +37,9 @@
 #include "TopoDS_CompSolid.hxx"
 #include "TopoDS.hxx"
 #include "TopoDS_Face.hxx"
+#include "TopoDS_Shell.hxx"
+#include "TopoDS_Solid.hxx"
+#include "TopoDS_Iterator.hxx"
 #include "Poly_Triangle.hxx"
 #include "Poly_ListOfTriangulation.hxx"
 #include "Poly_Triangulation.hxx"
@@ -85,6 +90,67 @@ bool Core3DTryBooleanActionForGizmo(
         default:
             return false;
     }
+}
+
+bool Core3DIsModelingOperationGizmo(
+    const PrimitiveGizmoType type) noexcept {
+    switch (type) {
+        case PrimitiveGizmoTypeChamfer:
+        case PrimitiveGizmoTypeSubtract:
+        case PrimitiveGizmoTypeUnion:
+        case PrimitiveGizmoTypeMirror:
+        case PrimitiveGizmoTypeExtrude:
+        case PrimitiveGizmoTypeIntersect:
+        case PrimitiveGizmoTypeLinearArray:
+        case PrimitiveGizmoTypeShell:
+        case PrimitiveGizmoTypeRadialArray:
+            return true;
+        case PrimitiveGizmoTypeNone:
+        case PrimitiveGizmoTypeMoveRotate:
+        case PrimitiveGizmoTypeScale:
+        case PrimitiveGizmoTypeMaterial:
+            return false;
+    }
+    return false;
+}
+
+bool Core3DSelectionTypeAllowsGizmo(
+    const PrimitiveSelectionType selectionType,
+    const PrimitiveGizmoType gizmoType) noexcept {
+    if (gizmoType == PrimitiveGizmoTypeNone) {
+        return true;
+    }
+    switch (selectionType) {
+        case PrimitiveSelectionTypeShape:
+            switch (gizmoType) {
+                case PrimitiveGizmoTypeMoveRotate:
+                case PrimitiveGizmoTypeScale:
+                case PrimitiveGizmoTypeChamfer:
+                case PrimitiveGizmoTypeSubtract:
+                case PrimitiveGizmoTypeUnion:
+                case PrimitiveGizmoTypeMirror:
+                case PrimitiveGizmoTypeMaterial:
+                case PrimitiveGizmoTypeIntersect:
+                case PrimitiveGizmoTypeLinearArray:
+                case PrimitiveGizmoTypeRadialArray:
+                    return true;
+                case PrimitiveGizmoTypeNone:
+                case PrimitiveGizmoTypeExtrude:
+                case PrimitiveGizmoTypeShell:
+                    return false;
+            }
+            return false;
+        case PrimitiveSelectionTypeFace:
+            return gizmoType == PrimitiveGizmoTypeChamfer
+                || gizmoType == PrimitiveGizmoTypeExtrude
+                || gizmoType == PrimitiveGizmoTypeShell;
+        case PrimitiveSelectionTypeEdge:
+            return gizmoType == PrimitiveGizmoTypeChamfer;
+        case PrimitiveSelectionTypeNone:
+        case PrimitiveSelectionTypeVertex:
+            return false;
+    }
+    return false;
 }
 
 void Core3DAbortCommandNoThrow(
@@ -631,6 +697,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 #endif
 }
 
+- (BOOL)core3d_canBeginCommittedEdit;
+
 @end
 
 @implementation Core3DViewController {
@@ -701,9 +769,17 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (BOOL)core3d_canBeginCommittedEdit {
+    return [NSThread isMainThread]
+        && GLController != nil
+        && GLController.viewer != nullptr
+        && GLController.viewer->canBeginCommittedEdit();
+}
+
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
     if ((self.selectedModelCapabilities
-            & Core3DModelCapabilityMaterial) == 0) {
+            & Core3DModelCapabilityMaterial) == 0
+        || ![self core3d_canBeginCommittedEdit]) {
         return;
     }
     auto context = GLController.viewer->AisContext();
@@ -821,7 +897,8 @@ void Core3DAddDebugOrphanVisualMaterial(
         return;
     }
 	if ((self.selectedModelCapabilities
-			& Core3DModelCapabilityMaterial) == 0) {
+			& Core3DModelCapabilityMaterial) == 0
+		|| ![self core3d_canBeginCommittedEdit]) {
 		return;
 	}
 
@@ -1001,7 +1078,8 @@ void Core3DAddDebugOrphanVisualMaterial(
             @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+    if (![self core3d_canBeginCommittedEdit]
+        || transaction.IsNull() || transaction->HasOpenCommand()) {
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"Finish the current modeling operation before editing a texture.");
@@ -1192,7 +1270,8 @@ void Core3DAddDebugOrphanVisualMaterial(
             @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+    if (![self core3d_canBeginCommittedEdit]
+        || transaction.IsNull() || transaction->HasOpenCommand()) {
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"Finish the current modeling operation before editing a texture.");
@@ -1382,7 +1461,8 @@ void Core3DAddDebugOrphanVisualMaterial(
             @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+    if (![self core3d_canBeginCommittedEdit]
+        || transaction.IsNull() || transaction->HasOpenCommand()) {
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"Finish the current modeling operation before editing a texture.");
@@ -1603,7 +1683,8 @@ void Core3DAddDebugOrphanVisualMaterial(
             @"Select only editable model objects before editing a texture.");
     }
     auto transaction = doc->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) {
+    if (![self core3d_canBeginCommittedEdit]
+        || transaction.IsNull() || transaction->HasOpenCommand()) {
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorUnavailable,
             @"Finish the current modeling operation before editing a texture.");
@@ -1857,6 +1938,12 @@ void Core3DAddDebugOrphanVisualMaterial(
         case Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation:
             suffix = @"marked-triangle-mesh-located-triangulation";
             break;
+        case Core3DDebugGeometryFixtureMarkedBRepFaceRoot:
+            suffix = @"marked-brep-face-root";
+            break;
+        case Core3DDebugGeometryFixtureMarkedBRepSubshapeRoots:
+            suffix = @"marked-brep-subshape-roots";
+            break;
     }
     if (suffix == nil) {
         return nil;
@@ -1904,6 +1991,19 @@ void Core3DAddDebugOrphanVisualMaterial(
                 return Core3DAddDebugGeometryDefinition(
                     shapeTool,
                     Core3DMakeDebugMixedGeometryDefinition());
+            };
+            const auto addBRepRoot = [&](const TopAbs_ShapeEnum rootType,
+                                         const Standard_Real x) {
+                const TopoDS_Shape solid = BRepPrimAPI_MakeBox(
+                    gp_Pnt(x, -10.0, -10.0),
+                    20.0, 20.0, 20.0).Shape();
+                TopExp_Explorer root(solid, rootType);
+                if (!root.More() || root.Current().IsNull()) {
+                    throw Standard_Failure(
+                        "Unable to extract BRep root fixture");
+                }
+                return Core3DAddDebugGeometryDefinition(
+                    shapeTool, root.Current());
             };
 
             switch (mode) {
@@ -1978,6 +2078,18 @@ void Core3DAddDebugOrphanVisualMaterial(
                 case Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation:
                     Core3DSetDebugGeometryRepresentation(
                         addLocatedTriangleMesh(), triangleMesh);
+                    return;
+                case Core3DDebugGeometryFixtureMarkedBRepFaceRoot:
+                    Core3DSetDebugGeometryRepresentation(
+                        addBRepRoot(TopAbs_FACE, -10.0), bRep);
+                    return;
+                case Core3DDebugGeometryFixtureMarkedBRepSubshapeRoots:
+                    Core3DSetDebugGeometryRepresentation(
+                        addBRepRoot(TopAbs_WIRE, -40.0), bRep);
+                    Core3DSetDebugGeometryRepresentation(
+                        addBRepRoot(TopAbs_EDGE, 0.0), bRep);
+                    Core3DSetDebugGeometryRepresentation(
+                        addBRepRoot(TopAbs_VERTEX, 40.0), bRep);
                     return;
             }
         });
@@ -3453,6 +3565,204 @@ void Core3DAddDebugOrphanVisualMaterial(
     return [GLController debugSelectedShapeCount];
 }
 
+- (NSDictionary<NSString *, id> *)debugTopologySelectionState {
+    NSMutableDictionary<NSString *, id> *state = [@{
+        @"ready": @NO,
+        @"acceptedMode": @(PrimitiveSelectionTypeNone),
+        @"rawSelectedOwnerCount": @0,
+        @"selectedCount": @0,
+        @"invalidSelectedOwnerCount": @0,
+        @"selectedKind": @0,
+        @"topologyIndex": @(-1),
+        @"presentationRepresentation": @(-1),
+        @"entityIdentifier": @"",
+        @"hasDetected": @NO,
+        @"singleSelectionExact": @NO,
+        @"selectionMatchesMode": @NO,
+        @"manipulatorAttached": @NO,
+        @"publicMode": @(PrimitiveSelectionTypeNone),
+        @"publicMatchesNative": @NO,
+        @"activeTool": @(PrimitiveGizmoTypeNone),
+        @"canApply": @NO,
+        @"canDelete": @NO,
+        @"canDuplicate": @NO,
+        @"canApplyMaterial": @NO,
+        @"availableToolMask": @0,
+    } mutableCopy];
+    if (![NSThread isMainThread]) {
+        // The native telemetry bridge also fails closed off-main. Do not defeat
+        // that boundary by reading public ivars or capability/controller state.
+        return [state copy];
+    }
+    if (GLController != nil) {
+        NSDictionary<NSString *, id> *nativeState =
+            [GLController debugTopologySelectionState];
+        if (nativeState != nil) {
+            [state addEntriesFromDictionary:nativeState];
+        }
+    }
+
+    unsigned long long availableToolMask = 0;
+    // Use the public capability-filtered rail, not its raw candidate backing
+    // array. TriangleMesh selections intentionally retain object tools while
+    // filtering Scale and BRep-only topology operations from admission.
+    for (NSNumber *tool in [self availableGizmoTypes]) {
+        const NSUInteger rawValue = tool.unsignedIntegerValue;
+        if (rawValue < 64) {
+            availableToolMask |= 1ULL << rawValue;
+        }
+    }
+    const PrimitiveSelectionType acceptedMode =
+        (PrimitiveSelectionType)[state[@"acceptedMode"] unsignedIntegerValue];
+    state[@"publicMode"] = @(_currentSelectionType);
+    state[@"publicMatchesNative"] = @(
+        [state[@"ready"] boolValue]
+        && acceptedMode == _currentSelectionType);
+    state[@"activeTool"] = @(_currentGizmoType);
+    state[@"canApply"] = @([self canApply]);
+    state[@"canDelete"] = @([self canDelete]);
+    state[@"canDuplicate"] = @([self canDuplicate]);
+    state[@"canApplyMaterial"] = @(self.can_apply_material);
+    state[@"availableToolMask"] = @(availableToolMask);
+    return [state copy];
+}
+
+- (BOOL)debugDetectAnyDisplayedShape {
+    return [GLController debugDetectAnyDisplayedShape];
+}
+
+- (BOOL)debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+	return [GLController
+		debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
+			entityIdentifier
+		faceTopologyIndex:faceTopologyIndex];
+}
+
+- (BOOL)debugDetectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [GLController
+		debugDetectReversedEdgeTopologyIndexWithEntityIdentifier:
+			entityIdentifier
+		edgeTopologyIndex:edgeTopologyIndex];
+}
+
+- (BOOL)debugDetectAlternatingForeignSelectableEdgeWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [GLController
+		debugDetectAlternatingForeignSelectableEdgeWithEntityIdentifier:
+			entityIdentifier
+		foreignEntityIdentifier:foreignEntityIdentifier
+		edgeTopologyIndex:edgeTopologyIndex];
+}
+
+- (BOOL)debugSelectAnyDisplayedTopologyElement {
+    return [GLController debugSelectAnyDisplayedTopologyElement];
+}
+
+- (BOOL)debugSelectFaceTopologyIndicesWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices {
+    return [GLController
+        debugSelectFaceTopologyIndicesWithEntityIdentifier:entityIdentifier
+        faceTopologyIndices:faceTopologyIndices];
+}
+
+- (BOOL)debugSelectReversedFaceTopologyIndexWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+    return [GLController
+        debugSelectReversedFaceTopologyIndexWithEntityIdentifier:
+            entityIdentifier
+        faceTopologyIndex:faceTopologyIndex];
+}
+
+- (BOOL)debugSelectEdgeTopologyIndicesWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices {
+	return [GLController
+		debugSelectEdgeTopologyIndicesWithEntityIdentifier:entityIdentifier
+		edgeTopologyIndices:edgeTopologyIndices];
+}
+
+- (BOOL)debugSelectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [GLController
+		debugSelectReversedEdgeTopologyIndexWithEntityIdentifier:
+			entityIdentifier
+		edgeTopologyIndex:edgeTopologyIndex];
+}
+
+- (BOOL)debugSelectValidAndForeignEdgeOwnersWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [GLController
+		debugSelectValidAndForeignEdgeOwnersWithEntityIdentifier:
+			entityIdentifier
+		foreignEntityIdentifier:foreignEntityIdentifier
+		edgeTopologyIndex:edgeTopologyIndex];
+}
+
+- (Core3DSelectionTypeChangeResult)
+    debugTrySetNativeSelectionTypeWithoutPublicSync:
+        (PrimitiveSelectionType)mode {
+    if (![NSThread isMainThread] || GLController == nil) {
+        return Core3DSelectionTypeChangeResultNotReady;
+    }
+    return [GLController trySetSelectionType:mode];
+}
+
+- (void)debugInvokeNativeSelectAll {
+    [GLController selectAll];
+}
+
+- (void)debugInvokeNativeDeleteSelected {
+    [GLController deleteSelected];
+}
+
+- (PrimitiveGizmoType)debugNativeGizmoType {
+    return GLController == nil
+        ? PrimitiveGizmoTypeNone
+        : [GLController getGizmoType];
+}
+
+- (void)debugSetNativeGizmoTypeWithoutPublicSync:
+    (PrimitiveGizmoType)type {
+    [GLController setGizmoType:type];
+}
+
+- (void)debugRefreshSelectionState {
+    [GLController refreshSelectionState];
+}
+
+- (BOOL)debugSelectRetainedOperationPresentation {
+    return [GLController debugSelectRetainedOperationPresentation];
+}
+
+- (BOOL)debugSetFirstDisplayedShapeSelectionMode:
+    (PrimitiveSelectionType)mode {
+    return [GLController debugSetFirstDisplayedShapeSelectionMode:mode];
+}
+
+- (BOOL)debugSetDisplayedShapeSelectionModeWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    mode:(PrimitiveSelectionType)mode {
+    return [GLController
+        debugSetDisplayedShapeSelectionModeWithEntityIdentifier:
+            entityIdentifier
+        mode:mode];
+}
+
+- (void)debugSetSelectionModeVerificationFailureCount:(NSUInteger)count {
+    [GLController debugSetSelectionModeVerificationFailureCount:count];
+}
+
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit {
     [GLController debugSetMaximumDisplayTraversalNodes:limit];
 }
@@ -3624,6 +3934,83 @@ void Core3DAddDebugOrphanVisualMaterial(
                     "Unable to create oversized extrusion fixture solid");
             }
         });
+}
+
+- (NSData *_Nullable)debugInvalidBRepSolidBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(
+        @"invalid-brep-solid-face-admission-fixture",
+        [](const Handle(TDocStd_Document)& document) {
+            const TopoDS_Shape box =
+                BRepPrimAPI_MakeBox(50.0, 50.0, 50.0).Shape();
+            BRep_Builder builder;
+            TopoDS_Shell openShell;
+            builder.MakeShell(openShell);
+            Standard_Integer faceCount = 0;
+            for (TopExp_Explorer face(box, TopAbs_FACE);
+                 face.More() && faceCount < 5; face.Next()) {
+                builder.Add(openShell, face.Current());
+                ++faceCount;
+            }
+            TopoDS_Solid invalidSolid;
+            builder.MakeSolid(invalidSolid);
+            builder.Add(invalidSolid, openShell);
+            const Handle(XCAFDoc_ShapeTool) shapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (faceCount != 5 || invalidSolid.IsNull()
+                || invalidSolid.ShapeType() != TopAbs_SOLID
+                || BRepCheck_Analyzer(
+                    invalidSolid, Standard_True).IsValid()
+                || shapeTool.IsNull()
+                || shapeTool->AddShape(
+                    invalidSolid,
+                    Standard_False,
+                    Standard_True).IsNull()) {
+                throw Standard_Failure(
+                    "Unable to create invalid BRep admission fixture");
+            }
+        });
+}
+
+- (NSData *_Nullable)debugOccurrenceAmplifiedBevelSolidBinXCAFFixtureData {
+	return Core3DCreateDebugBinXCAFFixture(
+		@"occurrence-amplified-bevel-solid-fixture",
+		[](const Handle(TDocStd_Document)& document) {
+			const TopoDS_Shape box =
+				BRepPrimAPI_MakeBox(50.0, 50.0, 50.0).Shape();
+			TopExp_Explorer shellExplorer(box, TopAbs_SHELL);
+			if (!shellExplorer.More()) {
+				throw Standard_Failure(
+					"Unable to resolve shared Bevel fixture shell");
+			}
+			const TopoDS_Shell sharedShell =
+				TopoDS::Shell(shellExplorer.Current());
+			BRep_Builder builder;
+			TopoDS_Solid amplifiedSolid;
+			builder.MakeSolid(amplifiedSolid);
+			constexpr Standard_Size occurrenceCount = 96;
+			for (Standard_Size index = 0; index < occurrenceCount; ++index) {
+				builder.Add(amplifiedSolid, sharedShell);
+			}
+			Standard_Size directShellCount = 0;
+			for (TopoDS_Iterator child(
+					 amplifiedSolid, Standard_False, Standard_False);
+				 child.More(); child.Next()) {
+				++directShellCount;
+			}
+			const Handle(XCAFDoc_ShapeTool) shapeTool =
+				XCAFDoc_DocumentTool::ShapeTool(document->Main());
+			if (amplifiedSolid.IsNull()
+				|| amplifiedSolid.ShapeType() != TopAbs_SOLID
+				|| directShellCount != occurrenceCount
+				|| shapeTool.IsNull()
+				|| shapeTool->AddShape(
+					amplifiedSolid,
+					Standard_False,
+					Standard_True).IsNull()) {
+				throw Standard_Failure(
+					"Unable to create occurrence-amplified Bevel fixture");
+			}
+		});
 }
 
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData {
@@ -4336,10 +4723,18 @@ void Core3DAddDebugOrphanVisualMaterial(
 
     if (result == Core3DTransformInspectorPositionCommitResultCommitted) {
         // NotifyChanges already schedules the OpenGL frame and its one scene
-        // invalidation callback. Publish the Metal snapshot/UI state here
-        // without requesting a duplicate renderer-neutral invalidation.
+        // invalidation callback. redrawDocument() may have recreated the
+        // interactors without uniquely restoring the selected owner; publish
+        // capabilities only after the recreated-gizmo callback and an exact
+        // synchronous selection refresh.
+        [GLController refreshSelectionState];
         [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingGizmo
+        [self sendNotifyUIState:UIStateChangingSelection
+                                 | UIStateChangingGizmo
+                                 | UIStateChangingDelete
+                                 | UIStateChangingDuplicate
+                                 | UIStateChangingApply
+                                 | UIStateChangingApplyMaterial
                                  | UIStateChangingHistory];
     }
     return result;
@@ -4509,7 +4904,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     (NSInteger)mode {
     if (![NSThread isMainThread]
         || GLController == nil || GLController.viewer == nullptr
-        || mode < 0 || mode > 2) {
+        || mode < 0 || mode > 3) {
         return;
     }
     GLController.viewer
@@ -4985,6 +5380,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController debugSetBooleanAbortFailureCount:count];
 }
 
+- (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count {
+    [GLController debugSetBooleanPostCommitInspectFailureCount:count];
+}
+
 - (void)debugSimulateBooleanMemoryWarning {
     [GLController didReceiveMemoryWarning];
 }
@@ -5137,6 +5536,10 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (BOOL)debugMutateShellSourcePersistedTransform {
     return [GLController debugMutateShellSourcePersistedTransform];
+}
+
+- (BOOL)debugMutateShellSourcePersistedShape {
+    return [GLController debugMutateShellSourcePersistedShape];
 }
 
 - (BOOL)debugBeginBevelWithEntityIdentifier:(NSString *)entityIdentifier
@@ -5363,30 +5766,121 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
-- (void)setSelectionType:(PrimitiveSelectionType)type {
-	if (_currentSelectionType != type) {
-		[GLController setSelectionType:type];
-		if ([GLController getSelectionType] != type) {
-			if (_currentGizmoType == PrimitiveGizmoTypeMirror
-				|| _currentGizmoType
-					== PrimitiveGizmoTypeLinearArray
-				|| _currentGizmoType
-					== PrimitiveGizmoTypeRadialArray
-				|| _currentGizmoType == PrimitiveGizmoTypeShell) {
-				const Core3DModelingPreviewStatus aStatus =
-					[self modelingPreviewStatusForGizmoType:
-						_currentGizmoType];
-				self.can_apply = aStatus.canApply;
-				[self viewDidChangeViewportPresentationState];
-				[self sendNotifyUIState:UIStateChangingSelection
-									 | UIStateChangingGizmo
-									 | UIStateChangingApply];
-			}
-			return;
-		}
-		_currentSelectionType = type;
+- (Core3DSelectionTypeChangeResult)
+    trySetSelectionType:(PrimitiveSelectionType)type
+{
+    if (![NSThread isMainThread]) {
+        return Core3DSelectionTypeChangeResultWrongThread;
+    }
+    if (GLController == nil) {
+        // Objective-C scalar messaging to nil returns zero, which is the raw
+        // value for Succeeded. Guard the public authority before forwarding so
+        // an uninstalled viewer is reported truthfully and without side effects.
+        return Core3DSelectionTypeChangeResultNotReady;
+    }
+    const BOOL requestedCurrentPublicMode = _currentSelectionType == type;
+    const BOOL wasExactSameMode = requestedCurrentPublicMode
+        && [GLController getSelectionType] == type;
+    const PrimitiveGizmoType toolBeforeRequest = _currentGizmoType;
+    const BOOL tracksModelingOperation =
+        Core3DIsModelingOperationGizmo(toolBeforeRequest);
+    const Core3DModelingPreviewStatus operationBeforeRequest =
+        tracksModelingOperation
+            ? [self modelingPreviewStatusForGizmoType:toolBeforeRequest]
+            : Core3DModelingPreviewStatus{};
+    const Core3DSelectionTypeChangeResult result =
+        [GLController trySetSelectionType:type];
+    const Core3DModelingPreviewStatus operationAfterRequest =
+        tracksModelingOperation
+            ? [self modelingPreviewStatusForGizmoType:toolBeforeRequest]
+            : Core3DModelingPreviewStatus{};
+    const BOOL retainedSameModeOperation =
+        result == Core3DSelectionTypeChangeResultSucceeded
+        && requestedCurrentPublicMode
+        && tracksModelingOperation
+        && operationBeforeRequest.active
+        && operationAfterRequest.active
+        && operationAfterRequest.operation == operationBeforeRequest.operation
+        && operationAfterRequest.generation
+            == operationBeforeRequest.generation
+        && operationAfterRequest.state == operationBeforeRequest.state
+        && operationAfterRequest.canApply == operationBeforeRequest.canApply;
+    if (retainedSameModeOperation) {
+        // Native operation-owned presentations are intentionally deactivated,
+        // so the strict ordinary-selection getter may report None while the
+        // accepted logical mode and typed operation remain unchanged. Treat
+        // that proven native no-op as success without closing its recovery UI.
+        return Core3DSelectionTypeChangeResultSucceeded;
+    }
+    if (result != Core3DSelectionTypeChangeResultSucceeded
+        || [GLController getSelectionType] != type) {
+        const Core3DSelectionTypeChangeResult publicResult =
+            result == Core3DSelectionTypeChangeResultSucceeded
+                ? Core3DSelectionTypeChangeResultPresentationFailure
+                : result;
+        if (publicResult == Core3DSelectionTypeChangeResultBusy) {
+            // An already outcome-unknown controller owns the only recovery
+            // authority. Busy is a strict no-op at both native and public layers.
+            return publicResult;
+        }
+        if (publicResult
+                == Core3DSelectionTypeChangeResultPresentationFailure) {
+            const BOOL operationCleanupBegan =
+                tracksModelingOperation
+                && operationBeforeRequest.active
+                && (!operationAfterRequest.active
+                    || operationAfterRequest.generation
+                        != operationBeforeRequest.generation
+                    || operationAfterRequest.state
+                        != operationBeforeRequest.state);
+            if (operationCleanupBegan) {
+                // A typed controller already mutated or retired its ledger.
+                // Close stale operation UI rather than fabricating recovery
+                // from the retained enum.
+                [self completeOperationInteraction];
+            } else {
+                // Presentation verification can fail after native OCCT has
+                // restored the prior modes, tolerance, and still-valid selected
+                // owners. Transient detection may already have been invalidated
+                // by mode reconfiguration. Merely reporting that failure must
+                // not call completeOperationInteraction(), which would destroy
+                // the successful best-effort rollback.
+                _currentSelectionType = [GLController getSelectionType];
+                _currentGizmoType = [GLController getGizmoType];
+                if (tracksModelingOperation) {
+                    self.can_apply = operationAfterRequest.canApply;
+                }
+                [self viewDidChangeViewportPresentationState];
+                [self sendNotifyUIState:UIStateChangingSelection
+                                         | UIStateChangingGizmo
+                                         | UIStateChangingApply];
+            }
+        } else if (publicResult
+                       != Core3DSelectionTypeChangeResultUnsupported
+                   && publicResult
+                       != Core3DSelectionTypeChangeResultNotReady) {
+            [self viewDidChangeViewportPresentationState];
+            [self sendNotifyUIState:UIStateChangingSelection
+                                 | UIStateChangingGizmo
+                                 | UIStateChangingApply];
+        }
+        return publicResult;
+    }
+    if (wasExactSameMode) {
+        // GL checks every outcome-unknown recovery barrier before its exact
+        // same-mode fast path. A successful exact request therefore performed
+        // no native mutation; preserve a Ready operation's typed tool UI.
+        return Core3DSelectionTypeChangeResultSucceeded;
+    }
+    // A changed mode or successful same-enum authority repair may have cleared
+    // stale owners. Recompute public state only after native state is final.
+    _currentSelectionType = type;
 
         _availableGizmoTypes = @[];
+        self.can_apply = NO;
+        self.can_delete = NO;
+        self.can_duplicate = NO;
+        self.can_apply_material = NO;
         switch (_currentSelectionType) {
             case PrimitiveSelectionTypeShape:
                 if ([GLController isSelected]) {
@@ -5401,7 +5895,9 @@ void Core3DAddDebugOrphanVisualMaterial(
                                              @(PrimitiveGizmoTypeIntersect),
                                              @(PrimitiveGizmoTypeMaterial)];
                 } else {
-                    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+                    [GLController setGizmoType:
+                        PrimitiveGizmoTypeMoveRotate];
+                    _currentGizmoType = [GLController getGizmoType];
                 }
                 _can_delete = [GLController isSelected];
                 _can_duplicate = [GLController isSelected];
@@ -5413,14 +5909,11 @@ void Core3DAddDebugOrphanVisualMaterial(
                 if (!isEmptyOfDisplayedObjects && isSelected) {
                     _availableGizmoTypes = @[@(PrimitiveGizmoTypeChamfer)];
                 }
-                [GLController deselectAll];
             }
                 _can_delete = NO;
                 _can_duplicate = NO;
-                [self setGizmoType:PrimitiveGizmoTypeNone];
-                // ^^ in this case setGizmoType may not be called, because gizmoType doesn't change
-                //    when the selection type is changed [PrimitiveGizmoTypeChamfer -> PrimitiveGizmoTypeChamfer],
-                //    so we notify ui state manually
+                [GLController setGizmoType:PrimitiveGizmoTypeNone];
+                _currentGizmoType = [GLController getGizmoType];
                 break;
             case PrimitiveSelectionTypeFace:
             {
@@ -5434,17 +5927,18 @@ void Core3DAddDebugOrphanVisualMaterial(
                         @(PrimitiveGizmoTypeShell)
                     ];
                 }
-                [GLController deselectAll];
             }
                 _can_delete = NO;
                 _can_duplicate = NO;
-                [self setGizmoType:PrimitiveGizmoTypeNone];
+                [GLController setGizmoType:PrimitiveGizmoTypeNone];
+                _currentGizmoType = [GLController getGizmoType];
                 break;
 
             default:
                 break;
         }
 
+        [GLController refreshSelectionState];
         // GLController emits render invalidations while this method is still
         // reconciling the public selection/gizmo state. Observe once more only
         // after that state is authoritative so alternate renderers cannot stay
@@ -5454,11 +5948,26 @@ void Core3DAddDebugOrphanVisualMaterial(
                                  | UIStateChangingGizmo
                                  | UIStateChangingDelete
                                  | UIStateChangingDuplicate];
-    }
+    return Core3DSelectionTypeChangeResultSucceeded;
+}
+
+- (void)setSelectionType:(PrimitiveSelectionType)type {
+    (void)[self trySetSelectionType:type];
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
-    if (_currentGizmoType != type) {
+    const PrimitiveSelectionType nativeSelectionType =
+        [GLController getSelectionType];
+    if (type != PrimitiveGizmoTypeNone
+        && (_currentSelectionType != nativeSelectionType
+            || !Core3DSelectionTypeAllowsGizmo(
+                _currentSelectionType, type))) {
+        return;
+    }
+    const PrimitiveGizmoType nativeGizmoType =
+        [GLController getGizmoType];
+    if (_currentGizmoType != type || nativeGizmoType != type
+		|| type == PrimitiveGizmoTypeChamfer) {
         [GLController setGizmoType:type];
 		_currentGizmoType = [GLController getGizmoType];
         switch (_currentGizmoType) {
@@ -5525,6 +6034,27 @@ void Core3DAddDebugOrphanVisualMaterial(
 - (void)viewDidSetup {
     if (!_isSetuped) {
         _isSetuped = YES;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController == nil ? nullptr : GLController.viewer;
+        if (viewer != nullptr) {
+            __weak typeof(self) weakSelf = self;
+            viewer->setInteractorRecreatedCallback(
+                [weakSelf](
+                    const core3d::PrimitiveManipulatorType nativeType) {
+                    __strong typeof(weakSelf) strongSelf = weakSelf;
+                    if (strongSelf == nil || ![NSThread isMainThread]) {
+                        return;
+                    }
+                    // redrawDocument() may deliberately downgrade a
+                    // selection-dependent Scale tool to None. Mirror the exact
+                    // native value synchronously: GLController publishes its
+                    // selection callback immediately after redraw and asserts
+                    // that these two authorities already agree.
+                    strongSelf->_currentGizmoType =
+                        static_cast<PrimitiveGizmoType>(nativeType);
+                    strongSelf.can_apply = NO;
+                });
+        }
         if (_shouldLoadAssetFileURL != nil) {
             [self loadFromAssetFile:_shouldLoadAssetFileURL
                  expectedByteCount:_shouldLoadAssetByteCount
@@ -5611,6 +6141,53 @@ void Core3DAddDebugOrphanVisualMaterial(
     return [GLController thumbData];
 }
 
+- (void)reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:
+    (BOOL)activatePassiveTool {
+    if (GLController == nil) {
+        return;
+    }
+    // Interactor recreation can clear owners or downgrade a selection-dependent
+    // tool. Reset derived public state first, then synchronously rebuild it from
+    // the exact native selection callback. This same path handles both a fresh
+    // replacement and a failed ImportCbf rollback.
+    _currentSelectionType = [GLController getSelectionType];
+    _currentGizmoType = [GLController getGizmoType];
+    _availableGizmoTypes = @[];
+    self.can_apply = false;
+    self.can_delete = false;
+    self.can_duplicate = false;
+    self.can_apply_material = false;
+    if (activatePassiveTool) {
+        // A successful replacement is a fresh native boundary: WholeShape, no
+        // owners, and None. Move/Rotate is the explicit passive post-load tool;
+        // never infer an operation from the replaced document's old enum.
+        [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    }
+    [GLController refreshSelectionState];
+
+    const Core3DModelingPreviewStatus retainedOperation =
+        Core3DIsModelingOperationGizmo(_currentGizmoType)
+            ? [self modelingPreviewStatusForGizmoType:_currentGizmoType]
+            : Core3DModelingPreviewStatus{};
+    if (retainedOperation.active) {
+        // Busy is a strict document no-op. If a typed operation retained its
+        // ledger, keep its one recovery control visible after the refresh.
+        _availableGizmoTypes = @[@(_currentGizmoType)];
+        self.can_apply = retainedOperation.canApply;
+    }
+    [self sendNotifyUIState:UIStateChangingSelection
+                             | UIStateChangingGizmo
+                             | UIStateChangingApply
+                             | UIStateChangingDelete
+                             | UIStateChangingDuplicate
+                             | UIStateChangingApplyMaterial
+                             | UIStateChangingHistory];
+}
+
+- (void)activatePassiveStateAfterDocumentReplacement {
+    [self reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:YES];
+}
+
 - (void)loadFromBundle:(NSURL *)bundleUrl {
     if(bundleUrl == nil) {
         [self viewDidFailToLoadFromBundle:Core3DAssetLoadResultInternalFailure];
@@ -5649,13 +6226,14 @@ void Core3DAddDebugOrphanVisualMaterial(
             if (!strongSelf) return;
             strongSelf->_isLoading = false;
             if (result != Core3DAssetLoadResultSuccess) {
+                [strongSelf
+                    reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:
+                        NO];
                 [strongSelf viewDidFailToLoadFromBundle:result];
                 return;
             }
             [(GLViewController *)strongSelf.glController fitAll];
-            if ([strongSelf currentGizmoType] == PrimitiveGizmoTypeNone) {
-                [strongSelf setGizmoType:PrimitiveGizmoTypeMoveRotate];
-            }
+            [strongSelf activatePassiveStateAfterDocumentReplacement];
             [strongSelf viewDidLoadFromBundle];
         }];
     } else {
@@ -5698,13 +6276,14 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (!strongSelf) return;
         strongSelf->_isLoading = false;
         if (result != Core3DAssetLoadResultSuccess) {
+            [strongSelf
+                reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:
+                    NO];
             [strongSelf viewDidFailToLoadFromBundle:result];
             return;
         }
         [(GLViewController *)strongSelf.glController fitAll];
-        if ([strongSelf currentGizmoType] == PrimitiveGizmoTypeNone) {
-            [strongSelf setGizmoType:PrimitiveGizmoTypeMoveRotate];
-        }
+        [strongSelf activatePassiveStateAfterDocumentReplacement];
         [strongSelf viewDidLoadFromBundle];
     }];
 }

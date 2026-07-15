@@ -23,6 +23,24 @@ bool Core3DIsBooleanGizmo(const PrimitiveGizmoType type) noexcept {
         || type == PrimitiveGizmoTypeIntersect;
 }
 
+bool Core3DPublicSelectionTypeMatchesMode(
+    const PrimitiveSelectionType type,
+    const core3d::ShapeSelectionMode mode) noexcept {
+    switch (type) {
+        case PrimitiveSelectionTypeShape:
+            return mode == core3d::ShapeSelectionMode::WholeShape;
+        case PrimitiveSelectionTypeFace:
+            return mode == core3d::ShapeSelectionMode::Face;
+        case PrimitiveSelectionTypeEdge:
+            return mode == core3d::ShapeSelectionMode::Edge;
+        case PrimitiveSelectionTypeVertex:
+            return mode == core3d::ShapeSelectionMode::Vertex;
+        case PrimitiveSelectionTypeNone:
+        default:
+            return false;
+    }
+}
+
 Core3DPBRMaterial* Core3DSelectionPBRMaterial(
     const XCAFDoc_VisMaterialPBR& material,
     const BOOL supportsScalarEditing,
@@ -109,7 +127,10 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 - (void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selections {
 
     assert(_currentGizmoType == [GLController getGizmoType]);
-    self.can_apply_material = (selections > 0);
+    const BOOL duplicateRecoveryPending =
+        [GLController hasUnresolvedDuplicate];
+    self.can_apply_material = !duplicateRecoveryPending
+        && (selections > 0);
     
     auto context = GLController.viewer->AisContext();
     auto document = GLController.viewer->getDocument();
@@ -197,14 +218,59 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
             break;
 
         default:
-            self.can_delete = selections & core3d::Core3DViewer::kSelectionTypeManipulator;
-            self.can_duplicate = selections & core3d::Core3DViewer::kSelectionTypeManipulator;
+            self.can_delete = !duplicateRecoveryPending
+                && (selections
+                    & core3d::Core3DViewer::kSelectionTypeManipulator);
+            self.can_duplicate = duplicateRecoveryPending
+                || (selections
+                    & core3d::Core3DViewer::kSelectionTypeManipulator);
             break;
     }
 
     if (selections & core3d::Core3DViewer::kSelectionTypeManipulator
                     || selections & core3d::Core3DViewer::kSelectionTypeObject) { // FIXME: it should be reviewed
-        _currentSelectionType = [GLController getSelectionType];
+        const std::shared_ptr<core3d::ShapeInteractor> shapeInteractor =
+            GLController.viewer == nullptr
+                ? nullptr
+                : GLController.viewer->getShapeInteractor();
+        const std::shared_ptr<core3d::ObjectInteractor> objectInteractor =
+            GLController.viewer == nullptr
+                ? nullptr
+                : GLController.viewer->getObjectInteractor();
+        const PrimitiveSelectionType strictSelectionType =
+            [GLController getSelectionType];
+        const BOOL preservesMirrorPlanePickingMode =
+            _currentSelectionType == PrimitiveSelectionTypeShape
+            && _currentGizmoType == PrimitiveGizmoTypeMirror
+            && [GLController getGizmoType] == PrimitiveGizmoTypeMirror
+            && [GLController isPickingMirrorPlane]
+            && shapeInteractor != nullptr
+            && shapeInteractor->getSelectionMode()
+                == core3d::ShapeSelectionMode::WholeShape
+            && objectInteractor != nullptr
+            && objectInteractor->mirrorPlanePickingAuthorityMatches();
+        const BOOL preservesRetainedOperationMode =
+            strictSelectionType == PrimitiveSelectionTypeNone
+            && _currentGizmoType == [GLController getGizmoType]
+            && shapeInteractor != nullptr
+            && Core3DPublicSelectionTypeMatchesMode(
+                _currentSelectionType,
+                shapeInteractor->getSelectionMode())
+            && GLController.viewer != nullptr
+            && GLController.viewer
+                ->selectionModeAuthorityAllowsRetainedOperation();
+        if (!preservesMirrorPlanePickingMode
+            && !preservesRetainedOperationMode) {
+            _currentSelectionType = strictSelectionType;
+        }
+        // Mirror plane picking temporarily adds Face selection alongside the
+        // accepted Object mode and deactivates its manipulator detector. The
+        // strict native getter therefore reports None until that private mode
+        // ledger is restored. Keep the public rail on its accepted logical
+        // mode while the picker or a validated typed operation owns those
+        // temporary presentations. Extrude/Shell retain Face; object tools
+        // retain Shape. The strict GL getter remains fail-closed; only the
+        // logical rail survives until the ledger reconciles.
         switch (_currentSelectionType) {
             case PrimitiveSelectionTypeEdge:
                 _availableGizmoTypes = @[@(PrimitiveGizmoTypeChamfer)];
@@ -230,6 +296,10 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 break;
 
             default:
+                _availableGizmoTypes = @[];
+                self.can_delete = NO;
+                self.can_duplicate = NO;
+                self.can_apply_material = NO;
                 break;
         }
 
@@ -243,7 +313,9 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply = [GLController canApplyBoolean];
                 break;
             case PrimitiveGizmoTypeExtrude:
-                self.can_apply = [GLController canApplyExtrusion];
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeExtrude].canApply;
                 break;
 			case PrimitiveGizmoTypeMirror:
 				self.can_apply =
@@ -303,7 +375,12 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 self.can_apply = [GLController canApplyBoolean];
                 break;
             case PrimitiveGizmoTypeExtrude:
-                self.can_apply = false;
+                // The source/candidate pair is deliberately deactivated while
+                // Ready and remains the sole retry authority while its commit
+                // outcome is unknown. Refresh from typed state in both cases.
+                self.can_apply =
+                    [self modelingPreviewStatusForGizmoType:
+                        PrimitiveGizmoTypeExtrude].canApply;
                 break;
             case PrimitiveGizmoTypeChamfer:
                 // A retained Bevel preview suppresses its source presentation,
@@ -347,8 +424,20 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
         }
     }
 
+    if (duplicateRecoveryPending) {
+        // The committed OCAF result may have no selectable AIS owner until the
+        // next explicit Duplicate action repairs presentation. Keep only that
+        // repair capability reachable; every other edit remains fail closed.
+        _availableGizmoTypes = @[];
+        self.can_delete = NO;
+        self.can_duplicate = YES;
+        self.can_apply = NO;
+        self.can_apply_material = NO;
+    }
+
     [self viewDidChangeViewportPresentationState];
     [self sendNotifyUIState:UIStateChangingGizmo
+                             | UIStateChangingAdd
                              | UIStateChangingDelete
                              | UIStateChangingDuplicate
                              | UIStateChangingHistory

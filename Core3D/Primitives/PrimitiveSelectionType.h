@@ -16,4 +16,17 @@ typedef NS_ENUM(NSUInteger, PrimitiveSelectionType) {
     PrimitiveSelectionTypeVertex = 4
 };
 
+//! Synchronous authority result for a selection-mode request.
+//! Any value other than Succeeded leaves the caller's authoritative mode
+//! unchanged. The legacy void setter remains available for source and ABI
+//! compatibility.
+typedef NS_ENUM(NSInteger, Core3DSelectionTypeChangeResult) {
+    Core3DSelectionTypeChangeResultSucceeded = 0,
+    Core3DSelectionTypeChangeResultUnsupported,
+    Core3DSelectionTypeChangeResultNotReady,
+    Core3DSelectionTypeChangeResultWrongThread,
+    Core3DSelectionTypeChangeResultBusy,
+    Core3DSelectionTypeChangeResultPresentationFailure,
+};
+
 #endif /* PrimitiveSelectionType_h */

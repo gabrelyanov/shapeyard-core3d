@@ -27,6 +27,7 @@
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_ShadingAspect.hxx>
 #include <RWMesh_FaceIterator.hxx>
+#include <SelectMgr_EntityOwner.hxx>
 #include <NCollection_Buffer.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -61,6 +62,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -79,6 +81,8 @@ constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr std::size_t kMaxFacesPerMesh = 250'000;
+constexpr std::size_t kMaxEdgesPerMesh = 250'000;
+constexpr std::size_t kMaxTopologicalVerticesPerMesh = 250'000;
 constexpr std::size_t kMaxVerticesPerMesh = 1'000'000;
 constexpr std::size_t kMaxIndicesPerMesh = 3'000'000;
 constexpr std::size_t kMaxMeshNumericBytes = 96ULL * 1024ULL * 1024ULL;
@@ -91,6 +95,11 @@ constexpr std::size_t kMaxSnapshotNumericBytes = 96ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxMaterialsPerSnapshot = 50'000;
 constexpr std::size_t kMaxPickElementsPerSnapshot = 250'001;
 constexpr std::size_t kMaxPrimitiveBindingsPerSnapshot = 250'000;
+// Definition topology maps coexist until the immutable scene is complete.
+// Preserve the existing 250k single-definition maxima while bounding their
+// aggregate peak to one maximum-size face, edge, and vertex map. The separate
+// face ceiling matches the later primitive-binding admission limit.
+constexpr std::size_t kMaxTopologyMapEntriesPerSnapshot = 750'000;
 constexpr std::size_t kMaxTexturesPerSnapshot = 256;
 constexpr std::size_t kMaxEncodedTextureBytes = 32ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxAggregateEncodedTextureBytes =
@@ -1155,12 +1164,15 @@ struct OccurrenceData {
     std::string definitionIdentifier;
     std::string name;
     bool visible = true;
+    bool editable = false;
 };
 
 struct DefinitionData {
     TDF_Label label;
     TopoDS_Shape shape;
     TopTools_IndexedMapOfShape faces;
+    TopTools_IndexedMapOfShape edges;
+    TopTools_IndexedMapOfShape vertices;
     MeshSnapshot mesh;
     Double3 sourceOrigin;
     OcctGeometryRepresentation representation =
@@ -1177,6 +1189,9 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
     aHash.AddString(theMesh.definitionIdentifier);
     aHash.AddDouble(theLinearDeflection);
     aHash.AddDouble(theAngularDeflection);
+    aHash.AddInteger(theMesh.topology.faceCount);
+    aHash.AddInteger(theMesh.topology.edgeCount);
+    aHash.AddInteger(theMesh.topology.vertexCount);
     aHash.AddInteger<std::uint64_t>(theMesh.vertices.size());
     for (const Vertex& aVertex : theMesh.vertices) {
         aHash.AddFloat(aVertex.positionX);
@@ -1199,6 +1214,35 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
         aHash.AddInteger(aPrimitive.faceIndex);
         aHash.AddBool(aPrimitive.hasTextureCoordinates);
     }
+    return aHash.Value();
+}
+
+void AddTopologyMapFingerprint(
+    Fingerprint& theHash,
+    const TopTools_IndexedMapOfShape& theMap)
+{
+    theHash.AddInteger<std::uint64_t>(
+        static_cast<std::uint64_t>(theMap.Extent()));
+    for (Standard_Integer anIndex = 1;
+         anIndex <= theMap.Extent(); ++anIndex) {
+        const TopoDS_Shape& aShape = theMap(anIndex);
+        theHash.AddInteger(static_cast<std::uint8_t>(aShape.ShapeType()));
+        // Builder state is process-local. The OCCT shape hash captures the
+        // exact TShape + location identity used by IndexedMap ordering, so an
+        // edge/vertex remap cannot silently retain a geometry revision merely
+        // because tessellated triangles and cardinalities stayed unchanged.
+        theHash.AddInteger<std::size_t>(
+            std::hash<TopoDS_Shape>{}(aShape));
+    }
+}
+
+std::uint64_t DefinitionFingerprint(const DefinitionData& theDefinition)
+{
+    Fingerprint aHash;
+    aHash.AddInteger(MeshFingerprint(theDefinition.mesh, 0.0, 0.0));
+    AddTopologyMapFingerprint(aHash, theDefinition.faces);
+    AddTopologyMapFingerprint(aHash, theDefinition.edges);
+    AddTopologyMapFingerprint(aHash, theDefinition.vertices);
     return aHash.Value();
 }
 
@@ -1684,14 +1728,38 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
 {
     theDefinition.label = theDefinitionLabel;
     theDefinition.shape = XCAFDoc_ShapeTool::GetShape(theDefinitionLabel);
-    if (theDefinition.shape.IsNull()) {
+    if (theDefinition.shape.IsNull()
+        || theDefinition.representation
+            == OcctGeometryRepresentation::Invalid) {
         return false;
     }
+    theDefinition.faces.Clear();
+    theDefinition.edges.Clear();
+    theDefinition.vertices.Clear();
     TopExp::MapShapes(theDefinition.shape, TopAbs_FACE, theDefinition.faces);
     if (theDefinition.faces.IsEmpty()
         || !FitsUInt32(static_cast<std::size_t>(theDefinition.faces.Extent()))
         || static_cast<std::size_t>(theDefinition.faces.Extent()) > kMaxFacesPerMesh) {
         return false;
+    }
+    const bool hasSemanticBRepTopology =
+        theDefinition.representation
+        != OcctGeometryRepresentation::TriangleMesh;
+    if (hasSemanticBRepTopology) {
+        TopExp::MapShapes(
+            theDefinition.shape, TopAbs_EDGE, theDefinition.edges);
+        TopExp::MapShapes(
+            theDefinition.shape, TopAbs_VERTEX, theDefinition.vertices);
+        if (!FitsUInt32(
+                static_cast<std::size_t>(theDefinition.edges.Extent()))
+            || !FitsUInt32(
+                static_cast<std::size_t>(theDefinition.vertices.Extent()))
+            || static_cast<std::size_t>(theDefinition.edges.Extent())
+                > kMaxEdgesPerMesh
+            || static_cast<std::size_t>(theDefinition.vertices.Extent())
+                > kMaxTopologicalVerticesPerMesh) {
+            return false;
+        }
     }
     theDefinition.closed = StdPrs_ToolTriangulatedShape::IsClosed(theDefinition.shape);
 
@@ -1895,6 +1963,14 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     theDefinition.sourceOrigin = Center(aSourceBounds);
     MeshSnapshot aMesh;
     aMesh.definitionIdentifier = theDefinitionIdentifier;
+    if (hasSemanticBRepTopology) {
+        aMesh.topology.faceCount = static_cast<std::uint32_t>(
+            theDefinition.faces.Extent());
+        aMesh.topology.edgeCount = static_cast<std::uint32_t>(
+            theDefinition.edges.Extent());
+        aMesh.topology.vertexCount = static_cast<std::uint32_t>(
+            theDefinition.vertices.Extent());
+    }
     aMesh.indices = std::move(aSourceIndices);
     aMesh.primitives = std::move(aPrimitives);
     aMesh.vertices.reserve(aSourceVertices.size());
@@ -1930,7 +2006,7 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     // Geometry identity is derived from the immutable copied payload itself.
     // No desired quality is recomputed from attacker-controlled BRep geometry
     // on the main thread.
-    theDefinition.fingerprint = MeshFingerprint(theDefinition.mesh, 0.0, 0.0);
+    theDefinition.fingerprint = DefinitionFingerprint(theDefinition);
     return true;
 }
 
@@ -2054,6 +2130,7 @@ std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
 std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
 {
     Fingerprint aHash;
+    aHash.AddInteger(static_cast<std::uint8_t>(theScene.selectionMode));
     aHash.AddInteger<std::uint64_t>(theScene.textures.size());
     for (const TextureResourceSnapshot& aTexture : theScene.textures) {
         // The identifier is a SHA-256 of the exact payload, so hashing it plus
@@ -2088,6 +2165,13 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
             aHash.AddInteger(aBinding.pickToken);
             aHash.AddBool(aBinding.visible);
         }
+    }
+    aHash.AddInteger<std::uint64_t>(theScene.pickTable.size());
+    for (const ElementIdentifier& anElement : theScene.pickTable) {
+        aHash.AddString(anElement.entityIdentifier);
+        aHash.AddInteger(static_cast<std::uint8_t>(anElement.kind));
+        aHash.AddInteger(anElement.topologyIndex);
+        aHash.AddInteger(anElement.geometryRevision);
     }
     aHash.AddInteger<std::uint64_t>(theScene.selection.selected.size());
     for (const ElementIdentifier& anElement : theScene.selection.selected) {
@@ -4214,7 +4298,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
     const Handle(OcctDocument)& theDocument,
     const Handle(AIS_InteractiveContext)& theContext,
     const Handle(V3d_View)& theView,
-    const UInt2& theViewportPixels) noexcept
+    const UInt2& theViewportPixels,
+    const ElementKind theAcceptedSelectionKind) noexcept
 {
     if (![NSThread isMainThread]
         || theDocument.IsNull()
@@ -4223,7 +4308,10 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         || myState == nullptr
         || myState->publicationSourceIdentifier.empty()
         || theViewportPixels.x == 0
-        || theViewportPixels.y == 0) {
+        || theViewportPixels.y == 0
+        || (theAcceptedSelectionKind != ElementKind::Object
+            && theAcceptedSelectionKind != ElementKind::Face
+            && theAcceptedSelectionKind != ElementKind::Edge)) {
         return {};
     }
 
@@ -4280,6 +4368,17 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             anOccurrence.occurrenceLocation = aNode.Location;
             anOccurrence.style = aNode.Style;
             anOccurrence.visible = aNode.Style.IsVisible();
+            // This is the label-level equivalent of
+            // CafShapePrs::IsEditablePresentation(): an assembly component's
+            // occurrence label differs from the definition label and cannot be
+            // addressed by Shapeyard's definition-owned editing model. Keep the
+            // document's existing free-simple authority as the second half of
+            // the same production gate rather than inferring editability from
+            // geometry representation or explorer depth.
+            anOccurrence.editable =
+                aNode.Label.IsEqual(aDefinitionLabel)
+                && theDocument->IsEditableFreeSimpleDefinitionLabel(
+                    aDefinitionLabel);
             const Standard_Integer aCurrentDepth = anExplorer.CurrentDepth();
             if (aCurrentDepth < 0
                 || static_cast<std::size_t>(aCurrentDepth)
@@ -4370,15 +4469,45 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         // never invoke a mesher here: Build is main-thread-only because it
         // reads live OCAF/AIS/V3d state, and meshing can be unbounded.
         if (!aDefinitions.empty()) {
-            for (auto& [aDefinitionIdentifier, aDefinitionIndex] : aDefinitionIndices) {
+            std::size_t aSnapshotFaceMapEntryCount = 0;
+            std::size_t aSnapshotTopologyMapEntryCount = 0;
+            for (auto& [aDefinitionIdentifier, aDefinitionIndex] :
+                 aDefinitionIndices) {
+                DefinitionData& aDefinition =
+                    aDefinitions[aDefinitionIndex];
                 if (!ExtractDefinitionGeometry(
-                        aDefinitions[aDefinitionIndex].label,
+                        aDefinition.label,
                         aDefinitionIdentifier,
 #ifdef DEBUG
                         static_cast<std::uint8_t>(
                             myState->debugTriangulationFailure),
 #endif
-                        aDefinitions[aDefinitionIndex])) {
+                        aDefinition)) {
+                    return {};
+                }
+                const std::size_t aFaceMapEntryCount =
+                    static_cast<std::size_t>(aDefinition.faces.Extent());
+                const std::size_t anEdgeMapEntryCount =
+                    static_cast<std::size_t>(aDefinition.edges.Extent());
+                const std::size_t aVertexMapEntryCount =
+                    static_cast<std::size_t>(aDefinition.vertices.Extent());
+                std::size_t aDefinitionTopologyMapEntryCount = 0;
+                if (!CheckedAdd(aFaceMapEntryCount,
+                                anEdgeMapEntryCount,
+                                aDefinitionTopologyMapEntryCount)
+                    || !CheckedAdd(aDefinitionTopologyMapEntryCount,
+                                   aVertexMapEntryCount,
+                                   aDefinitionTopologyMapEntryCount)
+                    || !CheckedAdd(aSnapshotFaceMapEntryCount,
+                                   aFaceMapEntryCount,
+                                   aSnapshotFaceMapEntryCount)
+                    || aSnapshotFaceMapEntryCount
+                        > kMaxPrimitiveBindingsPerSnapshot
+                    || !CheckedAdd(aSnapshotTopologyMapEntryCount,
+                                   aDefinitionTopologyMapEntryCount,
+                                   aSnapshotTopologyMapEntryCount)
+                    || aSnapshotTopologyMapEntryCount
+                        > kMaxTopologyMapEntriesPerSnapshot) {
                     return {};
                 }
             }
@@ -4408,6 +4537,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         aScene.publicationSourceIdentifier =
             aNextState.publicationSourceIdentifier;
         aScene.metersPerUnit = aMetersPerUnit;
+        aScene.selectionMode = theAcceptedSelectionKind;
         TextureTableState aTextureTable;
         aScene.meshes.reserve(aDefinitions.size());
         std::vector<std::string> aLiveRevisionKeys;
@@ -4603,7 +4733,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             anInstance.referenceAxis = aReferenceAxis;
             anInstance.reversesWinding = aWorldTransform.IsNegative();
             anInstance.visible = anOccurrence.visible;
-            anInstance.selectable = anOccurrence.visible;
+            anInstance.selectable = anOccurrence.visible
+                && anOccurrence.editable
+                && (theAcceptedSelectionKind == ElementKind::Object
+                    || (theAcceptedSelectionKind == ElementKind::Face
+                        && aMesh.topology.faceCount != 0)
+                    || (theAcceptedSelectionKind == ElementKind::Edge
+                        && aMesh.topology.edgeCount != 0));
             anInstance.name = anOccurrence.name;
             anInstance.role = RenderRole::Model;
 
@@ -4707,11 +4843,15 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 PrimitiveBinding aBinding;
                 aBinding.materialIndex = aMaterialIndex;
                 aBinding.visible = aFaceVisibility[aPrimitiveIndex];
-                if (anInstance.selectable && aBinding.visible) {
-                    const bool isTriangleMesh =
-                        aDefinition.representation
-                        == OcctGeometryRepresentation::TriangleMesh;
-                    if (!isTriangleMesh || !anObjectPickToken.has_value()) {
+                const bool publishesObjectPick =
+                    theAcceptedSelectionKind == ElementKind::Object;
+                const bool publishesFacePick =
+                    theAcceptedSelectionKind == ElementKind::Face
+                    && aMesh.topology.faceCount != 0;
+                if (anInstance.selectable && aBinding.visible
+                    && (publishesObjectPick || publishesFacePick)) {
+                    if (publishesFacePick
+                        || !anObjectPickToken.has_value()) {
                         if (!FitsUInt32(aScene.pickTable.size())
                             || aScene.pickTable.size()
                                 == std::numeric_limits<std::uint32_t>::max()
@@ -4724,15 +4864,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                 aScene.pickTable.size());
                         aScene.pickTable.push_back({
                             anInstance.entityIdentifier,
-                            isTriangleMesh
-                                ? ElementKind::Object
-                                : ElementKind::Face,
-                            isTriangleMesh
+                            theAcceptedSelectionKind,
+                            publishesObjectPick
                                 ? 0U
                                 : aMesh.primitives[aPrimitiveIndex].faceIndex,
                             aMesh.geometryRevision,
                         });
-                        if (isTriangleMesh) {
+                        if (publishesObjectPick) {
                             anObjectPickToken = aPickToken;
                         }
                     }
@@ -4798,35 +4936,74 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         // committed document snapshot.
         std::unordered_set<std::string> aSelectedKeys;
         const auto elementForInstance = [&](const std::size_t theInstanceIndex,
-                                            const TopoDS_Shape& theSubshape) {
+                                            const TopoDS_Shape& theSubshape)
+            -> std::optional<ElementIdentifier> {
             const InstanceSnapshot& anInstance =
                 aScene.instances[theInstanceIndex];
             const MeshSnapshot& aMesh = aScene.meshes[anInstance.meshIndex];
+            const DefinitionData& aDefinition =
+                aDefinitions[anInstance.meshIndex];
             ElementIdentifier anElement;
             anElement.entityIdentifier = anInstance.entityIdentifier;
-            anElement.kind = ElementKind::Object;
+            anElement.kind = theAcceptedSelectionKind;
             anElement.geometryRevision = aMesh.geometryRevision;
-            if (aDefinitions[anInstance.meshIndex].representation
-                    != OcctGeometryRepresentation::TriangleMesh
+            if (theAcceptedSelectionKind == ElementKind::Object) {
+                // WholeShape is one document-object identity regardless of the
+                // root TopoDS type. Valid BRep definitions may be rooted at a
+                // Face, Wire, Edge, or Vertex; owner topology must not silently
+                // change the accepted semantic mode.
+                return anElement;
+            }
+            if (theAcceptedSelectionKind == ElementKind::Face
+                && aMesh.topology.faceCount != 0
                 && !theSubshape.IsNull()
                 && theSubshape.ShapeType() == TopAbs_FACE) {
                 const Standard_Integer aFaceIndex =
-                    aDefinitions[anInstance.meshIndex].faces.FindIndex(
-                        theSubshape);
-                if (aFaceIndex > 0) {
-                    anElement.kind = ElementKind::Face;
-                    anElement.topologyIndex =
-                        static_cast<std::uint32_t>(aFaceIndex - 1);
+                    aDefinition.faces.FindIndex(theSubshape);
+                if (aFaceIndex <= 0
+                    || static_cast<std::uint32_t>(aFaceIndex)
+                        > aMesh.topology.faceCount
+                    || !aDefinition.faces.FindKey(aFaceIndex).IsEqual(
+                        theSubshape)) {
+                    return std::nullopt;
                 }
+                anElement.topologyIndex =
+                    static_cast<std::uint32_t>(aFaceIndex - 1);
+                return anElement;
             }
-            return anElement;
+            if (theAcceptedSelectionKind == ElementKind::Edge
+                && aMesh.topology.edgeCount != 0
+                && !theSubshape.IsNull()
+                && theSubshape.ShapeType() == TopAbs_EDGE) {
+                const Standard_Integer anEdgeIndex =
+                    aDefinition.edges.FindIndex(theSubshape);
+                if (anEdgeIndex <= 0
+                    || static_cast<std::uint32_t>(anEdgeIndex)
+                        > aMesh.topology.edgeCount
+                    || !aDefinition.edges.FindKey(anEdgeIndex).IsEqual(
+                        theSubshape)) {
+                    return std::nullopt;
+                }
+                anElement.topologyIndex =
+                    static_cast<std::uint32_t>(anEdgeIndex - 1);
+                return anElement;
+            }
+            // A mismatched/stale owner is rejected rather than silently
+            // publishing an object identity that violates accepted authority.
+            return std::nullopt;
         };
         theContext->InitSelected();
         for (; theContext->MoreSelected(); theContext->NextSelected()) {
             const Handle(AIS_InteractiveObject) anInteractive =
                 theContext->SelectedInteractive();
-            if (anInteractive.IsNull()) {
-                continue;
+            const Handle(SelectMgr_EntityOwner) aRawSelectedOwner =
+                theContext->SelectedOwner();
+            if (anInteractive.IsNull() || aRawSelectedOwner.IsNull()
+                || !aRawSelectedOwner->HasSelectable()
+                || aRawSelectedOwner->Selectable() != anInteractive) {
+                // A renderer-neutral identity may never be inferred from a
+                // foreign, detached, or outcome-ambiguous OCCT owner.
+                return {};
             }
             const TDF_Label aLabel = theDocument->ShapeLabel(anInteractive);
             const std::string aLabelIdentifier =
@@ -4853,7 +5030,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             TopoDS_Shape aSelectedSubshape;
             const Handle(StdSelect_BRepOwner) aSelectedOwner =
                 Handle(StdSelect_BRepOwner)::DownCast(
-                    theContext->SelectedOwner());
+                    aRawSelectedOwner);
             if (!aSelectedOwner.IsNull() && aSelectedOwner->HasShape()) {
                 // Keep topology identity in definition-local space. OCCT's
                 // SelectedShape() applies the interactive transformation as a
@@ -4869,16 +5046,23 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 }
                 InstanceSnapshot& anInstance =
                     aScene.instances[anInstanceIndex];
-                const ElementIdentifier anElement = elementForInstance(
+                if (!anInstance.visible || !anInstance.selectable) {
+                    return {};
+                }
+                const std::optional<ElementIdentifier> anElement =
+                    elementForInstance(
                     anInstanceIndex,
                     aSelectedSubshape);
+                if (!anElement.has_value()) {
+                    return {};
+                }
                 const std::string aSelectionKey =
-                    anElement.entityIdentifier + ":"
+                    anElement->entityIdentifier + ":"
                     + std::to_string(
-                        static_cast<unsigned int>(anElement.kind)) + ":"
-                    + std::to_string(anElement.topologyIndex);
+                        static_cast<unsigned int>(anElement->kind)) + ":"
+                    + std::to_string(anElement->topologyIndex);
                 if (aSelectedKeys.insert(aSelectionKey).second) {
-                    aScene.selection.selected.push_back(anElement);
+                    aScene.selection.selected.push_back(*anElement);
                 }
                 anInstance.selected = true;
             }
@@ -4908,7 +5092,17 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         if (theContext->HasDetected()) {
             const Handle(AIS_InteractiveObject) anInteractive =
                 theContext->DetectedInteractive();
-            if (!anInteractive.IsNull()) {
+            if (anInteractive.IsNull()) {
+                return {};
+            }
+            {
+                const Handle(SelectMgr_EntityOwner) aRawDetectedOwner =
+                    theContext->DetectedOwner();
+                if (aRawDetectedOwner.IsNull()
+                    || !aRawDetectedOwner->HasSelectable()
+                    || aRawDetectedOwner->Selectable() != anInteractive) {
+                    return {};
+                }
                 const TDF_Label aLabel = theDocument->ShapeLabel(anInteractive);
                 const std::string aLabelIdentifier =
                     theDocument->EntityIdentifierForLabel(aLabel);
@@ -4932,31 +5126,68 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     TopoDS_Shape aDetectedSubshape;
                     const Handle(StdSelect_BRepOwner) anOwner =
                         Handle(StdSelect_BRepOwner)::DownCast(
-                            theContext->DetectedOwner());
+                            aRawDetectedOwner);
                     if (!anOwner.IsNull() && anOwner->HasShape()) {
                         aDetectedSubshape = anOwner->Shape();
                     }
 
                     std::optional<std::size_t> aDetectedInstance;
-                    if (anInstanceIndices->size() == 1
-                        && aDefinitions[
-                            aScene.instances[anInstanceIndices->front()]
-                                .meshIndex].representation
-                            == OcctGeometryRepresentation::TriangleMesh) {
-                        aDetectedInstance = anInstanceIndices->front();
-                    } else if (!aDetectedSubshape.IsNull()
-                        && aDetectedSubshape.ShapeType() == TopAbs_FACE) {
+                    if (anInstanceIndices->size() == 1) {
+                        const std::size_t anInstanceIndex =
+                            anInstanceIndices->front();
+                        if (aScene.instances[anInstanceIndex].selectable) {
+                            aDetectedInstance = anInstanceIndex;
+                        }
+                    } else if (!aDetectedSubshape.IsNull()) {
                         for (const std::size_t anInstanceIndex :
                              *anInstanceIndices) {
                             const InstanceSnapshot& anInstance =
                                 aScene.instances[anInstanceIndex];
-                            if (aDefinitions[anInstance.meshIndex]
-                                    .representation
-                                == OcctGeometryRepresentation::TriangleMesh) {
+                            if (!anInstance.selectable) {
                                 continue;
                             }
-                            if (aDefinitions[anInstance.meshIndex]
-                                    .faces.FindIndex(aDetectedSubshape) > 0) {
+                            const DefinitionData& aDefinition =
+                                aDefinitions[anInstance.meshIndex];
+                            bool ownsDetectedSubshape = false;
+                            if (theAcceptedSelectionKind
+                                    == ElementKind::Face
+                                && aDetectedSubshape.ShapeType()
+                                    == TopAbs_FACE) {
+                                const Standard_Integer aFaceIndex =
+                                    aDefinition.faces.FindIndex(
+                                        aDetectedSubshape);
+                                ownsDetectedSubshape = aFaceIndex > 0
+                                    && aDefinition.faces.FindKey(aFaceIndex)
+                                        .IsEqual(aDetectedSubshape);
+                            } else if (theAcceptedSelectionKind
+                                           == ElementKind::Edge
+                                && aDetectedSubshape.ShapeType()
+                                    == TopAbs_EDGE) {
+                                const Standard_Integer anEdgeIndex =
+                                    aDefinition.edges.FindIndex(
+                                        aDetectedSubshape);
+                                ownsDetectedSubshape = anEdgeIndex > 0
+                                    && aDefinition.edges.FindKey(anEdgeIndex)
+                                        .IsEqual(aDetectedSubshape);
+                            } else if (theAcceptedSelectionKind
+                                           == ElementKind::Object) {
+                                ownsDetectedSubshape =
+                                    aDefinition.shape.IsSame(
+                                        aDetectedSubshape)
+                                    || (aDetectedSubshape.ShapeType()
+                                            == TopAbs_FACE
+                                        && aDefinition.faces.FindIndex(
+                                            aDetectedSubshape) > 0)
+                                    || (aDetectedSubshape.ShapeType()
+                                            == TopAbs_EDGE
+                                        && aDefinition.edges.FindIndex(
+                                            aDetectedSubshape) > 0)
+                                    || (aDetectedSubshape.ShapeType()
+                                            == TopAbs_VERTEX
+                                        && aDefinition.vertices.FindIndex(
+                                            aDetectedSubshape) > 0);
+                            }
+                            if (ownsDetectedSubshape) {
                                 if (aDetectedInstance.has_value()) {
                                     aDetectedInstance.reset();
                                     break;
@@ -4964,13 +5195,16 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                 aDetectedInstance = anInstanceIndex;
                             }
                         }
-                    } else if (anInstanceIndices->size() == 1) {
-                        aDetectedInstance = anInstanceIndices->front();
                     }
                     if (aDetectedInstance.has_value()) {
-                        aScene.selection.hovered = elementForInstance(
+                        const std::optional<ElementIdentifier> anElement =
+                            elementForInstance(
                             *aDetectedInstance,
                             aDetectedSubshape);
+                        if (!anElement.has_value()) {
+                            return {};
+                        }
+                        aScene.selection.hovered = *anElement;
                     }
                 }
             }
@@ -5067,6 +5301,12 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         aScene.revisions.model = aNextState.modelRevision;
         aScene.revisions.presentation = aNextState.presentationRevision;
         aScene.revisions.camera = aNextState.cameraRevision;
+        // A builder invariant failure must never advance committed revision
+        // state. Validate the exact renderer-neutral payload before publishing
+        // the next state, rather than relying solely on the later DTO bridge.
+        if (!IsValidSceneSnapshot(aScene)) {
+            return {};
+        }
         const Handle(TDF_Data)& aData = aDocument->GetData();
         if (aData.IsNull()) {
             return {};

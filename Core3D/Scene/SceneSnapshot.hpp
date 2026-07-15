@@ -19,7 +19,7 @@
 
 namespace core3d::scene {
 
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 5;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 6;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 10;
 
 struct Float2 {
@@ -224,10 +224,23 @@ struct PrimitiveBinding {
     bool visible = true;
 };
 
+//! Exact semantic topology owned by a reusable model definition. These counts
+//! are intentionally independent of render vertices and face primitives:
+//! tessellation may duplicate vertices, omit untriangulated topology, or use
+//! synthetic primitives for a non-topological polygon mesh. All-zero counts
+//! identify a definition that exposes no stable BRep topology. Semantic
+//! topology indices are zero-based and must be strictly below these counts.
+struct TopologyCardinality {
+    std::uint32_t faceCount = 0;
+    std::uint32_t edgeCount = 0;
+    std::uint32_t vertexCount = 0;
+};
+
 struct MeshSnapshot {
     std::string definitionIdentifier;
     std::uint64_t geometryRevision = 0;
     Bounds3d localBounds;
+    TopologyCardinality topology;
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<MeshPrimitive> primitives;
@@ -292,6 +305,10 @@ struct SceneSnapshot {
     //! documents use millimetres, so their value is 0.001.
     double metersPerUnit = 0.001;
     Double3 renderOrigin;
+    //! Authoritative semantic selection mode for this exact publication.
+    //! Full scene snapshots support Object, Face, and Edge only. Edge mode is
+    //! semantic/CPU-selected in V1 and deliberately publishes no GPU picks.
+    ElementKind selectionMode = ElementKind::Object;
     std::vector<MeshSnapshot> meshes;
     std::vector<InstanceSnapshot> instances;
     std::vector<MaterialSnapshot> materials;
@@ -301,6 +318,11 @@ struct SceneSnapshot {
     CameraSnapshot camera;
     SelectionSnapshot selection;
 };
+
+//! Validate the complete renderer-neutral full-scene contract. Producers call
+//! this before committing revision state; DTO bridges call the same function
+//! before copying public immutable values.
+bool IsValidSceneSnapshot(const SceneSnapshot& snapshot) noexcept;
 
 //! Lightweight publication used between full scene snapshots. It intentionally
 //! carries no geometry so interactive camera motion and drawable-size changes

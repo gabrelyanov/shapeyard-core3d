@@ -43,11 +43,14 @@ public:
     //!
     //! A null result means validation or extraction failed. Failed builds do
     //! not consume revision numbers or alter the builder's last-known state.
+    //! The accepted Object/Face/Edge mode is copied into the publication and
+    //! controls both semantic topology identity and GPU pick admission.
     SnapshotPointer Build(
         const Handle(OcctDocument)& theDocument,
         const Handle(AIS_InteractiveContext)& theContext,
         const Handle(V3d_View)& theView,
-        const UInt2& theViewportPixels) noexcept;
+        const UInt2& theViewportPixels,
+        ElementKind theAcceptedSelectionKind) noexcept;
 
     //! Capture only the semantic camera and revisions. Document, model, and
     //! presentation revisions come from the most recent full snapshot; camera

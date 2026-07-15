@@ -11,6 +11,7 @@
 
 #include <AIS_Shape.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Shape.hxx>
 
 #include <cstdint>
 #include <functional>
@@ -36,15 +37,59 @@ enum class ShellPreviewState : std::uint8_t {
     Failed,
 };
 
+//! Bounded, immutable proof that one oriented face is the canonical face of
+//! one displayed editable BRep solid and that the presentation still exactly
+//! mirrors its persisted XCAF definition and transform. Construction performs
+//! the topology cap before any full face map or BRep validity traversal.
+struct FaceOperationSourceProof {
+    Handle(AIS_Shape) original;
+    TDF_Label documentLabel;
+    TopoDS_Shape shape;
+    TopoDS_Face openingFace;
+    gp_Trsf transform;
+    Standard_Size faceTopologyIndex = 0;
+    Standard_Size topologyNodeCount = 0;
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+};
+
+//! Produce the shared idle/begin admission proof for face-local solid tools.
+//! theSelectedFace must have the same TShape, location, and orientation as the
+//! canonical face embedded in the presentation; reversed and stale owners are
+//! rejected rather than normalized silently.
+Standard_Boolean TryPrepareFaceOperationSource(
+    const Handle(AIS_InteractiveContext)& context,
+    const Handle(OcctDocument)& document,
+    const Handle(AIS_Shape)& presentation,
+    const TopoDS_Face& selectedFace,
+    Standard_Size maximumTopologyNodes,
+    Standard_Size maximumStyledSubshapeLabels,
+    FaceOperationSourceProof& proof) noexcept;
+
+//! Cheap exact revalidation for an already bounded proof. No topology map or
+//! kernel-wide validity traversal is repeated.
+Standard_Boolean FaceOperationSourceProofIsCurrent(
+    const Handle(AIS_InteractiveContext)& context,
+    const Handle(OcctDocument)& document,
+    const FaceOperationSourceProof& proof,
+    Standard_Size maximumStyledSubshapeLabels) noexcept;
+
+//! DEBUG/diagnostic index resolver that preserves TopExp's canonical unique
+//! face order but stops as soon as the requested face is known. Both the
+//! requested index and visited Face occurrences are bounded; no full map of an
+//! oversized source is constructed before production admission applies its
+//! source-wide topology cap.
+Standard_Boolean TryResolveCanonicalFaceTopologyIndexBounded(
+    const TopoDS_Shape& shape,
+    Standard_Size faceTopologyIndex,
+    Standard_Size maximumFaceOccurrences,
+    TopoDS_Face& face) noexcept;
+
 //! One immutable planar-face selection captured on the main thread. The
 //! controller deep-copies both the source and opening before dispatching any
 //! offset work.
 struct ShellSourceSelection {
-    Handle(AIS_Shape) original;
-    TDF_Label documentLabel;
-    TopoDS_Face openingFace;
-    //! Zero-based index in deterministic TopExp face traversal order.
-    Standard_Size faceTopologyIndex = 0;
+    FaceOperationSourceProof proof;
     Standard_Integer selectionMode =
         AIS_Shape::SelectionMode(TopAbs_SHAPE);
 };
@@ -113,6 +158,11 @@ public:
         Handle(OcctDocument) document);
     ~ShellOperationController() noexcept;
 
+    //! Full, read-only idle admission using the same preparation proof as
+    //! begin(). It never cancels an existing operation or changes controller,
+    //! document, selection, or presentation state.
+    Standard_Boolean canBegin(
+        const ShellSourceSelection& selection) const noexcept;
     Standard_Boolean begin(const ShellSourceSelection& selection) noexcept;
     Standard_Boolean setThickness(Standard_Real thickness) noexcept;
     ShellApplyResult apply() noexcept;
@@ -130,6 +180,10 @@ public:
     std::uint64_t previewGeneration() const noexcept;
     Standard_Boolean capturePreview(
         ShellPreviewCapture& capture) const noexcept;
+    //! Returns only the owned displayed zero-mode result retained while the
+    //! document outcome is unknown. It does not publish committed geometry.
+    Standard_Boolean captureSelectionModeSuspendedPresentations(
+        std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
 
 #ifdef DEBUG
@@ -143,6 +197,7 @@ public:
     void debugSetCommitMode(Standard_Integer mode) noexcept;
     void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
+    Standard_Boolean debugMutateSourcePersistedShape() noexcept;
 #endif
 
 private:
@@ -163,6 +218,10 @@ private:
         std::string entityIdentifier;
         std::string definitionIdentifier;
     };
+
+    Standard_Boolean tryPrepareSource(
+        const ShellSourceSelection& selection,
+        std::unique_ptr<Source>& source) const noexcept;
 
     enum class DocumentState : std::uint8_t {
         Original = 0,

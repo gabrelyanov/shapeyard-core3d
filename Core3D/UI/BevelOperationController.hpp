@@ -45,6 +45,19 @@ struct BevelSourceSelection {
     Standard_Integer selectionMode = AIS_Shape::SelectionMode(TopAbs_SHAPE);
 };
 
+//! Frozen v1 rail eligibility shared by read-only selection capture and the
+//! controller's final source proof. It is observational and fails closed.
+Standard_Boolean IsBevelEdgeEligible(
+    const TopoDS_Edge& edge) noexcept;
+
+//! DEBUG/test selection seams resolve deterministic indices only after a
+//! bounded occurrence walk, keeping the same pre-map work ceiling as admission.
+Standard_Boolean TryResolveCanonicalBevelEdgeTopologyIndexBounded(
+	const TopoDS_Shape& shape,
+	Standard_Size zeroBasedIndex,
+	Standard_Size maximumTopologyOccurrences,
+	TopoDS_Edge& edge) noexcept;
+
 //! Explicit renderer publication input. The snapshot builder never discovers
 //! transient Bevel geometry by enumerating the AIS context.
 struct BevelPreviewCapture {
@@ -104,13 +117,25 @@ public:
         Handle(OcctDocument) document);
     ~BevelOperationController() noexcept;
 
+    //! Pure idle admission. It performs the same bounded source and edge proof
+    //! as begin(), without cancelling an operation or mutating selection,
+    //! presentation, controller, or document state.
+    Standard_Boolean canBegin(
+        const std::vector<BevelSourceSelection>& selection) const noexcept;
     Standard_Boolean begin(
         const std::vector<BevelSourceSelection>& selection) noexcept;
+	//! Used only after an in-tool AIS selection refresh became empty/invalid.
+	//! It retires a coherent pristine Selecting ledger without touching any
+	//! preview or retained Computing/Ready/Failed operation.
+	Standard_Boolean retireIdleSelectingSelection() noexcept;
     Standard_Boolean setValue(Standard_Real signedDistance) noexcept;
     BevelApplyResult apply() noexcept;
     Standard_Boolean cancel() noexcept;
 
     Standard_Boolean canApply() const noexcept;
+	//! Current synchronous capture ceiling. DEBUG may inject a smaller value;
+	//! callers use it before source-wide maps as well as controller validation.
+	Standard_Size maximumCaptureTopologyNodes() const noexcept;
     Standard_Boolean hasActiveOperation() const noexcept;
     Standard_Boolean isSelectionFrozen() const noexcept;
     BevelPreviewState previewState() const noexcept;
@@ -141,7 +166,19 @@ private:
         Standard_Integer selectionMode =
             AIS_Shape::SelectionMode(TopAbs_SHAPE);
         std::string entityIdentifier;
+        std::string definitionIdentifier;
+        Standard_Size topologyNodeCount = 0;
+        Standard_Size sourceEdgeCount = 0;
     };
+
+    Standard_Boolean tryPrepareSources(
+        const std::vector<BevelSourceSelection>& selection,
+        std::vector<Source>& sources) const noexcept;
+    Standard_Boolean preparedSourcesAreCurrent(
+        const std::vector<Source>& sources,
+        Standard_Boolean requireDisplayed) const noexcept;
+	Standard_Boolean hasPristineSelectingLedger() const noexcept;
+	Standard_Boolean canAtomicallyReplaceSelectingSources() const noexcept;
 
     Standard_Boolean enqueuePreviewRequest() noexcept;
     void acceptWorkerResult(BevelPreviewWorkerResult result) noexcept;

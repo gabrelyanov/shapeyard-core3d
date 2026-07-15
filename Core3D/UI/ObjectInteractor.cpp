@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 namespace core3d {
@@ -759,6 +760,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::selectLastObject() {
+        if (hasUnresolvedDuplicate()) { return; }
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         Handle(AIS_InteractiveObject) object;
@@ -841,6 +843,7 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::	selectAll() {
+		if (hasUnresolvedDuplicate()) { return; }
 		if (!_manipulator.IsNull()
 			&& (_manipulatorGestureActive
 				|| _manipulator->HasActiveTransformation())) {
@@ -927,6 +930,9 @@ namespace core3d {
             theContent = {};
             theMirrorPreviewObjects.clear();
             theBooleanPreview = {};
+            if (hasUnresolvedDuplicate()) {
+                return PresentationOverlayCaptureStatus::Unsafe;
+            }
             const bool hasMirrorPreview = !_trialMirrorObjects.empty();
 			// The current renderer-neutral MirrorPreview contract has exactly
 			// six gizmo slots followed by N mirrored result bodies, all with the
@@ -1054,7 +1060,93 @@ namespace core3d {
         }
     }
 
+    Standard_Boolean
+    ObjectInteractor::captureSelectionModeSuspendedPresentations(
+        std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+    {
+        thePresentations.clear();
+        if (myContext.IsNull()) {
+            return Standard_False;
+        }
+        if (_manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+            && _linearArrayController != nullptr) {
+            return _linearArrayController
+                ->captureSelectionModeSuspendedPresentations(
+                    thePresentations);
+        }
+        if (_manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
+            && _radialArrayController != nullptr) {
+            return _radialArrayController
+                ->captureSelectionModeSuspendedPresentations(
+                    thePresentations);
+        }
+        if (_booleanOpController != nullptr) {
+            if (_manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeUnion) {
+                return _booleanOpController
+                    ->captureSelectionModeSuspendedPresentations(
+                        BooleanAction::BooleanUnion,
+                        thePresentations);
+            }
+            if (_manipulatorType
+                == PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect) {
+                return _booleanOpController
+                    ->captureSelectionModeSuspendedPresentations(
+                        BooleanAction::BooleanIntersect,
+                        thePresentations);
+            }
+        }
+        if (_manipulatorType
+                != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+            || _mirrorPlanePicking || !hasActiveMirror()
+            || (_trialMirrorObjects.empty()
+                && _mirrorReferencePresentations.empty())
+            || _trialMirrorObjects.size() > kMaxMirrorPreviewBodies
+            || _mirrorReferencePresentations.size() > 1) {
+            return Standard_False;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            thePresentations.reserve(
+                _trialMirrorObjects.size()
+                + _mirrorReferencePresentations.size());
+            const auto appendSuspended = [&](const Handle(AIS_Shape)& aShape) {
+                TColStd_ListOfInteger activeModes;
+                if (aShape.IsNull() || aShape->Shape().IsNull()
+                    || !myContext->IsDisplayed(aShape)) {
+                    return Standard_False;
+                }
+                myContext->ActivatedModes(aShape, activeModes);
+                if (!activeModes.IsEmpty()) {
+                    return Standard_False;
+                }
+                thePresentations.push_back(aShape);
+                return Standard_True;
+            };
+            for (const Handle(AIS_Shape)& aShape : _trialMirrorObjects) {
+                if (!appendSuspended(aShape)) {
+                    thePresentations.clear();
+                    return Standard_False;
+                }
+            }
+            for (const Handle(AIS_Shape)& aShape :
+                 _mirrorReferencePresentations) {
+                if (!appendSuspended(aShape)) {
+                    thePresentations.clear();
+                    return Standard_False;
+                }
+            }
+            return !thePresentations.empty();
+        } catch (...) {
+            thePresentations.clear();
+            return Standard_False;
+        }
+    }
+
     void ObjectInteractor::deleteSelected() {
+        if (hasUnresolvedDuplicate()) { return; }
         if (_manipulator.IsNull() || !_manipulator->IsAttached()) { return; }
 		auto doc = myDoc->ChangeDocument();
 		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
@@ -1280,6 +1372,16 @@ namespace core3d {
 			detachManipulator(false);
 			createManipulatorIfNeeded();
 			myContext->ClearSelected(Standard_False);
+#ifdef DEBUG
+			if (_debugDuplicatePresentationRepairFailureCount > 0) {
+				--_debugDuplicatePresentationRepairFailureCount;
+				// Model a failure after committed-result repair has cleared the old
+				// owners but before the first duplicate is selected. The pending
+				// ledger remains the sole recovery authority.
+				try { myDoc->NotifyChanges(); } catch (...) {}
+				return Standard_False;
+			}
+#endif
 			for (const DuplicatePendingResult& duplicate :
 				 _pendingDuplicateResults) {
 				if (duplicate.presentation.IsNull()
@@ -1664,14 +1766,20 @@ namespace core3d {
 			// rebuild from OCAF instead of trusting stale transient UI state.
 			try { myDoc->NotifyChanges(); } catch (...) {}
 		}
-    }
+	    }
 
-    const bool ObjectInteractor::isSelected() const {
+	bool ObjectInteractor::hasUnresolvedDuplicate() const noexcept {
+		return _duplicateOwnsDocumentCommand
+			|| !_pendingDuplicateResults.empty();
+	}
+
+	    const bool ObjectInteractor::isSelected() const {
 //        printf(">>> ObjectInteractor::isSelected - %d\n", !myContext->FirstSelectedObject().IsNull());
         return !myContext->FirstSelectedObject().IsNull();
     }
 
     void ObjectInteractor::attachManipulatorToSelection(bool detach) {
+        if (hasUnresolvedDuplicate()) { return; }
         if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { return; }
 		if (_manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
@@ -1733,6 +1841,7 @@ namespace core3d {
     }
 
 	void ObjectInteractor::setObjectTransparent(Handle(AIS_InteractiveObject) selected, const bool on) {
+		if (hasUnresolvedDuplicate()) { return; }
 		
 		Quantity_Color color = Quantity_Color(on ? Quantity_NameOfColor::Quantity_NOC_BLUE : Quantity_NameOfColor::Quantity_NOC_GRAY80);
 		
@@ -1744,6 +1853,7 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
+		if (hasUnresolvedDuplicate()) { return; }
 		const PrimitiveManipulatorType aPreviousType = _manipulatorType;
 		if (type
 				!= PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
@@ -1909,6 +2019,7 @@ namespace core3d {
     }
 
     bool ObjectInteractor::transformManipulator(const int theX, const int theY) {
+		if (hasUnresolvedDuplicate()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
 				_manipulator,
@@ -1929,6 +2040,7 @@ namespace core3d {
     }
 
     bool ObjectInteractor::startTransformManipulator(const int theX, const int theY) {
+		if (hasUnresolvedDuplicate()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
 				_manipulator,
@@ -1951,6 +2063,10 @@ namespace core3d {
     }
 
     void ObjectInteractor::finishInteraction() {
+		if (hasUnresolvedDuplicate()) {
+			_manipulatorGestureActive = false;
+			return;
+		}
 		struct GestureStateReset final {
 			bool& state;
 			~GestureStateReset() noexcept { state = false; }
@@ -2121,6 +2237,10 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
+		if (hasUnresolvedDuplicate()) {
+			_manipulatorGestureActive = false;
+			return;
+		}
 		_manipulatorGestureActive = false;
         if(!_manipulator.IsNull() && _manipulator->IsAttached()) {
 			_manipulator->StopTransform(Standard_False);
@@ -2449,10 +2569,15 @@ namespace core3d {
 		_booleanOpController->debugSetTransactionFailureCount(count);
 	}
 
-	void ObjectInteractor::debugSetBooleanAbortFailureCount(
-		const Standard_Size count) noexcept {
-		_booleanOpController->debugSetAbortFailureCount(count);
-	}
+		void ObjectInteractor::debugSetBooleanAbortFailureCount(
+			const Standard_Size count) noexcept {
+			_booleanOpController->debugSetAbortFailureCount(count);
+		}
+
+		void ObjectInteractor::debugSetBooleanPostCommitInspectFailureCount(
+			const Standard_Size count) noexcept {
+			_booleanOpController->debugSetPostCommitInspectFailureCount(count);
+		}
 #endif
 
 	Standard_Boolean ObjectInteractor::beginLinearArray() noexcept {
@@ -3489,6 +3614,135 @@ namespace core3d {
 
 	const bool ObjectInteractor::isPickingMirrorPlane() const noexcept {
 		return _mirrorPlanePicking;
+	}
+
+	Standard_Boolean
+	ObjectInteractor::mirrorPlanePickingAuthorityMatches() const noexcept {
+		constexpr std::size_t kMaximumPickPresentations =
+			limits::kMaximumLeafPresentations + 1;
+		if (!_mirrorPlanePicking
+			|| _manipulatorType
+				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			|| myContext.IsNull() || myDoc.IsNull()
+			|| myDoc->Document().IsNull()
+			|| _manipulator.IsNull() || !_manipulator->IsAttached()
+			|| _mirrorPlanePickModes.size() < 2
+			|| _mirrorPlanePickModes.size() > kMaximumPickPresentations) {
+			return Standard_False;
+		}
+
+		try {
+			OCC_CATCH_SIGNALS
+			const Standard_Integer aShapeMode =
+				AIS_Shape::SelectionMode(TopAbs_SHAPE);
+			const Standard_Integer aFaceMode =
+				AIS_Shape::SelectionMode(TopAbs_FACE);
+			const MirrorPlanePickSelectionModes& aManipulatorSnapshot =
+				_mirrorPlanePickModes.back();
+			if (aManipulatorSnapshot.presentation != _manipulator
+				|| !myContext->IsDisplayed(_manipulator)
+				|| _manipulator->HasActiveMode()
+				|| _manipulator->HasActiveTransformation()
+				|| !SelectionModesMatch(myContext, _manipulator, {})) {
+				return Standard_False;
+			}
+
+			std::unordered_set<const AIS_InteractiveObject*>
+				aTrackedPresentations;
+			aTrackedPresentations.reserve(
+				_mirrorPlanePickModes.size() - 1);
+			for (std::size_t anIndex = 0;
+				 anIndex + 1 < _mirrorPlanePickModes.size(); ++anIndex) {
+				const MirrorPlanePickSelectionModes& aSnapshot =
+					_mirrorPlanePickModes[anIndex];
+				if (aSnapshot.presentation.IsNull()
+					|| aSnapshot.presentation == _manipulator) {
+					return Standard_False;
+				}
+				const Handle(AIS_Shape) aShape =
+					Handle(AIS_Shape)::DownCast(aSnapshot.presentation);
+				const TDF_Label aLabel =
+					myDoc->ShapeLabel(aSnapshot.presentation);
+				const OcctGeometryRepresentation aRepresentation =
+					myDoc->GeometryRepresentationForLabel(aLabel);
+				const TopoDS_Shape aStoredShape = aLabel.IsNull()
+					? TopoDS_Shape()
+					: XCAFDoc_ShapeTool::GetShape(aLabel);
+				if (aSnapshot.modes.size() != 1
+					|| aSnapshot.modes.front() != aShapeMode
+					|| aShape.IsNull() || aShape->Shape().IsNull()
+					|| !myContext->IsDisplayed(aSnapshot.presentation)
+					|| !myDoc->IsPresentationEditable(
+						aSnapshot.presentation)
+					|| aLabel.IsNull()
+					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(aLabel)
+					|| !IsBRepModelingRepresentation(aRepresentation)
+					|| aStoredShape.IsNull()
+					|| !aStoredShape.IsEqual(aShape->Shape())
+					|| !aTrackedPresentations.insert(
+						aSnapshot.presentation.get()).second
+					|| !SelectionModesMatch(
+						myContext,
+						aSnapshot.presentation,
+						{aShapeMode, aFaceMode})) {
+					return Standard_False;
+				}
+			}
+
+			std::unordered_set<const AIS_InteractiveObject*>
+				aSeenTrackedPresentations;
+			aSeenTrackedPresentations.reserve(
+				aTrackedPresentations.size());
+			AIS_ListOfInteractive aDisplayed;
+			myContext->DisplayedObjects(aDisplayed);
+			for (AIS_ListIteratorOfListOfInteractive anIterator(aDisplayed);
+				 anIterator.More(); anIterator.Next()) {
+				const Handle(AIS_InteractiveObject)& aPresentation =
+					anIterator.Value();
+				if (aPresentation == _manipulator) {
+					continue;
+				}
+				if (aTrackedPresentations.find(aPresentation.get())
+						!= aTrackedPresentations.end()) {
+					aSeenTrackedPresentations.insert(aPresentation.get());
+					continue;
+				}
+
+				const TDF_Label aLabel = myDoc->ShapeLabel(aPresentation);
+				const OcctGeometryRepresentation aRepresentation =
+					myDoc->GeometryRepresentationForLabel(aLabel);
+				if (aRepresentation == OcctGeometryRepresentation::Invalid) {
+					// Transient operation presentations do not participate in
+					// committed topology authority.
+					continue;
+				}
+				std::vector<Standard_Integer> anExpectedModes;
+				if (myDoc->IsPresentationEditable(aPresentation)) {
+					if (aRepresentation
+							== OcctGeometryRepresentation::TriangleMesh
+						|| IsBRepModelingRepresentation(aRepresentation)) {
+						anExpectedModes.push_back(aShapeMode);
+					} else {
+						return Standard_False;
+					}
+				}
+				if (!SelectionModesMatch(
+						myContext, aPresentation, anExpectedModes)) {
+					return Standard_False;
+				}
+			}
+			if (aSeenTrackedPresentations.size()
+				!= aTrackedPresentations.size()) {
+				return Standard_False;
+			}
+
+			const Handle(StdSelect_ViewerSelector3d)& aSelector =
+				myContext->MainSelector();
+			return !aSelector.IsNull()
+				&& aSelector->CustomPixelTolerance() < 0;
+		} catch (...) {
+			return Standard_False;
+		}
 	}
 
 	const bool ObjectInteractor::hasCustomMirrorPlane() const noexcept {
@@ -4751,7 +5005,13 @@ namespace core3d {
 #ifdef DEBUG
 	void ObjectInteractor::debugSetDuplicateCommitMode(
 		const Standard_Integer mode) noexcept {
+		if (mode == 3) {
+			_debugDuplicateCommitMode = 0;
+			_debugDuplicatePresentationRepairFailureCount = 1;
+			return;
+		}
 		_debugDuplicateCommitMode = mode >= 0 && mode <= 2 ? mode : 0;
+		_debugDuplicatePresentationRepairFailureCount = 0;
 	}
 
 	MirrorPreviewDebugState

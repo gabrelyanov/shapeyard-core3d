@@ -14,6 +14,7 @@
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffset_Error.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
@@ -499,6 +500,228 @@ private:
 
 } // namespace
 
+Standard_Boolean TryPrepareFaceOperationSource(
+    const Handle(AIS_InteractiveContext)& theContext,
+    const Handle(OcctDocument)& theDocument,
+    const Handle(AIS_Shape)& thePresentation,
+    const TopoDS_Face& theSelectedFace,
+    const Standard_Size theMaximumTopologyNodes,
+    const Standard_Size theMaximumStyledSubshapeLabels,
+    FaceOperationSourceProof& theProof) noexcept
+{
+    theProof = FaceOperationSourceProof();
+    if (theContext.IsNull() || theDocument.IsNull()
+        || thePresentation.IsNull() || theSelectedFace.IsNull()
+        || theMaximumTopologyNodes == 0
+        || theMaximumStyledSubshapeLabels == 0) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) aDocument =
+            theDocument->Document();
+        const TDF_Label aLabel =
+            theDocument->ShapeLabel(thePresentation);
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument->GetUndoLimit() == 0 || aLabel.IsNull()
+            || aLabel.Data() != aDocument->GetData()
+            || !IsBRepModelingLabel(theDocument, aLabel)
+            || !theDocument->IsPresentationEditable(thePresentation)
+            || !theContext->IsDisplayed(thePresentation)) {
+            return Standard_False;
+        }
+
+        const TopoDS_Shape aShape = thePresentation->Shape();
+        const TopoDS_Shape aStoredShape =
+            XCAFDoc_ShapeTool::GetShape(aLabel);
+        gp_Trsf aPersistedTransform;
+        const gp_Trsf aPresentationTransform =
+            thePresentation->LocalTransformation();
+        if (aShape.IsNull() || aStoredShape.IsNull()
+            || aShape.ShapeType() != TopAbs_SOLID
+            || !aStoredShape.IsEqual(aShape)
+            || !theDocument->TryObjectTransformForLabel(
+                aLabel, aPersistedTransform)
+            || !TransformsMatch(
+                aPersistedTransform, aPresentationTransform)) {
+            return Standard_False;
+        }
+
+        // This occurrence-count cap must precede every full topology map and
+        // every kernel-wide validity traversal in synchronous admission.
+        Standard_Size aTopologyNodeCount = 0;
+        if (!CountBoundedTopology(
+                aShape,
+                theMaximumTopologyNodes,
+                aTopologyNodeCount)) {
+            return Standard_False;
+        }
+        if (HasStyledXCAFSubshape(
+                aDocument,
+                aLabel,
+                theMaximumStyledSubshapeLabels)
+            || !BRepCheck_Analyzer(aShape, Standard_True).IsValid()) {
+            return Standard_False;
+        }
+
+        TopTools_IndexedMapOfShape aFaces;
+        TopExp::MapShapes(aShape, TopAbs_FACE, aFaces);
+        Standard_Integer aFaceIndex = 0;
+        TopoDS_Face aCanonicalFace;
+        for (Standard_Integer anIndex = 1;
+             anIndex <= aFaces.Extent(); ++anIndex) {
+            const TopoDS_Shape& aCandidate = aFaces.FindKey(anIndex);
+            if (aCandidate.IsSame(theSelectedFace)) {
+                aFaceIndex = anIndex;
+                aCanonicalFace = TopoDS::Face(aCandidate);
+                break;
+            }
+        }
+        // IsSame intentionally locates a possible TShape/location match;
+        // IsEqual then enforces the presentation's canonical orientation.
+        if (aFaceIndex <= 0 || aCanonicalFace.IsNull()
+            || !aCanonicalFace.IsEqual(theSelectedFace)
+            || (aCanonicalFace.Orientation() != TopAbs_FORWARD
+                && aCanonicalFace.Orientation() != TopAbs_REVERSED)) {
+            return Standard_False;
+        }
+        const BRepAdaptor_Surface aSurface(
+            aCanonicalFace, Standard_True);
+        if (aSurface.GetType() != GeomAbs_Plane) {
+            return Standard_False;
+        }
+
+        const std::string anEntityIdentifier =
+            theDocument->EntityIdentifierForLabel(aLabel);
+        const std::string aDefinitionIdentifier =
+            theDocument->DefinitionIdentifierForLabel(aLabel);
+        if (anEntityIdentifier.empty() || aDefinitionIdentifier.empty()) {
+            return Standard_False;
+        }
+
+        theProof.original = thePresentation;
+        theProof.documentLabel = aLabel;
+        theProof.shape = aShape;
+        theProof.openingFace = aCanonicalFace;
+        theProof.transform = aPresentationTransform;
+        theProof.faceTopologyIndex =
+            static_cast<Standard_Size>(aFaceIndex - 1);
+        theProof.topologyNodeCount = aTopologyNodeCount;
+        theProof.entityIdentifier = anEntityIdentifier;
+        theProof.definitionIdentifier = aDefinitionIdentifier;
+        return Standard_True;
+    } catch (...) {
+        theProof = FaceOperationSourceProof();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean FaceOperationSourceProofIsCurrent(
+    const Handle(AIS_InteractiveContext)& theContext,
+    const Handle(OcctDocument)& theDocument,
+    const FaceOperationSourceProof& theProof,
+    const Standard_Size theMaximumStyledSubshapeLabels) noexcept
+{
+    if (theContext.IsNull() || theDocument.IsNull()
+        || theProof.original.IsNull() || theProof.documentLabel.IsNull()
+        || theProof.shape.IsNull() || theProof.openingFace.IsNull()
+        || theProof.topologyNodeCount == 0
+        || theMaximumStyledSubshapeLabels == 0
+        || theProof.entityIdentifier.empty()
+        || theProof.definitionIdentifier.empty()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) aDocument =
+            theDocument->Document();
+        const TopoDS_Shape aStoredShape =
+            XCAFDoc_ShapeTool::GetShape(theProof.documentLabel);
+        gp_Trsf aPersistedTransform;
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument->GetUndoLimit() == 0
+            || theProof.documentLabel.Data() != aDocument->GetData()
+            || !IsBRepModelingLabel(
+                theDocument, theProof.documentLabel)
+            || !theDocument->IsPresentationEditable(theProof.original)
+            || !theDocument->ShapeLabel(theProof.original).IsEqual(
+                theProof.documentLabel)
+            || !theContext->IsDisplayed(theProof.original)
+            || aStoredShape.IsNull()
+            || !aStoredShape.IsEqual(theProof.shape)
+            || !theProof.original->Shape().IsEqual(theProof.shape)
+            || !theDocument->TryObjectTransformForLabel(
+                theProof.documentLabel, aPersistedTransform)
+            || !TransformsMatch(
+                theProof.original->LocalTransformation(),
+                theProof.transform)
+            || !TransformsMatch(
+                aPersistedTransform, theProof.transform)
+            || HasStyledXCAFSubshape(
+                aDocument,
+                theProof.documentLabel,
+                theMaximumStyledSubshapeLabels)
+            || theDocument->EntityIdentifierForLabel(
+                theProof.documentLabel) != theProof.entityIdentifier
+            || theDocument->DefinitionIdentifierForLabel(
+                theProof.documentLabel) != theProof.definitionIdentifier
+            || (theProof.openingFace.Orientation() != TopAbs_FORWARD
+                && theProof.openingFace.Orientation() != TopAbs_REVERSED)) {
+            return Standard_False;
+        }
+        const BRepAdaptor_Surface aSurface(
+            theProof.openingFace, Standard_True);
+        return aSurface.GetType() == GeomAbs_Plane;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean TryResolveCanonicalFaceTopologyIndexBounded(
+    const TopoDS_Shape& theShape,
+    const Standard_Size theFaceTopologyIndex,
+    const Standard_Size theMaximumFaceOccurrences,
+    TopoDS_Face& theFace) noexcept
+{
+    theFace.Nullify();
+    if (theShape.IsNull() || theMaximumFaceOccurrences == 0
+        || theFaceTopologyIndex >= theMaximumFaceOccurrences
+        || theFaceTopologyIndex
+            > static_cast<Standard_Size>(
+                std::numeric_limits<Standard_Integer>::max() - 1)) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        TopTools_IndexedMapOfShape aFaces;
+        Standard_Size aVisitedFaceOccurrences = 0;
+        for (TopExp_Explorer aFace(theShape, TopAbs_FACE);
+             aFace.More(); aFace.Next()) {
+            if (++aVisitedFaceOccurrences
+                    > theMaximumFaceOccurrences) {
+                return Standard_False;
+            }
+            aFaces.Add(aFace.Current());
+            if (static_cast<Standard_Size>(aFaces.Extent())
+                    > theFaceTopologyIndex) {
+                const TopoDS_Shape& aCanonical = aFaces.FindKey(
+                    static_cast<Standard_Integer>(
+                        theFaceTopologyIndex) + 1);
+                if (aCanonical.IsNull()
+                    || aCanonical.ShapeType() != TopAbs_FACE) {
+                    return Standard_False;
+                }
+                theFace = TopoDS::Face(aCanonical);
+                return Standard_True;
+            }
+        }
+        return Standard_False;
+    } catch (...) {
+        theFace.Nullify();
+        return Standard_False;
+    }
+}
+
 class ShellPreviewWorker final
     : public std::enable_shared_from_this<ShellPreviewWorker> {
 public:
@@ -841,56 +1064,28 @@ void ShellOperationController::notifyPreviewStateChanged() noexcept
     }
 }
 
-Standard_Boolean ShellOperationController::begin(
-    const ShellSourceSelection& theSelection) noexcept
+Standard_Boolean ShellOperationController::canBegin(
+    const ShellSourceSelection& theSelection) const noexcept
 {
-    if (myContext.IsNull() || myDoc.IsNull()
-        || theSelection.original.IsNull()
-        || theSelection.openingFace.IsNull()) {
+    if (hasActiveOperation()) {
         return Standard_False;
     }
-    if (hasActiveOperation() && !cancel()) {
+    std::unique_ptr<Source> aSource;
+    return tryPrepareSource(theSelection, aSource);
+}
+
+Standard_Boolean ShellOperationController::tryPrepareSource(
+    const ShellSourceSelection& theSelection,
+    std::unique_ptr<Source>& theSource) const noexcept
+{
+    theSource.reset();
+    if (myContext.IsNull() || myDoc.IsNull()
+        || theSelection.proof.original.IsNull()
+        || theSelection.proof.openingFace.IsNull()) {
         return Standard_False;
     }
     try {
         OCC_CATCH_SIGNALS
-        const Handle(TDocStd_Document) aDocument =
-            myDoc->ChangeDocument();
-        if (aDocument.IsNull() || aDocument->HasOpenCommand()
-            || aDocument->GetUndoLimit() == 0
-            || theSelection.documentLabel.IsNull()
-            || theSelection.documentLabel.Data()
-                != aDocument->GetData()
-            || !IsBRepModelingLabel(
-                myDoc, theSelection.documentLabel)
-            || !myDoc->IsPresentationEditable(
-                theSelection.original)
-            || !myDoc->ShapeLabel(theSelection.original).IsEqual(
-                theSelection.documentLabel)
-            || !myContext->IsDisplayed(theSelection.original)) {
-            return Standard_False;
-        }
-
-        const TopoDS_Shape aShape = theSelection.original->Shape();
-        const TopoDS_Shape aStoredShape =
-            XCAFDoc_ShapeTool::GetShape(
-                theSelection.documentLabel);
-        const gp_Trsf aTransform =
-            theSelection.original->LocalTransformation();
-        if (aShape.IsNull() || aStoredShape.IsNull()
-            || !aStoredShape.IsEqual(aShape)
-            || aShape.ShapeType() != TopAbs_SOLID
-            || !TransformsMatch(
-                myDoc->ObjectTransformForLabel(
-                    theSelection.documentLabel),
-                aTransform)
-            || HasStyledXCAFSubshape(
-                aDocument,
-                theSelection.documentLabel,
-                kMaximumStyledSubshapeLabels)) {
-            return Standard_False;
-        }
-
 #ifdef DEBUG
         const Standard_Size aCaptureLimit =
             std::max<Standard_Size>(
@@ -902,36 +1097,28 @@ Standard_Boolean ShellOperationController::begin(
         const Standard_Size aCaptureLimit =
             kMaximumSourceTopologyNodes;
 #endif
-        Standard_Size aTopologyNodeCount = 0;
-        if (!CountBoundedTopology(
-                aShape, aCaptureLimit, aTopologyNodeCount)
-            || !BRepCheck_Analyzer(
-                aShape, Standard_True).IsValid()) {
+        const FaceOperationSourceProof& aProof = theSelection.proof;
+        if (aProof.topologyNodeCount > aCaptureLimit
+            || !FaceOperationSourceProofIsCurrent(
+                myContext,
+                myDoc,
+                aProof,
+                kMaximumStyledSubshapeLabels)
+            || !IsSinglePlanarOpening(aProof.openingFace)) {
             return Standard_False;
         }
 
-        TopTools_IndexedMapOfShape aFaces;
-        TopExp::MapShapes(aShape, TopAbs_FACE, aFaces);
-        const Standard_Integer aFaceIndex =
-            aFaces.FindIndex(theSelection.openingFace);
-        if (aFaceIndex <= 0
-            || static_cast<Standard_Size>(aFaceIndex - 1)
-                != theSelection.faceTopologyIndex
-            || !IsSinglePlanarOpening(
-                theSelection.openingFace)) {
-            return Standard_False;
-        }
-
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
         Standard_Real aMetersPerUnit = 0.0;
         Standard_Real aSourceBounds[6] = {};
         Standard_Real aSourceVolume = 0.0;
         Standard_Real aMaximumVertexTolerance = 0.0;
         if (!TryReadMetersPerUnit(
                 aDocument, aMetersPerUnit)
-            || !ShapeBounds(aShape, aSourceBounds)
-            || !ShapeVolume(aShape, aSourceVolume)
+            || !ShapeBounds(aProof.shape, aSourceBounds)
+            || !ShapeVolume(aProof.shape, aSourceVolume)
             || !MaximumVertexTolerance(
-                aShape, aMaximumVertexTolerance)) {
+                aProof.shape, aMaximumVertexTolerance)) {
             return Standard_False;
         }
         Standard_Real aMinimumThickness = 0.0;
@@ -948,35 +1135,46 @@ Standard_Boolean ShellOperationController::begin(
         }
         (void)aKernelTolerance;
 
-        const std::string anEntityIdentifier =
-            myDoc->EntityIdentifierForLabel(
-                theSelection.documentLabel);
-        const std::string aDefinitionIdentifier =
-            myDoc->DefinitionIdentifierForLabel(
-                theSelection.documentLabel);
-        if (anEntityIdentifier.empty()
-            || aDefinitionIdentifier.empty()) {
-            return Standard_False;
-        }
-
-        std::unique_ptr<Source> aSource =
-            std::make_unique<Source>();
-        aSource->original = theSelection.original;
-        aSource->label = theSelection.documentLabel;
-        aSource->shape = aShape;
-        aSource->openingFace = theSelection.openingFace;
-        aSource->transform = aTransform;
+        std::unique_ptr<Source> aSource = std::make_unique<Source>();
+        aSource->original = aProof.original;
+        aSource->label = aProof.documentLabel;
+        aSource->shape = aProof.shape;
+        aSource->openingFace = aProof.openingFace;
+        aSource->transform = aProof.transform;
         aSource->selectionMode = theSelection.selectionMode;
-        aSource->faceTopologyIndex =
-            static_cast<Standard_Size>(aFaceIndex - 1);
-        aSource->topologyNodeCount = aTopologyNodeCount;
+        aSource->faceTopologyIndex = aProof.faceTopologyIndex;
+        aSource->topologyNodeCount = aProof.topologyNodeCount;
         aSource->metersPerUnit = aMetersPerUnit;
         aSource->sourceVolume = aSourceVolume;
         aSource->minimumThickness = aMinimumThickness;
         aSource->maximumThickness = aMaximumThickness;
-        aSource->entityIdentifier = anEntityIdentifier;
-        aSource->definitionIdentifier = aDefinitionIdentifier;
+        aSource->entityIdentifier = aProof.entityIdentifier;
+        aSource->definitionIdentifier = aProof.definitionIdentifier;
 
+        theSource = std::move(aSource);
+        return Standard_True;
+    } catch (...) {
+        theSource.reset();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean ShellOperationController::begin(
+    const ShellSourceSelection& theSelection) noexcept
+{
+    if (myContext.IsNull() || myDoc.IsNull()
+        || theSelection.proof.original.IsNull()
+        || theSelection.proof.openingFace.IsNull()) {
+        return Standard_False;
+    }
+    if (hasActiveOperation() && !cancel()) {
+        return Standard_False;
+    }
+    std::unique_ptr<Source> aSource;
+    if (!tryPrepareSource(theSelection, aSource) || aSource == nullptr) {
+        return Standard_False;
+    }
+    try {
         mySource = std::move(aSource);
         myThickness = 0.0;
         myRequestedFingerprint.clear();
@@ -1004,6 +1202,7 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
         const Handle(TDocStd_Document) aDocument = myDoc->Document();
         const TopoDS_Shape aStoredShape =
             XCAFDoc_ShapeTool::GetShape(mySource->label);
+        gp_Trsf aPersistedTransform;
         if (aDocument.IsNull() || aDocument->HasOpenCommand()
             || mySource->label.IsNull()
             || mySource->label.Data() != aDocument->GetData()
@@ -1020,9 +1219,9 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
             || !TransformsMatch(
                 mySource->original->LocalTransformation(),
                 mySource->transform)
-            || !TransformsMatch(
-                myDoc->ObjectTransformForLabel(mySource->label),
-                mySource->transform)
+            || !myDoc->TryObjectTransformForLabel(
+                mySource->label, aPersistedTransform)
+            || !TransformsMatch(aPersistedTransform, mySource->transform)
             || HasStyledXCAFSubshape(
                 aDocument,
                 mySource->label,
@@ -1033,13 +1232,8 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
                 != mySource->definitionIdentifier) {
             return Standard_False;
         }
-        TopTools_IndexedMapOfShape aFaces;
-        TopExp::MapShapes(mySource->shape, TopAbs_FACE, aFaces);
-        const Standard_Integer aFaceIndex =
-            aFaces.FindIndex(mySource->openingFace);
-        return aFaceIndex > 0
-            && static_cast<Standard_Size>(aFaceIndex - 1)
-                == mySource->faceTopologyIndex
+        return (mySource->openingFace.Orientation() == TopAbs_FORWARD
+                || mySource->openingFace.Orientation() == TopAbs_REVERSED)
             && IsSinglePlanarOpening(mySource->openingFace);
     } catch (...) {
         return Standard_False;
@@ -1473,6 +1667,37 @@ Standard_Boolean ShellOperationController::capturePreview(
         return Standard_True;
     } catch (...) {
         theCapture = {};
+        return Standard_False;
+    }
+}
+
+Standard_Boolean
+ShellOperationController::captureSelectionModeSuspendedPresentations(
+    std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+{
+    thePresentations.clear();
+    if (myState != ShellPreviewState::OutcomeUnknown
+        || !canApply() || mySource == nullptr || myContext.IsNull()
+        || myPreviewResult.IsNull()
+        || myPreviewResult->Shape().IsNull()
+        || myPendingCandidate.IsNull()
+        || !myPreviewResult->Shape().IsEqual(myPendingCandidate)) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        TColStd_ListOfInteger anActiveModes;
+        if (!myContext->IsDisplayed(myPreviewResult)) {
+            return Standard_False;
+        }
+        myContext->ActivatedModes(myPreviewResult, anActiveModes);
+        if (!anActiveModes.IsEmpty()) {
+            return Standard_False;
+        }
+        thePresentations.push_back(myPreviewResult);
+        return Standard_True;
+    } catch (...) {
+        thePresentations.clear();
         return Standard_False;
     }
 }
@@ -1959,6 +2184,60 @@ ShellOperationController::debugMutateSourcePersistedTransform() noexcept
         try {
             if (!aDocument.IsNull()
                 && aDocument->HasOpenCommand()) {
+                aDocument->AbortCommand();
+            }
+        } catch (...) {
+        }
+        return Standard_False;
+    }
+}
+
+Standard_Boolean
+ShellOperationController::debugMutateSourcePersistedShape() noexcept
+{
+    if (mySource == nullptr || !sourceIsCurrent() || myDoc.IsNull()) {
+        return Standard_False;
+    }
+    Handle(TDocStd_Document) aDocument;
+    try {
+        OCC_CATCH_SIGNALS
+        aDocument = myDoc->ChangeDocument();
+        const Handle(XCAFDoc_ShapeTool) aShapeTool =
+            aDocument.IsNull()
+            ? Handle(XCAFDoc_ShapeTool)()
+            : XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+        const TopoDS_Shape aReplacement =
+            BRepPrimAPI_MakeBox(13.0, 17.0, 19.0).Shape();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aShapeTool.IsNull()
+            || mySource->label.IsNull()
+            || mySource->label.Data() != aDocument->GetData()
+            || aReplacement.IsNull()
+            || aReplacement.IsEqual(mySource->shape)) {
+            return Standard_False;
+        }
+        aDocument->NewCommand();
+        if (!aDocument->HasOpenCommand()) {
+            return Standard_False;
+        }
+        aShapeTool->SetShape(mySource->label, aReplacement);
+        try {
+            (void)aDocument->CommitCommand();
+        } catch (...) {
+        }
+        if (aDocument->HasOpenCommand()) {
+            aDocument->AbortCommand();
+            return Standard_False;
+        }
+        const TopoDS_Shape aStored =
+            XCAFDoc_ShapeTool::GetShape(mySource->label);
+        return !aStored.IsNull()
+            && aStored.IsEqual(aReplacement)
+            && !aStored.IsEqual(mySource->shape)
+            && mySource->original->Shape().IsEqual(mySource->shape);
+    } catch (...) {
+        try {
+            if (!aDocument.IsNull() && aDocument->HasOpenCommand()) {
                 aDocument->AbortCommand();
             }
         } catch (...) {

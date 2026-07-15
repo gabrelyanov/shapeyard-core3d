@@ -109,6 +109,9 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
                              geometryRevision:(uint64_t)geometryRevision
                                   localBounds:(Core3DSceneBounds *)localBounds
+                                    faceCount:(uint32_t)faceCount
+                                    edgeCount:(uint32_t)edgeCount
+                           topologyVertexCount:(uint32_t)topologyVertexCount
                                    vertexData:(NSData *)vertexData
                                     indexData:(NSData *)indexData
                                   vertexCount:(NSUInteger)vertexCount
@@ -177,6 +180,7 @@ static_assert(sizeof(std::uint32_t) == 4,
                              revisions:(Core3DSceneRevisionVector *)revisions
                          metersPerUnit:(double)metersPerUnit
                           renderOrigin:(simd_double3)renderOrigin
+                         selectionMode:(Core3DSceneElementKind)selectionMode
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
                            renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
                              materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials
@@ -354,6 +358,9 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
                              geometryRevision:(uint64_t)geometryRevision
                                   localBounds:(Core3DSceneBounds *)localBounds
+                                    faceCount:(uint32_t)faceCount
+                                    edgeCount:(uint32_t)edgeCount
+                           topologyVertexCount:(uint32_t)topologyVertexCount
                                    vertexData:(NSData *)vertexData
                                     indexData:(NSData *)indexData
                                   vertexCount:(NSUInteger)vertexCount
@@ -369,6 +376,9 @@ static_assert(sizeof(std::uint32_t) == 4,
         _definitionIdentifier = [definitionIdentifier copy];
         _geometryRevision = geometryRevision;
         _localBounds = localBounds;
+        _faceCount = faceCount;
+        _edgeCount = edgeCount;
+        _topologyVertexCount = topologyVertexCount;
         _vertexData = [vertexData copy];
         _indexData = [indexData copy];
         _vertexCount = vertexCount;
@@ -525,6 +535,7 @@ static_assert(sizeof(std::uint32_t) == 4,
                              revisions:(Core3DSceneRevisionVector *)revisions
                          metersPerUnit:(double)metersPerUnit
                           renderOrigin:(simd_double3)renderOrigin
+                         selectionMode:(Core3DSceneElementKind)selectionMode
                                 meshes:(NSArray<Core3DSceneMeshSnapshot *> *)meshes
                            renderItems:(NSArray<Core3DSceneRenderItemSnapshot *> *)renderItems
                              materials:(NSArray<Core3DSceneMaterialSnapshot *> *)materials
@@ -539,6 +550,7 @@ static_assert(sizeof(std::uint32_t) == 4,
         _revisions = revisions;
         _metersPerUnit = metersPerUnit;
         _renderOrigin = renderOrigin;
+        _selectionMode = selectionMode;
         _meshes = [meshes copy];
         _renderItems = [renderItems copy];
         _materials = [materials copy];
@@ -1001,6 +1013,19 @@ bool IsValid(const ElementKind value) noexcept {
     return false;
 }
 
+bool IsValidSceneSelectionMode(const ElementKind value) noexcept {
+    switch (value) {
+        case ElementKind::Object:
+        case ElementKind::Face:
+        case ElementKind::Edge:
+            return true;
+        case ElementKind::None:
+        case ElementKind::Vertex:
+            return false;
+    }
+    return false;
+}
+
 bool IsValidElement(
     const ElementIdentifier& value,
     const bool allowNoHit) noexcept {
@@ -1084,6 +1109,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         || !IsFinite(snapshot.metersPerUnit)
         || snapshot.metersPerUnit <= 0.0
         || !IsFinite(snapshot.renderOrigin)
+        || !IsValidSceneSelectionMode(snapshot.selectionMode)
         || !IsValid(snapshot.camera)
         || snapshot.meshes.size() > kMaximumDTOMeshes
         || snapshot.instances.size() > kMaximumDTOInstances
@@ -1091,6 +1117,8 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         || snapshot.textures.size() > kMaximumDTOTextures
         || snapshot.pickTable.empty()
         || snapshot.pickTable.size() > kMaximumDTOPickEntries
+        || (snapshot.selectionMode == ElementKind::Edge
+            && snapshot.pickTable.size() != 1)
         || snapshot.selection.selected.size()
             > kMaximumDTOSelectedElements
         || !IsValidElement(snapshot.pickTable.front(), true)
@@ -1240,6 +1268,8 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                 || indexCount % 3 != 0
                 || firstIndex > mesh.indices.size()
                 || indexCount > mesh.indices.size() - firstIndex
+                || (mesh.topology.faceCount != 0
+                    && primitive.faceIndex >= mesh.topology.faceCount)
                 || !faceIndices.insert(primitive.faceIndex).second) {
                 return false;
             }
@@ -1286,7 +1316,13 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             }
         }
         const MeshSnapshot& mesh = snapshot.meshes[instance.meshIndex];
-        if (instance.primitiveBindings.size() != mesh.primitives.size()) {
+        if (instance.primitiveBindings.size() != mesh.primitives.size()
+            || (snapshot.selectionMode == ElementKind::Face
+                && instance.selectable
+                && mesh.topology.faceCount == 0)
+            || (snapshot.selectionMode == ElementKind::Edge
+                && instance.selectable
+                && mesh.topology.edgeCount == 0)) {
             return false;
         }
     }
@@ -1296,8 +1332,26 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     for (std::size_t index = 1; index < snapshot.pickTable.size(); ++index) {
         const ElementIdentifier& element = snapshot.pickTable[index];
         if (!IsValidElement(element, false)
+            || (element.kind != ElementKind::Object
+                && element.kind != ElementKind::Face)
+            || element.kind != snapshot.selectionMode
             || !accountString(element.entityIdentifier)
             || !pickElements.insert(MakeElementKey(element)).second) {
+            return false;
+        }
+        const auto instanceFound =
+            instancesByIdentifier.find(element.entityIdentifier);
+        if (instanceFound == instancesByIdentifier.end()) {
+            return false;
+        }
+        const InstanceSnapshot& instance =
+            snapshot.instances[instanceFound->second];
+        const MeshSnapshot& mesh = snapshot.meshes[instance.meshIndex];
+        if (element.geometryRevision != mesh.geometryRevision
+            || (element.kind == ElementKind::Object
+                && element.topologyIndex != 0)
+            || (element.kind == ElementKind::Face
+                && element.topologyIndex >= mesh.topology.faceCount)) {
             return false;
         }
     }
@@ -1310,7 +1364,13 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
              primitiveIndex < instance.primitiveBindings.size(); ++primitiveIndex) {
             const PrimitiveBinding& binding =
                 instance.primitiveBindings[primitiveIndex];
-            const bool shouldBePickable = instance.selectable && binding.visible;
+            // GPU hit-testability is derived exactly from the published
+            // mode, instance, and per-primitive visibility authorities. Edge
+            // selection remains semantic/CPU-side and never owns GPU tokens.
+            const bool shouldBePickable =
+                snapshot.selectionMode != ElementKind::Edge
+                && instance.selectable
+                && instance.visible && binding.visible;
             if (binding.materialIndex >= snapshot.materials.size()
                 || binding.pickToken >= snapshot.pickTable.size()
                 || (shouldBePickable && binding.pickToken == 0)
@@ -1326,6 +1386,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             const MeshPrimitive& primitive = mesh.primitives[primitiveIndex];
             if (picked.entityIdentifier != instance.entityIdentifier
                 || picked.geometryRevision != mesh.geometryRevision
+                || picked.kind != snapshot.selectionMode
                 || (picked.kind == ElementKind::Face
                     && picked.topologyIndex != primitive.faceIndex)
                 || (picked.kind == ElementKind::Object
@@ -1343,6 +1404,10 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         }
     }
 
+    // Semantic selection is topology-authoritative, not pick-table or
+    // tessellation-authoritative. Edge mode intentionally has no GPU picks;
+    // Face picks, when present, were independently verified above against an
+    // exact render-primitive topology identity.
     const auto isPublishedElement = [&](const ElementIdentifier& element) {
         if (!IsValidElement(element, false)) {
             return false;
@@ -1355,14 +1420,24 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         const InstanceSnapshot& instance =
             snapshot.instances[instanceFound->second];
         const MeshSnapshot& mesh = snapshot.meshes[instance.meshIndex];
-        if (element.geometryRevision != mesh.geometryRevision) {
+        if (!instance.visible || !instance.selectable
+            || element.geometryRevision != mesh.geometryRevision) {
             return false;
         }
         if (element.kind == ElementKind::Object) {
-            return element.topologyIndex == 0;
+            return snapshot.selectionMode == ElementKind::Object
+                && element.topologyIndex == 0;
         }
-        return element.kind == ElementKind::Face
-            && pickElements.find(MakeElementKey(element)) != pickElements.end();
+        if (element.kind == ElementKind::Edge) {
+            return snapshot.selectionMode == ElementKind::Edge
+                && element.topologyIndex < mesh.topology.edgeCount;
+        }
+        if (element.kind != ElementKind::Face
+            || snapshot.selectionMode != ElementKind::Face
+            || element.topologyIndex >= mesh.topology.faceCount) {
+            return false;
+        }
+        return true;
     };
 
     std::unordered_set<ElementKey, ElementKeyHash> selectedElements;
@@ -1394,7 +1469,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     return true;
 }
 
-bool IsValidSceneSnapshot(const SceneSnapshot& snapshot) noexcept {
+bool ValidateSceneSnapshotPayload(const SceneSnapshot& snapshot) noexcept {
     try {
         return IsValidSceneSnapshotImpl(snapshot);
     } catch (...) {
@@ -2474,6 +2549,9 @@ Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
         initWithDefinitionIdentifier:StringFromUTF8(value.definitionIdentifier)
                     geometryRevision:value.geometryRevision
                          localBounds:BoundsFromScene(value.localBounds)
+                           faceCount:value.topology.faceCount
+                           edgeCount:value.topology.edgeCount
+                  topologyVertexCount:value.topology.vertexCount
                           vertexData:vertexData
                            indexData:indexData
                          vertexCount:value.vertices.size()
@@ -2530,6 +2608,10 @@ Core3DSceneSelectionSnapshot *SelectionFromScene(const SelectionSnapshot& value)
 
 } // namespace
 
+bool core3d::scene::IsValidSceneSnapshot(
+    const SceneSnapshot& snapshot) noexcept {
+    return ValidateSceneSnapshotPayload(snapshot);
+}
 
 Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
     const SceneSnapshot& snapshot) noexcept {
@@ -2567,6 +2649,7 @@ Core3DSceneSnapshot *Core3DCreateSceneSnapshotDTO(
                         revisions:RevisionVectorFromScene(snapshot.revisions)
                     metersPerUnit:snapshot.metersPerUnit
                      renderOrigin:Double3FromScene(snapshot.renderOrigin)
+                    selectionMode:ElementKindFromScene(snapshot.selectionMode)
                            meshes:meshes
                       renderItems:renderItems
                         materials:materials

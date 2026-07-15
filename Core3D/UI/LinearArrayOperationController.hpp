@@ -103,6 +103,12 @@ public:
     //! request for the caller to retain OCCT presentation for this frame.
     Standard_Boolean capturePreview(
         std::vector<Handle(AIS_Shape)>& previewObjects) const noexcept;
+    //! Captures the exact AIS handles whose selection modes are intentionally
+    //! suspended by any retained Array state, including Apply-only recovery.
+    //! This does not make the preview renderer-safe; it is only an ownership
+    //! proof for preserving the accepted logical Object mode.
+    Standard_Boolean captureSelectionModeSuspendedPresentations(
+        std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
     //! True only for the stable zero-spacing state after every owned preview
     //! body has been erased. This permits an explicit renderer-neutral clear
     //! without weakening failure or recovery presentation.

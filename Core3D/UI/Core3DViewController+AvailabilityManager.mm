@@ -177,7 +177,13 @@ Core3DModelCapability DocumentExportCapabilities(
 @implementation Core3DViewController (AvailabilityManager)
 
 - (BOOL)canAdd {
-    return self.can_add;
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
+    const std::shared_ptr<core3d::Core3DViewer> viewer =
+        GLController.viewer;
+    return self.can_add && viewer != nullptr
+        && !viewer->hasUnresolvedDuplicate();
 }
 
 - (BOOL)canDelete {
@@ -187,20 +193,39 @@ Core3DModelCapability DocumentExportCapabilities(
 }
 
 - (BOOL)canDuplicate {
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
+    const std::shared_ptr<core3d::Core3DViewer> viewer =
+        GLController.viewer;
+    if (viewer != nullptr && viewer->hasUnresolvedDuplicate()) {
+        // Presentation repair can legitimately have zero selected owners. The
+        // typed ledger, not selectedModelCapabilities, is then the authority:
+        // Duplicate is the sole action that can reconcile the committed result.
+        return YES;
+    }
     return self.can_duplicate
         && (self.selectedModelCapabilities
             & Core3DModelCapabilityDuplicate) != 0;
 }
 
 - (BOOL)canUndo {
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
     const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
     return viewer != nullptr
+        && !viewer->hasUnresolvedDuplicate()
         && !viewer->getDocument().IsNull()
         && viewer->getDocument()->canUndo();
 }
 - (BOOL)canRedo {
+    if (![NSThread isMainThread] || GLController == nil) {
+        return NO;
+    }
     const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
     return viewer != nullptr
+        && !viewer->hasUnresolvedDuplicate()
         && !viewer->getDocument().IsNull()
         && viewer->getDocument()->canRedo();
 }
@@ -290,69 +315,129 @@ Core3DModelCapability DocumentExportCapabilities(
 }
 
 - (NSArray<NSNumber *> *)availableGizmoTypes {
-    // Topology-changing previews can suppress or consume their live AIS
-    // selection while retaining an admitted BRep-only operation. Keep the tool
-    // rail (and, critically, Apply/Cancel) available until it resolves.
-    const BOOL hasRetainedBoolean =
-        Core3DIsBooleanGizmo(_currentGizmoType)
-        && GLController != nil
-        && [GLController hasActiveBoolean];
-    const BOOL hasRetainedChamfer =
-        _currentGizmoType == PrimitiveGizmoTypeChamfer
-        && GLController != nil
-        && [GLController hasActiveBevel];
-    const std::shared_ptr<core3d::Core3DViewer> viewer =
-        GLController == nil ? nullptr : GLController.viewer;
-    const BOOL hasRetainedExtrusion =
-        _currentGizmoType == PrimitiveGizmoTypeExtrude
-        && viewer != nullptr
-        && viewer->getShapeInteractor() != nullptr
-        && viewer->getShapeInteractor()->hasActiveExtrusion();
-    const BOOL hasRetainedShell =
-        _currentGizmoType == PrimitiveGizmoTypeShell
-        && viewer != nullptr
-        && viewer->getShapeInteractor() != nullptr
-        && viewer->getShapeInteractor()->hasActiveShell();
-    const BOOL hasRetainedLinearArray =
-        _currentGizmoType == PrimitiveGizmoTypeLinearArray
-        && viewer != nullptr
-        && viewer->getObjectInteractor() != nullptr
-        && viewer->getObjectInteractor()->hasActiveLinearArray();
-    const BOOL hasRetainedRadialArray =
-        _currentGizmoType == PrimitiveGizmoTypeRadialArray
-        && viewer != nullptr
-        && viewer->getObjectInteractor() != nullptr
-        && viewer->getObjectInteractor()->hasActiveRadialArray();
-    const BOOL hasRetainedBRepOperation =
-        hasRetainedBoolean || hasRetainedChamfer || hasRetainedExtrusion
-        || hasRetainedShell;
-    Core3DModelCapability capabilities = self.selectedModelCapabilities;
-    if (hasRetainedBRepOperation) {
-        capabilities = kBRepCapabilities;
-    } else if ((hasRetainedLinearArray || hasRetainedRadialArray)
-               && capabilities == Core3DModelCapabilityNone) {
-        // Arrays normally keep their one admitted source selected. If selection
-        // publication is momentarily unavailable, expose only the retained tool
-        // so Apply/Cancel stays reachable without leaking BRep-only tools to a
-        // retained TriangleMesh source.
-        capabilities = hasRetainedRadialArray
-            ? Core3DModelCapabilityRadialArray
-            : Core3DModelCapabilityLinearArray;
-    }
-    if (capabilities == Core3DModelCapabilityNone
-        || _availableGizmoTypes.count == 0) {
+    if (![NSThread isMainThread] || GLController == nil) {
         return @[];
     }
-    NSMutableArray<NSNumber *> *available =
-        [NSMutableArray arrayWithCapacity:_availableGizmoTypes.count];
-    for (NSNumber *value in _availableGizmoTypes) {
-        const PrimitiveGizmoType gizmoType =
-            static_cast<PrimitiveGizmoType>(value.unsignedIntegerValue);
-        if (CapabilitiesAllowGizmo(capabilities, gizmoType)) {
-            [available addObject:value];
+    try {
+        // Topology-changing previews can suppress or consume their live AIS
+        // selection while retaining an admitted BRep-only operation. Keep the
+        // tool rail (and Apply/Cancel) available until it resolves.
+        const BOOL hasRetainedBoolean =
+            Core3DIsBooleanGizmo(_currentGizmoType)
+            && [GLController hasActiveBoolean];
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const std::shared_ptr<core3d::ShapeInteractor> shapeInteractor =
+            viewer == nullptr ? nullptr : viewer->getShapeInteractor();
+		const BOOL hasRetainedChamfer =
+			_currentGizmoType == PrimitiveGizmoTypeChamfer
+			&& [GLController hasActiveBevel]
+			&& shapeInteractor != nullptr
+			&& (shapeInteractor->isBevelSelectionFrozen()
+				|| shapeInteractor->bevelPreviewState()
+					!= core3d::BevelPreviewState::Selecting);
+		const BOOL hasSelectingChamfer =
+			_currentGizmoType == PrimitiveGizmoTypeChamfer
+			&& [GLController hasActiveBevel]
+			&& !hasRetainedChamfer;
+        const BOOL hasRetainedExtrusion =
+            _currentGizmoType == PrimitiveGizmoTypeExtrude
+            && shapeInteractor != nullptr
+            && shapeInteractor->hasActiveExtrusion();
+        const BOOL hasRetainedShell =
+            _currentGizmoType == PrimitiveGizmoTypeShell
+            && shapeInteractor != nullptr
+            && shapeInteractor->hasActiveShell();
+        const BOOL hasRetainedLinearArray =
+            _currentGizmoType == PrimitiveGizmoTypeLinearArray
+            && viewer != nullptr
+            && viewer->getObjectInteractor() != nullptr
+            && viewer->getObjectInteractor()->hasActiveLinearArray();
+        const BOOL hasRetainedRadialArray =
+            _currentGizmoType == PrimitiveGizmoTypeRadialArray
+            && viewer != nullptr
+            && viewer->getObjectInteractor() != nullptr
+            && viewer->getObjectInteractor()->hasActiveRadialArray();
+        const BOOL hasRetainedBRepOperation =
+            hasRetainedBoolean || hasRetainedChamfer
+            || hasRetainedExtrusion || hasRetainedShell;
+        if (hasRetainedExtrusion) {
+            // The preview ledger owns only Extrude; do not fabricate Shell.
+            return @[@(PrimitiveGizmoTypeExtrude)];
         }
+        if (hasRetainedShell) {
+            // Keep Apply/Cancel reachable without advertising Extrude.
+            return @[@(PrimitiveGizmoTypeShell)];
+        }
+		if (hasRetainedChamfer) {
+			// The retained Bevel ledger owns exactly Chamfer. Its suppressed
+			// live selection must not fabricate unrelated BRep tools.
+			return @[@(PrimitiveGizmoTypeChamfer)];
+		}
+        Core3DModelCapability capabilities =
+            self.selectedModelCapabilities;
+        if (hasRetainedBRepOperation) {
+            capabilities = kBRepCapabilities;
+        } else if ((hasRetainedLinearArray || hasRetainedRadialArray)
+                   && capabilities == Core3DModelCapabilityNone) {
+            // A retained array owns only its exact array tool.
+            capabilities = hasRetainedRadialArray
+                ? Core3DModelCapabilityRadialArray
+                : Core3DModelCapabilityLinearArray;
+        }
+        if (capabilities == Core3DModelCapabilityNone
+            || _availableGizmoTypes.count == 0) {
+            return @[];
+        }
+        const BOOL exposesExtrusion =
+            [_availableGizmoTypes containsObject:
+                @(PrimitiveGizmoTypeExtrude)];
+        const BOOL exposesShell =
+            [_availableGizmoTypes containsObject:
+                @(PrimitiveGizmoTypeShell)];
+		const BOOL exposesChamfer =
+			[_availableGizmoTypes containsObject:
+				@(PrimitiveGizmoTypeChamfer)];
+        Standard_Boolean extrusionAdmission = Standard_False;
+        Standard_Boolean shellAdmission = Standard_False;
+        if (shapeInteractor != nullptr
+            && (exposesExtrusion || exposesShell)) {
+            (void)shapeInteractor->queryFaceOperationAdmission(
+                extrusionAdmission, shellAdmission);
+        }
+        const BOOL canBeginExtrusion =
+            exposesExtrusion && extrusionAdmission;
+        const BOOL canBeginShell = exposesShell && shellAdmission;
+		const BOOL canBeginChamfer = exposesChamfer
+			&& shapeInteractor != nullptr
+			&& shapeInteractor->canBeginBevelSelection();
+		if (hasSelectingChamfer) {
+			return canBeginChamfer
+				? @[@(PrimitiveGizmoTypeChamfer)]
+				: @[];
+		}
+        NSMutableArray<NSNumber *> *available =
+            [NSMutableArray arrayWithCapacity:_availableGizmoTypes.count];
+        for (NSNumber *value in _availableGizmoTypes) {
+            const PrimitiveGizmoType gizmoType =
+                static_cast<PrimitiveGizmoType>(
+                    value.unsignedIntegerValue);
+            const BOOL faceOperationIsAdmitted =
+                (gizmoType != PrimitiveGizmoTypeExtrude
+                    || canBeginExtrusion)
+                && (gizmoType != PrimitiveGizmoTypeShell
+                    || canBeginShell)
+				&& (gizmoType != PrimitiveGizmoTypeChamfer
+					|| canBeginChamfer);
+            if (faceOperationIsAdmitted
+                && CapabilitiesAllowGizmo(capabilities, gizmoType)) {
+                [available addObject:value];
+            }
+        }
+        return [available copy];
+    } catch (...) {
+        return @[];
     }
-    return [available copy];
 }
 
 - (BOOL)canExportType:(ExportType)exportType {
@@ -360,13 +445,18 @@ Core3DModelCapability DocumentExportCapabilities(
         return NO;
     }
     try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr || viewer->hasUnresolvedDuplicate()) {
+            return NO;
+        }
         const Core3DModelCapability required =
             ExportCapabilityForType(exportType);
         if (required == Core3DModelCapabilityNone) {
             return NO;
         }
         const Core3DModelCapability capabilities =
-            DocumentExportCapabilities(GLController.viewer);
+            DocumentExportCapabilities(viewer);
         return (capabilities & required) == required;
     } catch (...) {
         return NO;
@@ -378,8 +468,13 @@ Core3DModelCapability DocumentExportCapabilities(
         return @[];
     }
     try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr || viewer->hasUnresolvedDuplicate()) {
+            return @[];
+        }
         const Core3DModelCapability capabilities =
-            DocumentExportCapabilities(GLController.viewer);
+            DocumentExportCapabilities(viewer);
         if (capabilities == Core3DModelCapabilityNone) {
             return @[];
         }

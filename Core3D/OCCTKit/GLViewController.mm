@@ -36,7 +36,12 @@
 #include <Image_PixMap.hxx>
 #include <Image_SupportedFormats.hxx>
 #include <gp_Quaternion.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <TColStd_ListIteratorOfListOfInteger.hxx>
 #include <TColStd_ListOfInteger.hxx>
+#include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <XCAFPrs_Texture.hxx>
 #include <algorithm>
 #include <array>
@@ -45,6 +50,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <unordered_set>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -77,6 +83,84 @@ bool IsBooleanGizmo(const PrimitiveGizmoType theType) noexcept
 {
     BooleanAction anAction = BooleanAction::BooleanSubtract;
     return TryBooleanActionForGizmo(theType, anAction);
+}
+
+bool SelectionModeAllowsGizmo(
+    const ShapeSelectionMode theMode,
+    const PrimitiveGizmoType theType) noexcept
+{
+    if (theType == PrimitiveGizmoTypeNone) {
+        return true;
+    }
+    switch (theMode) {
+        case ShapeSelectionMode::WholeShape:
+            switch (theType) {
+                case PrimitiveGizmoTypeMoveRotate:
+                case PrimitiveGizmoTypeScale:
+                case PrimitiveGizmoTypeChamfer:
+                case PrimitiveGizmoTypeSubtract:
+                case PrimitiveGizmoTypeUnion:
+                case PrimitiveGizmoTypeMirror:
+                case PrimitiveGizmoTypeMaterial:
+                case PrimitiveGizmoTypeIntersect:
+                case PrimitiveGizmoTypeLinearArray:
+                case PrimitiveGizmoTypeRadialArray:
+                    return true;
+                case PrimitiveGizmoTypeNone:
+                case PrimitiveGizmoTypeExtrude:
+                case PrimitiveGizmoTypeShell:
+                    return false;
+            }
+            return false;
+        case ShapeSelectionMode::Face:
+            return theType == PrimitiveGizmoTypeChamfer
+                || theType == PrimitiveGizmoTypeExtrude
+                || theType == PrimitiveGizmoTypeShell;
+        case ShapeSelectionMode::Edge:
+            return theType == PrimitiveGizmoTypeChamfer;
+        case ShapeSelectionMode::Vertex:
+        case ShapeSelectionMode::Wire:
+            return false;
+    }
+    return false;
+}
+
+bool TryShapeSelectionMode(const PrimitiveSelectionType theType,
+                           ShapeSelectionMode& theMode) noexcept
+{
+    switch (theType) {
+        case PrimitiveSelectionTypeShape:
+            theMode = ShapeSelectionMode::WholeShape;
+            return true;
+        case PrimitiveSelectionTypeFace:
+            theMode = ShapeSelectionMode::Face;
+            return true;
+        case PrimitiveSelectionTypeEdge:
+            theMode = ShapeSelectionMode::Edge;
+            return true;
+        case PrimitiveSelectionTypeVertex:
+        case PrimitiveSelectionTypeNone:
+        default:
+            return false;
+    }
+}
+
+Core3DSelectionTypeChangeResult PublicSelectionTypeChangeResult(
+    const ShapeSelectionModeChangeResult theResult) noexcept
+{
+    switch (theResult) {
+        case ShapeSelectionModeChangeResult::Succeeded:
+            return Core3DSelectionTypeChangeResultSucceeded;
+        case ShapeSelectionModeChangeResult::Unsupported:
+            return Core3DSelectionTypeChangeResultUnsupported;
+        case ShapeSelectionModeChangeResult::NotReady:
+            return Core3DSelectionTypeChangeResultNotReady;
+        case ShapeSelectionModeChangeResult::Busy:
+            return Core3DSelectionTypeChangeResultBusy;
+        case ShapeSelectionModeChangeResult::PresentationFailure:
+            return Core3DSelectionTypeChangeResultPresentationFailure;
+    }
+    return Core3DSelectionTypeChangeResultPresentationFailure;
 }
 
 bool TryNativeReferenceSpace(
@@ -356,6 +440,90 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     });
 }
 
+#ifdef DEBUG
+bool TryFindExactDebugPresentation(
+	const std::shared_ptr<Core3DViewer>& theViewer,
+	NSString *theEntityIdentifier,
+	Handle(AIS_Shape)& thePresentation) noexcept
+{
+	thePresentation.Nullify();
+	if (theViewer == nullptr || theViewer->AisContext().IsNull()
+		|| theViewer->getDocument().IsNull()
+		|| ![theEntityIdentifier isKindOfClass:NSString.class]
+		|| theEntityIdentifier.length == 0
+		|| theEntityIdentifier.UTF8String == nullptr) {
+		return false;
+	}
+	try {
+		OCC_CATCH_SIGNALS
+		const std::string anIdentifier(theEntityIdentifier.UTF8String);
+		AIS_ListOfInteractive aDisplayed;
+		theViewer->AisContext()->DisplayedObjects(
+			AIS_KOI_Shape, -1, aDisplayed);
+		for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
+			 anObject.More(); anObject.Next()) {
+			const Handle(AIS_InteractiveObject)& anInteractive =
+				anObject.Value();
+			const TDF_Label aLabel =
+				theViewer->getDocument()->ShapeLabel(anInteractive);
+			if (aLabel.IsNull()
+				|| theViewer->getDocument()->EntityIdentifierForLabel(aLabel)
+					!= anIdentifier) {
+				continue;
+			}
+			const Handle(AIS_Shape) aCandidate =
+				Handle(AIS_Shape)::DownCast(anInteractive);
+			const OcctGeometryRepresentation aRepresentation =
+				theViewer->getDocument()
+					->GeometryRepresentationForLabel(aLabel);
+			if (!thePresentation.IsNull() || aCandidate.IsNull()
+				|| aCandidate->Shape().IsNull()
+				|| !theViewer->getDocument()
+					->IsPresentationEditable(aCandidate)
+				|| (aRepresentation != OcctGeometryRepresentation::BRep
+					&& aRepresentation
+						!= OcctGeometryRepresentation::LegacyUnknown)) {
+				return false;
+			}
+			thePresentation = aCandidate;
+		}
+		return !thePresentation.IsNull();
+	} catch (...) {
+		thePresentation.Nullify();
+		return false;
+	}
+}
+
+//! AIS normally derives DetectedInteractive from the same virtual Selectable
+//! read exposed by DetectedOwner, so a stable mismatch cannot be constructed.
+//! Alternating the two reads creates the exact adversarial boundary guarded by
+//! the production snapshot builder without changing production AIS behavior.
+class DebugAlternatingSelectableBRepOwner final
+	: public StdSelect_BRepOwner {
+public:
+	DebugAlternatingSelectableBRepOwner(
+		const TopoDS_Shape& theShape,
+		const Handle(AIS_Shape)& theReportedPresentation,
+		const Handle(AIS_Shape)& theForeignPresentation)
+	: StdSelect_BRepOwner(
+		theShape, theReportedPresentation, 0, Standard_True),
+	  myReportedPresentation(theReportedPresentation),
+	  myForeignPresentation(theForeignPresentation) {}
+
+	Handle(SelectMgr_SelectableObject) Selectable() const override
+	{
+		return mySelectableReadCount++ == 0
+			? myReportedPresentation
+			: myForeignPresentation;
+	}
+
+private:
+	Handle(SelectMgr_SelectableObject) myReportedPresentation;
+	Handle(SelectMgr_SelectableObject) myForeignPresentation;
+	mutable Standard_Size mySelectableReadCount = 0;
+};
+#endif
+
 } // namespace
 
 @interface GLViewController () <UIGestureRecognizerDelegate>
@@ -365,6 +533,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (void)addCube:(UIBarButtonItem *)sender;
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
 - (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type;
+- (BOOL)debugSelectEdgeTopologyIndicesWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices
+	reverseFirstEdge:(BOOL)reverseFirstEdge
+	foreignEntityIdentifier:(NSString *_Nullable)foreignEntityIdentifier;
+- (BOOL)debugPublishDetectedTopologyWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	topologyIndex:(NSUInteger)topologyIndex
+	isFace:(BOOL)isFace
+	foreignEntityIdentifier:(NSString *_Nullable)foreignEntityIdentifier;
 @end
 
 @implementation GLViewController {
@@ -1278,6 +1456,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)addCube:(UIBarButtonItem *)theSender {
+    if (_viewer == nullptr || !_viewer->canBeginCommittedEdit()) {
+        return;
+    }
     __auto_type stlFilename = _viewer->addTestPrimitives();
     _viewer->FitAll();
     [self requestRender];
@@ -1297,17 +1478,26 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)addTestPrimitives {
+    if (_viewer == nullptr || !_viewer->canBeginCommittedEdit()) {
+        return;
+    }
     _viewer->addTestPrimitives();
     _viewer->FitAll();
     [self requestRender];
 }
 
 - (void)addPrimitivesFromJSON:(NSString *)json {
+    if (_viewer == nullptr || !_viewer->canBeginCommittedEdit()) {
+        return;
+    }
     _viewer->addPrimitivesFromJSON(json);
     [self requestRender];
 }
 
 - (void)addPrimitive:(PrimitiveType)primitiveType {
+    if (_viewer == nullptr || !_viewer->canBeginCommittedEdit()) {
+        return;
+    }
     _viewer->addPrimitive(primitiveType);
     [self requestRender];
 }
@@ -1318,6 +1508,17 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)deleteSelected {
+    if (![NSThread isMainThread]
+        || _viewer == nullptr
+        || !_viewer->canBeginCommittedEdit()
+        || _viewer->getShapeInteractor() == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || !_viewer->getShapeInteractor()
+            ->selectionModeAuthorityIsExact()
+        || _viewer->getShapeInteractor()->getSelectionMode()
+            != ShapeSelectionMode::WholeShape) {
+        return;
+    }
     _viewer->getObjectInteractor()->deleteSelected();
     [self requestRender];
 }
@@ -1338,17 +1539,44 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)selectAll {
+	if (![NSThread isMainThread]
+        || _viewer == nullptr
+        || !_viewer->canBeginCommittedEdit()
+        || _viewer->getShapeInteractor() == nullptr
+        || _viewer->getObjectInteractor() == nullptr
+        || !_viewer->getShapeInteractor()
+            ->selectionModeAuthorityIsExact()
+        || _viewer->getShapeInteractor()->getSelectionMode()
+            != ShapeSelectionMode::WholeShape) {
+        return;
+    }
 	_viewer->getObjectInteractor()->selectAll();
 	[self checkSelections];
 	[self requestRender];
 }
 
 - (void)duplicateSelected {
-    if (![NSThread isMainThread]) {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getObjectInteractor() == nullptr) {
+        return;
+    }
+    const BOOL recoveryPending = _viewer->hasUnresolvedDuplicate();
+    if (!recoveryPending
+        && (!_viewer->canBeginCommittedEdit()
+            || _viewer->getShapeInteractor() == nullptr
+            || !_viewer->getShapeInteractor()
+                ->selectionModeAuthorityIsExact()
+            || _viewer->getShapeInteractor()->getSelectionMode()
+                != ShapeSelectionMode::WholeShape)) {
         return;
     }
     _viewer->getObjectInteractor()->duplicateSelected();
+    [self checkSelections];
     [self requestRender];
+}
+
+- (BOOL)hasUnresolvedDuplicate {
+    return _viewer != nullptr && _viewer->hasUnresolvedDuplicate();
 }
 
 - (void)deselectAll {
@@ -1397,6 +1625,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)undo {
+	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+		return;
+	}
 	PrimitiveGizmoType currentType = [self getGizmoType];
 	const BOOL wasBoolean = IsBooleanGizmo(currentType);
 		const std::shared_ptr<ShapeInteractor> shapeInteractor =
@@ -1479,6 +1710,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)redo {
+	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+		return;
+	}
 	PrimitiveGizmoType currentType = [self getGizmoType];
 	const BOOL wasBoolean = IsBooleanGizmo(currentType);
 		const std::shared_ptr<ShapeInteractor> shapeInteractor =
@@ -1560,97 +1794,182 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 	[self requestRender];
 }
 
-- (void)setSelectionType:(PrimitiveSelectionType)type {
-	_viewer->getObjectInteractor()->cancelInteraction();
-	PrimitiveGizmoType currentType = [self getGizmoType];
-	if (currentType == PrimitiveGizmoTypeChamfer) {
-		if (!_viewer->getShapeInteractor()->resetWireframeTemplateShape()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (IsBooleanGizmo(currentType)) {
-		if (![self retireBooleanActionForGizmoType:currentType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeMirror) {
-		if (!_viewer->getObjectInteractor()->cancelMirror()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
-		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeRadialArray) {
-		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeExtrude) {
-		if (!_viewer->getShapeInteractor()->cancelExtrusion()) {
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeShell) {
-		if (!_viewer->getShapeInteractor()->cancelShell()) {
-			[self requestRender];
-			return;
-		}
-	}
-
-    ShapeSelectionMode selectionMode;
-    switch (type) {
-        case PrimitiveSelectionTypeShape:
-            selectionMode = ShapeSelectionMode::WholeShape;
-            break;
-        case PrimitiveSelectionTypeEdge:
-            selectionMode = ShapeSelectionMode::Edge;
-            break;
-        case PrimitiveSelectionTypeFace:
-            selectionMode = ShapeSelectionMode::Face;
-            break;
-        case PrimitiveSelectionTypeVertex:
-            selectionMode = ShapeSelectionMode::Vertex;
-            break;
-        default:
-            assert(false);
-            break;
+- (Core3DSelectionTypeChangeResult)
+    trySetSelectionType:(PrimitiveSelectionType)type
+{
+    if (![NSThread isMainThread]) {
+        return Core3DSelectionTypeChangeResultWrongThread;
     }
-    _viewer->getShapeInteractor()->setSelectionMode(selectionMode);
+    ShapeSelectionMode selectionMode = ShapeSelectionMode::WholeShape;
+    if (!TryShapeSelectionMode(type, selectionMode)) {
+        return Core3DSelectionTypeChangeResultUnsupported;
+    }
+    if (!_didSetupViewer
+        || _viewer == nullptr
+        || _viewer->AisContext().IsNull()
+        || _viewer->ActiveView().IsNull()
+        || _viewer->getDocument().IsNull()
+        || _viewer->getDocument()->Document().IsNull()
+        || _viewer->getObjectInteractor() == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return Core3DSelectionTypeChangeResultNotReady;
+    }
+
+    const std::shared_ptr<ObjectInteractor> objectInteractor =
+        _viewer->getObjectInteractor();
+    const std::shared_ptr<ShapeInteractor> shapeInteractor =
+        _viewer->getShapeInteractor();
+    // Outcome-unknown controllers own the only authoritative reconciliation
+    // state for a possibly committed operation. Refuse before cancelling a
+    // gesture or preview so Busy remains fully side-effect free. Ordinary
+    // Selecting/Ready/Failed previews continue through their typed cancel path.
+    if (objectInteractor->hasUnresolvedDuplicate()
+        || objectInteractor->hasUnresolvedBoolean()
+        || objectInteractor->mirrorPreviewState()
+            == MirrorPreviewState::OutcomeUnknown
+        || objectInteractor->linearArrayPreviewState()
+            == LinearArrayPreviewState::OutcomeUnknown
+        || objectInteractor->radialArrayPreviewState()
+            == RadialArrayPreviewState::OutcomeUnknown
+        || shapeInteractor->shellPreviewState()
+            == ShellPreviewState::OutcomeUnknown
+        || shapeInteractor->extrusionPreviewState()
+            == ExtrusionPreviewState::OutcomeUnknown) {
+        return Core3DSelectionTypeChangeResultBusy;
+    }
+
+    const PrimitiveGizmoType currentType = [self getGizmoType];
+    if (selectionMode == ShapeSelectionMode::WholeShape
+        && shapeInteractor->getSelectionMode()
+            == ShapeSelectionMode::WholeShape
+        && currentType == PrimitiveGizmoTypeMirror
+        && objectInteractor->isPickingMirrorPlane()
+        && objectInteractor->mirrorPlanePickingAuthorityMatches()) {
+        // Mirror face picking intentionally adds Face mode alongside the
+        // accepted Object mode on committed bodies. Until its saved-mode
+        // ledger restores those presentations, a same-mode rail tap is Busy:
+        // it must neither claim ordinary authority nor destroy the picker.
+        return Core3DSelectionTypeChangeResultBusy;
+    }
+    const BOOL readyExtrusionExactlyOwnsSuspendedPresentations =
+        currentType == PrimitiveGizmoTypeExtrude
+        && _viewer->selectionModeAuthorityAllowsRetainedOperation();
+    if (shapeInteractor->getSelectionMode() == selectionMode
+        && (shapeInteractor->selectionModeAuthorityIsExact()
+            || readyExtrusionExactlyOwnsSuspendedPresentations)) {
+        // A Ready Extrusion deliberately deactivates exactly its original and
+        // candidate. Re-tapping the accepted rail mode preserves it only after
+        // every unowned committed presentation and picker tolerance are proven
+        // canonical. OutcomeUnknown was rejected above; unrelated same-enum
+        // drift still enters the normal cancellation-and-repair path.
+        return Core3DSelectionTypeChangeResultSucceeded;
+    }
+
+    try {
+        // Validation and readiness checks above intentionally precede every
+        // cancellation so malformed or premature requests are side-effect
+        // free.
+        objectInteractor->cancelInteraction();
+        if (currentType == PrimitiveGizmoTypeChamfer) {
+            if (!shapeInteractor->resetWireframeTemplateShape()) {
+                [self checkSelections];
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        } else if (IsBooleanGizmo(currentType)) {
+            if (![self retireBooleanActionForGizmoType:currentType]) {
+                [self checkSelections];
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        } else if (currentType == PrimitiveGizmoTypeMirror) {
+            if (!objectInteractor->cancelMirror()) {
+                [self checkSelections];
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        } else if (currentType == PrimitiveGizmoTypeLinearArray) {
+            if (!objectInteractor->cancelLinearArray()) {
+                [self checkSelections];
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        } else if (currentType == PrimitiveGizmoTypeRadialArray) {
+            if (!objectInteractor->cancelRadialArray()) {
+                [self checkSelections];
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        } else if (currentType == PrimitiveGizmoTypeExtrude) {
+            if (!shapeInteractor->cancelExtrusion()) {
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        } else if (currentType == PrimitiveGizmoTypeShell) {
+            if (!shapeInteractor->cancelShell()) {
+                [self requestRender];
+                return Core3DSelectionTypeChangeResultPresentationFailure;
+            }
+        }
+    } catch (...) {
+        [self checkSelections];
+        [self requestRender];
+        return Core3DSelectionTypeChangeResultPresentationFailure;
+    }
+
+    const ShapeSelectionModeChangeResult nativeResult =
+        shapeInteractor->setSelectionMode(selectionMode);
+    if (nativeResult != ShapeSelectionModeChangeResult::Succeeded) {
+        if (IsBooleanGizmo(currentType)) {
+            (void)[self restoreBooleanActionForRetainedGizmoType:currentType];
+        }
+        [self checkSelections];
+        [self requestRender];
+        return PublicSelectionTypeChangeResult(nativeResult);
+    }
+
+    // This preserves the legacy retained-Boolean reconciliation. A failed
+    // restore notifies the owner through the existing delegate path; the
+    // successfully accepted selection authority remains truthful.
     (void)[self restoreBooleanActionForRetainedGizmoType:currentType];
+    // setSelectionMode() clears the old owners only after the requested modes
+    // are verified. Reconcile the selection-dependent manipulator immediately,
+    // including same-enum authority repair, before publishing public state.
+    objectInteractor->attachManipulatorToSelection(false);
     [self requestRender];
+    return Core3DSelectionTypeChangeResultSucceeded;
+}
+
+- (void)setSelectionType:(PrimitiveSelectionType)type {
+    (void)[self trySetSelectionType:type];
 }
 
 - (PrimitiveSelectionType)getSelectionType {
-    PrimitiveSelectionType type = PrimitiveSelectionTypeNone;
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return PrimitiveSelectionTypeNone;
+    }
+    if (!_viewer->getShapeInteractor()->selectionModeAuthorityIsExact()) {
+        return PrimitiveSelectionTypeNone;
+    }
     switch (_viewer->getShapeInteractor()->getSelectionMode()) {
         case ShapeSelectionMode::WholeShape:
-            type = PrimitiveSelectionTypeShape;
-            break;
+            return PrimitiveSelectionTypeShape;
         case ShapeSelectionMode::Edge:
-            type = PrimitiveSelectionTypeEdge;
-            break;
+            return PrimitiveSelectionTypeEdge;
         case ShapeSelectionMode::Face:
-            type = PrimitiveSelectionTypeFace;
-            break;
+            return PrimitiveSelectionTypeFace;
         case ShapeSelectionMode::Vertex:
-            type = PrimitiveSelectionTypeVertex;
-            break;
+            return PrimitiveSelectionTypeVertex;
+        case ShapeSelectionMode::Wire:
         default:
-            assert(false);
-            break;
+            return PrimitiveSelectionTypeNone;
     }
-    return type;
 }
 
 - (void)setGizmo:(Handle(Core3DManipulator))manipulator {
+	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+		return;
+	}
 	_viewer->getObjectInteractor()->setManipulator(manipulator);
 	[self requestRender];
 }
@@ -1661,8 +1980,60 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
+	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+		return;
+	}
 	const PrimitiveGizmoType previousType = [self getGizmoType];
+	if (type != PrimitiveGizmoTypeNone) {
+		const std::shared_ptr<ShapeInteractor> shapeInteractor =
+			_viewer->getShapeInteractor();
+		const std::shared_ptr<ObjectInteractor> objectInteractor =
+			_viewer->getObjectInteractor();
+		if (shapeInteractor == nullptr
+			|| objectInteractor == nullptr
+			|| !SelectionModeAllowsGizmo(
+				shapeInteractor->getSelectionMode(), type)) {
+			return;
+		}
+		const bool hasExactOrdinaryAuthority =
+			shapeInteractor->selectionModeAuthorityIsExact();
+		const bool hasRetainedOperationAuthority = previousType == type
+			&& _viewer->selectionModeAuthorityAllowsRetainedOperation();
+		const bool hasMirrorPlanePickingAuthority =
+			previousType == PrimitiveGizmoTypeMirror
+			&& type == PrimitiveGizmoTypeMirror
+			&& shapeInteractor->getSelectionMode()
+				== ShapeSelectionMode::WholeShape
+			&& [self isPickingMirrorPlane]
+			&& objectInteractor->mirrorPlanePickingAuthorityMatches();
+		if (!hasExactOrdinaryAuthority
+			&& !hasRetainedOperationAuthority
+			&& !hasMirrorPlanePickingAuthority) {
+			return;
+		}
+		// Chamfer admission is proven before any prior-tool retirement or
+		// manipulator mutation. begin recaptures after this preflight so stale
+		// selection cannot cross the operation boundary.
+		if (type == PrimitiveGizmoTypeChamfer
+			&& !shapeInteractor->hasActiveBevel()
+			&& !shapeInteractor->canBeginBevelSelection()) {
+			return;
+		}
+	}
 	if (previousType == type) {
+		if (type == PrimitiveGizmoTypeChamfer
+			&& _viewer != nullptr
+			&& _viewer->getShapeInteractor() != nullptr
+			&& (!_viewer->getShapeInteractor()->hasActiveBevel()
+				|| (_viewer->getShapeInteractor()->bevelPreviewState()
+						== BevelPreviewState::Selecting
+					&& !_viewer->getShapeInteractor()
+						->isBevelSelectionFrozen()))
+			&& _viewer->getShapeInteractor()->saveSelectionEdges() == 0
+			&& !_viewer->getShapeInteractor()->hasActiveBevel()) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
 		if (type == PrimitiveGizmoTypeExtrude
 			&& _viewer != nullptr
 			&& _viewer->getShapeInteractor() != nullptr
@@ -1798,7 +2169,10 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 		return;
 	}
     if (type == PrimitiveGizmoTypeChamfer) {
-        _viewer->getShapeInteractor()->saveSelectionEdges();
+		if (_viewer->getShapeInteractor()->saveSelectionEdges() == 0) {
+			_viewer->getObjectInteractor()->setManipulatorType(
+				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+		}
 	} else if (IsBooleanGizmo(type)) {
 			Standard_Boolean forceActor = (type == PrimitiveGizmoTypeSubtract);
 			BooleanAction action = BooleanAction::BooleanSubtract;
@@ -2057,11 +2431,27 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (BOOL)beginMirrorPlanePicking {
 	if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+		|| _viewer->getShapeInteractor() == nullptr
 		|| [self getGizmoType] != PrimitiveGizmoTypeMirror) {
 		return NO;
 	}
+	const std::shared_ptr<ObjectInteractor> objectInteractor =
+		_viewer->getObjectInteractor();
+	if (objectInteractor->isPickingMirrorPlane()) {
+		return objectInteractor->mirrorPlanePickingAuthorityMatches();
+	}
+	const std::shared_ptr<ShapeInteractor> shapeInteractor =
+		_viewer->getShapeInteractor();
+	if (shapeInteractor->getSelectionMode()
+			!= ShapeSelectionMode::WholeShape
+		|| !shapeInteractor->selectionModeAuthorityIsExact()) {
+		// The pick ledger may only suspend a proven canonical Object mode.
+		// Capturing pre-existing presentation drift would make the temporary
+		// Face detector look authoritative and later restore that same drift.
+		return NO;
+	}
 	const BOOL didBegin =
-		_viewer->getObjectInteractor()->beginMirrorPlanePicking();
+		objectInteractor->beginMirrorPlanePicking();
 	[self checkSelections];
 	[self requestRender];
 	return didBegin;
@@ -2603,6 +2993,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || _viewer->getObjectInteractor() == nullptr) {
         return NO;
     }
+    if ([self getGizmoType] != type) {
+        // A document redraw deliberately recreates stateful tools as None.
+        // Starting only a Boolean controller from the stale enum would fabricate
+        // a hidden ledger whose native/public gizmo authority is None. No-history
+        // retention still passes because its original native enum remains exact.
+        return NO;
+    }
     if (_viewer->getObjectInteractor()->hasActiveBoolean(action)) {
         return YES;
     }
@@ -2709,6 +3106,909 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 
 - (NSInteger)debugSelectedShapeCount {
     return _viewer == nullptr ? 0 : _viewer->selectedCount();
+}
+
+- (NSDictionary<NSString *, id> *)debugTopologySelectionState {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return @{
+            @"ready": @NO,
+            @"acceptedMode": @(PrimitiveSelectionTypeNone),
+            @"rawSelectedOwnerCount": @0,
+            @"selectedCount": @0,
+            @"invalidSelectedOwnerCount": @0,
+            @"selectedKind": @0,
+            @"topologyIndex": @(-1),
+            @"presentationRepresentation": @(-1),
+            @"entityIdentifier": @"",
+            @"hasDetected": @NO,
+            @"singleSelectionExact": @NO,
+            @"selectionMatchesMode": @NO,
+            @"manipulatorAttached": @NO,
+        };
+    }
+
+    const TopologySelectionDebugState state =
+        _viewer->getShapeInteractor()->debugTopologySelectionState();
+    PrimitiveSelectionType acceptedMode = PrimitiveSelectionTypeNone;
+    switch (state.acceptedMode) {
+        case ShapeSelectionMode::WholeShape:
+            acceptedMode = PrimitiveSelectionTypeShape;
+            break;
+        case ShapeSelectionMode::Face:
+            acceptedMode = PrimitiveSelectionTypeFace;
+            break;
+        case ShapeSelectionMode::Edge:
+            acceptedMode = PrimitiveSelectionTypeEdge;
+            break;
+        case ShapeSelectionMode::Vertex:
+            acceptedMode = PrimitiveSelectionTypeVertex;
+            break;
+        case ShapeSelectionMode::Wire:
+            break;
+    }
+    NSString *entityIdentifier =
+        [NSString stringForStdString:state.entityIdentifier];
+    if (entityIdentifier == nil) {
+        entityIdentifier = @"";
+    }
+    return @{
+        @"ready": @(state.ready != Standard_False),
+        @"acceptedMode": @(acceptedMode),
+        @"rawSelectedOwnerCount": @(state.rawSelectedOwnerCount),
+        @"selectedCount": @(state.selectedCount),
+        @"invalidSelectedOwnerCount": @(
+            state.invalidSelectedOwnerCount),
+        @"selectedKind": @(
+            static_cast<NSUInteger>(state.selectedKind)),
+        @"topologyIndex": @(state.topologyIndex),
+        @"presentationRepresentation": @(
+            static_cast<NSInteger>(state.representation)),
+        @"entityIdentifier": entityIdentifier,
+        @"hasDetected": @(state.hasDetected != Standard_False),
+        @"singleSelectionExact": @(
+            state.singleSelectionExact != Standard_False),
+        @"selectionMatchesMode": @(
+            state.selectionMatchesMode != Standard_False),
+        @"manipulatorAttached": @(
+            _viewer->getObjectInteractor() != nullptr
+                && _viewer->getObjectInteractor()->isManipulatorAttached()),
+    };
+}
+
+- (BOOL)debugDetectAnyDisplayedShape {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->AisContext().IsNull()
+        || _viewer->ActiveView().IsNull()
+        || _viewer->getDocument().IsNull()) {
+        return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const CGSize drawable = self.drawableSize;
+        const Standard_Integer width = static_cast<Standard_Integer>(
+            std::max<CGFloat>(1.0, drawable.width));
+        const Standard_Integer height = static_cast<Standard_Integer>(
+            std::max<CGFloat>(1.0, drawable.height));
+        constexpr Standard_Integer probeCount = 16;
+        for (Standard_Integer row = 0; row <= probeCount; ++row) {
+            const Standard_Integer y = row * (height - 1) / probeCount;
+            for (Standard_Integer column = 0; column <= probeCount;
+                 ++column) {
+                const Standard_Integer x =
+                    column * (width - 1) / probeCount;
+                (void)_viewer->AisContext()->MoveTo(
+                    x, y, _viewer->ActiveView(), Standard_False);
+                if (!_viewer->AisContext()->HasDetected()) {
+                    continue;
+                }
+                const Handle(AIS_InteractiveObject) detected =
+                    _viewer->AisContext()->DetectedInteractive();
+                const TDF_Label label =
+                    _viewer->getDocument()->ShapeLabel(detected);
+                if (!label.IsNull()
+                    && _viewer->getDocument()
+                        ->GeometryRepresentationForLabel(label)
+                        != OcctGeometryRepresentation::Invalid) {
+                    return YES;
+                }
+            }
+        }
+        _viewer->AisContext()->ClearDetected(Standard_False);
+        return NO;
+    } catch (...) {
+        try {
+            OCC_CATCH_SIGNALS
+            _viewer->AisContext()->ClearDetected(Standard_False);
+        } catch (...) {
+        }
+        return NO;
+    }
+}
+
+- (BOOL)debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+	return [self
+		debugPublishDetectedTopologyWithEntityIdentifier:entityIdentifier
+		topologyIndex:faceTopologyIndex
+		isFace:YES
+		foreignEntityIdentifier:nil];
+}
+
+- (BOOL)debugDetectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [self
+		debugPublishDetectedTopologyWithEntityIdentifier:entityIdentifier
+		topologyIndex:edgeTopologyIndex
+		isFace:NO
+		foreignEntityIdentifier:nil];
+}
+
+- (BOOL)debugDetectAlternatingForeignSelectableEdgeWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [self
+		debugPublishDetectedTopologyWithEntityIdentifier:entityIdentifier
+		topologyIndex:edgeTopologyIndex
+		isFace:NO
+		foreignEntityIdentifier:foreignEntityIdentifier];
+}
+
+- (BOOL)debugPublishDetectedTopologyWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	topologyIndex:(NSUInteger)topologyIndex
+	isFace:(BOOL)isFace
+	foreignEntityIdentifier:(NSString *_Nullable)foreignEntityIdentifier {
+	const std::shared_ptr<ShapeInteractor> shapeInteractor =
+		_viewer == nullptr ? nullptr : _viewer->getShapeInteractor();
+	const ShapeSelectionMode expectedMode = isFace
+		? ShapeSelectionMode::Face
+		: ShapeSelectionMode::Edge;
+	if (![NSThread isMainThread] || _viewer == nullptr
+		|| _viewer->AisContext().IsNull()
+		|| _viewer->getDocument().IsNull()
+		|| shapeInteractor == nullptr
+		|| shapeInteractor->getSelectionMode() != expectedMode
+		|| !shapeInteractor->selectionModeAuthorityIsExact()
+		|| _viewer->selectedCount() != 0
+		|| ![entityIdentifier isKindOfClass:NSString.class]
+		|| entityIdentifier.length == 0
+		|| entityIdentifier.UTF8String == nullptr
+		|| (foreignEntityIdentifier != nil
+			&& (isFace
+				|| ![foreignEntityIdentifier isKindOfClass:NSString.class]
+				|| foreignEntityIdentifier.length == 0
+				|| foreignEntityIdentifier.UTF8String == nullptr
+				|| [foreignEntityIdentifier isEqualToString:
+					entityIdentifier]))) {
+		return NO;
+	}
+	try {
+		OCC_CATCH_SIGNALS
+		Handle(AIS_Shape) aPresentation;
+		if (!TryFindExactDebugPresentation(
+				_viewer, entityIdentifier, aPresentation)) {
+			return NO;
+		}
+
+		Handle(SelectMgr_EntityOwner) anOwner;
+		if (isFace) {
+			TopoDS_Face aCanonicalFace;
+			if (!TryResolveCanonicalFaceTopologyIndexBounded(
+					aPresentation->Shape(),
+					static_cast<Standard_Size>(topologyIndex),
+					ShellOperationController::kMaximumSourceTopologyNodes,
+					aCanonicalFace)
+				|| (aCanonicalFace.Orientation() != TopAbs_FORWARD
+					&& aCanonicalFace.Orientation() != TopAbs_REVERSED)) {
+				return NO;
+			}
+			const TopoDS_Face aReversedFace =
+				TopoDS::Face(aCanonicalFace.Reversed());
+			if (!aReversedFace.IsSame(aCanonicalFace)
+				|| aReversedFace.IsEqual(aCanonicalFace)) {
+				return NO;
+			}
+			anOwner = new StdSelect_BRepOwner(
+				aReversedFace, aPresentation, 0, Standard_True);
+		} else {
+			TopoDS_Edge aCanonicalEdge;
+			if (!TryResolveCanonicalBevelEdgeTopologyIndexBounded(
+					aPresentation->Shape(),
+					static_cast<Standard_Size>(topologyIndex),
+					BevelOperationController::kMaxSourceTopologyNodes,
+					aCanonicalEdge)) {
+				return NO;
+			}
+			if (foreignEntityIdentifier == nil) {
+				if (aCanonicalEdge.Orientation() != TopAbs_FORWARD
+					&& aCanonicalEdge.Orientation() != TopAbs_REVERSED) {
+					return NO;
+				}
+				const TopoDS_Edge aReversedEdge =
+					TopoDS::Edge(aCanonicalEdge.Reversed());
+				if (!aReversedEdge.IsSame(aCanonicalEdge)
+					|| aReversedEdge.IsEqual(aCanonicalEdge)) {
+					return NO;
+				}
+				anOwner = new StdSelect_BRepOwner(
+					aReversedEdge, aPresentation, 0, Standard_True);
+			} else {
+				Handle(AIS_Shape) aForeignPresentation;
+				if (!TryFindExactDebugPresentation(
+						_viewer,
+						foreignEntityIdentifier,
+						aForeignPresentation)) {
+					return NO;
+				}
+				anOwner = new DebugAlternatingSelectableBRepOwner(
+					aCanonicalEdge,
+					aPresentation,
+					aForeignPresentation);
+			}
+		}
+		return _viewer->DebugSetDetectedOwner(anOwner) != Standard_False;
+	} catch (...) {
+		try {
+			OCC_CATCH_SIGNALS
+			(void)_viewer->AisContext()->ClearDetected(Standard_False);
+		} catch (...) {
+		}
+		return NO;
+	}
+}
+
+- (BOOL)debugSelectAnyDisplayedTopologyElement {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->AisContext().IsNull()
+        || _viewer->ActiveView().IsNull()
+        || _viewer->getDocument().IsNull()
+        || _viewer->getShapeInteractor() == nullptr
+        || _viewer->selectedCount() != 0) {
+        return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const CGSize drawable = self.drawableSize;
+        const Standard_Integer width = static_cast<Standard_Integer>(
+            std::max<CGFloat>(1.0, drawable.width));
+        const Standard_Integer height = static_cast<Standard_Integer>(
+            std::max<CGFloat>(1.0, drawable.height));
+        constexpr Standard_Integer probeCount = 16;
+        for (Standard_Integer row = 0; row <= probeCount; ++row) {
+            const Standard_Integer y = row * (height - 1) / probeCount;
+            for (Standard_Integer column = 0; column <= probeCount;
+                 ++column) {
+                const Standard_Integer x =
+                    column * (width - 1) / probeCount;
+                (void)_viewer->AisContext()->MoveTo(
+                    x, y, _viewer->ActiveView(), Standard_False);
+                if (!_viewer->AisContext()->HasDetected()) {
+                    continue;
+                }
+                const Handle(AIS_InteractiveObject) detected =
+                    _viewer->AisContext()->DetectedInteractive();
+                const TDF_Label label =
+                    _viewer->getDocument()->ShapeLabel(detected);
+                if (label.IsNull()
+                    || _viewer->getDocument()
+                        ->GeometryRepresentationForLabel(label)
+                        == OcctGeometryRepresentation::Invalid) {
+                    continue;
+                }
+
+                _viewer->Select(x, y);
+                [self checkSelections];
+                [self requestRender];
+                const NSDictionary<NSString *, id> *state =
+                    [self debugTopologySelectionState];
+                if ([state[@"ready"] boolValue]
+                    && [state[@"rawSelectedOwnerCount"] integerValue] == 1
+                    && [state[@"selectedCount"] integerValue] == 1
+                    && [state[@"invalidSelectedOwnerCount"] integerValue] == 0
+                    && [state[@"singleSelectionExact"] boolValue]
+                    && [state[@"selectionMatchesMode"] boolValue]) {
+                    return YES;
+                }
+                _viewer->deselectAll();
+            }
+        }
+        _viewer->AisContext()->ClearDetected(Standard_False);
+        [self checkSelections];
+        [self requestRender];
+        return NO;
+    } catch (...) {
+        try {
+            OCC_CATCH_SIGNALS
+            _viewer->deselectAll();
+            _viewer->AisContext()->ClearDetected(Standard_False);
+        } catch (...) {
+        }
+        [self checkSelections];
+        [self requestRender];
+        return NO;
+    }
+}
+
+- (BOOL)debugSelectFaceTopologyIndicesWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices {
+    return [self
+        debugSelectFaceTopologyIndicesWithEntityIdentifier:entityIdentifier
+        faceTopologyIndices:faceTopologyIndices
+        reverseFirstFace:NO];
+}
+
+- (BOOL)debugSelectReversedFaceTopologyIndexWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+    return [self
+        debugSelectFaceTopologyIndicesWithEntityIdentifier:entityIdentifier
+        faceTopologyIndices:@[@(faceTopologyIndex)]
+        reverseFirstFace:YES];
+}
+
+- (BOOL)debugSelectFaceTopologyIndicesWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices
+    reverseFirstFace:(BOOL)reverseFirstFace {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->AisContext().IsNull()
+        || _viewer->getDocument().IsNull()
+        || _viewer->getShapeInteractor() == nullptr
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0
+        || entityIdentifier.UTF8String == nullptr
+        || ![faceTopologyIndices isKindOfClass:NSArray.class]
+        || faceTopologyIndices.count < 1
+        || faceTopologyIndices.count > 64
+        || _viewer->selectedCount() != 0
+        || _viewer->getShapeInteractor()->getSelectionMode()
+            != ShapeSelectionMode::Face
+        || !_viewer->getShapeInteractor()->selectionModeAuthorityIsExact()) {
+        return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        std::vector<Standard_Size> requestedIndices;
+        requestedIndices.reserve(faceTopologyIndices.count);
+        std::unordered_set<Standard_Size> uniqueIndices;
+        uniqueIndices.reserve(faceTopologyIndices.count);
+        for (id value in faceTopologyIndices) {
+            if (![value isKindOfClass:NSNumber.class]) {
+                return NO;
+            }
+            const long long signedIndex = [value longLongValue];
+            if (signedIndex < 0
+                || static_cast<unsigned long long>(signedIndex)
+                    > static_cast<unsigned long long>(
+                        std::numeric_limits<Standard_Integer>::max() - 1)) {
+                return NO;
+            }
+            const Standard_Size index =
+                static_cast<Standard_Size>(signedIndex);
+            if (!uniqueIndices.insert(index).second) {
+                return NO;
+            }
+            requestedIndices.push_back(index);
+        }
+
+        const std::string requestedIdentifier(entityIdentifier.UTF8String);
+        Handle(AIS_Shape) matchedPresentation;
+        AIS_ListOfInteractive displayedObjects;
+        _viewer->AisContext()->DisplayedObjects(
+            AIS_KOI_Shape, -1, displayedObjects);
+        for (AIS_ListIteratorOfListOfInteractive presentation(
+                 displayedObjects);
+             presentation.More(); presentation.Next()) {
+            const Handle(AIS_InteractiveObject)& object =
+                presentation.Value();
+            const TDF_Label label =
+                _viewer->getDocument()->ShapeLabel(object);
+            if (label.IsNull()
+                || _viewer->getDocument()->EntityIdentifierForLabel(label)
+                    != requestedIdentifier) {
+                continue;
+            }
+            const OcctGeometryRepresentation representation =
+                _viewer->getDocument()->GeometryRepresentationForLabel(label);
+            const Handle(AIS_Shape) candidate =
+                Handle(AIS_Shape)::DownCast(object);
+            if (!matchedPresentation.IsNull() || candidate.IsNull()
+                || candidate->Shape().IsNull()
+                || !_viewer->getDocument()->IsPresentationEditable(candidate)
+                || (representation != OcctGeometryRepresentation::BRep
+                    && representation
+                        != OcctGeometryRepresentation::LegacyUnknown)) {
+                return NO;
+            }
+            matchedPresentation = candidate;
+        }
+        if (matchedPresentation.IsNull()) {
+            return NO;
+        }
+
+        std::vector<Handle(StdSelect_BRepOwner)> owners;
+        owners.reserve(requestedIndices.size());
+        for (std::size_t requestOffset = 0;
+            requestOffset < requestedIndices.size(); ++requestOffset) {
+            const Standard_Size index = requestedIndices[requestOffset];
+            TopoDS_Face canonicalFace;
+            if (!TryResolveCanonicalFaceTopologyIndexBounded(
+                    matchedPresentation->Shape(),
+                    index,
+                    ShellOperationController::
+                        kMaximumSourceTopologyNodes,
+                    canonicalFace)) {
+                return NO;
+            }
+            TopoDS_Face ownerFace = canonicalFace;
+            if (reverseFirstFace && requestOffset == 0) {
+                if (canonicalFace.Orientation() != TopAbs_FORWARD
+                    && canonicalFace.Orientation() != TopAbs_REVERSED) {
+                    return NO;
+                }
+                ownerFace = TopoDS::Face(canonicalFace.Reversed());
+                if (!ownerFace.IsSame(canonicalFace)
+                    || ownerFace.IsEqual(canonicalFace)) {
+                    return NO;
+                }
+            }
+            owners.push_back(new StdSelect_BRepOwner(
+                ownerFace,
+                matchedPresentation,
+                0,
+                Standard_True));
+        }
+
+        _viewer->AisContext()->ClearDetected(Standard_False);
+        _viewer->AisContext()->ClearSelected(Standard_False);
+        for (const Handle(StdSelect_BRepOwner)& owner : owners) {
+            _viewer->AisContext()->AddOrRemoveSelected(
+                owner, Standard_False);
+            if (!owner->IsSelected()) {
+                throw Standard_Failure(
+                    "Unable to publish deterministic Face owner");
+            }
+        }
+
+        std::unordered_set<const SelectMgr_EntityOwner*> expectedOwners;
+        expectedOwners.reserve(owners.size());
+        for (const Handle(StdSelect_BRepOwner)& owner : owners) {
+            expectedOwners.insert(owner.get());
+        }
+        Standard_Size rawSelectedOwnerCount = 0;
+        for (_viewer->AisContext()->InitSelected();
+             _viewer->AisContext()->MoreSelected();
+             _viewer->AisContext()->NextSelected()) {
+            ++rawSelectedOwnerCount;
+            const Handle(SelectMgr_EntityOwner) selectedOwner =
+                _viewer->AisContext()->SelectedOwner();
+            if (selectedOwner.IsNull()
+                || expectedOwners.erase(selectedOwner.get()) != 1
+                || _viewer->AisContext()->SelectedInteractive()
+                    != matchedPresentation) {
+                throw Standard_Failure(
+                    "Deterministic Face owner publication drifted");
+            }
+        }
+        if (rawSelectedOwnerCount != owners.size()
+            || !expectedOwners.empty()) {
+            throw Standard_Failure(
+                "Deterministic Face owner count mismatch");
+        }
+        [self checkSelections];
+        [self requestRender];
+        return YES;
+    } catch (...) {
+        try {
+            OCC_CATCH_SIGNALS
+            _viewer->AisContext()->ClearSelected(Standard_False);
+            _viewer->AisContext()->ClearDetected(Standard_False);
+        } catch (...) {
+        }
+        [self checkSelections];
+        [self requestRender];
+        return NO;
+    }
+}
+
+- (BOOL)debugSelectEdgeTopologyIndicesWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices {
+	return [self
+		debugSelectEdgeTopologyIndicesWithEntityIdentifier:entityIdentifier
+		edgeTopologyIndices:edgeTopologyIndices
+		reverseFirstEdge:NO
+		foreignEntityIdentifier:nil];
+}
+
+- (BOOL)debugSelectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [self
+		debugSelectEdgeTopologyIndicesWithEntityIdentifier:entityIdentifier
+		edgeTopologyIndices:@[@(edgeTopologyIndex)]
+		reverseFirstEdge:YES
+		foreignEntityIdentifier:nil];
+}
+
+- (BOOL)debugSelectValidAndForeignEdgeOwnersWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex {
+	return [self
+		debugSelectEdgeTopologyIndicesWithEntityIdentifier:entityIdentifier
+		edgeTopologyIndices:@[@(edgeTopologyIndex)]
+		reverseFirstEdge:NO
+		foreignEntityIdentifier:foreignEntityIdentifier];
+}
+
+- (BOOL)debugSelectEdgeTopologyIndicesWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices
+	reverseFirstEdge:(BOOL)reverseFirstEdge
+	foreignEntityIdentifier:(NSString *_Nullable)foreignEntityIdentifier {
+	const std::shared_ptr<ShapeInteractor> shapeInteractor =
+		_viewer == nullptr ? nullptr : _viewer->getShapeInteractor();
+	const BOOL refreshesIdleBevel = shapeInteractor != nullptr
+		&& shapeInteractor->hasActiveBevel()
+		&& shapeInteractor->bevelPreviewState()
+			== BevelPreviewState::Selecting
+		&& !shapeInteractor->isBevelSelectionFrozen();
+	if (![NSThread isMainThread] || _viewer == nullptr
+		|| _viewer->AisContext().IsNull()
+		|| _viewer->getDocument().IsNull()
+		|| shapeInteractor == nullptr
+		|| ![entityIdentifier isKindOfClass:NSString.class]
+		|| entityIdentifier.length == 0
+		|| entityIdentifier.UTF8String == nullptr
+		|| ![edgeTopologyIndices isKindOfClass:NSArray.class]
+		|| edgeTopologyIndices.count < 1
+		|| edgeTopologyIndices.count
+			> BevelOperationController::kMaxSelectedEdges
+		|| (_viewer->selectedCount() != 0 && !refreshesIdleBevel)
+		|| shapeInteractor->getSelectionMode() != ShapeSelectionMode::Edge
+		|| !shapeInteractor->selectionModeAuthorityIsExact()
+		|| (foreignEntityIdentifier != nil
+			&& (![foreignEntityIdentifier isKindOfClass:NSString.class]
+				|| foreignEntityIdentifier.length == 0
+				|| foreignEntityIdentifier.UTF8String == nullptr
+				|| [foreignEntityIdentifier isEqualToString:
+					entityIdentifier]
+				|| edgeTopologyIndices.count != 1
+				|| reverseFirstEdge))) {
+		return NO;
+	}
+	try {
+		OCC_CATCH_SIGNALS
+		std::vector<Standard_Size> requestedIndices;
+		requestedIndices.reserve(edgeTopologyIndices.count);
+		std::unordered_set<Standard_Size> uniqueIndices;
+		uniqueIndices.reserve(edgeTopologyIndices.count);
+		for (id value in edgeTopologyIndices) {
+			if (![value isKindOfClass:NSNumber.class]
+				|| CFGetTypeID((__bridge CFTypeRef)value)
+					== CFBooleanGetTypeID()) {
+				return NO;
+			}
+			const long long signedIndex = [value longLongValue];
+			if (signedIndex < 0
+				|| static_cast<unsigned long long>(signedIndex)
+					> static_cast<unsigned long long>(
+						std::numeric_limits<Standard_Integer>::max() - 1)) {
+				return NO;
+			}
+			const Standard_Size index =
+				static_cast<Standard_Size>(signedIndex);
+			if (!uniqueIndices.insert(index).second) {
+				return NO;
+			}
+			requestedIndices.push_back(index);
+		}
+
+		const auto findExactPresentation =
+			[&](NSString *identifier, Handle(AIS_Shape)& result) {
+				result.Nullify();
+				const std::string requested(identifier.UTF8String);
+				AIS_ListOfInteractive displayedObjects;
+				_viewer->AisContext()->DisplayedObjects(
+					AIS_KOI_Shape, -1, displayedObjects);
+				for (AIS_ListIteratorOfListOfInteractive presentation(
+						displayedObjects);
+					 presentation.More(); presentation.Next()) {
+					const Handle(AIS_InteractiveObject)& object =
+						presentation.Value();
+					const TDF_Label label =
+						_viewer->getDocument()->ShapeLabel(object);
+					if (label.IsNull()
+						|| _viewer->getDocument()
+							->EntityIdentifierForLabel(label) != requested) {
+						continue;
+					}
+					const OcctGeometryRepresentation representation =
+						_viewer->getDocument()
+							->GeometryRepresentationForLabel(label);
+					const Handle(AIS_Shape) candidate =
+						Handle(AIS_Shape)::DownCast(object);
+					if (!result.IsNull() || candidate.IsNull()
+						|| candidate->Shape().IsNull()
+						|| !_viewer->getDocument()
+							->IsPresentationEditable(candidate)
+						|| (representation
+								!= OcctGeometryRepresentation::BRep
+							&& representation
+								!= OcctGeometryRepresentation::LegacyUnknown)) {
+						return Standard_False;
+					}
+					result = candidate;
+				}
+				return !result.IsNull();
+			};
+
+		Handle(AIS_Shape) matchedPresentation;
+		if (!findExactPresentation(entityIdentifier, matchedPresentation)) {
+			return NO;
+		}
+		Handle(AIS_Shape) foreignPresentation;
+		if (foreignEntityIdentifier != nil
+			&& !findExactPresentation(
+				foreignEntityIdentifier, foreignPresentation)) {
+			return NO;
+		}
+
+		std::vector<Handle(StdSelect_BRepOwner)> owners;
+		owners.reserve(requestedIndices.size()
+			+ (foreignPresentation.IsNull() ? 0U : 1U));
+		for (std::size_t offset = 0;
+			 offset < requestedIndices.size(); ++offset) {
+			TopoDS_Edge canonicalEdge;
+			if (!TryResolveCanonicalBevelEdgeTopologyIndexBounded(
+					matchedPresentation->Shape(),
+					requestedIndices[offset],
+					BevelOperationController::kMaxSourceTopologyNodes,
+					canonicalEdge)) {
+				return NO;
+			}
+			TopoDS_Edge ownerEdge = canonicalEdge;
+			if (reverseFirstEdge && offset == 0) {
+				if (canonicalEdge.Orientation() != TopAbs_FORWARD
+					&& canonicalEdge.Orientation() != TopAbs_REVERSED) {
+					return NO;
+				}
+				ownerEdge = TopoDS::Edge(canonicalEdge.Reversed());
+				if (!ownerEdge.IsSame(canonicalEdge)
+					|| ownerEdge.IsEqual(canonicalEdge)) {
+					return NO;
+				}
+			}
+			owners.push_back(new StdSelect_BRepOwner(
+				ownerEdge, matchedPresentation, 0, Standard_True));
+			if (!foreignPresentation.IsNull()) {
+				owners.push_back(new StdSelect_BRepOwner(
+					canonicalEdge,
+					foreignPresentation,
+					0,
+					Standard_True));
+			}
+		}
+
+		_viewer->AisContext()->ClearDetected(Standard_False);
+		_viewer->AisContext()->ClearSelected(Standard_False);
+		for (const Handle(StdSelect_BRepOwner)& owner : owners) {
+			_viewer->AisContext()->AddOrRemoveSelected(owner, Standard_False);
+			if (!owner->IsSelected()) {
+				throw Standard_Failure(
+					"Unable to publish deterministic Edge owner");
+			}
+		}
+
+		std::unordered_set<const SelectMgr_EntityOwner*> expectedOwners;
+		expectedOwners.reserve(owners.size());
+		for (const Handle(StdSelect_BRepOwner)& owner : owners) {
+			expectedOwners.insert(owner.get());
+		}
+		Standard_Size rawSelectedOwnerCount = 0;
+		for (_viewer->AisContext()->InitSelected();
+			 _viewer->AisContext()->MoreSelected();
+			 _viewer->AisContext()->NextSelected()) {
+			++rawSelectedOwnerCount;
+			const Handle(SelectMgr_EntityOwner) selectedOwner =
+				_viewer->AisContext()->SelectedOwner();
+			if (selectedOwner.IsNull()
+				|| expectedOwners.erase(selectedOwner.get()) != 1) {
+				throw Standard_Failure(
+					"Deterministic Edge owner publication drifted");
+			}
+		}
+		if (rawSelectedOwnerCount != owners.size()
+			|| !expectedOwners.empty()) {
+			throw Standard_Failure(
+				"Deterministic Edge owner count mismatch");
+		}
+		if (refreshesIdleBevel) {
+			(void)shapeInteractor->saveSelectionEdges();
+		}
+		[self checkSelections];
+		[self requestRender];
+		return YES;
+	} catch (...) {
+		try {
+			OCC_CATCH_SIGNALS
+			_viewer->AisContext()->ClearSelected(Standard_False);
+			_viewer->AisContext()->ClearDetected(Standard_False);
+			if (refreshesIdleBevel) {
+				(void)shapeInteractor->saveSelectionEdges();
+			}
+		} catch (...) {
+		}
+		[self checkSelections];
+		[self requestRender];
+		return NO;
+	}
+}
+
+- (BOOL)debugSelectRetainedOperationPresentation {
+    if (![NSThread isMainThread] || _viewer == nullptr) {
+        return NO;
+    }
+    const BOOL selected =
+        _viewer->DebugSelectRetainedOperationPresentation() != Standard_False;
+    if (selected) {
+        [self requestRender];
+    }
+    return selected;
+}
+
+- (BOOL)debugSetFirstDisplayedShapeSelectionMode:
+    (PrimitiveSelectionType)mode {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->AisContext().IsNull()
+        || _viewer->getDocument().IsNull()) {
+        return NO;
+    }
+    ShapeSelectionMode ignoredMode = ShapeSelectionMode::WholeShape;
+    if (!TryShapeSelectionMode(mode, ignoredMode)) {
+        return NO;
+    }
+    TopAbs_ShapeEnum topologyType = TopAbs_SHAPE;
+    switch (ignoredMode) {
+        case ShapeSelectionMode::WholeShape:
+            topologyType = TopAbs_SHAPE;
+            break;
+        case ShapeSelectionMode::Face:
+            topologyType = TopAbs_FACE;
+            break;
+        case ShapeSelectionMode::Edge:
+            topologyType = TopAbs_EDGE;
+            break;
+        case ShapeSelectionMode::Vertex:
+            topologyType = TopAbs_VERTEX;
+            break;
+        case ShapeSelectionMode::Wire:
+            return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        AIS_ListOfInteractive displayedObjects;
+        _viewer->AisContext()->DisplayedObjects(
+            AIS_KOI_Shape, -1, displayedObjects);
+        for (AIS_ListIteratorOfListOfInteractive presentation(
+                 displayedObjects);
+             presentation.More(); presentation.Next()) {
+            const Handle(AIS_InteractiveObject)& object =
+                presentation.Value();
+            const TDF_Label label =
+                _viewer->getDocument()->ShapeLabel(object);
+            if (label.IsNull()
+                || _viewer->getDocument()
+                    ->GeometryRepresentationForLabel(label)
+                    == OcctGeometryRepresentation::Invalid) {
+                continue;
+            }
+            _viewer->AisContext()->Deactivate(object);
+            _viewer->AisContext()->SetSelectionModeActive(
+                object,
+                AIS_Shape::SelectionMode(topologyType),
+                Standard_True,
+                AIS_SelectionModesConcurrency_Single,
+                Standard_True);
+            return YES;
+        }
+        return NO;
+    } catch (...) {
+        return NO;
+    }
+}
+
+- (BOOL)debugSetDisplayedShapeSelectionModeWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    mode:(PrimitiveSelectionType)mode {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->AisContext().IsNull()
+        || _viewer->getDocument().IsNull()
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0
+        || entityIdentifier.UTF8String == nullptr) {
+        return NO;
+    }
+    ShapeSelectionMode ignoredMode = ShapeSelectionMode::WholeShape;
+    if (!TryShapeSelectionMode(mode, ignoredMode)) {
+        return NO;
+    }
+    TopAbs_ShapeEnum topologyType = TopAbs_SHAPE;
+    switch (ignoredMode) {
+        case ShapeSelectionMode::WholeShape:
+            topologyType = TopAbs_SHAPE;
+            break;
+        case ShapeSelectionMode::Face:
+            topologyType = TopAbs_FACE;
+            break;
+        case ShapeSelectionMode::Edge:
+            topologyType = TopAbs_EDGE;
+            break;
+        case ShapeSelectionMode::Vertex:
+            topologyType = TopAbs_VERTEX;
+            break;
+        case ShapeSelectionMode::Wire:
+            return NO;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const std::string requestedIdentifier(entityIdentifier.UTF8String);
+        Handle(AIS_InteractiveObject) matchedPresentation;
+        AIS_ListOfInteractive displayedObjects;
+        _viewer->AisContext()->DisplayedObjects(
+            AIS_KOI_Shape, -1, displayedObjects);
+        for (AIS_ListIteratorOfListOfInteractive presentation(
+                 displayedObjects);
+             presentation.More(); presentation.Next()) {
+            const Handle(AIS_InteractiveObject)& object =
+                presentation.Value();
+            const TDF_Label label =
+                _viewer->getDocument()->ShapeLabel(object);
+            if (label.IsNull()
+                || _viewer->getDocument()
+                       ->GeometryRepresentationForLabel(label)
+                    == OcctGeometryRepresentation::Invalid
+                || _viewer->getDocument()->EntityIdentifierForLabel(label)
+                    != requestedIdentifier) {
+                continue;
+            }
+            if (!matchedPresentation.IsNull()) {
+                // One entity may temporarily own original and candidate AIS
+                // objects. This fault seam never guesses which one to poison.
+                return NO;
+            }
+            matchedPresentation = object;
+        }
+        if (matchedPresentation.IsNull()) {
+            return NO;
+        }
+        _viewer->AisContext()->Deactivate(matchedPresentation);
+        _viewer->AisContext()->SetSelectionModeActive(
+            matchedPresentation,
+            AIS_Shape::SelectionMode(topologyType),
+            Standard_True,
+            AIS_SelectionModesConcurrency_Single,
+            Standard_True);
+        return YES;
+    } catch (...) {
+        return NO;
+    }
+}
+
+- (void)debugSetSelectionModeVerificationFailureCount:(NSUInteger)count {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return;
+    }
+    _viewer->getShapeInteractor()
+        ->debugSetSelectionModeVerificationFailureCount(
+            static_cast<Standard_Size>(count));
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugMirrorState {
@@ -3085,6 +4385,13 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
     }
 }
 
+- (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBooleanPostCommitInspectFailureCount(
+            static_cast<Standard_Size>(count));
+    }
+}
+
 - (void)debugSetExtrusionCommitMode:(NSInteger)mode {
     if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr) {
         _viewer->getShapeInteractor()->debugSetExtrusionCommitMode(
@@ -3310,6 +4617,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 - (BOOL)debugMutateShellSourcePersistedTransform {
     return _viewer != nullptr
         && _viewer->DebugMutateShellSourcePersistedTransform();
+}
+
+- (BOOL)debugMutateShellSourcePersistedShape {
+    return _viewer != nullptr
+        && _viewer->DebugMutateShellSourcePersistedShape();
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState {
@@ -3560,6 +4872,11 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         Handle(Image_Texture) documentEmissiveTexture;
         const TDF_Label presentationLabel =
             _viewer->getDocument()->ShapeLabel(shape);
+        const OcctGeometryRepresentation presentationRepresentation =
+            presentationLabel.IsNull()
+                ? OcctGeometryRepresentation::Invalid
+                : _viewer->getDocument()->GeometryRepresentationForLabel(
+                    presentationLabel);
         XCAFDoc_VisMaterialPBR effectivePresentationMaterial;
         if (!presentationLabel.IsNull()
             && _viewer->getDocument()->TryEffectivePBRMaterialForLabel(
@@ -3793,6 +5110,22 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         TColStd_ListOfInteger activeSelectionModes;
         _viewer->AisContext()->ActivatedModes(
             shape, activeSelectionModes);
+        Standard_Boolean objectSelectionModeActive = Standard_False;
+        Standard_Boolean faceSelectionModeActive = Standard_False;
+        Standard_Boolean edgeSelectionModeActive = Standard_False;
+        Standard_Boolean vertexSelectionModeActive = Standard_False;
+        for (TColStd_ListIteratorOfListOfInteger mode(activeSelectionModes);
+             mode.More(); mode.Next()) {
+            const Standard_Integer value = mode.Value();
+            objectSelectionModeActive = objectSelectionModeActive
+                || value == AIS_Shape::SelectionMode(TopAbs_SHAPE);
+            faceSelectionModeActive = faceSelectionModeActive
+                || value == AIS_Shape::SelectionMode(TopAbs_FACE);
+            edgeSelectionModeActive = edgeSelectionModeActive
+                || value == AIS_Shape::SelectionMode(TopAbs_EDGE);
+            vertexSelectionModeActive = vertexSelectionModeActive
+                || value == AIS_Shape::SelectionMode(TopAbs_VERTEX);
+        }
         [states addObject:@{
             @"translationX": @(translation.X()),
             @"translationY": @(translation.Y()),
@@ -3914,6 +5247,16 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                 customNonAutoFaceCullingCount),
             @"activeSelectionModeCount": @(
                 activeSelectionModes.Extent()),
+            @"geometryRepresentation": @(
+                static_cast<NSInteger>(presentationRepresentation)),
+            @"objectSelectionModeActive": @(
+                objectSelectionModeActive != Standard_False),
+            @"faceSelectionModeActive": @(
+                faceSelectionModeActive != Standard_False),
+            @"edgeSelectionModeActive": @(
+                edgeSelectionModeActive != Standard_False),
+            @"vertexSelectionModeActive": @(
+                vertexSelectionModeActive != Standard_False),
         }];
     }
     return states;
@@ -3953,6 +5296,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
                     const bool hasTransientModeling =
                         objectInteractor == nullptr
                         || shapeInteractor == nullptr
+                        || strongSelf->_viewer->hasUnresolvedDuplicate()
                         || objectInteractor->hasActiveBoolean()
                         || objectInteractor->hasUnresolvedBoolean()
                         || objectInteractor->hasUnresolvedMirrorObjects()
@@ -4147,6 +5491,9 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
 }
 
 - (BOOL)saveSnapshot:(NSURL *)tmpUrl {
+    if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+        return NO;
+    }
     const auto fn = TCollection_AsciiString(tmpUrl.path.UTF8String);
     return _viewer->dumpOfDisplayedColoredObjects(500, 500, tmpUrl.path.UTF8String);
 }
@@ -4182,6 +5529,7 @@ void CompleteAssetLoadOnMain(void (^completion)(Core3DAssetLoadResult),
         || !document->CanExportGeometry(geometryExportFormat)
         || objectInteractor == nullptr
         || shapeInteractor == nullptr
+        || objectInteractor->hasUnresolvedDuplicate()
         || objectInteractor->hasActiveBoolean()
         || objectInteractor->hasUnresolvedBoolean()
         || objectInteractor->hasUnresolvedMirrorObjects()

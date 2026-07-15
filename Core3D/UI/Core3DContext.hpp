@@ -25,5 +25,11 @@ public:
                                   const Standard_Boolean               theToUpdateViewer,
                                   const PrsMgr_DisplayStatus           theDispStatus = PrsMgr_DisplayStatus_None);
     void ApplyDefaultMaterial(const Handle(AIS_InteractiveObject)& obj);
+#ifdef DEBUG
+    //! Deterministic test-only preselection publication. Production hover
+    //! continues to be owned exclusively by AIS_InteractiveContext::MoveTo().
+    Standard_Boolean DebugSetDetectedOwner(
+        const Handle(SelectMgr_EntityOwner)& owner) noexcept;
+#endif
 };
 #endif /* Core3DContext_hpp */

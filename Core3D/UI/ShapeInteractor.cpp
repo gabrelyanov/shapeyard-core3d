@@ -27,16 +27,14 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
-#include <XCAFDoc_ColorTool.hxx>
-#include <XCAFDoc_LayerTool.hxx>
-#include <XCAFDoc_VisMaterialTool.hxx>
-#include <TDF_ChildIterator.hxx>
 #include <BRepTools.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <StdPrs_ToolTriangulatedShape.hxx>
+#include <TColStd_ListIteratorOfListOfInteger.hxx>
+#include <TColStd_ListOfInteger.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <algorithm>
@@ -44,6 +42,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -62,6 +61,67 @@ namespace core3d {
 		constexpr Standard_Size kMaximumExtrusionSourceSubshapes = 1024;
 		constexpr Standard_Size kMaximumExtrusionProfileEdges = 64;
 		constexpr Standard_Real kMaximumExtrusionDistance = 100.0;
+		constexpr Standard_Integer kAdaptivePixelTolerance = -1;
+		constexpr Standard_Integer kExpandedTopologyPixelTolerance = 32;
+
+		//! Consume the Bevel admission budget by occurrence, not unique TShape.
+		//! This must run before any source-wide map, curve inspection, or BRep
+		//! validation so shared/adversarial topology cannot amplify UI-thread work.
+		Standard_Boolean ConsumeBevelSourceTopologyBudget(
+			const TopoDS_Shape& shape,
+			const Standard_Size perSourceLimit,
+			const Standard_Size aggregateLimit,
+			Standard_Size& aggregateCount,
+			Standard_Size& sourceCount) noexcept {
+			sourceCount = 0;
+			if (shape.IsNull() || perSourceLimit == 0
+				|| aggregateLimit == 0
+				|| aggregateCount > aggregateLimit) {
+				return Standard_False;
+			}
+			try {
+				OCC_CATCH_SIGNALS
+				std::vector<TopoDS_Shape> pending{shape};
+				while (!pending.empty()) {
+					const TopoDS_Shape current = pending.back();
+					pending.pop_back();
+					if (current.IsNull()
+						|| ++sourceCount
+							> perSourceLimit
+						|| ++aggregateCount
+							> aggregateLimit) {
+						sourceCount = 0;
+						return Standard_False;
+					}
+					for (TopoDS_Iterator child(
+							 current, Standard_True, Standard_True);
+						 child.More(); child.Next()) {
+						const Standard_Size sourceRemaining =
+							perSourceLimit - sourceCount;
+						const Standard_Size aggregateRemaining =
+							aggregateLimit - aggregateCount;
+						if (pending.size() + 1U
+								> static_cast<std::size_t>(sourceRemaining)
+							|| pending.size() + 1U
+								> static_cast<std::size_t>(aggregateRemaining)) {
+							sourceCount = 0;
+							return Standard_False;
+						}
+						pending.push_back(child.Value());
+					}
+				}
+				return sourceCount > 0;
+			} catch (...) {
+				sourceCount = 0;
+				return Standard_False;
+			}
+		}
+
+		Standard_Boolean UsesExpandedTopologyPixelTolerance(
+			const ShapeSelectionMode mode) noexcept {
+			return mode == ShapeSelectionMode::Edge
+				|| mode == ShapeSelectionMode::Vertex;
+		}
 
 		Standard_Boolean IsBRepModelingLabel(
 			const Handle(OcctDocument)& document,
@@ -178,106 +238,6 @@ namespace core3d {
 			}
 			edgeCount = static_cast<Standard_Size>(edges.Extent());
 			return edgeCount > 0;
-		}
-
-		Standard_Boolean HasStyledXCAFSubshape(
-			const Handle(TDocStd_Document)& document,
-			const TDF_Label& definition) {
-			if (document.IsNull() || definition.IsNull()) {
-				return Standard_True;
-			}
-			const Handle(XCAFDoc_ColorTool) colorTool =
-				XCAFDoc_DocumentTool::CheckColorTool(document->Main())
-					? XCAFDoc_DocumentTool::ColorTool(document->Main())
-					: Handle(XCAFDoc_ColorTool)();
-			const Handle(XCAFDoc_LayerTool) layerTool =
-				XCAFDoc_DocumentTool::CheckLayerTool(document->Main())
-					? XCAFDoc_DocumentTool::LayerTool(document->Main())
-					: Handle(XCAFDoc_LayerTool)();
-			Standard_Size childCount = 0;
-			for (TDF_ChildIterator item(definition, Standard_False);
-				 item.More(); item.Next()) {
-				if (++childCount > kMaximumExtrusionSourceSubshapes) {
-					return Standard_True;
-				}
-				const TDF_Label& label = item.Value();
-				if (!XCAFDoc_ShapeTool::IsSubShape(label)) {
-					continue;
-				}
-				TDF_LabelSequence layers;
-				if (label.IsNull()
-					|| (!colorTool.IsNull()
-						&& (colorTool->IsSet(label, XCAFDoc_ColorGen)
-							|| colorTool->IsSet(label, XCAFDoc_ColorSurf)
-							|| colorTool->IsSet(label, XCAFDoc_ColorCurv)
-							|| !XCAFDoc_ColorTool::IsVisible(label)))
-					|| !XCAFDoc_VisMaterialTool::GetShapeMaterial(
-						label).IsNull()
-					|| (!layerTool.IsNull()
-						&& layerTool->GetLayers(label, layers)
-						&& !layers.IsEmpty())) {
-					return Standard_True;
-				}
-			}
-			return Standard_False;
-		}
-
-		Standard_Boolean FaceBelongsToShape(
-			const TopoDS_Shape& shape,
-			const TopoDS_Face& face) {
-			for (TopExp_Explorer item(shape, TopAbs_FACE);
-				 item.More(); item.Next()) {
-				if (item.Current().IsSame(face)) {
-					return Standard_True;
-				}
-			}
-			return Standard_False;
-		}
-
-		Standard_Boolean IsEditableFreeSolidDefinition(
-			const Handle(OcctDocument)& document,
-			const Handle(AIS_Shape)& presentation,
-			const TDF_Label& label,
-			const TopoDS_Face& face,
-			Standard_Size& sourceSubshapeCount,
-			Standard_Size& profileEdgeCount) {
-			if (document.IsNull() || presentation.IsNull()
-				|| presentation->Shape().IsNull() || label.IsNull()
-				|| !IsBRepModelingLabel(document, label)
-				|| document->Document().IsNull()
-				|| label.Data() != document->Document()->GetData()
-				|| !document->IsPresentationEditable(presentation)
-				|| !document->ShapeLabel(presentation).IsEqual(label)) {
-				return Standard_False;
-			}
-			const Handle(XCAFDoc_ShapeTool) shapeTool =
-				XCAFDoc_DocumentTool::ShapeTool(
-					document->Document()->Main());
-			if (shapeTool.IsNull() || !shapeTool->IsShape(label)
-				|| !XCAFDoc_ShapeTool::IsFree(label)
-				|| !XCAFDoc_ShapeTool::IsSimpleShape(label)
-				|| XCAFDoc_ShapeTool::IsReference(label)
-				|| XCAFDoc_ShapeTool::IsComponent(label)
-				|| XCAFDoc_ShapeTool::IsAssembly(label)
-				|| XCAFDoc_ShapeTool::IsSubShape(label)
-				|| presentation->Shape().ShapeType() != TopAbs_SOLID
-				|| face.IsNull()) {
-				return Standard_False;
-			}
-			Standard_Size solidCount = 0;
-			if (!CountBoundedTopology(
-					presentation->Shape(),
-					kMaximumExtrusionSourceSubshapes,
-					sourceSubshapeCount,
-					solidCount)
-				|| solidCount != 1) {
-				return Standard_False;
-			}
-			if (HasStyledXCAFSubshape(document->Document(), label)) {
-				return Standard_False;
-			}
-			return FaceBelongsToShape(presentation->Shape(), face)
-				&& CountBoundedProfileEdges(face, profileEdgeCount);
 		}
 
 		Standard_Boolean BuildExtrusionCandidate(
@@ -491,42 +451,138 @@ namespace core3d {
 		}
 	}
 
+	Standard_Boolean
+	ShapeInteractor::tryCaptureExactlyOneSelectedPlanarFace(
+		FaceOperationSourceProof& theProof) const noexcept {
+		theProof = FaceOperationSourceProof();
+		if (myContext.IsNull()
+			|| getSelectionMode() != ShapeSelectionMode::Face
+			|| _topAbsSelMode != TopAbs_FACE
+			|| !selectionModeAuthorityIsExact()) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			Standard_Size aRawSelectedOwnerCount = 0;
+			Handle(AIS_Shape) aPresentation;
+			TopoDS_Face aFace;
+			for (myContext->InitSelected(); myContext->MoreSelected();
+				 myContext->NextSelected()) {
+				if (++aRawSelectedOwnerCount != 1) {
+					return Standard_False;
+				}
+				const Handle(SelectMgr_EntityOwner) anOwner =
+					myContext->SelectedOwner();
+				const Handle(AIS_InteractiveObject) aSelectedInteractive =
+					myContext->SelectedInteractive();
+				const Handle(StdSelect_BRepOwner) aBRepOwner =
+					Handle(StdSelect_BRepOwner)::DownCast(anOwner);
+				aPresentation =
+					Handle(AIS_Shape)::DownCast(aSelectedInteractive);
+				if (anOwner.IsNull() || !anOwner->HasSelectable()
+					|| aBRepOwner.IsNull() || !aBRepOwner->IsSelected()
+					|| !aBRepOwner->HasShape()
+					|| aBRepOwner->Shape().ShapeType() != TopAbs_FACE
+					|| aSelectedInteractive.IsNull()
+					|| aPresentation.IsNull()
+					|| aPresentation->Shape().IsNull()
+					|| anOwner->Selectable() != aSelectedInteractive
+					|| !myContext->IsDisplayed(aPresentation)) {
+					return Standard_False;
+				}
+				aFace = TopoDS::Face(aBRepOwner->Shape());
+			}
+			if (aRawSelectedOwnerCount != 1 || aPresentation.IsNull()
+				|| aFace.IsNull()) {
+				return Standard_False;
+			}
+
+			return TryPrepareFaceOperationSource(
+				myContext,
+				myDoc,
+				aPresentation,
+				aFace,
+				ShellOperationController::kMaximumSourceTopologyNodes,
+				ShellOperationController::
+					kMaximumStyledSubshapeLabels,
+				theProof);
+		} catch (...) {
+			theProof = FaceOperationSourceProof();
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ShapeInteractor::canBeginShellSelection() const noexcept {
+		if (_shellController == nullptr
+			|| _shellController->hasActiveOperation()) {
+			return Standard_False;
+		}
+		FaceOperationSourceProof aProof;
+		if (!tryCaptureExactlyOneSelectedPlanarFace(aProof)) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			ShellSourceSelection aSelection;
+			aSelection.proof = aProof;
+			aSelection.selectionMode =
+				AIS_Shape::SelectionMode(_topAbsSelMode);
+			return _shellController->canBegin(aSelection);
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
+	Standard_Boolean ShapeInteractor::queryFaceOperationAdmission(
+		Standard_Boolean& theCanBeginExtrusion,
+		Standard_Boolean& theCanBeginShell) const noexcept {
+		theCanBeginExtrusion = Standard_False;
+		theCanBeginShell = Standard_False;
+		FaceOperationSourceProof aProof;
+		if (!tryCaptureExactlyOneSelectedPlanarFace(aProof)) {
+			return Standard_False;
+		}
+		try {
+			OCC_CATCH_SIGNALS
+			if (!hasActiveExtrusion()) {
+				TDF_Label aLabel;
+				Standard_Size aSourceSubshapeCount = 0;
+				Standard_Size aProfileEdgeCount = 0;
+				theCanBeginExtrusion = tryPrepareExtrusionSelection(
+					aProof,
+					aLabel,
+					aSourceSubshapeCount,
+					aProfileEdgeCount);
+			}
+			if (_shellController != nullptr
+				&& !_shellController->hasActiveOperation()) {
+				ShellSourceSelection aSelection;
+				aSelection.proof = aProof;
+				aSelection.selectionMode =
+					AIS_Shape::SelectionMode(_topAbsSelMode);
+				theCanBeginShell =
+					_shellController->canBegin(aSelection);
+			}
+			return Standard_True;
+		} catch (...) {
+			theCanBeginExtrusion = Standard_False;
+			theCanBeginShell = Standard_False;
+			return Standard_False;
+		}
+	}
+
 	Standard_Boolean ShapeInteractor::beginShellSelection() noexcept {
 		if (myContext.IsNull() || _shellController == nullptr) {
 			return Standard_False;
 		}
 		try {
 			OCC_CATCH_SIGNALS
-			Handle(AIS_Shape) presentation;
-			TopoDS_Face face;
-			Standard_Size selectedCount = 0;
-			for (myContext->InitSelected(); myContext->MoreSelected();
-				 myContext->NextSelected()) {
-				if (++selectedCount != 1) {
-					(void)cancelShell();
-					return Standard_False;
-				}
-				const Handle(SelectMgr_EntityOwner) owner =
-					myContext->SelectedOwner();
-				const Handle(StdSelect_BRepOwner) brepOwner =
-					Handle(StdSelect_BRepOwner)::DownCast(owner);
-				presentation = Handle(AIS_Shape)::DownCast(
-					myContext->SelectedInteractive());
-				if (owner.IsNull() || !owner->HasSelectable()
-					|| brepOwner.IsNull() || !brepOwner->HasShape()
-					|| brepOwner->Shape().ShapeType() != TopAbs_FACE
-					|| presentation.IsNull()
-					|| owner->Selectable() != presentation) {
-					(void)cancelShell();
-					return Standard_False;
-				}
-				face = TopoDS::Face(brepOwner->Shape());
-			}
-			if (selectedCount != 1) {
+			FaceOperationSourceProof proof;
+			if (!tryCaptureExactlyOneSelectedPlanarFace(proof)) {
 				(void)cancelShell();
 				return Standard_False;
 			}
-			return beginShellSelectionImpl(presentation, face);
+			return beginShellSelectionImpl(proof);
 		} catch (...) {
 			(void)cancelShell();
 			return Standard_False;
@@ -534,35 +590,16 @@ namespace core3d {
 	}
 
 	Standard_Boolean ShapeInteractor::beginShellSelectionImpl(
-		const Handle(AIS_Shape)& presentation,
-		const TopoDS_Face& face) noexcept {
+		const FaceOperationSourceProof& proof) noexcept {
 		if (_shellController == nullptr || myDoc.IsNull()
-			|| presentation.IsNull() || presentation->Shape().IsNull()
-			|| face.IsNull()) {
+			|| proof.original.IsNull() || proof.shape.IsNull()
+			|| proof.openingFace.IsNull()) {
 			return Standard_False;
 		}
 		try {
 			OCC_CATCH_SIGNALS
-			const BRepAdaptor_Surface surface(face, Standard_True);
-			if (surface.GetType() != GeomAbs_Plane
-				|| (face.Orientation() != TopAbs_FORWARD
-					&& face.Orientation() != TopAbs_REVERSED)) {
-				return Standard_False;
-			}
-
-			TopTools_IndexedMapOfShape faces;
-			TopExp::MapShapes(presentation->Shape(), TopAbs_FACE, faces);
-			const Standard_Integer faceIndex = faces.FindIndex(face);
-			if (faceIndex <= 0) {
-				return Standard_False;
-			}
-
 			ShellSourceSelection selection;
-			selection.original = presentation;
-			selection.documentLabel = myDoc->ShapeLabel(presentation);
-			selection.openingFace = face;
-			selection.faceTopologyIndex =
-				static_cast<Standard_Size>(faceIndex - 1);
+			selection.proof = proof;
 			selection.selectionMode =
 				AIS_Shape::SelectionMode(_topAbsSelMode);
 			return _shellController->begin(selection);
@@ -657,51 +694,83 @@ namespace core3d {
 		}
 	}
 
+	Standard_Boolean
+	ShapeInteractor::canBeginExtrusionSelection() const noexcept {
+		if (hasActiveExtrusion()) {
+			return Standard_False;
+		}
+		FaceOperationSourceProof aProof;
+		if (!tryCaptureExactlyOneSelectedPlanarFace(aProof)) {
+			return Standard_False;
+		}
+		TDF_Label aLabel;
+		Standard_Size aSourceSubshapeCount = 0;
+		Standard_Size aProfileEdgeCount = 0;
+		return tryPrepareExtrusionSelection(
+			aProof,
+			aLabel,
+			aSourceSubshapeCount,
+			aProfileEdgeCount);
+	}
+
 	Standard_Boolean ShapeInteractor::beginExtrusionSelection() noexcept {
 		if (myContext.IsNull()) {
 			return Standard_False;
 		}
 		try {
 			OCC_CATCH_SIGNALS
-			Handle(AIS_Shape) presentation;
-			TopoDS_Face face;
-			Standard_Size selectedCount = 0;
-			for (myContext->InitSelected(); myContext->MoreSelected();
-				 myContext->NextSelected()) {
-				if (++selectedCount != 1) {
-					cancelExtrusion();
-					return Standard_False;
-				}
-				const Handle(SelectMgr_EntityOwner) owner =
-					myContext->SelectedOwner();
-				const Handle(StdSelect_BRepOwner) brepOwner =
-					Handle(StdSelect_BRepOwner)::DownCast(owner);
-				presentation = Handle(AIS_Shape)::DownCast(
-					myContext->SelectedInteractive());
-				if (owner.IsNull() || !owner->HasSelectable()
-					|| brepOwner.IsNull() || !brepOwner->HasShape()
-					|| brepOwner->Shape().ShapeType() != TopAbs_FACE
-					|| presentation.IsNull()
-					|| owner->Selectable() != presentation) {
-					cancelExtrusion();
-					return Standard_False;
-				}
-				face = TopoDS::Face(brepOwner->Shape());
-			}
-			if (selectedCount != 1) {
+			FaceOperationSourceProof proof;
+			if (!tryCaptureExactlyOneSelectedPlanarFace(proof)) {
 				cancelExtrusion();
 				return Standard_False;
 			}
-			return beginExtrusionSelectionImpl(presentation, face);
+			return beginExtrusionSelectionImpl(proof);
 		} catch (...) {
 			cancelExtrusion();
 			return Standard_False;
 		}
 	}
 
+	Standard_Boolean ShapeInteractor::tryPrepareExtrusionSelection(
+		const FaceOperationSourceProof& theProof,
+		TDF_Label& theLabel,
+		Standard_Size& theSourceSubshapeCount,
+		Standard_Size& theProfileEdgeCount) const noexcept {
+		theLabel = TDF_Label();
+		theSourceSubshapeCount = 0;
+		theProfileEdgeCount = 0;
+		try {
+			OCC_CATCH_SIGNALS
+			if (!FaceOperationSourceProofIsCurrent(
+					myContext,
+					myDoc,
+					theProof,
+					ShellOperationController::
+						kMaximumStyledSubshapeLabels)
+				|| theProof.topologyNodeCount
+					> ShellOperationController::
+						kMaximumSourceTopologyNodes) {
+				return Standard_False;
+			}
+			Standard_Size aProfileEdgeCount = 0;
+			if (!CountBoundedProfileEdges(
+					theProof.openingFace, aProfileEdgeCount)) {
+				return Standard_False;
+			}
+			theLabel = theProof.documentLabel;
+			theSourceSubshapeCount = theProof.topologyNodeCount;
+			theProfileEdgeCount = aProfileEdgeCount;
+			return Standard_True;
+		} catch (...) {
+			theLabel = TDF_Label();
+			theSourceSubshapeCount = 0;
+			theProfileEdgeCount = 0;
+			return Standard_False;
+		}
+	}
+
 	Standard_Boolean ShapeInteractor::beginExtrusionSelectionImpl(
-		const Handle(AIS_Shape)& presentation,
-		const TopoDS_Face& face) noexcept {
+		const FaceOperationSourceProof& proof) noexcept {
 		if (!cancelExtrusion() || _extrusion.IsReady()
 			|| _extrusion.ownsCommand) {
 			return Standard_False;
@@ -725,40 +794,21 @@ namespace core3d {
 #endif
 		try {
 			OCC_CATCH_SIGNALS
-			const Handle(TDocStd_Document) document = myDoc.IsNull()
-				? Handle(TDocStd_Document)()
-				: myDoc->ChangeDocument();
-			if (document.IsNull() || document->HasOpenCommand()
-				|| document->GetUndoLimit() == 0) {
-				return Standard_False;
-			}
-			const TDF_Label label = myDoc->ShapeLabel(presentation);
-			if (!IsBRepModelingLabel(myDoc, label)) {
-				return Standard_False;
-			}
+			TDF_Label label;
 			Standard_Size sourceSubshapeCount = 0;
 			Standard_Size profileEdgeCount = 0;
-			if (!IsEditableFreeSolidDefinition(
-					myDoc,
-					presentation,
+			if (!tryPrepareExtrusionSelection(
+					proof,
 					label,
-					face,
 					sourceSubshapeCount,
 					profileEdgeCount)) {
 				return Standard_False;
 			}
-			const BRepAdaptor_Surface surface(face, Standard_True);
-			if (surface.GetType() != GeomAbs_Plane
-				|| (face.Orientation() != TopAbs_FORWARD
-					&& face.Orientation() != TopAbs_REVERSED)) {
-				return Standard_False;
-			}
-
 			_extrusion.label = label;
-			_extrusion.originalPresentation = presentation;
-			_extrusion.originalShape = presentation->Shape();
-			_extrusion.selectedFace = face;
-			_extrusion.transform = presentation->LocalTransformation();
+			_extrusion.originalPresentation = proof.original;
+			_extrusion.originalShape = proof.shape;
+			_extrusion.selectedFace = proof.openingFace;
+			_extrusion.transform = proof.transform;
 			_extrusion.sourceSubshapeCount = sourceSubshapeCount;
 			_extrusion.profileEdgeCount = profileEdgeCount;
 			return Standard_True;
@@ -1236,7 +1286,16 @@ namespace core3d {
 	Standard_Boolean ShapeInteractor::debugBeginShellSelection(
 		const Handle(AIS_Shape)& presentation,
 		const TopoDS_Face& face) noexcept {
-		return beginShellSelectionImpl(presentation, face);
+		FaceOperationSourceProof proof;
+		return TryPrepareFaceOperationSource(
+			myContext,
+			myDoc,
+			presentation,
+			face,
+			ShellOperationController::kMaximumSourceTopologyNodes,
+			ShellOperationController::kMaximumStyledSubshapeLabels,
+			proof)
+			&& beginShellSelectionImpl(proof);
 	}
 
 	ShellPreviewDebugState ShapeInteractor::debugShellState() const noexcept {
@@ -1307,10 +1366,25 @@ namespace core3d {
 			&& _shellController->debugMutateSourcePersistedTransform();
 	}
 
+	Standard_Boolean
+	ShapeInteractor::debugMutateShellSourcePersistedShape() noexcept {
+		return _shellController != nullptr
+			&& _shellController->debugMutateSourcePersistedShape();
+	}
+
 	Standard_Boolean ShapeInteractor::debugBeginExtrusionSelection(
 		const Handle(AIS_Shape)& presentation,
 		const TopoDS_Face& face) noexcept {
-		return beginExtrusionSelectionImpl(presentation, face);
+		FaceOperationSourceProof proof;
+		return TryPrepareFaceOperationSource(
+			myContext,
+			myDoc,
+			presentation,
+			face,
+			ShellOperationController::kMaximumSourceTopologyNodes,
+			ShellOperationController::kMaximumStyledSubshapeLabels,
+			proof)
+			&& beginExtrusionSelectionImpl(proof);
 	}
 
 		ExtrusionDebugState ShapeInteractor::debugExtrusionState() const noexcept {
@@ -1389,6 +1463,12 @@ namespace core3d {
 				std::vector<BevelSourceSelection> aSources;
 				aSources.reserve(presentations.size());
 				Standard_Size anAggregateEdgeCount = 0;
+				Standard_Size anAggregateTopologyCount = 0;
+				const Standard_Size anAggregateTopologyLimit =
+					_bevelController->maximumCaptureTopologyNodes();
+				const Standard_Size aPerSourceTopologyLimit = std::min(
+					BevelOperationController::kMaxSourceTopologyNodes,
+					anAggregateTopologyLimit);
 				for (Standard_Size aSourceIndex = 0;
 					 aSourceIndex < presentations.size(); ++aSourceIndex) {
 					const Handle(AIS_Shape)& aPresentation =
@@ -1406,6 +1486,16 @@ namespace core3d {
 						return Standard_False;
 					}
 					anAggregateEdgeCount += aTopologyIndices.size();
+					Standard_Size aSourceTopologyCount = 0;
+					if (!ConsumeBevelSourceTopologyBudget(
+							aPresentation->Shape(),
+							aPerSourceTopologyLimit,
+							anAggregateTopologyLimit,
+							anAggregateTopologyCount,
+							aSourceTopologyCount)) {
+						return Standard_False;
+					}
+					// The occurrence proof above intentionally precedes this map.
 					TopTools_IndexedMapOfShape anEdges;
 					TopExp::MapShapes(
 						aPresentation->Shape(), TopAbs_EDGE, anEdges);
@@ -1432,7 +1522,6 @@ namespace core3d {
 				}
 				return _bevelController->begin(aSources);
 			} catch (...) {
-				(void)_bevelController->cancel();
 				return Standard_False;
 			}
 		}
@@ -1493,37 +1582,291 @@ namespace core3d {
 		}
 #endif
 
-	Standard_Boolean ShapeInteractor::beginBevelSelectionFromDetectedEdges() noexcept {
-		if (_bevelController == nullptr || _detectedEdges.empty()) {
+	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
+		std::vector<BevelSourceSelection>& theSelection) const noexcept {
+		theSelection.clear();
+		if (myContext.IsNull() || myDoc.IsNull()
+			|| _bevelController == nullptr
+			|| !selectionModeAuthorityIsExact()) {
 			return Standard_False;
 		}
+
+		TopAbs_ShapeEnum anExpectedOwnerType = TopAbs_SHAPE;
+		switch (getSelectionMode()) {
+			case ShapeSelectionMode::WholeShape:
+				anExpectedOwnerType = TopAbs_SHAPE;
+				break;
+			case ShapeSelectionMode::Face:
+				anExpectedOwnerType = TopAbs_FACE;
+				break;
+			case ShapeSelectionMode::Edge:
+				anExpectedOwnerType = TopAbs_EDGE;
+				break;
+			case ShapeSelectionMode::Vertex:
+			case ShapeSelectionMode::Wire:
+				return Standard_False;
+		}
+		if (_topAbsSelMode != anExpectedOwnerType) {
+			return Standard_False;
+		}
+
+		struct CapturedSource {
+			Handle(AIS_Shape) presentation;
+			TopoDS_Shape shape;
+			BevelSourceSelection selection;
+			TopTools_IndexedMapOfShape edges;
+			TopTools_IndexedMapOfShape faces;
+			TopTools_IndexedMapOfShape selectedTopology;
+		};
+
 		try {
-			std::vector<BevelSourceSelection> aSelection;
-			aSelection.reserve(_detectedEdges.size());
-			for (const EdgesSelection& anEdges : _detectedEdges) {
-				if (anEdges.detectedOwner.IsNull()
-					|| !anEdges.detectedOwner->HasSelectable()
-					|| anEdges.edges.empty()) {
-					return Standard_False;
-				}
-				const Handle(AIS_Shape) anOriginal =
-					Handle(AIS_Shape)::DownCast(
-						anEdges.detectedOwner->Selectable());
-				if (anOriginal.IsNull()) {
-					return Standard_False;
-				}
-				BevelSourceSelection aSource;
-				aSource.original = anOriginal;
-				aSource.documentLabel = anEdges.documentLabel;
-				aSource.edges = anEdges.edges;
-				aSource.selectionMode =
-					AIS_Shape::SelectionMode(_topAbsSelMode);
-				aSelection.push_back(std::move(aSource));
+			OCC_CATCH_SIGNALS
+			const Handle(TDocStd_Document) aDocument = myDoc->Document();
+			if (aDocument.IsNull() || aDocument->HasOpenCommand()
+				|| aDocument->GetUndoLimit() == 0) {
+				return Standard_False;
 			}
-			return _bevelController->begin(aSelection);
+			std::vector<std::unique_ptr<CapturedSource>> aSources;
+			aSources.reserve(BevelOperationController::kMaxSourceBodies);
+			Standard_Size aRawOwnerCount = 0;
+			Standard_Size anAggregateTopologyCount = 0;
+			Standard_Size anAggregateEdgeCount = 0;
+			const Standard_Size anAggregateTopologyLimit =
+				_bevelController->maximumCaptureTopologyNodes();
+			const Standard_Size aPerSourceTopologyLimit = std::min(
+				BevelOperationController::kMaxSourceTopologyNodes,
+				anAggregateTopologyLimit);
+
+			for (myContext->InitSelected(); myContext->MoreSelected();
+				 myContext->NextSelected()) {
+				if (++aRawOwnerCount
+					> BevelOperationController::kMaxSelectedEdges) {
+					return Standard_False;
+				}
+				const Handle(SelectMgr_EntityOwner) anOwner =
+					myContext->SelectedOwner();
+				const Handle(AIS_InteractiveObject) aSelectedInteractive =
+					myContext->SelectedInteractive();
+				const Handle(StdSelect_BRepOwner) aBRepOwner =
+					Handle(StdSelect_BRepOwner)::DownCast(anOwner);
+				const Handle(AIS_Shape) aPresentation =
+					Handle(AIS_Shape)::DownCast(aSelectedInteractive);
+				if (anOwner.IsNull() || !anOwner->HasSelectable()
+					|| aSelectedInteractive.IsNull()
+					|| aBRepOwner.IsNull() || !aBRepOwner->IsSelected()
+					|| !aBRepOwner->HasShape()
+					|| aPresentation.IsNull()
+					|| aPresentation->Shape().IsNull()
+					|| anOwner->Selectable() != aSelectedInteractive
+					|| !myContext->IsDisplayed(aPresentation)) {
+					return Standard_False;
+				}
+
+				CapturedSource* aSource = nullptr;
+				for (const std::unique_ptr<CapturedSource>& aCandidate
+					 : aSources) {
+					if (aCandidate->presentation == aPresentation) {
+						aSource = aCandidate.get();
+						break;
+					}
+				}
+				if (aSource == nullptr) {
+					if (aSources.size()
+						>= BevelOperationController::kMaxSourceBodies) {
+						return Standard_False;
+					}
+					const TopoDS_Shape aShape = aPresentation->Shape();
+					const TDF_Label aLabel = myDoc->ShapeLabel(aPresentation);
+					const TopoDS_Shape aStoredShape =
+						XCAFDoc_ShapeTool::GetShape(aLabel);
+					Standard_Size aSourceTopologyCount = 0;
+					if (aShape.ShapeType() != TopAbs_SOLID
+						|| aLabel.IsNull()
+						|| aLabel.Data() != aDocument->GetData()
+						|| !IsBRepModelingLabel(myDoc, aLabel)
+						|| !myDoc->IsPresentationEditable(aPresentation)
+						|| aStoredShape.IsNull()
+						|| !aStoredShape.IsEqual(aShape)
+						|| !ConsumeBevelSourceTopologyBudget(
+							aShape,
+							aPerSourceTopologyLimit,
+							anAggregateTopologyLimit,
+							anAggregateTopologyCount,
+							aSourceTopologyCount)) {
+						return Standard_False;
+					}
+
+					auto aCaptured = std::make_unique<CapturedSource>();
+					aCaptured->presentation = aPresentation;
+					aCaptured->shape = aShape;
+					aCaptured->selection.original = aPresentation;
+					aCaptured->selection.documentLabel = aLabel;
+					aCaptured->selection.selectionMode =
+						AIS_Shape::SelectionMode(_topAbsSelMode);
+					// The occurrence cap above deliberately precedes these maps.
+					TopExp::MapShapes(aShape, TopAbs_EDGE, aCaptured->edges);
+					if (aCaptured->edges.IsEmpty()) {
+						return Standard_False;
+					}
+					if (_topAbsSelMode == TopAbs_FACE) {
+						TopExp::MapShapes(aShape, TopAbs_FACE, aCaptured->faces);
+						if (aCaptured->faces.IsEmpty()) {
+							return Standard_False;
+						}
+					}
+					aSource = aCaptured.get();
+					aSources.push_back(std::move(aCaptured));
+				}
+
+				const TopoDS_Shape anOwnedShape = aBRepOwner->Shape();
+				TopoDS_Shape aCanonicalSelectedShape;
+				if (_topAbsSelMode == TopAbs_SHAPE) {
+					if (anOwnedShape.ShapeType() != TopAbs_SOLID
+						|| !anOwnedShape.IsEqual(aSource->shape)) {
+						return Standard_False;
+					}
+					aCanonicalSelectedShape = aSource->shape;
+				} else if (_topAbsSelMode == TopAbs_FACE) {
+					if (anOwnedShape.ShapeType() != TopAbs_FACE) {
+						return Standard_False;
+					}
+					const Standard_Integer anIndex =
+						aSource->faces.FindIndex(anOwnedShape);
+					if (anIndex <= 0) {
+						return Standard_False;
+					}
+					aCanonicalSelectedShape =
+						aSource->faces.FindKey(anIndex);
+					// Face-derived edges may be normalized only after proving the
+					// selected Face owner's canonical orientation exactly.
+					if (!aCanonicalSelectedShape.IsEqual(anOwnedShape)) {
+						return Standard_False;
+					}
+				} else {
+					if (anOwnedShape.ShapeType() != TopAbs_EDGE) {
+						return Standard_False;
+					}
+					const Standard_Integer anIndex =
+						aSource->edges.FindIndex(anOwnedShape);
+					if (anIndex <= 0) {
+						return Standard_False;
+					}
+					aCanonicalSelectedShape =
+						aSource->edges.FindKey(anIndex);
+					// Direct Edge selection preserves canonical orientation; unlike
+					// Face/Object-derived edges it is never silently reversed.
+					if (!aCanonicalSelectedShape.IsEqual(anOwnedShape)) {
+						return Standard_False;
+					}
+				}
+				if (aCanonicalSelectedShape.IsNull()
+					|| aSource->selectedTopology.Contains(
+						aCanonicalSelectedShape)) {
+					return Standard_False;
+				}
+				aSource->selectedTopology.Add(aCanonicalSelectedShape);
+
+				Standard_Size anOwnerEligibleEdgeCount = 0;
+				const auto captureEdge = [&](const TopoDS_Edge& anEdge) {
+					const Standard_Integer anIndex =
+						anEdge.IsNull() ? 0 : aSource->edges.FindIndex(anEdge);
+					if (anIndex <= 0) {
+						return Standard_False;
+					}
+					const TopoDS_Edge aCanonicalEdge = TopoDS::Edge(
+						aSource->edges.FindKey(anIndex));
+					if (aCanonicalEdge.IsNull()) {
+						return Standard_False;
+					}
+					if (!IsBevelEdgeEligible(aCanonicalEdge)) {
+						return Standard_True;
+					}
+					++anOwnerEligibleEdgeCount;
+					for (const TopoDS_Edge& anExisting
+						 : aSource->selection.edges) {
+						if (anExisting.IsSame(aCanonicalEdge)) {
+							return Standard_True;
+						}
+					}
+					if (anAggregateEdgeCount
+						>= BevelOperationController::kMaxSelectedEdges) {
+						return Standard_False;
+					}
+					++anAggregateEdgeCount;
+					aSource->selection.edges.push_back(aCanonicalEdge);
+					return Standard_True;
+				};
+
+				if (_topAbsSelMode == TopAbs_EDGE) {
+					if (!captureEdge(TopoDS::Edge(aCanonicalSelectedShape))) {
+						return Standard_False;
+					}
+				} else {
+					Standard_Size anEdgeOccurrenceCount = 0;
+					for (TopExp_Explorer anEdge(
+							 aCanonicalSelectedShape, TopAbs_EDGE);
+						 anEdge.More(); anEdge.Next()) {
+						if (++anEdgeOccurrenceCount
+								> BevelOperationController::
+									kMaxSourceTopologyNodes
+							|| !captureEdge(TopoDS::Edge(anEdge.Current()))) {
+							return Standard_False;
+						}
+					}
+				}
+				if (anOwnerEligibleEdgeCount == 0) {
+					return Standard_False;
+				}
+			}
+
+			if (aRawOwnerCount == 0 || aSources.empty()
+				|| anAggregateEdgeCount == 0) {
+				return Standard_False;
+			}
+			std::vector<BevelSourceSelection> aResult;
+			aResult.reserve(aSources.size());
+			for (const std::unique_ptr<CapturedSource>& aSource : aSources) {
+				if (aSource->selection.edges.empty()) {
+					return Standard_False;
+				}
+				aResult.push_back(aSource->selection);
+			}
+			theSelection = std::move(aResult);
+			return Standard_True;
 		} catch (...) {
+			theSelection.clear();
 			return Standard_False;
 		}
+	}
+
+	Standard_Boolean ShapeInteractor::canBeginBevelSelection() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		return tryCaptureBevelSelection(aSelection)
+			&& _bevelController->canBegin(aSelection);
+	}
+
+	Standard_Boolean
+	ShapeInteractor::beginBevelSelectionFromCurrentSelection() noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		if (!tryCaptureBevelSelection(aSelection)
+			|| !_bevelController->begin(aSelection)) {
+			// Core3DViewer calls this after every in-tool selection toggle. Once
+			// the live selection is invalid/empty, a pristine Selecting ledger is
+			// no longer authoritative. Retained preview states are never retired.
+			if (_bevelController->retireIdleSelectingSelection()) {
+				_detectedEdges.clear();
+			}
+			return Standard_False;
+		}
+		_detectedEdges.clear();
+		_detectedEdges.resize(aSelection.size());
+		return Standard_True;
 	}
 
 	Standard_Boolean ShapeInteractor::setChamferValueForSelection(
@@ -1598,180 +1941,685 @@ namespace core3d {
 	}
 
     Standard_Size ShapeInteractor::saveSelectionEdges(bool preventRechamfer) {
-	// checkFilleted:
-	//      - false - enable the chamfer functionality anyway
-	//      - true - disable the chamfer functionality if it has already been used
-        
-		if (!resetWireframeTemplateShape()) {
-			return 0;
-		}
+		// The frozen v1 contract always rejects already-ineligible topology.
+		// Keep the legacy parameter ABI, but do not let it weaken admission.
+		(void)preventRechamfer;
+		return beginBevelSelectionFromCurrentSelection()
+			? static_cast<Standard_Size>(_detectedEdges.size())
+			: 0;
+	}
 
-        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
-            const Handle(SelectMgr_EntityOwner) detectedOwner = myContext->SelectedOwner();
-			if (detectedOwner.IsNull() || !detectedOwner->HasSelectable()) { continue; }
-            Handle(AIS_Shape) ownerShape = Handle(AIS_Shape)::DownCast(detectedOwner->Selectable());
-			if (ownerShape.IsNull() || ownerShape->Shape().IsNull()) { continue; }
-            const Handle(StdSelect_BRepOwner) &aBRepOwnerOfSelection = Handle(StdSelect_BRepOwner)::DownCast(detectedOwner);
-			if (aBRepOwnerOfSelection.IsNull()) { continue; }
-
-			Standard_Integer found = -1;
-			for (Standard_Size index = 0; index < _detectedEdges.size(); ++index) {
-				if (_detectedEdges[index].detectedOwner.IsNull()
-					|| !_detectedEdges[index].detectedOwner->HasSelectable()) { continue; }
-				Handle(AIS_Shape) existing = Handle(AIS_Shape)::DownCast(
-					_detectedEdges[index].detectedOwner->Selectable());
-				if (!existing.IsNull() && existing->Shape().IsSame(ownerShape->Shape())) {
-					found = static_cast<Standard_Integer>(index);
-					break;
-				}
-			}
-			const Standard_Boolean isNewSelection = found < 0;
-			if (isNewSelection) {
-				EdgesSelection sel;
-				sel.documentLabel = myDoc->ShapeLabel(ownerShape);
-				if (sel.documentLabel.IsNull()
-					|| !IsBRepModelingLabel(
-						myDoc, sel.documentLabel)) {
-					continue;
-				}
-				sel.transform = ownerShape->LocalTransformation();
-				sel.materialName = myDoc->MaterialNameForLabel(sel.documentLabel);
-				sel.colorName = myDoc->ColorNameForLabel(sel.documentLabel);
-				sel.detectedOwner = detectedOwner;
-				_detectedEdges.push_back(sel);
-				found = static_cast<Standard_Integer>(_detectedEdges.size() - 1);
-			}
-
-			EdgesSelection& selection = _detectedEdges[found];
-			const Standard_Size originalEdgeCount = selection.edges.size();
-            auto selectedType = aBRepOwnerOfSelection->Shape().ShapeType();
-            if (aBRepOwnerOfSelection->IsSelected() && (selectedType == _topAbsSelMode || (selectedType == TopAbs_SOLID && _topAbsSelMode == TopAbs_SHAPE))) {
-				auto addEdge = [&](const TopoDS_Edge& edge) {
-					Standard_Real first = 0;
-					Standard_Real last = 0;
-					Handle_Geom_Curve curve = BRep_Tool::Curve(edge, first, last);
-					if (curve.IsNull()) { return; }
-					GeomAdaptor_Curve adaptor(curve);
-					const GeomAbs_CurveType curveType = adaptor.GetType();
-					const Standard_Boolean isChamferable = curveType == GeomAbs_Line
-						|| curveType == GeomAbs_BSplineCurve || adaptor.IsClosed();
-					if (!isChamferable && preventRechamfer) { return; }
-					for (const TopoDS_Edge& existing : selection.edges) {
-						if (existing.IsSame(edge)) { return; }
-					}
-					selection.edges.push_back(edge);
-				};
-				const TopoDS_Shape selectedShape = aBRepOwnerOfSelection->Shape();
-				if (selectedShape.ShapeType() == TopAbs_EDGE) {
-					addEdge(TopoDS::Edge(selectedShape));
-				} else {
-					for (TopExp_Explorer exp(selectedShape, TopAbs_EDGE); exp.More(); exp.Next()) {
-						addEdge(TopoDS::Edge(exp.Current()));
-					}
-				}
-            }
-			if (selection.edges.size() > 64) {
-				selection.edges.resize(originalEdgeCount);
-			}
-			if (isNewSelection && selection.edges.empty()) {
-				_detectedEdges.erase(_detectedEdges.begin() + found);
-			}
-        }
-		if (_detectedEdges.empty()
-			|| !beginBevelSelectionFromDetectedEdges()) {
-			_detectedEdges.clear();
-			return 0;
-		}
+	    const size_t ShapeInteractor::getNumberOfDetectedEdges() const {
 	        return _detectedEdges.size();
 	    }
 
-    const size_t ShapeInteractor::getNumberOfDetectedEdges() const {
-        return _detectedEdges.size();
-    }
+#ifdef DEBUG
+    TopologySelectionDebugState
+    ShapeInteractor::debugTopologySelectionState() const noexcept
+    {
+        TopologySelectionDebugState state;
+        state.acceptedMode = _previousSelectionMode;
+        if (myContext.IsNull() || myDoc.IsNull()
+            || myDoc->Document().IsNull()) {
+            return state;
+        }
 
-    void ShapeInteractor::setSelectionMode(ShapeSelectionMode mode) {
+        const auto kindMatchesMode = [](const ShapeSelectionMode mode,
+                                        const TopologySelectionDebugElementKind
+                                            kind) noexcept {
+            switch (mode) {
+                case ShapeSelectionMode::WholeShape:
+                    return kind
+                        == TopologySelectionDebugElementKind::Object;
+                case ShapeSelectionMode::Face:
+                    return kind == TopologySelectionDebugElementKind::Face;
+                case ShapeSelectionMode::Edge:
+                    return kind == TopologySelectionDebugElementKind::Edge;
+                case ShapeSelectionMode::Vertex:
+                    return kind
+                        == TopologySelectionDebugElementKind::Vertex;
+                case ShapeSelectionMode::Wire:
+                    return false;
+            }
+            return false;
+        };
+        const auto clearSingleSelection = [&state]() noexcept {
+            state.selectedKind =
+                TopologySelectionDebugElementKind::None;
+            state.topologyIndex = -1;
+            state.representation = OcctGeometryRepresentation::Invalid;
+            state.entityIdentifier.clear();
+            state.singleSelectionExact = Standard_False;
+        };
+
+        try {
+            OCC_CATCH_SIGNALS
+            state.hasDetected = myContext->HasDetected();
+            if (!selectionModeAuthorityIsExact()) {
+                return state;
+            }
+            Standard_Boolean allSelectionsMatchMode = Standard_True;
+            for (myContext->InitSelected(); myContext->MoreSelected();
+                 myContext->NextSelected()) {
+                ++state.rawSelectedOwnerCount;
+                const Handle(SelectMgr_EntityOwner) owner =
+                    myContext->SelectedOwner();
+                const Handle(AIS_Shape) presentation =
+                    Handle(AIS_Shape)::DownCast(
+                        myContext->SelectedInteractive());
+                if (owner.IsNull() || !owner->HasSelectable()
+                    || presentation.IsNull()
+                    || presentation->Shape().IsNull()
+                    || owner->Selectable() != presentation) {
+                    ++state.invalidSelectedOwnerCount;
+                    allSelectionsMatchMode = Standard_False;
+                    continue;
+                }
+
+                const TDF_Label label = myDoc->ShapeLabel(presentation);
+                if (label.IsNull()) {
+                    ++state.invalidSelectedOwnerCount;
+                    allSelectionsMatchMode = Standard_False;
+                    continue;
+                }
+                const OcctGeometryRepresentation representation =
+                    myDoc->GeometryRepresentationForLabel(label);
+                const std::string entityIdentifier =
+                    myDoc->EntityIdentifierForLabel(label);
+                if (representation
+                        == OcctGeometryRepresentation::Invalid
+                    || entityIdentifier.empty()) {
+                    ++state.invalidSelectedOwnerCount;
+                    allSelectionsMatchMode = Standard_False;
+                    continue;
+                }
+
+                TopologySelectionDebugElementKind kind =
+                    TopologySelectionDebugElementKind::None;
+                Standard_Integer topologyIndex = -1;
+                Standard_Boolean exact = Standard_False;
+                if (_previousSelectionMode
+                    == ShapeSelectionMode::WholeShape) {
+                    // Object identity is the accepted selection authority, not
+                    // the root TopoDS type. A valid BRep definition may itself
+                    // be a Face, Wire, Edge, or Vertex and still represents one
+                    // document object in WholeShape mode.
+                    kind = TopologySelectionDebugElementKind::Object;
+                    topologyIndex = 0;
+                    exact = Standard_True;
+                } else if (representation
+                    != OcctGeometryRepresentation::TriangleMesh) {
+                    const Handle(StdSelect_BRepOwner) brepOwner =
+                        Handle(StdSelect_BRepOwner)::DownCast(owner);
+                    if (!brepOwner.IsNull() && brepOwner->HasShape()) {
+                        const TopoDS_Shape selectedShape = brepOwner->Shape();
+                        TopAbs_ShapeEnum topologyType = TopAbs_SHAPE;
+                        switch (_previousSelectionMode) {
+                            case ShapeSelectionMode::Face:
+                                kind =
+                                    TopologySelectionDebugElementKind::Face;
+                                topologyType = TopAbs_FACE;
+                                break;
+                            case ShapeSelectionMode::Edge:
+                                kind =
+                                    TopologySelectionDebugElementKind::Edge;
+                                topologyType = TopAbs_EDGE;
+                                break;
+                            case ShapeSelectionMode::Vertex:
+                                kind =
+                                    TopologySelectionDebugElementKind::Vertex;
+                                topologyType = TopAbs_VERTEX;
+                                break;
+                            case ShapeSelectionMode::WholeShape:
+                            case ShapeSelectionMode::Wire:
+                                break;
+                        }
+                        if (topologyType != TopAbs_SHAPE
+                            && selectedShape.ShapeType() == topologyType) {
+                            TopTools_IndexedMapOfShape topology;
+                            Standard_Size visitedOccurrences = 0;
+                            for (TopExp_Explorer item(
+                                     presentation->Shape(), topologyType);
+                                 item.More(); item.Next()) {
+                                if (++visitedOccurrences
+                                        > ShellOperationController::
+                                            kMaximumSourceTopologyNodes) {
+                                    break;
+                                }
+                                topology.Add(item.Current());
+                                if (!item.Current().IsSame(selectedShape)) {
+                                    continue;
+                                }
+                                const Standard_Integer oneBasedIndex =
+                                    topology.FindIndex(selectedShape);
+                                if (oneBasedIndex > 0) {
+                                    topologyIndex = oneBasedIndex - 1;
+                                    exact = topology.FindKey(oneBasedIndex)
+                                        .IsEqual(selectedShape);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                ++state.selectedCount;
+                allSelectionsMatchMode = allSelectionsMatchMode
+                    && kindMatchesMode(_previousSelectionMode, kind);
+                if (state.selectedCount == 1) {
+                    state.selectedKind = kind;
+                    state.topologyIndex = topologyIndex;
+                    state.representation = representation;
+                    state.entityIdentifier = entityIdentifier;
+                    state.singleSelectionExact = exact;
+                }
+            }
+
+            if (state.rawSelectedOwnerCount != 1
+                || state.selectedCount != 1
+                || state.invalidSelectedOwnerCount != 0) {
+                clearSingleSelection();
+            }
+            state.selectionMatchesMode = allSelectionsMatchMode;
+            state.ready = Standard_True;
+            return state;
+        } catch (...) {
+            TopologySelectionDebugState failed;
+            failed.acceptedMode = _previousSelectionMode;
+            return failed;
+        }
+    }
+#endif
+
+    ShapeSelectionModeChangeResult ShapeInteractor::setSelectionMode(
+        const ShapeSelectionMode mode) noexcept
+    {
+        if (myContext.IsNull() || myDoc.IsNull()
+            || myDoc->Document().IsNull()) {
+            return ShapeSelectionModeChangeResult::NotReady;
+        }
+
+        TopAbs_ShapeEnum selectionShapeType = TopAbs_SHAPE;
         switch (mode) {
+            case ShapeSelectionMode::WholeShape:
+                selectionShapeType = TopAbs_SHAPE;
+                break;
+            case ShapeSelectionMode::Face:
+                selectionShapeType = TopAbs_FACE;
+                break;
             case ShapeSelectionMode::Edge:
+                selectionShapeType = TopAbs_EDGE;
+                break;
             case ShapeSelectionMode::Vertex:
-                myContext->SetPixelTolerance(32);
+                selectionShapeType = TopAbs_VERTEX;
+                break;
+            case ShapeSelectionMode::Wire:
+                selectionShapeType = TopAbs_WIRE;
                 break;
             default:
-                myContext->SetPixelTolerance();
-                break;
+                return ShapeSelectionModeChangeResult::Unsupported;
+        }
+        if (_previousSelectionMode == mode
+            && selectionModeAuthorityIsExact()) {
+            return ShapeSelectionModeChangeResult::Succeeded;
         }
 
-		if (_previousSelectionMode != mode) {
-			if (!resetWireframeTemplateShape()) {
-				return;
-			}
-			myContext->ClearSelected(Standard_True);
-		}
-        else {
-            return;
+        // Resolve the retained Bevel presentation before touching any active
+        // selection mode. The committed originals can be redisplayed by this
+        // reconciliation, so the transactional presentation set is captured
+        // only after it succeeds.
+        if (!resetWireframeTemplateShape()) {
+            return ShapeSelectionModeChangeResult::PresentationFailure;
         }
 
-		TopAbs_ShapeEnum selMode;
-		switch (mode) {
-			case ShapeSelectionMode::WholeShape:
-				selMode = TopAbs_ShapeEnum::TopAbs_SHAPE;
-				break;
-			case ShapeSelectionMode::Face:
-				selMode = TopAbs_ShapeEnum::TopAbs_FACE;
-				break;
-			case ShapeSelectionMode::Edge:
-				selMode = TopAbs_ShapeEnum::TopAbs_EDGE;
-				break;
-			case ShapeSelectionMode::Vertex:
-				selMode = TopAbs_ShapeEnum::TopAbs_VERTEX;
-				break;
-			default:
-				selMode = TopAbs_ShapeEnum::TopAbs_SHAPE;
-				break;
-		}
+        struct PresentationSelectionModes {
+            Handle(AIS_InteractiveObject) presentation;
+            std::vector<Standard_Integer> modes;
+        };
+        AIS_ListOfInteractive displayedObjects;
+        std::vector<PresentationSelectionModes> previousPresentations;
+        Standard_Integer previousPixelTolerance =
+            kAdaptivePixelTolerance;
+        try {
+            OCC_CATCH_SIGNALS
+            myContext->DisplayedObjects(displayedObjects);
+            previousPresentations.reserve(
+                static_cast<std::size_t>(displayedObjects.Size()));
+            for (AIS_ListIteratorOfListOfInteractive anIterator(
+                     displayedObjects);
+                 anIterator.More(); anIterator.Next()) {
+                PresentationSelectionModes snapshot;
+                snapshot.presentation = anIterator.Value();
+                TColStd_ListOfInteger activeModes;
+                myContext->ActivatedModes(
+                    snapshot.presentation, activeModes);
+                snapshot.modes.reserve(
+                    static_cast<std::size_t>(activeModes.Extent()));
+                for (TColStd_ListIteratorOfListOfInteger modeIterator(
+                         activeModes);
+                     modeIterator.More(); modeIterator.Next()) {
+                    snapshot.modes.push_back(modeIterator.Value());
+                }
+                previousPresentations.push_back(std::move(snapshot));
+            }
+            const Handle(StdSelect_ViewerSelector3d)& selector =
+                myContext->MainSelector();
+            if (selector.IsNull()) {
+                return ShapeSelectionModeChangeResult::PresentationFailure;
+            }
+            const Standard_Integer rawPixelTolerance =
+                selector->CustomPixelTolerance();
+            previousPixelTolerance = rawPixelTolerance < 0
+                ? kAdaptivePixelTolerance : rawPixelTolerance;
+        } catch (...) {
+            return ShapeSelectionModeChangeResult::PresentationFailure;
+        }
 
-		AIS_ListOfInteractive objects;
-		myContext->DisplayedObjects(objects);
-		AIS_ListIteratorOfListOfInteractive iobject(objects);
-		_previousSelectionMode = mode;
-		_topAbsSelMode = selMode;
+        const auto modesMatch = [&](const PresentationSelectionModes& snapshot)
+            -> Standard_Boolean {
+            TColStd_ListOfInteger activeModes;
+            myContext->ActivatedModes(snapshot.presentation, activeModes);
+            std::vector<Standard_Integer> actualModes;
+            actualModes.reserve(
+                static_cast<std::size_t>(activeModes.Extent()));
+            for (TColStd_ListIteratorOfListOfInteger modeIterator(activeModes);
+                 modeIterator.More(); modeIterator.Next()) {
+                actualModes.push_back(modeIterator.Value());
+            }
+            std::sort(actualModes.begin(), actualModes.end());
+            std::vector<Standard_Integer> expectedModes = snapshot.modes;
+            std::sort(expectedModes.begin(), expectedModes.end());
+            return actualModes == expectedModes;
+        };
+        const auto restorePreviousPresentation = [&]() noexcept {
+            Standard_Boolean restoredEveryPresentation = Standard_True;
+            try {
+                OCC_CATCH_SIGNALS
+                for (const PresentationSelectionModes& snapshot :
+                     previousPresentations) {
+                    myContext->Deactivate(snapshot.presentation);
+                    for (const Standard_Integer activeMode : snapshot.modes) {
+                        myContext->SetSelectionModeActive(
+                            snapshot.presentation,
+                            activeMode,
+                            Standard_True,
+                            AIS_SelectionModesConcurrency_Multiple,
+                            Standard_True);
+                    }
+                    restoredEveryPresentation =
+                        modesMatch(snapshot) && restoredEveryPresentation;
+                }
+                myContext->SetPixelTolerance(previousPixelTolerance);
+                const Handle(StdSelect_ViewerSelector3d)& selector =
+                    myContext->MainSelector();
+                restoredEveryPresentation = restoredEveryPresentation
+                    && !selector.IsNull()
+                    && selector->CustomPixelTolerance()
+                        == previousPixelTolerance;
+            } catch (...) {
+                restoredEveryPresentation = Standard_False;
+            }
+            if (!restoredEveryPresentation) {
+                // The retained enum is no longer publishable when the exact
+                // presentation snapshot cannot be restored. Remove owners so
+                // neither selected nor hover identity can leak across the
+                // fail-closed poisoned state; the same mode can later repair.
+                try {
+                    OCC_CATCH_SIGNALS
+                    myContext->ClearDetected(Standard_False);
+                    myContext->ClearSelected(Standard_True);
+                } catch (...) {
+                }
+            }
+            return restoredEveryPresentation;
+        };
 
-		while (iobject.More()) {
-			setInteractiveObjectSelectionMode(iobject.Value());
-			iobject.Next();
-		}
+        for (AIS_ListIteratorOfListOfInteractive anIterator(displayedObjects);
+             anIterator.More(); anIterator.Next()) {
+            if (!trySetInteractiveObjectSelectionMode(
+                    anIterator.Value(), mode, selectionShapeType)) {
+                (void)restorePreviousPresentation();
+                return ShapeSelectionModeChangeResult::PresentationFailure;
+            }
+        }
 
-		std::cout << "set selection mode=" << selMode << std::endl;
+        try {
+            OCC_CATCH_SIGNALS
+            // Whole-shape/face selection uses OCCT's adaptive default. Its raw
+            // CustomPixelTolerance() value is negative even though the fresh
+            // effective tolerance is 2. Passing 2 here can be a no-op in OCCT
+            // and must not be mistaken for an explicit custom value.
+            myContext->SetPixelTolerance(
+                UsesExpandedTopologyPixelTolerance(mode)
+                    ? kExpandedTopologyPixelTolerance
+                    : kAdaptivePixelTolerance);
+#ifdef DEBUG
+            if (_debugSelectionModeVerificationFailureCount > 0) {
+                --_debugSelectionModeVerificationFailureCount;
+                throw Standard_Failure(
+                    "Injected selection-mode verification failure");
+            }
+#endif
+            if (!selectionModeAuthorityMatches(
+                    mode, selectionShapeType)) {
+                throw Standard_Failure(
+                    "Selection presentation authority mismatch");
+            }
+
+            // Do not explicitly clear owners until every requested presentation
+            // and picker tolerance has been proven. OCCT may already invalidate
+            // transient detection while reconfiguring selection modes; rollback
+            // restores modes and tolerance but cannot fabricate that hover owner.
+            myContext->ClearDetected(Standard_False);
+            myContext->ClearSelected(Standard_True);
+            if (!selectionModeAuthorityMatches(
+                    mode, selectionShapeType)) {
+                throw Standard_Failure(
+                    "Selection authority changed while clearing owners");
+            }
+        } catch (...) {
+            (void)restorePreviousPresentation();
+            return ShapeSelectionModeChangeResult::PresentationFailure;
+        }
+
+        _previousSelectionMode = mode;
+        _topAbsSelMode = selectionShapeType;
+        return ShapeSelectionModeChangeResult::Succeeded;
     }
 
-	void ShapeInteractor::setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio) {
-		if (aio.IsNull() || !myDoc->IsPresentationEditable(aio)) {
-			if (!aio.IsNull()) {
-				myContext->Deactivate(aio);
-			}
-			return;
-		}
-		const TDF_Label aLabel = myDoc->ShapeLabel(aio);
-		const OcctGeometryRepresentation aRepresentation =
-			myDoc->GeometryRepresentationForLabel(aLabel);
-		if (aRepresentation == OcctGeometryRepresentation::Invalid) {
-			myContext->Deactivate(aio);
-			return;
-		}
-		if (aRepresentation == OcctGeometryRepresentation::TriangleMesh) {
-			// Triangle-only geometry has no editable BRep topology. Preserve the
-			// global mode for BRep objects in mixed documents, but expose this
-			// presentation only as one object-level selection target.
-			myContext->Deactivate(aio);
-			myContext->Activate(
-				aio,
-				AIS_Shape::SelectionMode(TopAbs_SHAPE),
-				Standard_True);
-			return;
-		}
-		myContext->Deactivate(aio, aio->GlobalSelectionMode());//(Standard_Integer)_previousSelectionMode);
-		myContext->Activate(aio, (Standard_Integer)_previousSelectionMode,  Standard_True);
-		myContext->SetSelectionModeActive (aio, AIS_Shape::SelectionMode (_topAbsSelMode), true, AIS_SelectionModesConcurrency::AIS_SelectionModesConcurrency_Single);
+	void ShapeInteractor::setInteractiveObjectSelectionMode(
+        const Handle(AIS_InteractiveObject) aio)
+    {
+        (void)trySetInteractiveObjectSelectionMode(
+            aio, _previousSelectionMode, _topAbsSelMode);
 	}
+
+    Standard_Boolean ShapeInteractor::trySetInteractiveObjectSelectionMode(
+        const Handle(AIS_InteractiveObject)& aio,
+        const ShapeSelectionMode mode,
+        const TopAbs_ShapeEnum topAbsMode) noexcept
+    {
+        if (myContext.IsNull() || myDoc.IsNull()
+            || myDoc->Document().IsNull() || aio.IsNull()) {
+            return Standard_False;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            if (!myDoc->IsPresentationEditable(aio)) {
+                myContext->Deactivate(aio);
+                return interactiveObjectSelectionModeMatches(
+                    aio, mode, topAbsMode);
+            }
+            const TDF_Label aLabel = myDoc->ShapeLabel(aio);
+            const OcctGeometryRepresentation aRepresentation =
+                myDoc->GeometryRepresentationForLabel(aLabel);
+            if (aRepresentation == OcctGeometryRepresentation::Invalid) {
+                myContext->Deactivate(aio);
+                return interactiveObjectSelectionModeMatches(
+                    aio, mode, topAbsMode);
+            }
+
+            myContext->Deactivate(aio);
+            if (aRepresentation
+                == OcctGeometryRepresentation::TriangleMesh) {
+                // Mesh imports expose no editable BRep subshape topology.
+                // In every subshape mode they are fully deactivated, while a
+                // mixed document may continue selecting its BRep contents.
+                if (mode == ShapeSelectionMode::WholeShape) {
+                    myContext->SetSelectionModeActive(
+                        aio,
+                        AIS_Shape::SelectionMode(TopAbs_SHAPE),
+                        Standard_True,
+                        AIS_SelectionModesConcurrency_Single,
+                        Standard_True);
+                }
+                return interactiveObjectSelectionModeMatches(
+                    aio, mode, topAbsMode);
+            }
+
+            myContext->SetSelectionModeActive(
+                aio,
+                AIS_Shape::SelectionMode(topAbsMode),
+                Standard_True,
+                AIS_SelectionModesConcurrency_Single,
+                Standard_True);
+            return interactiveObjectSelectionModeMatches(
+                aio, mode, topAbsMode);
+        } catch (...) {
+            // Never leave the presentation active in a possibly half-applied
+            // requested mode. The transition owner subsequently attempts to
+            // restore the prior mode across the complete displayed set.
+            try {
+                OCC_CATCH_SIGNALS
+                myContext->Deactivate(aio);
+            } catch (...) {
+            }
+            return Standard_False;
+        }
+    }
+
+    Standard_Boolean ShapeInteractor::interactiveObjectSelectionModeMatches(
+        const Handle(AIS_InteractiveObject)& aio,
+        const ShapeSelectionMode mode,
+        const TopAbs_ShapeEnum topAbsMode) const noexcept
+    {
+        if (myContext.IsNull() || myDoc.IsNull()
+            || myDoc->Document().IsNull() || aio.IsNull()) {
+            return Standard_False;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            const TDF_Label label = myDoc->ShapeLabel(aio);
+            const OcctGeometryRepresentation representation =
+                myDoc->GeometryRepresentationForLabel(label);
+            // Transient operation and gizmo presentations are outside the
+            // committed document topology authority.
+            if (representation == OcctGeometryRepresentation::Invalid) {
+                return Standard_True;
+            }
+
+            std::vector<Standard_Integer> expectedModes;
+            if (myDoc->IsPresentationEditable(aio)) {
+                if (representation
+                    == OcctGeometryRepresentation::TriangleMesh) {
+                    if (mode == ShapeSelectionMode::WholeShape) {
+                        expectedModes.push_back(
+                            AIS_Shape::SelectionMode(TopAbs_SHAPE));
+                    }
+                } else if (representation
+                        == OcctGeometryRepresentation::BRep
+                    || representation
+                        == OcctGeometryRepresentation::LegacyUnknown) {
+                    expectedModes.push_back(
+                        AIS_Shape::SelectionMode(topAbsMode));
+                } else {
+                    return Standard_False;
+                }
+            }
+
+            TColStd_ListOfInteger activeModes;
+            myContext->ActivatedModes(aio, activeModes);
+            std::vector<Standard_Integer> actualModes;
+            actualModes.reserve(
+                static_cast<std::size_t>(activeModes.Extent()));
+            for (TColStd_ListIteratorOfListOfInteger anIterator(activeModes);
+                 anIterator.More(); anIterator.Next()) {
+                actualModes.push_back(anIterator.Value());
+            }
+            std::sort(expectedModes.begin(), expectedModes.end());
+            std::sort(actualModes.begin(), actualModes.end());
+            return actualModes == expectedModes;
+        } catch (...) {
+            return Standard_False;
+        }
+    }
+
+    Standard_Boolean ShapeInteractor::selectionModeAuthorityMatches(
+        const ShapeSelectionMode mode,
+        const TopAbs_ShapeEnum topAbsMode) const noexcept
+    {
+        if (myContext.IsNull() || myDoc.IsNull()
+            || myDoc->Document().IsNull()) {
+            return Standard_False;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            AIS_ListOfInteractive displayedObjects;
+            myContext->DisplayedObjects(displayedObjects);
+            for (AIS_ListIteratorOfListOfInteractive anIterator(
+                     displayedObjects);
+                 anIterator.More(); anIterator.Next()) {
+                if (!interactiveObjectSelectionModeMatches(
+                        anIterator.Value(), mode, topAbsMode)) {
+                    return Standard_False;
+                }
+            }
+            const Handle(StdSelect_ViewerSelector3d)& selector =
+                myContext->MainSelector();
+            if (selector.IsNull()) {
+                return Standard_False;
+            }
+            const Standard_Integer rawPixelTolerance =
+                selector->CustomPixelTolerance();
+            return UsesExpandedTopologyPixelTolerance(mode)
+                ? rawPixelTolerance == kExpandedTopologyPixelTolerance
+                : rawPixelTolerance < 0;
+        } catch (...) {
+            return Standard_False;
+        }
+    }
+
+    Standard_Boolean
+    ShapeInteractor::selectionModeAuthorityIsExact() const noexcept
+    {
+        return selectionModeAuthorityMatches(
+            _previousSelectionMode, _topAbsSelMode);
+    }
+
+    Standard_Boolean
+    ShapeInteractor::selectionModeAuthorityIsExactIgnoring(
+        const std::vector<Handle(AIS_Shape)>& theSuspendedPresentations)
+        const noexcept
+    {
+        if (theSuspendedPresentations.empty() || myContext.IsNull()
+            || myDoc.IsNull() || myDoc->Document().IsNull()) {
+            return Standard_False;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            std::unordered_set<const AIS_InteractiveObject*> expected;
+            expected.reserve(theSuspendedPresentations.size());
+            for (const Handle(AIS_Shape)& aPresentation :
+                 theSuspendedPresentations) {
+                if (aPresentation.IsNull()
+                    || !expected.insert(aPresentation.get()).second) {
+                    return Standard_False;
+                }
+            }
+
+            std::unordered_set<const AIS_InteractiveObject*> observed;
+            observed.reserve(expected.size());
+            AIS_ListOfInteractive displayedObjects;
+            myContext->DisplayedObjects(displayedObjects);
+            for (AIS_ListIteratorOfListOfInteractive anIterator(
+                     displayedObjects);
+                 anIterator.More(); anIterator.Next()) {
+                const Handle(AIS_InteractiveObject)& aPresentation =
+                    anIterator.Value();
+                if (!aPresentation.IsNull()
+                    && expected.find(aPresentation.get()) != expected.end()) {
+                    TColStd_ListOfInteger activeModes;
+                    myContext->ActivatedModes(aPresentation, activeModes);
+                    if (!activeModes.IsEmpty()
+                        || !observed.insert(aPresentation.get()).second) {
+                        return Standard_False;
+                    }
+                    continue;
+                }
+                if (!interactiveObjectSelectionModeMatches(
+                        aPresentation,
+                        _previousSelectionMode,
+                        _topAbsSelMode)) {
+                    return Standard_False;
+                }
+            }
+            if (observed.size() != expected.size()) {
+                return Standard_False;
+            }
+
+            const Handle(StdSelect_ViewerSelector3d)& selector =
+                myContext->MainSelector();
+            if (selector.IsNull()) {
+                return Standard_False;
+            }
+            const Standard_Integer rawPixelTolerance =
+                selector->CustomPixelTolerance();
+            return UsesExpandedTopologyPixelTolerance(
+                       _previousSelectionMode)
+                ? rawPixelTolerance == kExpandedTopologyPixelTolerance
+                : rawPixelTolerance < 0;
+        } catch (...) {
+            return Standard_False;
+        }
+    }
+
+    Standard_Boolean
+    ShapeInteractor::captureExtrusionSelectionModeSuspendedPresentations(
+        std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+    {
+        thePresentations.clear();
+        const ExtrusionPreviewState aState = extrusionPreviewState();
+        const Standard_Boolean ownsRetainedState =
+            (aState == ExtrusionPreviewState::Ready
+                && canApplyExtrusion())
+            || (aState == ExtrusionPreviewState::OutcomeUnknown
+                && canRetryExtrusionResolution());
+        if (!ownsRetainedState || myContext.IsNull()
+            || _extrusion.originalPresentation.IsNull()
+            || _extrusion.candidatePresentation.IsNull()
+            || _extrusion.originalPresentation
+                == _extrusion.candidatePresentation) {
+            return Standard_False;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            const auto appendSuspended =
+                [&](const Handle(AIS_Shape)& aPresentation) {
+                    TColStd_ListOfInteger activeModes;
+                    if (aPresentation.IsNull()
+                        || aPresentation->Shape().IsNull()
+                        || !myContext->IsDisplayed(aPresentation)) {
+                        return Standard_False;
+                    }
+                    myContext->ActivatedModes(aPresentation, activeModes);
+                    if (!activeModes.IsEmpty()) {
+                        return Standard_False;
+                    }
+                    thePresentations.push_back(aPresentation);
+                    return Standard_True;
+                };
+            if (!appendSuspended(_extrusion.originalPresentation)
+                || !appendSuspended(_extrusion.candidatePresentation)) {
+                thePresentations.clear();
+                return Standard_False;
+            }
+            return thePresentations.size() == 2;
+        } catch (...) {
+            thePresentations.clear();
+            return Standard_False;
+        }
+    }
+
+    Standard_Boolean
+    ShapeInteractor::captureShellSelectionModeSuspendedPresentations(
+        std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+    {
+        thePresentations.clear();
+        return _shellController != nullptr
+            && _shellController
+                ->captureSelectionModeSuspendedPresentations(
+                    thePresentations);
+    }
 
     const ShapeSelectionMode ShapeInteractor::getSelectionMode() const {
         return _previousSelectionMode;

@@ -15,6 +15,7 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <AIS_DisplayMode.hxx>
+#include <StdSelect_BRepOwner.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_NeutralWindow.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -44,6 +45,8 @@
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
+#include <TColStd_ListIteratorOfListOfInteger.hxx>
+#include <TColStd_ListOfInteger.hxx>
 
 
 #include <BRepBuilderAPI_GTransform.hxx>
@@ -71,25 +74,6 @@
 namespace core3d {
 
 namespace {
-
-bool TryBooleanActionForManipulator(
-    const PrimitiveManipulatorType theType,
-    BooleanAction& theAction) noexcept
-{
-    switch (theType) {
-        case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
-            theAction = BooleanAction::BooleanSubtract;
-            return true;
-        case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
-            theAction = BooleanAction::BooleanUnion;
-            return true;
-        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
-            theAction = BooleanAction::BooleanIntersect;
-            return true;
-        default:
-            return false;
-    }
-}
 
 bool TryManipulatorForBooleanAction(
     const BooleanAction theAction,
@@ -173,6 +157,193 @@ bool TryCountDisplayedModelShapes(
         // the user's camera instead of risking an unexpected reframe.
         count = 0;
         return false;
+    }
+}
+
+struct SelectionPresentationModesSnapshot {
+    Handle(AIS_InteractiveObject) presentation;
+    std::vector<Standard_Integer> activeModes;
+};
+
+struct SelectionContextModesSnapshot {
+    std::vector<SelectionPresentationModesSnapshot> presentations;
+    // OCCT represents its adaptive/default picker tolerance with a negative
+    // raw custom value. Keep that representation exact: SetPixelTolerance(2)
+    // is allowed to return early when the effective tolerance is already 2,
+    // leaving CustomPixelTolerance() at -1.
+    Standard_Integer pixelTolerance = -1;
+};
+
+bool CaptureSelectionContextModes(
+    const Handle(Core3DContext)& theContext,
+    SelectionContextModesSnapshot& theSnapshot) noexcept
+{
+    theSnapshot = {};
+    if (theContext.IsNull()) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        AIS_ListOfInteractive displayedObjects;
+        theContext->DisplayedObjects(displayedObjects);
+        theSnapshot.presentations.reserve(
+            static_cast<std::size_t>(displayedObjects.Size()));
+        for (AIS_ListIteratorOfListOfInteractive anIterator(displayedObjects);
+             anIterator.More(); anIterator.Next()) {
+            SelectionPresentationModesSnapshot presentationSnapshot;
+            presentationSnapshot.presentation = anIterator.Value();
+            TColStd_ListOfInteger activeModes;
+            theContext->ActivatedModes(
+                presentationSnapshot.presentation, activeModes);
+            presentationSnapshot.activeModes.reserve(
+                static_cast<std::size_t>(activeModes.Extent()));
+            for (TColStd_ListIteratorOfListOfInteger mode(activeModes);
+                 mode.More(); mode.Next()) {
+                presentationSnapshot.activeModes.push_back(mode.Value());
+            }
+            theSnapshot.presentations.push_back(
+                std::move(presentationSnapshot));
+        }
+        const Handle(StdSelect_ViewerSelector3d)& selector =
+            theContext->MainSelector();
+        if (selector.IsNull()) {
+            theSnapshot = {};
+            return false;
+        }
+        const Standard_Integer rawPixelTolerance =
+            selector->CustomPixelTolerance();
+        theSnapshot.pixelTolerance = rawPixelTolerance < 0
+            ? -1 : rawPixelTolerance;
+        return true;
+    } catch (...) {
+        theSnapshot = {};
+        return false;
+    }
+}
+
+bool RestoreSelectionContextModes(
+    const Handle(Core3DContext)& theContext,
+    const SelectionContextModesSnapshot& theSnapshot) noexcept
+{
+    if (theContext.IsNull()) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        for (const SelectionPresentationModesSnapshot& snapshot :
+             theSnapshot.presentations) {
+            if (snapshot.presentation.IsNull()) {
+                return false;
+            }
+            theContext->Deactivate(snapshot.presentation);
+            for (const Standard_Integer activeMode : snapshot.activeModes) {
+                theContext->SetSelectionModeActive(
+                    snapshot.presentation,
+                    activeMode,
+                    Standard_True,
+                    AIS_SelectionModesConcurrency_Multiple,
+                    Standard_True);
+            }
+
+            TColStd_ListOfInteger restoredModes;
+            theContext->ActivatedModes(
+                snapshot.presentation, restoredModes);
+            std::vector<Standard_Integer> actualModes;
+            actualModes.reserve(
+                static_cast<std::size_t>(restoredModes.Extent()));
+            for (TColStd_ListIteratorOfListOfInteger mode(restoredModes);
+                 mode.More(); mode.Next()) {
+                actualModes.push_back(mode.Value());
+            }
+            std::vector<Standard_Integer> expectedModes =
+                snapshot.activeModes;
+            std::sort(actualModes.begin(), actualModes.end());
+            std::sort(expectedModes.begin(), expectedModes.end());
+            if (actualModes != expectedModes) {
+                return false;
+            }
+        }
+        theContext->SetPixelTolerance(theSnapshot.pixelTolerance);
+        const Handle(StdSelect_ViewerSelector3d)& selector =
+            theContext->MainSelector();
+        return !selector.IsNull()
+            && selector->CustomPixelTolerance()
+                == theSnapshot.pixelTolerance;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool IsStatelessManipulatorType(
+    const PrimitiveManipulatorType theType) noexcept
+{
+    switch (theType) {
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeNone:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
+            return true;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeScale:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeShell:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray:
+            return false;
+    }
+    return false;
+}
+
+PrimitiveManipulatorType StatelessManipulatorTypeOrNone(
+    const PrimitiveManipulatorType theType) noexcept
+{
+    return IsStatelessManipulatorType(theType)
+        ? theType
+        : PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+}
+
+PrimitiveManipulatorType InspectorRestorableManipulatorTypeOrNone(
+    const PrimitiveManipulatorType theType) noexcept
+{
+    // Scale has no operation ledger, but unlike the passive stateless tools it
+    // is valid only after the Position fallback restores its exact source
+    // selection. Never pass it through empty-selection interactor recreation.
+    return theType
+            == PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+        ? theType
+        : StatelessManipulatorTypeOrNone(theType);
+}
+
+bool HasActiveOperationLedger(
+    const std::shared_ptr<ObjectInteractor>& theObjectInteractor,
+    const std::shared_ptr<ShapeInteractor>& theShapeInteractor) noexcept
+{
+    try {
+        if (theObjectInteractor != nullptr
+            && (theObjectInteractor->hasUnresolvedDuplicate()
+                || theObjectInteractor->isPickingMirrorPlane()
+                || theObjectInteractor->hasActiveBoolean()
+                || theObjectInteractor->hasUnresolvedBoolean()
+                || theObjectInteractor->hasActiveMirror()
+                || theObjectInteractor->hasUnresolvedMirrorObjects()
+                || theObjectInteractor->hasActiveLinearArray()
+                || theObjectInteractor->hasUnresolvedLinearArray()
+                || theObjectInteractor->hasActiveRadialArray()
+                || theObjectInteractor->hasUnresolvedRadialArray())) {
+            return true;
+        }
+        return theShapeInteractor != nullptr
+            && (theShapeInteractor->hasActiveBevel()
+                || theShapeInteractor->hasActiveExtrusion()
+                || theShapeInteractor->hasActiveShell()
+                || theShapeInteractor->hasUnresolvedShell());
+    } catch (...) {
+        // If an operation controller cannot prove that it is idle, replacing
+        // its document or interactors would destroy its only recovery ledger.
+        return true;
     }
 }
 
@@ -1010,6 +1181,7 @@ void Core3DViewer::release() noexcept {
 }
 
 NSString* Core3DViewer::addTestPrimitives() {
+    if (!canBeginCommittedEdit()) { return @""; }
 
     gp_Pnt lowerLeftCornerOfBox(-50.0,-50.0,0.0);
     BRepPrimAPI_MakeBox boxMaker(lowerLeftCornerOfBox,100,100,50);
@@ -1091,37 +1263,118 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
     return result;
 }
 
-void Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
+bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                        ShapeSelectionMode theSelectionMode) {
+    if (!IsStatelessManipulatorType(theManipulatorType)) {
+        // Operation controllers own state that is not encoded by this enum.
+        // Reconstructing one from the enum would fabricate a fresh ledger and
+        // silently discard the retained operation's recovery authority.
+        return false;
+    }
+    SelectionContextModesSnapshot previousSelectionContext;
+    if (!CaptureSelectionContextModes(
+            myContext, previousSelectionContext)) {
+        return false;
+    }
     const float scale = [[UIScreen mainScreen] scale];
     const float pointsPerMillimeter = scale
         * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163)
         / 25.4;
     const float manipulatorSide = 15 * pointsPerMillimeter;
 
-    _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, manipulatorSide);
-    _objectInteractor->setBooleanPreviewStateChangedCallback(
+    std::shared_ptr<ObjectInteractor> objectInteractor =
+        std::make_shared<ObjectInteractor>(
+            myContext, myView, myDoc, manipulatorSide);
+    objectInteractor->setBooleanPreviewStateChangedCallback(
         _booleanPreviewStateChangedCallback);
-    _objectInteractor->setLinearArrayPreviewStateChangedCallback(
+    objectInteractor->setLinearArrayPreviewStateChangedCallback(
         _linearArrayPreviewStateChangedCallback);
-    _objectInteractor->setRadialArrayPreviewStateChangedCallback(
+    objectInteractor->setRadialArrayPreviewStateChangedCallback(
         _radialArrayPreviewStateChangedCallback);
-    _shapeInteractor = std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
-    _shapeInteractor->setBevelPreviewStateChangedCallback(
+    std::shared_ptr<ShapeInteractor> shapeInteractor =
+        std::make_shared<ShapeInteractor>(myContext, myView, myDoc);
+    shapeInteractor->setBevelPreviewStateChangedCallback(
         _bevelPreviewStateChangedCallback);
-    _shapeInteractor->setShellPreviewStateChangedCallback(
+    shapeInteractor->setShellPreviewStateChangedCallback(
         _shellPreviewStateChangedCallback);
 
-    if (theSelectionMode != ShapeSelectionMode::WholeShape) {
-        _shapeInteractor->setSelectionMode(theSelectionMode);
+    const ShapeSelectionModeChangeResult selectionResult =
+        shapeInteractor->setSelectionMode(theSelectionMode);
+    if (selectionResult != ShapeSelectionModeChangeResult::Succeeded
+        || !shapeInteractor->selectionModeAuthorityIsExact()) {
+        // The temporary interactor shares the live AIS context. Restore the
+        // exact modes that existed before it attempted configuration; if this
+        // restoration itself fails, the retained interactor's dynamic
+        // authority check remains poisoned and public getters fail closed.
+        (void)RestoreSelectionContextModes(
+            myContext, previousSelectionContext);
+        return false;
     }
-    if (theManipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
-        _objectInteractor->setManipulatorType(theManipulatorType);
-        BooleanAction anAction = BooleanAction::BooleanSubtract;
-        if (TryBooleanActionForManipulator(
-                theManipulatorType, anAction)) {
-            (void)_objectInteractor->beginBoolean(anAction);
+    if (theManipulatorType
+            != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
+        objectInteractor->setManipulatorType(theManipulatorType);
+        if (objectInteractor->getManipulatorType()
+                != theManipulatorType) {
+            // A nominally passive tool is publishable only if the fresh
+            // interactor accepted it exactly. In particular, Scale is never
+            // admitted here because an empty selection downgrades it to None.
+            (void)RestoreSelectionContextModes(
+                myContext, previousSelectionContext);
+            return false;
         }
+    }
+
+    // Publish the replacement interactors only after the requested topology
+    // mode is accepted. A failed reconstruction therefore cannot silently
+    // replace the retained Face/Edge authority with WholeShape.
+    _objectInteractor = std::move(objectInteractor);
+    _shapeInteractor = std::move(shapeInteractor);
+    return publishRecreatedInteractorState();
+}
+
+bool Core3DViewer::recreateFreshInteractorsForDocumentReplacement()
+{
+    if (myContext.IsNull()) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        myContext->ClearDetected(Standard_False);
+        myContext->ClearSelected(Standard_False);
+        if (!recreateInteractors(
+                PrimitiveManipulatorType::PrimitiveGizmoTypeNone,
+                ShapeSelectionMode::WholeShape)
+            || _objectInteractor == nullptr
+            || _shapeInteractor == nullptr
+            || _objectInteractor->getManipulatorType()
+                != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+            || _shapeInteractor->getSelectionMode()
+                != ShapeSelectionMode::WholeShape
+            || !_shapeInteractor->selectionModeAuthorityIsExact()
+            || myContext->HasDetected()) {
+            return false;
+        }
+        myContext->InitSelected();
+        return !myContext->MoreSelected();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool Core3DViewer::publishRecreatedInteractorState() noexcept
+{
+    if (_objectInteractor == nullptr) {
+        return false;
+    }
+    if (!_interactorRecreatedCallback) {
+        return true;
+    }
+    try {
+        _interactorRecreatedCallback(
+            _objectInteractor->getManipulatorType());
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 
@@ -1175,6 +1428,12 @@ void Core3DViewer::setShellPreviewStateChangedCallback(
     }
 }
 
+void Core3DViewer::setInteractorRecreatedCallback(
+    std::function<void(PrimitiveManipulatorType)> theCallback)
+{
+    _interactorRecreatedCallback = std::move(theCallback);
+}
+
 TransformInspectorMeasurement
 Core3DViewer::captureTransformInspectorMeasurement(
     TransformInspectorMeasurementCompletion theCompletion) noexcept
@@ -1209,9 +1468,10 @@ Core3DViewer::commitTransformInspectorPosition(
     }
 
     const PrimitiveManipulatorType aCommittedManipulatorType =
-        _objectInteractor == nullptr
-        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
-        : _objectInteractor->getManipulatorType();
+        InspectorRestorableManipulatorTypeOrNone(
+            _objectInteractor == nullptr
+                ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                : _objectInteractor->getManipulatorType());
     const Standard_Integer aDebugPublicationFallbackMode =
 #ifdef DEBUG
         std::exchange(
@@ -1268,6 +1528,11 @@ Core3DViewer::commitTransformInspectorPosition(
                 }
                 aRestoredSelection = aCandidate;
             }
+#ifdef DEBUG
+            if (aDebugPublicationFallbackMode == 3) {
+                aRestoredSelection.Nullify();
+            }
+#endif
             if (!aRestoredSelection.IsNull()
                 && _objectInteractor != nullptr) {
                 // Establish selection before restoring BRep-only Scale/Mirror;
@@ -1281,6 +1546,13 @@ Core3DViewer::commitTransformInspectorPosition(
                         aCommittedManipulatorType);
                     _objectInteractor->SelectAndAttachManipulator(
                         aRestoredSelection);
+                }
+                if (_objectInteractor->getManipulatorType()
+                        == aCommittedManipulatorType) {
+                    // redrawDocument() synchronously published its safe None
+                    // fallback. Once the exact Position source is restored,
+                    // mirror the now-valid Scale state before returning to UI.
+                    (void)publishRecreatedInteractorState();
                 }
             }
         } catch (...) {
@@ -1323,6 +1595,30 @@ Handle(OcctDocument) Core3DViewer::getDocument() {
     return myDoc;
 }
 
+bool Core3DViewer::canBeginCommittedEdit() const noexcept {
+    try {
+        if (_objectInteractor == nullptr || _shapeInteractor == nullptr
+            || HasActiveOperationLedger(
+                _objectInteractor, _shapeInteractor)
+            || myDoc.IsNull()) {
+            return false;
+        }
+        const Handle(TDocStd_Document) document = myDoc->Document();
+        return !document.IsNull() && !document->HasOpenCommand();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool Core3DViewer::hasUnresolvedDuplicate() const noexcept {
+    try {
+        return _objectInteractor == nullptr
+            || _objectInteractor->hasUnresolvedDuplicate();
+    } catch (...) {
+        return true;
+    }
+}
+
 static Quantity_NameOfColor colorNameFromString(NSString* colorStr) {
     static NSDictionary<NSString*, NSNumber*>* colorMap = @{
         @"white":   @(Quantity_NOC_WHITE),
@@ -1345,6 +1641,7 @@ static Quantity_NameOfColor colorNameFromString(NSString* colorStr) {
 
 void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
     if (![json isKindOfClass:[NSString class]]
+        || !canBeginCommittedEdit()
         || myDoc.IsNull()
         || myContext.IsNull()
         || _shapeInteractor == nullptr) {
@@ -1582,6 +1879,7 @@ void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
 }
 
 void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
+	if (!canBeginCommittedEdit()) { return; }
 
     TopoDS_Shape shape;
 	Standard_Size displayedModelShapeCount = 0;
@@ -1806,44 +2104,19 @@ DebugSetTransformInspectorPositionPublicationFallbackMode(
     const Standard_Integer theMode) noexcept
 {
     _debugTransformInspectorPositionPublicationFallbackMode =
-        theMode >= 0 && theMode <= 2 ? theMode : 0;
+        theMode >= 0 && theMode <= 3 ? theMode : 0;
     _debugForceNextTransformInspectorRedrawFailure = Standard_False;
 }
 #endif
 
 AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     assert(!myContext.IsNull());
-	if (_objectInteractor != nullptr
-		&& _objectInteractor->isPickingMirrorPlane()
-		&& !_objectInteractor->cancelMirrorPlanePicking()) {
-		return AssetImportResult::Busy;
-	}
-	if (_objectInteractor != nullptr
-		&& _objectInteractor->hasUnresolvedMirrorObjects()) {
-		// Never clear the context or replace the document while a trial,
-		// committed-result reconciliation, or custom reference presentation
-		// still has retryable ownership in the current interactor.
-		return AssetImportResult::Busy;
-	}
-	if (_objectInteractor != nullptr
-		&& (_objectInteractor->hasActiveLinearArray()
-			|| _objectInteractor->hasUnresolvedLinearArray())) {
-		return AssetImportResult::Busy;
-	}
-	if (_objectInteractor != nullptr
-		&& (_objectInteractor->hasActiveRadialArray()
-			|| _objectInteractor->hasUnresolvedRadialArray())) {
-		return AssetImportResult::Busy;
-	}
-	if (_shapeInteractor != nullptr
-		&& (_shapeInteractor->hasActiveShell()
-			|| _shapeInteractor->hasUnresolvedShell())) {
-		// Shell cancellation is intentionally retryable. In particular, an
-		// OutcomeUnknown result may already be committed while its controller
-		// still owns the only authoritative reconciliation state. Never replace
-		// the document or recreate interactors until that state is resolved.
-		return AssetImportResult::Busy;
-	}
+    if (HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
+        // Replacement is a hard document boundary. Never cancel or recreate
+        // an operation here: its controller may own previews, an open command,
+        // or an exactly-once reconciliation token that the enum cannot encode.
+        return AssetImportResult::Busy;
+    }
 
     Handle(TDocStd_Document) previous = myDoc->Document();
     if (previous.IsNull()) {
@@ -1863,9 +2136,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         return AssetImportResult::InternalFailure;
     }
 
-    const PrimitiveManipulatorType previousManipulatorType = _objectInteractor == nullptr
-        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
-        : _objectInteractor->getManipulatorType();
+    const PrimitiveManipulatorType previousManipulatorType =
+        StatelessManipulatorTypeOrNone(
+            _objectInteractor == nullptr
+                ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                : _objectInteractor->getManipulatorType());
     const ShapeSelectionMode previousSelectionMode = _shapeInteractor == nullptr
         ? ShapeSelectionMode::WholeShape
         : _shapeInteractor->getSelectionMode();
@@ -1875,8 +2150,12 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 		myDoc->ChangeDocument() = previous;
 		try {
 			clearContext();
-			traverseDocument(previous);
-			recreateInteractors(previousManipulatorType, previousSelectionMode);
+			if (traverseDocument(previous)
+				|| !recreateInteractors(
+					previousManipulatorType, previousSelectionMode)) {
+				throw Standard_Failure(
+					"Unable to restore prior document interactors");
+			}
 			myContext->UpdateCurrentViewer();
 			return;
 		} catch (...) {
@@ -1886,14 +2165,20 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 
 		try {
 			clearContext();
-			for (AIS_ListIteratorOfListOfInteractive presentation(previousPresentations);
+			for (AIS_ListIteratorOfListOfInteractive presentation(
+					 previousPresentations);
 				 presentation.More(); presentation.Next()) {
-				const Handle(AIS_InteractiveObject)& object = presentation.Value();
+				const Handle(AIS_InteractiveObject)& object =
+					presentation.Value();
 				if (!Handle(AIS_Shape)::DownCast(object).IsNull()) {
 					myContext->Display(object, Standard_False);
 				}
 			}
-			recreateInteractors(previousManipulatorType, previousSelectionMode);
+			if (!recreateInteractors(
+					previousManipulatorType, previousSelectionMode)) {
+				throw Standard_Failure(
+					"Unable to restore retained document interactors");
+			}
 			myContext->UpdateCurrentViewer();
 		} catch (...) {
 			// The persistent previous document remains authoritative even if the
@@ -1971,7 +2256,10 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         myContext->UpdateCurrentViewer();
 
         myDoc->ChangeDocument() = candidate;
-        recreateInteractors(previousManipulatorType, previousSelectionMode);
+        if (!recreateFreshInteractorsForDocumentReplacement()) {
+            throw Standard_Failure(
+                "Unable to create fresh document interactors");
+        }
         myContext->UpdateCurrentViewer();
     } catch (const Standard_Failure& failure) {
         std::cout << "Display CBF failure: " << failure.GetMessageString() << std::endl;
@@ -2048,34 +2336,22 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 }
 
 bool Core3DViewer::redrawDocument() noexcept {
-	if (_objectInteractor != nullptr
-		&& _objectInteractor->isPickingMirrorPlane()
-		&& !_objectInteractor->cancelMirrorPlanePicking()) {
-		return false;
-	}
-	if (_objectInteractor != nullptr
-		&& _objectInteractor->hasUnresolvedMirrorObjects()) {
-		return false;
-	}
-	if (_objectInteractor != nullptr
-		&& (_objectInteractor->hasActiveLinearArray()
-			|| _objectInteractor->hasUnresolvedLinearArray())) {
-		return false;
-	}
-	if (_objectInteractor != nullptr
-		&& (_objectInteractor->hasActiveRadialArray()
-			|| _objectInteractor->hasUnresolvedRadialArray())) {
-		return false;
-	}
+    if (HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
+        // A same-document rebuild is safe only after every typed operation has
+        // retired its controller ledger. The manipulator enum alone cannot
+        // recreate Boolean, Bevel, Mirror, Array, Extrude, or Shell state.
+        return false;
+    }
 #ifdef DEBUG
     const Standard_Boolean shouldForceTraversalFailure = std::exchange(
         _debugForceNextTransformInspectorRedrawFailure,
         Standard_False);
 #endif
     const PrimitiveManipulatorType manipulatorType =
-        _objectInteractor == nullptr
-        ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
-        : _objectInteractor->getManipulatorType();
+        StatelessManipulatorTypeOrNone(
+            _objectInteractor == nullptr
+                ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                : _objectInteractor->getManipulatorType());
     const ShapeSelectionMode selectionMode = _shapeInteractor == nullptr
         ? ShapeSelectionMode::WholeShape
         : _shapeInteractor->getSelectionMode();
@@ -2100,7 +2376,10 @@ bool Core3DViewer::redrawDocument() noexcept {
                 "Unable to rebuild document presentations"
             );
         }
-        recreateInteractors(manipulatorType, selectionMode);
+        if (!recreateInteractors(manipulatorType, selectionMode)) {
+            throw Standard_Failure(
+                "Unable to restore topology selection mode");
+        }
         myContext->UpdateCurrentViewer();
         return true;
     } catch (...) {
@@ -2120,7 +2399,10 @@ bool Core3DViewer::redrawDocument() noexcept {
                 myContext->Display(anObject, Standard_False);
             }
         }
-        recreateInteractors(manipulatorType, selectionMode);
+        if (!recreateInteractors(manipulatorType, selectionMode)) {
+            throw Standard_Failure(
+                "Unable to restore retained topology selection mode");
+        }
         myContext->UpdateCurrentViewer();
     } catch (...) {
     }
@@ -2196,10 +2478,132 @@ void Core3DViewer::StartRotation(int theX, int theY) {
     }
 }
 
+Standard_Boolean
+Core3DViewer::captureSelectionModeSuspendedPresentations(
+    std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+{
+    thePresentations.clear();
+    if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
+        return Standard_False;
+    }
+    switch (_objectInteractor->getManipulatorType()) {
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude:
+            return _shapeInteractor
+                ->captureExtrusionSelectionModeSuspendedPresentations(
+                    thePresentations);
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeShell:
+            return _shapeInteractor
+                ->captureShellSelectionModeSuspendedPresentations(
+                    thePresentations);
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeMirror:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
+            return _objectInteractor
+                ->captureSelectionModeSuspendedPresentations(
+                    thePresentations);
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeNone:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeScale:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial:
+            return Standard_False;
+    }
+    return Standard_False;
+}
+
+bool Core3DViewer::selectionModeAuthorityAllowsRetainedOperation()
+    const noexcept
+{
+    if (_shapeInteractor == nullptr) {
+        return false;
+    }
+    std::vector<Handle(AIS_Shape)> suspendedPresentations;
+    return captureSelectionModeSuspendedPresentations(
+               suspendedPresentations)
+        && _shapeInteractor->selectionModeAuthorityIsExactIgnoring(
+            suspendedPresentations);
+}
+
+#ifdef DEBUG
+Standard_Boolean Core3DViewer::DebugSetDetectedOwner(
+	const Handle(SelectMgr_EntityOwner)& theOwner) noexcept
+{
+	if (myContext.IsNull() || theOwner.IsNull()) {
+		return Standard_False;
+	}
+	try {
+		OCC_CATCH_SIGNALS
+		(void)myContext->ClearDetected(Standard_False);
+		return myContext->DebugSetDetectedOwner(theOwner);
+	} catch (...) {
+		return Standard_False;
+	}
+}
+
+Standard_Boolean
+Core3DViewer::DebugSelectRetainedOperationPresentation() noexcept
+{
+    if (myContext.IsNull()) {
+        return Standard_False;
+    }
+    std::vector<Handle(AIS_Shape)> suspendedPresentations;
+    if (!captureSelectionModeSuspendedPresentations(
+            suspendedPresentations)
+        || suspendedPresentations.empty()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(AIS_Shape)& aPresentation =
+            suspendedPresentations.back();
+        if (aPresentation.IsNull()
+            || aPresentation->Shape().IsNull()
+            || !myContext->IsDisplayed(aPresentation)) {
+            return Standard_False;
+        }
+        // The retained presentation intentionally has no active selection
+        // mode, so SetSelected(AIS_InteractiveObject) has no cached owner to
+        // publish. Manufacture the same full-shape BRep owner OCCT would have
+        // produced before deactivation. This remains DEBUG-only and is bound
+        // to the controller-proven presentation.
+        const Handle(StdSelect_BRepOwner) anOwner =
+            new StdSelect_BRepOwner(
+                aPresentation->Shape(), aPresentation, 0, Standard_False);
+        myContext->ClearSelected(Standard_False);
+        myContext->SetSelected(anOwner, Standard_True);
+        return selectedCount() == 1;
+    } catch (...) {
+        try {
+            OCC_CATCH_SIGNALS
+            myContext->ClearSelected(Standard_False);
+        } catch (...) {
+        }
+        return Standard_False;
+    }
+}
+#endif
+
 scene::OcctSceneSnapshotBuilder::SnapshotPointer
 Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
+    if (hasUnresolvedDuplicate()) {
+        return {};
+    }
+    if (_objectInteractor != nullptr
+        && (_objectInteractor->mirrorPreviewState()
+                == MirrorPreviewState::OutcomeUnknown
+            || _objectInteractor->linearArrayPreviewState()
+                == LinearArrayPreviewState::OutcomeUnknown
+            || _objectInteractor->hasUnresolvedBoolean())) {
+        // A closed command may already have changed OCAF, but only the typed
+        // controller can reconcile that outcome exactly once. Do not advance
+        // committed renderer revisions while its ledger remains authoritative.
+        return {};
+    }
     if (_objectInteractor != nullptr
         && _objectInteractor->radialArrayPreviewState()
             == RadialArrayPreviewState::OutcomeUnknown) {
@@ -2209,25 +2613,89 @@ Core3DViewer::captureSceneSnapshot(
         return {};
     }
     if (_shapeInteractor != nullptr
-        && _shapeInteractor->shellPreviewState()
-            == ShellPreviewState::OutcomeUnknown) {
+        && (_shapeInteractor->shellPreviewState()
+                == ShellPreviewState::OutcomeUnknown
+            || _shapeInteractor->extrusionPreviewState()
+                == ExtrusionPreviewState::OutcomeUnknown)) {
         // The candidate may already be committed, but the Shell controller
         // still owns the only authoritative reconciliation token. Publishing
         // here would expose an outcome that the operation cannot yet prove and
         // would also advance the snapshot builder's committed revision state.
         return {};
     }
+    if (_shapeInteractor == nullptr) {
+        return {};
+    }
+    if (!_shapeInteractor->selectionModeAuthorityIsExact()) {
+        bool hasRendererSafeReadyObjectPreview = false;
+        if (_objectInteractor != nullptr
+            && _objectInteractor->linearArrayPreviewState()
+                == LinearArrayPreviewState::Ready) {
+            std::vector<Handle(AIS_Shape)> previewObjects;
+            hasRendererSafeReadyObjectPreview =
+                _objectInteractor->captureLinearArrayPreview(previewObjects)
+                && _shapeInteractor->selectionModeAuthorityIsExactIgnoring(
+                    previewObjects);
+        } else if (_objectInteractor != nullptr
+                   && _objectInteractor->radialArrayPreviewState()
+                       == RadialArrayPreviewState::Ready) {
+            RadialArrayPreviewCapture preview;
+            hasRendererSafeReadyObjectPreview =
+                _objectInteractor->captureRadialArrayPreview(preview)
+                && _shapeInteractor->selectionModeAuthorityIsExactIgnoring(
+                    preview.previewObjects);
+        } else if (_objectInteractor != nullptr
+                   && _objectInteractor->mirrorPreviewState()
+                       == MirrorPreviewState::Ready) {
+            scene::PresentationOverlayContent content;
+            std::vector<Handle(AIS_Shape)> previewObjects;
+            BooleanPreviewCapture booleanPreview;
+            hasRendererSafeReadyObjectPreview =
+                _objectInteractor->captureIdlePresentationOverlay(
+                    content, previewObjects, booleanPreview)
+                    == PresentationOverlayCaptureStatus::Available
+                && !previewObjects.empty()
+                && _shapeInteractor->selectionModeAuthorityIsExactIgnoring(
+                    previewObjects);
+        }
+        if (!hasRendererSafeReadyObjectPreview) {
+        // Never promote a retained enum whose OCCT presentations could not be
+        // proven or restored. A same-mode request can repair this fail-closed
+        // state without publishing false renderer selection identity.
+            return {};
+        }
+    }
+    scene::ElementKind acceptedSelectionKind = scene::ElementKind::None;
+    switch (_shapeInteractor->getSelectionMode()) {
+        case ShapeSelectionMode::WholeShape:
+            acceptedSelectionKind = scene::ElementKind::Object;
+            break;
+        case ShapeSelectionMode::Face:
+            acceptedSelectionKind = scene::ElementKind::Face;
+            break;
+        case ShapeSelectionMode::Edge:
+            acceptedSelectionKind = scene::ElementKind::Edge;
+            break;
+        case ShapeSelectionMode::Vertex:
+            return {};
+        case ShapeSelectionMode::Wire:
+            return {};
+    }
     return _sceneSnapshotBuilder.Build(
         myDoc,
         myContext,
         myView,
-        scene::UInt2{viewportWidth, viewportHeight});
+        scene::UInt2{viewportWidth, viewportHeight},
+        acceptedSelectionKind);
 }
 
 std::optional<scene::FrameSnapshot>
 Core3DViewer::captureSceneFrameSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
+    if (hasUnresolvedDuplicate()) {
+        return std::nullopt;
+    }
     return _sceneSnapshotBuilder.CaptureFrame(
         myDoc,
         myView,
@@ -2236,6 +2704,9 @@ Core3DViewer::captureSceneFrameSnapshot(
 
 scene::OcctSceneSnapshotBuilder::OverlayPointer
 Core3DViewer::captureScenePresentationOverlay() noexcept {
+    if (hasUnresolvedDuplicate()) {
+        return {};
+    }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->hasActiveShell()) {
         ShellPreviewCapture aShellPreview;
@@ -2472,6 +2943,15 @@ void Core3DViewer::DebugSetBooleanAbortFailureCount(
     }
 }
 
+void Core3DViewer::DebugSetBooleanPostCommitInspectFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor
+            ->debugSetBooleanPostCommitInspectFailureCount(theCount);
+    }
+}
+
 Standard_Boolean Core3DViewer::debugBeginExtrusionSelection(
     const std::string& theEntityIdentifier,
     const Standard_Size theFaceTopologyIndex) noexcept {
@@ -2508,17 +2988,14 @@ Standard_Boolean Core3DViewer::debugBeginExtrusionSelection(
         if (aPresentation.IsNull() || aPresentation->Shape().IsNull()) {
             return Standard_False;
         }
-        Standard_Size aFaceIndex = 0;
-        for (TopExp_Explorer aFace(
-                 aPresentation->Shape(), TopAbs_FACE);
-             aFace.More(); aFace.Next(), ++aFaceIndex) {
-            if (aFaceIndex == theFaceTopologyIndex) {
-                return _shapeInteractor->debugBeginExtrusionSelection(
-                    aPresentation,
-                    TopoDS::Face(aFace.Current()));
-            }
-        }
-        return Standard_False;
+        TopoDS_Face aFace;
+        return TryResolveCanonicalFaceTopologyIndexBounded(
+                aPresentation->Shape(),
+                theFaceTopologyIndex,
+                ShellOperationController::kMaximumSourceTopologyNodes,
+                aFace)
+            && _shapeInteractor->debugBeginExtrusionSelection(
+                aPresentation, aFace);
     } catch (...) {
         _shapeInteractor->cancelExtrusion();
         return Standard_False;
@@ -2569,17 +3046,14 @@ Standard_Boolean Core3DViewer::debugBeginShellSelection(
             return Standard_False;
         }
 
-        TopTools_IndexedMapOfShape aFaces;
-        TopExp::MapShapes(aPresentation->Shape(), TopAbs_FACE, aFaces);
-        if (theFaceTopologyIndex
-            >= static_cast<Standard_Size>(aFaces.Extent())) {
-            return Standard_False;
-        }
-        const TopoDS_Shape& aFace = aFaces.FindKey(
-            static_cast<Standard_Integer>(theFaceTopologyIndex) + 1);
-        return !aFace.IsNull() && aFace.ShapeType() == TopAbs_FACE
+        TopoDS_Face aFace;
+        return TryResolveCanonicalFaceTopologyIndexBounded(
+                aPresentation->Shape(),
+                theFaceTopologyIndex,
+                ShellOperationController::kMaximumSourceTopologyNodes,
+                aFace)
             && _shapeInteractor->debugBeginShellSelection(
-                aPresentation, TopoDS::Face(aFace));
+                aPresentation, aFace);
     } catch (...) {
         (void)_shapeInteractor->cancelShell();
         return Standard_False;
@@ -2670,6 +3144,13 @@ Core3DViewer::DebugMutateShellSourcePersistedTransform() noexcept
         && _shapeInteractor->debugMutateShellSourcePersistedTransform();
 }
 
+Standard_Boolean
+Core3DViewer::DebugMutateShellSourcePersistedShape() noexcept
+{
+    return _shapeInteractor != nullptr
+        && _shapeInteractor->debugMutateShellSourcePersistedShape();
+}
+
 Standard_Boolean Core3DViewer::debugBeginBevelSelection(
     const std::string& theEntityIdentifier,
     const std::vector<Standard_Size>& theEdgeTopologyIndices) noexcept {
@@ -2712,10 +3193,6 @@ Standard_Boolean Core3DViewer::debugBeginBevelSelection(
             }
             anAggregateEdgeCount += anEdges.size();
         }
-        if (_shapeInteractor->hasActiveBevel()
-            && !_shapeInteractor->cancelChamfer()) {
-            return Standard_False;
-        }
         std::vector<Handle(AIS_Shape)> aPresentations(
             theEntityIdentifiers.size());
         AIS_ListOfInteractive aDisplayed;
@@ -2757,7 +3234,6 @@ Standard_Boolean Core3DViewer::debugBeginBevelSelection(
         return _objectInteractor->getManipulatorType()
             == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer;
     } catch (...) {
-        (void)_shapeInteractor->cancelChamfer();
         return Standard_False;
     }
 }
@@ -2874,9 +3350,11 @@ const int Core3DViewer::selectedCount() const {
 
 void Core3DViewer::Select(int theX, int theY) {
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
-        printf("ERROR with Select\n");
         return;
     }
+	if (_objectInteractor->hasUnresolvedDuplicate()) {
+		return;
+	}
 	if (_objectInteractor->isPickingMirrorPlane()) {
 		(void)_objectInteractor->pickMirrorPlaneAt(theX, theY);
 		redraw();
@@ -2920,14 +3398,11 @@ void Core3DViewer::Select(int theX, int theY) {
     //            _shapeInteractor->resetWireframeTemplateShape();
     //		}
 
-    bool isBoleanOp = _objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract;
 //	bool isMirrorOp = _objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror;
 //	OcctViewer::Select(theX, theY, isMirrorOp ? AIS_SelectionScheme::AIS_SelectionScheme_Replace : AIS_SelectionScheme::AIS_SelectionScheme_XOR);
     OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
-    //        OcctViewer::Select(theX, theY, isBoleanOp ? AIS_SelectionScheme::AIS_SelectionScheme_Add : AIS_SelectionScheme::AIS_SelectionScheme_XOR );
 
     int newCount = selectedCount();
-    std::cout << "count before =" << oldCount << ", count after=" << newCount << ", isBoleanOp=" << isBoleanOp << std::endl;
 
     _objectInteractor->attachManipulatorToSelection(newCount < oldCount);
     
@@ -2960,6 +3435,10 @@ void Core3DViewer::Select(int theX, int theY) {
 
 	void Core3DViewer::deselectAll() {
 		if (myContext.IsNull()) { return; }
+		if (_objectInteractor != nullptr
+			&& _objectInteractor->hasUnresolvedDuplicate()) {
+			return;
+		}
 		if (_shapeInteractor != nullptr
 			&& !_shapeInteractor->cancelExtrusion()) {
 			return;
@@ -3003,6 +3482,7 @@ void Core3DViewer::Select(int theX, int theY) {
     bool Core3DViewer::dumpOfDisplayedColoredObjects(const Standard_Integer width,
                                                      const Standard_Integer height,
                                                      const TCollection_AsciiString &fileName) {
+        if (hasUnresolvedDuplicate()) { return false; }
 
         // prepare viewer
         Handle(Aspect_DisplayConnection) displayConnection = new Aspect_DisplayConnection();
@@ -3108,6 +3588,7 @@ void Core3DViewer::Select(int theX, int theY) {
     bool Core3DViewer::dumpOfDisplayedObjects(const Standard_Integer width, 
                                               const Standard_Integer height,
                                               const TCollection_AsciiString &fileName) {
+        if (hasUnresolvedDuplicate()) { return false; }
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         AIS_ListIteratorOfListOfInteractive iobject(objects);
@@ -3196,6 +3677,7 @@ void Core3DViewer::Select(int theX, int theY) {
     bool Core3DViewer::saveSnapshot(const TCollection_AsciiString& thePath,
                                     int theWidth,
                                     int theHeight) {
+        if (hasUnresolvedDuplicate()) { return false; }
         showGrid(false);
         myView->TriedronErase();
         myView->FitAll();

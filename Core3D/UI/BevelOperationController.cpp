@@ -11,8 +11,10 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <GeomAdaptor_Curve.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -233,6 +235,61 @@ Standard_Boolean AccumulateBoundedTopology(
     }
 }
 
+//! Counts occurrences, not unique TShapes. Shared/adversarial topology must
+//! consume the synchronous source budget before any full map or BRepCheck.
+Standard_Boolean AccumulateBoundedTopologyOccurrences(
+    const TopoDS_Shape& theShape,
+    const Standard_Size thePerShapeLimit,
+    const Standard_Size theAggregateLimit,
+    Standard_Size& theAggregateCount,
+    Standard_Size& theShapeCount) noexcept
+{
+    theShapeCount = 0;
+    if (theShape.IsNull() || thePerShapeLimit == 0
+        || theAggregateLimit == 0
+        || theAggregateCount > theAggregateLimit) {
+        return Standard_False;
+    }
+    try {
+        std::vector<TopoDS_Shape> aPending{theShape};
+        while (!aPending.empty()) {
+            const TopoDS_Shape aCurrent = aPending.back();
+            aPending.pop_back();
+            if (aCurrent.IsNull()
+                || ++theShapeCount > thePerShapeLimit
+                || ++theAggregateCount > theAggregateLimit) {
+                theShapeCount = 0;
+                return Standard_False;
+            }
+            std::vector<TopoDS_Shape> aChildren;
+            for (TopoDS_Iterator aChild(
+                     aCurrent, Standard_True, Standard_True);
+                 aChild.More(); aChild.Next()) {
+                const Standard_Size aPerShapeRemaining =
+                    thePerShapeLimit - theShapeCount;
+                const Standard_Size anAggregateRemaining =
+                    theAggregateLimit - theAggregateCount;
+                if (aPending.size() + aChildren.size() + 1U
+                        > static_cast<std::size_t>(aPerShapeRemaining)
+                    || aPending.size() + aChildren.size() + 1U
+                        > static_cast<std::size_t>(anAggregateRemaining)) {
+                    theShapeCount = 0;
+                    return Standard_False;
+                }
+                aChildren.push_back(aChild.Value());
+            }
+            for (auto aChild = aChildren.rbegin();
+                 aChild != aChildren.rend(); ++aChild) {
+                aPending.push_back(*aChild);
+            }
+        }
+        return theShapeCount > 0;
+    } catch (...) {
+        theShapeCount = 0;
+        return Standard_False;
+    }
+}
+
 Standard_Boolean HasOnlySolidBranches(
     const TopoDS_Shape& theShape,
     const Standard_Size theMaximumNodes,
@@ -353,6 +410,71 @@ private:
 
 } // namespace
 
+Standard_Boolean IsBevelEdgeEligible(
+    const TopoDS_Edge& theEdge) noexcept
+{
+    if (theEdge.IsNull()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        Standard_Real aFirst = 0.0;
+        Standard_Real aLast = 0.0;
+        const Handle(Geom_Curve) aCurve =
+            BRep_Tool::Curve(theEdge, aFirst, aLast);
+        if (aCurve.IsNull() || !std::isfinite(aFirst)
+            || !std::isfinite(aLast)) {
+            return Standard_False;
+        }
+        const GeomAdaptor_Curve anAdaptor(aCurve);
+        const GeomAbs_CurveType aType = anAdaptor.GetType();
+        return aType == GeomAbs_Line
+            || aType == GeomAbs_BSplineCurve
+            || anAdaptor.IsClosed();
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean TryResolveCanonicalBevelEdgeTopologyIndexBounded(
+	const TopoDS_Shape& theShape,
+	const Standard_Size theZeroBasedIndex,
+	const Standard_Size theMaximumTopologyOccurrences,
+	TopoDS_Edge& theEdge) noexcept
+{
+	theEdge.Nullify();
+	if (theShape.IsNull() || theMaximumTopologyOccurrences == 0
+		|| theZeroBasedIndex
+			>= theMaximumTopologyOccurrences) {
+		return Standard_False;
+	}
+	try {
+		OCC_CATCH_SIGNALS
+		Standard_Size anAggregateCount = 0;
+		Standard_Size aShapeCount = 0;
+		if (!AccumulateBoundedTopologyOccurrences(
+				theShape,
+				theMaximumTopologyOccurrences,
+				theMaximumTopologyOccurrences,
+				anAggregateCount,
+				aShapeCount)) {
+			return Standard_False;
+		}
+		TopTools_IndexedMapOfShape anEdges;
+		TopExp::MapShapes(theShape, TopAbs_EDGE, anEdges);
+		if (theZeroBasedIndex
+			>= static_cast<Standard_Size>(anEdges.Extent())) {
+			return Standard_False;
+		}
+		theEdge = TopoDS::Edge(anEdges.FindKey(
+			static_cast<Standard_Integer>(theZeroBasedIndex + 1)));
+		return !theEdge.IsNull();
+	} catch (...) {
+		theEdge.Nullify();
+		return Standard_False;
+	}
+}
+
 class BevelPreviewWorker final
     : public std::enable_shared_from_this<BevelPreviewWorker> {
 public:
@@ -445,6 +567,17 @@ public:
 #endif
         }
         myCondition.notify_all();
+    }
+
+    Standard_Boolean isIdle() const noexcept
+    {
+        try {
+            std::lock_guard<std::mutex> aLock(myMutex);
+            return myActiveCancellation == nullptr
+                && !myPending.has_value();
+        } catch (...) {
+            return Standard_False;
+        }
     }
 
 #ifdef DEBUG
@@ -700,20 +833,31 @@ void BevelOperationController::notifyPreviewStateChanged() noexcept
     }
 }
 
-Standard_Boolean BevelOperationController::begin(
-    const std::vector<BevelSourceSelection>& theSelection) noexcept
+Standard_Boolean BevelOperationController::canBegin(
+    const std::vector<BevelSourceSelection>& theSelection) const noexcept
 {
+    if (hasActiveOperation()
+        && !canAtomicallyReplaceSelectingSources()) {
+        return Standard_False;
+    }
+    std::vector<Source> aSources;
+    return tryPrepareSources(theSelection, aSources);
+}
+
+Standard_Boolean BevelOperationController::tryPrepareSources(
+    const std::vector<BevelSourceSelection>& theSelection,
+    std::vector<Source>& theSources) const noexcept
+{
+    theSources.clear();
     if (myContext.IsNull() || myDoc.IsNull() || theSelection.empty()
         || theSelection.size() > kMaxSourceBodies) {
         return Standard_False;
     }
-    if (hasActiveOperation() && !cancel()) {
-        return Standard_False;
-    }
     try {
         OCC_CATCH_SIGNALS
-        const Handle(TDocStd_Document) aDocument = myDoc->ChangeDocument();
-        if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument->GetUndoLimit() == 0) {
             return Standard_False;
         }
 
@@ -733,11 +877,25 @@ Standard_Boolean BevelOperationController::begin(
         const Standard_Size aPerSourceLimit = kMaxSourceTopologyNodes;
 #endif
         for (const BevelSourceSelection& aSelection : theSelection) {
+            const Standard_Integer anObjectSelectionMode =
+                AIS_Shape::SelectionMode(TopAbs_SHAPE);
+            const Standard_Integer aFaceSelectionMode =
+                AIS_Shape::SelectionMode(TopAbs_FACE);
+            const Standard_Integer anEdgeSelectionMode =
+                AIS_Shape::SelectionMode(TopAbs_EDGE);
             if (aSelection.original.IsNull()
                 || aSelection.original->Shape().IsNull()
                 || aSelection.documentLabel.IsNull()
+                || aSelection.documentLabel.Data()
+                    != aDocument->GetData()
                 || aSelection.edges.empty()
                 || aSelection.edges.size() > kMaxSelectedEdges
+                || (!aSelection.edgeTopologyIndices.empty()
+                    && aSelection.edgeTopologyIndices.size()
+                        != aSelection.edges.size())
+                || (aSelection.selectionMode != anObjectSelectionMode
+                    && aSelection.selectionMode != aFaceSelectionMode
+                    && aSelection.selectionMode != anEdgeSelectionMode)
                 || !IsBRepModelingLabel(myDoc, aSelection.documentLabel)
                 || !myDoc->IsPresentationEditable(aSelection.original)
                 || !myDoc->ShapeLabel(aSelection.original).IsEqual(
@@ -750,22 +908,25 @@ Standard_Boolean BevelOperationController::begin(
                 XCAFDoc_ShapeTool::GetShape(aSelection.documentLabel);
             const gp_Trsf aCapturedTransform =
                 aSelection.original->LocalTransformation();
+            gp_Trsf aPersistedTransform;
             Standard_Size aSourceSolidCount = 0;
+            Standard_Size aSourceTopologyNodeCount = 0;
             if (aStoredShape.IsNull() || !aStoredShape.IsEqual(aShape)
+                || aShape.ShapeType() != TopAbs_SOLID
+                || !myDoc->TryObjectTransformForLabel(
+                    aSelection.documentLabel, aPersistedTransform)
                 || !TransformsMatch(
-                    myDoc->ObjectTransformForLabel(
-                        aSelection.documentLabel),
-                    aCapturedTransform)
+                    aPersistedTransform, aCapturedTransform)
+                || !AccumulateBoundedTopologyOccurrences(
+                    aShape,
+                    aPerSourceLimit,
+                    anAggregateLimit,
+                    anAggregateNodes,
+                    aSourceTopologyNodeCount)
                 || HasStyledXCAFSubshape(
                     aDocument,
                     aSelection.documentLabel,
                     kMaxStyledSubshapeLabels)
-                || aShape.ShapeType() != TopAbs_SOLID
-                || !AccumulateBoundedTopology(
-                    aShape,
-                    aPerSourceLimit,
-                    anAggregateLimit,
-                    anAggregateNodes)
                 || !HasOnlySolidBranches(
                     aShape,
                     aPerSourceLimit,
@@ -773,26 +934,49 @@ Standard_Boolean BevelOperationController::begin(
                     aSourceSolidCount)
                 || aSourceSolidCount != 1
                 || !BRepCheck_Analyzer(
-                    aShape, Standard_False).IsValid()) {
+                    aShape, Standard_True).IsValid()) {
                 return Standard_False;
             }
             TopTools_IndexedMapOfShape anEdges;
             TopExp::MapShapes(aShape, TopAbs_EDGE, anEdges);
             TopTools_IndexedMapOfShape aUniqueSelectedEdges;
+            std::vector<TopoDS_Edge> aCanonicalEdges;
+            std::vector<Standard_Size> aCanonicalEdgeIndices;
+            aCanonicalEdges.reserve(aSelection.edges.size());
+            aCanonicalEdgeIndices.reserve(aSelection.edges.size());
+            const Standard_Boolean requireExactSelectedEdgeOrientation =
+                aSelection.selectionMode == anEdgeSelectionMode;
             for (const TopoDS_Edge& anEdge : aSelection.edges) {
-                if (anEdge.IsNull() || anEdges.FindIndex(anEdge) == 0
-                    || aUniqueSelectedEdges.Contains(anEdge)) {
+                const Standard_Integer anIndex =
+                    anEdge.IsNull() ? 0 : anEdges.FindIndex(anEdge);
+                if (anIndex <= 0) {
                     return Standard_False;
                 }
-                aUniqueSelectedEdges.Add(anEdge);
+                const TopoDS_Edge aCanonicalEdge =
+                    TopoDS::Edge(anEdges.FindKey(anIndex));
+                if (aCanonicalEdge.IsNull()
+                    || (requireExactSelectedEdgeOrientation
+                        && !aCanonicalEdge.IsEqual(anEdge))
+                    || aUniqueSelectedEdges.Contains(aCanonicalEdge)
+                    || !IsBevelEdgeEligible(aCanonicalEdge)) {
+                    return Standard_False;
+                }
+                aUniqueSelectedEdges.Add(aCanonicalEdge);
+                aCanonicalEdges.push_back(aCanonicalEdge);
+                aCanonicalEdgeIndices.push_back(
+                    static_cast<Standard_Size>(anIndex - 1));
             }
-            anEdgeCount += aSelection.edges.size();
-            if (anEdgeCount > kMaxSelectedEdges) {
+            if (anEdgeCount > kMaxSelectedEdges
+                    - aCanonicalEdges.size()) {
                 return Standard_False;
             }
+            anEdgeCount += aCanonicalEdges.size();
             const std::string anIdentifier =
                 myDoc->EntityIdentifierForLabel(aSelection.documentLabel);
-            if (anIdentifier.empty()
+            const std::string aDefinitionIdentifier =
+                myDoc->DefinitionIdentifierForLabel(
+                    aSelection.documentLabel);
+            if (anIdentifier.empty() || aDefinitionIdentifier.empty()
                 || !anIdentifiers.insert(anIdentifier).second) {
                 return Standard_False;
             }
@@ -800,16 +984,9 @@ Standard_Boolean BevelOperationController::begin(
             aSource.original = aSelection.original;
             aSource.label = aSelection.documentLabel;
             aSource.shape = aShape;
-            aSource.edges = aSelection.edges;
-            aSource.edgeTopologyIndices.reserve(aSelection.edges.size());
-            for (const TopoDS_Edge& anEdge : aSelection.edges) {
-                const Standard_Integer anIndex = anEdges.FindIndex(anEdge);
-                if (anIndex <= 0) {
-                    return Standard_False;
-                }
-                aSource.edgeTopologyIndices.push_back(
-                    static_cast<Standard_Size>(anIndex - 1));
-            }
+            aSource.edges = std::move(aCanonicalEdges);
+            aSource.edgeTopologyIndices =
+                std::move(aCanonicalEdgeIndices);
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
                     != aSource.edgeTopologyIndices) {
@@ -818,8 +995,102 @@ Standard_Boolean BevelOperationController::begin(
             aSource.transform = aCapturedTransform;
             aSource.selectionMode = aSelection.selectionMode;
             aSource.entityIdentifier = anIdentifier;
+            aSource.definitionIdentifier = aDefinitionIdentifier;
+            aSource.topologyNodeCount = aSourceTopologyNodeCount;
+            aSource.sourceEdgeCount =
+                static_cast<Standard_Size>(anEdges.Extent());
             aSources.push_back(std::move(aSource));
         }
+        theSources = std::move(aSources);
+        return Standard_True;
+    } catch (...) {
+        theSources.clear();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
+    const std::vector<Source>& theSources,
+    const Standard_Boolean theRequireDisplayed) const noexcept
+{
+    if (myContext.IsNull() || myDoc.IsNull() || theSources.empty()
+        || theSources.size() > kMaxSourceBodies) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aDocument->GetUndoLimit() == 0) {
+            return Standard_False;
+        }
+        for (const Source& aSource : theSources) {
+            const TopoDS_Shape aStoredShape =
+                XCAFDoc_ShapeTool::GetShape(aSource.label);
+            gp_Trsf aPersistedTransform;
+            if (aSource.original.IsNull() || aSource.label.IsNull()
+                || aSource.label.Data() != aDocument->GetData()
+                || aSource.shape.IsNull() || aSource.edges.empty()
+                || aSource.topologyNodeCount == 0
+                || aStoredShape.IsNull()
+                || !IsBRepModelingLabel(myDoc, aSource.label)
+                || !myDoc->IsPresentationEditable(aSource.original)
+                || !myDoc->ShapeLabel(aSource.original).IsEqual(
+                    aSource.label)
+                || (theRequireDisplayed
+                    && !myContext->IsDisplayed(aSource.original))
+                || !aStoredShape.IsEqual(aSource.shape)
+                || !aSource.original->Shape().IsEqual(aSource.shape)
+                || !myDoc->TryObjectTransformForLabel(
+                    aSource.label, aPersistedTransform)
+                || !TransformsMatch(
+                    aSource.original->LocalTransformation(),
+                    aSource.transform)
+                || !TransformsMatch(
+                    aPersistedTransform, aSource.transform)
+                || HasStyledXCAFSubshape(
+                    aDocument,
+                    aSource.label,
+                    kMaxStyledSubshapeLabels)
+                || myDoc->EntityIdentifierForLabel(aSource.label)
+                    != aSource.entityIdentifier
+                || myDoc->DefinitionIdentifierForLabel(aSource.label)
+                    != aSource.definitionIdentifier) {
+                return Standard_False;
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean BevelOperationController::begin(
+    const std::vector<BevelSourceSelection>& theSelection) noexcept
+{
+	const Standard_Boolean isReplacement = hasActiveOperation();
+    if (isReplacement && !canAtomicallyReplaceSelectingSources()) {
+        return Standard_False;
+    }
+    std::vector<Source> aSources;
+    if (!tryPrepareSources(theSelection, aSources)) {
+        return Standard_False;
+    }
+    if (!preparedSourcesAreCurrent(aSources, Standard_True)) {
+        return Standard_False;
+    }
+	if (isReplacement) {
+		// A selection tap may replace only the pristine zero-value Selecting
+		// ledger. Revalidate after the potentially expensive source proof, then
+		// swap atomically without cancelling, hiding, or redisplaying anything.
+		if (!canAtomicallyReplaceSelectingSources()) {
+			return Standard_False;
+		}
+		mySources.swap(aSources);
+		notifyPreviewStateChanged();
+		return Standard_True;
+	}
+    try {
         mySources = std::move(aSources);
         myValue = 0.0;
         myCanApply = Standard_False;
@@ -837,40 +1108,41 @@ Standard_Boolean BevelOperationController::begin(
 
 Standard_Boolean BevelOperationController::sourcesAreCurrent() const noexcept
 {
-    if (myDoc.IsNull() || mySources.empty()) {
-        return Standard_False;
-    }
-    try {
-        OCC_CATCH_SIGNALS
-        for (const Source& aSource : mySources) {
-            const TopoDS_Shape aStoredShape =
-                XCAFDoc_ShapeTool::GetShape(aSource.label);
-            if (aSource.original.IsNull() || aSource.shape.IsNull()
-                || aStoredShape.IsNull()
-                || !IsBRepModelingLabel(myDoc, aSource.label)
-                || !myDoc->IsPresentationEditable(aSource.original)
-                || !myDoc->ShapeLabel(aSource.original).IsEqual(aSource.label)
-                || !aStoredShape.IsEqual(aSource.shape)
-                || !aSource.original->Shape().IsEqual(aSource.shape)
-                || !TransformsMatch(
-                    aSource.original->LocalTransformation(),
-                    aSource.transform)
-                || !TransformsMatch(
-                    myDoc->ObjectTransformForLabel(aSource.label),
-                    aSource.transform)
-                || HasStyledXCAFSubshape(
-                    myDoc->Document(),
-                    aSource.label,
-                    kMaxStyledSubshapeLabels)
-                || myDoc->EntityIdentifierForLabel(aSource.label)
-                    != aSource.entityIdentifier) {
-                return Standard_False;
-            }
-        }
-        return Standard_True;
-    } catch (...) {
-        return Standard_False;
-    }
+    return preparedSourcesAreCurrent(mySources, Standard_False);
+}
+
+Standard_Boolean
+BevelOperationController::canAtomicallyReplaceSelectingSources() const noexcept
+{
+	return hasPristineSelectingLedger() && sourcesAreCurrent();
+}
+
+Standard_Boolean
+BevelOperationController::hasPristineSelectingLedger() const noexcept
+{
+	return hasActiveOperation()
+		&& myStateValid
+		&& myState == BevelPreviewState::Selecting
+		&& std::abs(myValue)
+			<= std::numeric_limits<Standard_Real>::epsilon()
+		&& !myCanApply
+		&& !mySelectionFrozen
+		&& myPreviewResults.empty()
+		&& myRequestedFingerprint.empty()
+		&& (myWorker == nullptr || myWorker->isIdle());
+}
+
+Standard_Boolean
+BevelOperationController::retireIdleSelectingSelection() noexcept
+{
+	// No preview or worker owns presentation state in this structural ledger,
+	// so stale source identity is safe to forget after a failed live recapture.
+	if (!hasPristineSelectingLedger()) {
+		return Standard_False;
+	}
+	clearState();
+	notifyPreviewStateChanged();
+	return Standard_True;
 }
 
 std::string BevelOperationController::selectionFingerprint(
@@ -1178,6 +1450,16 @@ Standard_Boolean BevelOperationController::canApply() const noexcept
         && myPreviewResults.size() == mySources.size();
 }
 
+Standard_Size
+BevelOperationController::maximumCaptureTopologyNodes() const noexcept
+{
+#ifdef DEBUG
+	return myDebugMaximumCaptureTopologyNodes;
+#else
+	return kMaxCaptureTopologyNodes;
+#endif
+}
+
 Standard_Boolean BevelOperationController::hasActiveOperation() const noexcept
 {
     return !mySources.empty();
@@ -1438,13 +1720,7 @@ BevelOperationController::debugPreviewState() const noexcept
     try {
         OCC_CATCH_SIGNALS
         if (!mySources.empty()) {
-            TopTools_IndexedMapOfShape aSourceEdges;
-            TopExp::MapShapes(
-                mySources.front().shape,
-                TopAbs_EDGE,
-                aSourceEdges);
-            aState.sourceEdgeCount =
-                static_cast<Standard_Size>(aSourceEdges.Extent());
+            aState.sourceEdgeCount = mySources.front().sourceEdgeCount;
             if (!mySources.front().edgeTopologyIndices.empty()) {
                 aState.capturedEdgeTopologyIndex =
                     static_cast<Standard_Integer>(

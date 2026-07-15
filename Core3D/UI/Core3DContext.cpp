@@ -31,3 +31,19 @@ void Core3DContext::Display (const Handle(AIS_InteractiveObject)& theIObj,
     AIS_InteractiveContext::Display(theIObj, theDispMode, theSelectionMode, theToUpdateViewer, theDispStatus);
 }
 
+#ifdef DEBUG
+Standard_Boolean Core3DContext::DebugSetDetectedOwner(
+    const Handle(SelectMgr_EntityOwner)& theOwner) noexcept
+{
+    if (theOwner.IsNull() || !theOwner->HasSelectable()) {
+        return Standard_False;
+    }
+    try {
+        myLastPicked = theOwner;
+        return !myLastPicked.IsNull();
+    } catch (...) {
+        myLastPicked.Nullify();
+        return Standard_False;
+    }
+}
+#endif

@@ -3163,7 +3163,7 @@ Standard_Boolean ValidateGeometryDocument(
         }
 
 		// The definition pass above validates authored and implicit axes at an
-		// identity occurrence. Schema v5 publishes the resolved world axis for
+		// identity occurrence. Schema v6 publishes the resolved world axis for
 		// every leaf, so admission must also prove each real cumulative XCAF
 		// occurrence location. Use the same explorer/location authority as the
 		// snapshot builder and cross-check its count against the bounded graph

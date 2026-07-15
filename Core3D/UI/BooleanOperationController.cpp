@@ -1152,6 +1152,12 @@ void BooleanOperationController::debugSetAbortFailureCount(
 {
     _debugAbortFailureCount = theCount;
 }
+
+void BooleanOperationController::debugSetPostCommitInspectFailureCount(
+    const Standard_Size theCount) noexcept
+{
+    _debugPostCommitInspectFailureCount = theCount;
+}
 #endif
 
 Standard_Boolean BooleanOperationController::hasActiveOperation() const noexcept
@@ -1288,6 +1294,12 @@ Standard_Boolean BooleanOperationController::pruneOwnedPresentations() noexcept
 BooleanOperationController::DocumentState
 BooleanOperationController::inspectPendingTransaction() const noexcept
 {
+#ifdef DEBUG
+    if (_debugPostCommitInspectFailureCount > 0) {
+        --_debugPostCommitInspectFailureCount;
+        return DocumentState::Unavailable;
+    }
+#endif
     if (myDoc.IsNull()) {
         return DocumentState::Unavailable;
     }
@@ -2550,6 +2562,56 @@ Standard_Boolean BooleanOperationController::capturePreview(
         return Standard_True;
     } catch (...) {
         theCapture = {};
+        return Standard_False;
+    }
+}
+
+Standard_Boolean
+BooleanOperationController::captureSelectionModeSuspendedPresentations(
+    const BooleanAction theAction,
+    std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+{
+    thePresentations.clear();
+    if (!actionMatches(theAction)
+        || !IsSingleResultBooleanAction(theAction)
+        || !_documentCommandUnresolved || _stateValid
+        || _pendingResults.size() != 1
+        || _pendingSources.size() < 2
+        || _pendingSources.size() > kMaxSourceOperands
+        || _singleTrialResult.IsNull()
+        || _singleTrialResult->Shape().IsNull()
+        || myContext.IsNull() || myDoc.IsNull()) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        const PendingResult& aPending = _pendingResults.front();
+        const TDF_Label aPresentationLabel =
+            myDoc->ShapeLabel(_singleTrialResult);
+        const TopoDS_Shape aStored =
+            XCAFDoc_ShapeTool::GetShape(aPending.label);
+        TColStd_ListOfInteger anActiveModes;
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || aPending.label.IsNull()
+            || aPending.label.Data() != aDocument->GetData()
+            || aPresentationLabel.IsNull()
+            || !aPresentationLabel.IsEqual(aPending.label)
+            || aStored.IsNull() || aPending.expectedShape.IsNull()
+            || !aStored.IsEqual(aPending.expectedShape)
+            || !_singleTrialResult->Shape().IsEqual(
+                aPending.expectedShape)
+            || !myContext->IsDisplayed(_singleTrialResult)) {
+            return Standard_False;
+        }
+        myContext->ActivatedModes(_singleTrialResult, anActiveModes);
+        if (!anActiveModes.IsEmpty()) {
+            return Standard_False;
+        }
+        thePresentations.push_back(_singleTrialResult);
+        return Standard_True;
+    } catch (...) {
+        thePresentations.clear();
         return Standard_False;
     }
 }

@@ -332,14 +332,19 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 @implementation Core3DViewController (PrimitiveManager)
 
 - (void)addPrimitivesFromJSON:(NSString *)json {
-    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
-    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
-        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) {
         return;
     }
     [self setSelectionType:PrimitiveSelectionTypeShape];
     if (_currentSelectionType != PrimitiveSelectionTypeShape
         || [GLController getSelectionType] != PrimitiveSelectionTypeShape) {
+        return;
+    }
+    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
         return;
     }
     [GLController addPrimitivesFromJSON:json];
@@ -366,14 +371,19 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)addPrimitive:(PrimitiveType)primitiveType {
-    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
-    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
-        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) {
         return;
     }
     [self setSelectionType:PrimitiveSelectionTypeShape];
     if (_currentSelectionType != PrimitiveSelectionTypeShape
         || [GLController getSelectionType] != PrimitiveSelectionTypeShape) {
+        return;
+    }
+    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
         return;
     }
     [GLController addPrimitive:primitiveType];
@@ -401,6 +411,16 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)deleteSelected {
+    if (![NSThread isMainThread] || GLController == nil
+        || _currentSelectionType != PrimitiveSelectionTypeShape
+        || [GLController getSelectionType]
+            != PrimitiveSelectionTypeShape) {
+        return;
+    }
+    if ([GLController hasUnresolvedDuplicate]) {
+        [GLController refreshSelectionState];
+        return;
+    }
     [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
     if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
         || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
@@ -421,6 +441,14 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)selectAll {
+	if (![NSThread isMainThread]) {
+		return;
+	}
+	if (_currentSelectionType != PrimitiveSelectionTypeShape
+		|| [GLController getSelectionType]
+			!= PrimitiveSelectionTypeShape) {
+		return;
+	}
 	if (_currentGizmoType == PrimitiveGizmoTypeChamfer
 		|| _currentGizmoType == PrimitiveGizmoTypeExtrude
 		|| _currentGizmoType == PrimitiveGizmoTypeShell
@@ -442,14 +470,37 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)duplicateSelected {
-    [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
-    if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
-        || [GLController getGizmoType] != PrimitiveGizmoTypeMoveRotate) {
+    if (![NSThread isMainThread] || GLController == nil) {
         return;
     }
+    const BOOL recoveryPending = [GLController hasUnresolvedDuplicate];
+    if (!recoveryPending) {
+        if (GLController.viewer == nullptr
+            || !GLController.viewer->canBeginCommittedEdit()
+            || _currentSelectionType != PrimitiveSelectionTypeShape
+            || [GLController getSelectionType]
+                != PrimitiveSelectionTypeShape) {
+            return;
+        }
+        [self setGizmoType:PrimitiveGizmoTypeMoveRotate];
+        if (_currentGizmoType != PrimitiveGizmoTypeMoveRotate
+            || [GLController getGizmoType]
+                != PrimitiveGizmoTypeMoveRotate) {
+            return;
+        }
+    }
     [GLController duplicateSelected];
-    self.can_apply_material = YES;
-    [self sendNotifyUIState:UIStateChangingApplyMaterial
+    // GL synchronously republishes the exact post-attempt selection. This is
+    // also the production recovery path when committed-result presentation
+    // repair previously cleared every owner: Duplicate remains reachable from
+    // its typed ledger and one retry cannot start an additional command.
+    [self sendNotifyUIState:UIStateChangingSelection
+                            | UIStateChangingGizmo
+                            | UIStateChangingAdd
+                            | UIStateChangingDelete
+                            | UIStateChangingDuplicate
+                            | UIStateChangingApply
+                            | UIStateChangingApplyMaterial
                             | UIStateChangingHistory];
 }
 
@@ -1223,12 +1274,10 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)setOrthoProjection:(OrthoProjectionType)orthoType {
-    NSLog(@"SET ORTHO: %lu", static_cast<unsigned long>(orthoType));
     [GLController setOrthoProjection:orthoType];
 }
 
 - (void)setSnappingTranslation:(double)value {
-    NSLog(@"SET SNAPPING TRANSLATION: %f", value);
     Snapping::Instance().setLinear(value);
     [self sendNotifyUIState:UIStateChangingSnappingType];
 }
@@ -1242,7 +1291,6 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)setSnappingRotation:(double)value {
-    NSLog(@"SET SNAPPING ROTATION: %f", value);
     Snapping::Instance().setAngular(static_cast<double>(value));
     [self sendNotifyUIState:UIStateChangingSnappingType];
 }
@@ -1256,7 +1304,6 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)setSnappingScale:(double)value {
-    NSLog(@"SET SNAPPING SCALE: %f", static_cast<float>(value * 0.01));
     Snapping::Instance().setScaling(value * 0.01);
     [self sendNotifyUIState:UIStateChangingSnappingType];
 }

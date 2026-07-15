@@ -68,6 +68,13 @@ namespace core3d {
         std::shared_ptr<ObjectInteractor> getObjectInteractor();
         std::shared_ptr<ShapeInteractor> getShapeInteractor();
         Handle(OcctDocument) getDocument();
+        //! True only while no typed operation owns a command, preview, or
+        //! exactly-once recovery ledger and the OCAF document is writable.
+        bool canBeginCommittedEdit() const noexcept;
+        //! Duplicate presentation repair is intentionally exposed separately:
+        //! committed snapshots and project serialization must fail closed while
+        //! its result ledger remains the sole recovery authority.
+        bool hasUnresolvedDuplicate() const noexcept;
         bool dumpOfDisplayedColoredObjects(const Standard_Integer width,
                                            const Standard_Integer height,
                                            const TCollection_AsciiString& fileName);
@@ -104,6 +111,10 @@ namespace core3d {
             std::function<void()> callback);
         void setShellPreviewStateChangedCallback(
             std::function<void()> callback);
+        //! Synchronously mirrors the actual native tool after interactor
+        //! recreation, before a caller can publish a selection callback.
+        void setInteractorRecreatedCallback(
+            std::function<void(PrimitiveManipulatorType)> callback);
 
         //! Capture the document-authoritative single-selection transform and
         //! hybrid exact local bounds. A BRep cache miss returns Measuring and
@@ -127,6 +138,11 @@ namespace core3d {
         scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
+        //! True only when the active typed operation owns every deviation from
+        //! the retained selection mode. Ordinary GL selection authority stays
+        //! strict and OutcomeUnknown scene publication remains blocked.
+        bool selectionModeAuthorityAllowsRetainedOperation()
+            const noexcept;
 
         //! Capture only the current semantic camera and established revision
         //! vector. Main-thread only and constant with respect to mesh size.
@@ -140,6 +156,17 @@ namespace core3d {
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
 #ifdef DEBUG
+        //! Select exactly one presentation whose modes are deliberately
+        //! suspended by the active typed operation. This is a test-only seam
+        //! for exercising the production selection callback; it never admits
+        //! an unrelated displayed shape.
+        Standard_Boolean
+            DebugSelectRetainedOperationPresentation() noexcept;
+		//! Publish one deterministic DEBUG-only detected owner without running
+		//! view-space picking. The owner is consumed by the production snapshot
+		//! builder exactly as an AIS MoveTo result would be.
+		Standard_Boolean DebugSetDetectedOwner(
+			const Handle(SelectMgr_EntityOwner)& owner) noexcept;
         Standard_Boolean debugBeginBooleanSelection(
             BooleanAction action,
             const std::vector<std::string>& actorEntityIdentifiers,
@@ -156,6 +183,8 @@ namespace core3d {
         void DebugSetBooleanTransactionFailureCount(
             Standard_Size count) noexcept;
         void DebugSetBooleanAbortFailureCount(
+            Standard_Size count) noexcept;
+        void DebugSetBooleanPostCommitInspectFailureCount(
             Standard_Size count) noexcept;
         Standard_Boolean debugBeginExtrusionSelection(
             const std::string& entityIdentifier,
@@ -181,6 +210,8 @@ namespace core3d {
             Standard_Size count) noexcept;
         Standard_Boolean
             DebugMutateShellSourcePersistedTransform() noexcept;
+        Standard_Boolean
+            DebugMutateShellSourcePersistedShape() noexcept;
         Standard_Boolean debugBeginBevelSelection(
             const std::string& entityIdentifier,
             const std::vector<Standard_Size>& edgeTopologyIndices) noexcept;
@@ -236,8 +267,9 @@ namespace core3d {
         void DebugSetTransformInspectorPositionCommitMode(
             Standard_Integer mode) noexcept;
         //! One-shot publication fallback: 0 normal, 1 forces incremental
-        //! publication failure with a successful OCAF redraw, and 2 also
-        //! forces redraw traversal failure to exercise retained AIS restore.
+        //! publication failure with a successful OCAF redraw, 2 also forces
+        //! redraw traversal failure to exercise retained AIS restore, and 3
+        //! forces the post-redraw exact-owner restoration to miss.
         void DebugSetTransformInspectorPositionPublicationFallbackMode(
             Standard_Integer mode) noexcept;
 #endif
@@ -249,8 +281,12 @@ namespace core3d {
                                             const TCollection_AsciiString& theNamePrefix,
                                             const TopLoc_Location& theLoc,
                                             MapOfPrsForShapes& theMapOfShapes);
-        void recreateInteractors(PrimitiveManipulatorType theManipulatorType,
+        bool recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                  ShapeSelectionMode theSelectionMode);
+        bool recreateFreshInteractorsForDocumentReplacement();
+        bool publishRecreatedInteractorState() noexcept;
+        Standard_Boolean captureSelectionModeSuspendedPresentations(
+            std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
 
     private:
         std::shared_ptr<ObjectInteractor> _objectInteractor;
@@ -264,6 +300,8 @@ namespace core3d {
         std::function<void()> _radialArrayPreviewStateChangedCallback;
         std::function<void()> _bevelPreviewStateChangedCallback;
         std::function<void()> _shellPreviewStateChangedCallback;
+        std::function<void(PrimitiveManipulatorType)>
+            _interactorRecreatedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
 #ifdef DEBUG
         Standard_Integer

@@ -36,6 +36,14 @@ namespace core3d {
         Face
     };
 
+    enum class ShapeSelectionModeChangeResult : std::uint8_t {
+        Succeeded = 0,
+        Unsupported,
+        NotReady,
+        Busy,
+        PresentationFailure,
+    };
+
     enum class ExtrusionPreviewState : std::uint8_t {
         Unavailable = 0,
         Selecting,
@@ -56,6 +64,35 @@ namespace core3d {
 	};
 
 #ifdef DEBUG
+    //! Renderer-independent evidence for the currently accepted OCCT topology
+    //! selection. Element-kind values intentionally match the public
+    //! object/face/edge/vertex selection values, while topology indices are
+    //! zero-based in the selected presentation's definition-local shape.
+    enum class TopologySelectionDebugElementKind : std::uint8_t {
+        None = 0,
+        Object = 1,
+        Face = 2,
+        Edge = 3,
+        Vertex = 4,
+    };
+
+    struct TopologySelectionDebugState {
+        ShapeSelectionMode acceptedMode = ShapeSelectionMode::WholeShape;
+        Standard_Size rawSelectedOwnerCount = 0;
+        Standard_Size selectedCount = 0;
+        Standard_Size invalidSelectedOwnerCount = 0;
+        TopologySelectionDebugElementKind selectedKind =
+            TopologySelectionDebugElementKind::None;
+        Standard_Integer topologyIndex = -1;
+        OcctGeometryRepresentation representation =
+            OcctGeometryRepresentation::Invalid;
+        std::string entityIdentifier;
+        Standard_Boolean ready = Standard_False;
+        Standard_Boolean hasDetected = Standard_False;
+        Standard_Boolean singleSelectionExact = Standard_False;
+        Standard_Boolean selectionMatchesMode = Standard_False;
+    };
+
     struct ExtrusionDebugState {
         Standard_Boolean selectionReady = Standard_False;
         Standard_Boolean previewActive = Standard_False;
@@ -120,6 +157,7 @@ namespace core3d {
         };
         ExtrusionSelection _extrusion;
 #ifdef DEBUG
+        Standard_Size _debugSelectionModeVerificationFailureCount = 0;
         Standard_Boolean _lastExtrusionApplySucceeded = Standard_False;
         Standard_Size _lastExtrusionResultSubshapeCount = 0;
         Standard_Size _lastExtrusionResultSolidCount = 0;
@@ -148,8 +186,47 @@ namespace core3d {
         ~ShapeInteractor() noexcept;
         
         const size_t getNumberOfDetectedEdges() const;
-        void setSelectionMode(const ShapeSelectionMode mode);
+        ShapeSelectionModeChangeResult setSelectionMode(
+            ShapeSelectionMode mode) noexcept;
         const ShapeSelectionMode getSelectionMode() const;
+        //! True only when every committed model presentation and the picker
+        //! tolerance exactly implement the retained accepted mode. This is a
+        //! read-only authority check; callers use false as a fail-closed poison
+        //! state and may request the same mode again to repair it.
+        Standard_Boolean selectionModeAuthorityIsExact() const noexcept;
+        //! The same exact authority proof, except for a bounded set of
+        //! operation-owned AIS preview presentations that the owning controller
+        //! has already proven displayed and deliberately nonselectable. Every
+        //! supplied handle must be present exactly once with no active modes;
+        //! every other presentation and the picker tolerance remain canonical.
+        Standard_Boolean selectionModeAuthorityIsExactIgnoring(
+            const std::vector<Handle(AIS_Shape)>& suspendedPresentations)
+            const noexcept;
+        //! Capture only the exact retained Extrusion presentations that own a
+        //! deliberate selection-mode suspension in Ready or OutcomeUnknown.
+        Standard_Boolean
+            captureExtrusionSelectionModeSuspendedPresentations(
+                std::vector<Handle(AIS_Shape)>& presentations)
+                const noexcept;
+        //! Capture the one retained Shell presentation that owns a deliberate
+        //! selection-mode suspension while its committed outcome is unknown.
+        Standard_Boolean captureShellSelectionModeSuspendedPresentations(
+            std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
+		//! Read-only proof for the one ordinary Face-mode selection shared by
+		//! face-local solid operations. The output is cleared on failure. The
+		//! proof rejects poisoned presentation authority, multiple raw owners,
+		//! non-BRep owners, owner/presentation drift, foreign subshapes, and
+		//! non-planar, reversed, stale, invalid, or oversized sources.
+		Standard_Boolean tryCaptureExactlyOneSelectedPlanarFace(
+			FaceOperationSourceProof& proof) const noexcept;
+		//! Compute both idle face-tool decisions from one bounded source proof.
+		//! Outputs are always initialized false and no controller state changes.
+		Standard_Boolean queryFaceOperationAdmission(
+			Standard_Boolean& canBeginExtrusion,
+			Standard_Boolean& canBeginShell) const noexcept;
+			//! Pure, fail-closed admission for the current Shape/Face/Edge
+			//! selection. Availability and begin share the same fresh capture.
+			Standard_Boolean canBeginBevelSelection() const noexcept;
 			Standard_Boolean setChamferValueForSelection(const Standard_Real value);
 			BevelApplyResult applyBevel() noexcept;
 			Standard_Boolean canApplyBevel() const noexcept;
@@ -165,6 +242,7 @@ namespace core3d {
 			Standard_Boolean cancelChamfer() noexcept;
 
         //! Capture exactly one selected planar face for transient hollowing.
+        Standard_Boolean canBeginShellSelection() const noexcept;
         Standard_Boolean beginShellSelection() noexcept;
         Standard_Boolean setShellThickness(
             Standard_Real thickness) noexcept;
@@ -188,6 +266,7 @@ namespace core3d {
 
         //! Capture one selected planar face on one editable free solid.
         //! No document command is opened until a nonzero preview succeeds.
+        Standard_Boolean canBeginExtrusionSelection() const noexcept;
         Standard_Boolean beginExtrusionSelection() noexcept;
         //! Recompute a local BRepFeat prism preview in model units. Zero
         //! discards the open preview while retaining the captured face.
@@ -206,6 +285,12 @@ namespace core3d {
         //! confirmed aborted; state remains intact so cancellation can retry.
         Standard_Boolean cancelExtrusion() noexcept;
 #ifdef DEBUG
+        TopologySelectionDebugState
+            debugTopologySelectionState() const noexcept;
+        void debugSetSelectionModeVerificationFailureCount(
+            Standard_Size count) noexcept {
+            _debugSelectionModeVerificationFailureCount = count;
+        }
         Standard_Boolean debugBeginShellSelection(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;
@@ -227,6 +312,8 @@ namespace core3d {
             Standard_Size count) noexcept;
         Standard_Boolean
             debugMutateShellSourcePersistedTransform() noexcept;
+        Standard_Boolean
+            debugMutateShellSourcePersistedShape() noexcept;
         Standard_Boolean debugBeginExtrusionSelection(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;
@@ -272,14 +359,31 @@ namespace core3d {
         void exportToStep(const std::string &filename);
 
 	private:
-		void setInteractiveObjectSelectionMode(const Handle(AIS_InteractiveObject) aio);
-			Standard_Boolean beginBevelSelectionFromDetectedEdges() noexcept;
+		void setInteractiveObjectSelectionMode(
+            const Handle(AIS_InteractiveObject) aio);
+        Standard_Boolean trySetInteractiveObjectSelectionMode(
+            const Handle(AIS_InteractiveObject)& aio,
+            ShapeSelectionMode mode,
+            TopAbs_ShapeEnum topAbsMode) noexcept;
+        Standard_Boolean interactiveObjectSelectionModeMatches(
+            const Handle(AIS_InteractiveObject)& aio,
+            ShapeSelectionMode mode,
+            TopAbs_ShapeEnum topAbsMode) const noexcept;
+        Standard_Boolean selectionModeAuthorityMatches(
+            ShapeSelectionMode mode,
+            TopAbs_ShapeEnum topAbsMode) const noexcept;
+			Standard_Boolean tryCaptureBevelSelection(
+				std::vector<BevelSourceSelection>& selection) const noexcept;
+			Standard_Boolean beginBevelSelectionFromCurrentSelection() noexcept;
         Standard_Boolean beginShellSelectionImpl(
-            const Handle(AIS_Shape)& presentation,
-            const TopoDS_Face& face) noexcept;
+            const FaceOperationSourceProof& proof) noexcept;
         Standard_Boolean beginExtrusionSelectionImpl(
-            const Handle(AIS_Shape)& presentation,
-            const TopoDS_Face& face) noexcept;
+            const FaceOperationSourceProof& proof) noexcept;
+		Standard_Boolean tryPrepareExtrusionSelection(
+			const FaceOperationSourceProof& proof,
+			TDF_Label& label,
+			Standard_Size& sourceSubshapeCount,
+			Standard_Size& profileEdgeCount) const noexcept;
         Standard_Boolean discardExtrusionPreview(
             Standard_Boolean updateViewer) noexcept;
         void restoreExtrusionOriginalPresentation() noexcept;

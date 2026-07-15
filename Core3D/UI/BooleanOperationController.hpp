@@ -127,6 +127,11 @@ public:
     Standard_Boolean isSelectionFrozen() const noexcept;
     Standard_Boolean capturePreview(
         BooleanPreviewCapture& capture) const noexcept;
+    //! Returns the one owned displayed zero-mode result for a closed unresolved
+    //! Union/Intersect transaction. Subtract never uses this exception.
+    Standard_Boolean captureSelectionModeSuspendedPresentations(
+        BooleanAction action,
+        std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
     BooleanPreviewState previewState() const noexcept;
     std::uint64_t previewGeneration() const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
@@ -141,6 +146,7 @@ public:
     void debugSetMaximumResultSolids(Standard_Size limit) noexcept;
     void debugSetTransactionFailureCount(Standard_Size count) noexcept;
     void debugSetAbortFailureCount(Standard_Size count) noexcept;
+    void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
 #endif
 
 private:
@@ -251,6 +257,7 @@ private:
     Standard_Size _debugMaximumResultSolids = kMaxResultSolids;
     Standard_Size _debugTransactionFailureCount = 0;
     Standard_Size _debugAbortFailureCount = 0;
+    mutable Standard_Size _debugPostCommitInspectFailureCount = 0;
     std::uint64_t _debugAcceptedCount = 0;
     std::uint64_t _debugStaleSuppressionCount = 0;
 #endif

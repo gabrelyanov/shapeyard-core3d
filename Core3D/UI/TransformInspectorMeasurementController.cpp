@@ -833,6 +833,7 @@ bool EnvironmentIsIdle(
         const Handle(TDocStd_Document) aDocument =
             theDocument->Document();
         return !aDocument.IsNull() && !aDocument->HasOpenCommand()
+            && !theObjectInteractor->hasUnresolvedDuplicate()
             && !theObjectInteractor->isManipulatorGestureActive()
             && !theObjectInteractor->hasActiveBoolean()
             && !theObjectInteractor->hasUnresolvedBoolean()

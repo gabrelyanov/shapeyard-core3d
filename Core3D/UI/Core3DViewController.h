@@ -68,6 +68,10 @@ typedef NS_ENUM(NSInteger, Core3DDebugGeometryFixtureMode) {
     //! Valid admitted mesh whose authoritative face triangulation owns a
     //! nonidentity TopLoc_Location that must be applied to every stored node.
     Core3DDebugGeometryFixtureMarkedTriangleMeshWithLocatedTriangulation,
+    //! Valid marked BRep whose definition root is one analytic Face.
+    Core3DDebugGeometryFixtureMarkedBRepFaceRoot,
+    //! Valid marked BRep roots made solely from Wire, Edge, and Vertex shapes.
+    Core3DDebugGeometryFixtureMarkedBRepSubshapeRoots,
 };
 
 //! Standalone BinXCAF fixtures for the all-or-nothing Reference Axis schema.
@@ -498,10 +502,20 @@ typedef struct {
 - (NSDictionary<NSString *, NSNumber *> *)
     transformInspectorPerformanceState;
 
+//! Request a transient topology-selection mode and synchronously report the
+//! mode accepted by Core3D. A non-success result preserves the prior public
+//! selection mode.
+- (Core3DSelectionTypeChangeResult)
+    trySetSelectionType:(PrimitiveSelectionType)type;
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
 #ifdef DEBUG
+//! Re-run the production selection callback without changing AIS owners.
+- (void)debugRefreshSelectionState;
+//! Select one exact operation-owned presentation whose modes are deliberately
+//! suspended, so the nonempty production selection callback can be tested.
+- (BOOL)debugSelectRetainedOperationPresentation;
 //! Bounded counters and timings from the production inspector measurement
 //! controller. Values are intended for deterministic XCTest evidence only.
 - (NSDictionary<NSString *, NSNumber *> *)
@@ -523,7 +537,8 @@ typedef struct {
 //! 2 throw after close, and 3 staged write left open for production abort.
 - (void)debugSetTransformInspectorPositionCommitMode:(NSInteger)mode;
 //! One-shot publication mode: 0 normal, 1 incremental failure followed by a
-//! successful redraw, and 2 incremental plus redraw traversal failure.
+//! successful redraw, 2 incremental plus redraw traversal failure, and 3 a
+//! forced post-redraw exact-owner restoration miss.
 - (void)debugSetTransformInspectorPositionPublicationFallbackMode:
     (NSInteger)mode;
 
@@ -558,8 +573,8 @@ typedef struct {
 - (NSData *_Nullable)debugReferenceAxisFixtureDataWithMode:
     (Core3DDebugReferenceAxisFixtureMode)mode
     NS_SWIFT_NAME(debugReferenceAxisFixtureData(mode:));
-//! Inject Duplicate CommitCommand behavior after a real close: 0 normal,
-//! 1 false-after-close, and 2 throw-after-close.
+//! Inject Duplicate recovery behavior: 0 normal, 1 false-after-close,
+//! 2 throw-after-close, and 3 fail the first post-commit presentation repair.
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.
@@ -652,6 +667,8 @@ typedef struct {
 - (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count;
 //! Make the next N Boolean transaction abort attempts fail before touching it.
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
+//! Make the next N post-commit Boolean document inspections unavailable.
+- (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count;
 //! Deliver the viewport's production memory-warning cancellation path.
 - (void)debugSimulateBooleanMemoryWarning;
 //! Deliver the same production path for an active Linear Array regression.
@@ -719,6 +736,9 @@ typedef struct {
 //! Commit a real persisted transform change behind the active Shell snapshot
 //! without updating its retained AIS presentation.
 - (BOOL)debugMutateShellSourcePersistedTransform;
+//! Commit a different valid solid to the active Shell label without replacing
+//! its retained AIS shape, creating deterministic stored/presentation drift.
+- (BOOL)debugMutateShellSourcePersistedShape;
 //! Build a standalone pre-schema BinOcaf fixture with geometry and legacy
 //! child-11/12 appearance, but no identity or visual-material infrastructure.
 - (NSData *_Nullable)debugLegacyBinOcafFixtureData;
@@ -787,6 +807,13 @@ typedef struct {
 - (NSData *_Nullable)debugStyledSubshapeBinXCAFFixtureData;
 //! Single 300-sided prism exceeding extrusion's synchronous v1 topology cap.
 - (NSData *_Nullable)debugOversizedExtrusionSolidBinXCAFFixtureData;
+//! A TopAbs_SOLID containing an intentionally open five-face shell. Project
+//! loading admits the trusted fixture; face-tool admission must reject it via
+//! its bounded source BRep validity proof.
+- (NSData *_Nullable)debugInvalidBRepSolidBinXCAFFixtureData;
+//! A solid with 96 occurrences of one shared shell. Unique topology is tiny,
+//! while occurrence topology exceeds Bevel's synchronous source cap.
+- (NSData *_Nullable)debugOccurrenceAmplifiedBevelSolidBinXCAFFixtureData;
 //! Lower the display traversal ceiling for bounded aggregate-budget tests.
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
 //! Lower the leaf-presentation ceiling for all-or-nothing admission tests.
@@ -816,10 +843,102 @@ typedef struct {
 //! Current OpenGL selection size. Assembly occurrences are expected to remain
 //! zero after select-all because definition-addressed edits are unsafe.
 - (NSInteger)debugSelectedShapeCount;
+//! Renderer-independent topology-selection authority. The selected kind uses
+//! 0 none, 1 object, 2 face, 3 edge, and 4 vertex. Topology indices are
+//! zero-based; -1 means no exact single topology identity. Representation uses
+//! -1 invalid, 0 legacy BRep, 1 BRep, and 2 TriangleMesh.
+- (NSDictionary<NSString *, id> *)debugTopologySelectionState;
+//! Test-only OCCT detection seam. Boundedly probes the drawable for one
+//! committed presentation and leaves that owner as the current hover.
+- (BOOL)debugDetectAnyDisplayedShape;
+//! Publish a deterministic detected Face owner whose topology is canonical by
+//! TShape/location but has the opposite orientation.
+- (BOOL)debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	faceTopologyIndex:(NSUInteger)faceTopologyIndex
+	NS_SWIFT_NAME(debugDetectReversedFace(entityIdentifier:faceTopologyIndex:));
+//! Edge counterpart to debugDetectReversedFace.
+- (BOOL)debugDetectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
+	NS_SWIFT_NAME(debugDetectReversedEdge(entityIdentifier:edgeTopologyIndex:));
+//! The first virtual Selectable read reports entityIdentifier while the next
+//! reports foreignEntityIdentifier, constructing the otherwise impossible
+//! DetectedInteractive/DetectedOwner mismatch for snapshot fail-closed tests.
+- (BOOL)debugDetectAlternatingForeignSelectableEdgeWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
+	NS_SWIFT_NAME(debugDetectAlternatingForeignSelectableEdge(entityIdentifier:foreignEntityIdentifier:edgeTopologyIndex:));
+//! Boundedly finds one committed OCCT owner and selects it through the same XOR
+//! path as a production tap. The accepted Object/Face/Edge mode determines the
+//! selected topology kind; success requires one exact owner.
+- (BOOL)debugSelectAnyDisplayedTopologyElement;
+//! Deterministically publishes distinct zero-based Face owners for one exact
+//! committed BRep presentation. This is the multi-selection counterpart to the
+//! production tap seam and exists to prove raw-owner admission cardinality.
+- (BOOL)debugSelectFaceTopologyIndicesWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices
+    NS_SWIFT_NAME(debugSelectFaceTopologyIndices(entityIdentifier:faceTopologyIndices:));
+//! Publish one owner whose Face is the exact canonical presentation face with
+//! only its orientation reversed. The owner remains attached to the canonical
+//! presentation, proving face-tool admission rejects IsSame-but-not-IsEqual.
+- (BOOL)debugSelectReversedFaceTopologyIndexWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndex:(NSUInteger)faceTopologyIndex
+    NS_SWIFT_NAME(debugSelectReversedFace(entityIdentifier:faceTopologyIndex:));
+//! Deterministically publish exact canonical Edge owners for one BRep source.
+- (BOOL)debugSelectEdgeTopologyIndicesWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices
+	NS_SWIFT_NAME(debugSelectEdgeTopologyIndices(entityIdentifier:edgeTopologyIndices:));
+//! Publish an IsSame-but-orientation-reversed Edge owner.
+- (BOOL)debugSelectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
+	NS_SWIFT_NAME(debugSelectReversedEdge(entityIdentifier:edgeTopologyIndex:));
+//! Publish one valid Edge owner plus one owner whose edge belongs to the first
+//! presentation but whose selectable is the second presentation.
+- (BOOL)debugSelectValidAndForeignEdgeOwnersWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
+	NS_SWIFT_NAME(debugSelectValidAndForeignEdgeOwners(entityIdentifier:foreignEntityIdentifier:edgeTopologyIndex:));
+//! Change only the native picker mode, deliberately leaving the public cached
+//! mode untouched. This proves shared tools fail closed when two individually
+//! legal modes disagree about the active selection authority.
+- (Core3DSelectionTypeChangeResult)
+    debugTrySetNativeSelectionTypeWithoutPublicSync:
+        (PrimitiveSelectionType)mode
+    NS_SWIFT_NAME(debugTrySetNativeSelectionTypeWithoutPublicSync(_:));
+//! Invoke the lower GL mutation boundaries directly, bypassing the public
+//! controller's cancellation and authority checks. Active ledgers must still
+//! reject both operations without changing document or selection state.
+- (void)debugInvokeNativeSelectAll;
+- (void)debugInvokeNativeDeleteSelected;
+//! Direct native gizmo access for cache-reconciliation regressions. Setting the
+//! native value deliberately leaves the public cached tool untouched.
+- (PrimitiveGizmoType)debugNativeGizmoType;
+- (void)debugSetNativeGizmoTypeWithoutPublicSync:
+    (PrimitiveGizmoType)type;
+//! Deliberately drifts the first committed presentation without changing the
+//! accepted enum, so same-mode authority repair can be verified.
+- (BOOL)debugSetFirstDisplayedShapeSelectionMode:
+    (PrimitiveSelectionType)mode;
+//! Deliberately drifts the one committed presentation matching an exact entity
+//! identifier. Ambiguous or missing presentation ownership fails closed.
+- (BOOL)debugSetDisplayedShapeSelectionModeWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    mode:(PrimitiveSelectionType)mode
+    NS_SWIFT_NAME(debugSetDisplayedShapeSelectionMode(entityIdentifier:mode:));
+//! Fail the next N topology transitions after requested presentation modes are
+//! staged but before old selected/detected owners are cleared.
+- (void)debugSetSelectionModeVerificationFailureCount:(NSUInteger)count;
 //! Valid imported PBR material whose Common fallback owns an embedded PNG.
 //! Scalar authoring must remain read-only until that texture is app-owned.
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;
-//! Valid XCAF material with a normal map that schema v5 cannot represent.
+//! Valid XCAF material with a normal map that schema v6 cannot represent.
 //! Snapshot publication must fail closed so OCCT remains authoritative.
 - (NSData *_Nullable)debugUnsupportedPBRTextureBinXCAFFixtureData;
 //! Same fail-closed fixture shape with a metallic-roughness map.

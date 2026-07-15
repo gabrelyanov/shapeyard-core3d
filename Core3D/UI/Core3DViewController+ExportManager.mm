@@ -32,6 +32,7 @@ bool CanCaptureCommittedExport(
         && !transaction->HasOpenCommand()
         && objectInteractor != nullptr
         && shapeInteractor != nullptr
+        && !objectInteractor->hasUnresolvedDuplicate()
         && !objectInteractor->hasActiveBoolean()
         && !objectInteractor->hasUnresolvedBoolean()
         && !objectInteractor->hasUnresolvedMirrorObjects()

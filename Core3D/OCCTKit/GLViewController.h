@@ -60,6 +60,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)addPrimitive:(PrimitiveType)primitiveType;
 - (void)addPrimitivesFromJSON:(NSString *)json;
 
+- (Core3DSelectionTypeChangeResult)
+    trySetSelectionType:(PrimitiveSelectionType)type;
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (PrimitiveSelectionType)getSelectionType;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
@@ -72,6 +74,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)selectAll;
 - (void)deleteSelected;
 - (void)duplicateSelected;
+- (BOOL)hasUnresolvedDuplicate;
 - (void)deselectAll;
 - (void)refreshSelectionState;
 - (BOOL)isSelected;
@@ -153,6 +156,43 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSUInteger)debugBoundedProjectTopologyValidationCount;
 - (NSUInteger)debugGeometricBRepValidationCount;
 - (NSInteger)debugSelectedShapeCount;
+- (NSDictionary<NSString *, id> *)debugTopologySelectionState;
+- (BOOL)debugDetectAnyDisplayedShape;
+- (BOOL)debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	faceTopologyIndex:(NSUInteger)faceTopologyIndex;
+- (BOOL)debugDetectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex;
+- (BOOL)debugDetectAlternatingForeignSelectableEdgeWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex;
+- (BOOL)debugSelectAnyDisplayedTopologyElement;
+- (BOOL)debugSelectFaceTopologyIndicesWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices;
+- (BOOL)debugSelectReversedFaceTopologyIndexWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    faceTopologyIndex:(NSUInteger)faceTopologyIndex;
+- (BOOL)debugSelectEdgeTopologyIndicesWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices;
+- (BOOL)debugSelectReversedEdgeTopologyIndexWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex;
+- (BOOL)debugSelectValidAndForeignEdgeOwnersWithEntityIdentifier:
+			(NSString *)entityIdentifier
+	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex;
+- (BOOL)debugSelectRetainedOperationPresentation;
+- (BOOL)debugSetFirstDisplayedShapeSelectionMode:
+    (PrimitiveSelectionType)mode;
+- (BOOL)debugSetDisplayedShapeSelectionModeWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    mode:(PrimitiveSelectionType)mode
+    NS_SWIFT_NAME(debugSetDisplayedShapeSelectionMode(entityIdentifier:mode:));
+- (void)debugSetSelectionModeVerificationFailureCount:(NSUInteger)count;
 - (NSDictionary<NSString *, NSNumber *> *)debugMirrorState;
 - (void)debugSetMirrorTransactionFailureCount:(NSUInteger)count;
 - (void)debugSetMirrorAbortFailureCount:(NSUInteger)count;
@@ -201,6 +241,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetShellCommitMode:(NSInteger)mode;
 - (void)debugSetShellPostCommitInspectFailureCount:(NSUInteger)count;
 - (BOOL)debugMutateShellSourcePersistedTransform;
+- (BOOL)debugMutateShellSourcePersistedShape;
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
@@ -216,6 +257,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit;
 - (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count;
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
+- (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count;
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
 - (NSDictionary<NSString *, NSNumber *> *)

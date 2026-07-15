@@ -1179,6 +1179,37 @@ Standard_Boolean LinearArrayOperationController::capturePreview(
 }
 
 Standard_Boolean
+LinearArrayOperationController::captureSelectionModeSuspendedPresentations(
+    std::vector<Handle(AIS_Shape)>& thePresentations) const noexcept
+{
+    thePresentations.clear();
+    if (!hasActiveOperation() || !_source.has_value()
+        || _previewObjects.empty()
+        || _previewObjects.size() > kMaximumPreviewBodies) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        for (const Handle(AIS_Shape)& aPreview : _previewObjects) {
+            TColStd_ListOfInteger activeModes;
+            if (aPreview.IsNull() || aPreview->Shape().IsNull()
+                || !_context->IsDisplayed(aPreview)) {
+                return Standard_False;
+            }
+            _context->ActivatedModes(aPreview, activeModes);
+            if (!activeModes.IsEmpty()) {
+                return Standard_False;
+            }
+        }
+        thePresentations = _previewObjects;
+        return Standard_True;
+    } catch (...) {
+        thePresentations.clear();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean
 LinearArrayOperationController::canPublishEmptyPreview() const noexcept
 {
     return _state == LinearArrayPreviewState::Selecting

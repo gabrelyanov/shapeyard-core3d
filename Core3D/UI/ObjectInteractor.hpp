@@ -121,6 +121,9 @@ namespace core3d {
 		void selectAll();
         void deleteSelected();
         void duplicateSelected();
+		//! A Duplicate command or committed-result presentation repair still owns
+		//! exactly-once recovery state that must survive interactor recreation.
+		bool hasUnresolvedDuplicate() const noexcept;
 		void attachManipulatorToSelection(bool detach = false);
         
         bool transformManipulator(int theX, int theY);
@@ -157,6 +160,12 @@ namespace core3d {
             scene::PresentationOverlayContent& theContent,
             std::vector<Handle(AIS_Shape)>& theMirrorPreviewObjects,
             BooleanPreviewCapture& theBooleanPreview) const noexcept;
+        //! Returns only the exact retained Mirror/Array/Boolean presentations
+        //! that own deliberate selection-mode suspension for the current typed
+        //! tool.
+        //! False means callers must not preserve logical selection authority.
+        Standard_Boolean captureSelectionModeSuspendedPresentations(
+            std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
 
         const bool isSelected() const;
 		
@@ -193,8 +202,10 @@ namespace core3d {
 			Standard_Size limit) noexcept;
 		void debugSetBooleanTransactionFailureCount(
 			Standard_Size count) noexcept;
-		void debugSetBooleanAbortFailureCount(
-			Standard_Size count) noexcept;
+			void debugSetBooleanAbortFailureCount(
+				Standard_Size count) noexcept;
+			void debugSetBooleanPostCommitInspectFailureCount(
+				Standard_Size count) noexcept;
 #endif
         Standard_Boolean beginLinearArray() noexcept;
         LinearArrayApplyResult applyLinearArray() noexcept;
@@ -307,6 +318,10 @@ namespace core3d {
 		Standard_Boolean beginMirrorPlanePicking() noexcept;
 		//! Exit face picking and restore the exact selection modes captured on entry.
 		Standard_Boolean cancelMirrorPlanePicking() noexcept;
+		//! True only while the temporary Face detectors, every unaffected
+		//! committed presentation, the suspended manipulator, and picker
+		//! tolerance exactly implement the active Mirror pick ledger.
+		Standard_Boolean mirrorPlanePickingAuthorityMatches() const noexcept;
 		//! Consume one viewport tap while face picking is active.
 		Standard_Boolean pickMirrorPlaneAt(
 			Standard_Integer theX,
@@ -331,8 +346,8 @@ namespace core3d {
 		MirrorPreviewState mirrorPreviewState() const noexcept;
 		std::uint64_t mirrorPreviewGeneration() const noexcept;
 #ifdef DEBUG
-		//! Inject Duplicate CommitCommand behavior after a real close:
-		//! 0 normal, 1 false-after-close, 2 throw-after-close.
+		//! Inject Duplicate recovery behavior: 0 normal, 1 false-after-close,
+		//! 2 throw-after-close, 3 fail the first post-commit presentation repair.
 		void debugSetDuplicateCommitMode(Standard_Integer mode) noexcept;
 		MirrorPreviewDebugState debugMirrorPreviewState() const noexcept;
 		void debugSetMirrorTransactionFailureCount(
@@ -360,6 +375,7 @@ namespace core3d {
 #endif
 		
 		void setManipulator(Handle(Core3DManipulator) manipulator) {
+			if (hasUnresolvedDuplicate()) { return; }
 			_manipulator = manipulator;
 			_manipulatorGestureActive = false;
 			_manipulatorSourceLabels.clear();
@@ -504,6 +520,7 @@ namespace core3d {
 		bool _manipulatorGestureActive = false;
 #ifdef DEBUG
 		Standard_Integer _debugDuplicateCommitMode = 0;
+		Standard_Size _debugDuplicatePresentationRepairFailureCount = 0;
 		Standard_Size _debugMirrorTransactionFailureCount = 0;
 		Standard_Size _debugMirrorAbortFailureCount = 0;
 		Standard_Size _debugMirrorEraseFailureCount = 0;

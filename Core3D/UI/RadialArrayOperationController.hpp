@@ -126,6 +126,11 @@ public:
     std::uint64_t previewGeneration() const noexcept;
     Standard_Boolean capturePreview(
         RadialArrayPreviewCapture& capture) const noexcept;
+    //! Captures the exact AIS handles whose selection modes are intentionally
+    //! suspended by any retained Array state, including Apply-only recovery.
+    //! This is an ownership proof, not permission to publish uncertain geometry.
+    Standard_Boolean captureSelectionModeSuspendedPresentations(
+        std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
     Standard_Boolean canPublishEmptyPreview() const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
 

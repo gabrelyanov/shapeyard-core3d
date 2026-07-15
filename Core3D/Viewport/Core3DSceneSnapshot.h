@@ -247,11 +247,17 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, copy, readonly) NSString *definitionIdentifier;
 @property (nonatomic, assign, readonly) uint64_t geometryRevision;
 @property (nonatomic, strong, readonly) Core3DSceneBounds *localBounds;
+//! Exact semantic topology cardinality. All-zero values mean this render mesh
+//! exposes no stable BRep topology (for example, an imported polygon mesh).
+@property (nonatomic, assign, readonly) uint32_t faceCount;
+@property (nonatomic, assign, readonly) uint32_t edgeCount;
+@property (nonatomic, assign, readonly) uint32_t topologyVertexCount;
 
 //! Owned interleaved Core3DSceneVertex bytes.
 @property (nonatomic, copy, readonly) NSData *vertexData;
 //! Owned uint32_t index bytes.
 @property (nonatomic, copy, readonly) NSData *indexData;
+//! Number of tessellated render vertices, not semantic topology vertices.
 @property (nonatomic, assign, readonly) NSUInteger vertexCount;
 @property (nonatomic, assign, readonly) NSUInteger indexCount;
 @property (nonatomic, assign, readonly) NSUInteger vertexStride;
@@ -377,6 +383,9 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) double metersPerUnit;
 //! World-space origin subtracted before float vertex publication.
 @property (nonatomic, assign, readonly) simd_double3 renderOrigin;
+//! Authoritative semantic selection mode for this publication. Scene
+//! snapshots publish Object, Face, or Edge; Vertex is not a V1 mode.
+@property (nonatomic, assign, readonly) Core3DSceneElementKind selectionMode;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneMeshSnapshot *> *meshes;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneRenderItemSnapshot *> *renderItems;
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneMaterialSnapshot *> *materials;
