@@ -2964,6 +2964,31 @@ std::uint64_t OcctSceneSnapshotBuilder::DebugMesherInvocationCount() const noexc
 {
     return myState == nullptr ? 0 : myState->debugMesherInvocationCount;
 }
+
+std::uint64_t OcctSceneSnapshotBuilder::DebugPublishedDocumentGeneration(
+    const Handle(OcctDocument)& theDocument) const noexcept
+{
+    if (![NSThread isMainThread] || theDocument.IsNull()
+        || myState == nullptr || myState->documentObject.IsNull()
+        || myState->publicationSourceIdentifier.empty()
+        || myState->documentGeneration == 0 || myState->snapshotRevision == 0) {
+        return 0;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document)& aDocument = theDocument->Document();
+        if (aDocument.IsNull()
+            || aDocument.get() != myState->documentObject.get()
+            || theDocument->DocumentIdentifier() != myState->documentIdentifier) {
+            return 0;
+        }
+        // Only metadata from the last committed publication is exposed. The
+        // HasOpenCommand barrier in CaptureFrame remains mandatory.
+        return myState->documentGeneration;
+    } catch (...) {
+        return 0;
+    }
+}
 #endif
 
 std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(

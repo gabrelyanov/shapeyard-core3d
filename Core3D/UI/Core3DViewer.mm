@@ -2033,6 +2033,11 @@ Core3DViewer::DebugSceneSnapshotMesherInvocationCount() const noexcept
     return _sceneSnapshotBuilder.DebugMesherInvocationCount();
 }
 
+std::uint64_t Core3DViewer::DebugPublishedDocumentGeneration() const noexcept
+{
+    return _sceneSnapshotBuilder.DebugPublishedDocumentGeneration(myDoc);
+}
+
 TransformInspectorMeasurementDebugState
 Core3DViewer::DebugTransformInspectorMeasurementState() const noexcept
 {

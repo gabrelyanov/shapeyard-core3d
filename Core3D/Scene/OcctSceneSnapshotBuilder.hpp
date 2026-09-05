@@ -153,6 +153,11 @@ public:
     //! leave this at zero; OpenGL presentation meshing is outside this adapter.
     void DebugResetMesherInvocationCount() noexcept;
     std::uint64_t DebugMesherInvocationCount() const noexcept;
+
+    //! Observe the last published document identity even during an owned
+    //! preview. Does not capture a frame or admit uncommitted geometry.
+    std::uint64_t DebugPublishedDocumentGeneration(
+        const Handle(OcctDocument)& theDocument) const noexcept;
 #endif
 
 private:

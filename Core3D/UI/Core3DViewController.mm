@@ -3880,6 +3880,14 @@ void Core3DAddDebugOrphanVisualMaterial(
             GLController.viewer->DebugSceneSnapshotMesherInvocationCount());
 }
 
+- (uint64_t)debugPublishedDocumentGeneration {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) {
+        return 0;
+    }
+    return GLController.viewer->DebugPublishedDocumentGeneration();
+}
+
 - (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x {
     if (GLController == nil || GLController.viewer == nullptr) {
         return NO;

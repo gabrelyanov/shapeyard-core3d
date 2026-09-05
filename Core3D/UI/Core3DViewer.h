@@ -269,6 +269,7 @@ namespace core3d {
                 theFailure) noexcept;
         void DebugResetSceneSnapshotMesherInvocationCount() noexcept;
         std::uint64_t DebugSceneSnapshotMesherInvocationCount() const noexcept;
+        std::uint64_t DebugPublishedDocumentGeneration() const noexcept;
         TransformInspectorMeasurementDebugState
             DebugTransformInspectorMeasurementState() const noexcept;
         void DebugSetTransformInspectorWorkerBlocked(
