@@ -457,6 +457,11 @@ typedef struct {
 //! committed Shell result remains indeterminate, or before the native viewer
 //! has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
+//! Frame visible committed objects without changing geometry or undo history.
+//! Selected-only framing requires Object mode and a nonempty selection.
+//! Returns NO when unavailable; the previous camera is retained.
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:));
 
 //! Capture the current semantic camera and revision vector without traversing
 //! or copying scene geometry. Returns nil until a full snapshot has established

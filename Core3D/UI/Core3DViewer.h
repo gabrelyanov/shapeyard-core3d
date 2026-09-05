@@ -132,6 +132,11 @@ namespace core3d {
             transformInspectorMeasurementPerformanceState() const noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
+        //! Camera-only framing from validated committed scene bounds. Selected
+        //! framing requires Object mode. No meshing, OCAF command, or selection
+        //! mutation is performed. Failure preserves the previous camera.
+        bool frameModel(bool selectedObjectsOnly, std::uint32_t viewportWidth,
+                        std::uint32_t viewportHeight) noexcept;
 
         //! Capture committed OCAF geometry and semantic camera state into
         //! immutable renderer-neutral values. Main-thread only.

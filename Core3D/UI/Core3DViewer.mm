@@ -2427,6 +2427,83 @@ void Core3DViewer::showGrid(bool show) {
     myView->Redraw();
 }
 
+bool Core3DViewer::frameModel(
+    const bool selectedObjectsOnly,
+    const std::uint32_t viewportWidth,
+    const std::uint32_t viewportHeight) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit()
+        || myView.IsNull() || myContext.IsNull()
+        || viewportWidth == 0 || viewportHeight == 0) {
+        return false;
+    }
+    Handle(Graphic3d_Camera) previousCamera;
+    bool cameraWasMutated = false;
+    try {
+        OCC_CATCH_SIGNALS
+        // Reuse the bounded, document-authoritative extraction contract. This
+        // reads existing triangulations only and excludes gizmos/preview actors.
+        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
+        if (snapshot == nullptr
+            || (selectedObjectsOnly
+                && snapshot->selectionMode != scene::ElementKind::Object)) {
+            return false;
+        }
+        Bnd_Box bounds;
+        for (const auto& instance : snapshot->instances) {
+            if (!instance.visible || instance.role != scene::RenderRole::Model
+                || (selectedObjectsOnly && !instance.selected)) {
+                continue;
+            }
+            if (instance.meshIndex >= snapshot->meshes.size()) { return false; }
+            const auto& local = snapshot->meshes[instance.meshIndex].localBounds;
+            if (!local.valid) { return false; }
+            const auto& m = instance.worldFromObject.values;
+            for (const double x : {local.minimum.x, local.maximum.x}) {
+                for (const double y : {local.minimum.y, local.maximum.y}) {
+                    for (const double z : {local.minimum.z, local.maximum.z}) {
+                        const double wx = m[0]*x + m[4]*y + m[8]*z + m[12];
+                        const double wy = m[1]*x + m[5]*y + m[9]*z + m[13];
+                        const double wz = m[2]*x + m[6]*y + m[10]*z + m[14];
+                        if (!std::isfinite(wx) || !std::isfinite(wy)
+                            || !std::isfinite(wz)) { return false; }
+                        bounds.Add(gp_Pnt(wx, wy, wz));
+                    }
+                }
+            }
+        }
+        if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
+        previousCamera = new Graphic3d_Camera(myView->Camera());
+        cameraWasMutated = true;
+        myView->FitAll(bounds, 0.15, Standard_False);
+        myView->ZFitAll();
+        const auto& camera = myView->Camera();
+        const gp_Pnt eye = camera->Eye();
+        const gp_Pnt center = camera->Center();
+        const gp_Dir up = camera->Up();
+        for (const double value : {eye.X(), eye.Y(), eye.Z(),
+                                   center.X(), center.Y(), center.Z(),
+                                   up.X(), up.Y(), up.Z(), camera->Scale(),
+                                   camera->Distance(), camera->ZNear(),
+                                   camera->ZFar()}) {
+            if (!std::isfinite(value)) {
+                myView->Camera()->Copy(previousCamera);
+                return false;
+            }
+        }
+        if (camera->Scale() <= 0.0 || camera->Distance() <= 0.0
+            || camera->ZFar() <= camera->ZNear()) {
+            myView->Camera()->Copy(previousCamera);
+            return false;
+        }
+        return true;
+    } catch (...) {
+        if (cameraWasMutated && !previousCamera.IsNull()) {
+            try { myView->Camera()->Copy(previousCamera); } catch (...) {}
+        }
+        return false;
+    }
+}
+
 void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
 
         V3d_TypeOfOrientation orientation = V3d_Yneg;

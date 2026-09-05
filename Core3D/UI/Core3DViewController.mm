@@ -4481,6 +4481,28 @@ void Core3DAddDebugOrphanVisualMaterial(
     return (Core3DViewportRenderingAPI)GLController.renderingAPIVersion;
 }
 
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1.0 || size.height < 1.0
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        return NO;
+    }
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)))) {
+        return NO;
+    }
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
+}
+
 - (Core3DSceneSnapshot *)captureSceneSnapshot {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return nil;
