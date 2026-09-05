@@ -1039,7 +1039,8 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             gp_Pnt aNewPosition = anExPnts[1].Value();
             
             // apply linear snapping
-            if(snapping_linear.has_value() && myHasStartedTransformation) {
+            if (myCurrentMode == AIS_MM_Translation
+                && snapping_linear.has_value() && myHasStartedTransformation) {
                 double count = aNewPosition.Distance(myStartPick) / *snapping_linear;
                 auto v = aNewPosition.XYZ() - myStartPick.XYZ();
                 if(v.Modulus() > gp::Resolution()) {
@@ -1058,7 +1059,7 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
                         Snapping::Instance().setCurrentPosition(aNewPosition);
                     }
                 } else {
-                    return Standard_False;
+                    aNewPosition = myStartPick;
                 }
                 
                 
@@ -1073,7 +1074,13 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             }
             else if (aNewPosition.Distance (myStartPick) < Precision::Confusion())
             {
-                return Standard_False;
+                // A valid return to the start replaces the previous preview.
+                // Skipping this sample would commit the last nonzero pose.
+                if (myCurrentMode == AIS_MM_Scaling) {
+                    NonUniformScale(1.0, theCtx);
+                }
+                theTrsf = gp_Trsf();
+                return Standard_True;
             }
             
             gp_Trsf aNewTrsf;
@@ -1132,7 +1139,9 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             
             if (aNewPosition.Distance (myStartPick) < Precision::Confusion())
             {
-                return Standard_False;
+                theTrsf = gp_Trsf();
+                myPrevState = 0.0;
+                return Standard_True;
             }
             
             gp_Dir aStartAxis = aPosLoc.IsEqual (myStartPick, Precision::Confusion())
@@ -1151,7 +1160,9 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             
             if (Abs (anAngle) < Precision::Confusion())
             {
-                return Standard_False;
+                theTrsf = gp_Trsf();
+                myPrevState = 0.0;
+                return Standard_True;
             }
             
             if(snapping_angular.has_value()) {
@@ -1186,7 +1197,8 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             
             if (aNewPosition.Distance(myStartPick) < Precision::Confusion())
             {
-                return Standard_False;
+                theTrsf = gp_Trsf();
+                return Standard_True;
             }
             
             gp_Trsf aNewTrsf;
@@ -1273,6 +1285,8 @@ void Core3DManipulator::StartTransform (const Standard_Integer theX, const Stand
         return;
     }
     
+    myOldScaleFactor = 1.0;
+    myOldIndexScale = myCurrentIndex;
     gp_Trsf aTrsf;
     ObjectTransformation (theX, theY, theView, theCtx, aTrsf);
 }
@@ -1358,6 +1372,24 @@ void Core3DManipulator::NonUniformScale (const Standard_Real scaleFactor, const 
 	}
 	
 	{
+        // Restore the original TopoDS handles for an identity preview. Building
+        // a geometrically identical copy would still look like an edit to OCAF.
+        if (std::abs(scaleFactor - 1.0)
+                <= std::numeric_limits<Standard_Real>::epsilon()
+            && !mySourceShapes.empty()) {
+            for (const auto& source : mySourceShapes) {
+                const Handle(AIS_Shape) presentation =
+                    Handle(AIS_Shape)::DownCast(source.first);
+                if (!presentation.IsNull() && !source.second.IsNull()
+                    && !presentation->Shape().IsEqual(source.second)) {
+                    presentation->SetShape(source.second);
+                    theCtx->Redisplay(presentation, Standard_False);
+                }
+            }
+            myOldScaleFactor = 1.0;
+            myOldIndexScale = myCurrentIndex;
+            return;
+        }
 		if (abs(myOldScaleFactor - scaleFactor) < 1e-2f) //throttle
 			return;
 		

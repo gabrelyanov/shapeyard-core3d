@@ -524,6 +524,21 @@ namespace core3d {
 			}
 		}
 
+        bool IsAdmittedGestureTransform(const gp_Trsf& transform) noexcept {
+            for (Standard_Integer row = 1; row <= 3; ++row) {
+                for (Standard_Integer column = 1; column <= 4; ++column) {
+                    const Standard_Real value = transform.Value(row, column);
+                    if (!std::isfinite(value)
+                        || (column == 4 && std::abs(value)
+                            > limits::kMaximumModelCoordinateMagnitude)) {
+                        return false;
+                    }
+                }
+            }
+            return std::isfinite(transform.ScaleFactor())
+                && std::abs(transform.ScaleFactor())
+                    > std::numeric_limits<Standard_Real>::epsilon();
+        }
 		bool TransformDiffers(const gp_Trsf& theLeft,
 		                      const gp_Trsf& theRight) {
 			for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
@@ -2062,6 +2077,111 @@ namespace core3d {
         return false;
     }
 
+#ifdef DEBUG
+    bool ObjectInteractor::debugReplayGesture(
+        const Standard_Integer mode, const Standard_Integer axis,
+        const std::vector<Standard_Real>& values,
+        std::vector<std::array<Standard_Real, 2>>& samples) noexcept {
+        samples.clear();
+        if (mode < 0 || mode > 3 || axis < 0 || axis > 2
+            || values.size() < 2 || values.size() > 32
+            || _manipulator.IsNull() || !_manipulator->IsAttached()
+            || myView.IsNull() || myContext.IsNull()
+            || isManipulatorGestureActive() || hasUnresolvedDuplicate()) {
+            return false;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            const AIS_ManipulatorMode modes[] = {
+                AIS_MM_Translation, AIS_MM_Rotation,
+                AIS_MM_ScalingUniform, AIS_MM_Scaling};
+            const gp_Ax2 position = _manipulator->Position();
+            const gp_Dir directions[] = {
+                position.XDirection(), position.YDirection(), position.Direction()};
+            // Fixed orthographic projection avoids device-pixel-dependent hit
+            // detection. Every gesture sample still runs ConvertWithProj and
+            // the production manipulator math, snapping, and commit path.
+            myView->Camera()->SetProjectionType(
+                Graphic3d_Camera::Projection_Orthographic);
+            // SetAt/SetCenter changes direction relative to the previous eye;
+            // setting it after SetProj makes the first replay differ from one
+            // after Undo. Define the complete orientation together so each
+            // replay projects identical world samples onto identical pixels.
+            myView->Camera()->SetEyeAndCenter(
+                position.Location().Translated(gp_Vec(400.0, 400.0, 400.0)),
+                position.Location());
+            myView->Camera()->SetUp(gp_Dir(-1.0, -1.0, 2.0));
+            myView->Camera()->SetScale(400.0);
+            myView->Redraw();
+            std::vector<std::array<Standard_Integer, 2>> points;
+            for (const Standard_Real value : values) {
+                if (!std::isfinite(value) || std::abs(value) > 1.0e6
+                    || (mode >= 2 && value <= 0.0)) {
+                    return false;
+                }
+                gp_Pnt point = position.Location();
+                if (mode == 1) {
+                    point.Translate(gp_Vec(directions[(axis + 1) % 3]) * 100.0);
+                    gp_Trsf rotation;
+                    rotation.SetRotation(gp_Ax1(position.Location(), directions[axis]),
+                        value * M_PI / 180.0);
+                    point.Transform(rotation);
+                } else {
+                    point.Translate(gp_Vec(directions[axis])
+                        * (mode >= 2 ? 100.0 * value : 100.0 + value));
+                }
+                Standard_Integer x = 0, y = 0;
+                myView->Convert(point.X(), point.Y(), point.Z(), x, y);
+                points.push_back({x, y});
+            }
+            if (!_manipulator->DebugActivateGesture(modes[mode], axis)) {
+                return false;
+            }
+            _manipulator->StartTransform(
+                points.front()[0], points.front()[1], myView, myContext);
+            _manipulatorGestureActive = _manipulator->HasActiveTransformation();
+            if (!_manipulatorGestureActive) {
+                cancelInteraction();
+                return false;
+            }
+            for (std::size_t index = 1; index < points.size(); ++index) {
+                if (!transformManipulator(points[index][0], points[index][1])) {
+                    cancelInteraction();
+                    samples.clear();
+                    return false;
+                }
+                std::array<Standard_Real, 2> sample = {0.0, 0.0};
+                const auto objects = _manipulator->Objects();
+                Standard_Integer objectIndex = 1;
+                for (Core3DManipulatorObjectSequence::Iterator object(*objects);
+                     object.More(); object.Next(), ++objectIndex) {
+                    const gp_Trsf current = object.Value()->LocalTransformation();
+                    const gp_Trsf initial = _manipulator->StartTransformation(objectIndex);
+                    for (Standard_Integer row = 1; row <= 3; ++row) {
+                        for (Standard_Integer column = 1; column <= 4; ++column) {
+                            sample[0] = std::max(sample[0], std::abs(
+                                current.Value(row, column) - initial.Value(row, column)));
+                        }
+                    }
+                    const auto source = _manipulator->cachedShapes().find(object.Value());
+                    const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object.Value());
+                    if (source != _manipulator->cachedShapes().end()
+                        && !shape.IsNull() && !shape->Shape().IsEqual(source->second)) {
+                        sample[1] += 1.0;
+                    }
+                }
+                samples.push_back(sample);
+            }
+            finishInteraction();
+            return true;
+        } catch (...) {
+            try { cancelInteraction(); } catch (...) {}
+            samples.clear();
+            return false;
+        }
+    }
+#endif
+
     void ObjectInteractor::finishInteraction() {
 		if (hasUnresolvedDuplicate()) {
 			_manipulatorGestureActive = false;
@@ -2182,6 +2302,8 @@ namespace core3d {
 					|| (currentLabel.IsNull() && isSourceShapeCurrent)
 					|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
 					|| !IsObjectModelingRepresentation(representation)
+					|| !IsAdmittedGestureTransform(
+						presentation->LocalTransformation())
 					|| (_manipulatorType
 							== PrimitiveManipulatorType::PrimitiveGizmoTypeScale
 						&& !IsBRepModelingRepresentation(
@@ -2209,6 +2331,25 @@ namespace core3d {
 					}
 					myDoc->SaveObjectTransform(change.second, change.first);
 				}
+                // All candidates were admitted before the first write. Check
+                // the serialized values and reference-axis bounds while the
+                // batch can still be aborted without consuming undo history.
+                for (const auto& change : changes) {
+                    gp_Trsf storedTransform;
+                    gp_Ax1 referenceAxis;
+                    const TopoDS_Shape storedShape =
+                        XCAFDoc_ShapeTool::GetShape(change.second);
+                    if (!myDoc->TryObjectTransformForLabel(
+                            change.second, storedTransform)
+                        || TransformDiffers(storedTransform,
+                            change.first->LocalTransformation())
+                        || storedShape.IsNull()
+                        || !myDoc->ResolveReferenceAxisInWorld(
+                            change.second, storedShape.Location(), referenceAxis)) {
+                        throw Standard_Failure(
+                            "Gesture transform exceeds persisted document limits");
+                    }
+                }
 				if (!doc->CommitCommand()) {
 					if (doc->HasOpenCommand()) { doc->AbortCommand(); }
 					cancelInteraction();

@@ -758,6 +758,14 @@ typedef struct {
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit;
 //! Authoritative OCAF history depth for migration/transaction assertions.
 - (NSInteger)debugDocumentUndoCount;
+//! Deterministic projected gestures through the production transform/commit
+//! path, replacing only handle hit detection. 0 Move, 1 Rotate, 2 uniform
+//! Scale, 3 axis Scale. Values begin at offset/degrees 0 or scale factor 1.
+//! Each returned sample contains transformDelta and changedShapeCount.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values
+    NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:));
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 //! Lower the selected-object admission cap for aggregate texture-authoring

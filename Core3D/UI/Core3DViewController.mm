@@ -2748,6 +2748,38 @@ void Core3DAddDebugOrphanVisualMaterial(
         : static_cast<NSInteger>(document->GetAvailableUndos());
 }
 
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values {
+    if (![NSThread isMainThread] || mode < 0 || mode > 3 || axis < 0 || axis > 2
+        || values.count < 2 || values.count > 32 || GLController.viewer == nullptr) {
+        return nil;
+    }
+    [self setGizmoType:mode >= 2 ? PrimitiveGizmoTypeScale : PrimitiveGizmoTypeMoveRotate];
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr) { return nil; }
+    std::vector<Standard_Real> samples;
+    for (NSNumber *value in values) {
+        if (![value isKindOfClass:NSNumber.class]) { return nil; }
+        samples.push_back(value.doubleValue);
+    }
+    std::vector<std::array<Standard_Real, 2>> observed;
+    if (!interactor->debugReplayGesture(
+            static_cast<Standard_Integer>(mode), static_cast<Standard_Integer>(axis),
+            samples, observed)) {
+        return nil;
+    }
+    NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *result =
+        [NSMutableArray arrayWithCapacity:observed.size()];
+    for (const auto& sample : observed) {
+        [result addObject:@{
+            @"transformDelta": @(sample[0]),
+            @"changedShapeCount": @(sample[1]),
+        }];
+    }
+    return result;
+}
+
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit {
     auto document = GLController.viewer->getDocument()->ChangeDocument();
     Standard_Real metersPerUnit = 0.0;

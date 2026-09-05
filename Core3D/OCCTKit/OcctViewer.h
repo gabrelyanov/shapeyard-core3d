@@ -112,6 +112,8 @@ protected:
     //! Display every leaf occurrence below a root as an independent AIS
     //! presentation. XCAFPrs_DocumentExplorer supplies the resolved inherited
     //! style and the accumulated occurrence location for each leaf.
+    //! False means presentation failed, including resource limits and driver
+    //! exceptions; it is not evidence that persisted document bytes are invalid.
     bool displayWithChildren (const Handle(TDocStd_Document)& theDocument,
                               const TDF_Label&                theLabel,
                               const XCAFPrs_Style&            theDefaultStyle);

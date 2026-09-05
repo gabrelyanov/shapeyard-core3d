@@ -278,6 +278,22 @@ public: //! @name Setters for parameters
 
   Standard_Integer ActiveAxisIndex() const { return myCurrentIndex; }
 
+#ifdef DEBUG
+  //! Replace only hit detection in deterministic gesture regressions. The
+  //! caller still uses StartTransform, projected-point Transform, and Stop.
+  Standard_Boolean DebugActivateGesture(
+      const AIS_ManipulatorMode mode, const Standard_Integer axis) {
+    if (!IsAttached() || myHasStartedTransformation || axis < 0 || axis > 2
+        || (mode != AIS_MM_Translation && mode != AIS_MM_Rotation
+            && mode != AIS_MM_Scaling && mode != AIS_MM_ScalingUniform)) {
+      return Standard_False;
+    }
+    myCurrentMode = mode;
+    myCurrentIndex = axis;
+    return Standard_True;
+  }
+#endif
+
   //! @return poition of manipulator interactive object.
   const gp_Ax2& Position() const { return myPosition; }
 

@@ -16,6 +16,7 @@
 #include "RadialArrayOperationController.hpp"
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -130,6 +131,15 @@ namespace core3d {
         bool startTransformManipulator(int theX, int theY);
         void finishInteraction();
         void cancelInteraction();
+#ifdef DEBUG
+        //! Mode 0 Move, 1 Rotate, 2 uniform Scale, 3 axis Scale. Values are
+        //! model-unit offsets, degrees, or scale factors; the first is start.
+        //! Samples report maximum transform delta and changed-shape count.
+        bool debugReplayGesture(
+            Standard_Integer mode, Standard_Integer axis,
+            const std::vector<Standard_Real>& values,
+            std::vector<std::array<Standard_Real, 2>>& samples) noexcept;
+#endif
         void setManipulatorType(PrimitiveManipulatorType type);
 		Handle(TopLoc_Datum3D) manipulatorTransform();
 		gp_XYZ manipulatorPosition();

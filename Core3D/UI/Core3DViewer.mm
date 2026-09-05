@@ -2251,7 +2251,12 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         if (traverseDocument(candidate)) {
 			restorePreviousState();
 			CloseDocumentNoThrow(app, candidate);
-			return AssetImportResult::InvalidData;
+			// Both isolated and live document validation have succeeded. This
+			// failure belongs to presentation: display budgets, AIS allocation,
+			// or graphics-driver errors can all make traversal fail. Reporting
+			// InvalidData here would authorize the app to promote an older saved
+			// revision and delete this valid one. Preserve it for a later retry.
+			return AssetImportResult::InternalFailure;
 		}
         myContext->UpdateCurrentViewer();
 
