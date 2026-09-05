@@ -843,6 +843,9 @@ typedef struct {
 //! A solid with 96 occurrences of one shared shell. Unique topology is tiny,
 //! while occurrence topology exceeds Bevel's synchronous source cap.
 - (NSData *_Nullable)debugOccurrenceAmplifiedBevelSolidBinXCAFFixtureData;
+//! Metadata-only fixture inspection (maximum 256 free roots). This does not
+//! require renderer triangulations or weaken topology admission.
+- (NSArray<NSString *> *_Nullable)debugFreeShapeEntityIdentifiers;
 //! Lower the display traversal ceiling for bounded aggregate-budget tests.
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
 //! Lower the leaf-presentation ceiling for all-or-nothing admission tests.

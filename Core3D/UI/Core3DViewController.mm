@@ -3798,6 +3798,36 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController debugSetSelectionModeVerificationFailureCount:count];
 }
 
+- (NSArray<NSString *> *_Nullable)debugFreeShapeEntityIdentifiers {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) { return nil; }
+        const auto transaction = document->ChangeDocument();
+        if (transaction.IsNull() || transaction->HasOpenCommand()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(transaction->Main())) { return nil; }
+        const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(transaction->Main());
+        if (shapeTool.IsNull()) { return nil; }
+        TDF_LabelSequence labels;
+        shapeTool->GetFreeShapes(labels);
+        if (labels.Length() > 256) { return nil; }
+        NSMutableArray<NSString *> *identifiers = [NSMutableArray array];
+        std::unordered_set<std::string> unique;
+        for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+            const auto identifier = document->EntityIdentifierForLabel(labels.Value(index));
+            if (identifier.empty() || identifier.size() > 128
+                || !unique.insert(identifier).second) { return nil; }
+            NSString *value = [[NSString alloc] initWithBytes:identifier.data()
+                length:identifier.size() encoding:NSUTF8StringEncoding];
+            if (value == nil) { return nil; }
+            [identifiers addObject:value];
+        }
+        return [identifiers copy];
+    } catch (...) { return nil; }
+}
+
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit {
     [GLController debugSetMaximumDisplayTraversalNodes:limit];
 }
