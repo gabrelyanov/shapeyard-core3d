@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
                       packageRootURL:(NSURL *)packageRootURL
                           cleanupURL:(NSURL *)cleanupURL
                           exportType:(ExportType)exportType
+           selectedEntityIdentifiers:(NSArray<NSString *> *_Nullable)selectedEntityIdentifiers
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle

@@ -8,12 +8,14 @@
 #import <Foundation/Foundation.h>
 #import "GLViewController.h"
 #import "../Export/Core3DNativeExportOperation+Private.h"
+#import "../Viewport/Core3DSceneSnapshot.h"
 #import <Core3D/Core3DViewController+AvailabilityManager.h>
 #import <Core3D/Core3DViewController+ExportManager.h>
 
 #include "GLViewController+Trick.h"
 #include <Prs3d_Drawer.hxx>
 #include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -46,6 +48,51 @@ bool CanCaptureCommittedExport(
         && !shapeInteractor->hasUnresolvedShell();
 }
 
+// Derive scope from one committed publication, before creating any private
+// files. A missing or inconsistent selected item cannot widen the export.
+NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot) {
+    constexpr NSUInteger maximumItems = 50'000;
+    constexpr NSUInteger maximumIdentifierBytes = 128;
+    if (snapshot == nil
+        || snapshot.selectionMode != Core3DSceneElementKindObject
+        || snapshot.selection.selectedElements.count == 0
+        || snapshot.selection.selectedElements.count > maximumItems
+        || snapshot.renderItems.count > maximumItems) {
+        return nil;
+    }
+    NSMutableSet<NSString *> *selected = [NSMutableSet set];
+    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
+    for (Core3DSceneElementIdentifier *element in snapshot.selection.selectedElements) {
+        NSString *identifier = element.entityIdentifier;
+        NSData *bytes = [identifier dataUsingEncoding:NSUTF8StringEncoding
+                                allowLossyConversion:NO];
+        if (element.kind != Core3DSceneElementKindObject
+            || element.topologyIndex != 0
+            || bytes.length == 0 || bytes.length > maximumIdentifierBytes
+            || memchr(bytes.bytes, 0, bytes.length) != nullptr
+            || [selected containsObject:identifier]) {
+            return nil;
+        }
+        [selected addObject:identifier];
+        [ordered addObject:identifier];
+    }
+    NSMutableSet<NSString *> *matched = [NSMutableSet set];
+    for (Core3DSceneRenderItemSnapshot *item in snapshot.renderItems) {
+        if (item.renderRole != Core3DSceneRenderRoleModel
+            || item.coordinateSpace != Core3DSceneCoordinateSpaceWorld
+            || item.renderStyle != Core3DSceneRenderStyleShaded
+            || ![selected containsObject:item.entityIdentifier]) {
+            continue;
+        }
+        if (!item.isVisible || !item.isSelected
+            || [matched containsObject:item.entityIdentifier]) {
+            return nil;
+        }
+        [matched addObject:item.entityIdentifier];
+    }
+    return [matched isEqualToSet:selected] ? [ordered copy] : nil;
+}
+
 } // namespace
 
 @implementation Core3DViewController (ExportManager)
@@ -59,7 +106,14 @@ bool CanCaptureCommittedExport(
 
 - (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
     (ExportType)exportType {
-    if (![NSThread isMainThread]
+    return [self prepareNativeExportOperationWithType:exportType
+                                 selectedObjectsOnly:NO];
+}
+
+- (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
+    (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly {
+    if ((selectedObjectsOnly && exportType != ExportTypeStl)
+        || ![NSThread isMainThread]
         || (exportType != ExportTypeObj
             && exportType != ExportTypeStl
             && exportType != ExportTypeStep)
@@ -80,6 +134,15 @@ bool CanCaptureCommittedExport(
             || (![self canExportType:exportType]
                 && !document->IsGeometryDocumentEmpty())) {
             return nil;
+        }
+
+        NSArray<NSString *> *selectedIdentifiers = nil;
+        if (selectedObjectsOnly) {
+            selectedIdentifiers = CaptureSelectedSTLIdentifiers(
+                [self captureExportSceneSnapshot]);
+            if (selectedIdentifiers == nil) {
+                return nil;
+            }
         }
 
         Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
@@ -191,6 +254,7 @@ bool CanCaptureCommittedExport(
                 packageRootURL:packageRoot
                 cleanupURL:cleanupRoot
                 exportType:exportType
+                selectedEntityIdentifiers:selectedIdentifiers
                 deflectionType:static_cast<NSInteger>(deflectionType)
                 deviationCoefficient:deviationCoefficient
                 deviationAngle:deviationAngle

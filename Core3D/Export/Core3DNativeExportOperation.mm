@@ -80,6 +80,8 @@ struct NativeExportState {
     std::string cleanupPath;
     std::string primaryPath;
     ExportType exportType = ExportTypeObj;
+    bool usesSelectedRoots = false;
+    std::set<std::string> selectedEntityIdentifiers;
     Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
     Standard_Real deviationCoefficient = 0.001;
     Standard_Real deviationAngle = 20.0 * M_PI / 180.0;
@@ -1268,13 +1270,33 @@ NativeExportResult RunNativeExport(
                 "There is no committed geometry to export.");
         }
         TDF_LabelSequence rootLabels;
+        std::set<std::string> matchedSelectedIdentifiers;
         for (Standard_Integer index = 1;
              index <= freeLabels.Length();
              ++index) {
             ThrowIfCancelled(state);
-            if (!shapeTool->GetShape(freeLabels.Value(index)).IsNull()) {
-                rootLabels.Append(freeLabels.Value(index));
+            const TDF_Label& label = freeLabels.Value(index);
+            if (shapeTool->GetShape(label).IsNull()) {
+                continue;
             }
+            if (state->usesSelectedRoots) {
+                const std::string identifier = document->EntityIdentifierForLabel(label);
+                if (state->selectedEntityIdentifiers.count(identifier) == 0) {
+                    continue;
+                }
+                if (!matchedSelectedIdentifiers.insert(identifier).second) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInvalidState,
+                        "A selected export identity matches more than one object.");
+                }
+            }
+            rootLabels.Append(label);
+        }
+        if (state->usesSelectedRoots
+            && matchedSelectedIdentifiers != state->selectedEntityIdentifiers) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorInvalidState,
+                "The private document does not contain the exact selected objects.");
         }
         if (rootLabels.IsEmpty()) {
             throw NativeExportFailure(
@@ -1501,6 +1523,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
                       packageRootURL:(NSURL *)packageRootURL
                           cleanupURL:(NSURL *)cleanupURL
                           exportType:(ExportType)exportType
+           selectedEntityIdentifiers:(NSArray<NSString *> *)selectedEntityIdentifiers
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle
@@ -1527,6 +1550,27 @@ NSString *ErrorDescription(const NativeExportResult& result) {
         return nil;
     }
 
+    std::set<std::string> selectedIdentifiers;
+    if (selectedEntityIdentifiers != nil) {
+        if (exportType != ExportTypeStl
+            || selectedEntityIdentifiers.count == 0
+            || selectedEntityIdentifiers.count > 50'000) {
+            return nil;
+        }
+        for (NSString *identifier in selectedEntityIdentifiers) {
+            NSData *bytes = [identifier dataUsingEncoding:NSUTF8StringEncoding
+                                    allowLossyConversion:NO];
+            if (bytes.length == 0 || bytes.length > 128
+                || memchr(bytes.bytes, 0, bytes.length) != nullptr) {
+                return nil;
+            }
+            const std::string value(static_cast<const char *>(bytes.bytes), bytes.length);
+            if (!selectedIdentifiers.insert(value).second) {
+                return nil;
+            }
+        }
+    }
+
     const char *snapshotPath = snapshotURL.path.UTF8String;
     const char *snapshotCleanupPath = snapshotCleanupURL.path.UTF8String;
     const char *packageRootPath = packageRootURL.path.UTF8String;
@@ -1544,6 +1588,8 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->packageRootPath = packageRootPath;
     _state->cleanupPath = cleanupPath;
     _state->exportType = exportType;
+    _state->usesSelectedRoots = selectedEntityIdentifiers != nil;
+    _state->selectedEntityIdentifiers = std::move(selectedIdentifiers);
     const char *primaryFilename = exportType == ExportTypeStl
         ? "model.stl"
         : (exportType == ExportTypeStep ? "model.step" : "model.obj");

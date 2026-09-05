@@ -380,6 +380,13 @@ typedef struct {
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
+//! Freeze the current visible whole-object selection for binary STL export.
+//! Other selected formats, empty/subshape selections and unresolved object
+//! identities reject. NO preserves the existing all-document behavior.
+- (Core3DNativeExportOperation *_Nullable)
+    prepareNativeExportOperationWithType:(ExportType)exportType
+                    selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:));
 //! Capture only committed exportable geometry. Unlike the presentation
 //! snapshot seam, this returns nil while a Boolean, Mirror, Linear Array,
 //! Radial Array, or Shell trial is active or unresolved, or while the OCAF
