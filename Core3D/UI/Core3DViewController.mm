@@ -4509,8 +4509,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (entity == nullptr || publication == nullptr) { return NO; }
     try {
         core3d::ObjectFrameIdentity identity;
-        identity.entityIdentifier = entity;
-        identity.publicationSourceIdentifier = publication;
+        identity.entityIdentifier.assign(entity,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
         return [self frameCommittedSceneSelectedOnly:NO rect:rect objectIdentity:&identity];
