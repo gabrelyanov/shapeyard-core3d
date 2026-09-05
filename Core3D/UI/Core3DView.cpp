@@ -107,12 +107,8 @@ void Core3DView::OrientedRotate(const Standard_Real ax, const Standard_Real ay, 
     
     Handle(Graphic3d_Camera) aCamera = Camera();
 	
-    if (aCamera->ProjectionType() != Graphic3d_Camera::Projection_Perspective) {
-		aCamera->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
-		aCamera->InvalidateProjection();
-		aCamera->InvalidateOrientation();
-		FitAll(0.2, Standard_False);
-    }
+    // Orbit preserves the chosen projection and framing. Switching between
+    // parallel and perspective views belongs to the explicit View controls.
 
     if (Start)
     {

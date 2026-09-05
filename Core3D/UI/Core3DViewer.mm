@@ -2573,6 +2573,52 @@ bool Core3DViewer::frameModel(
     }
 }
 
+bool Core3DViewer::setCameraOrthographic(const bool orthographic) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit()
+        || myView.IsNull() || myContext.IsNull()) { return false; }
+    Handle(Graphic3d_Camera) previous;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto camera = myView->Camera();
+        if (camera.IsNull()) { return false; }
+        const auto projection = orthographic
+            ? Graphic3d_Camera::Projection_Orthographic
+            : Graphic3d_Camera::Projection_Perspective;
+        if (camera->ProjectionType() == projection) { return true; }
+        const double scale = camera->Scale();
+        if (!std::isfinite(scale) || scale <= 0.0) { return false; }
+        previous = new Graphic3d_Camera(camera);
+        camera->SetProjectionType(projection);
+        // OCCT interprets perspective scale as distance and orthographic scale
+        // as view height. Preserve the same apparent size at the target plane.
+        camera->SetScale(scale);
+        camera->SetCenter(previous->Center());
+        myView->ZFitAll();
+        const auto eye = camera->Eye();
+        const auto center = camera->Center();
+        for (const double value : {camera->Scale(), camera->Distance(),
+                camera->ZNear(), camera->ZFar(), eye.X(), eye.Y(), eye.Z(),
+                center.X(), center.Y(), center.Z()}) {
+            if (!std::isfinite(value)) {
+                camera->Copy(previous);
+                return false;
+            }
+        }
+        if (camera->Scale() <= 0.0 || camera->Distance() <= 0.0
+            || camera->ZFar() <= camera->ZNear()
+            || (!orthographic && camera->ZNear() <= 0.0)) {
+            camera->Copy(previous);
+            return false;
+        }
+        return true;
+    } catch (...) {
+        if (!previous.IsNull()) {
+            try { myView->Camera()->Copy(previous); } catch (...) {}
+        }
+        return false;
+    }
+}
+
 void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
 
         V3d_TypeOfOrientation orientation = V3d_Yneg;

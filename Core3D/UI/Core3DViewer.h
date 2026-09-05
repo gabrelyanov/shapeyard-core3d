@@ -139,6 +139,9 @@ namespace core3d {
             transformInspectorMeasurementPerformanceState() const noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
+        //! Change projection while retaining target, direction and apparent
+        //! scale at the target plane. Never opens an OCAF command.
+        bool setCameraOrthographic(bool orthographic) noexcept;
         //! Camera-only framing from validated committed scene bounds. Selected
         //! framing requires Object mode. No meshing, OCAF command, or selection
         //! mutation is performed. Failure preserves the previous camera.

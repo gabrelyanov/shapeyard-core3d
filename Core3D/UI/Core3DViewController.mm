@@ -4484,6 +4484,15 @@ void Core3DAddDebugOrphanVisualMaterial(
     return (Core3DViewportRenderingAPI)GLController.renderingAPIVersion;
 }
 
+- (BOOL)setCameraOrthographic:(BOOL)orthographic {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) { return NO; }
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || !viewer->setCameraOrthographic(orthographic)) { return NO; }
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
+}
+
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly {
     return [self frameModelWithSelectedObjectsOnly:selectedObjectsOnly
                            normalizedViewportRect:CGRectMake(0, 0, 1, 1)];

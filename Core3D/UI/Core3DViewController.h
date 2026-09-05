@@ -457,6 +457,10 @@ typedef struct {
 //! committed Shell result remains indeterminate, or before the native viewer
 //! has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
+//! Change camera projection without changing target-plane scale or the model.
+//! Returns NO when the viewer is unavailable or a modeling operation is active.
+- (BOOL)setCameraOrthographic:(BOOL)orthographic
+    NS_SWIFT_NAME(setCameraProjection(orthographic:));
 //! Frame visible committed objects without changing geometry or undo history.
 //! Selected-only framing requires Object mode and a nonempty selection.
 //! Returns NO when unavailable; the previous camera is retained.
