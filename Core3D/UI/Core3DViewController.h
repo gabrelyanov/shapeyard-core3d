@@ -467,6 +467,13 @@ typedef struct {
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
                 normalizedViewportRect:(CGRect)normalizedViewportRect
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:));
+//! Focus one visible model occurrence without selecting it. The expected
+//! publication stream, document generation and model revision must still match.
+//! Camera/selection-only changes do not invalidate this read-only request.
+- (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
+                             expected:(Core3DSceneSnapshot *)expected
+               normalizedViewportRect:(CGRect)normalizedViewportRect
+    NS_SWIFT_NAME(frameObject(entityIdentifier:expected:normalizedViewportRect:));
 
 //! Capture the current semantic camera and revision vector without traversing
 //! or copying scene geometry. Returns nil until a full snapshot has established

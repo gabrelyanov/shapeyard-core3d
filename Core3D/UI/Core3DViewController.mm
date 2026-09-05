@@ -698,6 +698,9 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)core3d_canBeginCommittedEdit;
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity;
 
 @end
 
@@ -4488,6 +4491,35 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
                 normalizedViewportRect:(CGRect)rect {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly
+                                           rect:rect objectIdentity:nullptr];
+}
+
+- (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
+                             expected:(Core3DSceneSnapshot *)expected
+               normalizedViewportRect:(CGRect)rect {
+    if (![NSThread isMainThread] || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || expected == nil
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        return NO;
+    }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return NO; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier = entity;
+        identity.publicationSourceIdentifier = publication;
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        return [self frameCommittedSceneSelectedOnly:NO rect:rect objectIdentity:&identity];
+    } catch (...) { return NO; }
+}
+
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return NO;
     }
@@ -4502,7 +4534,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
             static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)),
-            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)) {
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity)) {
         return NO;
     }
     [GLController requestRender];

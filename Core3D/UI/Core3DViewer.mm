@@ -2432,7 +2432,8 @@ bool Core3DViewer::frameModel(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight,
     const double targetX, const double targetY,
-    const double targetWidth, const double targetHeight) noexcept {
+    const double targetWidth, const double targetHeight,
+    const ObjectFrameIdentity* objectIdentity) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -2458,10 +2459,21 @@ bool Core3DViewer::frameModel(
                 && snapshot->selectionMode != scene::ElementKind::Object)) {
             return false;
         }
+        if (objectIdentity != nullptr
+            && (selectedObjectsOnly || objectIdentity->entityIdentifier.empty()
+                || objectIdentity->publicationSourceIdentifier
+                    != snapshot->publicationSourceIdentifier
+                || objectIdentity->documentGeneration
+                    != snapshot->revisions.documentGeneration
+                || objectIdentity->modelRevision != snapshot->revisions.model)) {
+            return false;
+        }
         Bnd_Box bounds;
         for (const auto& instance : snapshot->instances) {
             if (!instance.visible || instance.role != scene::RenderRole::Model
-                || (selectedObjectsOnly && !instance.selected)) {
+                || (selectedObjectsOnly && !instance.selected)
+                || (objectIdentity != nullptr && instance.entityIdentifier
+                    != objectIdentity->entityIdentifier)) {
                 continue;
             }
             if (instance.meshIndex >= snapshot->meshes.size()) { return false; }

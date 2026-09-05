@@ -32,6 +32,13 @@ namespace core3d {
         InternalFailure,
     };
 
+    struct ObjectFrameIdentity {
+        std::string entityIdentifier;
+        std::string publicationSourceIdentifier;
+        std::uint64_t documentGeneration = 0;
+        std::uint64_t modelRevision = 0;
+    };
+
     class Core3DViewer: public OcctViewer {
     public:
         static constexpr selection_t kSelectionTypeNone = 0;
@@ -138,7 +145,8 @@ namespace core3d {
         bool frameModel(bool selectedObjectsOnly, std::uint32_t viewportWidth,
                         std::uint32_t viewportHeight,
                         double targetX = 0.0, double targetY = 0.0,
-                        double targetWidth = 1.0, double targetHeight = 1.0) noexcept;
+                        double targetWidth = 1.0, double targetHeight = 1.0,
+                        const ObjectFrameIdentity* objectIdentity = nullptr) noexcept;
 
         //! Capture committed OCAF geometry and semantic camera state into
         //! immutable renderer-neutral values. Main-thread only.
