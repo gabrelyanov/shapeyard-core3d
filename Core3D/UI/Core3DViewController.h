@@ -462,6 +462,11 @@ typedef struct {
 //! Returns NO when unavailable; the previous camera is retained.
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:));
+//! As above, fitting a finite nonempty rectangle within [0,1] x [0,1].
+//! The target uses a top-left origin in the complete drawable viewport.
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)normalizedViewportRect
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:));
 
 //! Capture the current semantic camera and revision vector without traversing
 //! or copying scene geometry. Returns nil until a full snapshot has established

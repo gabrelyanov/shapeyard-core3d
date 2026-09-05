@@ -2430,7 +2430,17 @@ void Core3DViewer::showGrid(bool show) {
 bool Core3DViewer::frameModel(
     const bool selectedObjectsOnly,
     const std::uint32_t viewportWidth,
-    const std::uint32_t viewportHeight) noexcept {
+    const std::uint32_t viewportHeight,
+    const double targetX, const double targetY,
+    const double targetWidth, const double targetHeight) noexcept {
+    // Target coordinates are normalized to the full viewport, origin top-left.
+    if (!std::isfinite(targetX) || !std::isfinite(targetY)
+        || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
+        || targetX < 0.0 || targetY < 0.0
+        || targetWidth <= 0.0 || targetHeight <= 0.0
+        || targetX + targetWidth > 1.0 || targetY + targetHeight > 1.0) {
+        return false;
+    }
     if (![NSThread isMainThread] || !canBeginCommittedEdit()
         || myView.IsNull() || myContext.IsNull()
         || viewportWidth == 0 || viewportHeight == 0) {
@@ -2475,8 +2485,55 @@ bool Core3DViewer::frameModel(
         previousCamera = new Graphic3d_Camera(myView->Camera());
         cameraWasMutated = true;
         myView->FitAll(bounds, 0.15, Standard_False);
-        myView->ZFitAll();
         const auto& camera = myView->Camera();
+        if (targetX != 0.0 || targetY != 0.0
+            || targetWidth != 1.0 || targetHeight != 1.0) {
+            // Keep projection, aspect and orientation intact. First shrink the
+            // full-view fit, then translate the camera parallel to its image
+            // plane. Verify every bounding-box corner after perspective divide:
+            // deep geometry must fit as well as the center plane.
+            Standard_Real minX, minY, minZ, maxX, maxY, maxZ;
+            bounds.Get(minX, minY, minZ, maxX, maxY, maxZ);
+            const gp_Pnt worldCenter((minX + maxX) * 0.5,
+                                     (minY + maxY) * 0.5,
+                                     (minZ + maxZ) * 0.5);
+            const double left = 2.0 * targetX - 1.0;
+            const double right = 2.0 * (targetX + targetWidth) - 1.0;
+            const double bottom = 1.0 - 2.0 * (targetY + targetHeight);
+            const double top = 1.0 - 2.0 * targetY;
+            camera->SetScale(camera->Scale() / std::min(targetWidth, targetHeight));
+            bool fits = false;
+            for (int attempt = 0; attempt < 12; ++attempt) {
+                const auto projectedCenter = camera->Project(worldCenter);
+                const auto targetWorld = camera->UnProject(gp_Pnt(
+                    (left + right) * 0.5, (bottom + top) * 0.5,
+                    projectedCenter.Z()));
+                gp_Trsf shift;
+                shift.SetTranslation(gp_Vec(targetWorld, worldCenter));
+                camera->Transform(shift);
+                fits = true;
+                for (const double x : {minX, maxX}) {
+                    for (const double y : {minY, maxY}) {
+                        for (const double z : {minZ, maxZ}) {
+                            const auto point = camera->Project(gp_Pnt(x, y, z));
+                            if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
+                                || !std::isfinite(point.Z())
+                                || point.X() < left || point.X() > right
+                                || point.Y() < bottom || point.Y() > top) {
+                                fits = false;
+                            }
+                        }
+                    }
+                }
+                if (fits) { break; }
+                camera->SetScale(camera->Scale() * 1.2);
+            }
+            if (!fits) {
+                camera->Copy(previousCamera);
+                return false;
+            }
+        }
+        myView->ZFitAll();
         const gp_Pnt eye = camera->Eye();
         const gp_Pnt center = camera->Center();
         const gp_Dir up = camera->Up();

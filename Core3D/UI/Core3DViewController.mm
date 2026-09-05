@@ -4482,6 +4482,12 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly {
+    return [self frameModelWithSelectedObjectsOnly:selectedObjectsOnly
+                           normalizedViewportRect:CGRectMake(0, 0, 1, 1)];
+}
+
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return NO;
     }
@@ -4495,7 +4501,8 @@ void Core3DAddDebugOrphanVisualMaterial(
     const auto viewer = GLController.viewer;
     if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
             static_cast<std::uint32_t>(std::llround(size.width)),
-            static_cast<std::uint32_t>(std::llround(size.height)))) {
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)) {
         return NO;
     }
     [GLController requestRender];

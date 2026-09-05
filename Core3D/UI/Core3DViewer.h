@@ -136,7 +136,9 @@ namespace core3d {
         //! framing requires Object mode. No meshing, OCAF command, or selection
         //! mutation is performed. Failure preserves the previous camera.
         bool frameModel(bool selectedObjectsOnly, std::uint32_t viewportWidth,
-                        std::uint32_t viewportHeight) noexcept;
+                        std::uint32_t viewportHeight,
+                        double targetX = 0.0, double targetY = 0.0,
+                        double targetWidth = 1.0, double targetHeight = 1.0) noexcept;
 
         //! Capture committed OCAF geometry and semantic camera state into
         //! immutable renderer-neutral values. Main-thread only.
