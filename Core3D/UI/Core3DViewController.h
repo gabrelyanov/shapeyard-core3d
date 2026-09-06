@@ -561,6 +561,16 @@ typedef struct {
                           expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorUniformScale(_:expected:));
 
+//! Set one positive dimension in raw model units, measured on definition-local
+//! axes and including absolute persisted scale. Reshapes BRep around the local
+//! bounds center while preserving Position, rotation and signed uniform scale.
+//! Requires ready cached bounds and NonuniformScale capability.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDimensionValue:(double)value
+                                      axis:(Core3DTransformInspectorAxis)axis
+                          expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorDimension(_:axis:expected:));
+
 //! Release-safe counters for opt-in signed-device performance qualification.
 //! Values are observational only and never alter inspector admission policy.
 - (NSDictionary<NSString *, NSNumber *> *)

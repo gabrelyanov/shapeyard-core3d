@@ -17,6 +17,8 @@
 #include <Poly_Triangle.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <gp_GTrsf.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <StdSelect_BRepOwner.hxx>
@@ -1967,7 +1969,9 @@ TransformInspectorMeasurementController::commitPosition(
     }
     if ((theRequest.kind != TransformInspectorEditKind::Position
             && theRequest.kind != TransformInspectorEditKind::Rotation
-            && theRequest.kind != TransformInspectorEditKind::UniformScale)
+            && theRequest.kind != TransformInspectorEditKind::UniformScale
+            && theRequest.kind != TransformInspectorEditKind::Dimension)
+        || (theRequest.kind == TransformInspectorEditKind::Dimension && theRequest.value <= 0.0)
         || (theRequest.kind == TransformInspectorEditKind::UniformScale
             && (anAxis != 0 || std::abs(theRequest.value) <= Precision::Confusion()))
         || !std::isfinite(theRequest.value)
@@ -1998,6 +2002,59 @@ TransformInspectorMeasurementController::commitPosition(
         anOutcome.result =
             TransformInspectorPositionCommitResult::Stale;
         return anOutcome;
+    }
+    std::optional<gp_GTrsf> dimensionTransform;
+    TransformInspectorVector3 measuredDimensions;
+    if (theRequest.kind == TransformInspectorEditKind::Dimension) {
+        // Use the private shape/document cache, never caller-supplied extents.
+        // Validate correctable numeric errors before consuming the edit lease.
+        const auto& captured = *myImpl->positionEditContext;
+        TransformInspectorBoundsValue bounds;
+        if (!myImpl->lookup({captured.document, captured.storedShape}, bounds)) {
+            anOutcome.result = TransformInspectorPositionCommitResult::Unavailable;
+            return anOutcome;
+        }
+        const double scale = std::abs(captured.persistedTransform.uniformScale);
+        const double extents[3] = {bounds.localDimensions.x, bounds.localDimensions.y,
+                                   bounds.localDimensions.z};
+        measuredDimensions = {extents[0] * scale, extents[1] * scale, extents[2] * scale};
+        if (!std::isfinite(extents[anAxis]) || extents[anAxis] <= Precision::Confusion()) {
+            anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+            return anOutcome;
+        }
+        const double target = theRequest.value / scale;
+        const double ratio = target / extents[anAxis];
+        const double center = bounds.bounds[anAxis] * 0.5 + bounds.bounds[anAxis + 3] * 0.5;
+        if (!std::isfinite(target) || target <= Precision::Confusion()
+            || !std::isfinite(ratio) || ratio <= 0.0
+            || !std::isfinite(center)
+            || std::abs(center - target * 0.5) > limits::kMaximumModelCoordinateMagnitude
+            || std::abs(center + target * 0.5) > limits::kMaximumModelCoordinateMagnitude) {
+            anOutcome.result = TransformInspectorPositionCommitResult::InvalidValue;
+            return anOutcome;
+        }
+        // Reject ill-conditioned center/ratio combinations before they can
+        // cancel large products into an inaccurately sized small result.
+        const double offsetMagnitude = std::abs(center * (1.0 - ratio));
+        const double operandMagnitude = std::abs(ratio) * std::max(
+            std::abs(bounds.bounds[anAxis]), std::abs(bounds.bounds[anAxis + 3]));
+        const double roundingBound = 16 * std::numeric_limits<double>::epsilon()
+            * (operandMagnitude + offsetMagnitude);
+        const double roundingBudget = std::max(Precision::Confusion(), 1.0e-10 * target);
+        if (!std::isfinite(roundingBound) || roundingBound > roundingBudget) {
+            anOutcome.result = TransformInspectorPositionCommitResult::InvalidValue;
+            return anOutcome;
+        }
+        try {
+            gp_Mat matrix(1,0,0, 0,1,0, 0,0,1);
+            matrix.SetValue(static_cast<int>(anAxis) + 1, static_cast<int>(anAxis) + 1, ratio);
+            gp_XYZ offset(0, 0, 0);
+            offset.SetCoord(static_cast<int>(anAxis) + 1, center * (1.0 - ratio));
+            dimensionTransform.emplace(matrix, offset);
+        } catch (...) {
+            anOutcome.result = TransformInspectorPositionCommitResult::InvalidValue;
+            return anOutcome;
+        }
     }
     Impl::PositionEditContext anEditContext;
     try {
@@ -2139,7 +2196,7 @@ TransformInspectorMeasurementController::commitPosition(
                 aCapabilities)
             || aRepresentation != anEditContext.representation
             || aCapabilities != anEditContext.modelCapabilities
-            || (aCapabilities & (1ull << (theRequest.kind == TransformInspectorEditKind::UniformScale ? 4 : theRequest.kind == TransformInspectorEditKind::Rotation ? 3 : 2))) == 0) {
+            || (aCapabilities & (1ull << (theRequest.kind == TransformInspectorEditKind::Dimension ? 5 : theRequest.kind == TransformInspectorEditKind::UniformScale ? 4 : theRequest.kind == TransformInspectorEditKind::Rotation ? 3 : 2))) == 0) {
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unsupported;
             return anOutcome;
@@ -2169,7 +2226,8 @@ TransformInspectorMeasurementController::commitPosition(
 
         const bool rotates = theRequest.kind == TransformInspectorEditKind::Rotation;
         const bool scales = theRequest.kind == TransformInspectorEditKind::UniformScale;
-        TransformInspectorVector3 aCandidatePosition = scales
+        const bool sizes = theRequest.kind == TransformInspectorEditKind::Dimension;
+        TransformInspectorVector3 aCandidatePosition = sizes ? measuredDimensions : scales
             ? TransformInspectorVector3{aCurrentTransform.uniformScale, 0.0, 0.0}
             : rotates ? aCurrentTransform.extrinsicXYZDegrees : aCurrentTransform.position;
         double* const aCandidateComponents[3] = {
@@ -2193,7 +2251,18 @@ TransformInspectorMeasurementController::commitPosition(
         // Use the same exact persisted transform representation as the shared
         // controller, preserving its Translate basis invariant.
         gp_Trsf aCandidateTransform = exactBaseline.transform;
-        if (scales) {
+        TopoDS_Shape candidateShape = aStoredShape;
+        if (sizes) {
+            // Same affine BRep operation as axis scaling. Build from the exact
+            // captured definition around its measured local center; no extra
+            // synchronous exact-bounds sweep is needed for this diagonal map.
+            BRepBuilderAPI_GTransform builder(aStoredShape, *dimensionTransform, Standard_True);
+            if (!builder.IsDone() || builder.Shape().IsNull()) {
+                anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                return anOutcome;
+            }
+            candidateShape = builder.Shape();
+        } else if (scales) {
             // Absolute dimensionless factor; preserve the exact object origin,
             // orientation and definition-local geometry.
             aCandidateTransform.SetScaleFactor(theRequest.value);
@@ -2226,9 +2295,9 @@ TransformInspectorMeasurementController::commitPosition(
         OrdinaryTransformChange change;
         change.label = aDefinition;
         change.presentation = aPresentation;
-        change.shape = aStoredShape;
+        change.shape = candidateShape;
         change.transform = aCandidateTransform;
-        change.operation = scales ? OrdinaryTransformOperation::Scale
+        change.operation = (scales || sizes) ? OrdinaryTransformOperation::Scale
             : rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;
 #ifdef DEBUG
         const Standard_Integer fault = std::exchange(myImpl->debugPositionCommitMode, 0);

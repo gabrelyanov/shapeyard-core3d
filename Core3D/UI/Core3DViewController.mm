@@ -5371,6 +5371,14 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDimensionValue:(double)value
+                                      axis:(Core3DTransformInspectorAxis)axis
+                          expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot
+        kind:core3d::TransformInspectorEditKind::Dimension];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
     commitTransformInspectorValue:(double)value
                               axis:(Core3DTransformInspectorAxis)axis
                   expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
