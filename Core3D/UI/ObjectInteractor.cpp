@@ -2655,6 +2655,14 @@ namespace core3d {
                     || _manipulatorSourceLabels.size() != expected.size()) { return false; }
                 std::unordered_set<const AIS_InteractiveObject*> unique;
                 int index = 1;
+                if (_manipulator->HasActiveTransformation()) {
+                    for (const auto& record : ledger.records) {
+                        if (record.requested.rotationAroundPivot
+                            && (_manipulator->ActiveMode() != AIS_ManipulatorMode::AIS_MM_Rotation
+                                || !record.requested.rotationAroundPivot->pivot.IsEqual(
+                                    _manipulator->StartPosition().Location(), Precision::Confusion()))) { return false; }
+                    }
+                }
                 for (Core3DManipulatorObjectSequence::Iterator it(*attached); it.More(); it.Next(), ++index) {
                     const auto found = expected.find(it.Value().get());
                     const auto cached = _manipulator->cachedShapes().find(it.Value());

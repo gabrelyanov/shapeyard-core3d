@@ -238,6 +238,9 @@ public:
 
   Standard_Boolean HasActiveTransformation() const { return myHasStartedTransformation; }
 
+  //! Captured gesture anchor; meaningful only while HasActiveTransformation().
+  const gp_Ax2& StartPosition() const { return myStartPosition; }
+
   gp_Trsf StartTransformation() const { return !myStartTrsfs.IsEmpty() ? myStartTrsfs.First() : gp_Trsf(); }
 
   gp_Trsf StartTransformation (Standard_Integer theIndex) const

@@ -2557,6 +2557,42 @@ void Core3DAddDebugOrphanVisualMaterial(
     GLController.viewer->debugSetOrdinaryRepairFailures((int)incremental, (int)redraw);
 }
 
+- (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 7 || GLController == nil || GLController.viewer == nullptr) { return 5; }
+    const auto viewer = GLController.viewer;
+    const auto document = viewer->getDocument();
+    const auto context = viewer->AisContext();
+    if (document.IsNull() || context.IsNull()) { return 5; }
+    try {
+        core3d::OrdinaryRotationAroundPivot rotation;
+        rotation.pivot = gp_Pnt(5, -3, 2);
+        rotation.delta.SetRotation(gp_Ax1(rotation.pivot, gp_Dir(0, 0, 1)), M_PI_2);
+        if (mode == 7) { rotation.delta = gp_Trsf(); }
+        std::vector<core3d::OrdinaryTransformChange> changes;
+        for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
+            core3d::OrdinaryTransformChange change;
+            change.presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+            change.label = document->ShapeLabel(change.presentation);
+            OcctObjectTransformState before;
+            if (!document->CaptureObjectTransformStateForLabel(change.label, before)) { return 5; }
+            change.shape = before.shape;
+            change.transform = rotation.delta * before.transform;
+            change.operation = core3d::OrdinaryTransformOperation::Rotate;
+            change.rotationAroundPivot = rotation;
+            if (mode == 1) { change.rotationAroundPivot->pivot.SetX(6); }
+            if (mode == 2) { auto pos = change.transform.TranslationPart(); pos.SetX(pos.X() + 1); change.transform.SetTranslationPart(pos); }
+            if (mode == 3) { change.rotationAroundPivot->delta.SetScaleFactor(2); }
+            if (mode == 4 && !changes.empty()) { change.rotationAroundPivot->pivot.SetZ(3); }
+            if (mode == 5) { change.operation = core3d::OrdinaryTransformOperation::Translate; }
+            if (mode == 6 && !changes.empty()) { change.rotationAroundPivot.reset(); }
+            changes.push_back(change);
+        }
+        core3d::OrdinaryEditResult failure = core3d::OrdinaryEditResult::Invalid;
+        auto lease = viewer->beginOrdinaryTransform(changes, &failure);
+        return static_cast<NSInteger>(lease ? lease.stageAndCommit() : failure);
+    } catch (...) { return 5; }
+}
+
 - (NSInteger)debugReconcileViewerOrdinaryEdit {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return 5; }
     return static_cast<NSInteger>(GLController.viewer->reconcileOrdinaryEdit());

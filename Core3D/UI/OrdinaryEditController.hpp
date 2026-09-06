@@ -16,12 +16,20 @@ enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, R
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale };
 
+//! Rotation of a selection around an explicit world-space point, in model
+//! units. delta must be a unit-scale rigid transform that fixes the pivot.
+struct OrdinaryRotationAroundPivot {
+    gp_Pnt pivot;
+    gp_Trsf delta;
+};
+
 struct OrdinaryTransformChange {
     TDF_Label label;
     Handle(AIS_Shape) presentation;
     TopoDS_Shape shape;
     gp_Trsf transform;
     OrdinaryTransformOperation operation = OrdinaryTransformOperation::Translate;
+    std::optional<OrdinaryRotationAroundPivot> rotationAroundPivot;
 };
 
 struct OrdinaryTransformRecord {

@@ -4,6 +4,7 @@
 #include <gp_Quaternion.hxx>
 #include <Standard_Failure.hxx>
 #include <cmath>
+#include <algorithm>
 #include <limits>
 #include <unordered_set>
 #include <utility>
@@ -16,6 +17,34 @@ bool MatricesEqual(const gp_Trsf& a, const gp_Trsf& b) {
             if (!std::isfinite(a.Value(row, column))
                 || a.Value(row, column) != b.Value(row, column)) { return false; }
         }
+    }
+    return true;
+}
+// Admission accounts only for bounded floating-point arithmetic in composing
+// a rotation with a persisted transform. Candidate sealing/readback below
+// still compares exact persisted values, never this tolerance.
+bool RotationArithmeticEqual(double a, double b, double arithmeticScale) {
+    return std::isfinite(a) && std::isfinite(b)
+        && std::abs(a - b) <= 64 * std::numeric_limits<double>::epsilon()
+            * std::max({1.0, std::abs(a), std::abs(b), arithmeticScale});
+}
+bool IsRotationAroundPivot(const OrdinaryRotationAroundPivot& rotation) {
+    if (rotation.delta.ScaleFactor() != 1.0) { return false; }
+    for (int index = 1; index <= 3; ++index) {
+        if (!std::isfinite(rotation.pivot.Coord(index))
+            || std::abs(rotation.pivot.Coord(index)) > limits::kMaximumModelCoordinateMagnitude) { return false; }
+        for (int column = 1; column <= 4; ++column) {
+            if (!std::isfinite(rotation.delta.Value(index, column))) { return false; }
+        }
+    }
+    const gp_Pnt fixed = rotation.pivot.Transformed(rotation.delta);
+    for (int index = 1; index <= 3; ++index) {
+        // Near-zero coordinates can result from subtracting large terms.
+        const double scale = std::max({1.0, std::abs(rotation.pivot.X()),
+                                       std::abs(rotation.pivot.Y()), std::abs(rotation.pivot.Z())});
+        if (!std::isfinite(fixed.Coord(index))
+            || std::abs(fixed.Coord(index) - rotation.pivot.Coord(index))
+                > 64 * std::numeric_limits<double>::epsilon() * scale) { return false; }
     }
     return true;
 }
@@ -118,6 +147,16 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 || !presentations.insert(request.presentation.get()).second) {
                 return reject(OrdinaryEditResult::Invalid);
             }
+            if (request.rotationAroundPivot.has_value() != changes.front().rotationAroundPivot.has_value()) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.rotationAroundPivot) {
+                const auto& rotation = *request.rotationAroundPivot;
+                const auto& common = *changes.front().rotationAroundPivot;
+                if (request.operation != OrdinaryTransformOperation::Rotate || !IsRotationAroundPivot(rotation)
+                    || !rotation.pivot.IsEqual(common.pivot, 0.0)
+                    || !MatricesEqual(rotation.delta, common.delta)) { return reject(OrdinaryEditResult::Invalid); }
+            }
             if (request.operation == OrdinaryTransformOperation::Translate) {
                 for (int row = 1; row <= 3; ++row) {
                     for (int column = 1; column <= 3; ++column) {
@@ -130,9 +169,29 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 if (record.previous.transform.ScaleFactor() != request.transform.ScaleFactor()) {
                     return reject(OrdinaryEditResult::Invalid);
                 }
-                for (int row = 1; row <= 3; ++row) {
-                    if (record.previous.transform.Value(row, 4) != request.transform.Value(row, 4)) {
-                        return reject(OrdinaryEditResult::Invalid);
+                if (request.rotationAroundPivot) {
+                    const gp_Trsf expected = request.rotationAroundPivot->delta * record.previous.transform;
+                    for (int row = 1; row <= 3; ++row) {
+                        for (int column = 1; column <= 4; ++column) {
+                            // Bound cancellation by the actual products being summed,
+                            // including the pivot translation for the position column.
+                            const gp_Trsf& delta = request.rotationAroundPivot->delta;
+                            double arithmeticScale = column == 4 ? std::abs(delta.Value(row, 4)) : 0.0;
+                            for (int term = 1; term <= 3; ++term) {
+                                arithmeticScale += std::abs(delta.Value(row, term)
+                                    * record.previous.transform.Value(term, column));
+                            }
+                            if (!RotationArithmeticEqual(expected.Value(row, column),
+                                                         request.transform.Value(row, column), arithmeticScale)) {
+                                return reject(OrdinaryEditResult::Invalid);
+                            }
+                        }
+                    }
+                } else {
+                    for (int row = 1; row <= 3; ++row) {
+                        if (record.previous.transform.Value(row, 4) != request.transform.Value(row, 4)) {
+                            return reject(OrdinaryEditResult::Invalid);
+                        }
                     }
                 }
             }
