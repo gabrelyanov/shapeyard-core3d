@@ -23,6 +23,22 @@ NS_ASSUME_NONNULL_BEGIN
 @class Core3DSceneFrameSnapshot;
 @class Core3DScenePresentationOverlaySnapshot;
 
+typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
+    Core3DObjectAlignmentAnchorMinimum = 0,
+    Core3DObjectAlignmentAnchorCenter,
+    Core3DObjectAlignmentAnchorMaximum,
+    Core3DObjectAlignmentAnchorGround,
+};
+typedef NS_ENUM(NSInteger, Core3DObjectAlignmentResult) {
+    Core3DObjectAlignmentResultUnchanged = 0,
+    Core3DObjectAlignmentResultCommitted,
+    Core3DObjectAlignmentResultRejected,
+    Core3DObjectAlignmentResultBusy,
+    Core3DObjectAlignmentResultRecoveryRequired,
+    Core3DObjectAlignmentResultFailed,
+    Core3DObjectAlignmentResultCancelled,
+};
+
 typedef NS_ENUM(NSInteger, Core3DObjectNameEditResult) {
     Core3DObjectNameEditResultUnchanged = 0,
     Core3DObjectNameEditResultCommitted,
@@ -530,6 +546,16 @@ typedef struct {
                                                       name:(NSString *)name
                                                   expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(renameObject(entityIdentifier:name:expected:));
+//! Align up to 32 selected editable objects by analytic world bounds. Ground
+//! uses minimum Z = 0 and admits one object. Main-thread completion; one Undo.
+- (void)alignSelectedObjectsOnAxis:(Core3DTransformInspectorAxis)axis
+                           anchor:(Core3DObjectAlignmentAnchor)anchor
+                         expected:(Core3DSceneSnapshot *)expected
+                       completion:(void(^)(Core3DObjectAlignmentResult))completion
+    NS_SWIFT_NAME(alignSelectedObjects(axis:anchor:expected:completion:));
+//! Suppress pending mutation; its completion returns Cancelled after the worker
+//! drains. A second measurement is Busy until then, even after cancellation.
+- (void)cancelObjectAlignment;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
                               expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectObject(entityIdentifier:expected:));

@@ -697,6 +697,8 @@ void Core3DAddDebugOrphanVisualMaterial(
     unsigned long long _shouldLoadAssetByteCount;
     NSString *_shouldLoadAssetSHA256;
     std::atomic_bool _isLoading;
+    std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
+    BOOL _objectAlignmentCancelled;
 #ifdef DEBUG
     NSUInteger _debugMaximumTextureAuthoringObjects;
 #endif
@@ -725,6 +727,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (void)dealloc {
+    core3d::Core3DViewer::cancelObjectAlignment(_objectAlignmentWork);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     _glController = nil;
     NSLog(@"~Core3DViewController");
@@ -5228,6 +5231,89 @@ void Core3DAddDebugOrphanVisualMaterial(
     return Core3DObjectVisibilityEditResultRejected;
 }
 
+
+- (void)cancelObjectAlignment {
+    if (![NSThread isMainThread]) { return; }
+    _objectAlignmentCancelled = YES;
+    core3d::Core3DViewer::cancelObjectAlignment(_objectAlignmentWork);
+}
+
+- (void)alignSelectedObjectsOnAxis:(Core3DTransformInspectorAxis)axis
+                           anchor:(Core3DObjectAlignmentAnchor)anchor
+                         expected:(Core3DSceneSnapshot *)expected
+                       completion:(void(^)(Core3DObjectAlignmentResult))completion {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DObjectAlignmentResultRejected); });
+        return;
+    }
+    if (_objectAlignmentWork) { completion(Core3DObjectAlignmentResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128
+        || axis < Core3DTransformInspectorAxisX || axis > Core3DTransformInspectorAxisZ
+        || anchor < Core3DObjectAlignmentAnchorMinimum || anchor > Core3DObjectAlignmentAnchorGround) {
+        completion(Core3DObjectAlignmentResultRejected); return;
+    }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DObjectAlignmentResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DObjectAlignmentResultRejected); return;
+    }
+    try {
+        const char* publication = expected.publicationSourceIdentifier.UTF8String;
+        if (!publication) { completion(Core3DObjectAlignmentResultRejected); return; }
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto work = viewer->prepareObjectAlignment(static_cast<int>(axis),
+            static_cast<core3d::ObjectAlignmentAnchor>(anchor), identity,
+            expected.revisions.presentationRevision, static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DObjectAlignmentResultRejected); return; }
+        _objectAlignmentWork = work; _objectAlignmentCancelled = NO;
+        __weak Core3DViewController* weakSelf = self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            const bool measured = core3d::Core3DViewer::measureObjectAlignment(work);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                Core3DViewController* controller = weakSelf;
+                if (!controller) { return; }
+                const BOOL cancelled = controller->_objectAlignmentCancelled;
+                controller->_objectAlignmentWork.reset();
+                if (cancelled) { completion(Core3DObjectAlignmentResultCancelled); return; }
+                if (!controller->_isSetuped || ((GLViewController *)controller.glController) == nil
+                    || ((GLViewController *)controller.glController).viewer != viewer) {
+                    completion(Core3DObjectAlignmentResultRejected); return;
+                }
+                if (!measured) { completion(Core3DObjectAlignmentResultFailed); return; }
+                const auto native = viewer->commitObjectAlignment(work);
+                Core3DObjectAlignmentResult result = Core3DObjectAlignmentResultRejected;
+                switch (native) {
+                    case core3d::OrdinaryEditResult::NoChange: result = Core3DObjectAlignmentResultUnchanged; break;
+                    case core3d::OrdinaryEditResult::Committed:
+                        result = Core3DObjectAlignmentResultCommitted;
+                        [((GLViewController *)controller.glController) refreshSelectionState];
+                        [controller viewDidChangeViewportPresentationState];
+                        [controller sendNotifyUIState:UIStateChangingSelection | UIStateChangingGizmo
+                            | UIStateChangingDelete | UIStateChangingDuplicate | UIStateChangingApply
+                            | UIStateChangingApplyMaterial | UIStateChangingHistory];
+                        break;
+                    case core3d::OrdinaryEditResult::Busy: result = Core3DObjectAlignmentResultBusy; break;
+                    case core3d::OrdinaryEditResult::Invalid: result = Core3DObjectAlignmentResultRejected; break;
+                    case core3d::OrdinaryEditResult::OutcomeUnknown: result = Core3DObjectAlignmentResultRecoveryRequired; break;
+                    case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DObjectAlignmentResultFailed; break;
+                }
+                completion(result);
+            });
+        });
+    } catch (...) { completion(Core3DObjectAlignmentResultRejected); }
+}
+
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
                               expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
@@ -5357,6 +5443,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)prepareOrdinaryEditForDocumentClose {
+    [self cancelObjectAlignment];
     return [NSThread isMainThread] && _isSetuped && GLController != nil
         && [GLController prepareOrdinaryEditForDocumentClose];
 }

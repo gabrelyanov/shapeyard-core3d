@@ -40,6 +40,9 @@
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_Triangulation.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepBndLib.hxx>
 #include <TopExp.hxx>
@@ -1518,6 +1521,216 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
     } catch (...) {
         return false;
     }
+}
+
+
+// Authority remains on the main thread. Only the separately copied geometry,
+// value transforms, bounds and cancellation flag are touched by the worker.
+struct ObjectAlignmentWork {
+    struct Geometry {
+        TopoDS_Shape copy;
+        gp_Trsf transform;
+        bool mesh = false;
+        std::array<double, 6> bounds{};
+    };
+    std::vector<Geometry> geometry;
+    OrdinaryTransformLedger authority;
+    ObjectFrameIdentity identity;
+    std::uint64_t presentationRevision = 0;
+    std::uint32_t width = 0, height = 0;
+    Standard_Integer documentTime = 0;
+    int axis = 0;
+    ObjectAlignmentAnchor anchor = ObjectAlignmentAnchor::Minimum;
+    std::atomic_bool cancelled{false};
+    bool measured = false;
+    bool consumed = false;
+};
+
+std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
+    int axis, ObjectAlignmentAnchor anchor, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || axis < 0 || axis > 2 || width == 0 || height == 0
+        || (anchor != ObjectAlignmentAnchor::Minimum && anchor != ObjectAlignmentAnchor::Center
+            && anchor != ObjectAlignmentAnchor::Maximum && anchor != ObjectAlignmentAnchor::Ground)
+        || (anchor == ObjectAlignmentAnchor::Ground && axis != 2)) { return {}; }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision
+            || snapshot->selection.selected.size() > 32
+            || snapshot->selection.selected.size() < (anchor == ObjectAlignmentAnchor::Ground ? 1 : 2)) { return {}; }
+        auto work = std::make_shared<ObjectAlignmentWork>();
+        work->identity = identity; work->presentationRevision = presentationRevision;
+        work->width = width; work->height = height; work->axis = axis; work->anchor = anchor;
+        work->documentTime = myDoc->Document()->GetData()->Time();
+        std::unordered_set<std::string> selected;
+        for (const auto& element : snapshot->selection.selected) {
+            if (element.kind != scene::ElementKind::Object || !selected.insert(element.entityIdentifier).second) { return {}; }
+        }
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+            const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+            if (presentation.IsNull()) { return {}; }
+            OrdinaryTransformRecord record;
+            const auto label = myDoc->ShapeLabel(presentation);
+            if (!myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                || !myDoc->CaptureObjectTransformStateForLabel(label, record.previous)
+                || selected.erase(record.previous.entityIdentifier) != 1) { return {}; }
+            record.requested.label = label; record.requested.presentation = presentation;
+            record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
+            record.requested.operation = OrdinaryTransformOperation::Translate;
+            work->authority.records.push_back(record);
+        }
+        if (!selected.empty() || !admitTransform(work->authority)) { return {}; }
+        // Bound all copies together, including mesh vertex tables. Admission
+        // precedes copying so one large selection cannot queue unbounded work.
+        std::size_t nodes = 0, faces = 0, meshNodes = 0;
+        for (const auto& record : work->authority.records) {
+            const auto& state = record.previous;
+            if (state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+                && state.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh) { return {}; }
+            std::vector<TopoDS_Shape> stack{state.shape};
+            TopTools_IndexedMapOfShape visited;
+            while (!stack.empty()) {
+                const auto shape = stack.back(); stack.pop_back();
+                if (visited.Contains(shape)) { continue; }
+                visited.Add(shape);
+                if (++nodes > 8192) { return {}; }
+                for (TopoDS_Iterator child(shape); child.More(); child.Next()) {
+                    if (stack.size() >= 8192) { return {}; }
+                    if (!visited.Contains(child.Value())) { stack.push_back(child.Value()); }
+                }
+            }
+            if (state.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh) {
+                bool hasFace = false;
+                for (TopExp_Explorer face(state.shape, TopAbs_FACE); face.More(); face.Next()) {
+                    hasFace = true;
+                    if (++faces > 4096) { return {}; }
+                    TopLoc_Location location;
+                    const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(face.Current()), location);
+                    if (mesh.IsNull() || mesh->HasDeferredData() || !mesh->HasGeometry()
+                        || mesh->NbNodes() <= 0 || mesh->NbTriangles() <= 0
+                        || static_cast<std::size_t>(mesh->NbNodes()) > 262144 - meshNodes) { return {}; }
+                    meshNodes += mesh->NbNodes();
+                }
+                if (!hasFace) { return {}; }
+            }
+        }
+        for (const auto& record : work->authority.records) {
+            const bool mesh = record.previous.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh;
+            BRepBuilderAPI_Copy copy(record.previous.shape, Standard_True, mesh);
+            if (!copy.IsDone() || copy.Shape().IsNull()) { return {}; }
+            ObjectAlignmentWork::Geometry geometry;
+            geometry.copy = copy.Shape(); geometry.transform = record.previous.transform; geometry.mesh = mesh;
+            work->geometry.push_back(std::move(geometry));
+        }
+        return work;
+    } catch (...) { return {}; }
+}
+
+bool Core3DViewer::measureObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
+    if (!work || work->cancelled.load()) { return false; }
+    try {
+        OCC_CATCH_SIGNALS
+        for (auto& geometry : work->geometry) {
+            if (work->cancelled.load()) { return false; }
+            Bnd_Box bounds;
+            if (geometry.mesh) {
+                for (TopExp_Explorer face(geometry.copy, TopAbs_FACE); face.More(); face.Next()) {
+                    if (work->cancelled.load()) { return false; }
+                    TopLoc_Location location;
+                    const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(face.Current()), location);
+                    if (mesh.IsNull()) { return false; }
+                    for (int node = 1; node <= mesh->NbNodes(); ++node) {
+                        auto point = mesh->Node(node).Transformed(location.Transformation());
+                        point.Transform(geometry.transform);
+                        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) { return false; }
+                        bounds.Add(point);
+                    }
+                }
+            } else {
+                // Transform the private analytic shape, rather than its local
+                // AABB: rotating an AABB is not an accurate curved-solid bound.
+                BRepBuilderAPI_Transform transformed(geometry.copy, geometry.transform, Standard_True);
+                if (!transformed.IsDone()) { return false; }
+                BRepBndLib::AddOptimal(transformed.Shape(), bounds, Standard_False, Standard_False);
+            }
+            if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
+            auto& b = geometry.bounds;
+            bounds.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+            for (double value : b) { if (!std::isfinite(value)) { return false; } }
+            for (int axis = 0; axis < 3; ++axis) { if (b[axis] > b[axis + 3]) { return false; } }
+        }
+        work->measured = !work->cancelled.load();
+        return work->measured;
+    } catch (...) { return false; }
+}
+
+void Core3DViewer::cancelObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
+    if (work) { work->cancelled.store(true); }
+}
+
+OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
+    if (![NSThread isMainThread] || !work || work->cancelled.load() || !work->measured || work->consumed) {
+        return OrdinaryEditResult::Invalid;
+    }
+    work->consumed = true;
+    if (!canBeginCommittedEdit()) { return OrdinaryEditResult::Busy; }
+    try {
+        const auto snapshot = captureSceneSnapshot(work->width, work->height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != work->identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != work->identity.documentGeneration
+            || snapshot->revisions.model != work->identity.modelRevision
+            || snapshot->revisions.presentation != work->presentationRevision
+            || myDoc->Document()->GetData()->Time() != work->documentTime) { return OrdinaryEditResult::Invalid; }
+        for (const auto& record : work->authority.records) {
+            OcctObjectTransformState actual;
+            if (!myDoc->CaptureObjectTransformStateForLabel(record.previous.label, actual)
+                || !actual.IsEqual(record.previous)) { return OrdinaryEditResult::Invalid; }
+        }
+        auto authority = work->authority;
+        if (!admitTransform(authority) || authority.selectionOwners != work->authority.selectionOwners
+            || authority.manipulatorType != work->authority.manipulatorType
+            || authority.hadManipulator != work->authority.hadManipulator) { return OrdinaryEditResult::Invalid; }
+        const int axis = work->axis;
+        double minimum = work->geometry.front().bounds[axis];
+        double maximum = work->geometry.front().bounds[axis + 3];
+        for (const auto& geometry : work->geometry) {
+            minimum = std::min(minimum, geometry.bounds[axis]);
+            maximum = std::max(maximum, geometry.bounds[axis + 3]);
+        }
+        const auto coordinate = [&](double lo, double hi) {
+            switch (work->anchor) {
+                case ObjectAlignmentAnchor::Minimum: case ObjectAlignmentAnchor::Ground: return lo;
+                case ObjectAlignmentAnchor::Center: return lo * 0.5 + hi * 0.5;
+                case ObjectAlignmentAnchor::Maximum: return hi;
+            }
+            return lo;
+        };
+        const double target = work->anchor == ObjectAlignmentAnchor::Ground ? 0 : coordinate(minimum, maximum);
+        std::vector<OrdinaryTransformChange> changes;
+        for (std::size_t index = 0; index < work->geometry.size(); ++index) {
+            auto change = work->authority.records[index].requested;
+            const auto& b = work->geometry[index].bounds;
+            const double delta = target - coordinate(b[axis], b[axis + 3]);
+            if (!std::isfinite(delta)) { return OrdinaryEditResult::Invalid; }
+            auto translation = change.transform.TranslationPart();
+            // Ignore kernel-bound rounding below modeling precision. This
+            // makes repeated alignment a true no-op without history noise.
+            if (std::abs(delta) > 1e-7) {
+                translation.SetCoord(axis + 1, translation.Coord(axis + 1) + delta);
+                change.transform.SetTranslationPart(gp_Vec(translation));
+            }
+            changes.push_back(std::move(change));
+        }
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = beginOrdinaryTransform(changes, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
 }
 
 bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {

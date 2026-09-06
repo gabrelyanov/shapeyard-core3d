@@ -40,6 +40,9 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
+    struct ObjectAlignmentWork;
+    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground };
+
     class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
     public:
         static constexpr selection_t kSelectionTypeNone = 0;
@@ -88,6 +91,13 @@ namespace core3d {
         OrdinaryEditLease beginOrdinaryTransform(const std::vector<OrdinaryTransformChange>& changes,
                                                  OrdinaryEditResult* failure = nullptr) noexcept;
         OrdinaryEditResult reconcileOrdinaryEdit() noexcept;
+        //! Main-thread capture/commit; measurement accesses only private copies.
+        std::shared_ptr<ObjectAlignmentWork> prepareObjectAlignment(
+            int axis, ObjectAlignmentAnchor anchor, const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
+        static bool measureObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
+        static void cancelObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
+        OrdinaryEditResult commitObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
         OrdinaryEditResult setObjectVisibilityFromBrowser(const ObjectFrameIdentity& identity,
             bool visible, std::uint64_t presentationRevision, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight, bool* blockedByLayer = nullptr) noexcept;
