@@ -1372,6 +1372,11 @@ NativeExportResult RunNativeExport(
                 mesher.ChangeParameters().Deflection = deflection;
                 mesher.ChangeParameters().Angle = state->deviationAngle;
                 mesher.ChangeParameters().InParallel = Standard_True;
+                // Conical/analytic face interiors can exceed the requested chord
+                // error even when their boundary edges meet it. Quality exports
+                // must refine these interiors too; keep the final tolerance proof.
+                mesher.ChangeParameters().EnableControlSurfaceDeflectionAllSurfaces =
+                    state->meshQuality != Core3DExportMeshQualityViewport;
                 mesher.SetShape(meshingShape);
                 mesher.Perform(whole.Next(4));
                 ThrowIfCancelled(state);
