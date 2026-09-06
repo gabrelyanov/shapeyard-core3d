@@ -715,6 +715,13 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 @end
 
+@interface Core3DViewController (ProfileConstructionPrivate)
+- (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
+                            plane:(Core3DProfilePlane)plane parameter:(double)parameter
+                          revolve:(BOOL)revolve expected:(Core3DSceneSnapshot *)expected
+                       completion:(void(^)(Core3DProfileConstructionResult))completion;
+@end
+
 @interface Core3DViewController (NumericTransformPrivate)
 - (Core3DTransformInspectorPositionCommitResult)
     commitTransformInspectorValue:(double)value
@@ -5425,6 +5432,21 @@ void Core3DAddDebugOrphanVisualMaterial(
                                 depth:(double)depth
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self constructProfileWithPoints:points plane:plane parameter:depth revolve:NO expected:expected completion:completion];
+}
+
+- (void)createRevolvedProfileWithPoints:(NSArray<NSValue *> *)points
+                                plane:(Core3DProfilePlane)plane
+                         angleDegrees:(double)angleDegrees
+                             expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self constructProfileWithPoints:points plane:plane parameter:angleDegrees revolve:YES expected:expected completion:completion];
+}
+
+- (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
+                            plane:(Core3DProfilePlane)plane parameter:(double)depth
+                          revolve:(BOOL)revolve expected:(Core3DSceneSnapshot *)expected
+                       completion:(void(^)(Core3DProfileConstructionResult))completion {
     if (!completion) { return; }
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
@@ -5433,7 +5455,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
         || ![points isKindOfClass:[NSArray class]] || points.count < 3 || points.count > 64
-        || !std::isfinite(depth) || depth < 1e-3 || depth > 1e6
+        || !std::isfinite(depth) || depth < 1e-3 || depth > (revolve ? 360.0 : 1e6)
         || plane < Core3DProfilePlaneXY || plane > Core3DProfilePlaneYZ
         || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
         || expected.publicationSourceIdentifier.length == 0
@@ -5470,7 +5492,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         identity.modelRevision = expected.revisions.modelRevision;
         const auto work = viewer->prepareProfileSolid(outline, static_cast<int>(plane), depth,
             identity, expected.revisions.presentationRevision,
-            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)));
+            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         _profileSolidWork = work; _profileSolidCancelled = NO;
         const auto geometry = core3d::Core3DViewer::profileSolidGeometry(work);

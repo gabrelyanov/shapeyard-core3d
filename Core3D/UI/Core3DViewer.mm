@@ -44,6 +44,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepLib.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
@@ -1411,7 +1412,8 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
 struct ProfileSolidGeometry {
     std::vector<gp_Pnt2d> points;
     int plane = 0; // 0 XY -> +Z, 1 XZ -> +Y, 2 YZ -> +X.
-    double depth = 10;
+    double depth = 10; // Extrusion mm or revolution degrees.
+    bool revolve = false;
     std::atomic_bool cancelled{false};
     TopoDS_Shape solid;
     std::array<double, 6> bounds{};
@@ -1467,6 +1469,25 @@ bool ValidateProfileOutline(const std::vector<gp_Pnt2d>& points, int plane,
     }
     return std::isfinite(signedArea) && std::abs(signedArea) >= 1e-6;
 }
+bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane,
+                           double parameter, bool revolve, double& signedArea, double& volume) {
+    if (!ValidateProfileOutline(points, plane, revolve ? 1.0 : parameter, signedArea)) { return false; }
+    if (!revolve) { volume = std::abs(signedArea) * parameter; return std::isfinite(volume) && volume > 0; }
+    if (!std::isfinite(parameter) || parameter < 0.001 || parameter > 360) { return false; }
+    // One-sided contours avoid sweeping through the axis and self-overlapping.
+    // Axis-touching edges are valid, including degenerate pole edges in the solid.
+    for (const auto& point : points) { if (point.X() < 0) { return false; } }
+    double firstMoment = 0;
+    const auto& origin = points.front();
+    for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+        const auto& a = points[i]; const auto& b = points[i + 1];
+        const double area = ProfileCross(origin, a, b) * 0.5;
+        firstMoment += area * (origin.X() + a.X() + b.X()) / 3.0;
+    }
+    volume = std::abs(firstMoment) * (parameter * std::acos(-1.0) / 180.0);
+    return std::isfinite(volume) && volume > 1e-8;
+}
+
 gp_Pnt ProfilePointInPlane(const gp_Pnt2d& p, int plane) {
     switch (plane) {
         case 0: return gp_Pnt(p.X(), p.Y(), 0);
@@ -1480,8 +1501,9 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     if (!geometry || geometry->cancelled.load() || geometry->built) { return false; }
     try {
         OCC_CATCH_SIGNALS
-        double signedArea = 0;
-        if (!ValidateProfileOutline(geometry->points, geometry->plane, geometry->depth, signedArea)) { return false; }
+        double signedArea = 0, expected = 0;
+        if (!ProfileExpectedVolume(geometry->points, geometry->plane, geometry->depth,
+                                   geometry->revolve, signedArea, expected)) { return false; }
         auto points = geometry->points;
         if (signedArea < 0) { std::reverse(points.begin(), points.end()); }
         BRepBuilderAPI_MakePolygon polygon;
@@ -1493,15 +1515,31 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         if (!polygon.IsDone()) { return false; }
         BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
         if (!face.IsDone() || geometry->cancelled.load()) { return false; }
-        const gp_Vec direction = geometry->plane == 0 ? gp_Vec(0, 0, geometry->depth)
-            : geometry->plane == 1 ? gp_Vec(0, geometry->depth, 0) : gp_Vec(geometry->depth, 0, 0);
-        BRepPrimAPI_MakePrism prism(face.Face(), direction, Standard_True, Standard_True);
-        if (!prism.IsDone() || geometry->cancelled.load() || prism.Shape().ShapeType() != TopAbs_SOLID) { return false; }
-        auto solid = TopoDS::Solid(prism.Shape());
+        TopoDS_Shape result;
+        if (geometry->revolve) {
+            const gp_Ax1 axis(gp::Origin(), geometry->plane == 0 ? gp::DY() : gp::DZ());
+            if (geometry->depth == 360.0) {
+                BRepPrimAPI_MakeRevol sweep(face.Face(), axis, Standard_True);
+                if (!sweep.IsDone()) { return false; }
+                result = sweep.Shape();
+            } else {
+                BRepPrimAPI_MakeRevol sweep(face.Face(), axis,
+                    geometry->depth * std::acos(-1.0) / 180.0, Standard_True);
+                if (!sweep.IsDone()) { return false; }
+                result = sweep.Shape();
+            }
+        } else {
+            const gp_Vec direction = geometry->plane == 0 ? gp_Vec(0, 0, geometry->depth)
+                : geometry->plane == 1 ? gp_Vec(0, geometry->depth, 0) : gp_Vec(geometry->depth, 0, 0);
+            BRepPrimAPI_MakePrism prism(face.Face(), direction, Standard_True, Standard_True);
+            if (!prism.IsDone()) { return false; }
+            result = prism.Shape();
+        }
+        if (geometry->cancelled.load() || result.IsNull() || result.ShapeType() != TopAbs_SOLID) { return false; }
+        auto solid = TopoDS::Solid(result);
         if (!BRepLib::OrientClosedSolid(solid) || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) { return false; }
         GProp_GProps properties;
         BRepGProp::VolumeProperties(solid, properties);
-        const double expected = std::abs(signedArea) * geometry->depth;
         if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
             || std::abs(properties.Mass() - expected) > std::max(1e-8, expected * 1e-8)) { return false; }
         Bnd_Box bounds;
@@ -1533,12 +1571,12 @@ struct ProfileSolidWork {
 std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     const std::vector<gp_Pnt2d>& points, int plane, double depth,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
-    std::uint32_t width, std::uint32_t height) noexcept {
+    std::uint32_t width, std::uint32_t height, bool revolve) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || myDoc->Document().IsNull() || width == 0 || height == 0) { return {}; }
     try {
-        double area = 0;
-        if (!ValidateProfileOutline(points, plane, depth, area)) { return {}; }
+        double area = 0, volume = 0;
+        if (!ProfileExpectedVolume(points, plane, depth, revolve, area, volume)) { return {}; }
         const auto snapshot = captureSceneSnapshot(width, height);
         if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
             || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
@@ -1548,6 +1586,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
         auto work = std::make_shared<ProfileSolidWork>();
         if (!admitNames(work->authority)) { return {}; }
         work->geometry->points = points; work->geometry->plane = plane; work->geometry->depth = depth;
+        work->geometry->revolve = revolve;
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height;
         work->owner = myDoc; work->document = myDoc->Document();

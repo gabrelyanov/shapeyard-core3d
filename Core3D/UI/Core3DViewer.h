@@ -65,7 +65,7 @@ namespace core3d {
         std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
             const std::vector<gp_Pnt2d>& points, int plane, double depth,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
-            std::uint32_t width, std::uint32_t height) noexcept;
+            std::uint32_t width, std::uint32_t height, bool revolve = false) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
             const std::shared_ptr<ProfileSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;

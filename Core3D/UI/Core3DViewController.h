@@ -608,6 +608,14 @@ typedef struct {
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createExtrudedProfile(points:plane:depth:expected:completion:));
+//! Revolve a simple closed section around its plane's vertical axis at horizontal
+//! coordinate zero (XY: Y axis; XZ/YZ: Z axis). All horizontal coordinates must
+//! be nonnegative. Positive sweep 0.001–360 degrees; one undoable solid creation.
+- (void)createRevolvedProfileWithPoints:(NSArray<NSValue *> *)points
+                                plane:(Core3DProfilePlane)plane angleDegrees:(double)angleDegrees
+                             expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createRevolvedProfile(points:plane:angleDegrees:expected:completion:));
 //! Keep the worker slot until completion; cancel at document load/close boundaries.
 - (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
