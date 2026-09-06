@@ -714,7 +714,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     commitTransformInspectorValue:(double)value
                               axis:(Core3DTransformInspectorAxis)axis
                   expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
-                          rotation:(BOOL)rotation;
+                          kind:(core3d::TransformInspectorEditKind)kind;
 @end
 
 @implementation Core3DViewController {
@@ -5352,7 +5352,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                                       axis:(Core3DTransformInspectorAxis)axis
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot {
-    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot rotation:NO];
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::Position];
 }
 
 - (Core3DTransformInspectorPositionCommitResult)
@@ -5360,14 +5360,21 @@ void Core3DAddDebugOrphanVisualMaterial(
                                       axis:(Core3DTransformInspectorAxis)axis
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot {
-    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot rotation:YES];
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::Rotation];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorUniformScaleValue:(double)value
+                          expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorValue:value axis:Core3DTransformInspectorAxisX
+        expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::UniformScale];
 }
 
 - (Core3DTransformInspectorPositionCommitResult)
     commitTransformInspectorValue:(double)value
                               axis:(Core3DTransformInspectorAxis)axis
                   expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
-                          rotation:(BOOL)rotation {
+                          kind:(core3d::TransformInspectorEditKind)kind {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
         || GLController.viewer == nullptr) {
         return Core3DTransformInspectorPositionCommitResultUnavailable;
@@ -5439,8 +5446,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             static_cast<std::uint64_t>(snapshot.modelCapabilities);
         request.axis = nativeAxis;
         request.value = value;
-        request.kind = rotation ? core3d::TransformInspectorEditKind::Rotation
-                                : core3d::TransformInspectorEditKind::Position;
+        request.kind = kind;
         nativeResult = GLController.viewer
             ->commitTransformInspectorPosition(request);
     } catch (...) {

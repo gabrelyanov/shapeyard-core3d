@@ -552,6 +552,15 @@ typedef struct {
                               (Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorRotation(_:axis:expected:));
 
+//! Set an absolute signed uniform scale factor, dimensionless. Magnitude must
+//! be greater than OCCT confusion tolerance and at most 1,000,000. Uses the
+//! frozen inspector lease and UniformScale capability; preserves Position,
+//! rotation and definition-local geometry. Zero is invalid.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorUniformScaleValue:(double)value
+                          expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorUniformScale(_:expected:));
+
 //! Release-safe counters for opt-in signed-device performance qualification.
 //! Values are observational only and never alter inspector admission policy.
 - (NSDictionary<NSString *, NSNumber *> *)
