@@ -4379,6 +4379,11 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         std::unordered_map<std::string, std::size_t> aDefinitionIndices;
         std::vector<DefinitionData> aDefinitions;
         std::size_t aLabelInstanceMappingCount = 0;
+        std::size_t aLayerVisibilityCheckCount = 0;
+        const Handle(XCAFDoc_LayerTool) aLayerTool =
+            XCAFDoc_DocumentTool::CheckLayerTool(aDocument->Main())
+                ? XCAFDoc_DocumentTool::LayerTool(aDocument->Main())
+                : Handle(XCAFDoc_LayerTool)();
 
         XCAFPrs_DocumentExplorer anExplorer(
             aDocument,
@@ -4423,9 +4428,34 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 static_cast<std::size_t>(aCurrentDepth) + 1U);
             for (Standard_Integer aDepth = 0;
                  aDepth <= aCurrentDepth; ++aDepth) {
-                const TDF_Label& aPathLabel = anExplorer.Current(aDepth).Label;
+                const auto& aPathNode = anExplorer.Current(aDepth);
+                const TDF_Label& aPathLabel = aPathNode.Label;
                 if (aPathLabel.IsNull()) {
                     return {};
+                }
+                // Match OpenGL's occurrence, definition and ancestor visibility.
+                // Explorer style alone does not include invisible XCAF layers.
+                for (const TDF_Label& aVisibilityLabel :
+                     {aPathNode.Label, aPathNode.RefLabel}) {
+                    if (aVisibilityLabel.IsNull()) { continue; }
+                    anOccurrence.visible = anOccurrence.visible
+                        && XCAFDoc_ColorTool::IsVisible(aVisibilityLabel);
+                    TDF_LabelSequence aLayers;
+                    if (aLayerTool.IsNull()
+                        || !aLayerTool->GetLayers(aVisibilityLabel, aLayers)) {
+                        continue;
+                    }
+                    if (!CheckedAdd(aLayerVisibilityCheckCount,
+                                    static_cast<std::size_t>(aLayers.Length()),
+                                    aLayerVisibilityCheckCount)
+                        || aLayerVisibilityCheckCount > kMaxLabelInstanceMappings) {
+                        return {};
+                    }
+                    for (TDF_LabelSequence::Iterator aLayer(aLayers);
+                         aLayer.More(); aLayer.Next()) {
+                        anOccurrence.visible = anOccurrence.visible
+                            && aLayerTool->IsVisible(aLayer.Value());
+                    }
                 }
                 std::string aLabelIdentifier =
                     theDocument->EntityIdentifierForLabel(aPathLabel);
