@@ -2513,7 +2513,10 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 		Bnd_Box aFrameBox;
 		BRepBndLib::Add(shape, aFrameBox);
 		if (!aFrameBox.IsVoid()) {
-			myView->FitAll(aFrameBox, 0.2, Standard_False);
+			// Wide phone layouts have controls over the top of the viewport.
+			// Leave space around the first object; later additions preserve the camera.
+			const double margin = myView->Camera()->Aspect() > 1.5 ? 0.45 : 0.2;
+			myView->FitAll(aFrameBox, margin, Standard_False);
 			myView->ZFitAll();
 		}
 	}
