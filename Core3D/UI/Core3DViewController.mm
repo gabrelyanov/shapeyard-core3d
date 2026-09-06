@@ -5277,21 +5277,26 @@ void Core3DAddDebugOrphanVisualMaterial(
             static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DObjectAlignmentResultRejected); return; }
         _objectAlignmentWork = work; _objectAlignmentCancelled = NO;
+        const auto measurement = core3d::Core3DViewer::objectAlignmentMeasurement(work);
+        const std::weak_ptr<core3d::Core3DViewer> expectedViewer = viewer;
         __weak Core3DViewController* weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            const bool measured = core3d::Core3DViewer::measureObjectAlignment(work);
+            const bool measured = core3d::Core3DViewer::measureObjectAlignment(measurement);
             dispatch_async(dispatch_get_main_queue(), ^{
                 Core3DViewController* controller = weakSelf;
                 if (!controller) { return; }
                 const BOOL cancelled = controller->_objectAlignmentCancelled;
-                controller->_objectAlignmentWork.reset();
+                // The single in-flight slot is retained through cancellation.
+                // Recover its live authority only after returning to main.
+                const auto pendingWork = std::move(controller->_objectAlignmentWork);
+                const auto currentViewer = expectedViewer.lock();
                 if (cancelled) { completion(Core3DObjectAlignmentResultCancelled); return; }
-                if (controller->_isLoading.load() || !controller->_isSetuped || ((GLViewController *)controller.glController) == nil
-                    || ((GLViewController *)controller.glController).viewer != viewer) {
+                if (!pendingWork || !currentViewer || controller->_isLoading.load() || !controller->_isSetuped || ((GLViewController *)controller.glController) == nil
+                    || ((GLViewController *)controller.glController).viewer != currentViewer) {
                     completion(Core3DObjectAlignmentResultRejected); return;
                 }
                 if (!measured) { completion(Core3DObjectAlignmentResultFailed); return; }
-                const auto native = viewer->commitObjectAlignment(work);
+                const auto native = currentViewer->commitObjectAlignment(pendingWork);
                 Core3DObjectAlignmentResult result = Core3DObjectAlignmentResultRejected;
                 switch (native) {
                     case core3d::OrdinaryEditResult::NoChange: result = Core3DObjectAlignmentResultUnchanged; break;

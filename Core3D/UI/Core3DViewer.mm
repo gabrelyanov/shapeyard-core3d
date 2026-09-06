@@ -1524,9 +1524,10 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
 }
 
 
-// Authority remains on the main thread. Only the separately copied geometry,
-// value transforms, bounds and cancellation flag are touched by the worker.
-struct ObjectAlignmentWork {
+// The worker payload owns only copied geometry and values. Live OCAF/AIS
+// authority is separately owned on the main thread, including its destruction
+// if the editor closes before the background block finishes releasing captures.
+struct ObjectAlignmentMeasurement {
     struct Geometry {
         TopoDS_Shape copy;
         gp_Trsf transform;
@@ -1534,6 +1535,11 @@ struct ObjectAlignmentWork {
         std::array<double, 6> bounds{};
     };
     std::vector<Geometry> geometry;
+    std::atomic_bool cancelled{false};
+    bool measured = false;
+};
+struct ObjectAlignmentWork {
+    std::shared_ptr<ObjectAlignmentMeasurement> measurement = std::make_shared<ObjectAlignmentMeasurement>();
     OrdinaryTransformLedger authority;
     ObjectFrameIdentity identity;
     std::uint64_t presentationRevision = 0;
@@ -1541,8 +1547,6 @@ struct ObjectAlignmentWork {
     Standard_Integer documentTime = 0;
     int axis = 0;
     ObjectAlignmentAnchor anchor = ObjectAlignmentAnchor::Minimum;
-    std::atomic_bool cancelled{false};
-    bool measured = false;
     bool consumed = false;
 };
 
@@ -1624,24 +1628,29 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
             const bool mesh = record.previous.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh;
             BRepBuilderAPI_Copy copy(record.previous.shape, Standard_True, mesh);
             if (!copy.IsDone() || copy.Shape().IsNull()) { return {}; }
-            ObjectAlignmentWork::Geometry geometry;
+            ObjectAlignmentMeasurement::Geometry geometry;
             geometry.copy = copy.Shape(); geometry.transform = record.previous.transform; geometry.mesh = mesh;
-            work->geometry.push_back(std::move(geometry));
+            work->measurement->geometry.push_back(std::move(geometry));
         }
         return work;
     } catch (...) { return {}; }
 }
 
-bool Core3DViewer::measureObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
-    if (!work || work->cancelled.load()) { return false; }
+std::shared_ptr<ObjectAlignmentMeasurement> Core3DViewer::objectAlignmentMeasurement(
+    const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
+    return [NSThread isMainThread] && work ? work->measurement : nullptr;
+}
+
+bool Core3DViewer::measureObjectAlignment(const std::shared_ptr<ObjectAlignmentMeasurement>& measurement) noexcept {
+    if (!measurement || measurement->cancelled.load()) { return false; }
     try {
         OCC_CATCH_SIGNALS
-        for (auto& geometry : work->geometry) {
-            if (work->cancelled.load()) { return false; }
+        for (auto& geometry : measurement->geometry) {
+            if (measurement->cancelled.load()) { return false; }
             Bnd_Box bounds;
             if (geometry.mesh) {
                 for (TopExp_Explorer face(geometry.copy, TopAbs_FACE); face.More(); face.Next()) {
-                    if (work->cancelled.load()) { return false; }
+                    if (measurement->cancelled.load()) { return false; }
                     TopLoc_Location location;
                     const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(face.Current()), location);
                     if (mesh.IsNull()) { return false; }
@@ -1665,17 +1674,17 @@ bool Core3DViewer::measureObjectAlignment(const std::shared_ptr<ObjectAlignmentW
             for (double value : b) { if (!std::isfinite(value)) { return false; } }
             for (int axis = 0; axis < 3; ++axis) { if (b[axis] > b[axis + 3]) { return false; } }
         }
-        work->measured = !work->cancelled.load();
-        return work->measured;
+        measurement->measured = !measurement->cancelled.load();
+        return measurement->measured;
     } catch (...) { return false; }
 }
 
 void Core3DViewer::cancelObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
-    if (work) { work->cancelled.store(true); }
+    if (work) { work->measurement->cancelled.store(true); }
 }
 
 OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept {
-    if (![NSThread isMainThread] || !work || work->cancelled.load() || !work->measured || work->consumed) {
+    if (![NSThread isMainThread] || !work || work->measurement->cancelled.load() || !work->measurement->measured || work->consumed) {
         return OrdinaryEditResult::Invalid;
     }
     work->consumed = true;
@@ -1697,9 +1706,9 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
             || authority.manipulatorType != work->authority.manipulatorType
             || authority.hadManipulator != work->authority.hadManipulator) { return OrdinaryEditResult::Invalid; }
         const int axis = work->axis;
-        double minimum = work->geometry.front().bounds[axis];
-        double maximum = work->geometry.front().bounds[axis + 3];
-        for (const auto& geometry : work->geometry) {
+        double minimum = work->measurement->geometry.front().bounds[axis];
+        double maximum = work->measurement->geometry.front().bounds[axis + 3];
+        for (const auto& geometry : work->measurement->geometry) {
             minimum = std::min(minimum, geometry.bounds[axis]);
             maximum = std::max(maximum, geometry.bounds[axis + 3]);
         }
@@ -1713,9 +1722,9 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
         };
         const double target = work->anchor == ObjectAlignmentAnchor::Ground ? 0 : coordinate(minimum, maximum);
         std::vector<OrdinaryTransformChange> changes;
-        for (std::size_t index = 0; index < work->geometry.size(); ++index) {
+        for (std::size_t index = 0; index < work->measurement->geometry.size(); ++index) {
             auto change = work->authority.records[index].requested;
-            const auto& b = work->geometry[index].bounds;
+            const auto& b = work->measurement->geometry[index].bounds;
             const double delta = target - coordinate(b[axis], b[axis + 3]);
             if (!std::isfinite(delta)) { return OrdinaryEditResult::Invalid; }
             auto translation = change.transform.TranslationPart();

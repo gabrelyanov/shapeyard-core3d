@@ -41,6 +41,7 @@ namespace core3d {
     };
 
     struct ObjectAlignmentWork;
+    struct ObjectAlignmentMeasurement;
     enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground };
 
     class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
@@ -95,7 +96,9 @@ namespace core3d {
         std::shared_ptr<ObjectAlignmentWork> prepareObjectAlignment(
             int axis, ObjectAlignmentAnchor anchor, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
-        static bool measureObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
+        static std::shared_ptr<ObjectAlignmentMeasurement> objectAlignmentMeasurement(
+            const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
+        static bool measureObjectAlignment(const std::shared_ptr<ObjectAlignmentMeasurement>& measurement) noexcept;
         static void cancelObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
         OrdinaryEditResult commitObjectAlignment(const std::shared_ptr<ObjectAlignmentWork>& work) noexcept;
         OrdinaryEditResult setObjectVisibilityFromBrowser(const ObjectFrameIdentity& identity,
