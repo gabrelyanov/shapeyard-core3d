@@ -1377,6 +1377,19 @@ NativeExportResult RunNativeExport(
                 ThrowIfCancelled(state);
                 if (!mesher.IsDone()
                     || !BRepTools::Triangulation(meshingShape, deflection)) {
+#if DEBUG
+                    NSLog(@"[NativeExportMeshDiagnostic] done=%d flags=%d requested=%.17g", mesher.IsDone(), mesher.GetStatusFlags(), deflection);
+                    Standard_Integer diagnosticFace = 0;
+                    for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                        TopLoc_Location location;
+                        const auto face = TopoDS::Face(faces.Current());
+                        const auto mesh = BRep_Tool::Triangulation(face, location);
+                        NSLog(@"[NativeExportMeshDiagnostic] face=%d mesh=%d deflection=%.17g nodes=%d triangles=%d valid=%d",
+                            ++diagnosticFace, !mesh.IsNull(), mesh.IsNull() ? -1.0 : mesh->Deflection(),
+                            mesh.IsNull() ? 0 : mesh->NbNodes(), mesh.IsNull() ? 0 : mesh->NbTriangles(),
+                            BRepTools::Triangulation(face, deflection));
+                    }
+#endif
                     throw NativeExportFailure(
                         Core3DNativeExportErrorMeshingFailed,
                         "The committed geometry could not be meshed.");
