@@ -131,6 +131,11 @@ Core3DDuplicateCommandOwnerAttributeID();
 Standard_EXPORT const Standard_GUID&
 Core3DRadialArrayCommandOwnerAttributeID();
 
+//! Shared ordinary-edit ownership sentinel; Integer on document Main only.
+//! Marker observations prove closure/ownership, never geometry outcome.
+Standard_EXPORT const Standard_GUID&
+Core3DOrdinaryEditCommandOwnerAttributeID();
+
 //! Validate/canonicalize the narrow texture representation produced by the
 //! mobile material editor. Only complete, single-frame PNG/JPEG images within
 //! the shared project/snapshot safety budgets are accepted. The returned

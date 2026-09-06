@@ -113,6 +113,12 @@ const Standard_GUID& Core3DDuplicateCommandOwnerAttributeID()
     return anId;
 }
 
+const Standard_GUID& Core3DOrdinaryEditCommandOwnerAttributeID()
+{
+    static const Standard_GUID anId("58BBFE2E-F5F9-4F87-A7EA-EC1459362C89");
+    return anId;
+}
+
 const Standard_GUID& Core3DRadialArrayCommandOwnerAttributeID()
 {
     static const Standard_GUID anId(
@@ -1366,9 +1372,10 @@ Standard_Boolean ValidateCommandOwnerSentinelsDocument(
             return Standard_False;
         }
         const auto isValidLabel = [&](const TDF_Label& theLabel) {
-            const std::array<const Standard_GUID*, 2> anIds = {{
+            const std::array<const Standard_GUID*, 3> anIds = {{
                 &Core3DDuplicateCommandOwnerAttributeID(),
                 &Core3DRadialArrayCommandOwnerAttributeID(),
+                &Core3DOrdinaryEditCommandOwnerAttributeID(),
             }};
             for (const Standard_GUID* anId : anIds) {
                 Handle(TDF_Attribute) anAttribute;

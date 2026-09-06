@@ -103,6 +103,8 @@ typedef NS_ENUM(NSInteger, Core3DDebugReferenceAxisFixtureMode) {
     //! Even the correct private Radial Array sentinel type is corrupt when it
     //! is attached anywhere except document Main.
     Core3DDebugReferenceAxisFixtureRadialSentinelMisplaced,
+    Core3DDebugReferenceAxisFixtureOrdinarySentinelWrongType,
+    Core3DDebugReferenceAxisFixtureOrdinarySentinelMisplaced,
 };
 #endif
 
@@ -616,6 +618,8 @@ typedef struct {
     NS_SWIFT_NAME(debugReferenceAxisFixtureData(mode:));
 //! Inject Duplicate recovery behavior: 0 normal, 1 false-after-close,
 //! 2 throw-after-close, and 3 fail the first post-commit presentation repair.
+//! Synchronous DEBUG fixture over real ordinary command ownership faults.
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryCommand:(NSInteger)mode;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.

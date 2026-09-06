@@ -16,6 +16,7 @@
 
 #include "GLViewController+Trick.h"
 #include "BooleanOperationController.hpp"
+#include "OrdinaryEditCommand.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
 #include "../Common/dispatch_cancelable_block.h"
@@ -68,6 +69,7 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2507,6 +2509,107 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryCommand:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 15
+        || GLController == nil || GLController.viewer == nullptr) { return nil; }
+    const Handle(OcctDocument) document = GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->ChangeDocument();
+    if (ocaf.IsNull() || ocaf->HasOpenCommand()) { return nil; }
+    const TDF_Label label = Core3DFirstFreeSimpleDefinition(ocaf);
+    OcctObjectTransformState previous;
+    if (!document->CaptureObjectTransformStateForLabel(label, previous)) { return nil; }
+    const Standard_Integer undoBefore = ocaf->GetAvailableUndos();
+    core3d::OrdinaryEditCommandStamp stamp;
+    using Begin = core3d::OrdinaryCommandBeginResult;
+    using Observation = core3d::OrdinaryCommandObservation;
+    try {
+        if (mode >= 1 && mode <= 3) { stamp.debugSetNewCommandMode((int)mode); }
+        if (mode == 14) {
+            stamp.debugSetNewCommandMode(3);
+            stamp.debugSetAbortMode(1);
+        }
+        if (mode == 12) { ocaf->NewCommand(); }
+        Begin begin = Begin::Invalid;
+        if (mode == 15) {
+            // Synchronous test seam; production immediately rejects before
+            // inspecting any OCAF handle on this non-main thread.
+            std::thread worker([&] { begin = stamp.begin(document); });
+            worker.join();
+        } else {
+            begin = stamp.begin(document);
+        }
+        const bool retainedAfterBegin = stamp.isRetained();
+        Observation first = Observation::Unavailable;
+        Observation retried = Observation::Unavailable;
+        bool protectedForeign = true;
+        bool staged = false;
+        if (begin == Begin::Started) {
+            staged = document->SetObjectPositionComponentForLabel(label, 0, 12.5);
+            if (!staged) { (void)stamp.abortAndObserve(); return nil; }
+            if (mode == 11) {
+                Handle(TDataStd_Integer) marker;
+                if (!ocaf->Main().FindAttribute(Core3DOrdinaryEditCommandOwnerAttributeID(), marker)
+                    || marker.IsNull()) { throw Standard_Failure("Missing owned marker"); }
+                const Standard_Integer ownedValue = marker->Get();
+                TDataStd_Integer::Set(ocaf->Main(), Core3DOrdinaryEditCommandOwnerAttributeID(), ownedValue + 17);
+                first = stamp.abortAndObserve();
+                protectedForeign = ocaf->HasOpenCommand();
+                TDataStd_Integer::Set(ocaf->Main(), Core3DOrdinaryEditCommandOwnerAttributeID(), ownedValue);
+                retried = stamp.abortAndObserve();
+                protectedForeign = protectedForeign && ocaf->HasOpenCommand()
+                    && !stamp.releaseClosed();
+            } else if (mode == 0 || mode == 9 || mode == 10) {
+                if (mode == 9) { stamp.debugSetAbortMode(1); }
+                if (mode == 10) { stamp.debugSetAbortMode(2); }
+                first = stamp.abortAndObserve();
+                retried = stamp.abortAndObserve();
+            } else {
+                if (mode >= 5 && mode <= 8) { stamp.debugSetCommitMode((int)mode - 4); }
+                if (mode == 13) { stamp.debugSetPostCommitInspectionFailureCount(1); }
+                first = stamp.commitAndObserve();
+                retried = first == Observation::OpenOwned
+                    ? stamp.abortAndObserve() : stamp.observe();
+            }
+        } else if (mode == 12 || mode == 14) {
+            first = stamp.abortAndObserve();
+            retried = stamp.observe();
+            protectedForeign = ocaf->HasOpenCommand() && !stamp.releaseClosed();
+        }
+        const bool retainedBeforeCleanup = stamp.isRetained();
+        const bool openBeforeCleanup = ocaf->HasOpenCommand();
+        const bool committed = mode == 4 || mode == 7 || mode == 8 || mode == 13;
+        OcctObjectTransformState actual;
+        const bool captured = document->CaptureObjectTransformStateForLabel(label, actual);
+        const bool exactExpected = captured && (committed
+            ? actual.scalars[0] == 12.5 && actual.shape.IsEqual(previous.shape)
+                && actual.entityIdentifier == previous.entityIdentifier
+                && actual.definitionIdentifier == previous.definitionIdentifier
+            : openBeforeCleanup || actual.IsEqual(previous));
+        const Standard_Integer delta = ocaf->GetAvailableUndos() - undoBefore;
+        // Only the fixture driver cleans its deliberately foreign/unproven
+        // command, after recording that the production stamp refused to do so.
+        // No callbacks or another tool have run during this synchronous probe.
+        if (openBeforeCleanup) { ocaf->AbortCommand(); }
+        const bool released = !stamp.isRetained() || stamp.releaseClosed();
+        // Restore committed fixtures through the real history machinery.
+        if (committed) { ocaf->Undo(); }
+        OcctObjectTransformState restored;
+        const bool exactRestored = document->CaptureObjectTransformStateForLabel(label, restored)
+            && restored.IsEqual(previous);
+        return @{@"begin": @((int)begin), @"first": @((int)first), @"retry": @((int)retried),
+                 @"retainedAfterBegin": @(retainedAfterBegin),
+                 @"retainedBeforeCleanup": @(retainedBeforeCleanup),
+                 @"openBeforeCleanup": @(openBeforeCleanup), @"protectedForeign": @(protectedForeign),
+                 @"staged": @(staged), @"exactExpected": @(exactExpected),
+                 @"undoDelta": @(delta), @"released": @(released),
+                 @"restored": @(exactRestored), @"closed": @(!ocaf->HasOpenCommand())};
+    } catch (...) {
+        Core3DAbortCommandNoThrow(ocaf);
+        return nil;
+    }
+}
+
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode {
     [GLController debugSetDuplicateCommitMode:mode];
 }
@@ -2515,7 +2618,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     (Core3DDebugReferenceAxisFixtureMode)mode {
     if (mode < Core3DDebugReferenceAxisFixtureValidMixedSpace
         || mode
-            > Core3DDebugReferenceAxisFixtureRadialSentinelMisplaced) {
+            > Core3DDebugReferenceAxisFixtureOrdinarySentinelMisplaced) {
         return nil;
     }
     return Core3DCreateDebugBinXCAFFixture(
@@ -2566,6 +2669,16 @@ void Core3DAddDebugOrphanVisualMaterial(
                     label,
                     Core3DDebugRadialArrayCommandOwnerAttributeID(),
                     1);
+                return;
+            }
+            if (mode == Core3DDebugReferenceAxisFixtureOrdinarySentinelWrongType) {
+                TDataStd_Real::Set(document->Main(),
+                    Core3DOrdinaryEditCommandOwnerAttributeID(), 1.0);
+                return;
+            }
+            if (mode == Core3DDebugReferenceAxisFixtureOrdinarySentinelMisplaced) {
+                TDataStd_Integer::Set(label,
+                    Core3DOrdinaryEditCommandOwnerAttributeID(), 1);
                 return;
             }
             if (mode
