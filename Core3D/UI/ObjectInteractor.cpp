@@ -2322,62 +2322,75 @@ namespace core3d {
 				return;
 			}
 
-			try {
-				doc->NewCommand();
-				for (const auto& change : changes) {
-					if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale) {
-						if (!myDoc->ReplaceShape(change.second, change.first)) {
-							throw Standard_Failure(
-								"Unable to replace scaled geometry");
-						}
-					}
-					if (!myDoc->SaveObjectTransform(change.second, change.first)) {
-						throw Standard_Failure("Unable to stage object transform");
-					}
-				}
-                // All candidates were admitted before the first write. Check
-                // the serialized values and reference-axis bounds while the
-                // batch can still be aborted without consuming undo history.
+            // The viewer-owned typed controller owns staging, reconciliation,
+            // selection/gizmo repair and exactly-once publication.
+            const auto controller = _ordinaryEditController.lock();
+            if (!controller) { cancelInteraction(); return; }
+            OrdinaryTransformOperation operation;
+            switch (activeMode) {
+                case AIS_MM_Translation:
+                case AIS_MM_TranslationPlane:
+                    operation = OrdinaryTransformOperation::Translate;
+                    break;
+                case AIS_MM_Rotation:
+                    operation = OrdinaryTransformOperation::Rotate;
+                    break;
+                case AIS_MM_Scaling:
+                case AIS_MM_ScalingUniform:
+                    operation = OrdinaryTransformOperation::Scale;
+                    break;
+                default:
+                    cancelInteraction(); return;
+            }
+            std::vector<OrdinaryTransformChange> requests;
+            requests.reserve(changes.size());
+            try {
                 for (const auto& change : changes) {
-                    gp_Trsf storedTransform;
-                    gp_Ax1 referenceAxis;
-                    const TopoDS_Shape storedShape =
-                        XCAFDoc_ShapeTool::GetShape(change.second);
-                    if (!myDoc->TryObjectTransformForLabel(
-                            change.second, storedTransform)
-                        || TransformDiffers(storedTransform,
-                            change.first->LocalTransformation())
-                        || storedShape.IsNull()
-                        || !myDoc->ResolveReferenceAxisInWorld(
-                            change.second, storedShape.Location(), referenceAxis)) {
-                        throw Standard_Failure(
-                            "Gesture transform exceeds persisted document limits");
+                    OcctObjectTransformState before;
+                    if (!myDoc->CaptureObjectTransformStateForLabel(change.second, before)) {
+                        cancelInteraction(); return;
                     }
+                    // Editable free definitions have no transformed parent.
+                    // A parent-relative occurrence needs a different command
+                    // contract; never interpret its local matrix as world space.
+                    const auto parent = change.first->CombinedParentTransformation();
+                    if (!parent.IsNull() && parent->Form() != gp_Identity) {
+                        cancelInteraction(); return;
+                    }
+                    OrdinaryTransformChange request;
+                    request.label = change.second;
+                    request.presentation = change.first;
+                    request.shape = change.first->Shape();
+                    request.operation = operation;
+                    request.transform = change.first->LocalTransformation();
+                    if (operation == OrdinaryTransformOperation::Translate) {
+                        // Preserve the exact persisted orientation/scale rather
+                        // than introducing a quaternion round-trip into Move.
+                        request.transform = before.transform;
+                        request.transform.SetTranslationPart(change.first->LocalTransformation().TranslationPart());
+                    } else if (operation == OrdinaryTransformOperation::Rotate) {
+                        OrdinaryRotationAroundPivot rotation;
+                        rotation.pivot = _manipulator->StartPosition().Location();
+                        rotation.delta = _manipulator->GestureTransformation();
+                        request.rotationAroundPivot = rotation;
+                        request.transform = rotation.delta * before.transform;
+                    }
+                    requests.push_back(std::move(request));
                 }
-				if (!doc->CommitCommand()) {
-					if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-					cancelInteraction();
-					return;
-				}
-			} catch (...) {
-				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-				cancelInteraction();
-				return;
-			}
-
-			_manipulator->StopTransform(Standard_True);
-			myDoc->NotifyChanges();
-
-			_manipulator->UpdateCachedShapes();
-            
-            _manipulator->DeactivateCurrentMode();
-            // A touch release has no continuing pointer hover. OCCT otherwise
-            // retains the last detected handle and can immediately reactivate
-            // its mode during redisplay, leaving the idle presentation in an
-            // unsafe pseudo-active state after a successful transform.
-            myContext->ClearDetected(Standard_False);
-            _manipulator->Redisplay();
-            myContext->UpdateCurrentViewer();
+                OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+                auto lease = controller->beginTransform(requests, &failure);
+                if (!lease) {
+                    // An uncertain begin retains authority; only a definitive
+                    // rejection/no-op permits cancelling the transient preview.
+                    if (!controller->blocksNormalWork()) { cancelInteraction(); }
+                    return;
+                }
+                (void)lease.stageAndCommit();
+                // Do not roll back from a commit Boolean/exception or publish
+                // here. The retained controller resolves the durable outcome.
+            } catch (...) {
+                if (!controller->blocksNormalWork()) { cancelInteraction(); }
+            }
         }
     }
 

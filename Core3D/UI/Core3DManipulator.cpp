@@ -1012,6 +1012,7 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             myStartTrsfs.Append (anObjIter.Value()->LocalTransformation());
         }
         myStartPosition = myPosition;
+        myGestureTrsf = gp_Trsf();
     }
     
     // Get 3d point with projection vector
@@ -1328,6 +1329,7 @@ void Core3DManipulator::Transform (const gp_Trsf& theTrsf)
     {
         return;
     }
+    myGestureTrsf = theTrsf;
     
 	//if (!myAxes[myCurrentIndex].HasMirroringPos() && !myAxes[myCurrentIndex].HasMirroringNeg())
     {

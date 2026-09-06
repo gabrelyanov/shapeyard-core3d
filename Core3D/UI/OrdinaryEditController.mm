@@ -24,7 +24,7 @@ bool MatricesEqual(const gp_Trsf& a, const gp_Trsf& b) {
 // a rotation with a persisted transform. Candidate sealing/readback below
 // still compares exact persisted values, never this tolerance.
 bool RotationArithmeticEqual(double a, double b, double arithmeticScale) {
-    return std::isfinite(a) && std::isfinite(b)
+    return std::isfinite(a) && std::isfinite(b) && std::isfinite(arithmeticScale)
         && std::abs(a - b) <= 64 * std::numeric_limits<double>::epsilon()
             * std::max({1.0, std::abs(a), std::abs(b), arithmeticScale});
 }
@@ -288,6 +288,11 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
                 || record.candidate.scalars != EncodedTransform(record.requested.transform)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
+            }
+            gp_Ax1 referenceAxis;
+            if (!_document->ResolveReferenceAxisInWorld(record.candidate.label,
+                    record.candidate.shape.Location(), referenceAxis)) {
+                throw Standard_Failure("Ordinary transform exceeds persisted reference-axis limits");
             }
             for (bool present : record.candidate.present) {
                 if (!present) { throw Standard_Failure("Incomplete ordinary transform candidate"); }

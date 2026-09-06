@@ -241,6 +241,9 @@ public:
   //! Captured gesture anchor; meaningful only while HasActiveTransformation().
   const gp_Ax2& StartPosition() const { return myStartPosition; }
 
+  //! Last accepted world delta, meaningful during an active transformation.
+  const gp_Trsf& GestureTransformation() const { return myGestureTrsf; }
+
   gp_Trsf StartTransformation() const { return !myStartTrsfs.IsEmpty() ? myStartTrsfs.First() : gp_Trsf(); }
 
   gp_Trsf StartTransformation (Standard_Integer theIndex) const
@@ -848,6 +851,7 @@ protected: //! @name Fields for interactive transformation. Fields only for inte
 
   NCollection_Sequence<gp_Trsf> myStartTrsfs; //!< Owning object transformation for start. It is used internally.
   Standard_Boolean myHasStartedTransformation; //!< Shows if transformation is processed (sequential calls of Transform()).
+  gp_Trsf myGestureTrsf; //!< Last accepted gesture delta; reset at gesture start.
   gp_Ax2 myStartPosition; //! Start position of manipulator.
   gp_Pnt myStartPick; //! 3d point corresponding to start mouse pick.
   Standard_Real myPrevState; //! Previous value of angle during rotation.

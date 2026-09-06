@@ -630,6 +630,7 @@ typedef struct {
 - (NSInteger)debugApplyViewerOrdinaryTransform:(NSInteger)mode paused:(BOOL)paused;
 - (NSInteger)debugReconcileViewerOrdinaryEdit;
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode;
+- (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryRepairFailures:(NSInteger)incremental redraw:(NSInteger)redraw;
 - (NSDictionary<NSString *, id> *)debugViewerOrdinaryState;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;

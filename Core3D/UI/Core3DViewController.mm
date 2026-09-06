@@ -2557,6 +2557,22 @@ void Core3DAddDebugOrphanVisualMaterial(
     GLController.viewer->debugSetOrdinaryRepairFailures((int)incremental, (int)redraw);
 }
 
+- (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 5
+        || GLController == nil || GLController.viewer == nullptr) { return NO; }
+    const auto controller = GLController.viewer->debugOrdinaryEditController();
+    if (!controller || controller->blocksNormalWork()) { return NO; }
+    auto& stamp = controller->debugCommandStamp();
+    stamp.debugSetNewCommandMode(0);
+    stamp.debugSetAbortMode(0);
+    stamp.debugSetInspectionFailureCount(0);
+    stamp.debugSetPostCommitInspectionFailureCount(0);
+    stamp.debugSetCommitMode(mode == 1 ? 3 : mode == 2 ? 4 : mode == 3 ? 1 : 0);
+    controller->debugSetStageFailureIndex(mode == 4 ? 1 : -1);
+    controller->debugSetTruthUnavailableCount(mode == 5 ? 1 : 0);
+    return YES;
+}
+
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 7 || GLController == nil || GLController.viewer == nullptr) { return 5; }
     const auto viewer = GLController.viewer;
