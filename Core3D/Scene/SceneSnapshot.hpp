@@ -19,6 +19,7 @@
 
 namespace core3d::scene {
 
+//! Update the Swift Metal support and GLB export schema gates with this contract.
 inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 7;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 10;
 

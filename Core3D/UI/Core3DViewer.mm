@@ -1,4 +1,3 @@
-#include <cstdio>
 //
 //  Core3DViewer.m
 //  Core3D
@@ -1956,46 +1955,40 @@ bool Core3DViewer::selectSavedGroup(const ObjectFrameIdentity& expected,
     std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height,
     bool& selectionWasTouched) noexcept {
     selectionWasTouched = false;
-        static const auto rejectSavedGroup = [](int line) {
-#ifdef DEBUG
-            std::fprintf(stderr, "SavedGroupSelection rejection %s:%d\n", __FILE__, line);
-#endif
-            return false;
-        };
 
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || width == 0 || height == 0
         || expected.entityIdentifier.size() != 36 || myContext.IsNull() || !_objectInteractor
         || !_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
-        || !_shapeInteractor->selectionModeAuthorityIsExact()) { return rejectSavedGroup(__LINE__); }
+        || !_shapeInteractor->selectionModeAuthorityIsExact()) { return false; }
     try {
         const auto snapshot = captureSceneSnapshot(width, height);
         if (!snapshot || expected.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
             || expected.documentGeneration != snapshot->revisions.documentGeneration
             || expected.modelRevision != snapshot->revisions.model
-            || presentationRevision != snapshot->revisions.presentation) { return rejectSavedGroup(__LINE__); }
+            || presentationRevision != snapshot->revisions.presentation) { return false; }
         std::unordered_set<std::string> members;
         for (const auto& item : snapshot->instances) {
             if (item.groupIdentifier != expected.entityIdentifier) { continue; }
             // Selecting only visible members would silently move a partial group.
             if (!item.visible || !item.selectable || item.role != scene::RenderRole::Model
-                || !members.insert(item.entityIdentifier).second || members.size() > 32) { return rejectSavedGroup(__LINE__); }
+                || !members.insert(item.entityIdentifier).second || members.size() > 32) { return false; }
         }
-        if (members.empty()) { return rejectSavedGroup(__LINE__); }
+        if (members.empty()) { return false; }
         std::vector<Handle(AIS_InteractiveObject)> targets;
         AIS_ListOfInteractive displayed;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
         std::size_t count = 0;
         for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
-            if (++count > 50000) { return rejectSavedGroup(__LINE__); }
+            if (++count > 50000) { return false; }
             const auto object = it.Value();
             const auto label = myDoc->ShapeLabel(object);
             if (!members.count(myDoc->EntityIdentifierForLabel(label))) { continue; }
-            if (!myDoc->IsEditableFreeSimpleDefinitionLabel(label) || !myDoc->IsPresentationEditable(object)) { return rejectSavedGroup(__LINE__); }
+            if (!myDoc->IsEditableFreeSimpleDefinitionLabel(label) || !myDoc->IsPresentationEditable(object)) { return false; }
             targets.push_back(object);
         }
-        if (targets.size() != members.size()) { return rejectSavedGroup(__LINE__); }
+        if (targets.size() != members.size()) { return false; }
         return _objectInteractor->replaceSelectedObjectsForBrowser(targets, selectionWasTouched);
-    } catch (...) { return rejectSavedGroup(__LINE__); }
+    } catch (...) { return false; }
 }
 
 bool Core3DViewer::admitGrouping(OrdinaryGroupingLedger& ledger) noexcept {

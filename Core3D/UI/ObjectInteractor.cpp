@@ -1,4 +1,3 @@
-#include <cstdio>
 //
 //  ObjectInteractor.cpp
 //  Core3D
@@ -2500,12 +2499,6 @@ namespace core3d {
         bool& selectionWasTouched) noexcept
     {
         selectionWasTouched = false;
-        static const auto rejectSavedGroup = [](int line) {
-#ifdef DEBUG
-            std::fprintf(stderr, "SavedGroupSelection rejection %s:%d\n", __FILE__, line);
-#endif
-            return false;
-        };
 
 #ifdef DEBUG
         Standard_Integer failureMode = 0;
@@ -2523,15 +2516,15 @@ namespace core3d {
                 || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
-                return rejectSavedGroup(__LINE__);
+                return false;
             }
             const auto document = myDoc->Document();
-            if (document.IsNull() || document->HasOpenCommand()) { return rejectSavedGroup(__LINE__); }
+            if (document.IsNull() || document->HasOpenCommand()) { return false; }
             const auto isCommittedPresentation = [this](
                 const Handle(AIS_InteractiveObject)& object) {
                 const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object);
                 if (shape.IsNull() || !myContext->IsDisplayed(object)
-                    || !myDoc->IsPresentationEditable(object)) { return rejectSavedGroup(__LINE__); }
+                    || !myDoc->IsPresentationEditable(object)) { return false; }
                 const TDF_Label label = myDoc->ShapeLabel(object);
                 gp_Trsf transform;
                 return !label.IsNull()
@@ -2545,7 +2538,7 @@ namespace core3d {
             std::unordered_set<const AIS_InteractiveObject*> targetSet;
             for (const auto& target : targets) {
                 if (!isCommittedPresentation(target) || !targetSet.insert(target.get()).second
-                    || target->GlobalSelOwner().IsNull()) { return rejectSavedGroup(__LINE__); }
+                    || target->GlobalSelOwner().IsNull()) { return false; }
             }
             std::unordered_set<const AIS_InteractiveObject*> previousPresentations;
             for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
@@ -2555,33 +2548,60 @@ namespace core3d {
                     || !isCommittedPresentation(object)
                     || !previousOwnerSet.insert(owner.get()).second
                     || !previousPresentations.insert(object.get()).second) {
-                    return rejectSavedGroup(__LINE__);
+                    return false;
                 }
                 previousOwners.push_back(owner);
             }
             previousLabels = _manipulatorSourceLabels;
             if (!_manipulator.IsNull() && _manipulator->IsAttached()) {
                 const auto attached = _manipulator->Objects();
-                if (attached.IsNull() || attached->Size() < 1
-                    || static_cast<std::size_t>(attached->Size()) != previousPresentations.size()
-                    || previousLabels.size() != previousPresentations.size()) {
-                    return rejectSavedGroup(__LINE__);
-                }
-                previousObjects = new Core3DManipulatorObjectSequence();
+                bool previousGizmoIsExact = !attached.IsNull() && attached->Size() > 0
+                    && static_cast<std::size_t>(attached->Size()) == previousPresentations.size()
+                    && previousLabels.size() == previousPresentations.size();
                 std::unordered_set<const AIS_InteractiveObject*> uniqueAttached;
-                for (Core3DManipulatorObjectSequence::Iterator item(*attached); item.More(); item.Next()) {
-                    const auto object = item.Value();
-                    const auto label = previousLabels.find(object.get());
-                    if (previousPresentations.find(object.get()) == previousPresentations.end()
-                        || !uniqueAttached.insert(object.get()).second
-                        || label == previousLabels.end()
-                        || label->second != myDoc->ShapeLabel(object)) {
-                        return rejectSavedGroup(__LINE__);
+                if (previousGizmoIsExact) {
+                    for (Core3DManipulatorObjectSequence::Iterator item(*attached); item.More(); item.Next()) {
+                        const auto object = item.Value();
+                        const auto label = previousLabels.find(object.get());
+                        if (!previousPresentations.count(object.get()) || !uniqueAttached.insert(object.get()).second
+                            || label == previousLabels.end() || label->second != myDoc->ShapeLabel(object)) {
+                            previousGizmoIsExact = false;
+                            break;
+                        }
                     }
-                    previousObjects->Append(object);
+                }
+                if (previousGizmoIsExact) {
+                    previousObjects = new Core3DManipulatorObjectSequence();
+                    for (Core3DManipulatorObjectSequence::Iterator item(*attached); item.More(); item.Next()) {
+                        previousObjects->Append(item.Value());
+                    }
+                } else {
+                    // An explicit new selection may retire an inactive stale
+                    // gizmo. Rollback derives its attachment from independently
+                    // verified current owners, never from the mismatched cache.
+                    // Active gestures and unresolved edits were rejected above.
+                    previousLabels.clear();
+                    bool canRestoreGizmo = !previousOwners.empty() && previousOwners.size() <= 1024;
+                    for (const auto& owner : previousOwners) {
+                        const auto object = Handle(AIS_InteractiveObject)::DownCast(owner->Selectable());
+                        if (ManipulatorRequiresBRepModeling(_manipulatorType)
+                            && !IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(myDoc->ShapeLabel(object)))) {
+                            canRestoreGizmo = false;
+                        }
+                    }
+                    if (canRestoreGizmo) {
+                        previousObjects = new Core3DManipulatorObjectSequence();
+                        for (const auto& owner : previousOwners) {
+                            const auto object = Handle(AIS_InteractiveObject)::DownCast(owner->Selectable());
+                            previousObjects->Append(object);
+                            previousLabels.emplace(object.get(), myDoc->ShapeLabel(object));
+                        }
+                    }
                 }
             } else if (!previousLabels.empty()) {
-                return rejectSavedGroup(__LINE__);
+                // No live attachment can authorize stale source-label entries.
+                // Retire them when adopting the new explicit selection.
+                previousLabels.clear();
             }
             const bool shouldAttach = _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                 && (!ManipulatorRequiresBRepModeling(_manipulatorType)
@@ -2647,7 +2667,7 @@ namespace core3d {
             myContext->UpdateCurrentViewer();
             return true;
         } catch (...) {
-            if (!selectionWasTouched) { return rejectSavedGroup(__LINE__); }
+            if (!selectionWasTouched) { return false; }
         }
         try {
             OCC_CATCH_SIGNALS
@@ -2693,7 +2713,7 @@ namespace core3d {
             try { myContext->ClearSelected(Standard_False); } catch (...) {}
             try { myContext->UpdateCurrentViewer(); } catch (...) {}
         }
-        return rejectSavedGroup(__LINE__);
+        return false;
     }
 
     const PrimitiveManipulatorType ObjectInteractor::getManipulatorType() const {
