@@ -53,6 +53,7 @@
 #include "gp_Ax2.hxx"
 #include "gp_Dir.hxx"
 #include "gp_Pnt2d.hxx"
+#include "gp_Quaternion.hxx"
 #include "gp_Trsf.hxx"
 #include "gp_Vec.hxx"
 #include "TopLoc_Location.hxx"
