@@ -91,6 +91,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)cancelChamfer;
 - (BOOL)canApplyChamfer;
 - (BOOL)hasActiveBevel;
+- (double)getExtrusionMetersPerUnit;
 - (BOOL)setExtrusion:(CGFloat)value;
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;

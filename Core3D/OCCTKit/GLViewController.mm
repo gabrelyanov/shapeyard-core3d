@@ -2294,6 +2294,15 @@ private:
         && _viewer->getShapeInteractor()->hasActiveBevel();
 }
 
+- (double)getExtrusionMetersPerUnit {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeExtrude
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->extrusionMetersPerUnit();
+}
+
 - (BOOL)setExtrusion:(CGFloat)value {
     if ([self getGizmoType] != PrimitiveGizmoTypeExtrude
         || _viewer == nullptr

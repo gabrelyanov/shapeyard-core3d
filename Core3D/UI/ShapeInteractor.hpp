@@ -266,6 +266,9 @@ namespace core3d {
 
         //! Capture one selected planar face on one editable free solid.
         //! No document command is opened until a nonzero preview succeeds.
+        //! Read physical distance conversion for the captured source without
+        //! opening a command, rebuilding geometry or changing selection.
+        Standard_Real extrusionMetersPerUnit() const noexcept;
         Standard_Boolean canBeginExtrusionSelection() const noexcept;
         Standard_Boolean beginExtrusionSelection() noexcept;
         //! Recompute a local BRepFeat prism preview in model units. Zero

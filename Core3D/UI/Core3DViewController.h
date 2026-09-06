@@ -255,6 +255,9 @@ typedef struct {
 - (BOOL)cancelChamfer;
 - (void)setExtrusion:(CGFloat)value;
 - (Boundaries)getExtrusionBoundaries;
+//! Metres per local BRep distance, including the active source's absolute
+//! saved uniform scale. Zero means no valid active extrusion. Read-only.
+- (double)getExtrusionMetersPerUnit;
 - (Core3DModelingOperationResult)tryApplyExtrusion
     NS_SWIFT_NAME(tryApplyExtrusion());
 - (Core3DModelingOperationResult)tryCancelExtrusion

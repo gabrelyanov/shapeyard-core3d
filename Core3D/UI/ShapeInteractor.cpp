@@ -918,6 +918,27 @@ namespace core3d {
 		_extrusion = ExtrusionSelection();
 	}
 
+    Standard_Real ShapeInteractor::extrusionMetersPerUnit() const noexcept {
+        try {
+            if (!_extrusion.IsReady() || myDoc.IsNull()) { return 0.0; }
+            const Handle(TDocStd_Document) document = myDoc->ChangeDocument();
+            if (document.IsNull()
+                || _extrusion.label.Data() != document->GetData()) { return 0.0; }
+            Standard_Real documentMeters = 0.001;
+            const Standard_Boolean hasUnit =
+                XCAFDoc_DocumentTool::GetLengthUnit(document, documentMeters);
+            if ((!hasUnit && documentMeters != 0.001)
+                || !std::isfinite(documentMeters) || documentMeters <= 0.0) {
+                return 0.0;
+            }
+            const Standard_Real effective = documentMeters
+                * std::abs(_extrusion.transform.ScaleFactor());
+            return std::isfinite(effective) && effective > 0.0 ? effective : 0.0;
+        } catch (...) {
+            return 0.0;
+        }
+    }
+
 	Standard_Boolean ShapeInteractor::setExtrusionValueForSelection(
 		const Standard_Real distance) noexcept {
 		try {
