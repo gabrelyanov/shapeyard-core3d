@@ -134,6 +134,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                                selectable:(BOOL)selectable
                                  selected:(BOOL)selected
                                      name:(NSString *)name
+                          groupIdentifier:(NSString *)groupIdentifier
+                                groupName:(NSString *)groupName
                                renderRole:(Core3DSceneRenderRole)renderRole
                           coordinateSpace:(Core3DSceneCoordinateSpace)coordinateSpace
                               depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
@@ -409,6 +411,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                                selectable:(BOOL)selectable
                                  selected:(BOOL)selected
                                      name:(NSString *)name
+                          groupIdentifier:(NSString *)groupIdentifier
+                                groupName:(NSString *)groupName
                                renderRole:(Core3DSceneRenderRole)renderRole
                           coordinateSpace:(Core3DSceneCoordinateSpace)coordinateSpace
                               depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
@@ -430,6 +434,8 @@ static_assert(sizeof(std::uint32_t) == 4,
         _selectable = selectable;
         _selected = selected;
         _name = [name copy];
+        _groupIdentifier = [groupIdentifier copy];
+        _groupName = [groupName copy];
         _renderRole = renderRole;
         _coordinateSpace = coordinateSpace;
         _depthPolicy = depthPolicy;
@@ -1283,6 +1289,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     std::size_t totalBindings = 0;
     std::unordered_map<std::string, std::size_t> instancesByIdentifier;
     instancesByIdentifier.reserve(snapshot.instances.size());
+    std::unordered_map<std::string, std::pair<std::string, std::size_t>> savedGroups;
     for (std::size_t instanceIndex = 0;
          instanceIndex < snapshot.instances.size(); ++instanceIndex) {
         const InstanceSnapshot& instance = snapshot.instances[instanceIndex];
@@ -1290,6 +1297,9 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !accountString(instance.entityIdentifier)
             || instance.name.size() > kMaximumNameBytes
             || !accountString(instance.name)
+            || !accountString(instance.groupIdentifier) || !accountString(instance.groupName)
+            || instance.groupName.size() > 1024
+            || instance.groupIdentifier.empty() != instance.groupName.empty()
             || !instancesByIdentifier.emplace(
                 instance.entityIdentifier, instanceIndex).second
             || instance.meshIndex >= snapshot.meshes.size()
@@ -1314,6 +1324,18 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             if (!IsFinite(value)) {
                 return false;
             }
+        }
+        if (!instance.groupIdentifier.empty()) {
+            const auto& id = instance.groupIdentifier;
+            if (instance.role != RenderRole::Model || id.size() != 36) { return false; }
+            for (std::size_t i = 0; i < id.size(); ++i) {
+                const char c = id[i];
+                if ((i == 8 || i == 13 || i == 18 || i == 23)
+                    ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) { return false; }
+            }
+            auto pair = savedGroups.emplace(id, std::make_pair(instance.groupName, 0));
+            if (savedGroups.size() > 128 || pair.first->second.first != instance.groupName
+                || ++pair.first->second.second > 32) { return false; }
         }
         const MeshSnapshot& mesh = snapshot.meshes[instance.meshIndex];
         if (instance.primitiveBindings.size() != mesh.primitives.size()
@@ -2113,6 +2135,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
                 && instance.renderStyle != RenderStyle::Shaded)
             || ((isChamferItem || isShellItem)
                 && instance.renderStyle != RenderStyle::Shaded)
+            || !instance.groupIdentifier.empty() || !instance.groupName.empty()
             || instance.name.size() > kMaximumNameBytes
             || !CheckedAdd(stringBytes,
                            instance.entityIdentifier.size(),
@@ -2586,6 +2609,8 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
                       selectable:value.selectable
                         selected:value.selected
                             name:StringFromUTF8(value.name)
+                 groupIdentifier:StringFromUTF8(value.groupIdentifier)
+                       groupName:StringFromUTF8(value.groupName)
                       renderRole:RenderRoleFromScene(value.role)
                  coordinateSpace:CoordinateSpaceFromScene(value.coordinateSpace)
                      depthPolicy:DepthPolicyFromScene(value.depthPolicy)

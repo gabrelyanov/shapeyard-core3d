@@ -162,6 +162,8 @@ namespace core3d {
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         //! Caller proves committed Object-mode authority and a current identity
         //! lease. Replaces selection and the complete gizmo group, without OCAF.
+        bool replaceSelectedObjectsForBrowser(const std::vector<Handle(AIS_InteractiveObject)>& targets,
+                                               bool& selectionWasTouched) noexcept;
         bool replaceSelectedObjectForBrowser(
             const Handle(AIS_InteractiveObject)& target,
             bool& selectionWasTouched) noexcept;

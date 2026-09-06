@@ -19,7 +19,7 @@
 
 namespace core3d::scene {
 
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 6;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 7;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 10;
 
 struct Float2 {
@@ -269,6 +269,9 @@ struct InstanceSnapshot {
     bool selectable = true;
     bool selected = false;
     std::string name;
+    //! Empty together for ungrouped objects and transient overlays.
+    std::string groupIdentifier;
+    std::string groupName;
     RenderRole role = RenderRole::Model;
     CoordinateSpace coordinateSpace = CoordinateSpace::World;
     DepthPolicy depthPolicy = DepthPolicy::Scene;

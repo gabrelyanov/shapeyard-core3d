@@ -5133,6 +5133,119 @@ void Core3DAddDebugOrphanVisualMaterial(
     } catch (...) { return NO; }
 }
 
+- (Core3DSavedGroupEditResult)editSavedGroupOperation:(NSInteger)operation identifier:(NSString *)entityIdentifier
+    entities:(NSArray<NSString *> *)entities name:(NSString *)name expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || name.length > 256 || entities.count > 32
+        || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DSavedGroupEditResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DSavedGroupEditResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DSavedGroupEditResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        // Copy UTF-16 by explicit length. An embedded zero must reach native
+        // validation, rather than silently truncating a requested name.
+        TCollection_ExtendedString requested;
+        for (NSUInteger index = 0; index < name.length; ++index) {
+            requested += static_cast<Standard_ExtCharacter>([name characterAtIndex:index]);
+        }
+        std::vector<std::string> memberIDs;
+        for (NSString* member in entities) {
+            if (![member isKindOfClass:NSString.class] || member.length == 0 || member.length > 128 || member.UTF8String == nullptr) {
+                return Core3DSavedGroupEditResultRejected;
+            }
+            memberIDs.emplace_back(member.UTF8String, [member lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        }
+        bool blockedByLayer = false;
+        const auto result = GLController.viewer->editSavedGroup(static_cast<int>(operation), identity.entityIdentifier,
+            memberIDs, requested, identity, expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)), &blockedByLayer);
+        if (blockedByLayer) { return Core3DSavedGroupEditResultBlockedByLayer; }
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DSavedGroupEditResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                // NotifyChanges owns document publication. Updating controls
+                // here does not rebuild geometry or replace selection owners.
+                [GLController refreshSelectionState];
+                [self viewDidChangeViewportPresentationState];
+                [self sendNotifyUIState:UIStateChangingHistory | UIStateChangingSelection | UIStateChangingGizmo
+                    | UIStateChangingDelete | UIStateChangingDuplicate | UIStateChangingApply | UIStateChangingApplyMaterial];
+                return Core3DSavedGroupEditResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DSavedGroupEditResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DSavedGroupEditResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DSavedGroupEditResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DSavedGroupEditResultFailed;
+        }
+    } catch (...) {}
+    return Core3DSavedGroupEditResultRejected;
+}
+
+- (Core3DSavedGroupEditResult)createSavedGroupWithEntityIdentifiers:(NSArray<NSString *> *)entities name:(NSString *)name expected:(Core3DSceneSnapshot *)expected {
+    return [self editSavedGroupOperation:0 identifier:@"" entities:entities name:name expected:expected];
+}
+- (Core3DSavedGroupEditResult)renameSavedGroup:(NSString *)identifier name:(NSString *)name expected:(Core3DSceneSnapshot *)expected {
+    return [self editSavedGroupOperation:1 identifier:identifier entities:@[] name:name expected:expected];
+}
+- (Core3DSavedGroupEditResult)ungroupSavedGroup:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected {
+    return [self editSavedGroupOperation:2 identifier:identifier entities:@[] name:@"" expected:expected];
+}
+- (Core3DSavedGroupEditResult)setSavedGroupVisibility:(NSString *)identifier visible:(BOOL)visible expected:(Core3DSceneSnapshot *)expected {
+    return [self editSavedGroupOperation:visible ? 4 : 3 identifier:identifier entities:@[] name:@"" expected:expected];
+}
+
+- (BOOL)selectSavedGroup:(NSString *)entityIdentifier
+                              expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || expected.selectionMode != Core3DSceneElementKindObject
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return NO; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return NO; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        bool selectionWasTouched = false;
+        const bool selected = GLController.viewer->selectSavedGroup(
+            identity, expected.revisions.presentationRevision, static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)), selectionWasTouched);
+        if (selectionWasTouched) {
+            [GLController refreshSelectionState];
+            [GLController requestRender];
+            [self viewDidInvalidateSceneSnapshot];
+        }
+        return selected;
+    } catch (...) { return NO; }
+}
+
 - (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                                                       name:(NSString *)name
                                                   expected:(Core3DSceneSnapshot *)expected {

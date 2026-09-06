@@ -2487,6 +2487,110 @@ std::string NewIdentifier()
     return aValue == nil ? std::string() : std::string(aValue.UTF8String);
 }
 
+// Persistent saved-group schema v1. Each string uses an existing bounded
+// BinXCAF driver; never serialize the catalog into one large ASCII payload.
+const Standard_GUID& SavedGroupContainerID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861401"); return id;
+}
+const Standard_GUID& SavedGroupRecordID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861402"); return id;
+}
+const Standard_GUID& SavedGroupNameID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861403"); return id;
+}
+const Standard_GUID& SavedGroupMembershipID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861404"); return id;
+}
+constexpr std::size_t kMaximumSavedGroups = 128;
+constexpr std::size_t kMaximumSavedGroupMembers = 32;
+bool IsCanonicalSavedGroupID(const std::string& id) {
+    if (id.size() != 36 || !Standard_GUID::CheckGUIDFormat(id.c_str())) { return false; }
+    for (char c : id) {
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || c == '-')) { return false; }
+    }
+    return true;
+}
+bool HasSavedGroupAttribute(const TDF_Label& label) {
+    Handle(TDF_Attribute) attribute;
+    return label.FindAttribute(SavedGroupContainerID(), attribute)
+        || label.FindAttribute(SavedGroupRecordID(), attribute)
+        || label.FindAttribute(SavedGroupNameID(), attribute)
+        || label.FindAttribute(SavedGroupMembershipID(), attribute);
+}
+bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupState& output) noexcept {
+    output = OcctSavedGroupState();
+    try {
+        if (document.IsNull() || document->GetData().IsNull()) { return false; }
+        OcctSavedGroupState state;
+        state.documentData = document->GetData();
+        const TDF_Label root = state.documentData->Root();
+        if (HasSavedGroupAttribute(root)) { return false; }
+        std::vector<TDF_Label> records, members;
+        std::size_t count = 0;
+        // First collect every schema-bearing label, including wrongly placed
+        // attributes. Downcasting an unexpected type must fail admission.
+        for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
+            if (++count > kMaximumGeometryDocumentLabels) { return false; }
+            const TDF_Label label = it.Value();
+            Handle(TDF_Attribute) marker, record, name, member;
+            const bool hasMarker = label.FindAttribute(SavedGroupContainerID(), marker);
+            const bool hasRecord = label.FindAttribute(SavedGroupRecordID(), record);
+            const bool hasName = label.FindAttribute(SavedGroupNameID(), name);
+            const bool hasMember = label.FindAttribute(SavedGroupMembershipID(), member);
+            if (hasMarker) {
+                const auto typed = Handle(TDataStd_Integer)::DownCast(marker);
+                if (typed.IsNull() || typed->Get() != 1 || !label.Father().IsEqual(root)
+                    || label.IsEqual(document->Main()) || !state.container.IsNull()
+                    || hasRecord || hasName || hasMember) { return false; }
+                state.container = label;
+            }
+            if (hasRecord || hasName) {
+                if (!hasRecord || !hasName || hasMember
+                    || Handle(TDataStd_AsciiString)::DownCast(record).IsNull()
+                    || Handle(TDataStd_Name)::DownCast(name).IsNull()
+                    || records.size() >= kMaximumSavedGroups) { return false; }
+                records.push_back(label);
+            }
+            if (hasMember) {
+                if (Handle(TDataStd_AsciiString)::DownCast(member).IsNull()
+                    || members.size() >= kMaximumSavedGroups * kMaximumSavedGroupMembers) { return false; }
+                members.push_back(label);
+            }
+        }
+        if (state.container.IsNull() && (!records.empty() || !members.empty())) { return false; }
+        std::unordered_map<std::string, std::size_t> indices;
+        for (const auto& label : records) {
+            if (!label.Father().IsEqual(state.container)) { return false; }
+            OcctSavedGroup group;
+            group.recordLabel = label;
+            group.identifier = ReadIdentifier(label, SavedGroupRecordID());
+            Handle(TDataStd_Name) name;
+            if (!IsCanonicalSavedGroupID(group.identifier)
+                || !label.FindAttribute(SavedGroupNameID(), name)
+                || !OcctObjectNameIsValid(name->Get())
+                || !indices.emplace(group.identifier, state.groups.size()).second) { return false; }
+            group.name = name->Get();
+            state.groups.push_back(std::move(group));
+        }
+        const auto shapes = XCAFDoc_DocumentTool::CheckShapeTool(document->Main())
+            ? XCAFDoc_DocumentTool::ShapeTool(document->Main()) : Handle(XCAFDoc_ShapeTool)();
+        for (const auto& label : members) {
+            const auto id = ReadIdentifier(label, SavedGroupMembershipID());
+            const auto found = indices.find(id);
+            if (!IsCanonicalSavedGroupID(id) || found == indices.end() || shapes.IsNull()
+                || !IsGeometryDefinitionLabel(document, shapes, label)
+                || !XCAFDoc_ShapeTool::IsFree(label)
+                || ReadIdentifier(label, EntityIdentifierAttributeID()).empty()
+                || ReadIdentifier(label, DefinitionIdentifierAttributeID()).empty()) { return false; }
+            auto& group = state.groups[found->second];
+            if (group.members.size() >= kMaximumSavedGroupMembers) { return false; }
+            group.members.push_back(label);
+        }
+        output = std::move(state);
+        return true;
+    } catch (...) { output = OcctSavedGroupState(); return false; }
+}
+
 Standard_Boolean AssignNewIdentifier(
     const TDF_Label& theLabel,
     const Standard_GUID& theAttributeID)
@@ -2961,7 +3065,10 @@ Standard_Boolean ValidateGeometryDocument(
         OCC_CATCH_SIGNALS
         if (document.IsNull() || document->GetData().IsNull()
             || !ValidateCommandOwnerSentinelsDocument(document)
-            || !ValidateReferenceAxisDocument(document)) {
+            || !ValidateReferenceAxisDocument(document)
+            || !([](const Handle(TDocStd_Document)& doc) {
+                OcctSavedGroupState groups; return ReadSavedGroups(doc, groups);
+            })(document)) {
             return Standard_False;
         }
         const TDF_Label aRoot = document->GetData()->Root();
@@ -5910,6 +6017,110 @@ Standard_Boolean OcctObjectNameState::IsEqual(const OcctObjectNameState& other) 
     try {
         return object.IsEqual(other.object) && namePresent == other.namePresent
             && (!namePresent || name.IsEqual(other.name));
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctSavedGroupState::IsEqual(const OcctSavedGroupState& other) const noexcept {
+    try {
+        if (documentData.IsNull() || documentData != other.documentData
+            || !container.IsEqual(other.container) || groups.size() != other.groups.size()) { return Standard_False; }
+        for (std::size_t i = 0; i < groups.size(); ++i) {
+            const auto& a = groups[i]; const auto& b = other.groups[i];
+            if (!a.recordLabel.IsEqual(b.recordLabel) || a.identifier != b.identifier
+                || !a.name.IsEqual(b.name) || a.members.size() != b.members.size()) { return Standard_False; }
+            for (std::size_t j = 0; j < a.members.size(); ++j) {
+                if (!a.members[j].IsEqual(b.members[j])) { return Standard_False; }
+            }
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+Standard_Boolean OcctDocument::CaptureSavedGroups(OcctSavedGroupState& state) const noexcept {
+    state = OcctSavedGroupState();
+    return [NSThread isMainThread] && ReadSavedGroups(myOcafDoc, state);
+}
+Standard_Boolean OcctDocument::StageSavedGroups(const std::vector<OcctSavedGroup>& groups) noexcept {
+    if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || groups.size() > kMaximumSavedGroups) { return Standard_False; }
+    try {
+        OcctSavedGroupState before;
+        if (!CaptureSavedGroups(before)) { return Standard_False; }
+        std::unordered_set<std::string> identifiers, entities;
+        std::vector<OcctObjectNameState> objectAuthority;
+        for (const auto& group : groups) {
+            if (!IsCanonicalSavedGroupID(group.identifier) || !OcctObjectNameIsValid(group.name)
+                || !identifiers.insert(group.identifier).second || group.members.size() > kMaximumSavedGroupMembers) { return Standard_False; }
+            for (const auto& label : group.members) {
+                OcctObjectNameState object;
+                if (!CaptureObjectNameStateForLabel(label, object)
+                    || !entities.insert(object.object.entityIdentifier).second) { return Standard_False; }
+                objectAuthority.push_back(std::move(object));
+            }
+        }
+        // Capture removed members too; catalog replacement never changes parts.
+        for (const auto& group : before.groups) {
+            for (const auto& label : group.members) {
+                OcctObjectNameState object;
+                if (!CaptureObjectNameStateForLabel(label, object)) { return Standard_False; }
+                objectAuthority.push_back(std::move(object));
+            }
+        }
+        TDF_Label container = before.container;
+        if (container.IsNull() && groups.empty()) { return Standard_True; }
+        if (container.IsNull()) {
+            const auto root = myOcafDoc->GetData()->Root();
+            Standard_Integer tag = 0;
+            for (TDF_ChildIterator it(root, Standard_False); it.More(); it.Next()) { tag = std::max(tag, it.Value().Tag()); }
+            if (tag == std::numeric_limits<Standard_Integer>::max()) { return Standard_False; }
+            // A sibling of Main is outside all XCAF document-tool fixed tags.
+            container = root.FindChild(tag + 1, Standard_True);
+            TDataStd_Integer::Set(container, SavedGroupContainerID(), 1);
+        }
+        std::unordered_map<std::string, TDF_Label> retained;
+        std::vector<TDF_Label> reusable;
+        for (const auto& group : before.groups) {
+            if (identifiers.count(group.identifier)) { retained.emplace(group.identifier, group.recordLabel); }
+            for (const auto& label : group.members) { label.ForgetAttribute(SavedGroupMembershipID()); }
+            group.recordLabel.ForgetAttribute(SavedGroupRecordID());
+            group.recordLabel.ForgetAttribute(SavedGroupNameID());
+        }
+        Standard_Integer maximumTag = 0;
+        for (TDF_ChildIterator it(container, Standard_False); it.More(); it.Next()) {
+            const auto label = it.Value(); maximumTag = std::max(maximumTag, label.Tag());
+            bool reserved = false;
+            for (const auto& pair : retained) { if (pair.second.IsEqual(label)) { reserved = true; break; } }
+            if (!reserved && !label.HasAttribute() && !label.HasChild()) { reusable.push_back(label); }
+        }
+        for (const auto& group : groups) {
+            TDF_Label label;
+            const auto found = retained.find(group.identifier);
+            if (found != retained.end()) { label = found->second; }
+            else if (!reusable.empty()) { label = reusable.back(); reusable.pop_back(); }
+            else {
+                if (maximumTag == std::numeric_limits<Standard_Integer>::max()) { return Standard_False; }
+                label = container.FindChild(++maximumTag, Standard_True);
+            }
+            TDataStd_AsciiString::Set(label, SavedGroupRecordID(), TCollection_AsciiString(group.identifier.c_str()));
+            TDataStd_Name::Set(label, SavedGroupNameID(), group.name);
+            for (const auto& member : group.members) {
+                TDataStd_AsciiString::Set(member, SavedGroupMembershipID(), TCollection_AsciiString(group.identifier.c_str()));
+            }
+        }
+        OcctSavedGroupState after;
+        if (!CaptureSavedGroups(after) || after.groups.size() != groups.size()) { return Standard_False; }
+        for (const auto& requested : groups) {
+            const auto found = std::find_if(after.groups.begin(), after.groups.end(), [&](const auto& g) { return g.identifier == requested.identifier; });
+            if (found == after.groups.end() || !found->name.IsEqual(requested.name)
+                || found->members.size() != requested.members.size()) { return Standard_False; }
+            for (const auto& member : requested.members) {
+                if (std::none_of(found->members.begin(), found->members.end(), [&](const auto& l) { return l.IsEqual(member); })) { return Standard_False; }
+            }
+        }
+        for (const auto& expected : objectAuthority) {
+            OcctObjectNameState actual;
+            if (!CaptureObjectNameStateForLabel(expected.object.label, actual) || !expected.IsEqual(actual)) { return Standard_False; }
+        }
+        return Standard_True;
     } catch (...) { return Standard_False; }
 }
 

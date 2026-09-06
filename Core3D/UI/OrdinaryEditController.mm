@@ -246,6 +246,145 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
     }
 }
 
+OrdinaryEditLease OrdinaryEditController::beginGrouping(
+    const std::vector<OcctSavedGroup>& groups, OrdinaryEditResult* failure) noexcept {
+    const auto reject = [&](OrdinaryEditResult result) {
+        if (failure) { *failure = result; }
+        return OrdinaryEditLease();
+    };
+    if (![NSThread isMainThread]) { return reject(OrdinaryEditResult::Invalid); }
+    if (blocksNormalWork()) { return reject(OrdinaryEditResult::Busy); }
+    if (_document.IsNull() || groups.size() > 128
+        || _nextToken == std::numeric_limits<std::uint64_t>::max()) {
+        return reject(OrdinaryEditResult::Invalid);
+    }
+    _entering = true;
+    struct EnterReset { bool& flag; ~EnterReset() { flag = false; } } reset{_entering};
+    try {
+        const auto self = shared_from_this();
+        const auto lifetime = std::make_shared<const std::uint8_t>(0);
+        const auto document = _document->Document();
+        if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
+        OrdinaryGroupingLedger ledger;
+        if (!_document->CaptureSavedGroups(ledger.previous)) { return reject(OrdinaryEditResult::Invalid); }
+        ledger.requested = groups;
+        std::unordered_set<std::string> groupIDs, entities;
+        for (const auto& group : groups) {
+            if (group.identifier.size() != 36 || !Standard_GUID::CheckGUIDFormat(group.identifier.c_str())
+                || !groupIDs.insert(group.identifier).second || !OcctObjectNameIsValid(group.name)
+                || group.members.size() > 32) { return reject(OrdinaryEditResult::Invalid); }
+            for (const auto& label : group.members) {
+                OcctObjectNameState object;
+                if (!_document->CaptureObjectNameStateForLabel(label, object)
+                    || !entities.insert(object.object.entityIdentifier).second) { return reject(OrdinaryEditResult::Invalid); }
+                ledger.objects.push_back(std::move(object));
+            }
+        }
+        bool changed = groups.size() != ledger.previous.groups.size();
+        for (const auto& group : ledger.previous.groups) {
+            const auto match = std::find_if(groups.begin(), groups.end(), [&](const auto& value) { return value.identifier == group.identifier; });
+            changed = changed || match == groups.end();
+            if (match != groups.end()) {
+                changed = changed || !match->name.IsEqual(group.name) || match->members.size() != group.members.size();
+                for (const auto& label : group.members) {
+                    changed = changed || std::none_of(match->members.begin(), match->members.end(), [&](const auto& l) { return l.IsEqual(label); });
+                }
+            }
+            for (const auto& label : group.members) {
+                OcctObjectNameState object;
+                if (!_document->CaptureObjectNameStateForLabel(label, object)) { return reject(OrdinaryEditResult::Invalid); }
+                if (entities.insert(object.object.entityIdentifier).second) { ledger.objects.push_back(std::move(object)); }
+            }
+        }
+        if (!changed) { return reject(OrdinaryEditResult::NoChange); }
+        if (!_host.admitGrouping(ledger) || !groupingMatches(ledger, false)) { return reject(OrdinaryEditResult::Invalid); }
+        _pending.emplace(std::move(ledger));
+        _leaseLifetime = lifetime;
+        _activeToken = ++_nextToken;
+        const auto began = _command.begin(_document);
+        if (began != OrdinaryCommandBeginResult::Started) {
+            if (began == OrdinaryCommandBeginResult::OutcomeUnknown) {
+                _state = OrdinaryEditState::OutcomeUnknown;
+                return reject(OrdinaryEditResult::OutcomeUnknown);
+            }
+            _pending.reset();
+            _activeToken = 0;
+            return reject(began == OrdinaryCommandBeginResult::Busy
+                ? OrdinaryEditResult::Busy : began == OrdinaryCommandBeginResult::Invalid
+                ? OrdinaryEditResult::Invalid : OrdinaryEditResult::RetryableFailure);
+        }
+        _state = OrdinaryEditState::OpenOwned;
+        return OrdinaryEditLease(self, _activeToken, lifetime);
+    } catch (...) {
+        if (_command.isRetained()) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return reject(OrdinaryEditResult::OutcomeUnknown);
+        }
+        _pending.reset();
+        _activeToken = 0;
+        return reject(OrdinaryEditResult::Invalid);
+    }
+}
+
+bool OrdinaryEditController::groupingMatches(const OrdinaryGroupingLedger& ledger, bool candidate) const noexcept {
+    OcctSavedGroupState state;
+    if (_document.IsNull() || !_document->CaptureSavedGroups(state)
+        || !(candidate ? ledger.candidate : ledger.previous).IsEqual(state)) { return false; }
+    for (const auto& object : ledger.objects) { if (!captureMatches(object)) { return false; } }
+    return true;
+}
+OrdinaryEditResult OrdinaryEditController::stageGroupingAndCommit(std::uint64_t token) noexcept {
+    try {
+        auto& ledger = std::get<OrdinaryGroupingLedger>(*_pending);
+        if (!groupingMatches(ledger, false)) { return cancel(token); }
+        if (_command.observe() != OrdinaryCommandObservation::OpenOwned) {
+            _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+#ifdef DEBUG
+        if (_stageFailureIndex == 0) { _stageFailureIndex = -1; throw Standard_Failure("Grouping staging fault"); }
+#endif
+        if (!_document->StageSavedGroups(ledger.requested) || !_document->CaptureSavedGroups(ledger.candidate)) {
+            throw Standard_Failure("Grouping readback failed");
+        }
+        for (const auto& object : ledger.objects) {
+            if (!captureMatches(object)) { throw Standard_Failure("Grouping changed object authority"); }
+        }
+#ifdef DEBUG
+        if (_stageFailureIndex == 1) { _stageFailureIndex = -1; throw Standard_Failure("Grouping staged abort fault"); }
+#endif
+        ledger.candidateSealed = true;
+        if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
+            _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return OrdinaryEditResult::OutcomeUnknown;
+        }
+    } catch (...) {}
+    _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return reconcile();
+}
+OrdinaryEditResult OrdinaryEditController::reconcileGroupingImpl() noexcept {
+    try {
+        auto& ledger = std::get<OrdinaryGroupingLedger>(*_pending);
+#ifdef DEBUG
+        if (_truthUnavailableCount > 0) {
+            --_truthUnavailableCount; _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+#endif
+        auto observation = _command.observe();
+        if (observation == OrdinaryCommandObservation::OpenOwned) { observation = _command.abortAndObserve(); }
+        const bool candidate = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
+        const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
+        if ((!candidate && !previous) || (candidate && !ledger.candidateSealed) || !groupingMatches(ledger, candidate)) {
+            _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+        _committed = candidate; _state = OrdinaryEditState::RepairPending;
+        if (!_host.repairGrouping(ledger, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+        if (!groupingMatches(ledger, candidate)) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+        _state = OrdinaryEditState::Publishing;
+        if (!_command.releaseClosed()) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+        if (candidate && !_didPublish) { _didPublish = true; try { _document->NotifyChanges(); } catch (...) {} }
+        clearResolved();
+        return candidate ? OrdinaryEditResult::Committed : OrdinaryEditResult::RetryableFailure;
+    } catch (...) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+}
+
 OrdinaryEditLease OrdinaryEditController::beginNames(
     const std::vector<OrdinaryNameChange>& changes, OrdinaryEditResult* failure) noexcept {
     const auto reject = [&](OrdinaryEditResult result) {
@@ -592,6 +731,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
         || !_pending || token == 0 || token != _activeToken) { return OrdinaryEditResult::Busy; }
+    if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return stageGroupingAndCommit(token); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return stageVisibilityAndCommit(token); }
     if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return stageNamesAndCommit(token); }
     try {
@@ -705,6 +845,7 @@ OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
 }
 
 OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
+    if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return reconcileGroupingImpl(); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return reconcileVisibilityImpl(); }
     if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return reconcileNamesImpl(); }
     try {

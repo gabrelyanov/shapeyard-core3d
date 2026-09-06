@@ -1875,6 +1875,128 @@ OrdinaryEditResult Core3DViewer::setObjectVisibilityFromBrowser(
     } catch (...) { return OrdinaryEditResult::Invalid; }
 }
 
+OrdinaryEditResult Core3DViewer::editSavedGroup(int operation, const std::string& groupIdentifier,
+    const std::vector<std::string>& entities, const TCollection_ExtendedString& name,
+    const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height, bool* blockedByLayer) noexcept {
+    if (blockedByLayer) { *blockedByLayer = false; }
+    if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) { return OrdinaryEditResult::Busy; }
+    if (operation < 0 || operation > 4 || width == 0 || height == 0
+        || !_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+        || (operation == 0 ? (entities.size() < 2 || entities.size() > 32 || !groupIdentifier.empty())
+                            : (groupIdentifier.size() != 36 || !entities.empty()))
+        || (operation < 2 && !OcctObjectNameIsValid(name))) { return OrdinaryEditResult::Invalid; }
+    try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || expected.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+            || expected.documentGeneration != snapshot->revisions.documentGeneration
+            || expected.modelRevision != snapshot->revisions.model
+            || presentationRevision != snapshot->revisions.presentation) { return OrdinaryEditResult::Invalid; }
+        OcctSavedGroupState state;
+        if (!myDoc->CaptureSavedGroups(state)) { return OrdinaryEditResult::Invalid; }
+        auto requested = state.groups;
+        auto target = std::find_if(requested.begin(), requested.end(), [&](const auto& g) { return g.identifier == groupIdentifier; });
+        if (operation != 0 && (target == requested.end() || target->members.empty())) { return OrdinaryEditResult::Invalid; }
+        if (operation == 0) {
+            std::unordered_set<std::string> wanted;
+            for (const auto& id : entities) {
+                if (id.empty() || id.size() > 128 || id.find('\0') != std::string::npos || !wanted.insert(id).second) { return OrdinaryEditResult::Invalid; }
+                const auto count = std::count_if(snapshot->instances.begin(), snapshot->instances.end(), [&](const auto& i) {
+                    return i.entityIdentifier == id && i.role == scene::RenderRole::Model;
+                });
+                if (count != 1) { return OrdinaryEditResult::Invalid; }
+            }
+            OcctSavedGroup group;
+            group.identifier = NSUUID.UUID.UUIDString.UTF8String; group.name = name;
+            TDF_LabelSequence labels;
+            XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main())->GetFreeShapes(labels);
+            if (labels.Length() > 50000) { return OrdinaryEditResult::Invalid; }
+            for (Standard_Integer i = 1; i <= labels.Length(); ++i) {
+                const auto label = labels.Value(i);
+                if (!wanted.count(myDoc->EntityIdentifierForLabel(label))) { continue; }
+                if (!myDoc->IsEditableFreeSimpleDefinitionLabel(label)) { return OrdinaryEditResult::Invalid; }
+                group.members.push_back(label);
+            }
+            if (group.members.size() != wanted.size()) { return OrdinaryEditResult::Invalid; }
+            for (auto& previous : requested) {
+                previous.members.erase(std::remove_if(previous.members.begin(), previous.members.end(), [&](const auto& label) {
+                    return wanted.count(myDoc->EntityIdentifierForLabel(label)) != 0;
+                }), previous.members.end());
+            }
+            requested.erase(std::remove_if(requested.begin(), requested.end(), [](const auto& g) { return g.members.empty(); }), requested.end());
+            if (requested.size() >= 128) { return OrdinaryEditResult::Invalid; }
+            requested.push_back(std::move(group));
+        } else if (operation == 1) { target->name = name; }
+        else if (operation == 2) { requested.erase(target); }
+        else {
+            std::vector<OrdinaryVisibilityChange> changes;
+            for (const auto& label : target->members) {
+                OcctObjectVisibilityState visibility;
+                if (!myDoc->CaptureObjectVisibilityStateForLabel(label, visibility)) { return OrdinaryEditResult::Invalid; }
+                if (operation == 4 && std::any_of(visibility.layerInvisibleAttributePresent.begin(), visibility.layerInvisibleAttributePresent.end(), [](bool hidden) { return hidden; })) {
+                    if (blockedByLayer) { *blockedByLayer = true; }
+                    return OrdinaryEditResult::Invalid;
+                }
+                changes.push_back({label, operation == 4});
+            }
+            OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+            auto lease = _ordinaryEditController->beginVisibility(changes, &failure);
+            return lease ? lease.stageAndCommit() : failure;
+        }
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = _ordinaryEditController->beginGrouping(requested, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
+bool Core3DViewer::selectSavedGroup(const ObjectFrameIdentity& expected,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height,
+    bool& selectionWasTouched) noexcept {
+    selectionWasTouched = false;
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || width == 0 || height == 0
+        || expected.entityIdentifier.size() != 36 || myContext.IsNull() || !_objectInteractor
+        || !_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+        || !_shapeInteractor->selectionModeAuthorityIsExact()) { return false; }
+    try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || expected.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+            || expected.documentGeneration != snapshot->revisions.documentGeneration
+            || expected.modelRevision != snapshot->revisions.model
+            || presentationRevision != snapshot->revisions.presentation) { return false; }
+        std::unordered_set<std::string> members;
+        for (const auto& item : snapshot->instances) {
+            if (item.groupIdentifier != expected.entityIdentifier) { continue; }
+            // Selecting only visible members would silently move a partial group.
+            if (!item.visible || !item.selectable || item.role != scene::RenderRole::Model
+                || !members.insert(item.entityIdentifier).second || members.size() > 32) { return false; }
+        }
+        if (members.empty()) { return false; }
+        std::vector<Handle(AIS_InteractiveObject)> targets;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        std::size_t count = 0;
+        for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+            if (++count > 50000) { return false; }
+            const auto object = it.Value();
+            const auto label = myDoc->ShapeLabel(object);
+            if (!members.count(myDoc->EntityIdentifierForLabel(label))) { continue; }
+            if (!myDoc->IsEditableFreeSimpleDefinitionLabel(label) || !myDoc->IsPresentationEditable(object)) { return false; }
+            targets.push_back(object);
+        }
+        return targets.size() == members.size()
+            && _objectInteractor->replaceSelectedObjectsForBrowser(targets, selectionWasTouched);
+    } catch (...) { return false; }
+}
+
+bool Core3DViewer::admitGrouping(OrdinaryGroupingLedger& ledger) noexcept {
+    return _shapeInteractor && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
+        && admitNames(ledger.authority);
+}
+bool Core3DViewer::repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept {
+    return repairNames(ledger.authority, committed);
+}
+
 bool Core3DViewer::admitNames(OrdinaryNameLedger& ledger) noexcept {
     if (![NSThread isMainThread] || !_objectInteractor || !_shapeInteractor
         || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)

@@ -39,6 +39,16 @@ typedef NS_ENUM(NSInteger, Core3DObjectAlignmentResult) {
     Core3DObjectAlignmentResultCancelled,
 };
 
+typedef NS_ENUM(NSInteger, Core3DSavedGroupEditResult) {
+    Core3DSavedGroupEditResultUnchanged = 0,
+    Core3DSavedGroupEditResultCommitted,
+    Core3DSavedGroupEditResultRejected,
+    Core3DSavedGroupEditResultBusy,
+    Core3DSavedGroupEditResultRecoveryRequired,
+    Core3DSavedGroupEditResultFailed,
+    Core3DSavedGroupEditResultBlockedByLayer,
+};
+
 typedef NS_ENUM(NSInteger, Core3DObjectNameEditResult) {
     Core3DObjectNameEditResultUnchanged = 0,
     Core3DObjectNameEditResultCommitted,
@@ -542,6 +552,17 @@ typedef struct {
                                                                   visible:(BOOL)visible
                                                                  expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(setObjectVisibility(entityIdentifier:visible:expected:));
+- (Core3DSavedGroupEditResult)createSavedGroupWithEntityIdentifiers:(NSArray<NSString *> *)entityIdentifiers
+    name:(NSString *)name expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(createSavedGroup(entityIdentifiers:name:expected:));
+- (Core3DSavedGroupEditResult)renameSavedGroup:(NSString *)identifier name:(NSString *)name
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(renameSavedGroup(identifier:name:expected:));
+- (Core3DSavedGroupEditResult)ungroupSavedGroup:(NSString *)identifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(ungroupSavedGroup(identifier:expected:));
+- (Core3DSavedGroupEditResult)setSavedGroupVisibility:(NSString *)identifier visible:(BOOL)visible
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(setSavedGroupVisibility(identifier:visible:expected:));
+- (BOOL)selectSavedGroup:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(selectSavedGroup(identifier:expected:));
 - (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                                                       name:(NSString *)name
                                                   expected:(Core3DSceneSnapshot *)expected

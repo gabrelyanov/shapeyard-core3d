@@ -109,6 +109,13 @@ namespace core3d {
             _debugOrdinaryVisibilityAfterRepairFailures = count > 0 ? count : 0;
         }
 #endif
+        //! Operations: 0 create, 1 rename, 2 ungroup, 3 hide, 4 show.
+        OrdinaryEditResult editSavedGroup(int operation, const std::string& groupIdentifier,
+            const std::vector<std::string>& entities, const TCollection_ExtendedString& name,
+            const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height, bool* blockedByLayer = nullptr) noexcept;
+        bool selectSavedGroup(const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height, bool& selectionWasTouched) noexcept;
         OrdinaryEditResult renameObjectFromBrowser(const ObjectFrameIdentity& identity,
             const TCollection_ExtendedString& name, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
@@ -368,6 +375,8 @@ namespace core3d {
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
         bool admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept override;
         bool repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
+        bool admitGrouping(OrdinaryGroupingLedger& ledger) noexcept override;
+        bool repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept override;
         bool admitNames(OrdinaryNameLedger& ledger) noexcept override;
         bool repairNames(const OrdinaryNameLedger& ledger, bool committed) noexcept override;
         bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept override;

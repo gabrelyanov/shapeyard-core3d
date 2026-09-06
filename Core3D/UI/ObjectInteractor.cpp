@@ -2452,7 +2452,12 @@ namespace core3d {
     }
 
     bool ObjectInteractor::replaceSelectedObjectForBrowser(
-        const Handle(AIS_InteractiveObject)& target,
+        const Handle(AIS_InteractiveObject)& target, bool& selectionWasTouched) noexcept {
+        return replaceSelectedObjectsForBrowser({target}, selectionWasTouched);
+    }
+
+    bool ObjectInteractor::replaceSelectedObjectsForBrowser(
+        const std::vector<Handle(AIS_InteractiveObject)>& targets,
         bool& selectionWasTouched) noexcept
     {
         selectionWasTouched = false;
@@ -2465,7 +2470,7 @@ namespace core3d {
         std::unordered_map<const AIS_InteractiveObject*, TDF_Label> previousLabels;
         try {
             OCC_CATCH_SIGNALS
-            if (myDoc.IsNull() || myContext.IsNull() || target.IsNull()
+            if (myDoc.IsNull() || myContext.IsNull() || targets.empty() || targets.size() > 32
                 || hasUnresolvedEdit() || _manipulatorGestureActive
                 || (!_manipulator.IsNull()
                     && _manipulator->HasActiveTransformation())
@@ -2491,7 +2496,11 @@ namespace core3d {
                     && myDoc->TryObjectTransformForLabel(label, transform)
                     && !TransformDiffers(transform, shape->LocalTransformation());
             };
-            if (!isCommittedPresentation(target)) { return false; }
+            std::unordered_set<const AIS_InteractiveObject*> targetSet;
+            for (const auto& target : targets) {
+                if (!isCommittedPresentation(target) || !targetSet.insert(target.get()).second
+                    || target->GlobalSelOwner().IsNull()) { return false; }
+            }
             std::unordered_set<const AIS_InteractiveObject*> previousPresentations;
             for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
                 const auto owner = myContext->SelectedOwner();
@@ -2530,7 +2539,7 @@ namespace core3d {
             }
             const bool shouldAttach = _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                 && (!ManipulatorRequiresBRepModeling(_manipulatorType)
-                    || IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(myDoc->ShapeLabel(target))));
+                    || std::all_of(targets.begin(), targets.end(), [&](const auto& target) { return IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(myDoc->ShapeLabel(target))); }));
 #ifdef DEBUG
             failureMode = std::exchange(_debugBrowserSelectionFailureMode, 0);
 #endif
@@ -2538,18 +2547,18 @@ namespace core3d {
             myContext->ClearDetected(Standard_False);
             detachManipulator(false);
             myContext->ClearSelected(Standard_False);
-            myContext->SetSelected(target, Standard_False);
+            for (const auto& target : targets) { myContext->AddOrRemoveSelected(target->GlobalSelOwner(), Standard_False); }
 #ifdef DEBUG
             if (failureMode == 1) { throw Standard_Failure("Injected browser selection failure"); }
 #endif
-            myContext->InitSelected();
-            if (!myContext->MoreSelected() || myContext->SelectedInteractive() != target) {
-                throw Standard_Failure("Browser selection did not resolve the requested presentation");
+            std::unordered_set<const AIS_InteractiveObject*> actual;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                const auto object = myContext->SelectedInteractive();
+                if (!targetSet.count(object.get()) || !actual.insert(object.get()).second) {
+                    throw Standard_Failure("Browser group selection mismatch");
+                }
             }
-            myContext->NextSelected();
-            if (myContext->MoreSelected()) {
-                throw Standard_Failure("Browser selection retained another owner");
-            }
+            if (actual.size() != targets.size()) { throw Standard_Failure("Browser group selection incomplete"); }
             // Attach replaces the previous group because it was detached above.
             // The legacy single-object Attach overload otherwise appends objects.
             if (shouldAttach && _manipulator.IsNull()) {
@@ -2561,10 +2570,17 @@ namespace core3d {
             }
             if (shouldAttach) {
                 const auto attached = _manipulator->Objects();
-                if (attached.IsNull() || attached->Size() != 1 || attached->First() != target
-                    || _manipulatorSourceLabels.size() != 1
-                    || _manipulatorSourceLabels.at(target.get()) != myDoc->ShapeLabel(target)) {
-                    throw Standard_Failure("Browser selection retained a different gizmo target");
+                if (attached.IsNull() || static_cast<std::size_t>(attached->Size()) != targets.size()
+                    || _manipulatorSourceLabels.size() != targets.size()) {
+                    throw Standard_Failure("Browser group gizmo size mismatch");
+                }
+                std::unordered_set<const AIS_InteractiveObject*> attachedSet;
+                for (Core3DManipulatorObjectSequence::Iterator it(*attached); it.More(); it.Next()) {
+                    const auto object = it.Value();
+                    if (!targetSet.count(object.get()) || !attachedSet.insert(object.get()).second
+                        || _manipulatorSourceLabels.at(object.get()) != myDoc->ShapeLabel(object)) {
+                        throw Standard_Failure("Browser group gizmo target mismatch");
+                    }
                 }
             }
 #ifdef DEBUG

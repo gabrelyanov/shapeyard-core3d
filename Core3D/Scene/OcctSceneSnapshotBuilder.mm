@@ -2123,6 +2123,8 @@ std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
             aHash.AddBool(anAxis.authored);
         }
         aHash.AddString(anInstance.name);
+        aHash.AddString(anInstance.groupIdentifier);
+        aHash.AddString(anInstance.groupName);
     }
     return aHash.Value();
 }
@@ -2728,6 +2730,7 @@ bool ValidatePresentationOverlayPayload(
             || !IsValidIdentifier(anInstance.entityIdentifier)
             || !anEntityIdentifiers.insert(
                 anInstance.entityIdentifier).second
+            || !anInstance.groupIdentifier.empty() || !anInstance.groupName.empty()
             || anInstance.name.size() > 4'096
             || anInstance.meshIndex >= theMeshes.size()
             || anInstance.reversesWinding || !anInstance.visible
@@ -2859,6 +2862,8 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 			aHash.AddBool(anAxis.authored);
 		}
         aHash.AddString(anInstance.name);
+        aHash.AddString(anInstance.groupIdentifier);
+        aHash.AddString(anInstance.groupName);
         aHash.AddInteger(static_cast<std::uint8_t>(anInstance.role));
         aHash.AddInteger(
             static_cast<std::uint8_t>(anInstance.coordinateSpace));
@@ -4373,6 +4378,18 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             return {};
         }
 
+        OcctSavedGroupState savedGroups;
+        if (!theDocument->CaptureSavedGroups(savedGroups)) { return {}; }
+        std::unordered_map<std::string, std::pair<std::string, std::string>> groupByEntity;
+        for (const auto& group : savedGroups.groups) {
+            NSString* name = [[NSString alloc] initWithCharacters:
+                reinterpret_cast<const unichar*>(group.name.ToExtString()) length:group.name.Length()];
+            if (name == nil || name.UTF8String == nullptr) { return {}; }
+            for (const auto& label : group.members) {
+                const auto entity = theDocument->EntityIdentifierForLabel(label);
+                if (!groupByEntity.emplace(entity, std::make_pair(group.identifier, std::string(name.UTF8String))).second) { return {}; }
+            }
+        }
         std::vector<OccurrenceData> anOccurrences;
         std::unordered_set<std::string> anEntityIdentifiers;
         std::unordered_map<std::string, TDF_Label> aPersistentEntityLabels;
@@ -4805,6 +4822,11 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     || (theAcceptedSelectionKind == ElementKind::Edge
                         && aMesh.topology.edgeCount != 0));
             anInstance.name = anOccurrence.name;
+            const auto group = groupByEntity.find(anInstance.entityIdentifier);
+            if (group != groupByEntity.end()) {
+                anInstance.groupIdentifier = group->second.first;
+                anInstance.groupName = group->second.second;
+            }
             anInstance.role = RenderRole::Model;
 
             Graphic3d_NameOfMaterial aMaterialName;

@@ -13,7 +13,7 @@ namespace core3d {
 enum class PrimitiveManipulatorType;
 enum class ShapeSelectionMode;
 
-enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility };
+enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale };
@@ -106,6 +106,17 @@ struct OrdinaryVisibilityLedger {
     std::vector<Handle(AIS_Shape)> targetPresentations;
 };
 
+//! Organization is a distinct durable family; names of objects, geometry,
+//! transforms and existing presentation/selection authority are preserved.
+struct OrdinaryGroupingLedger {
+    OcctSavedGroupState previous;
+    OcctSavedGroupState candidate;
+    std::vector<OcctSavedGroup> requested;
+    std::vector<OcctObjectNameState> objects;
+    OrdinaryNameLedger authority;
+    bool candidateSealed = false;
+};
+
 //! Typed presentation boundary. The viewer implements admission/repair for
 //! exact selection, tool, manipulator and renderer identity. Neither method
 //! may mutate OCAF or call NotifyChanges. No captured callbacks in a ledger.
@@ -113,6 +124,8 @@ class OrdinaryEditPresentationHost {
 public:
     virtual ~OrdinaryEditPresentationHost() = default;
     virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
+    virtual bool admitGrouping(OrdinaryGroupingLedger&) noexcept { return false; }
+    virtual bool repairGrouping(const OrdinaryGroupingLedger&, bool) noexcept { return false; }
     virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
     virtual bool admitVisibility(OrdinaryVisibilityLedger&) noexcept { return false; }
     virtual bool repairVisibility(const OrdinaryVisibilityLedger&, bool) noexcept { return false; }
@@ -164,6 +177,8 @@ public:
     OrdinaryEditController& operator=(const OrdinaryEditController&) = delete;
     OrdinaryEditLease beginTransform(const std::vector<OrdinaryTransformChange>& changes,
                                      OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginGrouping(const std::vector<OcctSavedGroup>& groups,
+                                   OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
                                 OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginVisibility(const std::vector<OrdinaryVisibilityChange>& changes,
@@ -178,10 +193,13 @@ public:
 #endif
 private:
     friend class OrdinaryEditLease;
-    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger>;
+    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileImpl() noexcept;
+    OrdinaryEditResult stageGroupingAndCommit(std::uint64_t token) noexcept;
+    OrdinaryEditResult reconcileGroupingImpl() noexcept;
+    bool groupingMatches(const OrdinaryGroupingLedger& ledger, bool candidate) const noexcept;
     OrdinaryEditResult stageNamesAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileNamesImpl() noexcept;
     OrdinaryEditResult stageVisibilityAndCommit(std::uint64_t token) noexcept;

@@ -90,6 +90,22 @@ struct OcctObjectNameState
     Standard_EXPORT Standard_Boolean IsEqual(const OcctObjectNameState& other) const noexcept;
 };
 
+//! Flat saved groups keep members as editable free definitions in world space.
+//! Record labels and an optional container are exact persistent authority.
+//! Empty records may remain after deleting their last object, but are not UI groups.
+struct OcctSavedGroup {
+    TDF_Label recordLabel;
+    std::string identifier;
+    TCollection_ExtendedString name;
+    std::vector<TDF_Label> members;
+};
+struct OcctSavedGroupState {
+    Handle(TDF_Data) documentData;
+    TDF_Label container;
+    std::vector<OcctSavedGroup> groups;
+    Standard_EXPORT Standard_Boolean IsEqual(const OcctSavedGroupState& other) const noexcept;
+};
+
 //! Exact object visibility plus the layer associations that can independently
 //! hide it. This family supports editable free definitions, never occurrences.
 struct OcctObjectVisibilityState {
@@ -406,6 +422,12 @@ public:
     //! rejected without editing its layer or publishing a false visible result.
     Standard_EXPORT Standard_Boolean SetObjectVisibilityForLabel(
         const TDF_Label& label, Standard_Boolean visible) noexcept;
+    //! Read-only, bounded semantic validation; no lazy metadata allocation.
+    Standard_EXPORT Standard_Boolean CaptureSavedGroups(OcctSavedGroupState& state) const noexcept;
+    //! Replace the bounded catalog in an already owned command. Input record
+    //! labels are ignored; stable group IDs retain their canonical record slots.
+    //! Caller must abort on false and prove closure independently.
+    Standard_EXPORT Standard_Boolean StageSavedGroups(const std::vector<OcctSavedGroup>& groups) noexcept;
     Standard_EXPORT Standard_Boolean CaptureObjectNameStateForLabel(
         const TDF_Label& label, OcctObjectNameState& state) const noexcept;
     //! Stage only the name in the caller's open command; verify exact readback

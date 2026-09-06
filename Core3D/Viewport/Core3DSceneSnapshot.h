@@ -291,6 +291,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly, getter=isSelectable) BOOL selectable;
 @property (nonatomic, assign, readonly, getter=isSelected) BOOL selected;
 @property (nonatomic, copy, readonly) NSString *name;
+@property (nonatomic, copy, readonly) NSString *groupIdentifier;
+@property (nonatomic, copy, readonly) NSString *groupName;
 @property (nonatomic, assign, readonly) Core3DSceneRenderRole renderRole;
 @property (nonatomic, assign, readonly) Core3DSceneCoordinateSpace coordinateSpace;
 @property (nonatomic, assign, readonly) Core3DSceneDepthPolicy depthPolicy;
