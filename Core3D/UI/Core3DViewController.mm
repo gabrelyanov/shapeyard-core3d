@@ -3888,6 +3888,14 @@ void Core3DAddDebugOrphanVisualMaterial(
     return GLController.viewer->DebugPublishedDocumentGeneration();
 }
 
+- (uint64_t)debugPublishedModelRevision {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) {
+        return 0;
+    }
+    return GLController.viewer->DebugPublishedModelRevision();
+}
+
 - (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x {
     if (GLController == nil || GLController.viewer == nullptr) {
         return NO;

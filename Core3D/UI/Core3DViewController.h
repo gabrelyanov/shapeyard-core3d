@@ -872,6 +872,9 @@ typedef struct {
 //! Last published identity for the current document; zero when unavailable.
 //! Safe during an owned preview and never publishes uncommitted geometry.
 - (uint64_t)debugPublishedDocumentGeneration;
+//! Last published model revision, not the current working document revision.
+//! Check debugPublishedDocumentGeneration for availability; an empty model is 0.
+- (uint64_t)debugPublishedModelRevision;
 //! Assign an invisible in-memory XCAF layer to the occurrence at the requested
 //! accumulated X translation, then redraw the OpenGL fallback.
 - (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x

@@ -2038,6 +2038,11 @@ std::uint64_t Core3DViewer::DebugPublishedDocumentGeneration() const noexcept
     return _sceneSnapshotBuilder.DebugPublishedDocumentGeneration(myDoc);
 }
 
+std::uint64_t Core3DViewer::DebugPublishedModelRevision() const noexcept
+{
+    return _sceneSnapshotBuilder.DebugPublishedModelRevision(myDoc);
+}
+
 TransformInspectorMeasurementDebugState
 Core3DViewer::DebugTransformInspectorMeasurementState() const noexcept
 {

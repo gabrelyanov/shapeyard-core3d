@@ -158,6 +158,9 @@ public:
     //! preview. Does not capture a frame or admit uncommitted geometry.
     std::uint64_t DebugPublishedDocumentGeneration(
         const Handle(OcctDocument)& theDocument) const noexcept;
+    //! Revision of that same committed publication, not the working OCAF state.
+    std::uint64_t DebugPublishedModelRevision(
+        const Handle(OcctDocument)& theDocument) const noexcept;
 #endif
 
 private:

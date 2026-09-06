@@ -2989,6 +2989,15 @@ std::uint64_t OcctSceneSnapshotBuilder::DebugPublishedDocumentGeneration(
         return 0;
     }
 }
+
+std::uint64_t OcctSceneSnapshotBuilder::DebugPublishedModelRevision(
+    const Handle(OcctDocument)& theDocument) const noexcept
+{
+    // Reuse the main-thread and exact document/publication identity gate.
+    // Reading metadata must never bypass CaptureFrame's open-command barrier.
+    return DebugPublishedDocumentGeneration(theDocument) == 0
+        ? 0 : myState->modelRevision;
+}
 #endif
 
 std::optional<FrameSnapshot> OcctSceneSnapshotBuilder::CaptureFrame(
