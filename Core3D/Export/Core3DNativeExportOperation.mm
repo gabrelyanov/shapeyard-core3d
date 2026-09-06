@@ -15,6 +15,7 @@
 #include <NCollection_Map.hxx>
 #include <OSD_Path.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Precision.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <RWMesh_FaceIterator.hxx>
 #include <RWObj_CafWriter.hxx>
@@ -1368,36 +1369,64 @@ NativeExportResult RunNativeExport(
             const bool needsMeshing = state->meshQuality == Core3DExportMeshQualityViewport
                 ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
             if (needsMeshing) {
-                BRepMesh_IncrementalMesh mesher;
-                mesher.ChangeParameters().Deflection = deflection;
-                mesher.ChangeParameters().Angle = state->deviationAngle;
-                mesher.ChangeParameters().InParallel = Standard_True;
-                // Conical/analytic face interiors can exceed the requested chord
-                // error even when their boundary edges meet it. Quality exports
-                // must refine these interiors too; keep the final tolerance proof.
-                mesher.ChangeParameters().EnableControlSurfaceDeflectionAllSurfaces =
-                    state->meshQuality != Core3DExportMeshQualityViewport;
-                mesher.SetShape(meshingShape);
-                mesher.Perform(whole.Next(4));
-                ThrowIfCancelled(state);
-                if (!mesher.IsDone()
-                    || !BRepTools::Triangulation(meshingShape, deflection)) {
+                const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
+                const int maximumAttempts = qualityPreset ? 3 : 1;
+                Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
+                bool validMesh = false;
+                for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
+                    ThrowIfCancelled(state);
+                    // Preserve successful existing meshes. A failed quality proof
+                    // gets at most two finer private remeshes, never a looser limit.
+                    if (attempt > 0) { BRepTools::Clean(meshingShape); }
+                    const double target = attempt == 0 ? deflection
+                        : std::max(Precision::Confusion(), deflection * std::pow(0.25, attempt));
+                    BRepMesh_IncrementalMesh mesher;
+                    mesher.ChangeParameters().Deflection = target;
+                    mesher.ChangeParameters().Angle = state->deviationAngle;
+                    mesher.ChangeParameters().InParallel = Standard_True;
+                    if (attempt > 0) {
+                        mesher.ChangeParameters().DeflectionInterior = target;
+                        mesher.ChangeParameters().AngleInterior = state->deviationAngle;
+                        mesher.ChangeParameters().EnableControlSurfaceDeflectionAllSurfaces = Standard_True;
+                    }
+                    mesher.SetShape(meshingShape);
+                    mesher.Perform(meshScope.Next(1));
+                    ThrowIfCancelled(state);
+                    if (qualityPreset) {
+                        std::int64_t nodes = 0, triangles = 0;
+                        for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                            ThrowIfCancelled(state);
+                            TopLoc_Location location;
+                            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                            if (!mesh.IsNull()) { nodes += mesh->NbNodes(); triangles += mesh->NbTriangles(); }
+                            if (nodes > kMaximumSTLNodes || triangles > kMaximumSTLTriangles) {
+                                throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                                    "The export mesh is too detailed. Choose a coarser quality or export fewer objects.");
+                            }
+                        }
+                    }
+                    validMesh = mesher.IsDone() && BRepTools::Triangulation(meshingShape, deflection);
 #if DEBUG
-                    NSLog(@"[NativeExportMeshDiagnostic] done=%d flags=%d requested=%.17g", mesher.IsDone(), mesher.GetStatusFlags(), deflection);
-                    Standard_Integer diagnosticFace = 0;
-                    for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
-                        TopLoc_Location location;
-                        const auto face = TopoDS::Face(faces.Current());
-                        const auto mesh = BRep_Tool::Triangulation(face, location);
-                        NSLog(@"[NativeExportMeshDiagnostic] face=%d mesh=%d deflection=%.17g nodes=%d triangles=%d valid=%d",
-                            ++diagnosticFace, !mesh.IsNull(), mesh.IsNull() ? -1.0 : mesh->Deflection(),
-                            mesh.IsNull() ? 0 : mesh->NbNodes(), mesh.IsNull() ? 0 : mesh->NbTriangles(),
-                            BRepTools::Triangulation(face, deflection));
+                    if (!validMesh || attempt > 0) {
+                        NSLog(@"[NativeExportMeshDiagnostic] attempt=%d valid=%d done=%d flags=%d target=%.17g requested=%.17g",
+                            attempt, validMesh, mesher.IsDone(), mesher.GetStatusFlags(), target, deflection);
+                        Standard_Integer diagnosticFace = 0;
+                        for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More() && diagnosticFace < 16; faces.Next()) {
+                            TopLoc_Location location;
+                            const auto face = TopoDS::Face(faces.Current());
+                            const auto mesh = BRep_Tool::Triangulation(face, location);
+                            NSLog(@"[NativeExportMeshDiagnostic] face=%d mesh=%d deflection=%.17g nodes=%d triangles=%d valid=%d",
+                                ++diagnosticFace, !mesh.IsNull(), mesh.IsNull() ? -1.0 : mesh->Deflection(),
+                                mesh.IsNull() ? 0 : mesh->NbNodes(), mesh.IsNull() ? 0 : mesh->NbTriangles(),
+                                BRepTools::Triangulation(face, deflection));
+                        }
                     }
 #endif
-                    throw NativeExportFailure(
-                        Core3DNativeExportErrorMeshingFailed,
-                        "The committed geometry could not be meshed.");
+                    if (validMesh) { break; }
+                }
+                if (!validMesh) {
+                    throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                        "The committed geometry could not be meshed within the requested quality.");
                 }
             } else {
                 whole.Next(4).Close();
