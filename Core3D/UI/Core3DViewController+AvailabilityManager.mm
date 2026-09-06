@@ -248,7 +248,7 @@ Core3DModelCapability DocumentExportCapabilities(
     try {
         const std::shared_ptr<core3d::Core3DViewer> viewer =
             GLController.viewer;
-        if (viewer == nullptr) {
+        if (viewer == nullptr || viewer->hasUnresolvedEdit()) {
             return Core3DModelCapabilityNone;
         }
         const Handle(OcctDocument) document = viewer->getDocument();
