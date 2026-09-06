@@ -1560,6 +1560,7 @@ private:
         || _viewer->getObjectInteractor() == nullptr) {
         return;
     }
+    if (_viewer->hasUnresolvedOrdinaryEdit()) { return; }
     const BOOL recoveryPending = _viewer->hasUnresolvedDuplicate();
     if (!recoveryPending
         && (!_viewer->canBeginCommittedEdit()
@@ -1577,6 +1578,9 @@ private:
 
 - (BOOL)hasUnresolvedDuplicate {
     return _viewer != nullptr && _viewer->hasUnresolvedDuplicate();
+}
+- (BOOL)hasUnresolvedEdit {
+    return _viewer != nullptr && _viewer->hasUnresolvedEdit();
 }
 
 - (void)deselectAll {
@@ -1625,7 +1629,7 @@ private:
 }
 
 - (void)undo {
-	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}
 	PrimitiveGizmoType currentType = [self getGizmoType];
@@ -1710,7 +1714,7 @@ private:
 }
 
 - (void)redo {
-	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}
 	PrimitiveGizmoType currentType = [self getGizmoType];
@@ -1823,7 +1827,7 @@ private:
     // state for a possibly committed operation. Refuse before cancelling a
     // gesture or preview so Busy remains fully side-effect free. Ordinary
     // Selecting/Ready/Failed previews continue through their typed cancel path.
-    if (objectInteractor->hasUnresolvedDuplicate()
+    if ((_viewer->hasUnresolvedOrdinaryEdit() || objectInteractor->hasUnresolvedDuplicate())
         || objectInteractor->hasUnresolvedBoolean()
         || objectInteractor->mirrorPreviewState()
             == MirrorPreviewState::OutcomeUnknown
@@ -1967,7 +1971,7 @@ private:
 }
 
 - (void)setGizmo:(Handle(Core3DManipulator))manipulator {
-	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}
 	_viewer->getObjectInteractor()->setManipulator(manipulator);
@@ -1980,7 +1984,7 @@ private:
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
-	if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}
 	const PrimitiveGizmoType previousType = [self getGizmoType];
@@ -5305,7 +5309,7 @@ private:
                     const bool hasTransientModeling =
                         objectInteractor == nullptr
                         || shapeInteractor == nullptr
-                        || strongSelf->_viewer->hasUnresolvedDuplicate()
+                        || strongSelf->_viewer->hasUnresolvedEdit()
                         || objectInteractor->hasActiveBoolean()
                         || objectInteractor->hasUnresolvedBoolean()
                         || objectInteractor->hasUnresolvedMirrorObjects()
@@ -5500,7 +5504,7 @@ private:
 }
 
 - (BOOL)saveSnapshot:(NSURL *)tmpUrl {
-    if (_viewer == nullptr || _viewer->hasUnresolvedDuplicate()) {
+    if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
         return NO;
     }
     const auto fn = TCollection_AsciiString(tmpUrl.path.UTF8String);
@@ -5538,7 +5542,7 @@ private:
         || !document->CanExportGeometry(geometryExportFormat)
         || objectInteractor == nullptr
         || shapeInteractor == nullptr
-        || objectInteractor->hasUnresolvedDuplicate()
+        || (_viewer->hasUnresolvedOrdinaryEdit() || objectInteractor->hasUnresolvedDuplicate())
         || objectInteractor->hasActiveBoolean()
         || objectInteractor->hasUnresolvedBoolean()
         || objectInteractor->hasUnresolvedMirrorObjects()

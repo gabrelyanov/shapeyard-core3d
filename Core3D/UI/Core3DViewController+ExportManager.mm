@@ -21,7 +21,7 @@ namespace {
 
 bool CanCaptureCommittedExport(
     const std::shared_ptr<core3d::Core3DViewer>& viewer) {
-    if (viewer == nullptr) {
+    if (viewer == nullptr || viewer->hasUnresolvedOrdinaryEdit()) {
         return false;
     }
     const Handle(OcctDocument) document = viewer->getDocument();

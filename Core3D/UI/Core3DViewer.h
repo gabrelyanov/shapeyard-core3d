@@ -16,6 +16,7 @@
 #include "ObjectInteractor.hpp"
 #include "ShapeInteractor.hpp"
 #include "TransformInspectorMeasurementController.hpp"
+#include "OrdinaryEditController.hpp"
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -39,7 +40,7 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
-    class Core3DViewer: public OcctViewer {
+    class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
     public:
         static constexpr selection_t kSelectionTypeNone = 0;
         static constexpr selection_t kSelectionTypeManipulator = 1 << 0;
@@ -82,6 +83,16 @@ namespace core3d {
         //! committed snapshots and project serialization must fail closed while
         //! its result ledger remains the sole recovery authority.
         bool hasUnresolvedDuplicate() const noexcept;
+        bool hasUnresolvedOrdinaryEdit() const noexcept;
+        bool hasUnresolvedEdit() const noexcept;
+        OrdinaryEditLease beginOrdinaryTransform(const std::vector<OrdinaryTransformChange>& changes,
+                                                 OrdinaryEditResult* failure = nullptr) noexcept;
+        OrdinaryEditResult reconcileOrdinaryEdit() noexcept;
+#ifdef DEBUG
+        std::shared_ptr<OrdinaryEditController> debugOrdinaryEditController() const noexcept {
+            return _ordinaryEditController;
+        }
+#endif
         bool dumpOfDisplayedColoredObjects(const Standard_Integer width,
                                            const Standard_Integer height,
                                            const TCollection_AsciiString& fileName);
@@ -316,6 +327,9 @@ namespace core3d {
             std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
 
     private:
+        std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
+        bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
+        bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept override;
         std::shared_ptr<ObjectInteractor> _objectInteractor;
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
         std::shared_ptr<TransformInspectorMeasurementController>

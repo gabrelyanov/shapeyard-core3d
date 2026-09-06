@@ -128,7 +128,7 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
 
     assert(_currentGizmoType == [GLController getGizmoType]);
     const BOOL duplicateRecoveryPending =
-        [GLController hasUnresolvedDuplicate];
+        [GLController hasUnresolvedEdit];
     self.can_apply_material = !duplicateRecoveryPending
         && (selections > 0);
     

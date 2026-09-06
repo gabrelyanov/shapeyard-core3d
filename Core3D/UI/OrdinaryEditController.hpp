@@ -2,12 +2,14 @@
 #define OrdinaryEditController_hpp
 
 #include "OrdinaryEditCommand.hpp"
+#include <SelectMgr_EntityOwner.hxx>
 #include <memory>
 #include <optional>
 #include <variant>
 #include <vector>
 
 namespace core3d {
+enum class PrimitiveManipulatorType;
 
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
@@ -31,6 +33,9 @@ struct OrdinaryTransformRecord {
 struct OrdinaryTransformLedger {
     std::vector<OrdinaryTransformRecord> records;
     bool candidateSealed = false;
+    std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
+    PrimitiveManipulatorType manipulatorType = static_cast<PrimitiveManipulatorType>(0);
+    bool hadManipulator = false;
 };
 
 //! Typed presentation boundary. The viewer implements admission/repair for
@@ -39,7 +44,7 @@ struct OrdinaryTransformLedger {
 class OrdinaryEditPresentationHost {
 public:
     virtual ~OrdinaryEditPresentationHost() = default;
-    virtual bool admitTransform(const OrdinaryTransformLedger& ledger) noexcept = 0;
+    virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
     virtual bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept = 0;
 };
 

@@ -417,7 +417,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
             != PrimitiveSelectionTypeShape) {
         return;
     }
-    if ([GLController hasUnresolvedDuplicate]) {
+    if ([GLController hasUnresolvedEdit]) {
         [GLController refreshSelectionState];
         return;
     }
@@ -473,6 +473,7 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     if (![NSThread isMainThread] || GLController == nil) {
         return;
     }
+    if (GLController.viewer != nullptr && GLController.viewer->hasUnresolvedOrdinaryEdit()) { return; }
     const BOOL recoveryPending = [GLController hasUnresolvedDuplicate];
     if (!recoveryPending) {
         if (GLController.viewer == nullptr

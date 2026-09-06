@@ -31,6 +31,9 @@
 #include <TopoDS_Face.hxx>
 
 namespace core3d {
+    class OrdinaryEditController;
+    class Core3DViewer;
+    struct OrdinaryTransformLedger;
 
     enum struct PrimitiveManipulatorType {
         PrimitiveGizmoTypeNone = 0,
@@ -91,6 +94,12 @@ namespace core3d {
 #endif
 
     class ObjectInteractor : public Interactor {
+        friend class Core3DViewer;
+        std::weak_ptr<OrdinaryEditController> _ordinaryEditController;
+        bool blocksForOrdinaryEdit() const noexcept;
+        bool hasUnresolvedEdit() const noexcept;
+        bool captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept;
+        bool repairOrdinaryTransformPresentation(const OrdinaryTransformLedger& ledger, bool committed) noexcept;
         
 		PrimitiveManipulatorType _manipulatorType = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
         std::shared_ptr<BooleanOperationController> _booleanOpController;

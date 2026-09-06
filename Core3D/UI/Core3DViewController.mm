@@ -34,6 +34,7 @@
 #include "BRepPrimAPI_MakePrism.hxx"
 #include "BRepBuilderAPI_MakePolygon.hxx"
 #include "BRepBuilderAPI_MakeFace.hxx"
+#include "BRepBuilderAPI_Transform.hxx"
 #include "BRep_Builder.hxx"
 #include "TopoDS_Compound.hxx"
 #include "TopoDS_CompSolid.hxx"
@@ -2510,6 +2511,79 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (NSInteger)debugApplyViewerOrdinaryTransform:(NSInteger)mode paused:(BOOL)paused {
+    if (![NSThread isMainThread] || mode < 0 || mode > 2
+        || GLController == nil || GLController.viewer == nullptr) { return 5; }
+    const auto viewer = GLController.viewer;
+    const auto document = viewer->getDocument();
+    const auto context = viewer->AisContext();
+    if (document.IsNull() || context.IsNull()) { return 5; }
+    try {
+        std::vector<core3d::OrdinaryTransformChange> changes;
+        for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
+            core3d::OrdinaryTransformChange change;
+            change.presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+            change.label = document->ShapeLabel(change.presentation);
+            OcctObjectTransformState before;
+            if (!document->CaptureObjectTransformStateForLabel(change.label, before)) { return 5; }
+            change.shape = before.shape;
+            change.transform = before.transform;
+            if (mode == 0) {
+                auto translation = change.transform.TranslationPart();
+                translation.SetX(translation.X() + 12.5);
+                change.transform.SetTranslationPart(translation);
+            } else if (mode == 1) {
+                change.operation = core3d::OrdinaryTransformOperation::Rotate;
+                change.transform.SetRotationPart(gp_Quaternion(gp_Vec(0, 0, 1), M_PI_2));
+            } else {
+                change.operation = core3d::OrdinaryTransformOperation::Scale;
+                gp_Trsf scale;
+                scale.SetScale(gp_Pnt(0, 0, 0), 2.0);
+                change.shape = BRepBuilderAPI_Transform(before.shape, scale, Standard_True).Shape();
+            }
+            changes.push_back(change);
+        }
+        const auto controller = viewer->debugOrdinaryEditController();
+        if (!controller) { return 5; }
+        if (paused) { controller->debugSetTruthUnavailableCount(1); }
+        core3d::OrdinaryEditResult failure = core3d::OrdinaryEditResult::Invalid;
+        auto lease = viewer->beginOrdinaryTransform(changes, &failure);
+        return static_cast<NSInteger>(lease ? lease.stageAndCommit() : failure);
+    } catch (...) { return 5; }
+}
+
+- (NSInteger)debugReconcileViewerOrdinaryEdit {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return 5; }
+    return static_cast<NSInteger>(GLController.viewer->reconcileOrdinaryEdit());
+}
+
+- (NSDictionary<NSString *, id> *)debugViewerOrdinaryState {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return @{}; }
+    const auto viewer = GLController.viewer;
+    const auto controller = viewer->debugOrdinaryEditController();
+    const auto document = viewer->getDocument();
+    if (!controller || document.IsNull() || document->Document().IsNull()) { return @{}; }
+    const bool blocked = viewer->hasUnresolvedOrdinaryEdit();
+    NSMutableArray* matrices = [NSMutableArray array];
+    TDF_LabelSequence labels;
+    XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main())->GetFreeShapes(labels);
+    for (int index = 1; index <= labels.Length(); ++index) {
+        gp_Trsf transform;
+        if (!document->TryObjectTransformForLabel(labels.Value(index), transform)) { continue; }
+        NSMutableArray* values = [NSMutableArray array];
+        for (int row = 1; row <= 3; ++row) {
+            for (int column = 1; column <= 4; ++column) { [values addObject:@(transform.Value(row, column))]; }
+        }
+        [matrices addObject:values];
+    }
+    return @{@"blocked": @(blocked), @"state": @((int)controller->state()),
+             @"canBegin": @(viewer->canBeginCommittedEdit()), @"selected": @(viewer->selectedCount()),
+             @"undoCount": @(document->Document()->GetAvailableUndos()), @"matrices": matrices,
+             @"snapshotBlocked": @(blocked && !viewer->captureSceneSnapshot(800, 600)),
+             @"loadBlocked": @(blocked && viewer->ImportCbf("") == core3d::AssetImportResult::Busy),
+             @"redrawBlocked": @(blocked && !viewer->redrawDocument())};
+}
+
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryController:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 19
         || GLController == nil || GLController.viewer == nullptr) { return nil; }
@@ -2526,7 +2600,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         int failureMode = 0;
         int repairs = 0;
         bool reentrantRepairBlocked = true;
-        bool admitTransform(const core3d::OrdinaryTransformLedger& ledger) noexcept override {
+        bool admitTransform(core3d::OrdinaryTransformLedger& ledger) noexcept override {
             for (const auto& record : ledger.records) {
                 if (!context->IsDisplayed(record.requested.presentation)) { return false; }
             }

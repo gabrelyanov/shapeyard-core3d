@@ -183,7 +183,7 @@ Core3DModelCapability DocumentExportCapabilities(
     const std::shared_ptr<core3d::Core3DViewer> viewer =
         GLController.viewer;
     return self.can_add && viewer != nullptr
-        && !viewer->hasUnresolvedDuplicate();
+        && !viewer->hasUnresolvedEdit();
 }
 
 - (BOOL)canDelete {
@@ -198,6 +198,7 @@ Core3DModelCapability DocumentExportCapabilities(
     }
     const std::shared_ptr<core3d::Core3DViewer> viewer =
         GLController.viewer;
+    if (viewer != nullptr && viewer->hasUnresolvedOrdinaryEdit()) { return NO; }
     if (viewer != nullptr && viewer->hasUnresolvedDuplicate()) {
         // Presentation repair can legitimately have zero selected owners. The
         // typed ledger, not selectedModelCapabilities, is then the authority:
@@ -215,7 +216,7 @@ Core3DModelCapability DocumentExportCapabilities(
     }
     const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
     return viewer != nullptr
-        && !viewer->hasUnresolvedDuplicate()
+        && !viewer->hasUnresolvedEdit()
         && !viewer->getDocument().IsNull()
         && viewer->getDocument()->canUndo();
 }
@@ -225,7 +226,7 @@ Core3DModelCapability DocumentExportCapabilities(
     }
     const std::shared_ptr<core3d::Core3DViewer> viewer = GLController.viewer;
     return viewer != nullptr
-        && !viewer->hasUnresolvedDuplicate()
+        && !viewer->hasUnresolvedEdit()
         && !viewer->getDocument().IsNull()
         && viewer->getDocument()->canRedo();
 }
@@ -447,7 +448,7 @@ Core3DModelCapability DocumentExportCapabilities(
     try {
         const std::shared_ptr<core3d::Core3DViewer> viewer =
             GLController.viewer;
-        if (viewer == nullptr || viewer->hasUnresolvedDuplicate()) {
+        if (viewer == nullptr || viewer->hasUnresolvedEdit()) {
             return NO;
         }
         const Core3DModelCapability required =
@@ -470,7 +471,7 @@ Core3DModelCapability DocumentExportCapabilities(
     try {
         const std::shared_ptr<core3d::Core3DViewer> viewer =
             GLController.viewer;
-        if (viewer == nullptr || viewer->hasUnresolvedDuplicate()) {
+        if (viewer == nullptr || viewer->hasUnresolvedEdit()) {
             return @[];
         }
         const Core3DModelCapability capabilities =

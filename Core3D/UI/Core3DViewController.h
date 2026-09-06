@@ -623,6 +623,9 @@ typedef struct {
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryCommand:(NSInteger)mode;
 - (NSDictionary<NSString *, NSNumber *> *)debugOrdinaryCommandMarkerState;
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryController:(NSInteger)mode;
+- (NSInteger)debugApplyViewerOrdinaryTransform:(NSInteger)mode paused:(BOOL)paused;
+- (NSInteger)debugReconcileViewerOrdinaryEdit;
+- (NSDictionary<NSString *, id> *)debugViewerOrdinaryState;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.

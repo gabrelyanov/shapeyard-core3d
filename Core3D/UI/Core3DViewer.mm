@@ -1259,6 +1259,11 @@ bool Core3DViewer::InitViewer (UIView* theWin) {
                 return false;
             }
         }
+        if (_ordinaryEditController == nullptr) {
+            _ordinaryEditController = std::make_shared<OrdinaryEditController>(myDoc,
+                static_cast<OrdinaryEditPresentationHost&>(*this));
+        }
+        _objectInteractor->_ordinaryEditController = _ordinaryEditController;
     }
     return result;
 }
@@ -1327,6 +1332,7 @@ bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     // Publish the replacement interactors only after the requested topology
     // mode is accepted. A failed reconstruction therefore cannot silently
     // replace the retained Face/Edge authority with WholeShape.
+    objectInteractor->_ordinaryEditController = _ordinaryEditController;
     _objectInteractor = std::move(objectInteractor);
     _shapeInteractor = std::move(shapeInteractor);
     return publishRecreatedInteractorState();
@@ -1438,7 +1444,7 @@ TransformInspectorMeasurement
 Core3DViewer::captureTransformInspectorMeasurement(
     TransformInspectorMeasurementCompletion theCompletion) noexcept
 {
-    if (_transformInspectorMeasurementController == nullptr) {
+    if (hasUnresolvedOrdinaryEdit() || _transformInspectorMeasurementController == nullptr) {
         TransformInspectorMeasurement aMeasurement;
         aMeasurement.state =
             TransformInspectorMeasurementState::Invalid;
@@ -1454,7 +1460,7 @@ TransformInspectorPositionCommitResult
 Core3DViewer::commitTransformInspectorPosition(
     const TransformInspectorPositionCommitRequest& theRequest) noexcept
 {
-    if (_transformInspectorMeasurementController == nullptr) {
+    if (hasUnresolvedOrdinaryEdit() || _transformInspectorMeasurementController == nullptr) {
         return TransformInspectorPositionCommitResult::Unavailable;
     }
     TransformInspectorPositionCommitOutcome anOutcome =
@@ -1598,6 +1604,7 @@ Handle(OcctDocument) Core3DViewer::getDocument() {
 bool Core3DViewer::canBeginCommittedEdit() const noexcept {
     try {
         if (_objectInteractor == nullptr || _shapeInteractor == nullptr
+            || hasUnresolvedOrdinaryEdit()
             || HasActiveOperationLedger(
                 _objectInteractor, _shapeInteractor)
             || myDoc.IsNull()) {
@@ -1608,6 +1615,40 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
     } catch (...) {
         return false;
     }
+}
+
+bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
+    return _ordinaryEditController != nullptr && _ordinaryEditController->blocksNormalWork();
+}
+bool Core3DViewer::hasUnresolvedEdit() const noexcept {
+    return hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate();
+}
+OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
+    const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || !_ordinaryEditController) {
+        if (failure) { *failure = OrdinaryEditResult::Busy; }
+        return {};
+    }
+    return _ordinaryEditController->beginTransform(changes, failure);
+}
+OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
+    return _ordinaryEditController ? _ordinaryEditController->reconcile() : OrdinaryEditResult::NoChange;
+}
+bool Core3DViewer::admitTransform(OrdinaryTransformLedger& ledger) noexcept {
+    return [NSThread isMainThread] && _objectInteractor && _shapeInteractor
+        && !HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        && _shapeInteractor->selectionModeAuthorityIsExact()
+        && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
+        && _objectInteractor->captureOrdinaryTransformAuthority(ledger);
+}
+bool Core3DViewer::repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept {
+    return [NSThread isMainThread] && _ordinaryEditController
+        && _ordinaryEditController->state() == OrdinaryEditState::RepairPending
+        && _objectInteractor && _shapeInteractor
+        && !HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        && _shapeInteractor->selectionModeAuthorityIsExact()
+        && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
+        && _objectInteractor->repairOrdinaryTransformPresentation(ledger, committed);
 }
 
 bool Core3DViewer::hasUnresolvedDuplicate() const noexcept {
@@ -2121,7 +2162,7 @@ DebugSetTransformInspectorPositionPublicationFallbackMode(
 
 AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     assert(!myContext.IsNull());
-    if (HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
+    if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // Replacement is a hard document boundary. Never cancel or recreate
         // an operation here: its controller may own previews, an open command,
         // or an exactly-once reconciliation token that the enum cannot encode.
@@ -2351,7 +2392,7 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 }
 
 bool Core3DViewer::redrawDocument() noexcept {
-    if (HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
+    if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // A same-document rebuild is safe only after every typed operation has
         // retired its controller ledger. The manipulator enum alone cannot
         // recreate Boolean, Bevel, Mirror, Array, Extrude, or Shell state.
@@ -2857,7 +2898,7 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer
 Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
-    if (hasUnresolvedDuplicate()) {
+    if (hasUnresolvedEdit()) {
         return {};
     }
     if (_objectInteractor != nullptr
@@ -2960,7 +3001,7 @@ std::optional<scene::FrameSnapshot>
 Core3DViewer::captureSceneFrameSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
-    if (hasUnresolvedDuplicate()) {
+    if (hasUnresolvedEdit()) {
         return std::nullopt;
     }
     return _sceneSnapshotBuilder.CaptureFrame(
@@ -2971,7 +3012,7 @@ Core3DViewer::captureSceneFrameSnapshot(
 
 scene::OcctSceneSnapshotBuilder::OverlayPointer
 Core3DViewer::captureScenePresentationOverlay() noexcept {
-    if (hasUnresolvedDuplicate()) {
+    if (hasUnresolvedEdit()) {
         return {};
     }
     if (_shapeInteractor != nullptr
@@ -3619,7 +3660,7 @@ void Core3DViewer::Select(int theX, int theY) {
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
         return;
     }
-	if (_objectInteractor->hasUnresolvedDuplicate()) {
+	if (hasUnresolvedEdit()) {
 		return;
 	}
 	if (_objectInteractor->isPickingMirrorPlane()) {
@@ -3703,7 +3744,7 @@ void Core3DViewer::Select(int theX, int theY) {
 	void Core3DViewer::deselectAll() {
 		if (myContext.IsNull()) { return; }
 		if (_objectInteractor != nullptr
-			&& _objectInteractor->hasUnresolvedDuplicate()) {
+			&& hasUnresolvedEdit()) {
 			return;
 		}
 		if (_shapeInteractor != nullptr
@@ -3749,7 +3790,7 @@ void Core3DViewer::Select(int theX, int theY) {
     bool Core3DViewer::dumpOfDisplayedColoredObjects(const Standard_Integer width,
                                                      const Standard_Integer height,
                                                      const TCollection_AsciiString &fileName) {
-        if (hasUnresolvedDuplicate()) { return false; }
+        if (hasUnresolvedEdit()) { return false; }
 
         // prepare viewer
         Handle(Aspect_DisplayConnection) displayConnection = new Aspect_DisplayConnection();
@@ -3855,7 +3896,7 @@ void Core3DViewer::Select(int theX, int theY) {
     bool Core3DViewer::dumpOfDisplayedObjects(const Standard_Integer width, 
                                               const Standard_Integer height,
                                               const TCollection_AsciiString &fileName) {
-        if (hasUnresolvedDuplicate()) { return false; }
+        if (hasUnresolvedEdit()) { return false; }
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         AIS_ListIteratorOfListOfInteractive iobject(objects);
@@ -3944,7 +3985,7 @@ void Core3DViewer::Select(int theX, int theY) {
     bool Core3DViewer::saveSnapshot(const TCollection_AsciiString& thePath,
                                     int theWidth,
                                     int theHeight) {
-        if (hasUnresolvedDuplicate()) { return false; }
+        if (hasUnresolvedEdit()) { return false; }
         showGrid(false);
         myView->TriedronErase();
         myView->FitAll();

@@ -6,6 +6,7 @@
 //
 
 #include "ObjectInteractor.hpp"
+#include "OrdinaryEditController.hpp"
 #include "../Scene/SceneSnapshot.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include <BRepAlgoAPI_Cut.hxx>
@@ -775,7 +776,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::selectLastObject() {
-        if (hasUnresolvedDuplicate()) { return; }
+        if (hasUnresolvedEdit()) { return; }
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         Handle(AIS_InteractiveObject) object;
@@ -858,7 +859,7 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::	selectAll() {
-		if (hasUnresolvedDuplicate()) { return; }
+		if (hasUnresolvedEdit()) { return; }
 		if (!_manipulator.IsNull()
 			&& (_manipulatorGestureActive
 				|| _manipulator->HasActiveTransformation())) {
@@ -945,7 +946,7 @@ namespace core3d {
             theContent = {};
             theMirrorPreviewObjects.clear();
             theBooleanPreview = {};
-            if (hasUnresolvedDuplicate()) {
+            if (hasUnresolvedEdit()) {
                 return PresentationOverlayCaptureStatus::Unsafe;
             }
             const bool hasMirrorPreview = !_trialMirrorObjects.empty();
@@ -1161,7 +1162,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::deleteSelected() {
-        if (hasUnresolvedDuplicate()) { return; }
+        if (hasUnresolvedEdit()) { return; }
         if (_manipulator.IsNull() || !_manipulator->IsAttached()) { return; }
 		auto doc = myDoc->ChangeDocument();
 		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
@@ -1428,6 +1429,7 @@ namespace core3d {
 	}
 
     void ObjectInteractor::duplicateSelected() {
+        if (blocksForOrdinaryEdit()) { return; }
         auto doc = myDoc->ChangeDocument();
 		if (doc.IsNull()) { return; }
 		if (_duplicateOwnsDocumentCommand
@@ -1794,7 +1796,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::attachManipulatorToSelection(bool detach) {
-        if (hasUnresolvedDuplicate()) { return; }
+        if (hasUnresolvedEdit()) { return; }
         if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { return; }
 		if (_manipulatorType
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
@@ -1856,7 +1858,7 @@ namespace core3d {
     }
 
 	void ObjectInteractor::setObjectTransparent(Handle(AIS_InteractiveObject) selected, const bool on) {
-		if (hasUnresolvedDuplicate()) { return; }
+		if (hasUnresolvedEdit()) { return; }
 		
 		Quantity_Color color = Quantity_Color(on ? Quantity_NameOfColor::Quantity_NOC_BLUE : Quantity_NameOfColor::Quantity_NOC_GRAY80);
 		
@@ -1868,7 +1870,7 @@ namespace core3d {
 	}
 
 	void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
-		if (hasUnresolvedDuplicate()) { return; }
+		if (hasUnresolvedEdit()) { return; }
 		const PrimitiveManipulatorType aPreviousType = _manipulatorType;
 		if (type
 				!= PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray
@@ -2034,7 +2036,7 @@ namespace core3d {
     }
 
     bool ObjectInteractor::transformManipulator(const int theX, const int theY) {
-		if (hasUnresolvedDuplicate()) { return false; }
+		if (hasUnresolvedEdit()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
 				_manipulator,
@@ -2055,7 +2057,7 @@ namespace core3d {
     }
 
     bool ObjectInteractor::startTransformManipulator(const int theX, const int theY) {
-		if (hasUnresolvedDuplicate()) { return false; }
+		if (hasUnresolvedEdit()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
 				_manipulator,
@@ -2087,7 +2089,7 @@ namespace core3d {
             || values.size() < 2 || values.size() > 32
             || _manipulator.IsNull() || !_manipulator->IsAttached()
             || myView.IsNull() || myContext.IsNull()
-            || isManipulatorGestureActive() || hasUnresolvedDuplicate()) {
+            || isManipulatorGestureActive() || hasUnresolvedEdit()) {
             return false;
         }
         try {
@@ -2183,7 +2185,7 @@ namespace core3d {
 #endif
 
     void ObjectInteractor::finishInteraction() {
-		if (hasUnresolvedDuplicate()) {
+		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;
 		}
@@ -2380,7 +2382,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
-		if (hasUnresolvedDuplicate()) {
+		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;
 		}
@@ -2442,7 +2444,7 @@ namespace core3d {
         try {
             OCC_CATCH_SIGNALS
             if (myDoc.IsNull() || myContext.IsNull() || target.IsNull()
-                || hasUnresolvedDuplicate() || _manipulatorGestureActive
+                || hasUnresolvedEdit() || _manipulatorGestureActive
                 || (!_manipulator.IsNull()
                     && _manipulator->HasActiveTransformation())
                 || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
@@ -2600,6 +2602,164 @@ namespace core3d {
 
     const PrimitiveManipulatorType ObjectInteractor::getManipulatorType() const {
         return _manipulatorType;
+    }
+
+    bool ObjectInteractor::hasUnresolvedEdit() const noexcept {
+        return hasUnresolvedDuplicate() || blocksForOrdinaryEdit();
+    }
+
+    bool ObjectInteractor::blocksForOrdinaryEdit() const noexcept {
+        const auto controller = _ordinaryEditController.lock();
+        return controller && controller->blocksNormalWork();
+    }
+
+    bool ObjectInteractor::captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept {
+        try {
+            if (myDoc.IsNull() || myContext.IsNull() || ledger.records.empty()
+                || hasUnresolvedDuplicate()
+                || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) { return false; }
+            std::unordered_map<const AIS_InteractiveObject*, const OrdinaryTransformRecord*> expected;
+            for (const auto& record : ledger.records) {
+                const auto& presentation = record.requested.presentation;
+                if (presentation.IsNull() || !myContext->IsDisplayed(presentation)
+                    || !myDoc->IsPresentationEditable(presentation)
+                    || (!presentation->Shape().IsEqual(record.previous.shape)
+                        && !presentation->Shape().IsEqual(record.requested.shape))
+                    || (TransformDiffers(presentation->LocalTransformation(), record.previous.transform)
+                        && TransformDiffers(presentation->LocalTransformation(), record.requested.transform))
+                    || (record.requested.operation == OrdinaryTransformOperation::Scale
+                        && !IsTopologicallyValid(record.requested.shape))
+                    || !expected.emplace(presentation.get(), &record).second) { return false; }
+            }
+            ledger.selectionOwners.clear();
+            std::unordered_set<const AIS_InteractiveObject*> selected;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                const auto presentation = myContext->SelectedInteractive();
+                const auto owner = myContext->SelectedOwner();
+                const auto found = expected.find(presentation.get());
+                const auto brepOwner = Handle(StdSelect_BRepOwner)::DownCast(owner);
+                if (found == expected.end() || owner.IsNull() || owner->Selectable() != presentation
+                    || brepOwner.IsNull() || !brepOwner->HasShape()
+                    || !brepOwner->Shape().IsEqual(found->second->previous.shape)
+                    || !selected.insert(presentation.get()).second) { return false; }
+                ledger.selectionOwners.push_back(owner);
+            }
+            if (selected.size() != expected.size()) { return false; }
+            ledger.manipulatorType = _manipulatorType;
+            ledger.hadManipulator = !_manipulator.IsNull() && _manipulator->IsAttached();
+            if (ledger.hadManipulator) {
+                const auto attached = _manipulator->Objects();
+                if (attached.IsNull() || static_cast<std::size_t>(attached->Size()) != expected.size()
+                    || _manipulatorSourceLabels.size() != expected.size()) { return false; }
+                std::unordered_set<const AIS_InteractiveObject*> unique;
+                int index = 1;
+                for (Core3DManipulatorObjectSequence::Iterator it(*attached); it.More(); it.Next(), ++index) {
+                    const auto found = expected.find(it.Value().get());
+                    const auto cached = _manipulator->cachedShapes().find(it.Value());
+                    const auto label = _manipulatorSourceLabels.find(it.Value().get());
+                    if (found == expected.end() || !unique.insert(it.Value().get()).second
+                        || cached == _manipulator->cachedShapes().end()
+                        || !cached->second.IsEqual(found->second->previous.shape)
+                        || label == _manipulatorSourceLabels.end()
+                        || !label->second.IsEqual(found->second->previous.label)
+                        || (_manipulator->HasActiveTransformation()
+                            && TransformDiffers(_manipulator->StartTransformation(index), found->second->previous.transform))) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (...) { return false; }
+    }
+
+    bool ObjectInteractor::repairOrdinaryTransformPresentation(
+        const OrdinaryTransformLedger& ledger, bool committed) noexcept {
+        try {
+            if (myContext.IsNull() || myDoc.IsNull() || ledger.records.empty()
+                || ledger.selectionOwners.size() != ledger.records.size()) { return false; }
+            // Retire the preview without guessing its durable outcome. Every
+            // presentation is assigned from an independently proven OCAF state.
+            if (!_manipulator.IsNull()) {
+                if (_manipulator->HasActiveTransformation()) { _manipulator->StopTransform(Standard_True); }
+                _manipulator->DeactivateCurrentMode();
+                _manipulator->Detach();
+            }
+            _manipulatorGestureActive = false;
+            _manipulatorSourceLabels.clear();
+            myContext->ClearDetected(Standard_False);
+            myContext->ClearSelected(Standard_False);
+            Handle(Core3DManipulatorObjectSequence) group = new Core3DManipulatorObjectSequence();
+            std::unordered_map<const AIS_InteractiveObject*, const OcctObjectTransformState*> expected;
+            for (const auto& record : ledger.records) {
+                const auto& saved = committed ? record.candidate : record.previous;
+                OcctObjectTransformState actual;
+                const auto& presentation = record.requested.presentation;
+                if (!myDoc->CaptureObjectTransformStateForLabel(saved.label, actual)
+                    || !actual.IsEqual(saved) || presentation.IsNull()
+                    || !myContext->IsDisplayed(presentation)) { return false; }
+                presentation->SetShape(saved.shape);
+                presentation->SetLocalTransformation(saved.transform);
+                myContext->Redisplay(presentation, Standard_False);
+                // A Scale result has different topology. Select the rebuilt
+                // global owner, never a retained owner naming the old shape.
+                myContext->RecomputeSelectionOnly(presentation);
+                const auto owner = presentation->GlobalSelOwner();
+                if (owner.IsNull() || owner->Selectable() != presentation) { return false; }
+                myContext->AddOrRemoveSelected(owner, Standard_False);
+                group->Append(presentation);
+                expected.emplace(presentation.get(), &saved);
+            }
+            _manipulatorType = ledger.manipulatorType;
+            if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale) { return false; }
+            createManipulatorIfNeeded();
+            const bool scale = _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
+            const bool moveRotate = _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
+            for (int axis = 0; axis < 3; ++axis) {
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Scaling, scale);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_ScalingUniform, scale);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Translation, moveRotate);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Rotation, moveRotate);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_TranslationPlane, Standard_False);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg, Standard_False);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_MirroringPlanePos, Standard_False);
+            }
+            if (ledger.hadManipulator && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
+                _manipulator->Attach(group);
+                for (const auto& record : ledger.records) {
+                    _manipulatorSourceLabels.emplace(record.requested.presentation.get(), record.previous.label);
+                }
+                _manipulator->UpdateCachedShapes();
+                _manipulator->Redisplay();
+            }
+            _manipulator->DeactivateCurrentMode();
+            myContext->ClearDetected(Standard_False);
+            std::unordered_set<const AIS_InteractiveObject*> selected;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                const auto object = myContext->SelectedInteractive();
+                const auto found = expected.find(object.get());
+                const auto owner = Handle(StdSelect_BRepOwner)::DownCast(myContext->SelectedOwner());
+                if (found == expected.end() || !selected.insert(object.get()).second
+                    || owner.IsNull() || !owner->HasShape() || !owner->Shape().IsEqual(found->second->shape)) { return false; }
+            }
+            if (selected.size() != expected.size() || _manipulatorGestureActive
+                || _manipulator->HasActiveTransformation() || _manipulator->HasActiveMode()) { return false; }
+            if (ledger.hadManipulator && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone) {
+                if (!_manipulator->IsAttached() || _manipulator->Objects().IsNull()
+                    || static_cast<std::size_t>(_manipulator->Objects()->Size()) != expected.size()
+                    || _manipulatorSourceLabels.size() != expected.size()) { return false; }
+                for (const auto& record : ledger.records) {
+                    const auto cached = _manipulator->cachedShapes().find(record.requested.presentation);
+                    const auto& saved = committed ? record.candidate : record.previous;
+                    if (cached == _manipulator->cachedShapes().end() || !cached->second.IsEqual(saved.shape)) { return false; }
+                }
+            } else if (_manipulator->IsAttached()) { return false; }
+            myContext->UpdateCurrentViewer();
+            return true;
+        } catch (...) { return false; }
     }
 
     bool ObjectInteractor::publishCommittedInspectorTransform(
