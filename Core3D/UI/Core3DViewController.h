@@ -747,6 +747,7 @@ typedef struct {
 - (NSInteger)debugApplyViewerOrdinaryTransform:(NSInteger)mode paused:(BOOL)paused;
 - (NSInteger)debugReconcileViewerOrdinaryEdit;
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode;
+- (BOOL)debugConfigureOrdinaryCreationFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;

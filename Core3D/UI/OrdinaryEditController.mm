@@ -9,9 +9,50 @@
 #include <limits>
 #include <unordered_set>
 #include <utility>
+#include <TDF_Tool.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <TDataStd_Integer.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
 
 namespace core3d {
 namespace {
+
+std::string CreationLabelKey(const TDF_Label& label) {
+    TCollection_AsciiString entry;
+    TDF_Tool::Entry(label, entry);
+    return entry.ToCString();
+}
+bool CaptureCreationRoots(const Handle(OcctDocument)& owner, OrdinaryCreationCatalog& roots) {
+    roots.clear();
+    const auto document = owner.IsNull() ? Handle(TDocStd_Document)() : owner->Document();
+    if (document.IsNull()) { return false; }
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    if (shapes.IsNull()) { return false; }
+    TDF_LabelSequence labels;
+    shapes->GetFreeShapes(labels);
+    if (labels.Length() > 50000) { return false; }
+    for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+        const auto& label = labels.Value(index);
+        const auto shape = XCAFDoc_ShapeTool::GetShape(label);
+        if (label.IsNull() || label.Data() != document->GetData() || shape.IsNull()) { return false; }
+        if (!roots.emplace(CreationLabelKey(label), OrdinaryCreationRoot{label, shape,
+                owner->EntityIdentifierForLabel(label), owner->DefinitionIdentifierForLabel(label),
+                owner->GeometryRepresentationForLabel(label)}).second) { return false; }
+    }
+    return true;
+}
+bool CreationRootsEqual(const OrdinaryCreationRoot& a, const OrdinaryCreationRoot& b) {
+    return a.label.IsEqual(b.label) && a.label.Data() == b.label.Data()
+        && a.shape.IsEqual(b.shape) && a.entityIdentifier == b.entityIdentifier
+        && a.definitionIdentifier == b.definitionIdentifier && a.representation == b.representation;
+}
+bool CreationIntegerEquals(const TDF_Label& label, Standard_Integer tag, Standard_Integer expected) {
+    const auto child = label.FindChild(tag, Standard_False);
+    Handle(TDataStd_Integer) value;
+    return !child.IsNull() && child.FindAttribute(TDataStd_Integer::GetID(), value)
+        && !value.IsNull() && value->Get() == expected;
+}
+
 bool MatricesEqual(const gp_Trsf& a, const gp_Trsf& b) {
     for (int row = 1; row <= 3; ++row) {
         for (int column = 1; column <= 4; ++column) {
@@ -245,6 +286,170 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
         _activeToken = 0;
         return reject(OrdinaryEditResult::Invalid);
     }
+}
+
+
+OrdinaryEditLease OrdinaryEditController::beginCreation(
+    const std::vector<OrdinaryCreationRequest>& requests, OrdinaryEditResult* failure) noexcept {
+    const auto reject = [&](OrdinaryEditResult result) {
+        if (failure) { *failure = result; }
+        return OrdinaryEditLease();
+    };
+    if (![NSThread isMainThread]) { return reject(OrdinaryEditResult::Invalid); }
+    if (blocksNormalWork()) { return reject(OrdinaryEditResult::Busy); }
+    if (_document.IsNull() || requests.empty() || requests.size() > 1024
+        || _nextToken == std::numeric_limits<std::uint64_t>::max()) { return reject(OrdinaryEditResult::Invalid); }
+    _entering = true;
+    struct EnterReset { bool& flag; ~EnterReset() { flag = false; } } reset{_entering};
+    try {
+        const auto self = shared_from_this();
+        const auto lifetime = std::make_shared<const std::uint8_t>(0);
+        const auto document = _document->Document();
+        if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
+        OrdinaryCreationLedger ledger;
+        if (!CaptureCreationRoots(_document, ledger.previousRoots)
+            || ledger.previousRoots.size() + requests.size() > 50000
+            || !_document->CaptureSavedGroups(ledger.groups)) { return reject(OrdinaryEditResult::Invalid); }
+        std::unordered_set<const AIS_Shape*> presentations;
+        for (const auto& request : requests) {
+            if (request.presentation.IsNull() || request.presentation->Shape().IsNull()
+                || !presentations.insert(request.presentation.get()).second
+                || (request.representation != OcctGeometryRepresentation::BRep
+                    && request.representation != OcctGeometryRepresentation::TriangleMesh)
+                || !CandidateIsFinite(request.presentation->LocalTransformation())) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            ledger.records.push_back({request, request.presentation->Shape(),
+                                      request.presentation->LocalTransformation(), {}});
+        }
+        if (!_host.admitCreation(ledger) || !creationMatches(ledger, false)) { return reject(OrdinaryEditResult::Invalid); }
+        _pending.emplace(std::move(ledger));
+        _leaseLifetime = lifetime;
+        _activeToken = ++_nextToken;
+        const auto began = _command.begin(_document);
+        if (began != OrdinaryCommandBeginResult::Started) {
+            if (began == OrdinaryCommandBeginResult::OutcomeUnknown) {
+                _state = OrdinaryEditState::OutcomeUnknown;
+                return reject(OrdinaryEditResult::OutcomeUnknown);
+            }
+            _pending.reset(); _activeToken = 0;
+            return reject(began == OrdinaryCommandBeginResult::Busy ? OrdinaryEditResult::Busy
+                : began == OrdinaryCommandBeginResult::Invalid ? OrdinaryEditResult::Invalid
+                : OrdinaryEditResult::RetryableFailure);
+        }
+        _state = OrdinaryEditState::OpenOwned;
+        return OrdinaryEditLease(self, _activeToken, lifetime);
+    } catch (...) {
+        if (_command.isRetained()) { _state = OrdinaryEditState::OutcomeUnknown; return reject(OrdinaryEditResult::OutcomeUnknown); }
+        _pending.reset(); _activeToken = 0; return reject(OrdinaryEditResult::Invalid);
+    }
+}
+
+bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept {
+    try {
+        OrdinaryCreationCatalog actual;
+        OcctSavedGroupState groups;
+        if (!CaptureCreationRoots(_document, actual) || !_document->CaptureSavedGroups(groups)
+            || !ledger.groups.IsEqual(groups)
+            || actual.size() != ledger.previousRoots.size() + (candidate ? ledger.records.size() : 0)) { return false; }
+        for (const auto& entry : ledger.previousRoots) {
+            const auto match = actual.find(entry.first);
+            if (match == actual.end() || !CreationRootsEqual(entry.second, match->second)) { return false; }
+        }
+        if (!candidate) { return true; }
+        std::unordered_set<std::string> entities, definitions, labels;
+        for (const auto& record : ledger.records) {
+            const auto& expected = record.candidate;
+            const auto key = CreationLabelKey(expected.object.label);
+            OcctObjectNameState stored;
+            OcctReferenceAxis axis;
+            if (ledger.previousRoots.count(key) || !actual.count(key) || !labels.insert(key).second
+                || !entities.insert(expected.object.entityIdentifier).second
+                || !definitions.insert(expected.object.definitionIdentifier).second
+                || !_document->CaptureObjectNameStateForLabel(expected.object.label, stored)
+                || !expected.IsEqual(stored)
+                || !CreationIntegerEquals(expected.object.label, 11, record.requested.material)
+                || !CreationIntegerEquals(expected.object.label, 12, record.requested.color)
+                || _document->ReadReferenceAxisForLabel(expected.object.label, axis) != OcctReferenceAxisReadState::ImplicitDefault) { return false; }
+        }
+        for (const auto& entry : ledger.previousRoots) {
+            if (entities.count(entry.second.entityIdentifier) || definitions.count(entry.second.definitionIdentifier)) { return false; }
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t token) noexcept {
+    try {
+        auto& ledger = std::get<OrdinaryCreationLedger>(*_pending);
+        if (!creationMatches(ledger, false)) { return cancel(token); }
+        if (_command.observe() != OrdinaryCommandObservation::OpenOwned) {
+            _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+        for (std::size_t index = 0; index < ledger.records.size(); ++index) {
+            auto& record = ledger.records[index];
+#ifdef DEBUG
+            if (_stageFailureIndex == static_cast<int>(index)) {
+                _stageFailureIndex = -1; throw Standard_Failure("Creation staging fault");
+            }
+#endif
+            if (!record.requested.presentation->Shape().IsEqual(record.shape)
+                || !MatricesEqual(record.requested.presentation->LocalTransformation(), record.transform)) {
+                throw Standard_Failure("Creation private geometry changed");
+            }
+            const auto label = _document->AddShape(record.requested.presentation, record.requested.representation);
+            if (label.IsNull()) { throw Standard_Failure("Creation returned no root"); }
+            _document->SaveObjectMaterial(label, record.requested.material);
+            _document->SaveObjectColor(label, record.requested.color);
+            if (!_document->CaptureObjectNameStateForLabel(label, record.candidate)
+                || !record.candidate.object.shape.IsEqual(record.shape)
+                || record.candidate.object.scalars != EncodedTransform(record.transform)
+                || record.candidate.object.storedRepresentation != record.requested.representation
+                || record.candidate.object.resolvedRepresentation != record.requested.representation) {
+                throw Standard_Failure("Creation candidate readback failed");
+            }
+            for (bool present : record.candidate.object.present) {
+                if (!present) { throw Standard_Failure("Incomplete creation transform"); }
+            }
+        }
+#ifdef DEBUG
+        if (_stageFailureIndex == static_cast<int>(ledger.records.size())) {
+            _stageFailureIndex = -1; throw Standard_Failure("Creation staged abort fault");
+        }
+#endif
+        if (!creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
+        ledger.candidateSealed = true;
+        if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
+            _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return OrdinaryEditResult::OutcomeUnknown;
+        }
+    } catch (...) {}
+    _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return reconcile();
+}
+
+OrdinaryEditResult OrdinaryEditController::reconcileCreationImpl() noexcept {
+    try {
+        auto& ledger = std::get<OrdinaryCreationLedger>(*_pending);
+#ifdef DEBUG
+        if (_truthUnavailableCount > 0) {
+            --_truthUnavailableCount; _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+#endif
+        auto observation = _command.observe();
+        if (observation == OrdinaryCommandObservation::OpenOwned) { observation = _command.abortAndObserve(); }
+        const bool candidate = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
+        const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
+        if ((!candidate && !previous) || (candidate && !ledger.candidateSealed) || !creationMatches(ledger, candidate)) {
+            _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+        _committed = candidate; _state = OrdinaryEditState::RepairPending;
+        if (!_host.repairCreation(ledger, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+        if (!creationMatches(ledger, candidate)) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+        _state = OrdinaryEditState::Publishing;
+        if (!_command.releaseClosed()) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+        if (candidate && !_didPublish) { _didPublish = true; try { _document->NotifyChanges(); } catch (...) {} }
+        clearResolved();
+        return candidate ? OrdinaryEditResult::Committed : OrdinaryEditResult::RetryableFailure;
+    } catch (...) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
 }
 
 OrdinaryEditLease OrdinaryEditController::beginGrouping(
@@ -732,6 +937,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
         || !_pending || token == 0 || token != _activeToken) { return OrdinaryEditResult::Busy; }
+    if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return stageCreationAndCommit(token); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return stageGroupingAndCommit(token); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return stageVisibilityAndCommit(token); }
     if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return stageNamesAndCommit(token); }
@@ -846,6 +1052,7 @@ OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
 }
 
 OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
+    if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return reconcileCreationImpl(); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return reconcileGroupingImpl(); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return reconcileVisibilityImpl(); }
     if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return reconcileNamesImpl(); }

@@ -105,6 +105,9 @@ namespace core3d {
             bool visible, std::uint64_t presentationRevision, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight, bool* blockedByLayer = nullptr) noexcept;
 #ifdef DEBUG
+        void debugSetOrdinaryCreationAfterRepairFailures(int count) noexcept {
+            _debugOrdinaryCreationAfterRepairFailures = count > 0 ? count : 0;
+        }
         void debugSetOrdinaryVisibilityAfterRepairFailures(int count) noexcept {
             _debugOrdinaryVisibilityAfterRepairFailures = count > 0 ? count : 0;
         }
@@ -367,6 +370,7 @@ namespace core3d {
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
 #ifdef DEBUG
         int _debugOrdinaryRepairFailures = 0;
+        int _debugOrdinaryCreationAfterRepairFailures = 0;
         int _debugOrdinaryVisibilityAfterRepairFailures = 0;
         int _debugOrdinaryRedrawFailures = 0;
         int _debugOrdinaryOwnerResolutionFailures = 0;
@@ -375,6 +379,9 @@ namespace core3d {
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
         bool admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept override;
         bool repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
+        OrdinaryEditResult publishCreatedPrimitives(const std::vector<OrdinaryCreationRequest>& requests) noexcept;
+        bool admitCreation(OrdinaryCreationLedger& ledger) noexcept override;
+        bool repairCreation(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
         bool admitGrouping(OrdinaryGroupingLedger& ledger) noexcept override;
         bool repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept override;
         bool admitNames(OrdinaryNameLedger& ledger) noexcept override;

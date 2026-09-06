@@ -5,6 +5,9 @@
 #include "OrdinaryEditCommand.hpp"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
+#include <map>
+#include <Graphic3d_NameOfMaterial.hxx>
+#include <Quantity_NameOfColor.hxx>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -117,6 +120,39 @@ struct OrdinaryGroupingLedger {
     bool candidateSealed = false;
 };
 
+
+//! Private, prepared geometry. Ordinary creation never borrows a live source
+//! presentation and never publishes it until the durable result is proven.
+struct OrdinaryCreationRequest {
+    Handle(AIS_Shape) presentation;
+    Graphic3d_NameOfMaterial material = Graphic3d_NameOfMaterial_ShinyPlastified;
+    Quantity_NameOfColor color = Quantity_NOC_WHITE;
+    OcctGeometryRepresentation representation = OcctGeometryRepresentation::BRep;
+};
+struct OrdinaryCreationRecord {
+    OrdinaryCreationRequest requested;
+    TopoDS_Shape shape;
+    gp_Trsf transform;
+    OcctObjectNameState candidate;
+};
+//! Existing roots may be assemblies or read-only imported occurrences. They
+//! are preserved, not subjected to the new object's editable-root admission.
+struct OrdinaryCreationRoot {
+    TDF_Label label;
+    TopoDS_Shape shape;
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+    OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
+};
+using OrdinaryCreationCatalog = std::map<std::string, OrdinaryCreationRoot>;
+struct OrdinaryCreationLedger {
+    OrdinaryCreationCatalog previousRoots;
+    OcctSavedGroupState groups;
+    std::vector<OrdinaryCreationRecord> records;
+    OrdinaryNameLedger authority;
+    bool candidateSealed = false;
+};
+
 //! Typed presentation boundary. The viewer implements admission/repair for
 //! exact selection, tool, manipulator and renderer identity. Neither method
 //! may mutate OCAF or call NotifyChanges. No captured callbacks in a ledger.
@@ -124,6 +160,8 @@ class OrdinaryEditPresentationHost {
 public:
     virtual ~OrdinaryEditPresentationHost() = default;
     virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
+    virtual bool admitCreation(OrdinaryCreationLedger&) noexcept { return false; }
+    virtual bool repairCreation(const OrdinaryCreationLedger&, bool) noexcept { return false; }
     virtual bool admitGrouping(OrdinaryGroupingLedger&) noexcept { return false; }
     virtual bool repairGrouping(const OrdinaryGroupingLedger&, bool) noexcept { return false; }
     virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
@@ -165,8 +203,8 @@ private:
     std::uint64_t _token = 0;
 };
 
-//! Shared durable state machine. Transform is the first typed family; Add,
-//! Remove and Appearance extend PendingEdit when their exact snapshots exist.
+//! Shared durable state machine with typed transform, creation and metadata
+//! families. Remove and Appearance still need their exact snapshot contracts.
 //! The owning viewer must retain this controller and gate normal work with
 //! blocksNormalWork(), including the synchronous Publishing interval.
 class Standard_EXPORT OrdinaryEditController final
@@ -177,6 +215,8 @@ public:
     OrdinaryEditController& operator=(const OrdinaryEditController&) = delete;
     OrdinaryEditLease beginTransform(const std::vector<OrdinaryTransformChange>& changes,
                                      OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginCreation(const std::vector<OrdinaryCreationRequest>& requests,
+                                   OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginGrouping(const std::vector<OcctSavedGroup>& groups,
                                    OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
@@ -193,10 +233,13 @@ public:
 #endif
 private:
     friend class OrdinaryEditLease;
-    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger>;
+    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger, OrdinaryCreationLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileImpl() noexcept;
+    OrdinaryEditResult stageCreationAndCommit(std::uint64_t token) noexcept;
+    OrdinaryEditResult reconcileCreationImpl() noexcept;
+    bool creationMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept;
     OrdinaryEditResult stageGroupingAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileGroupingImpl() noexcept;
     bool groupingMatches(const OrdinaryGroupingLedger& ledger, bool candidate) const noexcept;

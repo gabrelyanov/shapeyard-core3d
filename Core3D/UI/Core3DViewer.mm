@@ -371,11 +371,7 @@ constexpr double kMaximumPrimitiveDimension = 1.0e6;
 constexpr double kMaximumPositionMagnitude = 1.0e6;
 constexpr double kMaximumRotationMagnitude = 360000.0;
 
-struct PreparedPrimitive {
-    Handle(AIS_Shape) presentation;
-    Graphic3d_NameOfMaterial material;
-    Quantity_NameOfColor color;
-};
+using PreparedPrimitive = OrdinaryCreationRequest;
 
 bool ReadFiniteJSONNumber(id value, double& result) {
     if (![value isKindOfClass:[NSNumber class]]) {
@@ -433,125 +429,7 @@ bool IsValidDimension(double value) {
         && value <= kMaximumPrimitiveDimension;
 }
 
-void AbortCommandNoThrow(const Handle(TDocStd_Document)& document) noexcept {
-    if (document.IsNull()) {
-        return;
-    }
-    try {
-        if (document->HasOpenCommand()) {
-            document->AbortCommand();
-        }
-    } catch (...) {
-        // Preserve the original transaction failure.
-    }
-}
 
-bool StagePreparedPrimitives(
-    const Handle(OcctDocument)& document,
-    const std::vector<PreparedPrimitive>& primitives) {
-    if (document.IsNull() || primitives.empty()) {
-        return false;
-    }
-
-    Handle(TDocStd_Document) transaction = document->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) {
-        return false;
-    }
-
-    try {
-        OCC_CATCH_SIGNALS
-        transaction->NewCommand();
-        if (!transaction->HasOpenCommand()) {
-            return false;
-        }
-
-        for (const PreparedPrimitive& primitive : primitives) {
-            if (primitive.presentation.IsNull()
-                || primitive.presentation->Shape().IsNull()) {
-                AbortCommandNoThrow(transaction);
-                return false;
-            }
-
-            const TDF_Label label = document->AddShape(primitive.presentation);
-            if (label.IsNull()) {
-                AbortCommandNoThrow(transaction);
-                return false;
-            }
-            document->SaveObjectMaterial(label, primitive.material);
-            document->SaveObjectColor(label, primitive.color);
-        }
-
-        return true;
-    } catch (const Standard_Failure&) {
-        AbortCommandNoThrow(transaction);
-        return false;
-    } catch (const std::exception&) {
-        AbortCommandNoThrow(transaction);
-        return false;
-    } catch (...) {
-        AbortCommandNoThrow(transaction);
-        return false;
-    }
-}
-
-bool PublishPreparedPrimitives(
-    const Handle(OcctDocument)& document,
-	const Handle(Core3DContext)& context,
-	const std::vector<PreparedPrimitive>& primitives,
-	Standard_Integer selectionMode) {
-	if (context.IsNull() || !StagePreparedPrimitives(document, primitives)) {
-		return false;
-	}
-
-	Standard_Boolean displayedAll = Standard_False;
-	try {
-		OCC_CATCH_SIGNALS
-		for (const PreparedPrimitive& primitive : primitives) {
-			context->Display(
-				primitive.presentation,
-				AIS_Shaded,
-				selectionMode,
-				Standard_False);
-		}
-		displayedAll = Standard_True;
-	} catch (...) {
-		displayedAll = Standard_False;
-	}
-
-	Handle(TDocStd_Document) transaction = document->ChangeDocument();
-	if (!displayedAll) {
-		for (const PreparedPrimitive& primitive : primitives) {
-			try {
-				context->Remove(primitive.presentation, Standard_False);
-			} catch (...) {
-			}
-		}
-		AbortCommandNoThrow(transaction);
-		return false;
-	}
-
-	Standard_Boolean committed = Standard_False;
-	try {
-		committed = !transaction.IsNull()
-			&& transaction->HasOpenCommand()
-			&& transaction->CommitCommand();
-	} catch (...) {
-		committed = Standard_False;
-	}
-	if (!committed) {
-		for (const PreparedPrimitive& primitive : primitives) {
-			try {
-				context->Remove(primitive.presentation, Standard_False);
-			} catch (...) {
-			}
-		}
-		AbortCommandNoThrow(transaction);
-		return false;
-	}
-
-	document->NotifyChanges();
-	return true;
-}
 
 AssetImportResult ImportResultForReaderStatus(PCDM_ReaderStatus status) {
     switch (status) {
@@ -2032,6 +1910,83 @@ bool Core3DViewer::selectSavedGroup(const ObjectFrameIdentity& expected,
     } catch (...) { return false; }
 }
 
+
+OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
+    const std::vector<OrdinaryCreationRequest>& requests) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || !_ordinaryEditController) {
+        return OrdinaryEditResult::Busy;
+    }
+    OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+    auto lease = _ordinaryEditController->beginCreation(requests, &failure);
+    return lease ? lease.stageAndCommit() : failure;
+}
+
+bool Core3DViewer::admitCreation(OrdinaryCreationLedger& ledger) noexcept {
+    try {
+        if (myContext.IsNull() || myDoc.IsNull() || !admitNames(ledger.authority)) { return false; }
+        for (const auto& record : ledger.records) {
+            const auto& presentation = record.requested.presentation;
+            if (presentation.IsNull() || presentation->HasInteractiveContext()
+                || myContext->IsDisplayed(presentation) || !myDoc->ShapeLabel(presentation).IsNull()) { return false; }
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool Core3DViewer::repairCreation(const OrdinaryCreationLedger& ledger, bool committed) noexcept {
+    try {
+        if (![NSThread isMainThread] || !_ordinaryEditController
+            || _ordinaryEditController->state() != OrdinaryEditState::RepairPending
+            || myContext.IsNull() || myDoc.IsNull() || !_objectInteractor || !_shapeInteractor
+            || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+            || !_shapeInteractor->selectionModeAuthorityIsExact()
+            || _shapeInteractor->getSelectionMode() != ledger.authority.selectionMode
+            || !_objectInteractor->verifyOrdinaryNameAuthority(ledger.authority)) { return false; }
+#ifdef DEBUG
+        if (_debugOrdinaryRepairFailures > 0) { --_debugOrdinaryRepairFailures; return false; }
+#endif
+        const auto sameTransform = [](const gp_Trsf& a, const gp_Trsf& b) {
+            for (int row = 1; row <= 3; ++row) {
+                for (int column = 1; column <= 4; ++column) {
+                    if (a.Value(row, column) != b.Value(row, column)) { return false; }
+                }
+            }
+            return true;
+        };
+        const auto mode = static_cast<Standard_Integer>(ledger.authority.selectionMode);
+        for (const auto& record : ledger.records) {
+            const auto& presentation = record.requested.presentation;
+            if (presentation.IsNull() || !presentation->Shape().IsEqual(record.shape)
+                || !sameTransform(presentation->LocalTransformation(), record.transform)
+                || (presentation->HasInteractiveContext() && presentation->InteractiveContext() != myContext.get())) { return false; }
+            if (committed) {
+                OcctObjectNameState actual;
+                if (!myDoc->CaptureObjectNameStateForLabel(record.candidate.object.label, actual)
+                    || !record.candidate.IsEqual(actual)
+                    || !myDoc->ShapeLabel(presentation).IsEqual(record.candidate.object.label)
+                    || !myDoc->IsPresentationEditable(presentation)) { return false; }
+                if (!myContext->IsDisplayed(presentation)) {
+                    myContext->Display(presentation, AIS_Shaded, mode, Standard_False);
+                }
+#ifdef DEBUG
+                if (_debugOrdinaryCreationAfterRepairFailures > 0) {
+                    --_debugOrdinaryCreationAfterRepairFailures; return false;
+                }
+#endif
+                TColStd_ListOfInteger modes;
+                myContext->ActivatedModes(presentation, modes);
+                if (!myContext->IsDisplayed(presentation) || modes.Extent() != 1 || modes.First() != mode) { return false; }
+            } else {
+                if (presentation->HasInteractiveContext()) { myContext->Remove(presentation, Standard_False); }
+                if (myContext->IsDisplayed(presentation) || presentation->HasInteractiveContext()) { return false; }
+            }
+        }
+        if (!_objectInteractor->verifyOrdinaryNameAuthority(ledger.authority)) { return false; }
+        myContext->UpdateCurrentViewer();
+        return true;
+    } catch (...) { return false; }
+}
+
 bool Core3DViewer::admitGrouping(OrdinaryGroupingLedger& ledger) noexcept {
     return _shapeInteractor && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
         && admitNames(ledger.authority);
@@ -2470,15 +2425,7 @@ void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
 	// deselection can itself finalize an explicitly pending chamfer.
 	deselectAll();
 
-	// Keep one command open through presentation staging so either side can be
-	// rolled back without consuming undo/redo history.
-	const Standard_Integer selectionMode =
-		static_cast<Standard_Integer>(_shapeInteractor->getSelectionMode());
-	if (!PublishPreparedPrimitives(
-		myDoc,
-		myContext,
-		preparedPrimitives,
-		selectionMode)) {
+	if (publishCreatedPrimitives(preparedPrimitives) != OrdinaryEditResult::Committed) {
         return;
     }
 	try {
@@ -2555,11 +2502,7 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 		Graphic3d_NameOfMaterial_ShinyPlastified,
 		qc.Name(),
 	}};
-	if (!PublishPreparedPrimitives(
-		myDoc,
-		myContext,
-		primitive,
-		static_cast<Standard_Integer>(_shapeInteractor->getSelectionMode()))) {
+	if (publishCreatedPrimitives(primitive) != OrdinaryEditResult::Committed) {
         return;
     }
 	if (shouldFrameFirstPrimitive && !myView.IsNull()) {

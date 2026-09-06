@@ -2585,6 +2585,22 @@ void Core3DAddDebugOrphanVisualMaterial(
     return YES;
 }
 
+- (BOOL)debugConfigureOrdinaryCreationFault:(NSInteger)mode {
+    if (mode < 0 || mode > 13 || ![self debugConfigureOrdinaryGestureFault:mode <= 5 ? mode : 0]) { return NO; }
+    const auto viewer = GLController.viewer;
+    const auto controller = viewer->debugOrdinaryEditController();
+    auto& stamp = controller->debugCommandStamp();
+    viewer->debugSetOrdinaryCreationAfterRepairFailures(mode == 13 ? 1 : 0);
+    if (mode >= 6 && mode <= 8) { stamp.debugSetNewCommandMode(static_cast<int>(mode - 5)); }
+    if (mode == 9) { stamp.debugSetCommitMode(2); }
+    if (mode == 10 || mode == 11) {
+        stamp.debugSetCommitMode(1);
+        stamp.debugSetAbortMode(mode == 10 ? 1 : 2);
+    }
+    if (mode == 12) { stamp.debugSetPostCommitInspectionFailureCount(1); }
+    return YES;
+}
+
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 5
         || GLController == nil || GLController.viewer == nullptr) { return NO; }
