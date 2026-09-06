@@ -211,6 +211,9 @@ private:
             AIS_Shape::SelectionMode(TopAbs_SHAPE);
         Standard_Size faceTopologyIndex = 0;
         Standard_Size topologyNodeCount = 0;
+        Standard_Real documentMetersPerUnit = 0.0;
+        // Physical metres per local BRep thickness unit, including the
+        // captured object's uniform presentation scale.
         Standard_Real metersPerUnit = 0.0;
         Standard_Real sourceVolume = 0.0;
         Standard_Real minimumThickness = 0.0;

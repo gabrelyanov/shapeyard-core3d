@@ -1121,12 +1121,18 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
                 aProof.shape, aMaximumVertexTolerance)) {
             return Standard_False;
         }
+        const Standard_Real aMetersPerLocalUnit =
+            aMetersPerUnit * std::abs(aProof.transform.ScaleFactor());
+        if (!std::isfinite(aMetersPerLocalUnit)
+            || aMetersPerLocalUnit <= 0.0) {
+            return Standard_False;
+        }
         Standard_Real aMinimumThickness = 0.0;
         Standard_Real aMaximumThickness = 0.0;
         Standard_Real aKernelTolerance = 0.0;
         if (!ComputeThicknessRange(
                 aSourceBounds,
-                aMetersPerUnit,
+                aMetersPerLocalUnit,
                 aMaximumVertexTolerance,
                 aMinimumThickness,
                 aMaximumThickness,
@@ -1144,7 +1150,8 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
         aSource->selectionMode = theSelection.selectionMode;
         aSource->faceTopologyIndex = aProof.faceTopologyIndex;
         aSource->topologyNodeCount = aProof.topologyNodeCount;
-        aSource->metersPerUnit = aMetersPerUnit;
+        aSource->documentMetersPerUnit = aMetersPerUnit;
+        aSource->metersPerUnit = aMetersPerLocalUnit;
         aSource->sourceVolume = aSourceVolume;
         aSource->minimumThickness = aMinimumThickness;
         aSource->maximumThickness = aMaximumThickness;
@@ -1203,7 +1210,10 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
         const TopoDS_Shape aStoredShape =
             XCAFDoc_ShapeTool::GetShape(mySource->label);
         gp_Trsf aPersistedTransform;
+        Standard_Real aDocumentMetersPerUnit = 0.0;
         if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || !TryReadMetersPerUnit(aDocument, aDocumentMetersPerUnit)
+            || aDocumentMetersPerUnit != mySource->documentMetersPerUnit
             || mySource->label.IsNull()
             || mySource->label.Data() != aDocument->GetData()
             || mySource->original.IsNull()
@@ -1251,6 +1261,8 @@ std::string ShellOperationController::selectionFingerprint(
         std::ostringstream aFingerprint;
         aFingerprint << std::setprecision(17)
             << myThickness << '|'
+            << mySource->documentMetersPerUnit << '|'
+            << mySource->metersPerUnit << '|'
             << mySource->entityIdentifier << '|'
             << mySource->definitionIdentifier << ':'
             << reinterpret_cast<std::uintptr_t>(

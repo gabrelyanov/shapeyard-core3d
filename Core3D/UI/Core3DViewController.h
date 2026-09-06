@@ -193,8 +193,10 @@ typedef NS_ENUM(NSInteger, Core3DRadialArrayReferenceEditResult) {
     Core3DRadialArrayReferenceEditResultRetryableFailure,
 };
 
-//! Native-authoritative model-unit thickness for one active Shell preview.
-//! Swift converts these values through metersPerUnit for millimetre display.
+//! Native-authoritative local BRep thickness for one active Shell preview.
+//! metersPerUnit includes the captured object's absolute uniform scale, so
+//! Swift's millimetre display describes the resulting world-space thickness.
+//! The document's stored length unit is not changed.
 typedef struct {
     CGFloat thickness;
     CGFloat defaultThickness;
