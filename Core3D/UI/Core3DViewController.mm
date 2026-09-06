@@ -2552,6 +2552,11 @@ void Core3DAddDebugOrphanVisualMaterial(
     } catch (...) { return 5; }
 }
 
+- (void)debugSetViewerOrdinaryRepairFailures:(NSInteger)incremental redraw:(NSInteger)redraw {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return; }
+    GLController.viewer->debugSetOrdinaryRepairFailures((int)incremental, (int)redraw);
+}
+
 - (NSInteger)debugReconcileViewerOrdinaryEdit {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return 5; }
     return static_cast<NSInteger>(GLController.viewer->reconcileOrdinaryEdit());
@@ -2579,6 +2584,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     return @{@"blocked": @(blocked), @"state": @((int)controller->state()),
              @"canBegin": @(viewer->canBeginCommittedEdit()), @"selected": @(viewer->selectedCount()),
              @"undoCount": @(document->Document()->GetAvailableUndos()), @"matrices": matrices,
+             @"redrawAttempts": @(viewer->debugOrdinaryRedrawAttempts()),
              @"snapshotBlocked": @(blocked && !viewer->captureSceneSnapshot(800, 600)),
              @"loadBlocked": @(blocked && viewer->ImportCbf("") == core3d::AssetImportResult::Busy),
              @"redrawBlocked": @(blocked && !viewer->redrawDocument())};

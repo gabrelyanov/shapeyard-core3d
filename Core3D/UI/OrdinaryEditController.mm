@@ -330,7 +330,21 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
         if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
-            return OrdinaryEditResult::OutcomeUnknown;
+            std::vector<Handle(AIS_Shape)> replacements;
+            if (!_host.rebuildTransform(ledger, candidate, replacements)
+                || replacements.size() != ledger.records.size()) { return OrdinaryEditResult::OutcomeUnknown; }
+            auto repaired = ledger;
+            std::unordered_set<const AIS_Shape*> unique;
+            for (std::size_t index = 0; index < replacements.size(); ++index) {
+                if (replacements[index].IsNull() || !unique.insert(replacements[index].get()).second) {
+                    return OrdinaryEditResult::OutcomeUnknown;
+                }
+                repaired.records[index].requested.presentation = replacements[index];
+            }
+            if (!presentationMatches(repaired, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+            for (std::size_t index = 0; index < replacements.size(); ++index) {
+                ledger.records[index].requested.presentation = replacements[index];
+            }
         }
         // Retain Publishing through synchronous observers. Host/observer
         // reentrancy remains Busy until this entire method has returned.

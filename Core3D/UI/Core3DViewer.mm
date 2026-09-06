@@ -1642,6 +1642,10 @@ bool Core3DViewer::admitTransform(OrdinaryTransformLedger& ledger) noexcept {
         && _objectInteractor->captureOrdinaryTransformAuthority(ledger);
 }
 bool Core3DViewer::repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept {
+    if (![NSThread isMainThread]) { return false; }
+#ifdef DEBUG
+    if (_debugOrdinaryRepairFailures > 0) { --_debugOrdinaryRepairFailures; return false; }
+#endif
     return [NSThread isMainThread] && _ordinaryEditController
         && _ordinaryEditController->state() == OrdinaryEditState::RepairPending
         && _objectInteractor && _shapeInteractor
@@ -1649,6 +1653,94 @@ bool Core3DViewer::repairTransform(const OrdinaryTransformLedger& ledger, bool c
         && _shapeInteractor->selectionModeAuthorityIsExact()
         && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
         && _objectInteractor->repairOrdinaryTransformPresentation(ledger, committed);
+}
+
+bool Core3DViewer::rebuildTransform(const OrdinaryTransformLedger& ledger, bool committed,
+                                  std::vector<Handle(AIS_Shape)>& replacements) noexcept {
+    replacements.clear();
+    if (![NSThread isMainThread] || !_ordinaryEditController
+        || _ordinaryEditController->state() != OrdinaryEditState::RepairPending
+        || !_objectInteractor || !_shapeInteractor || myDoc.IsNull() || myContext.IsNull()
+        || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        || ledger.records.empty() || ledger.records.size() > 1024) { return false; }
+    AIS_ListOfInteractive previousPresentations;
+    bool touchedDisplay = false;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()) { return false; }
+        // The caller has proven the closed result. Recheck every durable
+        // object before touching the display; no OCAF write belongs here.
+        for (const auto& record : ledger.records) {
+            const auto& saved = committed ? record.candidate : record.previous;
+            OcctObjectTransformState actual;
+            if (!myDoc->CaptureObjectTransformStateForLabel(saved.label, actual)
+                || !actual.IsEqual(saved)) { return false; }
+        }
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
+        touchedDisplay = true;
+        clearContext();
+#ifdef DEBUG
+        ++_debugOrdinaryRedrawAttempts;
+        if (_debugOrdinaryRedrawFailures > 0) {
+            --_debugOrdinaryRedrawFailures;
+            throw Standard_Failure("Injected ordinary recovery redraw failure after clear");
+        }
+#endif
+        if (traverseDocument(document)) {
+            throw Standard_Failure("Unable to rebuild ordinary edit presentations");
+        }
+        std::unordered_map<std::string, Handle(AIS_Shape)> displayedByIdentity;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        std::size_t visited = 0;
+        for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+            if (++visited > 50000) { throw Standard_Failure("Ordinary redraw display budget exceeded"); }
+            const auto presentation = Handle(AIS_Shape)::DownCast(it.Value());
+            const auto label = myDoc->ShapeLabel(presentation);
+            if (presentation.IsNull() || label.IsNull()) { continue; }
+            const auto identity = myDoc->EntityIdentifierForLabel(label);
+            if (identity.empty() || !displayedByIdentity.emplace(identity, presentation).second) {
+                throw Standard_Failure("Ambiguous ordinary redraw identity");
+            }
+        }
+        auto repaired = ledger;
+        for (auto& record : repaired.records) {
+            const auto& saved = committed ? record.candidate : record.previous;
+            const auto found = displayedByIdentity.find(saved.entityIdentifier);
+            if (found == displayedByIdentity.end()
+                || !myDoc->ShapeLabel(found->second).IsEqual(saved.label)
+                || !myDoc->IsPresentationEditable(found->second)) {
+                throw Standard_Failure("Unable to resolve ordinary redraw object");
+            }
+            record.requested.presentation = found->second;
+        }
+        // Keep the same typed interactors and controller. Their other operation
+        // ledgers were proved idle; rebuilding their callbacks would publish
+        // intermediate state through the recovery barrier.
+        if (!_shapeInteractor->selectionModeAuthorityIsExact()
+            || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+            || !_objectInteractor->repairOrdinaryTransformPresentation(repaired, committed)) {
+            throw Standard_Failure("Unable to restore ordinary redraw selection and tool");
+        }
+        for (const auto& record : repaired.records) { replacements.push_back(record.requested.presentation); }
+        return true;
+    } catch (...) {
+        replacements.clear();
+    }
+    if (!touchedDisplay) { return false; }
+    // Restore retained handles if traversal or repair failed. The controller
+    // remains RepairPending, so partial restoration is never publishable.
+    try {
+        clearContext();
+        for (AIS_ListIteratorOfListOfInteractive it(previousPresentations); it.More(); it.Next()) {
+            if (!Handle(AIS_Shape)::DownCast(it.Value()).IsNull()) {
+                myContext->Display(it.Value(), Standard_False);
+            }
+        }
+        myContext->UpdateCurrentViewer();
+    } catch (...) {}
+    return false;
 }
 
 bool Core3DViewer::hasUnresolvedDuplicate() const noexcept {

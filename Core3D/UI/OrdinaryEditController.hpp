@@ -46,6 +46,14 @@ public:
     virtual ~OrdinaryEditPresentationHost() = default;
     virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
     virtual bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept = 0;
+    //! One bounded full redraw per reconciliation attempt. Only presentation
+    //! handles may be replaced; the controller validates them against its
+    //! immutable durable snapshots before adopting them or publishing.
+    virtual bool rebuildTransform(const OrdinaryTransformLedger& ledger, bool committed,
+                                  std::vector<Handle(AIS_Shape)>& replacements) noexcept {
+        replacements.clear();
+        return false;
+    }
 };
 
 class OrdinaryEditController;

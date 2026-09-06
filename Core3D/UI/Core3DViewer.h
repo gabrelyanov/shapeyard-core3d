@@ -89,6 +89,12 @@ namespace core3d {
                                                  OrdinaryEditResult* failure = nullptr) noexcept;
         OrdinaryEditResult reconcileOrdinaryEdit() noexcept;
 #ifdef DEBUG
+        void debugSetOrdinaryRepairFailures(int incremental, int redraw) noexcept {
+            _debugOrdinaryRepairFailures = incremental;
+            _debugOrdinaryRedrawFailures = redraw;
+            _debugOrdinaryRedrawAttempts = 0;
+        }
+        int debugOrdinaryRedrawAttempts() const noexcept { return _debugOrdinaryRedrawAttempts; }
         std::shared_ptr<OrdinaryEditController> debugOrdinaryEditController() const noexcept {
             return _ordinaryEditController;
         }
@@ -328,8 +334,15 @@ namespace core3d {
 
     private:
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
+#ifdef DEBUG
+        int _debugOrdinaryRepairFailures = 0;
+        int _debugOrdinaryRedrawFailures = 0;
+        int _debugOrdinaryRedrawAttempts = 0;
+#endif
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
         bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept override;
+        bool rebuildTransform(const OrdinaryTransformLedger& ledger, bool committed,
+                              std::vector<Handle(AIS_Shape)>& replacements) noexcept override;
         std::shared_ptr<ObjectInteractor> _objectInteractor;
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
         std::shared_ptr<TransformInspectorMeasurementController>
