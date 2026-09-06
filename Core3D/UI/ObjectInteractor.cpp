@@ -2612,6 +2612,9 @@ namespace core3d {
             selectionWasTouched = true;
             myContext->ClearDetected(Standard_False);
             detachManipulator(false);
+            // A null gizmo may still have stale cached source labels. The new
+            // explicit selection owns its attachment map, including no gizmo.
+            _manipulatorSourceLabels.clear();
             myContext->ClearSelected(Standard_False);
             for (const auto& target : targets) { myContext->AddOrRemoveSelected(target->GlobalSelOwner(), Standard_False); }
 #ifdef DEBUG
