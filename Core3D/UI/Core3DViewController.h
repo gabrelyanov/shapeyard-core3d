@@ -543,6 +543,15 @@ typedef struct {
                               (Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorPosition(_:axis:expected:));
 
+//! Set one absolute extrinsic XYZ angle in degrees (finite, +/-1,000,000).
+//! Uses the same frozen inspector lease; preserves position, scale and BRep.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorRotationValue:(double)value
+                                      axis:(Core3DTransformInspectorAxis)axis
+                          expectedSnapshot:
+                              (Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorRotation(_:axis:expected:));
+
 //! Release-safe counters for opt-in signed-device performance qualification.
 //! Values are observational only and never alter inspector admission policy.
 - (NSDictionary<NSString *, NSNumber *> *)

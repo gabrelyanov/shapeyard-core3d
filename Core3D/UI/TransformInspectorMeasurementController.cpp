@@ -1965,7 +1965,9 @@ TransformInspectorMeasurementController::commitPosition(
                 TransformInspectorPositionCommitResult::InvalidValue;
             return anOutcome;
     }
-    if (!std::isfinite(theRequest.value)
+    if ((theRequest.kind != TransformInspectorEditKind::Position
+            && theRequest.kind != TransformInspectorEditKind::Rotation)
+        || !std::isfinite(theRequest.value)
         || std::abs(theRequest.value)
             > limits::kMaximumModelCoordinateMagnitude
         || !PositionIsFiniteAndBounded(
@@ -2134,7 +2136,7 @@ TransformInspectorMeasurementController::commitPosition(
                 aCapabilities)
             || aRepresentation != anEditContext.representation
             || aCapabilities != anEditContext.modelCapabilities
-            || (aCapabilities & (1ull << 2)) == 0) {
+            || (aCapabilities & (1ull << (theRequest.kind == TransformInspectorEditKind::Rotation ? 3 : 2))) == 0) {
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unsupported;
             return anOutcome;
@@ -2162,14 +2164,16 @@ TransformInspectorMeasurementController::commitPosition(
             return anOutcome;
         }
 
-        TransformInspectorVector3 aCandidatePosition =
-            aCurrentTransform.position;
+        const bool rotates = theRequest.kind == TransformInspectorEditKind::Rotation;
+        TransformInspectorVector3 aCandidatePosition = rotates
+            ? aCurrentTransform.extrinsicXYZDegrees : aCurrentTransform.position;
         double* const aCandidateComponents[3] = {
             &aCandidatePosition.x,
             &aCandidatePosition.y,
             &aCandidatePosition.z,
         };
-        if (*aCandidateComponents[anAxis] == theRequest.value) {
+        if (*aCandidateComponents[anAxis] == theRequest.value
+            || (rotates && std::remainder(theRequest.value - *aCandidateComponents[anAxis], 360.0) == 0.0)) {
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unchanged;
             return anOutcome;
@@ -2184,10 +2188,20 @@ TransformInspectorMeasurementController::commitPosition(
         // Use the same exact persisted transform representation as the shared
         // controller, preserving its Translate basis invariant.
         gp_Trsf aCandidateTransform = exactBaseline.transform;
-        aCandidateTransform.SetTranslationPart(gp_XYZ(
-            aCandidatePosition.x,
-            aCandidatePosition.y,
-            aCandidatePosition.z));
+        if (rotates) {
+            gp_Quaternion rotation;
+            constexpr double radiansPerDegree = M_PI / 180.0;
+            rotation.SetEulerAngles(gp_Extrinsic_XYZ,
+                std::remainder(aCandidatePosition.x, 360.0) * radiansPerDegree,
+                std::remainder(aCandidatePosition.y, 360.0) * radiansPerDegree,
+                std::remainder(aCandidatePosition.z, 360.0) * radiansPerDegree);
+            rotation.Normalize();
+            aCandidateTransform.SetRotationPart(rotation);
+            aCandidateTransform.SetScaleFactor(exactBaseline.transform.ScaleFactor());
+        } else {
+            aCandidateTransform.SetTranslationPart(gp_XYZ(
+                aCandidatePosition.x, aCandidatePosition.y, aCandidatePosition.z));
+        }
         for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
             for (Standard_Integer aColumn = 1; aColumn <= 4;
                  ++aColumn) {
@@ -2205,7 +2219,7 @@ TransformInspectorMeasurementController::commitPosition(
         change.presentation = aPresentation;
         change.shape = aStoredShape;
         change.transform = aCandidateTransform;
-        change.operation = OrdinaryTransformOperation::Translate;
+        change.operation = rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;
 #ifdef DEBUG
         const Standard_Integer fault = std::exchange(myImpl->debugPositionCommitMode, 0);
         if (fault != 0) {

@@ -709,6 +709,14 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 @end
 
+@interface Core3DViewController (NumericTransformPrivate)
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorValue:(double)value
+                              axis:(Core3DTransformInspectorAxis)axis
+                  expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+                          rotation:(BOOL)rotation;
+@end
+
 @implementation Core3DViewController {
     __weak dispatch_cancelable_block_t _uiStateChangingBlock;
     UIStateChanging _sendingState;
@@ -5344,6 +5352,22 @@ void Core3DAddDebugOrphanVisualMaterial(
                                       axis:(Core3DTransformInspectorAxis)axis
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot rotation:NO];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorRotationValue:(double)value
+                                      axis:(Core3DTransformInspectorAxis)axis
+                          expectedSnapshot:
+                              (Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot rotation:YES];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorValue:(double)value
+                              axis:(Core3DTransformInspectorAxis)axis
+                  expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+                          rotation:(BOOL)rotation {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
         || GLController.viewer == nullptr) {
         return Core3DTransformInspectorPositionCommitResultUnavailable;
@@ -5415,6 +5439,8 @@ void Core3DAddDebugOrphanVisualMaterial(
             static_cast<std::uint64_t>(snapshot.modelCapabilities);
         request.axis = nativeAxis;
         request.value = value;
+        request.kind = rotation ? core3d::TransformInspectorEditKind::Rotation
+                                : core3d::TransformInspectorEditKind::Position;
         nativeResult = GLController.viewer
             ->commitTransformInspectorPosition(request);
     } catch (...) {

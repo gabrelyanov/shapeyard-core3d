@@ -116,7 +116,10 @@ enum class TransformInspectorPositionCommitResult : std::uint8_t {
 
 //! Public DTO values copied back into the native compare-and-swap gate. The
 //! actual document/TShape lease remains private to the controller.
+enum class TransformInspectorEditKind : std::uint8_t { Position, Rotation };
+
 struct TransformInspectorPositionCommitRequest {
+    TransformInspectorEditKind kind = TransformInspectorEditKind::Position;
     std::uint64_t positionEditGeneration = 0;
     std::uint64_t documentEditGeneration = 0;
     std::uint64_t geometryEditGeneration = 0;
