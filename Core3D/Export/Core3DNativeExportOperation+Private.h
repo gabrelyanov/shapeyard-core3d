@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
                           cleanupURL:(NSURL *)cleanupURL
                           exportType:(ExportType)exportType
            selectedEntityIdentifiers:(NSArray<NSString *> *_Nullable)selectedEntityIdentifiers
+                         meshQuality:(Core3DExportMeshQuality)meshQuality
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle

@@ -80,6 +80,7 @@ struct NativeExportState {
     std::string cleanupPath;
     std::string primaryPath;
     ExportType exportType = ExportTypeObj;
+    Core3DExportMeshQuality meshQuality = Core3DExportMeshQualityViewport;
     bool usesSelectedRoots = false;
     std::set<std::string> selectedEntityIdentifiers;
     Aspect_TypeOfDeflection deflectionType = Aspect_TOD_RELATIVE;
@@ -1340,16 +1341,42 @@ NativeExportResult RunNativeExport(
                     "The mesh deflection is invalid.");
             }
 
-            if (!BRepTools::Triangulation(compound, deflection)) {
+            // Only analytic faces are remeshed. Mesh-only faces carry
+            // authored triangles/UVs and never enter the mesher or Clean.
+            // Everything here belongs to the deserialized private document.
+            TopoDS_Compound geometricFaces;
+            builder.MakeCompound(geometricFaces);
+            TopoDS_Shape meshingShape = compound;
+            bool hasGeometricFaces = false;
+            if (state->meshQuality != Core3DExportMeshQualityViewport) {
+                Standard_Integer faceCount = 0;
+                for (TopExp_Explorer faces(compound, TopAbs_FACE); faces.More(); faces.Next()) {
+                    ThrowIfCancelled(state);
+                    if (++faceCount > 4096) {
+                        throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                            "Mesh quality presets support up to 4,096 faces. Use viewport quality for this model.");
+                    }
+                    const TopoDS_Face face = TopoDS::Face(faces.Current());
+                    if (!BRep_Tool::Surface(face).IsNull()) {
+                        BRepTools::Clean(face);
+                        builder.Add(geometricFaces, face);
+                        hasGeometricFaces = true;
+                    }
+                }
+                meshingShape = geometricFaces;
+            }
+            const bool needsMeshing = state->meshQuality == Core3DExportMeshQualityViewport
+                ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
+            if (needsMeshing) {
                 BRepMesh_IncrementalMesh mesher;
                 mesher.ChangeParameters().Deflection = deflection;
                 mesher.ChangeParameters().Angle = state->deviationAngle;
                 mesher.ChangeParameters().InParallel = Standard_True;
-                mesher.SetShape(compound);
+                mesher.SetShape(meshingShape);
                 mesher.Perform(whole.Next(4));
                 ThrowIfCancelled(state);
                 if (!mesher.IsDone()
-                    || !BRepTools::Triangulation(compound, deflection)) {
+                    || !BRepTools::Triangulation(meshingShape, deflection)) {
                     throw NativeExportFailure(
                         Core3DNativeExportErrorMeshingFailed,
                         "The committed geometry could not be meshed.");
@@ -1358,6 +1385,26 @@ NativeExportResult RunNativeExport(
                 whole.Next(4).Close();
             }
             ThrowIfCancelled(state);
+
+            if (state->meshQuality != Core3DExportMeshQualityViewport) {
+                std::int64_t nodes = 0, triangles = 0;
+                for (TopExp_Explorer faces(compound, TopAbs_FACE); faces.More(); faces.Next()) {
+                    ThrowIfCancelled(state);
+                    TopLoc_Location location;
+                    const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(
+                        TopoDS::Face(faces.Current()), location);
+                    if (mesh.IsNull()) {
+                        throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                            "An export face has no mesh.");
+                    }
+                    nodes += mesh->NbNodes();
+                    triangles += mesh->NbTriangles();
+                    if (nodes > kMaximumSTLNodes || triangles > kMaximumSTLTriangles) {
+                        throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                            "The export mesh is too detailed. Choose a coarser quality or export fewer objects.");
+                    }
+                }
+            }
 
             if (state->exportType == ExportTypeStl) {
                 Message_ProgressScope stlScope(
@@ -1524,6 +1571,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
                           cleanupURL:(NSURL *)cleanupURL
                           exportType:(ExportType)exportType
            selectedEntityIdentifiers:(NSArray<NSString *> *)selectedEntityIdentifiers
+                         meshQuality:(Core3DExportMeshQuality)meshQuality
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle
@@ -1539,6 +1587,10 @@ NSString *ErrorDescription(const NativeExportResult& result) {
         || (exportType != ExportTypeObj
             && exportType != ExportTypeStl
             && exportType != ExportTypeStep)
+        || meshQuality < Core3DExportMeshQualityViewport
+        || meshQuality > Core3DExportMeshQualityFine
+        || (meshQuality != Core3DExportMeshQualityViewport
+            && exportType == ExportTypeStep)
         || (deflectionType != Aspect_TOD_ABSOLUTE
             && deflectionType != Aspect_TOD_RELATIVE)
         || !std::isfinite(deviationCoefficient)
@@ -1588,6 +1640,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->packageRootPath = packageRootPath;
     _state->cleanupPath = cleanupPath;
     _state->exportType = exportType;
+    _state->meshQuality = meshQuality;
     _state->usesSelectedRoots = selectedEntityIdentifiers != nil;
     _state->selectedEntityIdentifiers = std::move(selectedIdentifiers);
     const char *primaryFilename = exportType == ExportTypeStl
@@ -1603,6 +1656,10 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->deviationAngle = deviationAngle;
     _state->maximalChordialDeviation = maximalChordialDeviation;
     return self;
+}
+
+- (Core3DExportMeshQuality)meshQuality {
+    return _state == nullptr ? Core3DExportMeshQualityViewport : _state->meshQuality;
 }
 
 - (BOOL)isCancelled {

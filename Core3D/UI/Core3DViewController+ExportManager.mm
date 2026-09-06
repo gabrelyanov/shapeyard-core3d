@@ -112,6 +112,20 @@ NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot
 
 - (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
     (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly {
+    return [self prepareNativeExportOperationWithType:exportType
+                                 selectedObjectsOnly:selectedObjectsOnly
+                                         meshQuality:Core3DExportMeshQualityViewport];
+}
+
+- (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
+    (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality {
+    if (meshQuality < Core3DExportMeshQualityViewport
+        || meshQuality > Core3DExportMeshQualityFine
+        || (meshQuality != Core3DExportMeshQualityViewport
+            && exportType != ExportTypeObj && exportType != ExportTypeStl)) {
+        return nil;
+    }
     if ((selectedObjectsOnly && exportType != ExportTypeStl)
         || ![NSThread isMainThread]
         || (exportType != ExportTypeObj
@@ -178,6 +192,17 @@ NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot
                       maximalChordialDeviation);
                 return nil;
             }
+        }
+
+        if (meshQuality != Core3DExportMeshQualityViewport) {
+            deflectionType = Aspect_TOD_RELATIVE;
+            // Dimensionless chord coefficients and angles in radians. These
+            // belong to the export operation, never the live AIS drawer.
+            deviationCoefficient = meshQuality == Core3DExportMeshQualityCoarse
+                ? 0.01 : (meshQuality == Core3DExportMeshQualityFine ? 0.00025 : 0.001);
+            deviationAngle = (meshQuality == Core3DExportMeshQualityCoarse
+                ? 30.0 : (meshQuality == Core3DExportMeshQualityFine ? 10.0 : 20.0))
+                * M_PI / 180.0;
         }
 
         NSFileManager *fileManager = NSFileManager.defaultManager;
@@ -255,6 +280,7 @@ NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot
                 cleanupURL:cleanupRoot
                 exportType:exportType
                 selectedEntityIdentifiers:selectedIdentifiers
+                meshQuality:meshQuality
                 deflectionType:static_cast<NSInteger>(deflectionType)
                 deviationCoefficient:deviationCoefficient
                 deviationAngle:deviationAngle

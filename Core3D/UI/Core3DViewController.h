@@ -445,6 +445,13 @@ typedef struct {
     prepareNativeExportOperationWithType:(ExportType)exportType
                     selectedObjectsOnly:(BOOL)selectedObjectsOnly
     NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:));
+//! Capture an immutable OBJ/STL mesh quality without changing the viewport or
+//! editable source. Invalid qualities and non-viewport STEP presets reject.
+- (Core3DNativeExportOperation *_Nullable)
+    prepareNativeExportOperationWithType:(ExportType)exportType
+                    selectedObjectsOnly:(BOOL)selectedObjectsOnly
+                            meshQuality:(Core3DExportMeshQuality)meshQuality
+    NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:meshQuality:));
 //! Capture only committed exportable geometry. Unlike the presentation
 //! snapshot seam, this returns nil while a Boolean, Mirror, Linear Array,
 //! Radial Array, or Shell trial is active or unresolved, or while the OCAF

@@ -2,6 +2,16 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+//! Viewport preserves the legacy captured drawer settings. Other presets
+//! rebuild only private geometric surfaces for OBJ/STL; authored meshes keep
+//! their original triangles. STEP does not accept a tessellation preset.
+typedef NS_ENUM(NSInteger, Core3DExportMeshQuality) {
+    Core3DExportMeshQualityViewport = 0,
+    Core3DExportMeshQualityCoarse,
+    Core3DExportMeshQualityStandard,
+    Core3DExportMeshQualityFine,
+};
+
 FOUNDATION_EXPORT NSErrorDomain const Core3DNativeExportErrorDomain;
 
 typedef NS_ERROR_ENUM(
@@ -44,6 +54,7 @@ NS_SWIFT_SENDABLE
 @interface Core3DNativeExportOperation : NSObject
 
 @property(atomic, readonly, getter=isCancelled) BOOL cancelled;
+@property(nonatomic, readonly) Core3DExportMeshQuality meshQuality;
 
 - (instancetype)init NS_UNAVAILABLE;
 - (void)startWithCompletion:(Core3DNativeExportCompletion)completion
