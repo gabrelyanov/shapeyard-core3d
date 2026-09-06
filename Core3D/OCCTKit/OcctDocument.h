@@ -36,6 +36,9 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
+#include <TDF_Data.hxx>
+#include <TopoDS_Shape.hxx>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -52,6 +55,28 @@ enum class OcctGeometryRepresentation : Standard_Integer
     LegacyUnknown = 0,
     BRep = 1,
     TriangleMesh = 2,
+};
+
+//! Exact durable state for transform reconciliation. Attribute presence is
+//! significant: a missing legacy default and an authored zero are not the
+//! same OCAF state, even when their resulting matrices match. No AIS handles.
+struct OcctObjectTransformState
+{
+    TDF_Label label;
+    Handle(TDF_Data) documentData;
+    TopoDS_Shape shape;
+    gp_Trsf transform;
+    std::array<Standard_Real, 8> scalars = {{0, 0, 0, 0, 0, 0, 1, 1}};
+    std::array<Standard_Boolean, 8> present = {};
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+    OcctGeometryRepresentation storedRepresentation = OcctGeometryRepresentation::Invalid;
+    OcctGeometryRepresentation resolvedRepresentation = OcctGeometryRepresentation::Invalid;
+
+    //! Invalid/default snapshots never compare equal. Exact stored scalars,
+    //! oriented shape identity, label/data and metadata must all agree.
+    Standard_EXPORT Standard_Boolean IsEqual(
+        const OcctObjectTransformState& other) const noexcept;
 };
 
 //! Export formats supported directly by the persisted geometry contract.
@@ -342,6 +367,11 @@ public:
     Standard_Boolean SaveObjectTransform(
         const TDF_Label& label, const Handle(AIS_Shape) anAis);
     void LoadObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    //! Read-only main-thread capture, valid during an owned open command or
+    //! after closure. Does not create labels/attributes or repair metadata.
+    //! On failure clears the output so a caller cannot reuse stale proof.
+    Standard_EXPORT Standard_Boolean CaptureObjectTransformStateForLabel(
+        const TDF_Label& label, OcctObjectTransformState& state) const noexcept;
     //! Write exactly one translation scalar in the caller's already-open OCAF
     //! command. Axis is 0...2 and value uses raw document model units. The
     //! definition, representation, coordinate ceiling, and read-back are

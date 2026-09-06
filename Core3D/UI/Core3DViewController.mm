@@ -2423,7 +2423,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (NSDictionary<NSString *, id> *_Nullable)debugProbeTransformStorage:(NSInteger)mode {
-    if (![NSThread isMainThread] || mode < 0 || mode > 4
+    if (![NSThread isMainThread] || mode < 0 || mode > 5
         || GLController == nil || GLController.viewer == nullptr) {
         return nil;
     }
@@ -2438,8 +2438,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     // Exercise staging without publishing or committing a document edit.
     // Swift checks the measured state and history after the owned abort.
     try {
+        OcctObjectTransformState beforeState;
         gp_Trsf baseline;
-        if (!document->TryObjectTransformForLabel(label, baseline)) {
+        if (!document->CaptureObjectTransformStateForLabel(label, beforeState)
+            || !document->TryObjectTransformForLabel(label, baseline)) {
             return nil;
         }
         gp_Trsf candidate;
@@ -2454,9 +2456,22 @@ void Core3DAddDebugOrphanVisualMaterial(
                 return nil;
             }
         }
-        const bool accepted = document->SaveObjectTransform(
-            mode == 2 ? ocaf->Main() : label,
-            mode == 1 ? Handle(AIS_Shape)() : presentation);
+        bool accepted = false;
+        if (mode == 5) {
+            // Same effective zero translation, different exact authored state.
+            label.FindChild(1, Standard_False).ForgetAttribute(TDataStd_Real::GetID());
+        } else {
+            accepted = document->SaveObjectTransform(
+                mode == 2 ? ocaf->Main() : label,
+                mode == 1 ? Handle(AIS_Shape)() : presentation);
+        }
+        OcctObjectTransformState stagedState;
+        const bool stateReadable = document->CaptureObjectTransformStateForLabel(label, stagedState);
+        const bool stateUnchanged = stateReadable && beforeState.IsEqual(stagedState);
+        // Invalid capture must erase previous output instead of leaving usable proof.
+        OcctObjectTransformState invalidState = beforeState;
+        const bool invalidRejected = !document->CaptureObjectTransformStateForLabel(ocaf->Main(), invalidState)
+            && invalidState.label.IsNull() && !invalidState.IsEqual(beforeState);
         gp_Trsf staged;
         const bool readable = document->TryObjectTransformForLabel(label, staged);
         NSMutableArray<NSNumber *> *matrix = [NSMutableArray arrayWithCapacity:12];
@@ -2476,9 +2491,14 @@ void Core3DAddDebugOrphanVisualMaterial(
                     && restored.Value(row, column) == baseline.Value(row, column);
             }
         }
+        OcctObjectTransformState restoredState;
+        const bool exactRestored = document->CaptureObjectTransformStateForLabel(label, restoredState)
+            && beforeState.IsEqual(restoredState);
         return @{@"accepted": @(accepted), @"readable": @(readable),
                  @"matrix": matrix, @"restored": @(unchanged),
-                 @"closed": @(!ocaf->HasOpenCommand())};
+                 @"closed": @(!ocaf->HasOpenCommand()),
+                 @"stateReadable": @(stateReadable), @"stateUnchanged": @(stateUnchanged),
+                 @"exactRestored": @(exactRestored), @"invalidRejected": @(invalidRejected)};
     } catch (...) {
         // Entry established that no other command existed; this synchronous
         // debug-only probe invokes no callbacks before cleanup.

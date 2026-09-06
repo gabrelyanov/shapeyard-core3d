@@ -4281,6 +4281,7 @@ Standard_Boolean OcctDocument::ReplaceShape(
 Standard_Boolean OcctDocument::SaveObjectTransform(
     const TDF_Label& label, const Handle(AIS_Shape) anAis)
 {
+    if (![NSThread isMainThread]) { return Standard_False; }
     try {
         OCC_CATCH_SIGNALS
         if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
@@ -4319,17 +4320,16 @@ Standard_Boolean OcctDocument::SaveObjectTransform(
         for (Standard_Integer index = 0; index < 8; ++index) {
             TDataStd_Real::Set(label.FindChild(index + 1), values[index]);
         }
+        OcctObjectTransformState stored;
+        if (!CaptureObjectTransformStateForLabel(label, stored)) {
+            return Standard_False;
+        }
         for (Standard_Integer index = 0; index < 8; ++index) {
-            const TDF_Label child = label.FindChild(index + 1, Standard_False);
-            Handle(TDataStd_Real) stored;
-            if (child.IsNull()
-                || !child.FindAttribute(TDataStd_Real::GetID(), stored)
-                || stored.IsNull() || stored->Get() != values[index]) {
+            if (!stored.present[index] || stored.scalars[index] != values[index]) {
                 return Standard_False;
             }
         }
-        gp_Trsf storedTransform;
-        return TryObjectTransformForLabel(label, storedTransform);
+        return Standard_True;
     } catch (...) {
         return Standard_False;
     }
@@ -5735,6 +5735,83 @@ Standard_Boolean OcctDocument::TryObjectTransformForLabel(
             myOcafDoc, aShapeTool, label, transform)
             ? Standard_True : Standard_False;
     } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctObjectTransformState::IsEqual(
+    const OcctObjectTransformState& other) const noexcept
+{
+    if (![NSThread isMainThread]) { return Standard_False; }
+    try {
+        for (Standard_Integer row = 1; row <= 3; ++row) {
+            for (Standard_Integer column = 1; column <= 4; ++column) {
+                const Standard_Real value = transform.Value(row, column);
+                if (!std::isfinite(value) || value != other.transform.Value(row, column)) {
+                    return Standard_False;
+                }
+            }
+        }
+        return !label.IsNull() && !other.label.IsNull()
+            && !documentData.IsNull() && documentData == other.documentData
+            && label.IsEqual(other.label) && label.Data() == documentData
+            && other.label.Data() == other.documentData
+            && !shape.IsNull() && !other.shape.IsNull() && shape.IsEqual(other.shape)
+            && !entityIdentifier.empty() && entityIdentifier == other.entityIdentifier
+            && !definitionIdentifier.empty() && definitionIdentifier == other.definitionIdentifier
+            && storedRepresentation != OcctGeometryRepresentation::Invalid
+            && storedRepresentation == other.storedRepresentation
+            && resolvedRepresentation != OcctGeometryRepresentation::Invalid
+            && resolvedRepresentation == other.resolvedRepresentation
+            && present == other.present && scalars == other.scalars;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
+    const TDF_Label& label, OcctObjectTransformState& state) const noexcept
+{
+    state = OcctObjectTransformState();
+    if (![NSThread isMainThread]) { return Standard_False; }
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(myOcafDoc->Main())
+            || !IsEditableFreeSimpleDefinitionLabel(label)) {
+            return Standard_False;
+        }
+        OcctObjectTransformState captured;
+        captured.label = label;
+        captured.documentData = myOcafDoc->GetData();
+        captured.shape = XCAFDoc_ShapeTool::GetShape(label);
+        captured.entityIdentifier = EntityIdentifierForLabel(label);
+        captured.definitionIdentifier = DefinitionIdentifierForLabel(label);
+        captured.storedRepresentation = StoredGeometryRepresentationForLabel(label);
+        captured.resolvedRepresentation = GeometryRepresentationForLabel(label);
+        if (captured.documentData.IsNull() || captured.shape.IsNull()
+            || captured.entityIdentifier.empty() || captured.definitionIdentifier.empty()
+            || captured.storedRepresentation == OcctGeometryRepresentation::Invalid
+            || captured.resolvedRepresentation == OcctGeometryRepresentation::Invalid
+            || !TryObjectTransformForLabel(label, captured.transform)) {
+            return Standard_False;
+        }
+        for (Standard_Integer index = 0; index < 8; ++index) {
+            const TDF_Label child = label.FindChild(index + 1, Standard_False);
+            Handle(TDF_Attribute) attribute;
+            if (!child.IsNull() && child.FindAttribute(TDataStd_Real::GetID(), attribute)) {
+                const Handle(TDataStd_Real) scalar = Handle(TDataStd_Real)::DownCast(attribute);
+                if (scalar.IsNull() || !std::isfinite(scalar->Get())) {
+                    return Standard_False;
+                }
+                captured.present[index] = Standard_True;
+                captured.scalars[index] = scalar->Get();
+            }
+        }
+        state = std::move(captured);
+        return Standard_True;
+    } catch (...) {
+        state = OcctObjectTransformState();
         return Standard_False;
     }
 }
