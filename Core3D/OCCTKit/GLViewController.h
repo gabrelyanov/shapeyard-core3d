@@ -76,6 +76,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)duplicateSelected;
 - (BOOL)hasUnresolvedDuplicate;
 - (BOOL)hasUnresolvedEdit;
+- (BOOL)hasUnresolvedOrdinaryEdit;
+- (BOOL)prepareOrdinaryEditForDocumentClose;
 - (void)deselectAll;
 - (void)refreshSelectionState;
 - (BOOL)isSelected;

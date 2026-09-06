@@ -455,6 +455,10 @@ typedef struct {
 
 - (void)setPreviewMode;
 
+//! Resolve an ordinary edit before closing. NO retains recovery and means
+//! the caller must keep the editor/document alive and offer another retry.
+- (BOOL)prepareOrdinaryEditForDocumentClose;
+- (BOOL)hasUnresolvedOrdinaryEdit;
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
 - (NSData *_Nullable)thumbData;
 

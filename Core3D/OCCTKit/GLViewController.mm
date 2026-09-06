@@ -1582,6 +1582,23 @@ private:
 - (BOOL)hasUnresolvedEdit {
     return _viewer != nullptr && _viewer->hasUnresolvedEdit();
 }
+- (BOOL)hasUnresolvedOrdinaryEdit {
+    return _viewer != nullptr && _viewer->hasUnresolvedOrdinaryEdit();
+}
+- (BOOL)prepareOrdinaryEditForDocumentClose {
+    if (![NSThread isMainThread] || _viewer == nullptr) { return NO; }
+    if (!_viewer->hasUnresolvedOrdinaryEdit()) { return YES; }
+    const auto viewer = _viewer;
+    GLView* view = self.isViewLoaded ? [self viewportView] : nil;
+    if (view == nil) { return NO; }
+    const BOOL performed = [view performWithRenderingContext:^{
+        (void)viewer->reconcileOrdinaryEdit();
+    }];
+    if (!performed || viewer->hasUnresolvedOrdinaryEdit()) { return NO; }
+    [self refreshSelectionState];
+    [self requestRender];
+    return YES;
+}
 
 - (void)deselectAll {
     if (_viewer != nullptr && _viewer->getShapeInteractor() != nullptr

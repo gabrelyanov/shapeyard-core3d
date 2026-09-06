@@ -5183,6 +5183,14 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (BOOL)prepareOrdinaryEditForDocumentClose {
+    return [NSThread isMainThread] && _isSetuped && GLController != nil
+        && [GLController prepareOrdinaryEditForDocumentClose];
+}
+- (BOOL)hasUnresolvedOrdinaryEdit {
+    return GLController != nil && [GLController hasUnresolvedOrdinaryEdit];
+}
+
 - (Core3DScenePresentationOverlaySnapshot *)captureScenePresentationOverlay {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return nil;
