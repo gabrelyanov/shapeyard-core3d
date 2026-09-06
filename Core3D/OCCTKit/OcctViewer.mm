@@ -597,9 +597,10 @@ bool OcctViewer::displayWithChildren (
             XCAFPrs_Style style;
             TopLoc_Location location;
             TopoDS_Shape shape;
+            bool visible;
         };
-        std::vector<AdmittedLeaf> anAdmittedVisibleLeaves;
-        anAdmittedVisibleLeaves.reserve(
+        std::vector<AdmittedLeaf> anAdmittedLeaves;
+        anAdmittedLeaves.reserve(
             std::min<Standard_Size>(myMaximumLeafPresentations, 256));
         Standard_Size aNodeCount = 0;
         Standard_Size aLeafCount = 0;
@@ -640,11 +641,8 @@ bool OcctViewer::displayWithChildren (
             {
                 return false;
             }
-            if (!aNode.Style.IsVisible()
-                || !IsExplorerPathVisible(anExplorer, aLayerTool))
-            {
-                continue;
-            }
+            const bool isVisible = aNode.Style.IsVisible()
+                && IsExplorerPathVisible(anExplorer, aLayerTool);
 
             const TopoDS_Shape aShape =
                 XCAFDoc_ShapeTool::GetShape(aDefinition);
@@ -653,12 +651,13 @@ bool OcctViewer::displayWithChildren (
                 return false;
             }
 
-            anAdmittedVisibleLeaves.push_back({
+            anAdmittedLeaves.push_back({
                 aNode.Label,
                 aDefinition,
                 aNode.Style,
                 aNode.Location,
                 aShape,
+                isVisible,
             });
         }
         if (aLeafCount == 0)
@@ -668,8 +667,30 @@ bool OcctViewer::displayWithChildren (
 
         // The full explorer is now admitted. Only this publication phase may
         // allocate or display one CafShapePrs per visible leaf occurrence.
-        for (const AdmittedLeaf& aLeaf : anAdmittedVisibleLeaves)
+        for (const AdmittedLeaf& aLeaf : anAdmittedLeaves)
         {
+            if (!aLeaf.visible)
+            {
+                // A saved BRep may have no triangulation after reopening.
+                // Prepare it through the normal admitted display-computation
+                // path now, while loading, so read-only scene publication can
+                // include hidden objects without invoking a mesher. A plain
+                // temporary shape avoids XCAF visibility suppressing Compute.
+                // No selection mode or viewer update is enabled; remove it
+                // synchronously before any normal frame can be presented.
+                Handle(AIS_Shape) aHiddenGeometry = new AIS_Shape(aLeaf.shape);
+                try
+                {
+                    myContext->Display(aHiddenGeometry, AIS_Shaded, -1, Standard_False);
+                    myContext->Remove(aHiddenGeometry, Standard_False);
+                }
+                catch (...)
+                {
+                    myContext->Remove(aHiddenGeometry, Standard_False);
+                    throw;
+                }
+                continue;
+            }
             // A definition may be instanced many times. Keep its BRep shared,
             // but never share the AIS object: selection and the OpenGL local
             // transform are occurrence state.

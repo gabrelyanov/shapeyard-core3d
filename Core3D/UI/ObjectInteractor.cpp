@@ -2643,7 +2643,13 @@ namespace core3d {
             for (const auto& selected : ledger.authority.selectedPresentations) {
                 OcctObjectNameState state;
                 if (!myDoc->CaptureObjectNameStateForLabel(myDoc->ShapeLabel(selected.presentation), state)
-                    || !myDoc->IsPresentationEditable(selected.presentation)) { return false; }
+                    || !myDoc->IsPresentationEditable(selected.presentation)
+                    || !selected.shape.IsEqual(state.object.shape)) { return false; }
+                for (int row = 1; row <= 3; ++row) {
+                    for (int column = 1; column <= 4; ++column) {
+                        if (selected.transform.Value(row, column) != state.object.transform.Value(row, column)) { return false; }
+                    }
+                }
                 ledger.selectedObjects.push_back(state);
             }
             AIS_ListOfInteractive displayed;

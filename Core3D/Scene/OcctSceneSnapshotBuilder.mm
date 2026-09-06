@@ -1,4 +1,3 @@
-#include <iostream>
 //
 //  OcctSceneSnapshotBuilder.mm
 //  Core3D
@@ -4347,7 +4346,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         || (theAcceptedSelectionKind != ElementKind::Object
             && theAcceptedSelectionKind != ElementKind::Face
             && theAcceptedSelectionKind != ElementKind::Edge)) {
-        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+        return {};
     }
 
     try {
@@ -4355,13 +4354,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
 
         const Handle(TDocStd_Document)& aDocument = theDocument->Document();
         if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
         const std::string aDocumentIdentifier =
             theDocument->DocumentIdentifier();
         if (aDocumentIdentifier.empty()
             || !XCAFDoc_DocumentTool::CheckShapeTool(aDocument->Main())) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
         Standard_Real aMetersPerUnit = kLegacyMetersPerUnit;
         const bool hasDocumentLengthUnit =
@@ -4371,7 +4370,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     || aMetersPerUnit <= 0.0))
             || (!hasDocumentLengthUnit
                 && aMetersPerUnit != kLegacyMetersPerUnit)) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
 
         std::vector<OccurrenceData> anOccurrences;
@@ -4393,14 +4392,14 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         for (; anExplorer.More(); anExplorer.Next()) {
             if (anOccurrences.size()
                 >= core3d::limits::kMaximumLeafPresentations) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             const XCAFPrs_DocumentNode& aNode = anExplorer.Current();
             const TDF_Label aDefinitionLabel = aNode.RefLabel.IsNull()
                 ? aNode.Label
                 : aNode.RefLabel;
             if (aNode.Label.IsNull() || aDefinitionLabel.IsNull()) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             OccurrenceData anOccurrence;
             anOccurrence.occurrenceLabel = aNode.Label;
@@ -4423,7 +4422,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (aCurrentDepth < 0
                 || static_cast<std::size_t>(aCurrentDepth)
                     >= kMaxOccurrenceDepth) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             anOccurrence.labelIdentifiers.reserve(
                 static_cast<std::size_t>(aCurrentDepth) + 1U);
@@ -4432,7 +4431,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 const auto& aPathNode = anExplorer.Current(aDepth);
                 const TDF_Label& aPathLabel = aPathNode.Label;
                 if (aPathLabel.IsNull()) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 // Match OpenGL's occurrence, definition and ancestor visibility.
                 // Explorer style alone does not include invisible XCAF layers.
@@ -4450,7 +4449,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                     static_cast<std::size_t>(aLayers.Length()),
                                     aLayerVisibilityCheckCount)
                         || aLayerVisibilityCheckCount > kMaxLabelInstanceMappings) {
-                        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                        return {};
                     }
                     for (TDF_LabelSequence::Iterator aLayer(aLayers);
                          aLayer.More(); aLayer.Next()) {
@@ -4461,14 +4460,14 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 std::string aLabelIdentifier =
                     theDocument->EntityIdentifierForLabel(aPathLabel);
                 if (aLabelIdentifier.empty()) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 const auto [aKnownIdentifier, wasInserted] =
                     aPersistentEntityLabels.emplace(aLabelIdentifier,
                                                     aPathLabel);
                 if (!wasInserted
                     && !aKnownIdentifier->second.IsEqual(aPathLabel)) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 anOccurrence.labelIdentifiers.push_back(
                     std::move(aLabelIdentifier));
@@ -4477,7 +4476,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                             anOccurrence.labelIdentifiers.size(),
                             aLabelInstanceMappingCount)
                 || aLabelInstanceMappingCount > kMaxLabelInstanceMappings) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             anOccurrence.entityIdentifier = DeriveOccurrenceIdentifier(
                 aDocumentIdentifier,
@@ -4488,7 +4487,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 || anOccurrence.definitionIdentifier.empty()
                 || !anEntityIdentifiers.insert(
                         anOccurrence.entityIdentifier).second) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             anOccurrence.name = ReadName(aNode.Label, aDefinitionLabel);
             if (anOccurrence.name.empty()) {
@@ -4498,7 +4497,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             const TopoDS_Shape aShape =
                 XCAFDoc_ShapeTool::GetShape(aDefinitionLabel);
             if (aShape.IsNull()) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             const auto aKnownDefinition = aDefinitionIndices.find(
                 anOccurrence.definitionIdentifier);
@@ -4511,7 +4510,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         aDefinitionLabel);
                 if (aDefinition.representation
                     == OcctGeometryRepresentation::Invalid) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 aDefinitionIndices.emplace(anOccurrence.definitionIdentifier,
                                            aDefinitions.size());
@@ -4523,7 +4522,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     || !aKnown.shape.IsSame(aShape)) {
                     // A persistent definition UUID must identify exactly one
                     // product label, even when two labels share a TShape.
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
             }
             anOccurrences.push_back(std::move(anOccurrence));
@@ -4548,7 +4547,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                             myState->debugTriangulationFailure),
 #endif
                         aDefinition)) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 const std::size_t aFaceMapEntryCount =
                     static_cast<std::size_t>(aDefinition.faces.Extent());
@@ -4573,7 +4572,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                    aSnapshotTopologyMapEntryCount)
                     || aSnapshotTopologyMapEntryCount
                         > kMaxTopologyMapEntriesPerSnapshot) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
             }
         }
@@ -4582,7 +4581,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         if (aNextState.documentObject.get() != aDocument.get()
             || aNextState.documentIdentifier != aDocumentIdentifier) {
             if (!IncrementRevision(aNextState.documentGeneration)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             aNextState.documentObject = aDocument;
             aNextState.documentIdentifier = aDocumentIdentifier;
@@ -4614,7 +4613,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             std::string aRevisionKey = aDocumentIdentifier + "\n"
                 + aDefinition.mesh.definitionIdentifier;
             if (!aLiveRevisionKeySet.insert(aRevisionKey).second) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             if (aNextState.definitions.find(aRevisionKey)
                 == aNextState.definitions.end()) {
@@ -4627,7 +4626,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         if (!CheckedAdd(aNextState.definitions.size(),
                         aNewRevisionCount,
                         aRetainedRevisionCount)) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
         if (aRetainedRevisionCount > kMaxRetainedDefinitionRevisions) {
             const std::size_t anEvictionCount = aRetainedRevisionCount
@@ -4643,7 +4642,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 }
             }
             if (aTombstones.size() < anEvictionCount) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             std::sort(aTombstones.begin(),
                       aTombstones.end(),
@@ -4670,7 +4669,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (aRevisionFound == aNextState.definitions.end()) {
                 if (aNextState.definitions.size()
                     >= kMaxRetainedDefinitionRevisions) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 aRevisionFound = aNextState.definitions.emplace(
                     aRevisionKey,
@@ -4681,7 +4680,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (!aRevision.hasFingerprint
                 || aRevision.fingerprint != aDefinition.fingerprint) {
                 if (!IncrementRevision(aRevision.revision)) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 aRevision.fingerprint = aDefinition.fingerprint;
                 aRevision.hasFingerprint = true;
@@ -4714,7 +4713,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 || aSnapshotNumericBytes > kMaxSnapshotNumericBytes
                 || aSnapshotVertexCount > kMaxVerticesPerSnapshot
                 || aSnapshotIndexCount > kMaxIndicesPerSnapshot) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             aScene.meshes.push_back(std::move(aDefinition.mesh));
         }
@@ -4730,7 +4729,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 anOccurrence.definitionIdentifier);
             if (aDefinitionFound == aDefinitionIndices.end()
                 || !FitsUInt32(aDefinitionFound->second)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             const std::size_t aDefinitionIndex = aDefinitionFound->second;
             const DefinitionData& aDefinition = aDefinitions[aDefinitionIndex];
@@ -4739,7 +4738,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                             aMesh.primitives.size(),
                             aBindingCount)
                 || aBindingCount > kMaxPrimitiveBindingsPerSnapshot) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
 
             // Resolve reference authority against the true object/occurrence
@@ -4761,7 +4760,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 || !ReferenceSpaceFromOcct(
                     aStoredReferenceAxis.directionSpace,
                     aReferenceAxis.directionSpace)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             aReferenceAxis.worldPivot = {
                 aWorldReferenceAxis.Location().X(),
@@ -4779,7 +4778,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             gp_Trsf anObjectTransform;
             if (!theDocument->TryObjectTransformForLabel(
                     anOccurrence.definitionLabel, anObjectTransform)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             gp_Trsf aWorldTransform = anObjectTransform.Multiplied(
                 anOccurrence.occurrenceLocation.Transformation());
@@ -4793,7 +4792,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             anInstance.entityIdentifier = anOccurrence.entityIdentifier;
             anInstance.meshIndex = static_cast<std::uint32_t>(aDefinitionIndex);
             if (!MatrixFromTransform(aWorldTransform, anInstance.worldFromObject)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             anInstance.referenceAxis = aReferenceAxis;
             anInstance.reversesWinding = aWorldTransform.IsNegative();
@@ -4829,7 +4828,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         anOccurrence.definitionLabel);
                 if (aVisualMaterial.IsNull()
                     || !aVisualMaterial->HasPbrMaterial()) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 aPbrOverride = WholeObjectPBRMaterial{
                     aPbrMaterial,
@@ -4856,13 +4855,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 const Standard_Integer aFaceMapIndex =
                     aDefinition.faces.FindIndex(aFace.Face());
                 if (aFaceMapIndex <= 0) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 const auto aPrimitiveFound = aPrimitiveByFace.find(
                     static_cast<std::uint32_t>(aFaceMapIndex - 1));
                 if (aPrimitiveFound == aPrimitiveByFace.end()
                     || aFaceMaterials[aPrimitiveFound->second].has_value()) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 aFaceVisibility[aPrimitiveFound->second] =
                     aFace.FaceStyle().IsVisible();
@@ -4887,7 +4886,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         aTextureTable,
                         anEmissiveTexture,
                         aMaterial.emissiveTextureIndex)) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);
             }
@@ -4897,13 +4896,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             for (std::size_t aPrimitiveIndex = 0;
                  aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
                 if (!aFaceMaterials[aPrimitiveIndex].has_value()) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 std::uint32_t aMaterialIndex = 0;
                 if (!AddMaterial(aScene,
                                  std::move(*aFaceMaterials[aPrimitiveIndex]),
                                  aMaterialIndex)) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 PrimitiveBinding aBinding;
                 aBinding.materialIndex = aMaterialIndex;
@@ -4922,7 +4921,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                 == std::numeric_limits<std::uint32_t>::max()
                             || aScene.pickTable.size()
                                 >= kMaxPickElementsPerSnapshot) {
-                            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                            return {};
                         }
                         const std::uint32_t aPickToken =
                             static_cast<std::uint32_t>(
@@ -4993,7 +4992,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                            anAuxiliaryBytes,
                            aSnapshotNumericBytes)
             || aSnapshotNumericBytes > kMaxSnapshotNumericBytes) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
 
         // Selection is intentionally copied after committed instances exist.
@@ -5068,7 +5067,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 || aRawSelectedOwner->Selectable() != anInteractive) {
                 // A renderer-neutral identity may never be inferred from a
                 // foreign, detached, or outcome-ambiguous OCCT owner.
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             const TDF_Label aLabel = theDocument->ShapeLabel(anInteractive);
             const std::string aLabelIdentifier =
@@ -5107,19 +5106,19 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                  *anInstanceIndices) {
                 if (aScene.selection.selected.size()
                     >= kMaxSelectedElements) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 InstanceSnapshot& anInstance =
                     aScene.instances[anInstanceIndex];
                 if (!anInstance.visible || !anInstance.selectable) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 const std::optional<ElementIdentifier> anElement =
                     elementForInstance(
                     anInstanceIndex,
                     aSelectedSubshape);
                 if (!anElement.has_value()) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 const std::string aSelectionKey =
                     anElement->entityIdentifier + ":"
@@ -5158,7 +5157,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             const Handle(AIS_InteractiveObject) anInteractive =
                 theContext->DetectedInteractive();
             if (anInteractive.IsNull()) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             {
                 const Handle(SelectMgr_EntityOwner) aRawDetectedOwner =
@@ -5166,7 +5165,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 if (aRawDetectedOwner.IsNull()
                     || !aRawDetectedOwner->HasSelectable()
                     || aRawDetectedOwner->Selectable() != anInteractive) {
-                    { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                    return {};
                 }
                 const TDF_Label aLabel = theDocument->ShapeLabel(anInteractive);
                 const std::string aLabelIdentifier =
@@ -5267,7 +5266,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                             *aDetectedInstance,
                             aDetectedSubshape);
                         if (!anElement.has_value()) {
-                            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                            return {};
                         }
                         aScene.selection.hovered = *anElement;
                     }
@@ -5284,7 +5283,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 || !CheckedAdd(aSelectionBytes,
                                anElement.entityIdentifier.size(),
                                aSelectionBytes)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
         }
         if (aScene.selection.hovered.has_value()
@@ -5295,17 +5294,17 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     aSelectionBytes,
                     aScene.selection.hovered->entityIdentifier.size(),
                     aSelectionBytes))) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
         if (!CheckedAdd(aSnapshotNumericBytes,
                         aSelectionBytes,
                         aSnapshotNumericBytes)
             || aSnapshotNumericBytes > kMaxSnapshotNumericBytes) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
 
         if (!BuildCamera(theView, theViewportPixels, aScene.camera)) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
 
         Bounds3d aWorldBounds;
@@ -5318,7 +5317,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         if (!TransformPoint(anInstance.worldFromObject,
                                             {anX, aY, aZ},
                                             aWorldPoint)) {
-                            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                            return {};
                         }
                         Extend(aWorldBounds,
                                aWorldPoint.x,
@@ -5339,26 +5338,26 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         if (!aNextState.modelFingerprint.has_value()
             || *aNextState.modelFingerprint != aModelFingerprint) {
             if (!IncrementRevision(aNextState.modelRevision)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             aNextState.modelFingerprint = aModelFingerprint;
         }
         if (!aNextState.presentationFingerprint.has_value()
             || *aNextState.presentationFingerprint != aPresentationFingerprint) {
             if (!IncrementRevision(aNextState.presentationRevision)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             aNextState.presentationFingerprint = aPresentationFingerprint;
         }
         if (!aNextState.cameraFingerprint.has_value()
             || *aNextState.cameraFingerprint != aCameraFingerprint) {
             if (!IncrementRevision(aNextState.cameraRevision)) {
-                { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+                return {};
             }
             aNextState.cameraFingerprint = aCameraFingerprint;
         }
         if (!IncrementRevision(aNextState.snapshotRevision)) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
 
         aScene.revisions.snapshot = aNextState.snapshotRevision;
@@ -5370,11 +5369,11 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         // state. Validate the exact renderer-neutral payload before publishing
         // the next state, rather than relying solely on the later DTO bridge.
         if (!IsValidSceneSnapshot(aScene)) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
         const Handle(TDF_Data)& aData = aDocument->GetData();
         if (aData.IsNull()) {
-            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+            return {};
         }
         aNextState.lastFullSnapshotRevision =
             aNextState.snapshotRevision;
@@ -5400,9 +5399,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         myState.swap(aCommittedState);
         return aSnapshot;
     } catch (const Standard_Failure&) {
-        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+        return {};
     } catch (...) {
-        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
+        return {};
     }
 }
 
