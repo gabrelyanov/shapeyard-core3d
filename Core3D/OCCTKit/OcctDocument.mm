@@ -1,3 +1,4 @@
+#include <TDataStd_Name.hxx>
 // Copyright (c) 2017 OPEN CASCADE SAS
 //
 // This file is part of the examples of the Open CASCADE Technology software library.
@@ -5821,6 +5822,65 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         state = OcctObjectTransformState();
         return Standard_False;
     }
+}
+
+Standard_Boolean OcctObjectNameState::IsEqual(const OcctObjectNameState& other) const noexcept {
+    try {
+        return object.IsEqual(other.object) && namePresent == other.namePresent
+            && (!namePresent || name.IsEqual(other.name));
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctObjectNameIsValid(const TCollection_ExtendedString& name) noexcept {
+    try {
+        if (name.Length() < 1 || name.Length() > 256) { return Standard_False; }
+        NSString* value = [[NSString alloc]
+            initWithCharacters:reinterpret_cast<const unichar*>(name.ToExtString())
+            length:static_cast<NSUInteger>(name.Length())];
+        if (value == nil || [value dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO] == nil) {
+            return Standard_False;
+        }
+        for (Standard_Integer index = 1; index <= name.Length(); ++index) {
+            const auto character = name.Value(index);
+            if (character < 0x20 || (character >= 0x7f && character <= 0x9f)
+                || character == 0x2028 || character == 0x2029) { return Standard_False; }
+        }
+        NSString* trimmed = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        return trimmed.length > 0 && [trimmed isEqualToString:value];
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::CaptureObjectNameStateForLabel(
+    const TDF_Label& label, OcctObjectNameState& state) const noexcept {
+    state = OcctObjectNameState();
+    if (![NSThread isMainThread]) { return Standard_False; }
+    try {
+        OcctObjectNameState captured;
+        if (!CaptureObjectTransformStateForLabel(label, captured.object)) { return Standard_False; }
+        Handle(TDF_Attribute) attribute;
+        if (label.FindAttribute(TDataStd_Name::GetID(), attribute)) {
+            const auto authored = Handle(TDataStd_Name)::DownCast(attribute);
+            if (authored.IsNull()) { return Standard_False; }
+            captured.namePresent = Standard_True;
+            captured.name = authored->Get();
+        }
+        state = std::move(captured);
+        return Standard_True;
+    } catch (...) { state = OcctObjectNameState(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::SetObjectNameForLabel(
+    const TDF_Label& label, const TCollection_ExtendedString& name) noexcept {
+    if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || !OcctObjectNameIsValid(name)) { return Standard_False; }
+    try {
+        OcctObjectNameState before, after;
+        if (!CaptureObjectNameStateForLabel(label, before)) { return Standard_False; }
+        if (before.namePresent && before.name.IsEqual(name)) { return Standard_True; }
+        TDataStd_Name::Set(label, name);
+        return CaptureObjectNameStateForLabel(label, after)
+            && before.object.IsEqual(after.object) && after.namePresent && after.name.IsEqual(name);
+    } catch (...) { return Standard_False; }
 }
 
 void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(AIS_Shape) anAis) {

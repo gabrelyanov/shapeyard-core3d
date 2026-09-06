@@ -246,6 +246,172 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
     }
 }
 
+OrdinaryEditLease OrdinaryEditController::beginNames(
+    const std::vector<OrdinaryNameChange>& changes, OrdinaryEditResult* failure) noexcept {
+    const auto reject = [&](OrdinaryEditResult result) {
+        if (failure) { *failure = result; }
+        return OrdinaryEditLease();
+    };
+    if (![NSThread isMainThread]) { return reject(OrdinaryEditResult::Invalid); }
+    if (blocksNormalWork()) { return reject(OrdinaryEditResult::Busy); }
+    if (_document.IsNull() || changes.empty() || changes.size() > 1024
+        || _nextToken == std::numeric_limits<std::uint64_t>::max()) {
+        return reject(OrdinaryEditResult::Invalid);
+    }
+    _entering = true;
+    struct EnterReset { bool& flag; ~EnterReset() { flag = false; } } reset{_entering};
+    try {
+        const auto self = shared_from_this();
+        const auto lifetime = std::make_shared<const std::uint8_t>(0);
+        const auto document = _document->Document();
+        if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
+        OrdinaryNameLedger ledger;
+        ledger.records.reserve(changes.size());
+        std::unordered_set<std::string> entities;
+        bool changed = false;
+        for (const auto& request : changes) {
+            OrdinaryNameRecord record;
+            if (!OcctObjectNameIsValid(request.name)
+                || !_document->CaptureObjectNameStateForLabel(request.label, record.previous)
+                || !entities.insert(record.previous.object.entityIdentifier).second) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            changed = changed || !record.previous.namePresent || !record.previous.name.IsEqual(request.name);
+            record.requested = request;
+            ledger.records.push_back(std::move(record));
+        }
+        if (!changed) { return reject(OrdinaryEditResult::NoChange); }
+        if (!_host.admitNames(ledger)) { return reject(OrdinaryEditResult::Invalid); }
+        for (const auto& record : ledger.records) {
+            if (!captureMatches(record.previous)) { return reject(OrdinaryEditResult::Invalid); }
+        }
+        _pending.emplace(std::move(ledger));
+        _leaseLifetime = lifetime;
+        _activeToken = ++_nextToken;
+        const auto began = _command.begin(_document);
+        if (began != OrdinaryCommandBeginResult::Started) {
+            if (began == OrdinaryCommandBeginResult::OutcomeUnknown) {
+                _state = OrdinaryEditState::OutcomeUnknown;
+                return reject(OrdinaryEditResult::OutcomeUnknown);
+            }
+            _pending.reset();
+            _activeToken = 0;
+            return reject(began == OrdinaryCommandBeginResult::Busy
+                ? OrdinaryEditResult::Busy : began == OrdinaryCommandBeginResult::Invalid
+                ? OrdinaryEditResult::Invalid : OrdinaryEditResult::RetryableFailure);
+        }
+        _state = OrdinaryEditState::OpenOwned;
+        return OrdinaryEditLease(self, _activeToken, lifetime);
+    } catch (...) {
+        if (_command.isRetained()) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return reject(OrdinaryEditResult::OutcomeUnknown);
+        }
+        _pending.reset();
+        _activeToken = 0;
+        return reject(OrdinaryEditResult::Invalid);
+    }
+}
+
+bool OrdinaryEditController::captureMatches(const OcctObjectNameState& expected) const noexcept {
+    OcctObjectNameState actual;
+    return !_document.IsNull()
+        && _document->CaptureObjectNameStateForLabel(expected.object.label, actual)
+        && expected.IsEqual(actual);
+}
+
+OrdinaryEditResult OrdinaryEditController::stageNamesAndCommit(std::uint64_t token) noexcept {
+    // stageAndCommit has already checked thread, state and lease ownership.
+    try {
+        auto& ledger = std::get<OrdinaryNameLedger>(*_pending);
+        for (const auto& record : ledger.records) {
+            if (!captureMatches(record.previous)) { return cancel(token); }
+        }
+        if (_command.observe() != OrdinaryCommandObservation::OpenOwned) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+        std::size_t index = 0;
+        for (auto& record : ledger.records) {
+#ifdef DEBUG
+            if (_stageFailureIndex == static_cast<int>(index)) {
+                _stageFailureIndex = -1;
+                throw Standard_Failure("Ordinary name staging fault");
+            }
+#endif
+            ++index;
+            if (!_document->SetObjectNameForLabel(record.requested.label, record.requested.name)
+                || !_document->CaptureObjectNameStateForLabel(record.requested.label, record.candidate)
+                || !record.candidate.object.IsEqual(record.previous.object)
+                || !record.candidate.namePresent
+                || !record.candidate.name.IsEqual(record.requested.name)) {
+                throw Standard_Failure("Ordinary name candidate readback failed");
+            }
+        }
+        ledger.candidateSealed = true;
+        if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            _activeToken = 0;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+    } catch (...) {
+        // The owned command and exact metadata ledger determine the outcome.
+    }
+    _state = OrdinaryEditState::OutcomeUnknown;
+    _activeToken = 0;
+    return reconcile();
+}
+
+OrdinaryEditResult OrdinaryEditController::reconcileNamesImpl() noexcept {
+    try {
+        auto& ledger = std::get<OrdinaryNameLedger>(*_pending);
+#ifdef DEBUG
+        if (_truthUnavailableCount > 0) {
+            --_truthUnavailableCount;
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+#endif
+        auto observation = _command.observe();
+        if (observation == OrdinaryCommandObservation::OpenOwned) { observation = _command.abortAndObserve(); }
+        const bool candidate = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
+        const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
+        if ((!candidate && !previous) || (candidate && !ledger.candidateSealed)) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+        for (const auto& record : ledger.records) {
+            if (!captureMatches(candidate ? record.candidate : record.previous)) {
+                _state = OrdinaryEditState::OutcomeUnknown;
+                return OrdinaryEditResult::OutcomeUnknown;
+            }
+        }
+        _committed = candidate;
+        _state = OrdinaryEditState::RepairPending;
+        if (!_host.repairNames(ledger, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+        for (const auto& record : ledger.records) {
+            if (!captureMatches(candidate ? record.candidate : record.previous)) {
+                _state = OrdinaryEditState::OutcomeUnknown;
+                return OrdinaryEditResult::OutcomeUnknown;
+            }
+        }
+        _state = OrdinaryEditState::Publishing;
+        if (!_command.releaseClosed()) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+        if (candidate && !_didPublish) {
+            _didPublish = true;
+            try { _document->NotifyChanges(); } catch (...) {}
+        }
+        clearResolved();
+        return candidate ? OrdinaryEditResult::Committed : OrdinaryEditResult::RetryableFailure;
+    } catch (...) {
+        _state = OrdinaryEditState::OutcomeUnknown;
+        return OrdinaryEditResult::OutcomeUnknown;
+    }
+}
+
 bool OrdinaryEditController::captureMatches(const OcctObjectTransformState& expected) const noexcept {
     OcctObjectTransformState actual;
     return !_document.IsNull()
@@ -257,6 +423,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
         || !_pending || token == 0 || token != _activeToken) { return OrdinaryEditResult::Busy; }
+    if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return stageNamesAndCommit(token); }
     try {
         auto& ledger = std::get<OrdinaryTransformLedger>(*_pending);
         // Reject stale baseline before the first write; ownership alone is
@@ -368,6 +535,7 @@ OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
 }
 
 OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
+    if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return reconcileNamesImpl(); }
     try {
         auto& ledger = std::get<OrdinaryTransformLedger>(*_pending);
 #ifdef DEBUG

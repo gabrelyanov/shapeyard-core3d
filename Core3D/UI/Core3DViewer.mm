@@ -1537,6 +1537,74 @@ OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
 OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
     return _ordinaryEditController ? _ordinaryEditController->reconcile() : OrdinaryEditResult::NoChange;
 }
+bool Core3DViewer::admitNames(OrdinaryNameLedger& ledger) noexcept {
+    if (![NSThread isMainThread] || !_objectInteractor || !_shapeInteractor
+        || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        || !_shapeInteractor->selectionModeAuthorityIsExact()) { return false; }
+    ledger.selectionMode = _shapeInteractor->getSelectionMode();
+    return _objectInteractor->captureOrdinaryNameAuthority(ledger);
+}
+
+bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept {
+    if (![NSThread isMainThread]) { return false; }
+#ifdef DEBUG
+    if (_debugOrdinaryRepairFailures > 0) { --_debugOrdinaryRepairFailures; return false; }
+#endif
+    // Metadata leaves existing presentation and topology owners intact. A
+    // mismatch retains recovery authority; never erase the user's selection.
+    return _ordinaryEditController && _ordinaryEditController->state() == OrdinaryEditState::RepairPending
+        && _objectInteractor && _shapeInteractor
+        && !HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        && _shapeInteractor->selectionModeAuthorityIsExact()
+        && _shapeInteractor->getSelectionMode() == ledger.selectionMode
+        && _objectInteractor->verifyOrdinaryNameAuthority(ledger);
+}
+
+OrdinaryEditResult Core3DViewer::renameObjectFromBrowser(
+    const ObjectFrameIdentity& identity, const TCollection_ExtendedString& name,
+    std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
+    if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) { return OrdinaryEditResult::Busy; }
+    if (!OcctObjectNameIsValid(name) || viewportWidth == 0 || viewportHeight == 0
+        || identity.entityIdentifier.empty() || identity.entityIdentifier.size() > 128
+        || identity.entityIdentifier.find('\0') != std::string::npos
+        || identity.publicationSourceIdentifier.empty() || identity.publicationSourceIdentifier.size() > 128
+        || identity.publicationSourceIdentifier.find('\0') != std::string::npos) { return OrdinaryEditResult::Invalid; }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
+        if (!snapshot || identity.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+            || identity.documentGeneration != snapshot->revisions.documentGeneration
+            || identity.modelRevision != snapshot->revisions.model) { return OrdinaryEditResult::Invalid; }
+        std::size_t matches = 0;
+        for (const auto& instance : snapshot->instances) {
+            if (instance.entityIdentifier == identity.entityIdentifier) {
+                if (instance.role != scene::RenderRole::Model) { return OrdinaryEditResult::Invalid; }
+                ++matches;
+            }
+        }
+        if (matches != 1) { return OrdinaryEditResult::Invalid; }
+        const auto document = myDoc->Document();
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence labels;
+        shapes->GetFreeShapes(labels);
+        if (labels.Length() > 50000) { return OrdinaryEditResult::Invalid; }
+        TDF_Label target;
+        for (Standard_Integer i = 1; i <= labels.Length(); ++i) {
+            const auto& label = labels.Value(i);
+            if (myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { continue; }
+            if (!target.IsNull() || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) {
+                return OrdinaryEditResult::Invalid;
+            }
+            target = label;
+        }
+        if (target.IsNull()) { return OrdinaryEditResult::Invalid; }
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = _ordinaryEditController->beginNames({{target, name}}, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
 bool Core3DViewer::admitTransform(OrdinaryTransformLedger& ledger) noexcept {
     return [NSThread isMainThread] && _objectInteractor && _shapeInteractor
         && !HasActiveOperationLedger(_objectInteractor, _shapeInteractor)

@@ -37,6 +37,7 @@
 #include <gp_Trsf.hxx>
 
 #include <TDF_Data.hxx>
+#include <TCollection_ExtendedString.hxx>
 #include <TopoDS_Shape.hxx>
 #include <array>
 #include <string>
@@ -78,6 +79,20 @@ struct OcctObjectTransformState
     Standard_EXPORT Standard_Boolean IsEqual(
         const OcctObjectTransformState& other) const noexcept;
 };
+
+//! Exact authored name and object authority. Attribute absence is distinct
+//! from an authored empty legacy name; read paths never create attributes.
+struct OcctObjectNameState
+{
+    OcctObjectTransformState object;
+    Standard_Boolean namePresent = Standard_False;
+    TCollection_ExtendedString name;
+    Standard_EXPORT Standard_Boolean IsEqual(const OcctObjectNameState& other) const noexcept;
+};
+
+//! A bounded nonempty Unicode object name. Display names are never identity.
+Standard_EXPORT Standard_Boolean OcctObjectNameIsValid(
+    const TCollection_ExtendedString& name) noexcept;
 
 //! Export formats supported directly by the persisted geometry contract.
 //! Values are bit flags returned by SupportedGeometryExportFormats().
@@ -372,6 +387,12 @@ public:
     Standard_Boolean SaveObjectTransform(
         const TDF_Label& label, const Handle(AIS_Shape) anAis);
     void LoadObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    Standard_EXPORT Standard_Boolean CaptureObjectNameStateForLabel(
+        const TDF_Label& label, OcctObjectNameState& state) const noexcept;
+    //! Stage only the name in the caller's open command; verify exact readback
+    //! and unchanged geometry/identity/transform. Never commit or notify here.
+    Standard_EXPORT Standard_Boolean SetObjectNameForLabel(
+        const TDF_Label& label, const TCollection_ExtendedString& name) noexcept;
     //! Read-only main-thread capture, valid during an owned open command or
     //! after closure. Does not create labels/attributes or repair metadata.
     //! On failure clears the output so a caller cannot reuse stale proof.

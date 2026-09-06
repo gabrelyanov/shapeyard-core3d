@@ -1,5 +1,6 @@
 #ifndef OrdinaryEditController_hpp
 #define OrdinaryEditController_hpp
+#include <gp_Ax2.hxx>
 
 #include "OrdinaryEditCommand.hpp"
 #include <SelectMgr_EntityOwner.hxx>
@@ -10,8 +11,9 @@
 
 namespace core3d {
 enum class PrimitiveManipulatorType;
+enum class ShapeSelectionMode;
 
-enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance };
+enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale };
@@ -46,6 +48,41 @@ struct OrdinaryTransformLedger {
     bool hadManipulator = false;
 };
 
+struct OrdinaryNameChange {
+    TDF_Label label;
+    TCollection_ExtendedString name;
+};
+
+struct OrdinaryNameRecord {
+    OcctObjectNameState previous;
+    OcctObjectNameState candidate;
+    OrdinaryNameChange requested;
+};
+
+//! Names do not replace presentations or selection. Retain exact authority
+//! across uncertain transaction outcomes before publishing the new metadata.
+struct OrdinaryNamePresentation {
+    Handle(AIS_Shape) presentation;
+    TopoDS_Shape shape;
+    gp_Trsf transform;
+};
+
+struct OrdinaryNameLedger {
+    std::vector<OrdinaryNameRecord> records;
+    bool candidateSealed = false;
+    std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
+    PrimitiveManipulatorType manipulatorType = static_cast<PrimitiveManipulatorType>(0);
+    ShapeSelectionMode selectionMode = static_cast<ShapeSelectionMode>(0);
+    bool hadManipulator = false;
+    gp_Trsf manipulatorTransform;
+    std::vector<Handle(AIS_InteractiveObject)> manipulatorObjects;
+    std::vector<TDF_Label> manipulatorSourceLabels;
+    std::vector<TopoDS_Shape> manipulatorCachedShapes;
+    std::vector<OrdinaryNamePresentation> selectedPresentations;
+    Handle(AIS_InteractiveObject) manipulatorPresentation;
+    gp_Ax2 manipulatorPosition;
+};
+
 //! Typed presentation boundary. The viewer implements admission/repair for
 //! exact selection, tool, manipulator and renderer identity. Neither method
 //! may mutate OCAF or call NotifyChanges. No captured callbacks in a ledger.
@@ -53,6 +90,8 @@ class OrdinaryEditPresentationHost {
 public:
     virtual ~OrdinaryEditPresentationHost() = default;
     virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
+    virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
+    virtual bool repairNames(const OrdinaryNameLedger&, bool) noexcept { return false; }
     virtual bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept = 0;
     //! One bounded full redraw per reconciliation attempt. Only presentation
     //! handles may be replaced; the controller validates them against its
@@ -100,6 +139,8 @@ public:
     OrdinaryEditController& operator=(const OrdinaryEditController&) = delete;
     OrdinaryEditLease beginTransform(const std::vector<OrdinaryTransformChange>& changes,
                                      OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
+                                OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditResult reconcile() noexcept;
     bool blocksNormalWork() const noexcept;
     OrdinaryEditState state() const noexcept { return _state; }
@@ -110,10 +151,13 @@ public:
 #endif
 private:
     friend class OrdinaryEditLease;
-    using PendingEdit = std::variant<OrdinaryTransformLedger>;
+    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileImpl() noexcept;
+    OrdinaryEditResult stageNamesAndCommit(std::uint64_t token) noexcept;
+    OrdinaryEditResult reconcileNamesImpl() noexcept;
+    bool captureMatches(const OcctObjectNameState& expected) const noexcept;
     bool captureMatches(const OcctObjectTransformState& expected) const noexcept;
     bool presentationMatches(const OrdinaryTransformLedger& ledger, bool committed) const noexcept;
     void clearResolved() noexcept;

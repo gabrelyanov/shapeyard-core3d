@@ -23,6 +23,15 @@ NS_ASSUME_NONNULL_BEGIN
 @class Core3DSceneFrameSnapshot;
 @class Core3DScenePresentationOverlaySnapshot;
 
+typedef NS_ENUM(NSInteger, Core3DObjectNameEditResult) {
+    Core3DObjectNameEditResultUnchanged = 0,
+    Core3DObjectNameEditResultCommitted,
+    Core3DObjectNameEditResultRejected,
+    Core3DObjectNameEditResultBusy,
+    Core3DObjectNameEditResultRecoveryRequired,
+    Core3DObjectNameEditResultFailed,
+};
+
 typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
     Core3DAssetLoadResultSuccess = 0,
     Core3DAssetLoadResultInvalidData,
@@ -500,6 +509,12 @@ typedef struct {
 //! Replace whole-object selection with one visible editable browser entry.
 //! Requires Object mode and the same publication/document/model identity.
 //! Does not move the camera or create a model-history entry.
+//! Rename one supported object without changing selection or geometry.
+//! The expected scene identity/revision must still match; names are not IDs.
+- (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
+                                                      name:(NSString *)name
+                                                  expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(renameObject(entityIdentifier:name:expected:));
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
                               expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectObject(entityIdentifier:expected:));
@@ -659,6 +674,7 @@ typedef struct {
 - (NSInteger)debugReconcileViewerOrdinaryEdit;
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
+- (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryRepairFailures:(NSInteger)incremental redraw:(NSInteger)redraw;
 - (NSDictionary<NSString *, id> *)debugViewerOrdinaryState;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;

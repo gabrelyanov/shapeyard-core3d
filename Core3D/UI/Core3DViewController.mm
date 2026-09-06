@@ -2565,6 +2565,12 @@ void Core3DAddDebugOrphanVisualMaterial(
     GLController.viewer->debugSetOrdinaryRepairFailures((int)incremental, (int)redraw);
 }
 
+- (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode {
+    if (![self debugConfigureOrdinaryGestureFault:mode]) { return NO; }
+    GLController.viewer->debugOrdinaryEditController()->debugSetStageFailureIndex(mode == 4 ? 0 : -1);
+    return YES;
+}
+
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 5
         || GLController == nil || GLController.viewer == nullptr) { return NO; }
@@ -5113,6 +5119,55 @@ void Core3DAddDebugOrphanVisualMaterial(
         identity.modelRevision = expected.revisions.modelRevision;
         return [self frameCommittedSceneSelectedOnly:NO rect:rect objectIdentity:&identity];
     } catch (...) { return NO; }
+}
+
+- (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
+                                                      name:(NSString *)name
+                                                  expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || name.length == 0 || name.length > 256
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DObjectNameEditResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DObjectNameEditResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DObjectNameEditResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        // Copy UTF-16 by explicit length. An embedded zero must reach native
+        // validation, rather than silently truncating a requested name.
+        TCollection_ExtendedString requested;
+        for (NSUInteger index = 0; index < name.length; ++index) {
+            requested += static_cast<Standard_ExtCharacter>([name characterAtIndex:index]);
+        }
+        const auto result = GLController.viewer->renameObjectFromBrowser(identity, requested,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DObjectNameEditResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                // NotifyChanges owns document publication. Updating controls
+                // here does not rebuild geometry or replace selection owners.
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DObjectNameEditResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DObjectNameEditResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DObjectNameEditResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DObjectNameEditResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DObjectNameEditResultFailed;
+        }
+    } catch (...) {}
+    return Core3DObjectNameEditResultRejected;
 }
 
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

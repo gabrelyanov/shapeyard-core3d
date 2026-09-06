@@ -2635,6 +2635,103 @@ namespace core3d {
         return controller && controller->blocksNormalWork();
     }
 
+    bool ObjectInteractor::captureOrdinaryNameAuthority(OrdinaryNameLedger& ledger) const noexcept {
+        try {
+            if (myDoc.IsNull() || myContext.IsNull() || _manipulatorGestureActive
+                || hasUnresolvedDuplicate()
+                || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial)
+                || (!_manipulator.IsNull() && _manipulator->HasActiveTransformation())) { return false; }
+            ledger.selectionOwners.clear();
+            ledger.selectedPresentations.clear();
+            std::unordered_set<const AIS_InteractiveObject*> unique;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                if (ledger.selectionOwners.size() >= 1024) { return false; }
+                const auto owner = myContext->SelectedOwner();
+                const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+                if (owner.IsNull() || presentation.IsNull() || owner->Selectable() != presentation
+                    || !myContext->IsDisplayed(presentation)) { return false; }
+                ledger.selectionOwners.push_back(owner);
+                if (unique.insert(presentation.get()).second) {
+                    ledger.selectedPresentations.push_back({presentation, presentation->Shape(),
+                                                           presentation->LocalTransformation()});
+                }
+            }
+            ledger.manipulatorType = _manipulatorType;
+            ledger.manipulatorPresentation = _manipulator;
+            ledger.hadManipulator = !_manipulator.IsNull() && _manipulator->IsAttached();
+            ledger.manipulatorObjects.clear();
+            ledger.manipulatorSourceLabels.clear();
+            ledger.manipulatorCachedShapes.clear();
+            if (!_manipulator.IsNull()) {
+                ledger.manipulatorTransform = _manipulator->LocalTransformation();
+                ledger.manipulatorPosition = _manipulator->Position();
+            }
+            if (ledger.hadManipulator) {
+                const auto attached = _manipulator->Objects();
+                if (attached.IsNull() || attached->Size() > 1024
+                    || static_cast<std::size_t>(attached->Size()) != _manipulatorSourceLabels.size()
+                    || static_cast<std::size_t>(attached->Size()) != _manipulator->cachedShapes().size()) { return false; }
+                for (Core3DManipulatorObjectSequence::Iterator it(*attached); it.More(); it.Next()) {
+                    const auto label = _manipulatorSourceLabels.find(it.Value().get());
+                    const auto cached = _manipulator->cachedShapes().find(it.Value());
+                    if (it.Value().IsNull() || label == _manipulatorSourceLabels.end()
+                        || cached == _manipulator->cachedShapes().end()) { return false; }
+                    ledger.manipulatorObjects.push_back(it.Value());
+                    ledger.manipulatorSourceLabels.push_back(label->second);
+                    ledger.manipulatorCachedShapes.push_back(cached->second);
+                }
+            }
+            return true;
+        } catch (...) { return false; }
+    }
+
+    bool ObjectInteractor::verifyOrdinaryNameAuthority(const OrdinaryNameLedger& ledger) const noexcept {
+        try {
+            OrdinaryNameLedger actual;
+            if (!captureOrdinaryNameAuthority(actual)
+                || actual.selectionOwners != ledger.selectionOwners
+                || actual.manipulatorType != ledger.manipulatorType
+                || actual.manipulatorPresentation != ledger.manipulatorPresentation
+                || actual.hadManipulator != ledger.hadManipulator
+                || actual.manipulatorObjects != ledger.manipulatorObjects
+                || actual.manipulatorSourceLabels.size() != ledger.manipulatorSourceLabels.size()
+                || actual.manipulatorCachedShapes.size() != ledger.manipulatorCachedShapes.size()
+                || actual.selectedPresentations.size() != ledger.selectedPresentations.size()) { return false; }
+            const auto sameTransform = [](const gp_Trsf& a, const gp_Trsf& b) {
+                for (int row = 1; row <= 3; ++row) {
+                    for (int column = 1; column <= 4; ++column) {
+                        if (a.Value(row, column) != b.Value(row, column)) { return false; }
+                    }
+                }
+                return true;
+            };
+            if (!ledger.manipulatorPresentation.IsNull()) {
+                if (!sameTransform(actual.manipulatorTransform, ledger.manipulatorTransform)) { return false; }
+                const auto& a = actual.manipulatorPosition;
+                const auto& b = ledger.manipulatorPosition;
+                for (int axis = 1; axis <= 3; ++axis) {
+                    if (a.Location().Coord(axis) != b.Location().Coord(axis)
+                        || a.Direction().Coord(axis) != b.Direction().Coord(axis)
+                        || a.XDirection().Coord(axis) != b.XDirection().Coord(axis)) { return false; }
+                }
+            }
+            for (std::size_t i = 0; i < actual.selectedPresentations.size(); ++i) {
+                const auto& a = actual.selectedPresentations[i];
+                const auto& b = ledger.selectedPresentations[i];
+                if (a.presentation != b.presentation || !a.shape.IsEqual(b.shape)
+                    || !sameTransform(a.transform, b.transform)) { return false; }
+            }
+            for (std::size_t i = 0; i < actual.manipulatorObjects.size(); ++i) {
+                if (!actual.manipulatorSourceLabels[i].IsEqual(ledger.manipulatorSourceLabels[i])
+                    || !actual.manipulatorCachedShapes[i].IsEqual(ledger.manipulatorCachedShapes[i])) { return false; }
+            }
+            return true;
+        } catch (...) { return false; }
+    }
+
     bool ObjectInteractor::captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept {
         try {
             if (myDoc.IsNull() || myContext.IsNull() || ledger.records.empty()

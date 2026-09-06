@@ -88,6 +88,9 @@ namespace core3d {
         OrdinaryEditLease beginOrdinaryTransform(const std::vector<OrdinaryTransformChange>& changes,
                                                  OrdinaryEditResult* failure = nullptr) noexcept;
         OrdinaryEditResult reconcileOrdinaryEdit() noexcept;
+        OrdinaryEditResult renameObjectFromBrowser(const ObjectFrameIdentity& identity,
+            const TCollection_ExtendedString& name, std::uint32_t viewportWidth,
+            std::uint32_t viewportHeight) noexcept;
 #ifdef DEBUG
         void debugSetOrdinaryRepairFailures(int incremental, int redraw) noexcept {
             _debugOrdinaryRepairFailures = incremental;
@@ -341,6 +344,8 @@ namespace core3d {
         int _debugOrdinaryRedrawAttempts = 0;
 #endif
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
+        bool admitNames(OrdinaryNameLedger& ledger) noexcept override;
+        bool repairNames(const OrdinaryNameLedger& ledger, bool committed) noexcept override;
         bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept override;
         bool rebuildTransform(const OrdinaryTransformLedger& ledger, bool committed,
                               std::vector<Handle(AIS_Shape)>& replacements) noexcept override;
