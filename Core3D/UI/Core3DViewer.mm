@@ -1,3 +1,4 @@
+#include <iostream>
 //
 //  Core3DViewer.m
 //  Core3D
@@ -3084,7 +3085,7 @@ Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
     if (hasUnresolvedEdit()) {
-        return {};
+        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
     }
     if (_objectInteractor != nullptr
         && (_objectInteractor->mirrorPreviewState()
@@ -3095,7 +3096,7 @@ Core3DViewer::captureSceneSnapshot(
         // A closed command may already have changed OCAF, but only the typed
         // controller can reconcile that outcome exactly once. Do not advance
         // committed renderer revisions while its ledger remains authoritative.
-        return {};
+        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
     }
     if (_objectInteractor != nullptr
         && _objectInteractor->radialArrayPreviewState()
@@ -3103,7 +3104,7 @@ Core3DViewer::captureSceneSnapshot(
         // The geometry command or separate reference-axis edit may already
         // have committed. Do not advance committed renderer revision state
         // until the controller's retained ledger proves the exact outcome.
-        return {};
+        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
     }
     if (_shapeInteractor != nullptr
         && (_shapeInteractor->shellPreviewState()
@@ -3114,10 +3115,10 @@ Core3DViewer::captureSceneSnapshot(
         // still owns the only authoritative reconciliation token. Publishing
         // here would expose an outcome that the operation cannot yet prove and
         // would also advance the snapshot builder's committed revision state.
-        return {};
+        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
     }
     if (_shapeInteractor == nullptr) {
-        return {};
+        { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
     }
     if (!_shapeInteractor->selectionModeAuthorityIsExact()) {
         bool hasRendererSafeReadyObjectPreview = false;
@@ -3155,7 +3156,7 @@ Core3DViewer::captureSceneSnapshot(
         // Never promote a retained enum whose OCCT presentations could not be
         // proven or restored. A same-mode request can repair this fail-closed
         // state without publishing false renderer selection identity.
-            return {};
+            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
         }
     }
     scene::ElementKind acceptedSelectionKind = scene::ElementKind::None;
@@ -3170,9 +3171,9 @@ Core3DViewer::captureSceneSnapshot(
             acceptedSelectionKind = scene::ElementKind::Edge;
             break;
         case ShapeSelectionMode::Vertex:
-            return {};
+            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
         case ShapeSelectionMode::Wire:
-            return {};
+            { std::cerr << "VISIBILITY SNAPSHOT REJECT " << __FILE__ << ":" << __LINE__ << std::endl; return {}; }
     }
     return _sceneSnapshotBuilder.Build(
         myDoc,
