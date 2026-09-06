@@ -622,6 +622,7 @@ typedef struct {
 //! Synchronous DEBUG fixture over real ordinary command ownership faults.
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryCommand:(NSInteger)mode;
 - (NSDictionary<NSString *, NSNumber *> *)debugOrdinaryCommandMarkerState;
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryController:(NSInteger)mode;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.

@@ -17,6 +17,7 @@
 #include "GLViewController+Trick.h"
 #include "BooleanOperationController.hpp"
 #include "OrdinaryEditCommand.hpp"
+#include "OrdinaryEditController.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
 #include "../Common/dispatch_cancelable_block.h"
@@ -2505,6 +2506,175 @@ void Core3DAddDebugOrphanVisualMaterial(
         // Entry established that no other command existed; this synchronous
         // debug-only probe invokes no callbacks before cleanup.
         if (mode != 0) { Core3DAbortCommandNoThrow(ocaf); }
+        return nil;
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryController:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 19
+        || GLController == nil || GLController.viewer == nullptr) { return nil; }
+    const auto viewer = GLController.viewer;
+    const Handle(OcctDocument) document = viewer->getDocument();
+    const auto ocaf = document.IsNull() ? Handle(TDocStd_Document)() : document->Document();
+    const auto context = viewer->AisContext();
+    if (ocaf.IsNull() || ocaf->HasOpenCommand() || context.IsNull()) { return nil; }
+    using Result = core3d::OrdinaryEditResult;
+    using State = core3d::OrdinaryEditState;
+    struct FixtureHost final : core3d::OrdinaryEditPresentationHost {
+        Handle(AIS_InteractiveContext) context;
+        core3d::OrdinaryEditController* controller = nullptr;
+        int failureMode = 0;
+        int repairs = 0;
+        bool reentrantRepairBlocked = true;
+        bool admitTransform(const core3d::OrdinaryTransformLedger& ledger) noexcept override {
+            for (const auto& record : ledger.records) {
+                if (!context->IsDisplayed(record.requested.presentation)) { return false; }
+            }
+            return true;
+        }
+        bool repairTransform(const core3d::OrdinaryTransformLedger& ledger, bool committed) noexcept override {
+            ++repairs;
+            reentrantRepairBlocked = reentrantRepairBlocked && controller
+                && controller->blocksNormalWork() && controller->reconcile() == Result::Busy;
+            const int fault = std::exchange(failureMode, 0);
+            if (fault == 1) { return false; }
+            try {
+                int index = 0;
+                for (const auto& record : ledger.records) {
+                    const auto& expected = committed ? record.candidate : record.previous;
+                    record.requested.presentation->SetShape(expected.shape);
+                    record.requested.presentation->SetLocalTransformation(expected.transform);
+                    context->Redisplay(record.requested.presentation, Standard_False);
+                    if (fault == 2 && index++ == 0) { return false; }
+                }
+                return true;
+            } catch (...) { return false; }
+        }
+    } host;
+    host.context = context;
+    std::vector<core3d::OrdinaryTransformChange> changes;
+    std::vector<OcctObjectTransformState> previous;
+    AIS_ListOfInteractive displayed;
+    context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+    for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More() && changes.size() < 2; it.Next()) {
+        const auto presentation = Handle(AIS_Shape)::DownCast(it.Value());
+        if (presentation.IsNull()) { continue; }
+        const TDF_Label label = document->ShapeLabel(presentation);
+        OcctObjectTransformState baseline;
+        if (!document->CaptureObjectTransformStateForLabel(label, baseline)) { continue; }
+        core3d::OrdinaryTransformChange change;
+        change.label = label;
+        change.presentation = presentation;
+        change.shape = baseline.shape;
+        change.transform = baseline.transform;
+        if (mode != 14) {
+            auto translation = change.transform.TranslationPart();
+            translation.SetX(translation.X() + 12.5 * (changes.size() + 1));
+            change.transform.SetTranslationPart(translation);
+        }
+        if (mode == 18) {
+            change.transform.SetRotationPart(gp_Quaternion(gp_Vec(0, 0, 1), M_PI_2));
+        }
+        if (mode == 19) { change.operation = core3d::OrdinaryTransformOperation::Rotate; }
+        changes.push_back(change);
+        previous.push_back(baseline);
+    }
+    if (changes.size() != 2) { return nil; }
+    if (mode == 15) { changes.push_back(changes.front()); }
+    const auto controller = std::make_shared<core3d::OrdinaryEditController>(document, host);
+    host.controller = controller.get();
+    if (mode == 1) { controller->debugCommandStamp().debugSetCommitMode(3); }
+    if (mode == 2) { controller->debugCommandStamp().debugSetCommitMode(4); }
+    if (mode == 3 || mode == 10) { controller->debugCommandStamp().debugSetCommitMode(1); }
+    if (mode == 4) { controller->debugCommandStamp().debugSetCommitMode(2); }
+    if (mode == 5 || mode == 12) { controller->debugCommandStamp().debugSetNewCommandMode(3); }
+    if (mode == 6) { controller->debugSetStageFailureIndex(1); }
+    if (mode == 7) { controller->debugSetTruthUnavailableCount(1); }
+    if (mode == 8) { host.failureMode = 1; }
+    if (mode == 9) { host.failureMode = 2; }
+    if (mode == 10 || mode == 12) { controller->debugCommandStamp().debugSetAbortMode(1); }
+    if (mode == 13) { controller->debugCommandStamp().debugSetPostCommitInspectionFailureCount(1); }
+    __block int notifications = 0;
+    __block bool publishingBlocked = true;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:@"OcctDocumentChanges"
+        object:nil queue:nil usingBlock:^(NSNotification* notification) {
+        if (![notification.object isKindOfClass:NSValue.class]
+            || [(NSValue*)notification.object pointerValue] != document.get()) { return; }
+        ++notifications;
+        Result failure = Result::Invalid;
+        auto reentrant = controller->beginTransform(changes, &failure);
+        publishingBlocked = publishingBlocked && !reentrant && failure == Result::Busy
+            && controller->state() == State::Publishing && controller->blocksNormalWork();
+    }];
+    const Standard_Integer undoBefore = ocaf->GetAvailableUndos();
+    try {
+        Result failure = Result::Invalid;
+        Result first = Result::Invalid;
+        {
+            auto lease = controller->beginTransform(changes, &failure);
+            if (!lease) { first = failure; }
+            else if (mode == 11) { first = lease.cancel(); }
+            else if (mode == 16) {
+                auto movedLease = std::move(lease);
+                first = Result::NoChange;
+            } else if (mode == 17) {
+                std::thread worker([abandoned = std::move(lease)]() mutable {
+                    abandoned = core3d::OrdinaryEditLease();
+                });
+                worker.join();
+                first = Result::OutcomeUnknown;
+            } else { first = lease.stageAndCommit(); }
+        }
+        const bool blocked = controller->blocksNormalWork();
+        const auto firstState = controller->state();
+        const auto historyAfterFirst = ocaf->GetAvailableUndos();
+        // Only the fixture owner closes its deliberately unproven begin after
+        // verifying that ordinary reconciliation does not claim abort authority.
+        bool unprovenProtected = true;
+        if (mode == 12) {
+            unprovenProtected = ocaf->HasOpenCommand()
+                && controller->reconcile() == Result::OutcomeUnknown
+                && ocaf->HasOpenCommand();
+            ocaf->AbortCommand();
+        }
+        const Result retry = blocked ? controller->reconcile() : first;
+        const bool committed = retry == Result::Committed;
+        bool exact = true;
+        for (std::size_t index = 0; index < previous.size(); ++index) {
+            OcctObjectTransformState actual;
+            exact = exact && document->CaptureObjectTransformStateForLabel(previous[index].label, actual);
+            if (committed) {
+                exact = exact && actual.scalars[0] == changes[index].transform.TranslationPart().X()
+                    && actual.shape.IsEqual(previous[index].shape)
+                    && actual.entityIdentifier == previous[index].entityIdentifier;
+            } else { exact = exact && actual.IsEqual(previous[index]); }
+        }
+        const int notifyCount = notifications;
+        const int repairCount = host.repairs;
+        const bool idle = !controller->blocksNormalWork() && controller->state() == State::Idle;
+        const auto delta = ocaf->GetAvailableUndos() - undoBefore;
+        const bool retryDidNotAddHistory = ocaf->GetAvailableUndos() == historyAfterFirst;
+        [NSNotificationCenter.defaultCenter removeObserver:observer];
+        observer = nil;
+        if (committed) { ocaf->Undo(); }
+        bool restored = true;
+        for (std::size_t index = 0; index < previous.size(); ++index) {
+            OcctObjectTransformState actual;
+            restored = restored && document->CaptureObjectTransformStateForLabel(previous[index].label, actual)
+                && actual.IsEqual(previous[index]);
+            changes[index].presentation->SetShape(previous[index].shape);
+            changes[index].presentation->SetLocalTransformation(previous[index].transform);
+            context->Redisplay(changes[index].presentation, Standard_False);
+        }
+        return @{@"first": @((int)first), @"retry": @((int)retry), @"firstState": @((int)firstState),
+                 @"blocked": @(blocked), @"idle": @(idle), @"exact": @(exact), @"restored": @(restored),
+                 @"undoDelta": @(delta), @"retryDidNotAddHistory": @(retryDidNotAddHistory),
+                 @"notifications": @(notifyCount), @"repairs": @(repairCount),
+                 @"publishingBlocked": @(publishingBlocked), @"repairReentryBlocked": @(host.reentrantRepairBlocked),
+                 @"unprovenProtected": @(unprovenProtected), @"closed": @(!ocaf->HasOpenCommand())};
+    } catch (...) {
+        [NSNotificationCenter.defaultCenter removeObserver:observer];
+        Core3DAbortCommandNoThrow(ocaf);
         return nil;
     }
 }
