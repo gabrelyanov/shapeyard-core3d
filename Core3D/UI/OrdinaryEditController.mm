@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #include <gp_Quaternion.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_GUID.hxx>
 #include <cmath>
 #include <algorithm>
 #include <limits>
