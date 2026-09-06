@@ -105,6 +105,7 @@ typedef NS_ENUM(NSInteger, Core3DDebugReferenceAxisFixtureMode) {
     Core3DDebugReferenceAxisFixtureRadialSentinelMisplaced,
     Core3DDebugReferenceAxisFixtureOrdinarySentinelWrongType,
     Core3DDebugReferenceAxisFixtureOrdinarySentinelMisplaced,
+    Core3DDebugReferenceAxisFixtureOrdinarySentinelValid,
 };
 #endif
 
@@ -620,6 +621,7 @@ typedef struct {
 //! 2 throw-after-close, and 3 fail the first post-commit presentation repair.
 //! Synchronous DEBUG fixture over real ordinary command ownership faults.
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryCommand:(NSInteger)mode;
+- (NSDictionary<NSString *, NSNumber *> *)debugOrdinaryCommandMarkerState;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while
 //! preserving the authoritative mirror lifecycle and renderer invalidation.

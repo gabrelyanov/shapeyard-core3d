@@ -2509,6 +2509,22 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)debugOrdinaryCommandMarkerState {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) {
+        return @{@"valid": @NO};
+    }
+    try {
+        const Handle(OcctDocument) document = GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()) { return @{@"valid": @NO}; }
+        Handle(TDF_Attribute) attribute;
+        const bool present = document->Document()->Main().FindAttribute(
+            Core3DOrdinaryEditCommandOwnerAttributeID(), attribute);
+        const Handle(TDataStd_Integer) marker = Handle(TDataStd_Integer)::DownCast(attribute);
+        return @{@"valid": @(!present || !marker.IsNull()), @"present": @(present),
+                 @"value": @(marker.IsNull() ? 0 : marker->Get())};
+    } catch (...) { return @{@"valid": @NO}; }
+}
+
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProbeOrdinaryCommand:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 15
         || GLController == nil || GLController.viewer == nullptr) { return nil; }
@@ -2618,7 +2634,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     (Core3DDebugReferenceAxisFixtureMode)mode {
     if (mode < Core3DDebugReferenceAxisFixtureValidMixedSpace
         || mode
-            > Core3DDebugReferenceAxisFixtureOrdinarySentinelMisplaced) {
+            > Core3DDebugReferenceAxisFixtureOrdinarySentinelValid) {
         return nil;
     }
     return Core3DCreateDebugBinXCAFFixture(
@@ -2712,7 +2728,14 @@ void Core3DAddDebugOrphanVisualMaterial(
                 mode == Core3DDebugReferenceAxisFixtureOrphanRecord
                 ? document->Main().FindChild(97, Standard_True)
                 : label;
-            Core3DWriteDebugReferenceAxisRecord(target, mode);
+            if (mode == Core3DDebugReferenceAxisFixtureOrdinarySentinelValid) {
+                TDataStd_Integer::Set(document->Main(),
+                    Core3DOrdinaryEditCommandOwnerAttributeID(),
+                    std::numeric_limits<Standard_Integer>::max());
+            }
+            Core3DWriteDebugReferenceAxisRecord(target,
+                mode == Core3DDebugReferenceAxisFixtureOrdinarySentinelValid
+                    ? Core3DDebugReferenceAxisFixtureValidMixedSpace : mode);
         });
 }
 
