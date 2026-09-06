@@ -2421,6 +2421,71 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 }
 
+- (NSDictionary<NSString *, id> *_Nullable)debugProbeTransformStorage:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 4
+        || GLController == nil || GLController.viewer == nullptr) {
+        return nil;
+    }
+    const Handle(OcctDocument) document = GLController.viewer->getDocument();
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->ChangeDocument();
+    const TDF_Label label = Core3DFirstFreeSimpleDefinition(ocaf);
+    if (document.IsNull() || ocaf.IsNull() || label.IsNull()
+        || ocaf->HasOpenCommand()) {
+        return nil;
+    }
+    // Exercise staging without publishing or committing a document edit.
+    // Swift checks the measured state and history after the owned abort.
+    try {
+        gp_Trsf baseline;
+        if (!document->TryObjectTransformForLabel(label, baseline)) {
+            return nil;
+        }
+        gp_Trsf candidate;
+        candidate.SetRotationPart(gp_Quaternion(gp_Vec(0, 0, 1), M_PI_2));
+        candidate.SetScaleFactor(-2.0);
+        candidate.SetTranslationPart(gp_XYZ(mode == 3 ? 1'000'001.0 : 12.5, -7.25, 3.0));
+        Handle(AIS_Shape) presentation = new AIS_Shape(XCAFDoc_ShapeTool::GetShape(label));
+        presentation->SetLocalTransformation(candidate);
+        if (mode != 0) {
+            ocaf->NewCommand();
+            if (!ocaf->HasOpenCommand()) {
+                return nil;
+            }
+        }
+        const bool accepted = document->SaveObjectTransform(
+            mode == 2 ? ocaf->Main() : label,
+            mode == 1 ? Handle(AIS_Shape)() : presentation);
+        gp_Trsf staged;
+        const bool readable = document->TryObjectTransformForLabel(label, staged);
+        NSMutableArray<NSNumber *> *matrix = [NSMutableArray arrayWithCapacity:12];
+        for (Standard_Integer row = 1; row <= 3; ++row) {
+            for (Standard_Integer column = 1; column <= 4; ++column) {
+                [matrix addObject:@(staged.Value(row, column))];
+            }
+        }
+        if (mode != 0) {
+            ocaf->AbortCommand();
+        }
+        gp_Trsf restored;
+        bool unchanged = document->TryObjectTransformForLabel(label, restored);
+        for (Standard_Integer row = 1; row <= 3; ++row) {
+            for (Standard_Integer column = 1; column <= 4; ++column) {
+                unchanged = unchanged
+                    && restored.Value(row, column) == baseline.Value(row, column);
+            }
+        }
+        return @{@"accepted": @(accepted), @"readable": @(readable),
+                 @"matrix": matrix, @"restored": @(unchanged),
+                 @"closed": @(!ocaf->HasOpenCommand())};
+    } catch (...) {
+        // Entry established that no other command existed; this synchronous
+        // debug-only probe invokes no callbacks before cleanup.
+        if (mode != 0) { Core3DAbortCommandNoThrow(ocaf); }
+        return nil;
+    }
+}
+
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode {
     [GLController debugSetDuplicateCommitMode:mode];
 }

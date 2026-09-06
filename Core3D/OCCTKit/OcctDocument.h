@@ -337,7 +337,10 @@ public:
         return myOcafDoc;
     }
 
-    void SaveObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    //! Stage all transform scalars in the caller's open command and verify
+    //! exact attribute readback. Success proves staging only, never commit.
+    Standard_Boolean SaveObjectTransform(
+        const TDF_Label& label, const Handle(AIS_Shape) anAis);
     void LoadObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
     //! Write exactly one translation scalar in the caller's already-open OCAF
     //! command. Axis is 0...2 and value uses raw document model units. The

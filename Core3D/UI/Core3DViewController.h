@@ -607,6 +607,8 @@ typedef struct {
 //! manipulator, or bounds authority. Negative values exercise oriented-axis
 //! reversal in the production resolver.
 - (BOOL)debugSetFirstReferenceAxisPersistedUniformScale:(CGFloat)scale;
+//! Probe checked staging and abort; modes 0...3 invalid, 4 valid signed transform.
+- (NSDictionary<NSString *, id> *_Nullable)debugProbeTransformStorage:(NSInteger)mode;
 //! Create one deterministic XBF fixture. Only ValidMixedSpace may pass the
 //! production project-load gate; every malformed mode must fail closed.
 - (NSData *_Nullable)debugReferenceAxisFixtureDataWithMode:

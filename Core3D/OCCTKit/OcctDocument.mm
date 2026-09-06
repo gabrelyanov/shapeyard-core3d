@@ -4163,7 +4163,9 @@ TDF_Label OcctDocument::AddShape(
 	        label, representation)) {
 	    return TDF_Label();
 	}
-	SaveObjectTransform(label, aisShape);
+	if (!SaveObjectTransform(label, aisShape)) {
+	    return TDF_Label();
+	}
 	return label;
 }
 
@@ -4265,7 +4267,10 @@ Standard_Boolean OcctDocument::ReplaceShape(
             restorePrevious();
             return Standard_False;
         }
-        SaveObjectTransform(label, aisShape);
+        if (!SaveObjectTransform(label, aisShape)) {
+            restorePrevious();
+            return Standard_False;
+        }
         return Standard_True;
     } catch (...) {
         restorePrevious();
@@ -4273,21 +4278,61 @@ Standard_Boolean OcctDocument::ReplaceShape(
     }
 }
 
-void OcctDocument::SaveObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
-    if (anAis.IsNull()
-        || !EnsureGeometryRepresentationForMutation(label)) {
-        return;
+Standard_Boolean OcctDocument::SaveObjectTransform(
+    const TDF_Label& label, const Handle(AIS_Shape) anAis)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || label.IsNull() || label.Data() != myOcafDoc->GetData()
+            || anAis.IsNull()
+            || !IsEditableFreeSimpleDefinitionLabel(label)) {
+            return Standard_False;
+        }
+        const gp_Trsf transform = anAis->LocalTransformation();
+        const gp_Quaternion rotation = transform.GetRotation();
+        const Standard_Real values[8] = {
+            transform.TranslationPart().X(),
+            transform.TranslationPart().Y(),
+            transform.TranslationPart().Z(),
+            rotation.X(), rotation.Y(), rotation.Z(), rotation.W(),
+            transform.ScaleFactor(),
+        };
+        // Validate the whole candidate before changing any attribute. The
+        // caller retains transaction ownership if staging later fails.
+        for (const Standard_Real value : values) {
+            if (!std::isfinite(value)) {
+                return Standard_False;
+            }
+        }
+        for (Standard_Integer axis = 0; axis < 3; ++axis) {
+            if (std::abs(values[axis])
+                > core3d::limits::kMaximumModelCoordinateMagnitude) {
+                return Standard_False;
+            }
+        }
+        if (std::abs(values[7])
+                <= std::numeric_limits<Standard_Real>::epsilon()
+            || !EnsureGeometryRepresentationForMutation(label)) {
+            return Standard_False;
+        }
+        for (Standard_Integer index = 0; index < 8; ++index) {
+            TDataStd_Real::Set(label.FindChild(index + 1), values[index]);
+        }
+        for (Standard_Integer index = 0; index < 8; ++index) {
+            const TDF_Label child = label.FindChild(index + 1, Standard_False);
+            Handle(TDataStd_Real) stored;
+            if (child.IsNull()
+                || !child.FindAttribute(TDataStd_Real::GetID(), stored)
+                || stored.IsNull() || stored->Get() != values[index]) {
+                return Standard_False;
+            }
+        }
+        gp_Trsf storedTransform;
+        return TryObjectTransformForLabel(label, storedTransform);
+    } catch (...) {
+        return Standard_False;
     }
-    auto t = anAis->LocalTransformation();
-    TDataStd_Real::Set(label.FindChild(1), t.TranslationPart().X());
-    TDataStd_Real::Set(label.FindChild(2), t.TranslationPart().Y());
-    TDataStd_Real::Set(label.FindChild(3), t.TranslationPart().Z());
-    TDataStd_Real::Set(label.FindChild(4), t.GetRotation().X());
-    TDataStd_Real::Set(label.FindChild(5), t.GetRotation().Y());
-    TDataStd_Real::Set(label.FindChild(6), t.GetRotation().Z());
-    TDataStd_Real::Set(label.FindChild(7), t.GetRotation().W());
-    TDataStd_Real::Set(label.FindChild(8), t.ScaleFactor());
- 
 }
 
 Standard_Boolean OcctDocument::SetObjectPositionComponentForLabel(

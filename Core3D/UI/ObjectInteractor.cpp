@@ -2329,7 +2329,9 @@ namespace core3d {
 								"Unable to replace scaled geometry");
 						}
 					}
-					myDoc->SaveObjectTransform(change.second, change.first);
+					if (!myDoc->SaveObjectTransform(change.second, change.first)) {
+						throw Standard_Failure("Unable to stage object transform");
+					}
 				}
                 // All candidates were admitted before the first write. Check
                 // the serialized values and reference-axis bounds while the
