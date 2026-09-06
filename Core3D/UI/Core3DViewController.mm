@@ -50,6 +50,8 @@
 #include "Standard_Failure.hxx"
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
+#include "TDataStd_AsciiString.hxx"
+#include "TDataStd_Name.hxx"
 #include "TDataStd_Real.hxx"
 #include "TDF_LabelSequence.hxx"
 #include "Standard_GUID.hxx"
