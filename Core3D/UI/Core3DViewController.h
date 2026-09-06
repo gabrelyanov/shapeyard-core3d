@@ -23,6 +23,18 @@ NS_ASSUME_NONNULL_BEGIN
 @class Core3DSceneFrameSnapshot;
 @class Core3DScenePresentationOverlaySnapshot;
 
+typedef NS_ENUM(NSInteger, Core3DProfilePlane) {
+    Core3DProfilePlaneXY = 0, Core3DProfilePlaneXZ, Core3DProfilePlaneYZ,
+};
+typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
+    Core3DProfileConstructionResultCommitted = 0,
+    Core3DProfileConstructionResultRejected,
+    Core3DProfileConstructionResultBusy,
+    Core3DProfileConstructionResultRecoveryRequired,
+    Core3DProfileConstructionResultFailed,
+    Core3DProfileConstructionResultCancelled,
+};
+
 typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
     Core3DObjectAlignmentAnchorMinimum = 0,
     Core3DObjectAlignmentAnchorCenter,
@@ -589,6 +601,15 @@ typedef struct {
 //! Suppress pending mutation; its completion returns Cancelled after the worker
 //! drains. A second measurement is Busy until then, even after cancellation.
 - (void)cancelObjectAlignment;
+//! Construct one solid from 3–64 non-intersecting outline points in mm, either
+//! winding, with positive depth 0.001–1,000,000 mm. One undoable creation.
+- (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
+                                plane:(Core3DProfilePlane)plane depth:(double)depth
+                             expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createExtrudedProfile(points:plane:depth:expected:completion:));
+//! Keep the worker slot until completion; cancel at document load/close boundaries.
+- (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
                               expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectObject(entityIdentifier:expected:));

@@ -699,6 +699,8 @@ void Core3DAddDebugOrphanVisualMaterial(
     unsigned long long _shouldLoadAssetByteCount;
     NSString *_shouldLoadAssetSHA256;
     std::atomic_bool _isLoading;
+    std::shared_ptr<core3d::ProfileSolidWork> _profileSolidWork;
+    BOOL _profileSolidCancelled;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
 #ifdef DEBUG
@@ -730,6 +732,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (void)dealloc {
     core3d::Core3DViewer::cancelObjectAlignment(_objectAlignmentWork);
+    core3d::Core3DViewer::cancelProfileSolid(_profileSolidWork);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     _glController = nil;
     NSLog(@"~Core3DViewController");
@@ -5411,6 +5414,108 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 
+- (void)cancelProfileConstruction {
+    if (![NSThread isMainThread]) { return; }
+    _profileSolidCancelled = YES;
+    core3d::Core3DViewer::cancelProfileSolid(_profileSolidWork);
+}
+
+- (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
+                                plane:(Core3DProfilePlane)plane
+                                depth:(double)depth
+                             expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) { return; }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![points isKindOfClass:[NSArray class]] || points.count < 3 || points.count > 64
+        || !std::isfinite(depth) || depth < 1e-3 || depth > 1e6
+        || plane < Core3DProfilePlaneXY || plane > Core3DProfilePlaneYZ
+        || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DProfileConstructionResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        std::vector<gp_Pnt2d> outline;
+        outline.reserve(points.count);
+        for (id value in points) {
+            if (![value isKindOfClass:[NSValue class]] || std::strcmp([value objCType], @encode(CGPoint)) != 0) {
+                completion(Core3DProfileConstructionResultRejected); return;
+            }
+            const CGPoint point = [value CGPointValue];
+            if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
+                completion(Core3DProfileConstructionResultRejected); return;
+            }
+            outline.emplace_back(point.x, point.y);
+        }
+        const char* publication = expected.publicationSourceIdentifier.UTF8String;
+        if (!publication) { completion(Core3DProfileConstructionResultRejected); return; }
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto work = viewer->prepareProfileSolid(outline, static_cast<int>(plane), depth,
+            identity, expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        _profileSolidWork = work; _profileSolidCancelled = NO;
+        const auto geometry = core3d::Core3DViewer::profileSolidGeometry(work);
+        const std::weak_ptr<core3d::Core3DViewer> expectedViewer = viewer;
+        __weak Core3DViewController* weakSelf = self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            const bool built = core3d::Core3DViewer::buildProfileSolidGeometry(geometry);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                Core3DViewController* controller = weakSelf;
+                if (!controller) { return; }
+                const BOOL cancelled = controller->_profileSolidCancelled;
+                // Main-thread work owns live scene authority. The worker's only
+                // strong payload contains new private geometry and scalar values.
+                const auto pendingWork = std::move(controller->_profileSolidWork);
+                const auto currentViewer = expectedViewer.lock();
+                if (cancelled) { completion(Core3DProfileConstructionResultCancelled); return; }
+                if (!pendingWork || !currentViewer || controller->_isLoading.load() || !controller->_isSetuped
+                    || ((GLViewController *)controller.glController) == nil
+                    || ((GLViewController *)controller.glController).viewer != currentViewer) {
+                    completion(Core3DProfileConstructionResultRejected); return;
+                }
+                if (!built) { completion(Core3DProfileConstructionResultFailed); return; }
+                const auto native = currentViewer->commitProfileSolid(pendingWork);
+                Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
+                switch (native) {
+                    case core3d::OrdinaryEditResult::Committed:
+                        result = Core3DProfileConstructionResultCommitted;
+                        [((GLViewController *)controller.glController) refreshSelectionState];
+                        [controller viewDidChangeViewportPresentationState];
+                        [controller sendNotifyUIState:UIStateChangingSelection | UIStateChangingGizmo
+                            | UIStateChangingDelete | UIStateChangingDuplicate | UIStateChangingApply
+                            | UIStateChangingApplyMaterial | UIStateChangingHistory];
+                        break;
+                    case core3d::OrdinaryEditResult::Busy: result = Core3DProfileConstructionResultBusy; break;
+                    case core3d::OrdinaryEditResult::NoChange:
+                    case core3d::OrdinaryEditResult::Invalid: result = Core3DProfileConstructionResultRejected; break;
+                    case core3d::OrdinaryEditResult::OutcomeUnknown: result = Core3DProfileConstructionResultRecoveryRequired; break;
+                    case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
+                }
+                completion(result);
+            });
+        });
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
 - (void)cancelObjectAlignment {
     if (![NSThread isMainThread]) { return; }
     _objectAlignmentCancelled = YES;
@@ -5628,6 +5733,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (BOOL)prepareOrdinaryEditForDocumentClose {
     [self cancelObjectAlignment];
+    [self cancelProfileConstruction];
     return [NSThread isMainThread] && _isSetuped && GLController != nil
         && [GLController prepareOrdinaryEditForDocumentClose];
 }
@@ -7349,6 +7455,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
     
     [self cancelObjectAlignment];
+    [self cancelProfileConstruction];
     _isLoading = true;
     _shouldLoadAssetFileURL = nil;
     _shouldLoadAssetByteCount = 0;
@@ -7410,6 +7517,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
 
     [self cancelObjectAlignment];
+    [self cancelProfileConstruction];
     _isLoading = true;
     if (!_isSetuped) {
         _shouldLoadBundleUrl = nil;

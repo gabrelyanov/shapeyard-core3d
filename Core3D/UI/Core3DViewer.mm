@@ -41,6 +41,12 @@
 #include <TDF_LabelSequence.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepLib.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -1401,6 +1407,208 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
     }
 }
 
+
+struct ProfileSolidGeometry {
+    std::vector<gp_Pnt2d> points;
+    int plane = 0; // 0 XY -> +Z, 1 XZ -> +Y, 2 YZ -> +X.
+    double depth = 10;
+    std::atomic_bool cancelled{false};
+    TopoDS_Shape solid;
+    std::array<double, 6> bounds{};
+    bool built = false;
+};
+
+namespace {
+double ProfileCross(const gp_Pnt2d& a, const gp_Pnt2d& b, const gp_Pnt2d& c) {
+    return (b.X() - a.X()) * (c.Y() - a.Y()) - (b.Y() - a.Y()) * (c.X() - a.X());
+}
+bool ProfilePointOnSegment(const gp_Pnt2d& p, const gp_Pnt2d& a, const gp_Pnt2d& b) {
+    constexpr double tolerance = 1e-7;
+    return std::abs(ProfileCross(a, b, p)) <= tolerance * a.Distance(b)
+        && p.X() >= std::min(a.X(), b.X()) - tolerance
+        && p.X() <= std::max(a.X(), b.X()) + tolerance
+        && p.Y() >= std::min(a.Y(), b.Y()) - tolerance
+        && p.Y() <= std::max(a.Y(), b.Y()) + tolerance;
+}
+bool ProfileSegmentsMeet(const gp_Pnt2d& a, const gp_Pnt2d& b,
+                         const gp_Pnt2d& c, const gp_Pnt2d& d) {
+    const double abC = ProfileCross(a, b, c), abD = ProfileCross(a, b, d);
+    const double cdA = ProfileCross(c, d, a), cdB = ProfileCross(c, d, b);
+    const bool proper = ((abC > 0 && abD < 0) || (abC < 0 && abD > 0))
+        && ((cdA > 0 && cdB < 0) || (cdA < 0 && cdB > 0));
+    return proper || ProfilePointOnSegment(c, a, b) || ProfilePointOnSegment(d, a, b)
+        || ProfilePointOnSegment(a, c, d) || ProfilePointOnSegment(b, c, d);
+}
+bool ValidateProfileOutline(const std::vector<gp_Pnt2d>& points, int plane,
+                            double depth, double& signedArea) {
+    constexpr double coordinateLimit = 1e6, minimumEdge = 1e-3;
+    signedArea = 0;
+    if (plane < 0 || plane > 2 || points.size() < 3 || points.size() > 64
+        || !std::isfinite(depth) || depth < minimumEdge || depth > coordinateLimit) { return false; }
+    for (const auto& point : points) {
+        if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
+            || std::abs(point.X()) > coordinateLimit || std::abs(point.Y()) > coordinateLimit) { return false; }
+    }
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto& a = points[i];
+        const auto& b = points[(i + 1) % points.size()];
+        const auto& c = points[(i + 2) % points.size()];
+        for (std::size_t j = i + 1; j < points.size(); ++j) {
+            if (a.Distance(points[j]) < minimumEdge) { return false; }
+        }
+        if (std::abs(ProfileCross(a, b, c)) <= 1e-7 * (a.Distance(b) + b.Distance(c))) { return false; }
+        // Shift the shoelace origin to reduce cancellation for a small outline
+        // authored far from the work-plane origin.
+        signedArea += ProfileCross(points.front(), a, b) * 0.5;
+        for (std::size_t j = i + 1; j < points.size(); ++j) {
+            if (j == (i + 1) % points.size() || (j + 1) % points.size() == i) { continue; }
+            if (ProfileSegmentsMeet(a, b, points[j], points[(j + 1) % points.size()])) { return false; }
+        }
+    }
+    return std::isfinite(signedArea) && std::abs(signedArea) >= 1e-6;
+}
+gp_Pnt ProfilePointInPlane(const gp_Pnt2d& p, int plane) {
+    switch (plane) {
+        case 0: return gp_Pnt(p.X(), p.Y(), 0);
+        case 1: return gp_Pnt(p.X(), 0, p.Y());
+        default: return gp_Pnt(0, p.X(), p.Y());
+    }
+}
+}
+
+bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept {
+    if (!geometry || geometry->cancelled.load() || geometry->built) { return false; }
+    try {
+        OCC_CATCH_SIGNALS
+        double signedArea = 0;
+        if (!ValidateProfileOutline(geometry->points, geometry->plane, geometry->depth, signedArea)) { return false; }
+        auto points = geometry->points;
+        if (signedArea < 0) { std::reverse(points.begin(), points.end()); }
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const auto& point : points) {
+            if (geometry->cancelled.load()) { return false; }
+            polygon.Add(ProfilePointInPlane(point, geometry->plane));
+        }
+        polygon.Close();
+        if (!polygon.IsDone()) { return false; }
+        BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
+        if (!face.IsDone() || geometry->cancelled.load()) { return false; }
+        const gp_Vec direction = geometry->plane == 0 ? gp_Vec(0, 0, geometry->depth)
+            : geometry->plane == 1 ? gp_Vec(0, geometry->depth, 0) : gp_Vec(geometry->depth, 0, 0);
+        BRepPrimAPI_MakePrism prism(face.Face(), direction, Standard_True, Standard_True);
+        if (!prism.IsDone() || geometry->cancelled.load() || prism.Shape().ShapeType() != TopAbs_SOLID) { return false; }
+        auto solid = TopoDS::Solid(prism.Shape());
+        if (!BRepLib::OrientClosedSolid(solid) || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) { return false; }
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(solid, properties);
+        const double expected = std::abs(signedArea) * geometry->depth;
+        if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
+            || std::abs(properties.Mass() - expected) > std::max(1e-8, expected * 1e-8)) { return false; }
+        Bnd_Box bounds;
+        BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
+        if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
+        auto& b = geometry->bounds;
+        bounds.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+        for (double value : b) { if (!std::isfinite(value) || std::abs(value) > 1e6 + 1e-7) { return false; } }
+        if (geometry->cancelled.load()) { return false; }
+        geometry->solid = solid;
+        geometry->built = true;
+        return true;
+    } catch (...) { return false; }
+}
+
+struct ProfileSolidWork {
+    std::shared_ptr<ProfileSolidGeometry> geometry = std::make_shared<ProfileSolidGeometry>();
+    OrdinaryNameLedger authority;
+    ObjectFrameIdentity identity;
+    Handle(OcctDocument) owner;
+    Handle(TDocStd_Document) document;
+    std::uint64_t presentationRevision = 0;
+    std::uint32_t width = 0, height = 0;
+    Standard_Integer documentTime = 0;
+    bool frameFirst = false;
+    bool consumed = false;
+};
+
+std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
+    const std::vector<gp_Pnt2d>& points, int plane, double depth,
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || myDoc.IsNull() || myDoc->Document().IsNull() || width == 0 || height == 0) { return {}; }
+    try {
+        double area = 0;
+        if (!ValidateProfileOutline(points, plane, depth, area)) { return {}; }
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision) { return {}; }
+        auto work = std::make_shared<ProfileSolidWork>();
+        if (!admitNames(work->authority)) { return {}; }
+        work->geometry->points = points; work->geometry->plane = plane; work->geometry->depth = depth;
+        work->identity = identity; work->presentationRevision = presentationRevision;
+        work->width = width; work->height = height;
+        work->owner = myDoc; work->document = myDoc->Document();
+        work->documentTime = work->document->GetData()->Time();
+        Standard_Size count = 0;
+        if (!TryCountDisplayedModelShapes(myContext, count)) { return {}; }
+        work->frameFirst = count == 0;
+        return work;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<ProfileSolidGeometry> Core3DViewer::profileSolidGeometry(
+    const std::shared_ptr<ProfileSolidWork>& work) noexcept {
+    return work ? work->geometry : nullptr;
+}
+bool Core3DViewer::buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept {
+    return BuildProfileSolidGeometry(geometry);
+}
+void Core3DViewer::cancelProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept {
+    if (work) { work->geometry->cancelled.store(true); }
+}
+
+OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept {
+    if (![NSThread isMainThread] || !work || work->consumed || !work->geometry->built
+        || work->geometry->cancelled.load() || work->geometry->solid.IsNull()) { return OrdinaryEditResult::Invalid; }
+    work->consumed = true;
+    if (!canBeginCommittedEdit()) { return OrdinaryEditResult::Busy; }
+    try {
+        if (myDoc != work->owner || myDoc->Document() != work->document
+            || work->document->GetData()->Time() != work->documentTime) { return OrdinaryEditResult::Invalid; }
+        const auto snapshot = captureSceneSnapshot(work->width, work->height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != work->identity.publicationSourceIdentifier
+            || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->revisions.documentGeneration != work->identity.documentGeneration
+            || snapshot->revisions.model != work->identity.modelRevision
+            || snapshot->revisions.presentation != work->presentationRevision
+            || !_shapeInteractor->selectionModeAuthorityIsExact()
+            || _shapeInteractor->getSelectionMode() != work->authority.selectionMode
+            || !_objectInteractor->verifyOrdinaryNameAuthority(work->authority)) { return OrdinaryEditResult::Invalid; }
+        Handle(AIS_Shape) presentation = new AIS_Shape(work->geometry->solid);
+        myContext->ApplyDefaultMaterial(presentation);
+        Quantity_Color color;
+        presentation->Color(color);
+        const std::vector<OrdinaryCreationRequest> requests = {{presentation,
+            Graphic3d_NameOfMaterial_ShinyPlastified, color.Name(), OcctGeometryRepresentation::BRep}};
+        const auto result = publishCreatedPrimitives(requests);
+        if (result != OrdinaryEditResult::Committed) { return result; }
+        // Cosmetic continuation follows durable publication. Recovery can safely
+        // leave the new solid visible but unselected if this continuation fails.
+        try {
+            if (work->frameFirst && !myView.IsNull()) {
+                const auto& b = work->geometry->bounds;
+                Bnd_Box bounds; bounds.Add(gp_Pnt(b[0], b[1], b[2])); bounds.Add(gp_Pnt(b[3], b[4], b[5]));
+                myView->FitAll(bounds, 0.45, Standard_False); myView->ZFitAll();
+            }
+            deselectAll();
+            _objectInteractor->SelectAndAttachManipulator(presentation);
+        } catch (...) {}
+        return result;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
 
 // The worker payload owns only copied geometry and values. Live OCAF/AIS
 // authority is separately owned on the main thread, including its destruction

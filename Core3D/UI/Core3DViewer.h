@@ -17,6 +17,7 @@
 #include "ShapeInteractor.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "OrdinaryEditController.hpp"
+#include <gp_Pnt2d.hxx>
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -40,6 +41,8 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
+    struct ProfileSolidWork;
+    struct ProfileSolidGeometry;
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
     enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps };
@@ -58,6 +61,16 @@ namespace core3d {
         Standard_EXPORT NSString* addTestPrimitives();
         void addPrimitive(PrimitiveType primitiveType);
         void addPrimitivesFromJSON(NSString* json);
+        //! Closed polygon construction: main-thread admission/commit, private worker geometry.
+        std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
+            const std::vector<gp_Pnt2d>& points, int plane, double depth,
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
+            const std::shared_ptr<ProfileSolidWork>& work) noexcept;
+        static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;
+        static void cancelProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept;
+        OrdinaryEditResult commitProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept;
         
         void showGrid(bool show);
         
