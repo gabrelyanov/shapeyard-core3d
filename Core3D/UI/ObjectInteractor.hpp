@@ -145,6 +145,16 @@ namespace core3d {
 		gp_XYZ manipulatorPosition();
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
+        //! Caller proves committed Object-mode authority and a current identity
+        //! lease. Replaces selection and the complete gizmo group, without OCAF.
+        bool replaceSelectedObjectForBrowser(
+            const Handle(AIS_InteractiveObject)& target,
+            bool& selectionWasTouched) noexcept;
+#ifdef DEBUG
+        void debugSetBrowserSelectionFailureMode(Standard_Integer mode) noexcept {
+            _debugBrowserSelectionFailureMode = mode >= 1 && mode <= 3 ? mode : 0;
+        }
+#endif
         const bool isManipulatorAttached() const;
         //! True only from a successful raw touch start through finish/cancel.
         //! Unlike isManipulatorInteractionActive(), hover detection alone does
@@ -394,6 +404,9 @@ namespace core3d {
 		void detachManipulator(bool updateViewer);
 
     private:
+#ifdef DEBUG
+        Standard_Integer _debugBrowserSelectionFailureMode = 0;
+#endif
         void createManipulatorIfNeeded();
         void attachManipulator(Handle(AIS_InteractiveObject) toObject);
 		void detachManipulator(Handle(AIS_InteractiveObject) fromObject);

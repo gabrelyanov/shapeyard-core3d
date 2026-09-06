@@ -151,6 +151,13 @@ namespace core3d {
                         double targetWidth = 1.0, double targetHeight = 1.0,
                         const ObjectFrameIdentity* objectIdentity = nullptr) noexcept;
 
+        //! Select one exact, visible, editable object from a current browser
+        //! lease. Keeps camera and model history; updates the selection gizmo.
+        bool selectObjectFromBrowser(const ObjectFrameIdentity& identity,
+                                     std::uint32_t viewportWidth,
+                                     std::uint32_t viewportHeight,
+                                     bool& selectionWasTouched) noexcept;
+
         //! Capture committed OCAF geometry and semantic camera state into
         //! immutable renderer-neutral values. Main-thread only.
         scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(

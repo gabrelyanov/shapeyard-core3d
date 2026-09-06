@@ -485,6 +485,12 @@ typedef struct {
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)normalizedViewportRect
     NS_SWIFT_NAME(frameObject(entityIdentifier:expected:normalizedViewportRect:));
+//! Replace whole-object selection with one visible editable browser entry.
+//! Requires Object mode and the same publication/document/model identity.
+//! Does not move the camera or create a model-history entry.
+- (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
+                              expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(selectObject(entityIdentifier:expected:));
 
 //! Capture the current semantic camera and revision vector without traversing
 //! or copying scene geometry. Returns nil until a full snapshot has established
@@ -875,6 +881,8 @@ typedef struct {
 //! Last published model revision, not the current working document revision.
 //! Check debugPublishedDocumentGeneration for availability; an empty model is 0.
 - (uint64_t)debugPublishedModelRevision;
+//! One-shot browser selection failure: 1 owner change, 2 gizmo, 3 rollback.
+- (void)debugSetBrowserSelectionFailureMode:(NSInteger)mode;
 //! Assign an invisible in-memory XCAF layer to the occurrence at the requested
 //! accumulated X translation, then redraw the OpenGL fallback.
 - (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x

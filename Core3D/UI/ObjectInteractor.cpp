@@ -2425,6 +2425,177 @@ namespace core3d {
         attachManipulatorToSelection();
     }
 
+    bool ObjectInteractor::replaceSelectedObjectForBrowser(
+        const Handle(AIS_InteractiveObject)& target,
+        bool& selectionWasTouched) noexcept
+    {
+        selectionWasTouched = false;
+#ifdef DEBUG
+        Standard_Integer failureMode = 0;
+#endif
+        std::vector<Handle(SelectMgr_EntityOwner)> previousOwners;
+        std::unordered_set<const SelectMgr_EntityOwner*> previousOwnerSet;
+        Handle(Core3DManipulatorObjectSequence) previousObjects;
+        std::unordered_map<const AIS_InteractiveObject*, TDF_Label> previousLabels;
+        try {
+            OCC_CATCH_SIGNALS
+            if (myDoc.IsNull() || myContext.IsNull() || target.IsNull()
+                || hasUnresolvedDuplicate() || _manipulatorGestureActive
+                || (!_manipulator.IsNull()
+                    && _manipulator->HasActiveTransformation())
+                || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
+                return false;
+            }
+            const auto document = myDoc->Document();
+            if (document.IsNull() || document->HasOpenCommand()) { return false; }
+            const auto isCommittedPresentation = [this](
+                const Handle(AIS_InteractiveObject)& object) {
+                const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object);
+                if (shape.IsNull() || !myContext->IsDisplayed(object)
+                    || !myDoc->IsPresentationEditable(object)) { return false; }
+                const TDF_Label label = myDoc->ShapeLabel(object);
+                gp_Trsf transform;
+                return !label.IsNull()
+                    && myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                    && IsObjectModelingRepresentation(myDoc->GeometryRepresentationForLabel(label))
+                    && !shape->Shape().IsNull()
+                    && XCAFDoc_ShapeTool::GetShape(label).IsEqual(shape->Shape())
+                    && myDoc->TryObjectTransformForLabel(label, transform)
+                    && !TransformDiffers(transform, shape->LocalTransformation());
+            };
+            if (!isCommittedPresentation(target)) { return false; }
+            std::unordered_set<const AIS_InteractiveObject*> previousPresentations;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                const auto owner = myContext->SelectedOwner();
+                const auto object = myContext->SelectedInteractive();
+                if (previousOwners.size() >= 50000 || owner.IsNull()
+                    || !isCommittedPresentation(object)
+                    || !previousOwnerSet.insert(owner.get()).second
+                    || !previousPresentations.insert(object.get()).second) {
+                    return false;
+                }
+                previousOwners.push_back(owner);
+            }
+            previousLabels = _manipulatorSourceLabels;
+            if (!_manipulator.IsNull() && _manipulator->IsAttached()) {
+                const auto attached = _manipulator->Objects();
+                if (attached.IsNull() || attached->Size() < 1
+                    || static_cast<std::size_t>(attached->Size()) != previousPresentations.size()
+                    || previousLabels.size() != previousPresentations.size()) {
+                    return false;
+                }
+                previousObjects = new Core3DManipulatorObjectSequence();
+                std::unordered_set<const AIS_InteractiveObject*> uniqueAttached;
+                for (Core3DManipulatorObjectSequence::Iterator item(*attached); item.More(); item.Next()) {
+                    const auto object = item.Value();
+                    const auto label = previousLabels.find(object.get());
+                    if (previousPresentations.find(object.get()) == previousPresentations.end()
+                        || !uniqueAttached.insert(object.get()).second
+                        || label == previousLabels.end()
+                        || label->second != myDoc->ShapeLabel(object)) {
+                        return false;
+                    }
+                    previousObjects->Append(object);
+                }
+            } else if (!previousLabels.empty()) {
+                return false;
+            }
+            const bool shouldAttach = _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
+                && (!ManipulatorRequiresBRepModeling(_manipulatorType)
+                    || IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(myDoc->ShapeLabel(target))));
+#ifdef DEBUG
+            failureMode = std::exchange(_debugBrowserSelectionFailureMode, 0);
+#endif
+            selectionWasTouched = true;
+            myContext->ClearDetected(Standard_False);
+            detachManipulator(false);
+            myContext->ClearSelected(Standard_False);
+            myContext->SetSelected(target, Standard_False);
+#ifdef DEBUG
+            if (failureMode == 1) { throw Standard_Failure("Injected browser selection failure"); }
+#endif
+            myContext->InitSelected();
+            if (!myContext->MoreSelected() || myContext->SelectedInteractive() != target) {
+                throw Standard_Failure("Browser selection did not resolve the requested presentation");
+            }
+            myContext->NextSelected();
+            if (myContext->MoreSelected()) {
+                throw Standard_Failure("Browser selection retained another owner");
+            }
+            // Attach replaces the previous group because it was detached above.
+            // The legacy single-object Attach overload otherwise appends objects.
+            if (shouldAttach && _manipulator.IsNull()) {
+                setManipulatorType(_manipulatorType);
+            }
+            attachManipulatorToSelection();
+            if (isManipulatorAttached() != shouldAttach) {
+                throw Standard_Failure("Browser selection gizmo availability mismatch");
+            }
+            if (shouldAttach) {
+                const auto attached = _manipulator->Objects();
+                if (attached.IsNull() || attached->Size() != 1 || attached->First() != target
+                    || _manipulatorSourceLabels.size() != 1
+                    || _manipulatorSourceLabels.at(target.get()) != myDoc->ShapeLabel(target)) {
+                    throw Standard_Failure("Browser selection retained a different gizmo target");
+                }
+            }
+#ifdef DEBUG
+            if (failureMode >= 2) { throw Standard_Failure("Injected browser gizmo failure"); }
+#endif
+            myContext->UpdateCurrentViewer();
+            return true;
+        } catch (...) {
+            if (!selectionWasTouched) { return false; }
+        }
+        try {
+            OCC_CATCH_SIGNALS
+#ifdef DEBUG
+            if (failureMode == 3) { throw Standard_Failure("Injected browser selection rollback failure"); }
+#endif
+            detachManipulator(false);
+            myContext->ClearSelected(Standard_False);
+            for (const auto& owner : previousOwners) {
+                myContext->AddOrRemoveSelected(owner, Standard_False);
+            }
+            std::size_t restoredCount = 0;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                if (previousOwnerSet.find(myContext->SelectedOwner().get()) == previousOwnerSet.end()) {
+                    throw Standard_Failure("Browser selection rollback owner mismatch");
+                }
+                ++restoredCount;
+            }
+            if (restoredCount != previousOwners.size()) {
+                throw Standard_Failure("Browser selection rollback was incomplete");
+            }
+            if (!previousObjects.IsNull()) {
+                createManipulatorIfNeeded();
+                _manipulator->Attach(previousObjects);
+                if (!_manipulator->IsAttached() || _manipulator->Objects() != previousObjects) {
+                    throw Standard_Failure("Browser selection rollback gizmo mismatch");
+                }
+            }
+            _manipulatorSourceLabels.swap(previousLabels);
+            myContext->UpdateCurrentViewer();
+        } catch (...) {
+            // A failed presentation repair must not leave a gizmo capable of
+            // changing a different object from the visible selection.
+            const Handle(Core3DManipulator) abandoned = _manipulator;
+            _manipulator.Nullify();
+            _manipulatorSourceLabels.clear();
+            _manipulatorGestureActive = false;
+            // Raw gesture entry points can only use _manipulator. Sever that
+            // reference even if OCCT cannot remove an abandoned presentation.
+            try {
+                if (!abandoned.IsNull()) { myContext->Remove(abandoned, Standard_False); }
+            } catch (...) {}
+            try { myContext->ClearSelected(Standard_False); } catch (...) {}
+            try { myContext->UpdateCurrentViewer(); } catch (...) {}
+        }
+        return false;
+    }
+
     const PrimitiveManipulatorType ObjectInteractor::getManipulatorType() const {
         return _manipulatorType;
     }

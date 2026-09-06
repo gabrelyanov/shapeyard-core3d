@@ -2437,6 +2437,66 @@ void Core3DViewer::showGrid(bool show) {
     myView->Redraw();
 }
 
+bool Core3DViewer::selectObjectFromBrowser(
+    const ObjectFrameIdentity& identity,
+    const std::uint32_t viewportWidth,
+    const std::uint32_t viewportHeight,
+    bool& selectionWasTouched) noexcept {
+    selectionWasTouched = false;
+    if (![NSThread isMainThread] || !canBeginCommittedEdit()
+        || myContext.IsNull() || myView.IsNull()
+        || viewportWidth == 0 || viewportHeight == 0
+        || identity.entityIdentifier.empty() || identity.entityIdentifier.size() > 128
+        || identity.entityIdentifier.find('\0') != std::string::npos
+        || identity.publicationSourceIdentifier.empty()
+        || identity.publicationSourceIdentifier.size() > 128
+        || identity.publicationSourceIdentifier.find('\0') != std::string::npos
+        || _objectInteractor->isManipulatorGestureActive()
+        || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+        || !_shapeInteractor->selectionModeAuthorityIsExact()) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
+        if (snapshot == nullptr || snapshot->selectionMode != scene::ElementKind::Object
+            || identity.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+            || identity.documentGeneration != snapshot->revisions.documentGeneration
+            || identity.modelRevision != snapshot->revisions.model) {
+            return false;
+        }
+        std::size_t matchingInstances = 0;
+        for (const auto& instance : snapshot->instances) {
+            if (instance.entityIdentifier == identity.entityIdentifier) {
+                if (instance.role != scene::RenderRole::Model || !instance.visible
+                    || !instance.selectable) { return false; }
+                ++matchingInstances;
+            }
+        }
+        if (matchingInstances != 1) { return false; }
+        Handle(AIS_InteractiveObject) target;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        std::size_t inspected = 0;
+        for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
+            if (++inspected > 50000) { return false; }
+            const auto candidate = item.Value();
+            const TDF_Label label = myDoc->ShapeLabel(candidate);
+            if (label.IsNull() || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) {
+                continue;
+            }
+            // Assembly occurrences must never resolve to their shared definition.
+            if (!target.IsNull() || !myDoc->IsPresentationEditable(candidate)
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) { return false; }
+            target = candidate;
+        }
+        return !target.IsNull()
+            && _objectInteractor->replaceSelectedObjectForBrowser(target, selectionWasTouched);
+    } catch (...) {
+        return false;
+    }
+}
+
 bool Core3DViewer::frameModel(
     const bool selectedObjectsOnly,
     const std::uint32_t viewportWidth,

@@ -3896,6 +3896,15 @@ void Core3DAddDebugOrphanVisualMaterial(
     return GLController.viewer->DebugPublishedModelRevision();
 }
 
+- (void)debugSetBrowserSelectionFailureMode:(NSInteger)mode {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) { return; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor != nullptr) {
+        interactor->debugSetBrowserSelectionFailureMode(static_cast<Standard_Integer>(mode));
+    }
+}
+
 - (BOOL)debugHideOccurrenceWithInvisibleLayerAtTranslationX:(CGFloat)x {
     if (GLController == nil || GLController.viewer == nullptr) {
         return NO;
@@ -4571,6 +4580,45 @@ void Core3DAddDebugOrphanVisualMaterial(
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
         return [self frameCommittedSceneSelectedOnly:NO rect:rect objectIdentity:&identity];
+    } catch (...) { return NO; }
+}
+
+- (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
+                              expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || expected.selectionMode != Core3DSceneElementKindObject
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        return NO;
+    }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return NO; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return NO; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        bool selectionWasTouched = false;
+        const bool selected = GLController.viewer->selectObjectFromBrowser(
+            identity, static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)), selectionWasTouched);
+        if (selectionWasTouched) {
+            [GLController refreshSelectionState];
+            [GLController requestRender];
+            [self viewDidInvalidateSceneSnapshot];
+        }
+        return selected;
     } catch (...) { return NO; }
 }
 
