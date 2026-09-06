@@ -2511,12 +2511,12 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 		// neither affects the pre-insert count. Later inserts must preserve the
 		// camera the user established while modeling.
 		Bnd_Box aFrameBox;
-		BRepBndLib::Add(shape, aFrameBox);
+		BRepBndLib::AddOptimal(shape, aFrameBox, Standard_False, Standard_False);
 		if (!aFrameBox.IsVoid()) {
-			// Wide phone layouts have controls over the top of the viewport.
-			// Leave space around the first object; later additions preserve the camera.
-			const double margin = myView->Camera()->Aspect() > 1.5 ? 0.45 : 0.2;
-			myView->FitAll(aFrameBox, margin, Standard_False);
+			// Frame the analytic shape independently of cached tessellation.
+			// Leave room for the surrounding touch controls in either orientation;
+			// later additions preserve the camera established by the user.
+			myView->FitAll(aFrameBox, 0.45, Standard_False);
 			myView->ZFitAll();
 		}
 	}
