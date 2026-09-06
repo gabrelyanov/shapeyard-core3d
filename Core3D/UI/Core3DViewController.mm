@@ -5246,7 +5246,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DObjectAlignmentResultRejected); });
         return;
     }
-    if (_objectAlignmentWork) { completion(Core3DObjectAlignmentResultBusy); return; }
+    if (_objectAlignmentWork || _isLoading.load()) { completion(Core3DObjectAlignmentResultBusy); return; }
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
         || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
         || expected.publicationSourceIdentifier.length == 0
@@ -5286,7 +5286,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                 const BOOL cancelled = controller->_objectAlignmentCancelled;
                 controller->_objectAlignmentWork.reset();
                 if (cancelled) { completion(Core3DObjectAlignmentResultCancelled); return; }
-                if (!controller->_isSetuped || ((GLViewController *)controller.glController) == nil
+                if (controller->_isLoading.load() || !controller->_isSetuped || ((GLViewController *)controller.glController) == nil
                     || ((GLViewController *)controller.glController).viewer != viewer) {
                     completion(Core3DObjectAlignmentResultRejected); return;
                 }
@@ -7164,6 +7164,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         return;
     }
     
+    [self cancelObjectAlignment];
     _isLoading = true;
     _shouldLoadAssetFileURL = nil;
     _shouldLoadAssetByteCount = 0;
@@ -7224,6 +7225,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         return;
     }
 
+    [self cancelObjectAlignment];
     _isLoading = true;
     if (!_isSetuped) {
         _shouldLoadBundleUrl = nil;
