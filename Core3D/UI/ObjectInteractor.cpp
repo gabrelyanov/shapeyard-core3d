@@ -1,3 +1,4 @@
+#include <cstdio>
 //
 //  ObjectInteractor.cpp
 //  Core3D
@@ -2499,6 +2500,13 @@ namespace core3d {
         bool& selectionWasTouched) noexcept
     {
         selectionWasTouched = false;
+        static const auto rejectSavedGroup = [](int line) {
+#ifdef DEBUG
+            std::fprintf(stderr, "SavedGroupSelection rejection %s:%d\n", __FILE__, line);
+#endif
+            return false;
+        };
+
 #ifdef DEBUG
         Standard_Integer failureMode = 0;
 #endif
@@ -2515,15 +2523,15 @@ namespace core3d {
                 || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
-                return false;
+                return rejectSavedGroup(__LINE__);
             }
             const auto document = myDoc->Document();
-            if (document.IsNull() || document->HasOpenCommand()) { return false; }
+            if (document.IsNull() || document->HasOpenCommand()) { return rejectSavedGroup(__LINE__); }
             const auto isCommittedPresentation = [this](
                 const Handle(AIS_InteractiveObject)& object) {
                 const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object);
                 if (shape.IsNull() || !myContext->IsDisplayed(object)
-                    || !myDoc->IsPresentationEditable(object)) { return false; }
+                    || !myDoc->IsPresentationEditable(object)) { return rejectSavedGroup(__LINE__); }
                 const TDF_Label label = myDoc->ShapeLabel(object);
                 gp_Trsf transform;
                 return !label.IsNull()
@@ -2537,7 +2545,7 @@ namespace core3d {
             std::unordered_set<const AIS_InteractiveObject*> targetSet;
             for (const auto& target : targets) {
                 if (!isCommittedPresentation(target) || !targetSet.insert(target.get()).second
-                    || target->GlobalSelOwner().IsNull()) { return false; }
+                    || target->GlobalSelOwner().IsNull()) { return rejectSavedGroup(__LINE__); }
             }
             std::unordered_set<const AIS_InteractiveObject*> previousPresentations;
             for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
@@ -2547,7 +2555,7 @@ namespace core3d {
                     || !isCommittedPresentation(object)
                     || !previousOwnerSet.insert(owner.get()).second
                     || !previousPresentations.insert(object.get()).second) {
-                    return false;
+                    return rejectSavedGroup(__LINE__);
                 }
                 previousOwners.push_back(owner);
             }
@@ -2557,7 +2565,7 @@ namespace core3d {
                 if (attached.IsNull() || attached->Size() < 1
                     || static_cast<std::size_t>(attached->Size()) != previousPresentations.size()
                     || previousLabels.size() != previousPresentations.size()) {
-                    return false;
+                    return rejectSavedGroup(__LINE__);
                 }
                 previousObjects = new Core3DManipulatorObjectSequence();
                 std::unordered_set<const AIS_InteractiveObject*> uniqueAttached;
@@ -2568,12 +2576,12 @@ namespace core3d {
                         || !uniqueAttached.insert(object.get()).second
                         || label == previousLabels.end()
                         || label->second != myDoc->ShapeLabel(object)) {
-                        return false;
+                        return rejectSavedGroup(__LINE__);
                     }
                     previousObjects->Append(object);
                 }
             } else if (!previousLabels.empty()) {
-                return false;
+                return rejectSavedGroup(__LINE__);
             }
             const bool shouldAttach = _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                 && (!ManipulatorRequiresBRepModeling(_manipulatorType)
@@ -2639,7 +2647,7 @@ namespace core3d {
             myContext->UpdateCurrentViewer();
             return true;
         } catch (...) {
-            if (!selectionWasTouched) { return false; }
+            if (!selectionWasTouched) { return rejectSavedGroup(__LINE__); }
         }
         try {
             OCC_CATCH_SIGNALS
@@ -2685,7 +2693,7 @@ namespace core3d {
             try { myContext->ClearSelected(Standard_False); } catch (...) {}
             try { myContext->UpdateCurrentViewer(); } catch (...) {}
         }
-        return false;
+        return rejectSavedGroup(__LINE__);
     }
 
     const PrimitiveManipulatorType ObjectInteractor::getManipulatorType() const {
