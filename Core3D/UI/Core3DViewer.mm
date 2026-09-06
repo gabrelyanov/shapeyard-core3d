@@ -1460,117 +1460,20 @@ TransformInspectorPositionCommitResult
 Core3DViewer::commitTransformInspectorPosition(
     const TransformInspectorPositionCommitRequest& theRequest) noexcept
 {
-    if (hasUnresolvedOrdinaryEdit() || _transformInspectorMeasurementController == nullptr) {
+    if (hasUnresolvedOrdinaryEdit() || !_transformInspectorMeasurementController
+        || !_ordinaryEditController) {
         return TransformInspectorPositionCommitResult::Unavailable;
     }
-    TransformInspectorPositionCommitOutcome anOutcome =
-        _transformInspectorMeasurementController->commitPosition(
-            _objectInteractor,
-            _shapeInteractor,
-            theRequest);
-    if (anOutcome.result
-        != TransformInspectorPositionCommitResult::Committed) {
-        return anOutcome.result;
-    }
-
-    const PrimitiveManipulatorType aCommittedManipulatorType =
-        InspectorRestorableManipulatorTypeOrNone(
-            _objectInteractor == nullptr
-                ? PrimitiveManipulatorType::PrimitiveGizmoTypeNone
-                : _objectInteractor->getManipulatorType());
-    const Standard_Integer aDebugPublicationFallbackMode =
 #ifdef DEBUG
-        std::exchange(
-            _debugTransformInspectorPositionPublicationFallbackMode,
-            0);
-#else
-        0;
-#endif
-    bool wasPublished = false;
-    if (aDebugPublicationFallbackMode == 0
-        && _objectInteractor != nullptr) {
-        wasPublished = _objectInteractor
-            ->publishCommittedInspectorTransform(
-                anOutcome.presentation,
-                anOutcome.committedTransform);
+    const auto fault = std::exchange(_debugTransformInspectorPositionPublicationFallbackMode, 0);
+    if (fault > 0) {
+        _debugOrdinaryRepairFailures = 1;
+        _debugOrdinaryRedrawFailures = fault == 2 ? 1 : 0;
+        _debugOrdinaryOwnerResolutionFailures = fault == 3 ? 1 : 0;
     }
-    if (!wasPublished) {
-        try {
-            // redrawDocument() retains these AIS handles as its transactional
-            // fallback. Make the already-authoritative Position visible even
-            // if rebuilding every presentation from OCAF later fails.
-            if (!anOutcome.presentation.IsNull()) {
-                anOutcome.presentation->SetLocalTransformation(
-                    anOutcome.committedTransform);
-            }
-            // The OCAF command is already authoritative. Rebuild every AIS
-            // object as a fail-safe if incremental publication could not prove
-            // parity, then restore the uniquely identified selection so a
-            // recoverable renderer fault does not eject the user's context.
-#ifdef DEBUG
-            _debugForceNextTransformInspectorRedrawFailure =
-                aDebugPublicationFallbackMode == 2;
 #endif
-            redrawDocument();
-            Handle(AIS_InteractiveObject) aRestoredSelection;
-            AIS_ListOfInteractive aDisplayed;
-            myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
-            for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
-                 anObject.More(); anObject.Next()) {
-                const Handle(AIS_InteractiveObject)& aCandidate =
-                    anObject.Value();
-                const TDF_Label aLabel = myDoc->ShapeLabel(aCandidate);
-                if (aLabel.IsNull()
-                    || myDoc->EntityIdentifierForLabel(aLabel)
-                        != theRequest.entityIdentifier
-                    || myDoc->DefinitionIdentifierForLabel(aLabel)
-                        != theRequest.definitionIdentifier
-                    || !myDoc->IsPresentationEditable(aCandidate)) {
-                    continue;
-                }
-                if (!aRestoredSelection.IsNull()) {
-                    aRestoredSelection.Nullify();
-                    break;
-                }
-                aRestoredSelection = aCandidate;
-            }
-#ifdef DEBUG
-            if (aDebugPublicationFallbackMode == 3) {
-                aRestoredSelection.Nullify();
-            }
-#endif
-            if (!aRestoredSelection.IsNull()
-                && _objectInteractor != nullptr) {
-                // Establish selection before restoring BRep-only Scale/Mirror;
-                // setManipulatorType intentionally rejects those modes with
-                // an empty selection during recreateInteractors().
-                _objectInteractor->SelectAndAttachManipulator(
-                    aRestoredSelection);
-                if (_objectInteractor->getManipulatorType()
-                        != aCommittedManipulatorType) {
-                    _objectInteractor->setManipulatorType(
-                        aCommittedManipulatorType);
-                    _objectInteractor->SelectAndAttachManipulator(
-                        aRestoredSelection);
-                }
-                if (_objectInteractor->getManipulatorType()
-                        == aCommittedManipulatorType) {
-                    // redrawDocument() synchronously published its safe None
-                    // fallback. Once the exact Position source is restored,
-                    // mirror the now-valid Scale state before returning to UI.
-                    (void)publishRecreatedInteractorState();
-                }
-            }
-        } catch (...) {
-        }
-    }
-    try {
-        if (!myDoc.IsNull()) {
-            myDoc->NotifyChanges();
-        }
-    } catch (...) {
-    }
-    return TransformInspectorPositionCommitResult::Committed;
+    return _transformInspectorMeasurementController->commitPosition(
+        _objectInteractor, _shapeInteractor, theRequest, _ordinaryEditController).result;
 }
 
 void Core3DViewer::cancelTransformInspectorMeasurement() noexcept
@@ -1707,6 +1610,12 @@ bool Core3DViewer::rebuildTransform(const OrdinaryTransformLedger& ledger, bool 
         auto repaired = ledger;
         for (auto& record : repaired.records) {
             const auto& saved = committed ? record.candidate : record.previous;
+#ifdef DEBUG
+            if (_debugOrdinaryOwnerResolutionFailures > 0) {
+                --_debugOrdinaryOwnerResolutionFailures;
+                displayedByIdentity.erase(saved.entityIdentifier);
+            }
+#endif
             const auto found = displayedByIdentity.find(saved.entityIdentifier);
             if (found == displayedByIdentity.end()
                 || !myDoc->ShapeLabel(found->second).IsEqual(saved.label)

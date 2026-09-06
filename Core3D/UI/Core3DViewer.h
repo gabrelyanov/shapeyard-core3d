@@ -337,6 +337,7 @@ namespace core3d {
 #ifdef DEBUG
         int _debugOrdinaryRepairFailures = 0;
         int _debugOrdinaryRedrawFailures = 0;
+        int _debugOrdinaryOwnerResolutionFailures = 0;
         int _debugOrdinaryRedrawAttempts = 0;
 #endif
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;

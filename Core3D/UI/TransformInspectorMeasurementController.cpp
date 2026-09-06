@@ -1,3 +1,4 @@
+#include "OrdinaryEditController.hpp"
 //
 //  TransformInspectorMeasurementController.cpp
 //  Core3D
@@ -1928,13 +1929,14 @@ TransformInspectorPositionCommitOutcome
 TransformInspectorMeasurementController::commitPosition(
     const std::shared_ptr<ObjectInteractor>& theObjectInteractor,
     const std::shared_ptr<ShapeInteractor>& theShapeInteractor,
-    const TransformInspectorPositionCommitRequest& theRequest) noexcept
+    const TransformInspectorPositionCommitRequest& theRequest,
+    const std::shared_ptr<OrdinaryEditController>& theEdits) noexcept
 {
     TransformInspectorPositionCommitOutcome anOutcome;
     anOutcome.result =
         TransformInspectorPositionCommitResult::InternalFailure;
     if (myStopped || pthread_main_np() == 0 || myImpl == nullptr
-        || myContext.IsNull() || myDoc.IsNull()) {
+        || myContext.IsNull() || myDoc.IsNull() || !theEdits) {
         anOutcome.result =
             TransformInspectorPositionCommitResult::Unavailable;
         return anOutcome;
@@ -2174,7 +2176,14 @@ TransformInspectorMeasurementController::commitPosition(
         }
         *aCandidateComponents[anAxis] = theRequest.value;
 
-        gp_Trsf aCandidateTransform = aCurrentTransform.transform;
+        OcctObjectTransformState exactBaseline;
+        if (!myDoc->CaptureObjectTransformStateForLabel(aDefinition, exactBaseline)) {
+            anOutcome.result = TransformInspectorPositionCommitResult::Stale;
+            return anOutcome;
+        }
+        // Use the same exact persisted transform representation as the shared
+        // controller, preserving its Translate basis invariant.
+        gp_Trsf aCandidateTransform = exactBaseline.transform;
         aCandidateTransform.SetTranslationPart(gp_XYZ(
             aCandidatePosition.x,
             aCandidatePosition.y,
@@ -2191,116 +2200,40 @@ TransformInspectorMeasurementController::commitPosition(
             }
         }
 
-        OcafCommandAbortGuard aCommandGuard(aDocument);
-        aCommandGuard.arm();
-        try {
-            aDocument->NewCommand();
-        } catch (...) {
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-        if (!aDocument->HasOpenCommand()) {
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-
-        if (!myDoc->SetObjectPositionComponentForLabel(
-                aDefinition,
-                static_cast<Standard_Integer>(anAxis),
-                theRequest.value)) {
-            (void)aCommandGuard.abortNow();
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-        PersistedTransformCapture aStagedTransform;
-        if (!TryCapturePersistedTransform(
-                aDefinition, aStagedTransform)
-            || !positionIsExact(
-                aStagedTransform.position, aCandidatePosition)
-            || !TransformsMatch(
-                aStagedTransform.transform, aCandidateTransform)) {
-            (void)aCommandGuard.abortNow();
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-
-        const Standard_Integer aDebugCommitMode =
+        OrdinaryTransformChange change;
+        change.label = aDefinition;
+        change.presentation = aPresentation;
+        change.shape = aStoredShape;
+        change.transform = aCandidateTransform;
+        change.operation = OrdinaryTransformOperation::Translate;
 #ifdef DEBUG
-            std::exchange(myImpl->debugPositionCommitMode, 0);
-#else
-            0;
+        const Standard_Integer fault = std::exchange(myImpl->debugPositionCommitMode, 0);
+        if (fault != 0) {
+            theEdits->debugCommandStamp().debugSetCommitMode(
+                fault == 1 ? 3 : fault == 2 ? 4 : 1);
+        }
 #endif
-        try {
-            Standard_Boolean wasReportedCommitted = Standard_False;
-            if (aDebugCommitMode != 3) {
-                wasReportedCommitted = aDocument->CommitCommand();
-            }
-#ifdef DEBUG
-            if (aDebugCommitMode == 1) {
-                // Model an OCCT wrapper that reports failure after the real
-                // command has already closed and durably applied.
-                wasReportedCommitted = Standard_False;
-            } else if (aDebugCommitMode == 2) {
-                throw Standard_Failure(
-                    "Injected Position failure after command close");
-            }
-#endif
-            (void)wasReportedCommitted;
-        } catch (...) {
-            // Reconcile below: OCCT can close and durably apply a command
-            // before a wrapper reports failure.
+        OrdinaryEditResult result = OrdinaryEditResult::Invalid;
+        auto lease = theEdits->beginTransform({change}, &result);
+        if (lease) { result = lease.stageAndCommit(); }
+        switch (result) {
+            case OrdinaryEditResult::Committed:
+                anOutcome.result = TransformInspectorPositionCommitResult::Committed;
+                break;
+            case OrdinaryEditResult::NoChange:
+                anOutcome.result = TransformInspectorPositionCommitResult::Unchanged;
+                break;
+            case OrdinaryEditResult::Busy:
+                anOutcome.result = TransformInspectorPositionCommitResult::Busy;
+                break;
+            case OrdinaryEditResult::Invalid:
+            case OrdinaryEditResult::RetryableFailure:
+            case OrdinaryEditResult::OutcomeUnknown:
+                // Recovery ownership remains in the viewer. A legacy public
+                // result cannot claim success before presentation parity.
+                anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                break;
         }
-
-        bool isOpen = false;
-        try {
-            isOpen = aDocument->HasOpenCommand();
-        } catch (...) {
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-        if (isOpen) {
-            const bool wasAborted = aCommandGuard.abortNow();
-            PersistedTransformCapture aRestoredTransform;
-            if (!wasAborted
-                || !TryCapturePersistedTransform(
-                    aDefinition, aRestoredTransform)
-                || !positionIsExact(
-                    aRestoredTransform.position,
-                    aCurrentTransform.position)
-                || !TransformsMatch(
-                    aRestoredTransform.transform,
-                    aCurrentTransform.transform)) {
-                anOutcome.result =
-                    TransformInspectorPositionCommitResult::InternalFailure;
-                return anOutcome;
-            }
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-        aCommandGuard.release();
-
-        PersistedTransformCapture aCommittedTransform;
-        if (!TryCapturePersistedTransform(
-                aDefinition, aCommittedTransform)
-            || !positionIsExact(
-                aCommittedTransform.position, aCandidatePosition)
-            || !TransformsMatch(
-                aCommittedTransform.transform, aCandidateTransform)) {
-            anOutcome.result =
-                TransformInspectorPositionCommitResult::InternalFailure;
-            return anOutcome;
-        }
-
-        anOutcome.result =
-            TransformInspectorPositionCommitResult::Committed;
-        anOutcome.presentation = aPresentation;
-        anOutcome.committedTransform = aCommittedTransform.transform;
         return anOutcome;
     } catch (...) {
         anOutcome.result =

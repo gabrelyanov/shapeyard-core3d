@@ -2632,7 +2632,8 @@ namespace core3d {
                 || hasUnresolvedDuplicate()
                 || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
-                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) { return false; }
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial)) { return false; }
             std::unordered_map<const AIS_InteractiveObject*, const OrdinaryTransformRecord*> expected;
             for (const auto& record : ledger.records) {
                 const auto& presentation = record.requested.presentation;
@@ -2735,7 +2736,8 @@ namespace core3d {
             _manipulatorType = ledger.manipulatorType;
             if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                 && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
-                && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale) { return false; }
+                && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMaterial) { return false; }
             createManipulatorIfNeeded();
             const bool scale = _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
             const bool moveRotate = _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;

@@ -183,6 +183,8 @@ struct TransformInspectorMeasurementDebugState {
 
 //! Main-thread selection capture plus a bounded hybrid local-bounds engine.
 //! The controller owns no UI and never mutates the document or presentation.
+class OrdinaryEditController;
+
 class TransformInspectorMeasurementController final
     : public std::enable_shared_from_this<
           TransformInspectorMeasurementController> {
@@ -212,13 +214,14 @@ public:
         const std::shared_ptr<ShapeInteractor>& shapeInteractor,
         TransformInspectorMeasurementCompletion completion = {}) noexcept;
 
-    //! Compare-and-swap one raw model-unit Position scalar. Persistence is
-    //! completed here; Core3DViewer owns presentation publication and the one
-    //! document notification after a Committed outcome.
+    //! Compare-and-swap one raw model-unit Position scalar. The captured
+    //! inspector lease admits the request; the shared edit controller owns
+    //! persistence, presentation recovery and document publication.
     TransformInspectorPositionCommitOutcome commitPosition(
         const std::shared_ptr<ObjectInteractor>& objectInteractor,
         const std::shared_ptr<ShapeInteractor>& shapeInteractor,
-        const TransformInspectorPositionCommitRequest& request) noexcept;
+        const TransformInspectorPositionCommitRequest& request,
+        const std::shared_ptr<OrdinaryEditController>& edits) noexcept;
 
     //! Invalidate the current generation and suppress its completion. Exact
     //! AddOptimal work already inside OCCT may finish and populate the cache.
