@@ -28,6 +28,11 @@ typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
     Core3DObjectAlignmentAnchorCenter,
     Core3DObjectAlignmentAnchorMaximum,
     Core3DObjectAlignmentAnchorGround,
+    //! Distribute 3–32 objects in center order, with stable entity-ID ties.
+    //! Centers keeps endpoint centers fixed; Gaps preserves outer bounds and
+    //! rejects insufficient space. Saved-group members remain separate parts.
+    Core3DObjectAlignmentAnchorEqualCenters,
+    Core3DObjectAlignmentAnchorEqualGaps,
 };
 typedef NS_ENUM(NSInteger, Core3DObjectAlignmentResult) {
     Core3DObjectAlignmentResultUnchanged = 0,

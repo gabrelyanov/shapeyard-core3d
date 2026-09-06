@@ -1556,7 +1556,8 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || axis < 0 || axis > 2 || width == 0 || height == 0
         || (anchor != ObjectAlignmentAnchor::Minimum && anchor != ObjectAlignmentAnchor::Center
-            && anchor != ObjectAlignmentAnchor::Maximum && anchor != ObjectAlignmentAnchor::Ground)
+            && anchor != ObjectAlignmentAnchor::Maximum && anchor != ObjectAlignmentAnchor::Ground
+            && anchor != ObjectAlignmentAnchor::EqualCenters && anchor != ObjectAlignmentAnchor::EqualGaps)
         || (anchor == ObjectAlignmentAnchor::Ground && axis != 2)) { return {}; }
     try {
         OCC_CATCH_SIGNALS
@@ -1567,7 +1568,8 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
             || snapshot->revisions.model != identity.modelRevision
             || snapshot->revisions.presentation != presentationRevision
             || snapshot->selection.selected.size() > 32
-            || snapshot->selection.selected.size() < (anchor == ObjectAlignmentAnchor::Ground ? 1 : 2)) { return {}; }
+            || snapshot->selection.selected.size() < (anchor == ObjectAlignmentAnchor::Ground ? 1
+                : (anchor == ObjectAlignmentAnchor::EqualCenters || anchor == ObjectAlignmentAnchor::EqualGaps) ? 3 : 2)) { return {}; }
         auto work = std::make_shared<ObjectAlignmentWork>();
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height; work->axis = axis; work->anchor = anchor;
@@ -1715,23 +1717,62 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
         const auto coordinate = [&](double lo, double hi) {
             switch (work->anchor) {
                 case ObjectAlignmentAnchor::Minimum: case ObjectAlignmentAnchor::Ground: return lo;
-                case ObjectAlignmentAnchor::Center: return lo * 0.5 + hi * 0.5;
+                case ObjectAlignmentAnchor::Center:
+                case ObjectAlignmentAnchor::EqualCenters: return lo * 0.5 + hi * 0.5;
+                case ObjectAlignmentAnchor::EqualGaps: return lo;
                 case ObjectAlignmentAnchor::Maximum: return hi;
             }
             return lo;
         };
         const double target = work->anchor == ObjectAlignmentAnchor::Ground ? 0 : coordinate(minimum, maximum);
+        const auto& geometry = work->measurement->geometry;
+        std::vector<double> targets(geometry.size(), target);
+        if (work->anchor == ObjectAlignmentAnchor::EqualCenters || work->anchor == ObjectAlignmentAnchor::EqualGaps) {
+            if (geometry.size() < 3 || geometry.size() != work->authority.records.size()) { return OrdinaryEditResult::Invalid; }
+            std::vector<std::size_t> order;
+            for (std::size_t i = 0; i < geometry.size(); ++i) { order.push_back(i); }
+            const auto center = [&](std::size_t i) {
+                return geometry[i].bounds[axis] * 0.5 + geometry[i].bounds[axis + 3] * 0.5;
+            };
+            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                const double ca = center(a), cb = center(b);
+                return ca != cb ? ca < cb : work->authority.records[a].previous.entityIdentifier
+                    < work->authority.records[b].previous.entityIdentifier;
+            });
+            if (work->anchor == ObjectAlignmentAnchor::EqualCenters) {
+                const double first = center(order.front()), last = center(order.back());
+                for (std::size_t rank = 0; rank < order.size(); ++rank) {
+                    const double fraction = static_cast<double>(rank) / static_cast<double>(order.size() - 1);
+                    targets[order[rank]] = first * (1 - fraction) + last * fraction;
+                }
+            } else {
+                double totalExtent = 0;
+                for (const auto& item : geometry) { totalExtent += item.bounds[axis + 3] - item.bounds[axis]; }
+                const double available = maximum - minimum - totalExtent;
+                // This command promises free gaps, not overlapping centers.
+                // Allow only kernel rounding below modeling precision.
+                if (!std::isfinite(available) || available < -1e-7) { return OrdinaryEditResult::Invalid; }
+                const double gap = std::max(0.0, available) / static_cast<double>(order.size() - 1);
+                double nextMinimum = minimum;
+                for (const auto index : order) {
+                    targets[index] = nextMinimum;
+                    nextMinimum += geometry[index].bounds[axis + 3] - geometry[index].bounds[axis] + gap;
+                }
+            }
+        }
         std::vector<OrdinaryTransformChange> changes;
-        for (std::size_t index = 0; index < work->measurement->geometry.size(); ++index) {
+        for (std::size_t index = 0; index < geometry.size(); ++index) {
             auto change = work->authority.records[index].requested;
             const auto& b = work->measurement->geometry[index].bounds;
-            const double delta = target - coordinate(b[axis], b[axis + 3]);
+            const double delta = targets[index] - coordinate(b[axis], b[axis + 3]);
             if (!std::isfinite(delta)) { return OrdinaryEditResult::Invalid; }
             auto translation = change.transform.TranslationPart();
             // Ignore kernel-bound rounding below modeling precision. This
             // makes repeated alignment a true no-op without history noise.
             if (std::abs(delta) > 1e-7) {
-                translation.SetCoord(axis + 1, translation.Coord(axis + 1) + delta);
+                const double translated = translation.Coord(axis + 1) + delta;
+                if (!std::isfinite(translated)) { return OrdinaryEditResult::Invalid; }
+                translation.SetCoord(axis + 1, translated);
                 change.transform.SetTranslationPart(gp_Vec(translation));
             }
             changes.push_back(std::move(change));

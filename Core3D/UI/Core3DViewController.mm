@@ -5415,7 +5415,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         || expected.publicationSourceIdentifier.length == 0
         || expected.publicationSourceIdentifier.length > 128
         || axis < Core3DTransformInspectorAxisX || axis > Core3DTransformInspectorAxisZ
-        || anchor < Core3DObjectAlignmentAnchorMinimum || anchor > Core3DObjectAlignmentAnchorGround) {
+        || anchor < Core3DObjectAlignmentAnchorMinimum || anchor > Core3DObjectAlignmentAnchorEqualGaps) {
         completion(Core3DObjectAlignmentResultRejected); return;
     }
     const auto viewer = GLController.viewer;

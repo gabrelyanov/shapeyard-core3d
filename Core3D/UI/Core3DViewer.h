@@ -42,7 +42,7 @@ namespace core3d {
 
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
-    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground };
+    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps };
 
     class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
     public:
