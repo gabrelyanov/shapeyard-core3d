@@ -1302,11 +1302,16 @@ namespace core3d {
 				}
 				++committedCount;
 			}
+            const auto& groups = _pendingDuplicateResults.front().groups;
+            OcctSavedGroupState actualGroups;
+            if (!groups || !myDoc->CaptureSavedGroups(actualGroups)) { return DuplicateDocumentState::Unavailable; }
 			if (committedCount == _pendingDuplicateResults.size()) {
-				return DuplicateDocumentState::AllCommitted;
+                return groups->candidateSealed && groups->candidate.IsEqual(actualGroups)
+                    ? DuplicateDocumentState::AllCommitted : DuplicateDocumentState::PartialOrMismatched;
 			}
 			if (missingCount == _pendingDuplicateResults.size()) {
-				return DuplicateDocumentState::None;
+                return groups->previous.IsEqual(actualGroups)
+                    ? DuplicateDocumentState::None : DuplicateDocumentState::PartialOrMismatched;
 			}
 			return DuplicateDocumentState::PartialOrMismatched;
 		} catch (...) {
@@ -1534,6 +1539,16 @@ namespace core3d {
 		if (!myDoc->CanDuplicateGeometryDefinitions(sourceLabels)) {
 			return;
 		}
+        OcctSavedGroupState groupBefore;
+        if (!myDoc->CaptureSavedGroups(groupBefore)) { return; }
+        const auto fullySelected = [&](const OcctSavedGroup& group) {
+            return !group.members.empty() && std::all_of(group.members.begin(), group.members.end(), [&](const auto& label) {
+                return std::any_of(sourceLabels.begin(), sourceLabels.end(), [&](const auto& source) { return source.IsEqual(label); });
+            });
+        };
+        const auto activeGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), [](const auto& g) { return !g.members.empty(); });
+        const auto copiedGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), fullySelected);
+        if (activeGroups + copiedGroups > 128) { return; }
 
         Bnd_Box overallBox;
         for (const DuplicateSource& source : sources) {
@@ -1623,6 +1638,8 @@ namespace core3d {
 			return;
 		}
 		if (duplicates.empty()) { return; }
+        duplicates.front().groups.emplace();
+        duplicates.front().groups->previous = groupBefore;
 		_pendingDuplicateResults = std::move(duplicates);
 
 		const auto retainRetryableOrUnknown = [&]() noexcept {
@@ -1739,6 +1756,27 @@ namespace core3d {
 				}
 				myDoc->LoadObjectMeterial(label, duplicate.presentation);
 			}
+            auto& groupAuthority = *_pendingDuplicateResults.front().groups;
+            if (copiedGroups > 0) {
+                auto requested = groupAuthority.previous.groups;
+                requested.erase(std::remove_if(requested.begin(), requested.end(), [](const auto& g) { return g.members.empty(); }), requested.end());
+                for (const auto& original : groupAuthority.previous.groups) {
+                    if (!fullySelected(original)) { continue; }
+                    OcctSavedGroup copy;
+                    copy.identifier = OcctDocument::NewSavedGroupIdentifier();
+                    copy.name = original.name;
+                    if (copy.name.Length() <= 251) { copy.name += TCollection_ExtendedString(" copy"); }
+                    for (const auto& label : original.members) {
+                        const auto result = std::find_if(_pendingDuplicateResults.begin(), _pendingDuplicateResults.end(), [&](const auto& r) { return r.sourceLabel.IsEqual(label); });
+                        if (result == _pendingDuplicateResults.end() || result->resultLabel.IsNull()) { retainRetryableOrUnknown(); return; }
+                        copy.members.push_back(result->resultLabel);
+                    }
+                    requested.push_back(std::move(copy));
+                }
+                if (!myDoc->StageSavedGroups(requested)) { retainRetryableOrUnknown(); return; }
+            }
+            if (!myDoc->CaptureSavedGroups(groupAuthority.candidate)) { retainRetryableOrUnknown(); return; }
+            groupAuthority.candidateSealed = true;
 			if (!myDoc->ValidateGeometryRepresentations()) {
 				retainRetryableOrUnknown();
 				return;
@@ -2564,7 +2602,19 @@ namespace core3d {
             if (shouldAttach && _manipulator.IsNull()) {
                 setManipulatorType(_manipulatorType);
             }
-            attachManipulatorToSelection();
+            if (shouldAttach) {
+                if (_manipulator.IsNull()) { throw Standard_Failure("Browser group has no gizmo"); }
+                // The legacy helper attaches only its last selected object.
+                // Bind the complete, already admitted group in one operation.
+                _manipulator->Detach();
+                Handle(Core3DManipulatorObjectSequence) objects = new Core3DManipulatorObjectSequence();
+                _manipulatorSourceLabels.clear();
+                for (const auto& target : targets) {
+                    objects->Append(target);
+                    _manipulatorSourceLabels.emplace(target.get(), myDoc->ShapeLabel(target));
+                }
+                _manipulator->Attach(objects);
+            }
             if (isManipulatorAttached() != shouldAttach) {
                 throw Standard_Failure("Browser selection gizmo availability mismatch");
             }

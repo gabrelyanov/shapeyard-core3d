@@ -1908,7 +1908,8 @@ OrdinaryEditResult Core3DViewer::editSavedGroup(int operation, const std::string
                 if (count != 1) { return OrdinaryEditResult::Invalid; }
             }
             OcctSavedGroup group;
-            group.identifier = NSUUID.UUID.UUIDString.UTF8String; group.name = name;
+            group.identifier = OcctDocument::NewSavedGroupIdentifier(); group.name = name;
+            if (group.identifier.empty()) { return OrdinaryEditResult::Invalid; }
             TDF_LabelSequence labels;
             XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main())->GetFreeShapes(labels);
             if (labels.Length() > 50000) { return OrdinaryEditResult::Invalid; }

@@ -3893,6 +3893,54 @@ void Core3DAddDebugOrphanVisualMaterial(
         });
 }
 
+- (NSData *_Nullable)debugSavedGroupBinXCAFFixture:(NSInteger)mode {
+    if (mode < 0 || mode > 12) { return nil; }
+    return Core3DCreateDebugBinXCAFFixture(@"saved-group-schema", [mode](const Handle(TDocStd_Document)& document) {
+        // Independent on-disk schema fixture, deliberately repeats persistent
+        // GUIDs instead of asking production helpers to author a valid record.
+        const Standard_GUID containerID("EC7B5F15-218F-47E4-BF6A-61BF42861401");
+        const Standard_GUID recordID("EC7B5F15-218F-47E4-BF6A-61BF42861402");
+        const Standard_GUID nameID("EC7B5F15-218F-47E4-BF6A-61BF42861403");
+        const Standard_GUID memberID("EC7B5F15-218F-47E4-BF6A-61BF42861404");
+        const Standard_GUID entityID("0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+        const Standard_GUID definitionID("3611F2B2-C694-4E12-AED8-A2A97A3D283B");
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto root = document->GetData()->Root();
+        const auto container = mode == 2 ? document->Main().FindChild(47, Standard_True) : root.FindChild(42, Standard_True);
+        if (mode == 1) { TDataStd_Real::Set(container, containerID, 1.0); }
+        else { TDataStd_Integer::Set(container, containerID, mode == 3 ? 2 : 1); }
+        const std::string id = "9824816B-0E48-45A5-B874-1D703D68D23D";
+        const auto record = container.FindChild(1, Standard_True);
+        TDataStd_AsciiString::Set(record, recordID, TCollection_AsciiString(mode == 4 ? "bad-identifier" : id.c_str()));
+        if (mode != 5) {
+            TDataStd_Name::Set(record, nameID, TCollection_ExtendedString(mode == 6 ? " bad name " : "Imported group"));
+        }
+        if (mode == 7) {
+            const auto duplicate = container.FindChild(2, Standard_True);
+            TDataStd_AsciiString::Set(duplicate, recordID, TCollection_AsciiString(id.c_str()));
+            TDataStd_Name::Set(duplicate, nameID, TCollection_ExtendedString("Duplicate ID"));
+        }
+        if (mode == 8) { TDataStd_AsciiString::Set(root, memberID, TCollection_AsciiString(id.c_str())); }
+        if (mode == 9) {
+            for (int i = 2; i <= 129; ++i) {
+                const auto extra = container.FindChild(i, Standard_True);
+                TDataStd_AsciiString::Set(extra, recordID, TCollection_AsciiString(NSUUID.UUID.UUIDString.UTF8String));
+                TDataStd_Name::Set(extra, nameID, TCollection_ExtendedString("Extra group"));
+            }
+        }
+        const int count = mode == 10 ? 33 : 2;
+        for (int i = 0; i < count; ++i) {
+            const auto label = Core3DAddDebugGeometryDefinition(shapes,
+                BRepPrimAPI_MakeBox(gp_Pnt(i * 5.0, 0, 0), 2, 2, 2).Shape());
+            Core3DSetDebugGeometryRepresentation(label, static_cast<Standard_Integer>(OcctGeometryRepresentation::BRep));
+            TDataStd_AsciiString::Set(label, entityID, TCollection_AsciiString(NSUUID.UUID.UUIDString.UTF8String));
+            TDataStd_AsciiString::Set(label, definitionID, TCollection_AsciiString(NSUUID.UUID.UUIDString.UTF8String));
+            if (mode == 11) { TDataStd_Integer::Set(label, memberID, 1); }
+            else { TDataStd_AsciiString::Set(label, memberID, TCollection_AsciiString(mode == 12 ? "9824816B-0E48-45A5-B874-1D703D68D23E" : id.c_str())); }
+        }
+    });
+}
+
 - (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData {
     return Core3DCreateDebugBinXCAFFixture(
         @"hidden-assembly-visibility-fixture",

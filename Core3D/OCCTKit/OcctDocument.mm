@@ -6035,6 +6035,10 @@ Standard_Boolean OcctSavedGroupState::IsEqual(const OcctSavedGroupState& other) 
         return Standard_True;
     } catch (...) { return Standard_False; }
 }
+std::string OcctDocument::NewSavedGroupIdentifier() noexcept {
+    if (![NSThread isMainThread]) { return {}; }
+    try { return NewIdentifier(); } catch (...) { return {}; }
+}
 Standard_Boolean OcctDocument::CaptureSavedGroups(OcctSavedGroupState& state) const noexcept {
     state = OcctSavedGroupState();
     return [NSThread isMainThread] && ReadSavedGroups(myOcafDoc, state);

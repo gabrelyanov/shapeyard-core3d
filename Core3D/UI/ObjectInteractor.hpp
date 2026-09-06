@@ -478,6 +478,11 @@ namespace core3d {
 		
     private:
 		Standard_ShortReal _manipulatorSide;
+        struct DuplicateGroupAuthority {
+            OcctSavedGroupState previous;
+            OcctSavedGroupState candidate;
+            bool candidateSealed = false;
+        };
 		struct DuplicatePendingResult {
 			Handle(AIS_Shape) presentation;
 			TDF_Label sourceLabel;
@@ -491,6 +496,7 @@ namespace core3d {
 			OcctReferenceAxisReadState expectedReferenceAxisState =
 				OcctReferenceAxisReadState::Invalid;
 			OcctReferenceAxis expectedReferenceAxis;
+            std::optional<DuplicateGroupAuthority> groups; // owned by the first result only
 		};
 		std::vector<DuplicatePendingResult> _pendingDuplicateResults;
 		bool _duplicateOwnsDocumentCommand = false;

@@ -970,6 +970,7 @@ typedef struct {
 //! Standalone BinXCAF with two free roots sharing the same assembly subtree.
 - (NSData *_Nullable)debugSharedSubtreeMultipleRootsBinXCAFFixtureData;
 //! Standalone assembly containing visible and hidden path/layer variants.
+- (NSData *_Nullable)debugSavedGroupBinXCAFFixture:(NSInteger)mode;
 - (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData;
 //! Standalone free located box used to verify TopoDS location ownership.
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
