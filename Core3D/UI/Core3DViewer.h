@@ -88,6 +88,14 @@ namespace core3d {
         OrdinaryEditLease beginOrdinaryTransform(const std::vector<OrdinaryTransformChange>& changes,
                                                  OrdinaryEditResult* failure = nullptr) noexcept;
         OrdinaryEditResult reconcileOrdinaryEdit() noexcept;
+        OrdinaryEditResult setObjectVisibilityFromBrowser(const ObjectFrameIdentity& identity,
+            bool visible, std::uint64_t presentationRevision, std::uint32_t viewportWidth,
+            std::uint32_t viewportHeight, bool* blockedByLayer = nullptr) noexcept;
+#ifdef DEBUG
+        void debugSetOrdinaryVisibilityAfterRepairFailures(int count) noexcept {
+            _debugOrdinaryVisibilityAfterRepairFailures = count > 0 ? count : 0;
+        }
+#endif
         OrdinaryEditResult renameObjectFromBrowser(const ObjectFrameIdentity& identity,
             const TCollection_ExtendedString& name, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
@@ -339,11 +347,14 @@ namespace core3d {
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
 #ifdef DEBUG
         int _debugOrdinaryRepairFailures = 0;
+        int _debugOrdinaryVisibilityAfterRepairFailures = 0;
         int _debugOrdinaryRedrawFailures = 0;
         int _debugOrdinaryOwnerResolutionFailures = 0;
         int _debugOrdinaryRedrawAttempts = 0;
 #endif
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
+        bool admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept override;
+        bool repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
         bool admitNames(OrdinaryNameLedger& ledger) noexcept override;
         bool repairNames(const OrdinaryNameLedger& ledger, bool committed) noexcept override;
         bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept override;

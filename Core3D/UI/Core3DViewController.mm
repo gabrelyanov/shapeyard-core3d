@@ -2565,6 +2565,15 @@ void Core3DAddDebugOrphanVisualMaterial(
     GLController.viewer->debugSetOrdinaryRepairFailures((int)incremental, (int)redraw);
 }
 
+- (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return; }
+    GLController.viewer->debugSetOrdinaryVisibilityAfterRepairFailures(static_cast<int>(count));
+}
+
+- (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode {
+    return [self debugConfigureOrdinaryNameFault:mode];
+}
+
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode {
     if (![self debugConfigureOrdinaryGestureFault:mode]) { return NO; }
     GLController.viewer->debugOrdinaryEditController()->debugSetStageFailureIndex(mode == 4 ? 0 : -1);
@@ -5168,6 +5177,55 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
     } catch (...) {}
     return Core3DObjectNameEditResultRejected;
+}
+
+- (Core3DObjectVisibilityEditResult)setObjectVisibilityWithEntityIdentifier:(NSString *)entityIdentifier
+                                                      visible:(BOOL)visible
+                                                  expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || expected.selectionMode != Core3DSceneElementKindObject
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DObjectVisibilityEditResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DObjectVisibilityEditResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DObjectVisibilityEditResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        bool blockedByLayer = false;
+        const auto result = GLController.viewer->setObjectVisibilityFromBrowser(identity, visible,
+            expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)), &blockedByLayer);
+        if (blockedByLayer) { return Core3DObjectVisibilityEditResultBlockedByLayer; }
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DObjectVisibilityEditResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                // Publish controls only after native presentation and history settle.
+                [GLController refreshSelectionState];
+                [self viewDidChangeViewportPresentationState];
+                [self sendNotifyUIState:UIStateChangingSelection | UIStateChangingGizmo
+                    | UIStateChangingDelete | UIStateChangingDuplicate | UIStateChangingApply
+                    | UIStateChangingApplyMaterial | UIStateChangingHistory];
+                return Core3DObjectVisibilityEditResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DObjectVisibilityEditResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DObjectVisibilityEditResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DObjectVisibilityEditResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DObjectVisibilityEditResultFailed;
+        }
+    } catch (...) {}
+    return Core3DObjectVisibilityEditResultRejected;
 }
 
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

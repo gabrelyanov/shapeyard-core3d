@@ -1,3 +1,6 @@
+#include <TDataStd_UAttribute.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_GraphNode.hxx>
 #include <TDataStd_Name.hxx>
 // Copyright (c) 2017 OPEN CASCADE SAS
 //
@@ -5822,6 +5825,85 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         state = OcctObjectTransformState();
         return Standard_False;
     }
+}
+
+Standard_Boolean OcctObjectVisibilityState::HasSameObjectAndLayers(
+    const OcctObjectVisibilityState& other) const noexcept {
+    try {
+        if (!object.IsEqual(other.object) || layerLinkPresent != other.layerLinkPresent
+            || layers.size() != other.layers.size()
+            || layerInvisibleAttributePresent != other.layerInvisibleAttributePresent) { return Standard_False; }
+        for (std::size_t index = 0; index < layers.size(); ++index) {
+            if (!layers[index].IsEqual(other.layers[index])) { return Standard_False; }
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctObjectVisibilityState::IsEqual(const OcctObjectVisibilityState& other) const noexcept {
+    return invisibleAttributePresent == other.invisibleAttributePresent && HasSameObjectAndLayers(other);
+}
+
+Standard_Boolean OcctObjectVisibilityState::IsEffectivelyVisible() const noexcept {
+    if (invisibleAttributePresent) { return Standard_False; }
+    for (bool hidden : layerInvisibleAttributePresent) { if (hidden) { return Standard_False; } }
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::CaptureObjectVisibilityStateForLabel(
+    const TDF_Label& label, OcctObjectVisibilityState& state) const noexcept {
+    state = OcctObjectVisibilityState();
+    if (![NSThread isMainThread]) { return Standard_False; }
+    try {
+        OcctObjectVisibilityState captured;
+        if (!CaptureObjectNameStateForLabel(label, captured.object)) { return Standard_False; }
+        const auto captureInvisible = [](const TDF_Label& target, bool& present) {
+            Handle(TDF_Attribute) attribute;
+            present = target.FindAttribute(XCAFDoc::InvisibleGUID(), attribute);
+            return !present || !Handle(TDataStd_UAttribute)::DownCast(attribute).IsNull();
+        };
+        bool hidden = false;
+        if (!captureInvisible(label, hidden)) { return Standard_False; }
+        captured.invisibleAttributePresent = hidden;
+        Handle(TDF_Attribute) association;
+        if (label.FindAttribute(XCAFDoc::LayerRefGUID(), association)) {
+            const auto graph = Handle(XCAFDoc_GraphNode)::DownCast(association);
+            if (graph.IsNull() || graph->NbFathers() < 0 || graph->NbFathers() > 1024) { return Standard_False; }
+            captured.layerLinkPresent = Standard_True;
+            for (Standard_Integer index = 1; index <= graph->NbFathers(); ++index) {
+                const auto father = graph->GetFather(index);
+                if (father.IsNull()) { return Standard_False; }
+                const auto layer = father->Label();
+                if (layer.IsNull() || layer.Data() != captured.object.object.documentData
+                    || !captureInvisible(layer, hidden)) { return Standard_False; }
+                for (const auto& previous : captured.layers) {
+                    if (previous.IsEqual(layer)) { return Standard_False; }
+                }
+                captured.layers.push_back(layer);
+                captured.layerInvisibleAttributePresent.push_back(hidden);
+            }
+        }
+        state = std::move(captured);
+        return Standard_True;
+    } catch (...) { state = OcctObjectVisibilityState(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::SetObjectVisibilityForLabel(
+    const TDF_Label& label, Standard_Boolean visible) noexcept {
+    if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || !XCAFDoc_DocumentTool::CheckColorTool(myOcafDoc->Main())) { return Standard_False; }
+    try {
+        OcctObjectVisibilityState before, after;
+        if (!CaptureObjectVisibilityStateForLabel(label, before)) { return Standard_False; }
+        if (visible) {
+            for (bool hidden : before.layerInvisibleAttributePresent) { if (hidden) { return Standard_False; } }
+        }
+        if (before.invisibleAttributePresent == !visible) { return Standard_True; }
+        const auto colors = XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
+        colors->SetVisibility(label, visible);
+        return CaptureObjectVisibilityStateForLabel(label, after)
+            && before.HasSameObjectAndLayers(after) && after.invisibleAttributePresent == !visible;
+    } catch (...) { return Standard_False; }
 }
 
 Standard_Boolean OcctObjectNameState::IsEqual(const OcctObjectNameState& other) const noexcept {

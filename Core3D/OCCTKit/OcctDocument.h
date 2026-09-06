@@ -90,6 +90,19 @@ struct OcctObjectNameState
     Standard_EXPORT Standard_Boolean IsEqual(const OcctObjectNameState& other) const noexcept;
 };
 
+//! Exact object visibility plus the layer associations that can independently
+//! hide it. This family supports editable free definitions, never occurrences.
+struct OcctObjectVisibilityState {
+    OcctObjectNameState object;
+    Standard_Boolean invisibleAttributePresent = Standard_False;
+    Standard_Boolean layerLinkPresent = Standard_False;
+    std::vector<TDF_Label> layers;
+    std::vector<bool> layerInvisibleAttributePresent;
+    Standard_EXPORT Standard_Boolean HasSameObjectAndLayers(const OcctObjectVisibilityState& other) const noexcept;
+    Standard_EXPORT Standard_Boolean IsEqual(const OcctObjectVisibilityState& other) const noexcept;
+    Standard_EXPORT Standard_Boolean IsEffectivelyVisible() const noexcept;
+};
+
 //! A bounded nonempty Unicode object name. Display names are never identity.
 Standard_EXPORT Standard_Boolean OcctObjectNameIsValid(
     const TCollection_ExtendedString& name) noexcept;
@@ -387,6 +400,12 @@ public:
     Standard_Boolean SaveObjectTransform(
         const TDF_Label& label, const Handle(AIS_Shape) anAis);
     void LoadObjectTransform(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    Standard_EXPORT Standard_Boolean CaptureObjectVisibilityStateForLabel(
+        const TDF_Label& label, OcctObjectVisibilityState& state) const noexcept;
+    //! Stage the object's own flag only. Showing a layer-hidden object is
+    //! rejected without editing its layer or publishing a false visible result.
+    Standard_EXPORT Standard_Boolean SetObjectVisibilityForLabel(
+        const TDF_Label& label, Standard_Boolean visible) noexcept;
     Standard_EXPORT Standard_Boolean CaptureObjectNameStateForLabel(
         const TDF_Label& label, OcctObjectNameState& state) const noexcept;
     //! Stage only the name in the caller's open command; verify exact readback

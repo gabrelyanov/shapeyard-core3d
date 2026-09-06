@@ -2635,6 +2635,174 @@ namespace core3d {
         return controller && controller->blocksNormalWork();
     }
 
+    bool ObjectInteractor::captureOrdinaryVisibilityAuthority(OrdinaryVisibilityLedger& ledger) const noexcept {
+        try {
+            if (ledger.records.empty() || ledger.records.size() > 1024
+                || !captureOrdinaryNameAuthority(ledger.authority)) { return false; }
+            ledger.selectedObjects.clear();
+            for (const auto& selected : ledger.authority.selectedPresentations) {
+                OcctObjectNameState state;
+                if (!myDoc->CaptureObjectNameStateForLabel(myDoc->ShapeLabel(selected.presentation), state)
+                    || !myDoc->IsPresentationEditable(selected.presentation)) { return false; }
+                ledger.selectedObjects.push_back(state);
+            }
+            AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            if (displayed.Extent() > 50000) { return false; }
+            ledger.targetPresentations.clear();
+            for (const auto& record : ledger.records) {
+                Handle(AIS_Shape) found;
+                for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                    const auto presentation = Handle(AIS_Shape)::DownCast(it.Value());
+                    if (presentation.IsNull()
+                        || !myDoc->ShapeLabel(presentation).IsEqual(record.previous.object.object.label)) { continue; }
+                    if (!found.IsNull() || !myDoc->IsPresentationEditable(presentation)
+                        || !presentation->Shape().IsEqual(record.previous.object.object.shape)
+                        || TransformDiffers(presentation->LocalTransformation(), record.previous.object.object.transform)) {
+                        return false;
+                    }
+                    found = presentation;
+                }
+                if (record.previous.IsEffectivelyVisible() != !found.IsNull()) { return false; }
+                ledger.targetPresentations.push_back(found);
+            }
+            return true;
+        } catch (...) { return false; }
+    }
+
+    bool ObjectInteractor::repairOrdinaryVisibilityPresentation(
+        const OrdinaryVisibilityLedger& ledger, bool committed) noexcept {
+        try {
+            if (myDoc.IsNull() || myContext.IsNull() || ledger.records.empty()
+                || ledger.selectedObjects.size() != ledger.authority.selectedPresentations.size()) { return false; }
+            const auto sameTransform = [](const gp_Trsf& a, const gp_Trsf& b) {
+                for (int row = 1; row <= 3; ++row) {
+                    for (int col = 1; col <= 4; ++col) {
+                        if (a.Value(row, col) != b.Value(row, col)) { return false; }
+                    }
+                }
+                return true;
+            };
+            const auto isHiddenTarget = [&](const Handle(AIS_InteractiveObject)& object) {
+                const auto presentation = Handle(AIS_Shape)::DownCast(object);
+                if (presentation.IsNull()) { return false; }
+                const auto label = myDoc->ShapeLabel(presentation);
+                for (const auto& record : ledger.records) {
+                    const auto& saved = committed ? record.candidate : record.previous;
+                    if (label.IsEqual(saved.object.object.label)) { return !saved.IsEffectivelyVisible(); }
+                }
+                return false;
+            };
+            // Verify the surviving source objects before any selection repair.
+            for (std::size_t i = 0; i < ledger.selectedObjects.size(); ++i) {
+                const auto& expected = ledger.selectedObjects[i];
+                const auto& presentation = ledger.authority.selectedPresentations[i];
+                OcctObjectNameState actual;
+                if (!myDoc->CaptureObjectNameStateForLabel(expected.object.label, actual)
+                    || !actual.IsEqual(expected)
+                    || !presentation.presentation->Shape().IsEqual(presentation.shape)
+                    || !sameTransform(presentation.presentation->LocalTransformation(), presentation.transform)) {
+                    return false;
+                }
+            }
+            std::vector<Handle(SelectMgr_EntityOwner)> survivors;
+            for (const auto& owner : ledger.authority.selectionOwners) {
+                if (owner.IsNull()) { return false; }
+                const auto object = Handle(AIS_InteractiveObject)::DownCast(owner->Selectable());
+                if (object.IsNull()) { return false; }
+                if (!isHiddenTarget(object)) { survivors.push_back(owner); }
+            }
+            const bool changesSelection = survivors.size() != ledger.authority.selectionOwners.size();
+            if (changesSelection && !_manipulator.IsNull()) {
+                _manipulator->DeactivateCurrentMode();
+                _manipulator->Detach();
+                _manipulatorSourceLabels.clear();
+            }
+            AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            if (displayed.Extent() > 50000) { return false; }
+            for (const auto& record : ledger.records) {
+                const auto& expected = committed ? record.candidate : record.previous;
+                OcctObjectVisibilityState actual;
+                if (!myDoc->CaptureObjectVisibilityStateForLabel(expected.object.object.label, actual)
+                    || !actual.IsEqual(expected)) { return false; }
+                int matches = 0;
+                for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                    const auto presentation = Handle(AIS_Shape)::DownCast(it.Value());
+                    if (presentation.IsNull()
+                        || !myDoc->ShapeLabel(presentation).IsEqual(expected.object.object.label)) { continue; }
+                    if (++matches > 1 || !myDoc->IsPresentationEditable(presentation)
+                        || !presentation->Shape().IsEqual(expected.object.object.shape)
+                        || !sameTransform(presentation->LocalTransformation(), expected.object.object.transform)) { return false; }
+                    if (!expected.IsEffectivelyVisible()) { myContext->Remove(presentation, Standard_False); }
+                }
+                if (expected.IsEffectivelyVisible() && matches != 1) { return false; }
+            }
+            if (!changesSelection) {
+                // Showing never selects a new object or moves an existing gizmo.
+                if (!verifyOrdinaryNameAuthority(ledger.authority)) { return false; }
+            } else {
+                myContext->ClearDetected(Standard_False);
+                myContext->ClearSelected(Standard_False);
+                Handle(Core3DManipulatorObjectSequence) group = new Core3DManipulatorObjectSequence();
+                for (const auto& owner : survivors) {
+                    const auto object = Handle(AIS_InteractiveObject)::DownCast(owner->Selectable());
+                    if (object.IsNull() || !myContext->IsDisplayed(object)) { return false; }
+                    myContext->AddOrRemoveSelected(owner, Standard_False);
+                    group->Append(object);
+                }
+                _manipulatorType = ledger.authority.manipulatorType;
+                createManipulatorIfNeeded();
+                const bool scale = _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeScale;
+                const bool moveRotate = _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
+                for (int axis = 0; axis < 3; ++axis) {
+                    _manipulator->SetPart(axis, AIS_MM_Scaling, scale);
+                    _manipulator->SetPart(axis, AIS_MM_ScalingUniform, scale);
+                    _manipulator->SetPart(axis, AIS_MM_Translation, moveRotate);
+                    _manipulator->SetPart(axis, AIS_MM_Rotation, moveRotate);
+                    _manipulator->SetPart(axis, AIS_MM_TranslationPlane, Standard_False);
+                    _manipulator->SetPart(axis, AIS_MM_MirroringPlaneNeg, Standard_False);
+                    _manipulator->SetPart(axis, AIS_MM_MirroringPlanePos, Standard_False);
+                }
+                const bool attach = ledger.authority.hadManipulator && !survivors.empty()
+                    && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+                if (attach) {
+                    _manipulator->Attach(group);
+                    for (Core3DManipulatorObjectSequence::Iterator it(*group); it.More(); it.Next()) {
+                        const auto presentation = Handle(AIS_Shape)::DownCast(it.Value());
+                        _manipulatorSourceLabels.emplace(presentation.get(), myDoc->ShapeLabel(presentation));
+                    }
+                    _manipulator->UpdateCachedShapes();
+                    _manipulator->Redisplay();
+                }
+                _manipulator->DeactivateCurrentMode();
+                OrdinaryNameLedger repaired;
+                if (!captureOrdinaryNameAuthority(repaired)
+                    || repaired.selectionOwners != survivors
+                    || repaired.manipulatorType != ledger.authority.manipulatorType
+                    || repaired.hadManipulator != attach) { return false; }
+                if (attach) {
+                    if (repaired.manipulatorObjects.size() != survivors.size()) { return false; }
+                    for (std::size_t i = 0; i < repaired.manipulatorObjects.size(); ++i) {
+                        const auto presentation = Handle(AIS_Shape)::DownCast(repaired.manipulatorObjects[i]);
+                        if (presentation.IsNull() || !myDoc->ShapeLabel(presentation).IsEqual(repaired.manipulatorSourceLabels[i])
+                            || !presentation->Shape().IsEqual(repaired.manipulatorCachedShapes[i])) { return false; }
+                    }
+                }
+            }
+            // Removed AIS objects must also be absent from the active selector.
+            AIS_ListOfInteractive finalDisplay;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, finalDisplay);
+            for (AIS_ListIteratorOfListOfInteractive it(finalDisplay); it.More(); it.Next()) {
+                if (isHiddenTarget(it.Value())) { return false; }
+            }
+            _manipulatorGestureActive = false;
+            myContext->ClearDetected(Standard_False);
+            myContext->UpdateCurrentViewer();
+            return true;
+        } catch (...) { return false; }
+    }
+
     bool ObjectInteractor::captureOrdinaryNameAuthority(OrdinaryNameLedger& ledger) const noexcept {
         try {
             if (myDoc.IsNull() || myContext.IsNull() || _manipulatorGestureActive

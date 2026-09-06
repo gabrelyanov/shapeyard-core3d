@@ -32,6 +32,16 @@ typedef NS_ENUM(NSInteger, Core3DObjectNameEditResult) {
     Core3DObjectNameEditResultFailed,
 };
 
+typedef NS_ENUM(NSInteger, Core3DObjectVisibilityEditResult) {
+    Core3DObjectVisibilityEditResultUnchanged = 0,
+    Core3DObjectVisibilityEditResultCommitted,
+    Core3DObjectVisibilityEditResultRejected,
+    Core3DObjectVisibilityEditResultBusy,
+    Core3DObjectVisibilityEditResultRecoveryRequired,
+    Core3DObjectVisibilityEditResultFailed,
+    Core3DObjectVisibilityEditResultBlockedByLayer,
+};
+
 typedef NS_ENUM(NSInteger, Core3DAssetLoadResult) {
     Core3DAssetLoadResultSuccess = 0,
     Core3DAssetLoadResultInvalidData,
@@ -511,6 +521,11 @@ typedef struct {
 //! Does not move the camera or create a model-history entry.
 //! Rename one supported object without changing selection or geometry.
 //! The expected scene identity/revision must still match; names are not IDs.
+//! Object mode only. Changes a free object's saved visibility without selecting it.
+- (Core3DObjectVisibilityEditResult)setObjectVisibilityWithEntityIdentifier:(NSString *)entityIdentifier
+                                                                  visible:(BOOL)visible
+                                                                 expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(setObjectVisibility(entityIdentifier:visible:expected:));
 - (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                                                       name:(NSString *)name
                                                   expected:(Core3DSceneSnapshot *)expected
@@ -675,6 +690,8 @@ typedef struct {
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
+- (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;
+- (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count;
 - (void)debugSetViewerOrdinaryRepairFailures:(NSInteger)incremental redraw:(NSInteger)redraw;
 - (NSDictionary<NSString *, id> *)debugViewerOrdinaryState;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;

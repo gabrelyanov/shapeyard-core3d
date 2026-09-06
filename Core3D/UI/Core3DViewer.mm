@@ -1537,6 +1537,122 @@ OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
 OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
     return _ordinaryEditController ? _ordinaryEditController->reconcile() : OrdinaryEditResult::NoChange;
 }
+bool Core3DViewer::admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept {
+    if (![NSThread isMainThread] || !_objectInteractor || !_shapeInteractor || myDoc.IsNull()
+        || myDoc->Document().IsNull() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        || !_shapeInteractor->selectionModeAuthorityIsExact()
+        || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+        || !XCAFDoc_DocumentTool::CheckLayerTool(myDoc->Document()->Main())
+        || !XCAFDoc_DocumentTool::CheckColorTool(myDoc->Document()->Main())) { return false; }
+    ledger.selectionMode = ShapeSelectionMode::WholeShape;
+    return _objectInteractor->captureOrdinaryVisibilityAuthority(ledger);
+}
+
+bool Core3DViewer::repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept {
+    if (![NSThread isMainThread] || !_ordinaryEditController
+        || _ordinaryEditController->state() != OrdinaryEditState::RepairPending
+        || !_objectInteractor || !_shapeInteractor || myDoc.IsNull() || myContext.IsNull()
+        || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        || _shapeInteractor->getSelectionMode() != ledger.selectionMode
+        || ledger.selectionMode != ShapeSelectionMode::WholeShape) { return false; }
+#ifdef DEBUG
+    if (_debugOrdinaryRepairFailures > 0) { --_debugOrdinaryRepairFailures; return false; }
+#endif
+    try {
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()) { return false; }
+        // Recreate only a missing visible target. Surviving presentations and
+        // selection owners retain their identity; retries never duplicate it.
+        for (const auto& record : ledger.records) {
+            const auto& expected = committed ? record.candidate : record.previous;
+            OcctObjectVisibilityState actual;
+            if (!myDoc->CaptureObjectVisibilityStateForLabel(expected.object.object.label, actual)
+                || !actual.IsEqual(expected)) { return false; }
+            AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            if (displayed.Extent() > 50000) { return false; }
+            int matches = 0;
+            for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                const auto shape = Handle(AIS_Shape)::DownCast(it.Value());
+                if (!shape.IsNull() && myDoc->ShapeLabel(shape).IsEqual(expected.object.object.label)) { ++matches; }
+            }
+            if (matches > 1) { return false; }
+            if (expected.IsEffectivelyVisible() && matches == 0) {
+                XCAFPrs_Style style;
+                style.SetColorSurf(Quantity_NOC_GRAY80);
+                style.SetColorCurv(Quantity_NOC_GRAY80);
+                if (!displayWithChildren(document, expected.object.object.label, style)) { return false; }
+            }
+        }
+        if (!_objectInteractor->repairOrdinaryVisibilityPresentation(ledger, committed)
+            || !_shapeInteractor->selectionModeAuthorityIsExact()) { return false; }
+#ifdef DEBUG
+        if (_debugOrdinaryVisibilityAfterRepairFailures > 0) {
+            --_debugOrdinaryVisibilityAfterRepairFailures;
+            return false;
+        }
+#endif
+        return true;
+    } catch (...) { return false; }
+}
+
+OrdinaryEditResult Core3DViewer::setObjectVisibilityFromBrowser(
+    const ObjectFrameIdentity& identity, bool visible, std::uint64_t presentationRevision,
+    std::uint32_t viewportWidth, std::uint32_t viewportHeight, bool* blockedByLayer) noexcept {
+    if (blockedByLayer) { *blockedByLayer = false; }
+    if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) { return OrdinaryEditResult::Busy; }
+    if (viewportWidth == 0 || viewportHeight == 0
+        || identity.entityIdentifier.empty() || identity.entityIdentifier.size() > 128
+        || identity.entityIdentifier.find('\0') != std::string::npos
+        || identity.publicationSourceIdentifier.empty() || identity.publicationSourceIdentifier.size() > 128
+        || identity.publicationSourceIdentifier.find('\0') != std::string::npos
+        || !_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape) {
+        return OrdinaryEditResult::Invalid;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
+        if (!snapshot || identity.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+            || identity.documentGeneration != snapshot->revisions.documentGeneration
+            || identity.modelRevision != snapshot->revisions.model
+            || presentationRevision != snapshot->revisions.presentation) { return OrdinaryEditResult::Invalid; }
+        std::size_t matches = 0;
+        for (const auto& instance : snapshot->instances) {
+            if (instance.entityIdentifier == identity.entityIdentifier) {
+                if (instance.role != scene::RenderRole::Model) { return OrdinaryEditResult::Invalid; }
+                ++matches;
+            }
+        }
+        if (matches != 1) { return OrdinaryEditResult::Invalid; }
+        const auto document = myDoc->Document();
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence labels;
+        shapes->GetFreeShapes(labels);
+        if (labels.Length() > 50000) { return OrdinaryEditResult::Invalid; }
+        TDF_Label target;
+        for (Standard_Integer i = 1; i <= labels.Length(); ++i) {
+            const auto& label = labels.Value(i);
+            if (myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { continue; }
+            if (!target.IsNull() || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) { return OrdinaryEditResult::Invalid; }
+            target = label;
+        }
+        OcctObjectVisibilityState state;
+        if (target.IsNull() || !myDoc->CaptureObjectVisibilityStateForLabel(target, state)) { return OrdinaryEditResult::Invalid; }
+        if (visible) {
+            for (bool hidden : state.layerInvisibleAttributePresent) {
+                if (hidden) {
+                    if (blockedByLayer) { *blockedByLayer = true; }
+                    return OrdinaryEditResult::Invalid;
+                }
+            }
+        }
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = _ordinaryEditController->beginVisibility({{target, visible}}, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
 bool Core3DViewer::admitNames(OrdinaryNameLedger& ledger) noexcept {
     if (![NSThread isMainThread] || !_objectInteractor || !_shapeInteractor
         || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)

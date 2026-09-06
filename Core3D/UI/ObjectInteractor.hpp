@@ -35,6 +35,7 @@ namespace core3d {
     class Core3DViewer;
     struct OrdinaryTransformLedger;
     struct OrdinaryNameLedger;
+    struct OrdinaryVisibilityLedger;
 
     enum struct PrimitiveManipulatorType {
         PrimitiveGizmoTypeNone = 0,
@@ -100,6 +101,8 @@ namespace core3d {
         bool blocksForOrdinaryEdit() const noexcept;
         bool hasUnresolvedEdit() const noexcept;
         bool captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept;
+        bool captureOrdinaryVisibilityAuthority(OrdinaryVisibilityLedger& ledger) const noexcept;
+        bool repairOrdinaryVisibilityPresentation(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept;
         bool captureOrdinaryNameAuthority(OrdinaryNameLedger& ledger) const noexcept;
         bool verifyOrdinaryNameAuthority(const OrdinaryNameLedger& ledger) const noexcept;
         bool repairOrdinaryTransformPresentation(const OrdinaryTransformLedger& ledger, bool committed) noexcept;

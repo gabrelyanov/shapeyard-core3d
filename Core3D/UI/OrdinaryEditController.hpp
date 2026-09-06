@@ -13,7 +13,7 @@ namespace core3d {
 enum class PrimitiveManipulatorType;
 enum class ShapeSelectionMode;
 
-enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name };
+enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale };
@@ -83,6 +83,29 @@ struct OrdinaryNameLedger {
     gp_Ax2 manipulatorPosition;
 };
 
+struct OrdinaryVisibilityChange {
+    TDF_Label label;
+    bool visible = true;
+};
+
+struct OrdinaryVisibilityRecord {
+    OcctObjectVisibilityState previous;
+    OcctObjectVisibilityState candidate;
+    OrdinaryVisibilityChange requested;
+};
+
+struct OrdinaryVisibilityLedger {
+    std::vector<OrdinaryVisibilityRecord> records;
+    bool candidateSealed = false;
+    std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
+    std::vector<OcctObjectNameState> selectedObjects;
+    OrdinaryNameLedger authority;
+    PrimitiveManipulatorType manipulatorType = static_cast<PrimitiveManipulatorType>(0);
+    ShapeSelectionMode selectionMode = static_cast<ShapeSelectionMode>(0);
+    bool hadManipulator = false;
+    std::vector<Handle(AIS_Shape)> targetPresentations;
+};
+
 //! Typed presentation boundary. The viewer implements admission/repair for
 //! exact selection, tool, manipulator and renderer identity. Neither method
 //! may mutate OCAF or call NotifyChanges. No captured callbacks in a ledger.
@@ -91,6 +114,8 @@ public:
     virtual ~OrdinaryEditPresentationHost() = default;
     virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
     virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
+    virtual bool admitVisibility(OrdinaryVisibilityLedger&) noexcept { return false; }
+    virtual bool repairVisibility(const OrdinaryVisibilityLedger&, bool) noexcept { return false; }
     virtual bool repairNames(const OrdinaryNameLedger&, bool) noexcept { return false; }
     virtual bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept = 0;
     //! One bounded full redraw per reconciliation attempt. Only presentation
@@ -141,6 +166,8 @@ public:
                                      OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
                                 OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginVisibility(const std::vector<OrdinaryVisibilityChange>& changes,
+                                     OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditResult reconcile() noexcept;
     bool blocksNormalWork() const noexcept;
     OrdinaryEditState state() const noexcept { return _state; }
@@ -151,12 +178,15 @@ public:
 #endif
 private:
     friend class OrdinaryEditLease;
-    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger>;
+    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileImpl() noexcept;
     OrdinaryEditResult stageNamesAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileNamesImpl() noexcept;
+    OrdinaryEditResult stageVisibilityAndCommit(std::uint64_t token) noexcept;
+    OrdinaryEditResult reconcileVisibilityImpl() noexcept;
+    bool captureMatches(const OcctObjectVisibilityState& expected) const noexcept;
     bool captureMatches(const OcctObjectNameState& expected) const noexcept;
     bool captureMatches(const OcctObjectTransformState& expected) const noexcept;
     bool presentationMatches(const OrdinaryTransformLedger& ledger, bool committed) const noexcept;
