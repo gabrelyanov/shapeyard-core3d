@@ -343,6 +343,15 @@ namespace core3d {
 				return Standard_False;
 			}
 			try {
+                // BRepCheck_Edge::InContext in OCCT 7.8 dereferences the face
+                // surface. A malformed mixed BRep/triangulation candidate
+                // must fail admission before reaching that unchecked access.
+                for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+                    TopLoc_Location location;
+                    if (BRep_Tool::Surface(TopoDS::Face(faces.Current()), location).IsNull()) {
+                        return Standard_False;
+                    }
+                }
 				BRepCheck_Analyzer analyzer(shape, Standard_True);
 				return analyzer.IsValid();
 			} catch (...) {

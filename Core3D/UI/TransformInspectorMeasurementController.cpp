@@ -2256,7 +2256,16 @@ TransformInspectorMeasurementController::commitPosition(
             // Same affine BRep operation as axis scaling. Build from the exact
             // captured definition around its measured local center; no extra
             // synchronous exact-bounds sweep is needed for this diagonal map.
-            BRepBuilderAPI_GTransform builder(aStoredShape, *dimensionTransform, Standard_True);
+            // OCCT 7.8 NURBS conversion can rebuild an already-spline face
+            // with bare triangulation when NewSurface returns false. Work on
+            // an independent geometry-only copy so repeated edits preserve
+            // analytic surfaces and never clean the live document's mesh.
+            BRepBuilderAPI_Copy geometryCopy(aStoredShape, Standard_True, Standard_False);
+            if (!geometryCopy.IsDone() || geometryCopy.Shape().IsNull()) {
+                anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                return anOutcome;
+            }
+            BRepBuilderAPI_GTransform builder(geometryCopy.Shape(), *dimensionTransform, Standard_True);
             if (!builder.IsDone() || builder.Shape().IsNull()) {
                 anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
                 return anOutcome;
