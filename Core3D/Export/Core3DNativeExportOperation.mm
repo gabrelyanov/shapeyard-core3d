@@ -23,6 +23,8 @@
 #include <Prs3d_Drawer.hxx>
 #include <RWMesh_FaceIterator.hxx>
 #include <RWObj_CafWriter.hxx>
+#include <RWObj_ObjWriterContext.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
 #include <RWStl.hxx>
 #include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
@@ -55,6 +57,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <locale>
+#include <unordered_map>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -168,6 +173,48 @@ public:
         return myCreatesMaterialFile ? myTextures.Extent() : 0;
     }
 
+    using PBRScalars = std::array<double, 5>;
+    const std::unordered_map<std::string, PBRScalars>& MaterialScalars() const {
+        return myMaterialScalars;
+    }
+
+protected:
+    bool writePositions(RWObj_ObjWriterContext& writer,
+                        Message_LazyProgressScope& progress,
+                        const RWMesh_FaceIterator& face) override {
+        // OCCT registers the effective face material before writing positions.
+        // Use that exact key; material names cannot be reconstructed from labels.
+        const auto& material = face.FaceStyle().Material();
+        if (!material.IsNull() && material->HasPbrMaterial()
+            && !writer.ActiveMaterial().IsEmpty()) {
+            const auto& pbr = material->PbrMaterial();
+            const auto& color = face.HasFaceColor()
+                ? face.FaceColor().GetRGB() : pbr.BaseColor.GetRGB();
+            const PBRScalars values{color.Red(), color.Green(), color.Blue(),
+                                    pbr.Metallic, pbr.Roughness};
+            for (double value : values) {
+                if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                        "An OBJ PBR material has invalid scalar values.");
+                }
+            }
+            const std::string name(writer.ActiveMaterial().ToCString());
+            const auto found = myMaterialScalars.find(name);
+            if (found != myMaterialScalars.end() && found->second != values) {
+                throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                    "An OBJ material name identifies conflicting PBR values.");
+            }
+            if (found == myMaterialScalars.end()) {
+                if (myMaterialScalars.size() >= 100'000) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                        "The OBJ material count exceeds the export budget.");
+                }
+                myMaterialScalars.emplace(name, values);
+            }
+        }
+        return RWObj_CafWriter::writePositions(writer, progress, face);
+    }
+
 protected:
     void addFaceInfo(
         const RWMesh_FaceIterator& face,
@@ -190,9 +237,80 @@ protected:
     }
 
 private:
+    std::unordered_map<std::string, PBRScalars> myMaterialScalars;
     NCollection_Map<Handle(Image_Texture)> myTextures;
     Standard_Boolean myCreatesMaterialFile = Standard_False;
 };
+
+//! Upgrade only writer-owned PBR sections. Keep legacy materials, texture
+//! references, opacity and common-material fallback directives intact.
+void PreserveOBJMaterialScalars(
+    const std::shared_ptr<NativeExportState>& state,
+    const ValidatedOBJWriter& writer) {
+    const auto& materials = writer.MaterialScalars();
+    if (materials.empty()) {
+        return;
+    }
+    auto path = std::filesystem::path(state->primaryPath);
+    path.replace_extension(".mtl");
+    if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(path))
+        || std::filesystem::file_size(path) > 32ULL * 1024ULL * 1024ULL) {
+        throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+            "The OBJ material library is missing or exceeds the export budget.");
+    }
+    const auto temporary = path.string() + ".pbr.tmp";
+    std::ifstream input(path, std::ios::binary);
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    output.imbue(std::locale::classic());
+    output << std::setprecision(9);
+    std::set<std::string> sections, colors;
+    std::string line, active;
+    std::size_t lineNumber = 0;
+    while (std::getline(input, line)) {
+        if ((++lineNumber % 256) == 0
+            && state->cancelled.load(std::memory_order_acquire)) {
+            throw NativeExportFailure(Core3DNativeExportErrorCancelled,
+                "OBJ export was cancelled while retaining its materials.");
+        }
+        if (line.rfind("newmtl ", 0) == 0) {
+            active = line.substr(7);
+            output << line << '\n';
+            const auto found = materials.find(active);
+            if (found != materials.end()) {
+                if (!sections.insert(active).second) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                        "The OBJ material library repeats a PBR section.");
+                }
+                output << "Pm " << found->second[3] << '\n'
+                       << "Pr " << found->second[4] << '\n';
+            }
+        } else if (line.rfind("Kd ", 0) == 0 && materials.count(active) != 0) {
+            if (!colors.insert(active).second) {
+                throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                    "The OBJ material library repeats a PBR base color.");
+            }
+            const auto& values = materials.at(active);
+            output << "Kd " << values[0] << ' ' << values[1] << ' ' << values[2] << '\n';
+        } else {
+            output << line << '\n';
+        }
+    }
+    output.flush();
+    if (!input.eof() || !output.good()
+        || sections.size() != materials.size() || colors != sections) {
+        throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+            "The OBJ material library could not retain every PBR material.");
+    }
+    output.close();
+    input.close();
+    if (!output.good()) {
+        throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
+            "The OBJ material library could not be written.");
+    }
+    // Both files belong to this private operation. Publish the complete MTL
+    // before package validation; any error discards the whole private export.
+    std::filesystem::rename(temporary, path);
+}
 
 #ifdef DEBUG
 std::mutex gDebugWorkerPauseMutex;
@@ -1601,6 +1719,7 @@ NativeExportResult RunNativeExport(
                         "The texture-omission test seam could not be applied.");
                 }
 #endif
+                PreserveOBJMaterialScalars(state, writer);
                 if (!ValidateOBJArtifact(
                         state,
                         writer.ExpectedTextureCount())) {
