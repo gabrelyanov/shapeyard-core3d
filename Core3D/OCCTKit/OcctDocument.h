@@ -71,6 +71,7 @@ struct OcctObjectTransformState
     std::array<Standard_Boolean, 8> present = {};
     std::string entityIdentifier;
     std::string definitionIdentifier;
+    Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 padded triangle atlas
     OcctGeometryRepresentation storedRepresentation = OcctGeometryRepresentation::Invalid;
     OcctGeometryRepresentation resolvedRepresentation = OcctGeometryRepresentation::Invalid;
 
@@ -517,8 +518,11 @@ public:
     TDF_Label AddShape(
         Handle(AIS_InteractiveObject) object,
         OcctGeometryRepresentation representation);
-    //! False for an XCAF component occurrence whose persistent edits cannot be
-    //! represented safely by the current definition-owned editing model.
+    //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
+    Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label) noexcept;
+    //! False for a read-only XCAF component occurrence.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;
     //! True only for a free, simple, whole XCAF definition label. Material

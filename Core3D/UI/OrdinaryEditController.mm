@@ -179,7 +179,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
             OrdinaryTransformRecord record;
             if (request.operation != OrdinaryTransformOperation::Translate
                 && request.operation != OrdinaryTransformOperation::Rotate
-                && request.operation != OrdinaryTransformOperation::Scale) {
+                && request.operation != OrdinaryTransformOperation::Scale
+                && request.operation != OrdinaryTransformOperation::MeshUVAtlas) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.presentation.IsNull() || request.shape.IsNull()
@@ -238,10 +239,18 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 }
             }
             const bool geometryChanges = !record.previous.shape.IsEqual(request.shape);
-            if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale) {
+            if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale
+                && request.operation != OrdinaryTransformOperation::MeshUVAtlas) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             const auto representation = record.previous.resolvedRepresentation;
+            if (request.operation == OrdinaryTransformOperation::MeshUVAtlas
+                && (changes.size() != 1 || !geometryChanges
+                    || representation != OcctGeometryRepresentation::TriangleMesh
+                    || !MatricesEqual(record.previous.transform, request.transform)
+                    || !_document->ValidateTriangleUVAtlas(request.label, request.shape))) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
             if ((representation != OcctGeometryRepresentation::BRep
                     && representation != OcctGeometryRepresentation::LegacyUnknown
                     && representation != OcctGeometryRepresentation::TriangleMesh)) {
@@ -976,11 +985,14 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if ((!record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
                 || !_document->SaveObjectTransform(record.previous.label, candidate)
+                || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
+                    && !_document->MarkTriangleUVAtlas(record.previous.label))
                 || !_document->CaptureObjectTransformStateForLabel(record.previous.label, record.candidate)
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
-                || record.candidate.scalars != EncodedTransform(record.requested.transform)) {
+                || record.candidate.scalars != EncodedTransform(record.requested.transform)
+                || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? 1 : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
             gp_Ax1 referenceAxis;

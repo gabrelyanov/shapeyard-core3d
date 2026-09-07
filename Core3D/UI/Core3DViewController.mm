@@ -2208,6 +2208,10 @@ void Core3DAddDebugOrphanVisualMaterial(
             if (markerPresent && !marker.IsNull()) {
                 state[@"storedRawValue"] = @(marker->Get());
             }
+            OcctObjectTransformState transformState;
+            if (document->CaptureObjectTransformStateForLabel(label, transformState)) {
+                state[@"meshUVAtlasVersion"] = @(transformState.meshUVAtlasVersion);
+            }
             [states addObject:state];
         }
     } catch (...) {
@@ -5386,6 +5390,48 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
         return selected;
     } catch (...) { return NO; }
+}
+
+- (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DMeshUVAtlasResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DMeshUVAtlasResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DMeshUVAtlasResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->generateTriangleUVAtlas(identity,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DMeshUVAtlasResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+                [self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DMeshUVAtlasResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DMeshUVAtlasResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DMeshUVAtlasResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DMeshUVAtlasResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DMeshUVAtlasResultFailed;
+        }
+    } catch (...) {}
+    return Core3DMeshUVAtlasResultRejected;
 }
 
 - (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier

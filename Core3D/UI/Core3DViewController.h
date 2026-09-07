@@ -66,6 +66,15 @@ typedef NS_ENUM(NSInteger, Core3DSavedGroupEditResult) {
     Core3DSavedGroupEditResultBlockedByLayer,
 };
 
+typedef NS_ENUM(NSInteger, Core3DMeshUVAtlasResult) {
+    Core3DMeshUVAtlasResultUnchanged,
+    Core3DMeshUVAtlasResultCommitted,
+    Core3DMeshUVAtlasResultRejected,
+    Core3DMeshUVAtlasResultBusy,
+    Core3DMeshUVAtlasResultRecoveryRequired,
+    Core3DMeshUVAtlasResultFailed,
+};
+
 typedef NS_ENUM(NSInteger, Core3DObjectNameEditResult) {
     Core3DObjectNameEditResultUnchanged = 0,
     Core3DObjectNameEditResultCommitted,
@@ -598,6 +607,10 @@ typedef struct {
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(setSavedGroupVisibility(identifier:visible:expected:));
 - (BOOL)selectSavedGroup:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectSavedGroup(identifier:expected:));
+//! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
+- (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(generateTriangleUVAtlas(entityIdentifier:expected:));
 - (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                                                       name:(NSString *)name
                                                   expected:(Core3DSceneSnapshot *)expected

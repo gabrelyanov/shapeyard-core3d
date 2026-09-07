@@ -2392,6 +2392,41 @@ bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept 
         && _objectInteractor->verifyOrdinaryNameAuthority(ledger);
 }
 
+OrdinaryEditResult Core3DViewer::generateTriangleUVAtlas(
+    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) { return OrdinaryEditResult::Busy; }
+    try {
+        if (width == 0 || height == 0 || identity.entityIdentifier.empty()
+            || identity.entityIdentifier.size() > 128 || identity.publicationSourceIdentifier.empty()
+            || identity.publicationSourceIdentifier.size() > 128) { return OrdinaryEditResult::Invalid; }
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || myContext.IsNull() || myDoc.IsNull()) { return OrdinaryEditResult::Invalid; }
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) { return OrdinaryEditResult::Invalid; }
+        const auto selected = myContext->SelectedInteractive();
+        const auto presentation = Handle(AIS_Shape)::DownCast(selected);
+        const auto label = myDoc->ShapeLabel(selected);
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || presentation.IsNull() || label.IsNull()
+            || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { return OrdinaryEditResult::Invalid; }
+        OcctObjectTransformState previous;
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return OrdinaryEditResult::Invalid; }
+        if (previous.meshUVAtlasVersion == 1) { return OrdinaryEditResult::NoChange; }
+        TopoDS_Shape candidate;
+        if (!myDoc->PrepareTriangleUVAtlas(label, candidate)) { return OrdinaryEditResult::Invalid; }
+        OrdinaryTransformChange request;
+        request.label = label; request.presentation = presentation; request.shape = candidate;
+        request.transform = previous.transform; request.operation = OrdinaryTransformOperation::MeshUVAtlas;
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = _ordinaryEditController->beginTransform({request}, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
 OrdinaryEditResult Core3DViewer::renameObjectFromBrowser(
     const ObjectFrameIdentity& identity, const TCollection_ExtendedString& name,
     std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
