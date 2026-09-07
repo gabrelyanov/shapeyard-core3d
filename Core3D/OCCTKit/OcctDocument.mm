@@ -4231,6 +4231,52 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
 }
 }
 
+Standard_Boolean OcctDocument::CaptureMeshUVAtlasPreview(
+    const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept {
+    preview={};
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        OcctObjectTransformState source;
+        if (!CaptureObjectTransformStateForLabel(label,source) || source.meshUVAtlasVersion!=2) return Standard_False;
+        TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+        if (!TriangleAtlasFace(source.shape,face,mesh) || !mesh->HasUVNodes()
+            || mesh->NbNodes()-3*mesh->NbTriangles()!=source.meshUVAtlasSettings[2]) return Standard_False;
+        const int count=mesh->NbTriangles(), originals=source.meshUVAtlasSettings[2];
+        using Corner=std::array<double,5>;
+        std::map<std::pair<Corner,Corner>,std::vector<int>> edges;
+        std::vector<int> parents(count);std::iota(parents.begin(),parents.end(),0);
+        auto root=[&](int i) { while(parents[i]!=i) { parents[i]=parents[parents[i]];i=parents[i]; } return i; };
+        OcctMeshUVAtlasPreview result;result.triangleUVs.reserve(count*6);
+        for(int triangle=0;triangle<count;++triangle) {
+            int ids[3];mesh->Triangle(triangle+1).Get(ids[0],ids[1],ids[2]);
+            std::array<Corner,3> corners;
+            for(int k=0;k<3;++k) {
+                if(ids[k]!=originals+triangle*3+1+k) return Standard_False;
+                const auto& point=mesh->Node(ids[k]);const auto& uv=mesh->UVNode(ids[k]);
+                corners[k]={point.X(),point.Y(),point.Z(),uv.X(),uv.Y()};
+                for(double value:corners[k]) if(!std::isfinite(value)) return Standard_False;
+                if(uv.X()<0 || uv.X()>1 || uv.Y()<0 || uv.Y()>1) return Standard_False;
+                result.triangleUVs.push_back(uv.X());result.triangleUVs.push_back(uv.Y());
+            }
+            const auto& a=corners[0];const auto& b=corners[1];const auto& c=corners[2];
+            const double area=std::abs((b[3]-a[3])*(c[4]-a[4])-(b[4]-a[4])*(c[3]-a[3]))*0.5;
+            if(!std::isfinite(area) || area<=0) return Standard_False;
+            result.occupancy+=area;
+            for(int k=0;k<3;++k) {
+                auto first=corners[k],second=corners[(k+1)%3];if(second<first)std::swap(first,second);
+                auto& uses=edges[{first,second}];uses.push_back(triangle);
+                if(uses.size()>2) return Standard_False;
+                if(uses.size()==2) parents[root(triangle)]=root(uses[0]);
+            }
+        }
+        for(int i=0;i<count;++i) if(root(i)==i) ++result.chartCount;
+        if(!std::isfinite(result.occupancy) || result.occupancy>1+1.e-10) return Standard_False;
+        result.authoredResolution=source.meshUVAtlasSettings[0];
+        result.authoredGutterPixels=source.meshUVAtlasSettings[1];
+        preview=std::move(result);return Standard_True;
+    } catch(...) { preview={};return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
     const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options, OcctMeshUVAtlasPreview* preview) const noexcept {
     candidate.Nullify();

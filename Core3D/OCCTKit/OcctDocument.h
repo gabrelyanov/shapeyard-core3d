@@ -533,6 +533,8 @@ public:
     TDF_Label AddShape(
         Handle(AIS_InteractiveObject) object,
         OcctGeometryRepresentation representation);
+    //! Read the stored v2 atlas without regenerating it; images remain readable.
+    Standard_EXPORT Standard_Boolean CaptureMeshUVAtlasPreview(const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept;
     //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
     Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}, OcctMeshUVAtlasPreview* preview = nullptr) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;

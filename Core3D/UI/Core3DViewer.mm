@@ -2417,7 +2417,12 @@ std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
         if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return std::nullopt; }
         if (options.version != 2) return std::nullopt;
         TopoDS_Shape candidate; OcctMeshUVAtlasPreview preview;
-        if (!myDoc->PrepareTriangleUVAtlas(label,candidate,options,&preview)) return std::nullopt;
+        if (previous.meshUVAtlasVersion==2 && previous.meshUVAtlasSettings[0]==options.resolution
+            && previous.meshUVAtlasSettings[1]==options.gutterPixels) {
+            // Match Generate's Unchanged semantics after later geometry edits.
+            // Reading a stored atlas does not authorize replacement under images.
+            if (!myDoc->CaptureMeshUVAtlasPreview(label,preview)) return std::nullopt;
+        } else if (!myDoc->PrepareTriangleUVAtlas(label,candidate,options,&preview)) return std::nullopt;
         preview.authoredResolution=previous.meshUVAtlasSettings[0];
         preview.authoredGutterPixels=previous.meshUVAtlasSettings[1];
         return preview;
