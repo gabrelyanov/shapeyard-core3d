@@ -7,6 +7,10 @@
 #include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDataStd_Real.hxx>
+#include <TNaming_NamedShape.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Image_Texture.hxx>
 #include <Interface_CheckIterator.hxx>
@@ -448,6 +452,86 @@ bool ValidateOBJArtifact(
     return expectedTextureCount >= 0
         && textureFiles.size()
             == static_cast<std::size_t>(expectedTextureCount);
+}
+
+bool ApplyPrivateExportTransforms(
+    const Handle(OcctDocument)& document,
+    const std::shared_ptr<NativeExportState>& state,
+    const Message_ProgressRange& progress) {
+    const auto& ocaf = document->Document();
+    if (ocaf.IsNull() || !ocaf->HasOpenCommand()) { return false; }
+    const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(ocaf->Main());
+    if (shapeTool.IsNull()) { return false; }
+    Message_ProgressScope phases(progress, "Apply export transforms", 2);
+    TDF_LabelSequence roots;
+    shapeTool->GetFreeShapes(roots);
+    Message_ProgressScope scaling(phases.Next(), "Bake export scale", roots.Length());
+    std::int64_t copiedNodes = 0, copiedTriangles = 0;
+    for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+        ThrowIfCancelled(state);
+        if (!scaling.More()) { return false; }
+        const auto& root = roots.Value(index);
+        const gp_Trsf stored = document->ObjectTransformForLabel(root);
+        const double factor = stored.ScaleFactor();
+        if (factor != 1.0) {
+            // Object scale is separate from shape placement. OCCT locations
+            // reject scale, so bake it into a detached copy in this private
+            // export document before applying the remaining rigid transform.
+            if (!std::isfinite(factor) || factor == 0.0
+                || !XCAFDoc_ShapeTool::IsSimpleShape(root)
+                || XCAFDoc_ShapeTool::IsAssembly(root)
+                || XCAFDoc_ShapeTool::IsReference(root)) { return false; }
+            const TopoDS_Shape original = shapeTool->GetShape(root);
+            if (original.IsNull()) { return false; }
+            for (TopExp_Explorer faces(original, TopAbs_FACE); faces.More(); faces.Next()) {
+                ThrowIfCancelled(state);
+                TopLoc_Location location;
+                const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                if (!mesh.IsNull()) {
+                    copiedNodes += mesh->NbNodes(); copiedTriangles += mesh->NbTriangles();
+                    if (copiedNodes > kMaximumSTLNodes || copiedTriangles > kMaximumSTLTriangles) {
+                        throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                            "Scaled geometry exceeds the supported mobile export size.");
+                    }
+                }
+            }
+            gp_Trsf scale;
+            scale.SetScale(gp_Pnt(0, 0, 0), factor);
+            // CopyMesh preserves authored UVs and handles negative scale's
+            // triangle winding/normals. BRep surfaces stay analytic for STEP.
+            BRepBuilderAPI_Transform transformed(original, scale, Standard_True, Standard_True);
+            ThrowIfCancelled(state);
+            if (!transformed.IsDone() || transformed.Shape().IsNull()) { return false; }
+            std::vector<std::pair<TDF_Label, TopoDS_Shape>> replacements;
+            const auto captureReplacement = [&](const TDF_Label& label) {
+                Handle(TNaming_NamedShape) named;
+                if (!label.FindAttribute(TNaming_NamedShape::GetID(), named)) { return true; }
+                const TopoDS_Shape previous = shapeTool->GetShape(label);
+                if (previous.IsNull()) { return false; }
+                const TopoDS_Shape replacement = transformed.ModifiedShape(previous);
+                if (replacement.IsNull()) { return false; }
+                replacements.emplace_back(label, replacement);
+                return true;
+            };
+            if (!captureReplacement(root)) { return false; }
+            std::size_t labelCount = 0;
+            for (TDF_ChildIterator child(root, Standard_True); child.More(); child.Next()) {
+                ThrowIfCancelled(state);
+                if (++labelCount > 100'000 || !captureReplacement(child.Value())) { return false; }
+            }
+            // Replace only this root's labels. Global naming substitution can
+            // also replace another occurrence sharing the original shape.
+            for (const auto& replacement : replacements) {
+                ThrowIfCancelled(state);
+                shapeTool->SetShape(replacement.first, replacement.second);
+            }
+            // Tag 8 is the persisted object-scale field read by
+            // ObjectTransformForLabel. The source snapshot is never modified.
+            TDataStd_Real::Set(root.FindChild(8, Standard_True), 1.0);
+        }
+        scaling.Next();
+    }
+    return document->ApplyTransforms(phases.Next());
 }
 
 Handle(Poly_Triangulation) BuildBinarySTLMesh(
@@ -1254,7 +1338,7 @@ NativeExportResult RunNativeExport(
                 Core3DNativeExportErrorInvalidState,
                 "The private export transaction could not be opened.");
         }
-        if (!document->ApplyTransforms(whole.Next(1))) {
+        if (!ApplyPrivateExportTransforms(document, state, whole.Next(1))) {
             ThrowIfCancelled(state);
             throw NativeExportFailure(
                 Core3DNativeExportErrorInvalidState,
