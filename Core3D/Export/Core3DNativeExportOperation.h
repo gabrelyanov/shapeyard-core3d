@@ -2,8 +2,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class Core3DSceneSnapshot;
+typedef void (NS_SWIFT_SENDABLE ^Core3DExportSceneCompletion)(
+    Core3DSceneSnapshot *_Nullable snapshot, NSError *_Nullable error);
+
 //! Viewport preserves the legacy captured drawer settings. Other presets
-//! rebuild only private geometric surfaces for OBJ/STL; authored meshes keep
+//! rebuild only private geometric surfaces for OBJ/STL/GLB; authored meshes keep
 //! their original triangles. STEP does not accept a tessellation preset.
 typedef NS_ENUM(NSInteger, Core3DExportMeshQuality) {
     Core3DExportMeshQualityViewport = 0,
@@ -59,6 +63,11 @@ NS_SWIFT_SENDABLE
 - (instancetype)init NS_UNAVAILABLE;
 - (void)startWithCompletion:(Core3DNativeExportCompletion)completion
     NS_SWIFT_NAME(start(completion:));
+//! GLB preparation yields immutable values for the strict client writer. All
+//! private document files are removed before completion; no geometry file is
+//! produced. Call start(completion:) only for OBJ/STL/STEP operations.
+- (void)startSceneSnapshotWithCompletion:(Core3DExportSceneCompletion)completion
+    NS_SWIFT_NAME(startSceneSnapshot(completion:));
 - (void)cancel;
 
 #ifdef DEBUG

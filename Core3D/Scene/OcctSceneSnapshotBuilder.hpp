@@ -15,6 +15,8 @@
 #include <TDF_Label.hxx>
 
 #include <memory>
+#include <functional>
+#include <TopoDS_Shape.hxx>
 #include <optional>
 #include <cstdint>
 #include <vector>
@@ -51,6 +53,18 @@ public:
         const Handle(V3d_View)& theView,
         const UInt2& theViewportPixels,
         ElementKind theAcceptedSelectionKind) noexcept;
+
+    //! Export-only derivative over an exclusively owned deserialized document.
+    //! Never call with the live document. The callback meshes only the supplied
+    //! private definitions. Frozen appearance/provenance and authored mesh
+    //! buffers are retained; the returned values must never be published to a
+    //! renderer as a new committed scene. No AIS/view handles are consulted.
+    static SnapshotPointer BuildPrivateExportDerivative(
+        const Handle(OcctDocument)& document,
+        const SceneSnapshot& source,
+        bool selectedObjectsOnly,
+        const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+        const std::function<bool()>& cancelled) noexcept;
 
     //! Capture only the semantic camera and revisions. Document, model, and
     //! presentation revisions come from the most recent full snapshot; camera

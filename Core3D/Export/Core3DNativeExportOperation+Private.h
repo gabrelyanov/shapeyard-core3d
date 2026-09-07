@@ -1,5 +1,6 @@
 #import "Core3DNativeExportOperation.h"
 #import "ExportType.h"
+#include "../Scene/OcctSceneSnapshotBuilder.hpp"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -15,7 +16,9 @@ NS_ASSUME_NONNULL_BEGIN
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle
-            maximalChordialDeviation:(double)maximalChordialDeviation;
+            maximalChordialDeviation:(double)maximalChordialDeviation
+                         sourceScene:(core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer)sourceScene
+                 selectedObjectsOnly:(BOOL)selectedObjectsOnly;
 
 @end
 

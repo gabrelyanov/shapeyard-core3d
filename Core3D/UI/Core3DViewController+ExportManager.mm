@@ -16,6 +16,8 @@
 #include <Prs3d_Drawer.hxx>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 
 namespace {
 
@@ -123,14 +125,15 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
     if (meshQuality < Core3DExportMeshQualityViewport
         || meshQuality > Core3DExportMeshQualityFine
         || (meshQuality != Core3DExportMeshQualityViewport
-            && exportType != ExportTypeObj && exportType != ExportTypeStl)) {
+            && exportType != ExportTypeObj && exportType != ExportTypeStl && exportType != ExportTypeGltf)) {
         return nil;
     }
-    if ((selectedObjectsOnly && exportType != ExportTypeStl && exportType != ExportTypeObj)
+    if ((selectedObjectsOnly && exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf)
         || ![NSThread isMainThread]
         || (exportType != ExportTypeObj
             && exportType != ExportTypeStl
-            && exportType != ExportTypeStep)
+            && exportType != ExportTypeStep
+            && exportType != ExportTypeGltf)
         || GLController == nil) {
         return nil;
     }
@@ -150,10 +153,22 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             return nil;
         }
 
+        core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer sourceScene;
+        if (exportType == ExportTypeGltf) {
+            const CGSize size = GLController.drawableSize;
+            if (!std::isfinite(size.width) || !std::isfinite(size.height)
+                || size.width < 1 || size.height < 1
+                || size.width > std::numeric_limits<std::uint32_t>::max()
+                || size.height > std::numeric_limits<std::uint32_t>::max()) { return nil; }
+            sourceScene = viewer->captureSceneSnapshot(
+                static_cast<std::uint32_t>(std::llround(size.width)),
+                static_cast<std::uint32_t>(std::llround(size.height)));
+            if (!sourceScene) { return nil; }
+        }
         NSArray<NSString *> *selectedIdentifiers = nil;
         if (selectedObjectsOnly) {
             selectedIdentifiers = CaptureSelectedExportIdentifiers(
-                [self captureExportSceneSnapshot]);
+                sourceScene ? Core3DCreateSceneSnapshotDTO(*sourceScene) : [self captureExportSceneSnapshot]);
             if (selectedIdentifiers == nil) {
                 return nil;
             }
@@ -284,7 +299,8 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
                 deflectionType:static_cast<NSInteger>(deflectionType)
                 deviationCoefficient:deviationCoefficient
                 deviationAngle:deviationAngle
-                maximalChordialDeviation:maximalChordialDeviation];
+                maximalChordialDeviation:maximalChordialDeviation
+                sourceScene:sourceScene selectedObjectsOnly:selectedObjectsOnly];
         if (operation == nil) {
             NSLog(@"[NativeExport] Operation construction failed");
             [fileManager removeItemAtURL:inputRoot error:nil];

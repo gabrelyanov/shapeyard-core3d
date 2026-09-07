@@ -1,3 +1,5 @@
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 //
 //  OcctSceneSnapshotBuilder.mm
 //  Core3D
@@ -4331,6 +4333,125 @@ OcctSceneSnapshotBuilder::PublishRadialArrayPreviewOverlay(
     } catch (...) {
         return {};
     }
+}
+
+OcctSceneSnapshotBuilder::SnapshotPointer
+OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
+    const Handle(OcctDocument)& document,
+    const SceneSnapshot& source,
+    bool selectedObjectsOnly,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled) noexcept
+{
+    if ([NSThread isMainThread] || document.IsNull() || !meshPrivateSurfaces
+        || !cancelled || cancelled() || !IsValidSceneSnapshot(source)) { return {}; }
+    try {
+        const auto& ocaf = document->Document();
+        if (ocaf.IsNull() || ocaf->HasOpenCommand()) { return {}; }
+        Standard_Real metersPerUnit = kLegacyMetersPerUnit;
+        XCAFDoc_DocumentTool::GetLengthUnit(ocaf, metersPerUnit);
+        if (metersPerUnit != source.metersPerUnit) { return {}; }
+        const auto documentIdentifier = document->DocumentIdentifier();
+        std::unordered_map<std::string, std::size_t> wanted;
+        for (std::size_t i = 0; i < source.instances.size(); ++i) {
+            const auto& item = source.instances[i];
+            if (item.role == RenderRole::Model && item.visible
+                && (!selectedObjectsOnly || item.selected)) {
+                wanted.emplace(item.entityIdentifier, i);
+            }
+        }
+        if (wanted.empty() || (selectedObjectsOnly
+            && source.selectionMode != ElementKind::Object)) { return {}; }
+        struct ExportOccurrence { std::size_t instance; std::size_t definition; gp_Trsf transform; };
+        std::vector<ExportOccurrence> occurrences;
+        std::vector<DefinitionData> definitions;
+        std::unordered_map<std::string, std::size_t> definitionIndices;
+        std::unordered_set<std::string> matched;
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        XCAFPrs_DocumentExplorer explorer(ocaf,
+            XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes, XCAFPrs_Style());
+        for (; explorer.More(); explorer.Next()) {
+            if (cancelled()) { return {}; }
+            const auto& node = explorer.Current();
+            std::vector<std::string> path;
+            if (explorer.CurrentDepth() < 0
+                || explorer.CurrentDepth() >= kMaxOccurrenceDepth) { return {}; }
+            for (Standard_Integer depth = 0; depth <= explorer.CurrentDepth(); ++depth) {
+                path.push_back(document->EntityIdentifierForLabel(explorer.Current(depth).Label));
+            }
+            const auto entity = DeriveOccurrenceIdentifier(documentIdentifier, path);
+            const auto found = wanted.find(entity);
+            if (found == wanted.end()) { continue; }
+            if (!matched.insert(entity).second) { return {}; }
+            const auto label = node.RefLabel.IsNull() ? node.Label : node.RefLabel;
+            const auto identifier = document->DefinitionIdentifierForLabel(label);
+            const auto& item = source.instances[found->second];
+            if (identifier != source.meshes[item.meshIndex].definitionIdentifier) { return {}; }
+            // Authored polygon topology/UVs/normals are already frozen. Do not
+            // recopy, clean, remesh or transform those buffers through OCCT.
+            const auto representation = document->GeometryRepresentationForLabel(label);
+            if (representation == OcctGeometryRepresentation::TriangleMesh) { continue; }
+            if (representation == OcctGeometryRepresentation::Invalid) { return {}; }
+            auto known = definitionIndices.find(identifier);
+            if (known == definitionIndices.end()) {
+                DefinitionData definition;
+                definition.label = label;
+                definition.shape = XCAFDoc_ShapeTool::GetShape(label);
+                definition.representation = representation;
+                if (definition.shape.IsNull()) { return {}; }
+                builder.Add(compound, definition.shape);
+                known = definitionIndices.emplace(identifier, definitions.size()).first;
+                definitions.push_back(std::move(definition));
+            } else if (!definitions[known->second].label.IsEqual(label)) { return {}; }
+            gp_Trsf objectTransform;
+            if (!document->TryObjectTransformForLabel(label, objectTransform)) { return {}; }
+            occurrences.push_back({found->second, known->second,
+                objectTransform.Multiplied(node.Location.Transformation())});
+        }
+        if (matched.size() != wanted.size() || cancelled()) { return {}; }
+        if (!definitions.empty()) { meshPrivateSurfaces(compound); }
+        if (cancelled()) { return {}; }
+        auto result = std::make_shared<SceneSnapshot>(source);
+        std::size_t totalVertices = 0, totalIndices = 0;
+        for (const auto& entry : definitionIndices) {
+            auto& definition = definitions[entry.second];
+            if (cancelled() || !ExtractDefinitionGeometry(definition.label, entry.first,
+#ifdef DEBUG
+                    0,
+#endif
+                    definition)) { return {}; }
+        }
+        std::unordered_set<std::size_t> replaced;
+        for (const auto& occurrence : occurrences) {
+            if (cancelled()) { return {}; }
+            auto& item = result->instances[occurrence.instance];
+            const auto& definition = definitions[occurrence.definition];
+            auto& mesh = result->meshes[item.meshIndex];
+            if (replaced.insert(item.meshIndex).second) {
+                if (mesh.primitives.size() != definition.mesh.primitives.size()) { return {}; }
+                for (std::size_t i = 0; i < mesh.primitives.size(); ++i) {
+                    if (mesh.primitives[i].faceIndex != definition.mesh.primitives[i].faceIndex) { return {}; }
+                }
+                const auto revision = mesh.geometryRevision;
+                mesh = definition.mesh;
+                mesh.geometryRevision = revision; // frozen provenance, never a live publication
+            }
+            gp_Trsf origin;
+            origin.SetTranslation(gp_Vec(definition.sourceOrigin.x,
+                definition.sourceOrigin.y, definition.sourceOrigin.z));
+            const auto world = occurrence.transform.Multiplied(origin);
+            if (!MatrixFromTransform(world, item.worldFromObject)) { return {}; }
+            item.reversesWinding = world.IsNegative();
+        }
+        for (const auto& mesh : result->meshes) {
+            if (!CheckedAdd(totalVertices, mesh.vertices.size(), totalVertices)
+                || !CheckedAdd(totalIndices, mesh.indices.size(), totalIndices)
+                || totalVertices > kMaxVerticesPerSnapshot || totalIndices > kMaxIndicesPerSnapshot) { return {}; }
+        }
+        return !cancelled() && IsValidSceneSnapshot(*result) ? result : SnapshotPointer{};
+    } catch (...) { return {}; }
 }
 
 OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
