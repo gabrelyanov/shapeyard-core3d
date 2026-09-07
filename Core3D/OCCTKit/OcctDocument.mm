@@ -1,5 +1,4 @@
 #include "CoherentMeshUVAtlas.hpp"
-#include <TDataStd_IntegerArray.hxx>
 #include <TDataStd_UAttribute.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_GraphNode.hxx>
@@ -1300,9 +1299,15 @@ const Standard_GUID& MeshUVAtlasAttributeID() {
     return id;
 }
 
-const Standard_GUID& MeshUVAtlasSettingsAttributeID() {
-    static const Standard_GUID id("137327fe-a06c-4be4-b45b-345f5343bda2");
-    return id;
+const Standard_GUID& MeshUVAtlasSettingsAttributeID(const int index) {
+    // Fixed scalar attributes use the existing bounded binary schema. Never
+    // broaden the document reader to arbitrary arrays for this three-value record.
+    static const Standard_GUID ids[] = {
+        Standard_GUID("137327fe-a06c-4be4-b45b-345f5343bda2"),
+        Standard_GUID("29dd8d60-6fd2-4139-bbc5-9d8e9b469f9d"),
+        Standard_GUID("a46a3ce4-2af3-4a77-a17d-b403e1503f13")
+    };
+    return ids[index];
 }
 
 const Standard_GUID& GeometryRepresentationAttributeID()
@@ -4384,10 +4389,13 @@ Standard_Boolean OcctDocument::MarkTriangleUVAtlas(const TDF_Label& label, const
             if (!TriangleAtlasFace(XCAFDoc_ShapeTool::GetShape(label),face,mesh)) return Standard_False;
             const int originals=mesh->NbNodes()-3*mesh->NbTriangles();
             if (originals<=0 || originals>12288) return Standard_False;
-            const auto metadata=TDataStd_IntegerArray::Set(label,MeshUVAtlasSettingsAttributeID(),1,3);
-            metadata->SetValue(1,options.resolution);metadata->SetValue(2,options.gutterPixels);metadata->SetValue(3,originals);
+            TDataStd_Integer::Set(label,MeshUVAtlasSettingsAttributeID(0),options.resolution);
+            TDataStd_Integer::Set(label,MeshUVAtlasSettingsAttributeID(1),options.gutterPixels);
+            TDataStd_Integer::Set(label,MeshUVAtlasSettingsAttributeID(2),originals);
         } else if (options.version != 1 || options.resolution != 0 || options.gutterPixels != 0
-                   || label.IsAttribute(MeshUVAtlasSettingsAttributeID())) { return Standard_False; }
+                   || label.IsAttribute(MeshUVAtlasSettingsAttributeID(0))
+                   || label.IsAttribute(MeshUVAtlasSettingsAttributeID(1))
+                   || label.IsAttribute(MeshUVAtlasSettingsAttributeID(2))) { return Standard_False; }
         TDataStd_Integer::Set(label, MeshUVAtlasAttributeID(), options.version);
         return Standard_True;
     } catch (...) { return Standard_False; }
@@ -6121,15 +6129,18 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
                 || captured.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh) { return Standard_False; }
             captured.meshUVAtlasVersion = version->Get();
         }
-        Handle(TDF_Attribute) settingsAttribute;
-        const bool hasSettings=label.FindAttribute(MeshUVAtlasSettingsAttributeID(),settingsAttribute);
-        if (captured.meshUVAtlasVersion == 2) {
-            const auto settings=Handle(TDataStd_IntegerArray)::DownCast(settingsAttribute);
-            if (!hasSettings || settings.IsNull() || settings->Lower()!=1 || settings->Upper()!=3) return Standard_False;
-            for(int i=0;i<3;++i) captured.meshUVAtlasSettings[i]=settings->Value(i+1);
-            if (!shapeyard::uv::Settings{captured.meshUVAtlasSettings[0],captured.meshUVAtlasSettings[1]}.valid()
-                || captured.meshUVAtlasSettings[2]<=0 || captured.meshUVAtlasSettings[2]>12288) return Standard_False;
-        } else if (hasSettings) { return Standard_False; }
+        for (int i=0;i<3;++i) {
+            Handle(TDF_Attribute) attribute;
+            const bool present=label.FindAttribute(MeshUVAtlasSettingsAttributeID(i),attribute);
+            if (captured.meshUVAtlasVersion == 2) {
+                const auto value=Handle(TDataStd_Integer)::DownCast(attribute);
+                if (!present || value.IsNull()) return Standard_False;
+                captured.meshUVAtlasSettings[i]=value->Get();
+            } else if (present) { return Standard_False; }
+        }
+        if (captured.meshUVAtlasVersion == 2
+            && (!shapeyard::uv::Settings{captured.meshUVAtlasSettings[0],captured.meshUVAtlasSettings[1]}.valid()
+                || captured.meshUVAtlasSettings[2]<=0 || captured.meshUVAtlasSettings[2]>12288)) return Standard_False;
         if (captured.documentData.IsNull() || captured.shape.IsNull()
             || captured.entityIdentifier.empty() || captured.definitionIdentifier.empty()
             || captured.storedRepresentation == OcctGeometryRepresentation::Invalid

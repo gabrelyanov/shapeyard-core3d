@@ -506,6 +506,8 @@ typedef struct {
 
 //! Immutable read-only derivative; UV byte payload is six doubles per triangle.
 @interface Core3DMeshUVAtlasPreview : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
 @property (nonatomic, readonly, copy) NSData *triangleUVData;
 @property (nonatomic, readonly) NSInteger authoredResolution;
 @property (nonatomic, readonly) NSInteger authoredGutterPixels;
