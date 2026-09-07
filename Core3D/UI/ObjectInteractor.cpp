@@ -3021,7 +3021,9 @@ namespace core3d {
                     || (TransformDiffers(presentation->LocalTransformation(), record.previous.transform)
                         && TransformDiffers(presentation->LocalTransformation(), record.requested.transform))
                     || (record.requested.operation == OrdinaryTransformOperation::Scale
-                        && !IsTopologicallyValid(record.requested.shape))
+                        && (record.previous.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh
+                            ? !record.previous.shape.IsEqual(record.requested.shape)
+                            : !IsTopologicallyValid(record.requested.shape)))
                     || !expected.emplace(presentation.get(), &record).second) { return false; }
             }
             ledger.selectionOwners.clear();
@@ -3101,8 +3103,8 @@ namespace core3d {
                 presentation->SetShape(saved.shape);
                 presentation->SetLocalTransformation(saved.transform);
                 myContext->Redisplay(presentation, Standard_False);
-                // A Scale result has different topology. Select the rebuilt
-                // global owner, never a retained owner naming the old shape.
+                // A Scale result may replace topology. Recompute the global
+                // owner for both geometry changes and persisted transforms.
                 myContext->RecomputeSelectionOnly(presentation);
                 const auto owner = presentation->GlobalSelOwner();
                 if (owner.IsNull() || owner->Selectable() != presentation) { return false; }

@@ -130,6 +130,7 @@ constexpr std::uint64_t kTriangleMeshModelCapabilities =
     static_cast<std::uint64_t>(Core3DModelCapabilityObjectSelection)
     | static_cast<std::uint64_t>(Core3DModelCapabilityTranslate)
     | static_cast<std::uint64_t>(Core3DModelCapabilityRotate)
+    | static_cast<std::uint64_t>(Core3DModelCapabilityUniformScale)
     | static_cast<std::uint64_t>(Core3DModelCapabilityDelete)
     | static_cast<std::uint64_t>(Core3DModelCapabilityDuplicate)
     | static_cast<std::uint64_t>(Core3DModelCapabilityMaterial)

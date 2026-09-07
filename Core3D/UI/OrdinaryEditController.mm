@@ -244,10 +244,20 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
             const auto representation = record.previous.resolvedRepresentation;
             if ((representation != OcctGeometryRepresentation::BRep
                     && representation != OcctGeometryRepresentation::LegacyUnknown
-                    && representation != OcctGeometryRepresentation::TriangleMesh)
-                || (request.operation == OrdinaryTransformOperation::Scale
-                    && representation == OcctGeometryRepresentation::TriangleMesh)) {
+                    && representation != OcctGeometryRepresentation::TriangleMesh)) {
                 return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.operation == OrdinaryTransformOperation::Scale
+                && representation == OcctGeometryRepresentation::TriangleMesh) {
+                // Mesh scaling changes only the persisted dimensionless factor.
+                // A Scale request cannot replace topology, move its origin or
+                // rotate it; those edits require their own admitted operation.
+                if (geometryChanges) { return reject(OrdinaryEditResult::Invalid); }
+                gp_Trsf expected = record.previous.transform;
+                expected.SetScaleFactor(request.transform.ScaleFactor());
+                if (!MatricesEqual(expected, request.transform)) {
+                    return reject(OrdinaryEditResult::Invalid);
+                }
             }
             changed = changed || geometryChanges || !MatricesEqual(record.previous.transform, request.transform);
             record.requested = request;

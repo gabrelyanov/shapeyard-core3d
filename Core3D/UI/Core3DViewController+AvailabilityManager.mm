@@ -45,6 +45,7 @@ constexpr Core3DModelCapability kTriangleMeshCapabilities =
         Core3DModelCapabilityObjectSelection
         | Core3DModelCapabilityTranslate
         | Core3DModelCapabilityRotate
+        | Core3DModelCapabilityUniformScale
         | Core3DModelCapabilityDelete
         | Core3DModelCapabilityDuplicate
         | Core3DModelCapabilityLinearArray

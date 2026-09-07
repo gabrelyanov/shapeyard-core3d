@@ -2538,7 +2538,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (NSInteger)debugApplyViewerOrdinaryTransform:(NSInteger)mode paused:(BOOL)paused {
-    if (![NSThread isMainThread] || mode < 0 || mode > 2
+    if (![NSThread isMainThread] || mode < 0 || mode > 5
         || GLController == nil || GLController.viewer == nullptr) { return 5; }
     const auto viewer = GLController.viewer;
     const auto document = viewer->getDocument();
@@ -2565,7 +2565,18 @@ void Core3DAddDebugOrphanVisualMaterial(
                 change.operation = core3d::OrdinaryTransformOperation::Scale;
                 gp_Trsf scale;
                 scale.SetScale(gp_Pnt(0, 0, 0), 2.0);
-                change.shape = BRepBuilderAPI_Transform(before.shape, scale, Standard_True).Shape();
+                if (mode == 2) {
+                    change.shape = BRepBuilderAPI_Transform(before.shape, scale, Standard_True).Shape();
+                } else {
+                    change.transform.SetScaleFactor(2.0);
+                    if (mode == 4) {
+                        auto position = change.transform.TranslationPart();
+                        position.SetX(position.X() + 1.0);
+                        change.transform.SetTranslationPart(position);
+                    } else if (mode == 5) {
+                        change.transform.SetRotationPart(gp_Quaternion(gp_Vec(0, 0, 1), M_PI_2));
+                    }
+                }
             }
             changes.push_back(change);
         }

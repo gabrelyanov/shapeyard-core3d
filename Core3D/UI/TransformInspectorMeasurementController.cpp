@@ -171,6 +171,7 @@ constexpr std::uint64_t kTriangleMeshModelCapabilities =
     (1ull << 0)  // ObjectSelection
     | (1ull << 2)  // Translate
     | (1ull << 3)  // Rotate
+    | (1ull << 4)  // UniformScale (persisted transform only)
     | (1ull << 6)  // Delete
     | (1ull << 7)  // Duplicate
     | (1ull << 12) // Material
@@ -2009,6 +2010,13 @@ TransformInspectorMeasurementController::commitPosition(
         // Use the private shape/document cache, never caller-supplied extents.
         // Validate correctable numeric errors before consuming the edit lease.
         const auto& captured = *myImpl->positionEditContext;
+        // Reject unsupported deformation before looking up BRep bounds or
+        // consuming the numeric edit lease. Imported meshes allow only the
+        // independent persisted uniform scale, not per-axis Dimensions.
+        if ((captured.modelCapabilities & (1ull << 5)) == 0) {
+            anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+            return anOutcome;
+        }
         TransformInspectorBoundsValue bounds;
         if (!myImpl->lookup({captured.document, captured.storedShape}, bounds)) {
             anOutcome.result = TransformInspectorPositionCommitResult::Unavailable;
