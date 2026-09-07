@@ -1,3 +1,5 @@
+#include "CoherentMeshUVAtlas.hpp"
+#include <TDataStd_IntegerArray.hxx>
 #include <TDataStd_UAttribute.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_GraphNode.hxx>
@@ -1295,6 +1297,11 @@ const Standard_GUID& DefinitionIdentifierAttributeID()
 //! public header are persistent schema identifiers.
 const Standard_GUID& MeshUVAtlasAttributeID() {
     static const Standard_GUID id("9bf75aca-8719-4aca-9a5e-c7b4c3a40ba1");
+    return id;
+}
+
+const Standard_GUID& MeshUVAtlasSettingsAttributeID() {
+    static const Standard_GUID id("137327fe-a06c-4be4-b45b-345f5343bda2");
     return id;
 }
 
@@ -4220,14 +4227,18 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
 }
 
 Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
-    const TDF_Label& label, TopoDS_Shape& candidate) const noexcept {
+    const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options) const noexcept {
     candidate.Nullify();
     if (![NSThread isMainThread]) { return Standard_False; }
     try {
+        const shapeyard::uv::Settings settings{options.resolution, options.gutterPixels};
+        if ((options.version != 1 && options.version != 2)
+            || (options.version == 1 && (options.resolution != 0 || options.gutterPixels != 0))
+            || (options.version == 2 && !settings.valid())) { return Standard_False; }
         OcctObjectTransformState source;
         if (!CaptureObjectTransformStateForLabel(label, source)
             || source.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh
-            || source.meshUVAtlasVersion != 0) { return Standard_False; }
+            || (options.version == 1 && source.meshUVAtlasVersion != 0)) { return Standard_False; }
         TDF_LabelSequence subshapes;
         XCAFDoc_ShapeTool::GetSubShapes(label, subshapes);
         if (subshapes.Length() != 0) { return Standard_False; }
@@ -4247,8 +4258,33 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
             }
         }
         TopoDS_Face face; Handle(Poly_Triangulation) mesh;
-        if (!TriangleAtlasFace(source.shape, face, mesh) || mesh->NbNodes() > 12288) { return Standard_False; }
-        const int count = mesh->NbTriangles(), originals = mesh->NbNodes();
+        if (!TriangleAtlasFace(source.shape, face, mesh)) { return Standard_False; }
+        const int count = mesh->NbTriangles();
+        int originals = mesh->NbNodes();
+        if (source.meshUVAtlasVersion != 0) {
+            originals -= 3 * count;
+            if (!mesh->HasUVNodes() || originals <= 0
+                || (source.meshUVAtlasVersion == 2 && source.meshUVAtlasSettings[2] != originals)) { return Standard_False; }
+            // Owned prefix stays fixed through regeneration, including legacy v1.
+            for (int i=1;i<=count;++i) {
+                int ids[3]; mesh->Triangle(i).Get(ids[0],ids[1],ids[2]);
+                for (int k=0;k<3;++k) if (ids[k] != originals+(i-1)*3+1+k) { return Standard_False; }
+            }
+        }
+        if (originals <= 0 || originals > 12288) { return Standard_False; }
+        shapeyard::uv::Atlas coherent;
+        if (options.version == 2) {
+            std::vector<shapeyard::uv::Triangle> triangles(count);
+            for (int i=1;i<=count;++i) {
+                int ids[3]; mesh->Triangle(i).Get(ids[0],ids[1],ids[2]);
+                for(int k=0;k<3;++k) {
+                    if(ids[k]<1 || ids[k]>mesh->NbNodes()) return Standard_False;
+                    const auto p=mesh->Node(ids[k]);
+                    triangles[i-1].points[k]={p.X(),p.Y(),p.Z()};
+                }
+            }
+            if (!shapeyard::uv::generate(triangles, settings, coherent)) { return Standard_False; }
+        }
         const int columns = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
         const double cell = 1.0 / columns, padding = cell * 0.04;
         Handle(Poly_Triangulation) atlas = new Poly_Triangulation(originals + 3 * count, count, true, mesh->HasNormals());
@@ -4264,7 +4300,7 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
         }
         for (int triangle = 1; triangle <= count; ++triangle) {
             int ids[3]; mesh->Triangle(triangle).Get(ids[0], ids[1], ids[2]);
-            for (int id : ids) { if (id < 1 || id > originals) { return Standard_False; } }
+            for (int id : ids) { if (id < 1 || id > mesh->NbNodes()) { return Standard_False; } }
             const gp_Vec edge(mesh->Node(ids[0]), mesh->Node(ids[1]));
             const gp_Vec other(mesh->Node(ids[0]), mesh->Node(ids[2]));
             const double length = edge.Magnitude();
@@ -4282,7 +4318,12 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
             const int first = originals + (triangle - 1) * 3 + 1;
             for (int corner = 0; corner < 3; ++corner) {
                 atlas->SetNode(first + corner, mesh->Node(ids[corner]));
-                atlas->SetUVNode(first + corner, gp_Pnt2d(originU + (xs[corner] - minX) * scale, originV + ys[corner] * scale));
+                if (options.version == 2) {
+                    const auto& uv = coherent.corners[triangle-1][corner];
+                    atlas->SetUVNode(first + corner, gp_Pnt2d(uv[0],uv[1]));
+                } else {
+                    atlas->SetUVNode(first + corner, gp_Pnt2d(originU + (xs[corner] - minX) * scale, originV + ys[corner] * scale));
+                }
                 if (mesh->HasNormals()) { gp_Vec3f normal; mesh->Normal(ids[corner], normal); atlas->SetNormal(first + corner, normal); }
             }
             atlas->SetTriangle(triangle, Poly_Triangle(first, first + 1, first + 2));
@@ -4300,10 +4341,10 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
 }
 
 Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(
-    const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept {
+    const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options) const noexcept {
     try {
         TopoDS_Shape expected;
-        if (!PrepareTriangleUVAtlas(label, expected)) { return Standard_False; }
+        if (!PrepareTriangleUVAtlas(label, expected, options)) { return Standard_False; }
         TopoDS_Face a, b; Handle(Poly_Triangulation) x, y;
         if (!TriangleAtlasFace(expected, a, x) || !TriangleAtlasFace(candidate, b, y)
             || candidate.ShapeType() != expected.ShapeType() || candidate.Orientation() != expected.Orientation()
@@ -4322,12 +4363,22 @@ Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(
     } catch (...) { return Standard_False; }
 }
 
-Standard_Boolean OcctDocument::MarkTriangleUVAtlas(const TDF_Label& label) noexcept {
+Standard_Boolean OcctDocument::MarkTriangleUVAtlas(const TDF_Label& label, const OcctMeshUVAtlasOptions& options) noexcept {
     try {
         if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
             || !IsEditableFreeSimpleDefinitionLabel(label)
             || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh) { return Standard_False; }
-        TDataStd_Integer::Set(label, MeshUVAtlasAttributeID(), 1);
+        if (options.version == 2) {
+            if (!shapeyard::uv::Settings{options.resolution,options.gutterPixels}.valid()) return Standard_False;
+            TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+            if (!TriangleAtlasFace(XCAFDoc_ShapeTool::GetShape(label),face,mesh)) return Standard_False;
+            const int originals=mesh->NbNodes()-3*mesh->NbTriangles();
+            if (originals<=0 || originals>12288) return Standard_False;
+            const auto metadata=TDataStd_IntegerArray::Set(label,MeshUVAtlasSettingsAttributeID(),1,3);
+            metadata->SetValue(1,options.resolution);metadata->SetValue(2,options.gutterPixels);metadata->SetValue(3,originals);
+        } else if (options.version != 1 || options.resolution != 0 || options.gutterPixels != 0
+                   || label.IsAttribute(MeshUVAtlasSettingsAttributeID())) { return Standard_False; }
+        TDataStd_Integer::Set(label, MeshUVAtlasAttributeID(), options.version);
         return Standard_True;
     } catch (...) { return Standard_False; }
 }
@@ -6026,6 +6077,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && resolvedRepresentation != OcctGeometryRepresentation::Invalid
             && resolvedRepresentation == other.resolvedRepresentation
             && meshUVAtlasVersion == other.meshUVAtlasVersion
+            && meshUVAtlasSettings == other.meshUVAtlasSettings
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -6055,10 +6107,19 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         Handle(TDF_Attribute) atlasAttribute;
         if (label.FindAttribute(MeshUVAtlasAttributeID(), atlasAttribute)) {
             const auto version = Handle(TDataStd_Integer)::DownCast(atlasAttribute);
-            if (version.IsNull() || version->Get() != 1
+            if (version.IsNull() || (version->Get() != 1 && version->Get() != 2)
                 || captured.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh) { return Standard_False; }
             captured.meshUVAtlasVersion = version->Get();
         }
+        Handle(TDF_Attribute) settingsAttribute;
+        const bool hasSettings=label.FindAttribute(MeshUVAtlasSettingsAttributeID(),settingsAttribute);
+        if (captured.meshUVAtlasVersion == 2) {
+            const auto settings=Handle(TDataStd_IntegerArray)::DownCast(settingsAttribute);
+            if (!hasSettings || settings.IsNull() || settings->Lower()!=1 || settings->Upper()!=3) return Standard_False;
+            for(int i=0;i<3;++i) captured.meshUVAtlasSettings[i]=settings->Value(i+1);
+            if (!shapeyard::uv::Settings{captured.meshUVAtlasSettings[0],captured.meshUVAtlasSettings[1]}.valid()
+                || captured.meshUVAtlasSettings[2]<=0 || captured.meshUVAtlasSettings[2]>12288) return Standard_False;
+        } else if (hasSettings) { return Standard_False; }
         if (captured.documentData.IsNull() || captured.shape.IsNull()
             || captured.entityIdentifier.empty() || captured.definitionIdentifier.empty()
             || captured.storedRepresentation == OcctGeometryRepresentation::Invalid

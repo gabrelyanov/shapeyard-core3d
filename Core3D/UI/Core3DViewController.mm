@@ -2211,6 +2211,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             OcctObjectTransformState transformState;
             if (document->CaptureObjectTransformStateForLabel(label, transformState)) {
                 state[@"meshUVAtlasVersion"] = @(transformState.meshUVAtlasVersion);
+                state[@"meshUVAtlasResolution"] = @(transformState.meshUVAtlasSettings[0]);
+                state[@"meshUVAtlasGutterPixels"] = @(transformState.meshUVAtlasSettings[1]);
+                state[@"meshUVAtlasOriginalNodes"] = @(transformState.meshUVAtlasSettings[2]);
             }
             [states addObject:state];
         }
@@ -5417,6 +5420,52 @@ void Core3DAddDebugOrphanVisualMaterial(
         const auto result = GLController.viewer->generateTriangleUVAtlas(identity,
             static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DMeshUVAtlasResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+                [self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DMeshUVAtlasResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DMeshUVAtlasResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DMeshUVAtlasResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DMeshUVAtlasResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DMeshUVAtlasResultFailed;
+        }
+    } catch (...) {}
+    return Core3DMeshUVAtlasResultRejected;
+}
+
+- (Core3DMeshUVAtlasResult)generateCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
+                                                       resolution:(NSInteger)resolution
+                                                     gutterPixels:(NSInteger)gutterPixels
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (resolution < 256 || resolution > 4096 || gutterPixels < 1 || gutterPixels > 32) return Core3DMeshUVAtlasResultRejected;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DMeshUVAtlasResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DMeshUVAtlasResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DMeshUVAtlasResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->generateTriangleUVAtlas(identity,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            OcctMeshUVAtlasOptions{2,static_cast<int>(resolution),static_cast<int>(gutterPixels)});
         switch (result) {
             case core3d::OrdinaryEditResult::NoChange: return Core3DMeshUVAtlasResultUnchanged;
             case core3d::OrdinaryEditResult::Committed:

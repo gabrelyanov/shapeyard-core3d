@@ -145,7 +145,7 @@ namespace core3d {
         bool selectSavedGroup(const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height, bool& selectionWasTouched) noexcept;
         OrdinaryEditResult generateTriangleUVAtlas(const ObjectFrameIdentity& identity,
-            std::uint32_t width, std::uint32_t height) noexcept;
+            std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options = {}) noexcept;
         OrdinaryEditResult renameObjectFromBrowser(const ObjectFrameIdentity& identity,
             const TCollection_ExtendedString& name, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;

@@ -248,7 +248,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 && (changes.size() != 1 || !geometryChanges
                     || representation != OcctGeometryRepresentation::TriangleMesh
                     || !MatricesEqual(record.previous.transform, request.transform)
-                    || !_document->ValidateTriangleUVAtlas(request.label, request.shape))) {
+                    || !_document->ValidateTriangleUVAtlas(request.label, request.shape, request.meshUVAtlasOptions))) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if ((representation != OcctGeometryRepresentation::BRep
@@ -986,14 +986,23 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     && !_document->ReplaceShape(record.previous.label, candidate))
                 || !_document->SaveObjectTransform(record.previous.label, candidate)
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
-                    && !_document->MarkTriangleUVAtlas(record.previous.label))
+                    && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
                 || !_document->CaptureObjectTransformStateForLabel(record.previous.label, record.candidate)
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
                 || record.candidate.scalars != EncodedTransform(record.requested.transform)
-                || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? 1 : record.previous.meshUVAtlasVersion)) {
+                || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
+            }
+            if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
+                const auto& options=record.requested.meshUVAtlasOptions;
+                if (options.version == 2 && (record.candidate.meshUVAtlasSettings[0]!=options.resolution
+                    || record.candidate.meshUVAtlasSettings[1]!=options.gutterPixels)) {
+                    throw Standard_Failure("Ordinary UV settings readback failed");
+                }
+            } else if (record.candidate.meshUVAtlasSettings != record.previous.meshUVAtlasSettings) {
+                throw Standard_Failure("Ordinary transform changed UV settings");
             }
             gp_Ax1 referenceAxis;
             if (!_document->ResolveReferenceAxisInWorld(record.candidate.label,

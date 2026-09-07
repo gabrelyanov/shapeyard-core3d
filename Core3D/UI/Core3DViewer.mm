@@ -2393,7 +2393,7 @@ bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept 
 }
 
 OrdinaryEditResult Core3DViewer::generateTriangleUVAtlas(
-    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height) noexcept {
+    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options) noexcept {
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (!canBeginCommittedEdit() || !_ordinaryEditController) { return OrdinaryEditResult::Busy; }
     try {
@@ -2415,12 +2415,16 @@ OrdinaryEditResult Core3DViewer::generateTriangleUVAtlas(
             || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { return OrdinaryEditResult::Invalid; }
         OcctObjectTransformState previous;
         if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return OrdinaryEditResult::Invalid; }
-        if (previous.meshUVAtlasVersion == 1) { return OrdinaryEditResult::NoChange; }
+        if ((options.version == 1 && options.resolution == 0 && options.gutterPixels == 0 && previous.meshUVAtlasVersion == 1)
+            || (options.version == 2 && previous.meshUVAtlasVersion == 2
+                && previous.meshUVAtlasSettings[0] == options.resolution
+                && previous.meshUVAtlasSettings[1] == options.gutterPixels)) { return OrdinaryEditResult::NoChange; }
         TopoDS_Shape candidate;
-        if (!myDoc->PrepareTriangleUVAtlas(label, candidate)) { return OrdinaryEditResult::Invalid; }
+        if (!myDoc->PrepareTriangleUVAtlas(label, candidate, options)) { return OrdinaryEditResult::Invalid; }
         OrdinaryTransformChange request;
         request.label = label; request.presentation = presentation; request.shape = candidate;
         request.transform = previous.transform; request.operation = OrdinaryTransformOperation::MeshUVAtlas;
+        request.meshUVAtlasOptions = options;
         OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
         auto lease = _ordinaryEditController->beginTransform({request}, &failure);
         return lease ? lease.stageAndCommit() : failure;

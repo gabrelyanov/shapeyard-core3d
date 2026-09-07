@@ -35,6 +35,7 @@ struct OrdinaryTransformChange {
     gp_Trsf transform;
     OrdinaryTransformOperation operation = OrdinaryTransformOperation::Translate;
     std::optional<OrdinaryRotationAroundPivot> rotationAroundPivot;
+    OcctMeshUVAtlasOptions meshUVAtlasOptions;
 };
 
 struct OrdinaryTransformRecord {

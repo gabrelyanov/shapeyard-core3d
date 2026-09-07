@@ -58,6 +58,12 @@ enum class OcctGeometryRepresentation : Standard_Integer
     TriangleMesh = 2,
 };
 
+struct OcctMeshUVAtlasOptions {
+    Standard_Integer version = 1;
+    Standard_Integer resolution = 0;
+    Standard_Integer gutterPixels = 0;
+};
+
 //! Exact durable state for transform reconciliation. Attribute presence is
 //! significant: a missing legacy default and an authored zero are not the
 //! same OCAF state, even when their resulting matrices match. No AIS handles.
@@ -71,7 +77,8 @@ struct OcctObjectTransformState
     std::array<Standard_Boolean, 8> present = {};
     std::string entityIdentifier;
     std::string definitionIdentifier;
-    Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 padded triangle atlas
+    Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 triangle grid, 2 coherent planar atlas
+    std::array<Standard_Integer, 3> meshUVAtlasSettings = {}; // resolution, gutter, original-node prefix; v2 only
     OcctGeometryRepresentation storedRepresentation = OcctGeometryRepresentation::Invalid;
     OcctGeometryRepresentation resolvedRepresentation = OcctGeometryRepresentation::Invalid;
 
@@ -519,9 +526,9 @@ public:
         Handle(AIS_InteractiveObject) object,
         OcctGeometryRepresentation representation);
     //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
-    Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
-    Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
-    Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label) noexcept;
+    Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
+    Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label, const OcctMeshUVAtlasOptions& options = {}) noexcept;
     //! False for a read-only XCAF component occurrence.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;

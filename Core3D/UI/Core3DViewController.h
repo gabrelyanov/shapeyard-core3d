@@ -611,6 +611,12 @@ typedef struct {
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(generateTriangleUVAtlas(entityIdentifier:expected:));
+//! Coherent planar charts with common texel density; regenerates untextured v1/v2.
+- (Core3DMeshUVAtlasResult)generateCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
+                                                       resolution:(NSInteger)resolution
+                                                     gutterPixels:(NSInteger)gutterPixels
+                                                         expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(generateCoherentUVAtlas(entityIdentifier:resolution:gutterPixels:expected:));
 - (Core3DObjectNameEditResult)renameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                                                       name:(NSString *)name
                                                   expected:(Core3DSceneSnapshot *)expected
