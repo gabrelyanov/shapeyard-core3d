@@ -261,7 +261,7 @@ private:
 
 //! Rewrite only writer-owned coefficients under the captured convention.
 //! Current retains legacy common coefficients. Texture references, opacity and
-//! non-color scalar directives remain intact in every convention.
+//! non-color scalar values remain intact; explicit modes express opacity as d.
 void PreserveOBJMaterialScalars(
     const std::shared_ptr<NativeExportState>& state,
     const ValidatedOBJWriter& writer) {
@@ -311,6 +311,20 @@ void PreserveOBJMaterialScalars(
             }
             const auto& values = materials.at(active);
             output << "Kd " << values[0] << ' ' << values[1] << ' ' << values[2] << '\n';
+        } else if (state->objColorConvention != Core3DOBJColorConventionCurrent
+                   && materials.count(active) != 0 && line.rfind("Tr ", 0) == 0) {
+            // Preserve opacity using the widely consumed dissolve directive.
+            // Blender ignores OCCT's Tr spelling. Current keeps legacy bytes;
+            // explicit modes emit only d so consumers cannot apply both.
+            std::istringstream values(line.substr(3));
+            values.imbue(std::locale::classic());
+            double transparency;
+            if (!(values >> transparency) || !(values >> std::ws).eof()
+                || !std::isfinite(transparency) || transparency < 0.0 || transparency > 1.0) {
+                throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                    "An OBJ material opacity is malformed.");
+            }
+            output << "d " << (1.0 - transparency) << '\n';
         } else if (state->objColorConvention == Core3DOBJColorConventionLinear
                    && materials.count(active) != 0
                    && (line.rfind("Ka ", 0) == 0 || line.rfind("Ks ", 0) == 0)) {

@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, Core3DExportMeshQuality) {
 //! legacy output (linear authored PBR diffuse, OCCT sRGB common coefficients).
 //! Linear and SRGB explicitly encode all diffuse/ambient/specular coefficients;
 //! texture bytes and scalar opacity/metallic/roughness are never gamma converted.
+//! Explicit modes use d for opacity; Current retains the legacy Tr directive.
 typedef NS_ENUM(NSInteger, Core3DOBJColorConvention) {
     Core3DOBJColorConventionCurrent = 0,
     Core3DOBJColorConventionLinear,
