@@ -5455,6 +5455,16 @@ void Core3DAddDebugOrphanVisualMaterial(
                            expected:expected completion:completion];
 }
 
+- (void)createRevolvedCircularProfileWithCenter:(CGPoint)center outerRadius:(double)outerRadius
+                          innerRadius:(double)innerRadius plane:(Core3DProfilePlane)plane
+                                angleDegrees:(double)angleDegrees expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion {
+    const std::optional<core3d::ProfileCircularSection> circle = core3d::ProfileCircularSection{
+        gp_Pnt2d(center.x, center.y), outerRadius, innerRadius};
+    [self constructProfileWithPoints:@[] plane:plane parameter:angleDegrees revolve:YES circle:circle
+                           expected:expected completion:completion];
+}
+
 - (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
                             plane:(Core3DProfilePlane)plane parameter:(double)depth
                           revolve:(BOOL)revolve

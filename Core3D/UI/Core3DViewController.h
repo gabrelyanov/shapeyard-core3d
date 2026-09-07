@@ -624,6 +624,14 @@ typedef struct {
                                 depth:(double)depth expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createCircularProfile(center:outerRadius:innerRadius:plane:depth:expected:completion:));
+//! Revolve an exact circular/annular section into a torus or curved tube.
+//! Center U is the bend radius; the full outer circle must stay at least
+//! 0.001 mm to the right of the work-plane revolution axis. Angle: 0.001...360.
+- (void)createRevolvedCircularProfileWithCenter:(CGPoint)center outerRadius:(double)outerRadius
+                                  innerRadius:(double)innerRadius plane:(Core3DProfilePlane)plane
+                                 angleDegrees:(double)angleDegrees expected:(Core3DSceneSnapshot *)expected
+                                   completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createRevolvedCircularProfile(center:outerRadius:innerRadius:plane:angleDegrees:expected:completion:));
 //! Keep the worker slot until completion; cancel at document load/close boundaries.
 - (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

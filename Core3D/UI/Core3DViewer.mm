@@ -1497,21 +1497,27 @@ bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
     const std::optional<ProfileCircularSection>& circle, int plane, double parameter,
     bool revolve, double& signedArea, double& volume) {
     if (!circle) { return ProfileExpectedVolume(points, plane, parameter, revolve, signedArea, volume); }
-    // Circular sections currently support extrusion only. Never silently
-    // ignore a supplied polygon or treat an unsupported sweep as extrusion.
-    if (!points.empty() || revolve || plane < 0 || plane > 2) { return false; }
+    // A typed circular section cannot also carry a polygon outline.
+    if (!points.empty() || plane < 0 || plane > 2) { return false; }
     const auto& c = *circle;
     constexpr double minimum = 1e-3, limit = 1e6;
     for (const double value : {c.center.X(), c.center.Y(), c.outerRadius, c.innerRadius, parameter}) {
         if (!std::isfinite(value)) { return false; }
     }
-    if (parameter < minimum || parameter > limit || c.outerRadius < minimum
+    if (parameter < minimum || parameter > (revolve ? 360.0 : limit) || c.outerRadius < minimum
         || c.innerRadius < 0 || (c.innerRadius > 0 && c.innerRadius < minimum)
         || c.outerRadius - c.innerRadius < minimum
         || std::abs(c.center.X()) + c.outerRadius > limit
         || std::abs(c.center.Y()) + c.outerRadius > limit) { return false; }
     signedArea = std::acos(-1.0) * (c.outerRadius - c.innerRadius) * (c.outerRadius + c.innerRadius);
-    volume = signedArea * parameter;
+    if (revolve) {
+        // Keep the whole cross-section strictly outside the revolution axis.
+        // Axis-crossing spindle/horn surfaces are not admitted as valid tubes.
+        if (c.center.X() - c.outerRadius < minimum) { return false; }
+        volume = signedArea * c.center.X() * (parameter * std::acos(-1.0) / 180.0);
+    } else {
+        volume = signedArea * parameter;
+    }
     return std::isfinite(volume) && volume > 0;
 }
 
