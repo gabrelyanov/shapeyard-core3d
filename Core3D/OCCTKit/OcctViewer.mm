@@ -271,7 +271,7 @@ bool OcctViewer::InitViewer (UIView* theWin)
         Standard_False);
     Graphic3d_RenderingParams& renderingParams = myView->ChangeRenderingParams();
     renderingParams.NbMsaaSamples = 0;
-    renderingParams.ToEnableDepthPrepass = Standard_True;
+    renderingParams.ToEnableDepthPrepass = Standard_False;
     // Start with basic unordered alpha blending. The capability probe after
     // SetWindow may enable weighted OIT only when OCCT reports the exact path
     // (including the MSAA variant) as supported.
