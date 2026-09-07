@@ -47,6 +47,10 @@ namespace core3d {
         double outerRadius = 0;
         double innerRadius = 0; // Zero is a disk; positive is a concentric hole.
     };
+    struct ProfileCircularHole {
+        gp_Pnt2d center;
+        double radius = 0;
+    };
     struct ProfileSolidWork;
     struct ProfileSolidGeometry;
     struct ObjectAlignmentWork;
@@ -72,7 +76,8 @@ namespace core3d {
             const std::vector<gp_Pnt2d>& points, int plane, double depth,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height, bool revolve = false,
-            const std::optional<ProfileCircularSection>& circle = std::nullopt) noexcept;
+            const std::optional<ProfileCircularSection>& circle = std::nullopt,
+            const std::vector<ProfileCircularHole>& holes = {}) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
             const std::shared_ptr<ProfileSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;

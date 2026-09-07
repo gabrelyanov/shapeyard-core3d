@@ -1416,6 +1416,7 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
 struct ProfileSolidGeometry {
     std::vector<gp_Pnt2d> points;
     std::optional<ProfileCircularSection> circle;
+    std::vector<ProfileCircularHole> holes;
     int plane = 0; // 0 XY -> +Z, 1 XZ -> +Y, 2 YZ -> +X.
     double depth = 10; // Extrusion mm or revolution degrees.
     bool revolve = false;
@@ -1493,10 +1494,59 @@ bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane,
     return std::isfinite(volume) && volume > 1e-8;
 }
 
+bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
+                      const std::vector<ProfileCircularHole>& holes, double& area) {
+    constexpr double clearance = 1e-3, limit = 1e6;
+    area = 0;
+    if (holes.size() > 16 || points.size() < 3) { return false; }
+    for (std::size_t i = 0; i < holes.size(); ++i) {
+        const auto& hole = holes[i];
+        if (!std::isfinite(hole.center.X()) || !std::isfinite(hole.center.Y())
+            || !std::isfinite(hole.radius) || hole.radius < clearance
+            || std::abs(hole.center.X()) + hole.radius > limit
+            || std::abs(hole.center.Y()) + hole.radius > limit) { return false; }
+        bool inside = false;
+        for (std::size_t edge = 0; edge < points.size(); ++edge) {
+            const auto& a = points[edge]; const auto& b = points[(edge + 1) % points.size()];
+            const double dx = b.X() - a.X(), dy = b.Y() - a.Y();
+            const double lengthSquared = dx * dx + dy * dy;
+            if (!std::isfinite(lengthSquared) || lengthSquared <= 0) { return false; }
+            const double t = std::max(0.0, std::min(1.0,
+                ((hole.center.X() - a.X()) * dx + (hole.center.Y() - a.Y()) * dy) / lengthSquared));
+            const double distance = std::hypot(hole.center.X() - a.X() - t * dx,
+                                               hole.center.Y() - a.Y() - t * dy);
+            if (!std::isfinite(distance) || distance < hole.radius + clearance) { return false; }
+            // Half-open ray crossings handle concave polygons and shared vertices.
+            if ((a.Y() > hole.center.Y()) != (b.Y() > hole.center.Y())) {
+                const double crossingX = a.X() + (hole.center.Y() - a.Y()) * dx / dy;
+                if (hole.center.X() < crossingX) { inside = !inside; }
+            }
+        }
+        if (!inside) { return false; }
+        for (std::size_t other = 0; other < i; ++other) {
+            if (hole.center.Distance(holes[other].center) < hole.radius + holes[other].radius + clearance) {
+                return false;
+            }
+        }
+        area += std::acos(-1.0) * hole.radius * hole.radius;
+    }
+    return std::isfinite(area);
+}
+
 bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
-    const std::optional<ProfileCircularSection>& circle, int plane, double parameter,
-    bool revolve, double& signedArea, double& volume) {
-    if (!circle) { return ProfileExpectedVolume(points, plane, parameter, revolve, signedArea, volume); }
+    const std::optional<ProfileCircularSection>& circle, const std::vector<ProfileCircularHole>& holes,
+    int plane, double parameter, bool revolve, double& signedArea, double& volume) {
+    if (!holes.empty() && (circle || revolve)) { return false; }
+    if (!circle) {
+        if (!ProfileExpectedVolume(points, plane, parameter, revolve, signedArea, volume)) { return false; }
+        if (holes.empty()) { return true; }
+        double holeArea = 0;
+        if (!ProfileHolesArea(points, holes, holeArea)) { return false; }
+        const double remaining = std::abs(signedArea) - holeArea;
+        volume = remaining * parameter;
+        // Keep signedArea as the original outer winding for wire construction.
+        return remaining >= 1e-6 && std::isfinite(volume) && volume > 1e-8;
+    }
     // A typed circular section cannot also carry a polygon outline.
     if (!points.empty() || plane < 0 || plane > 2) { return false; }
     const auto& c = *circle;
@@ -1535,7 +1585,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     try {
         OCC_CATCH_SIGNALS
         double signedArea = 0, expected = 0;
-        if (!ProfileDefinitionExpectedVolume(geometry->points, geometry->circle, geometry->plane,
+        if (!ProfileDefinitionExpectedVolume(geometry->points, geometry->circle, geometry->holes, geometry->plane,
                 geometry->depth, geometry->revolve, signedArea, expected)) { return false; }
         TopoDS_Face profileFace;
         if (geometry->circle) {
@@ -1573,9 +1623,23 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             if (!polygon.IsDone()) { return false; }
             BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
             if (!face.IsDone()) { return false; }
+            const gp_Dir normal = geometry->plane == 0 ? gp::DZ()
+                : (geometry->plane == 1 ? gp_Dir(0, -1, 0) : gp::DX());
+            const gp_Dir uDirection = geometry->plane == 2 ? gp::DY() : gp::DX();
+            for (const auto& hole : geometry->holes) {
+                if (geometry->cancelled.load()) { return false; }
+                const gp_Ax2 basis(ProfilePointInPlane(hole.center, geometry->plane), normal, uDirection);
+                BRepBuilderAPI_MakeEdge edge(gp_Circ(basis, hole.radius));
+                if (!edge.IsDone()) { return false; }
+                BRepBuilderAPI_MakeWire wire(edge.Edge());
+                if (!wire.IsDone()) { return false; }
+                face.Add(TopoDS::Wire(wire.Wire().Reversed()));
+                if (!face.IsDone()) { return false; }
+            }
             profileFace = face.Face();
         }
-        if (profileFace.IsNull() || geometry->cancelled.load()) { return false; }
+        if (profileFace.IsNull() || geometry->cancelled.load()
+            || !BRepCheck_Analyzer(profileFace, Standard_True).IsValid()) { return false; }
         TopoDS_Shape result;
         if (geometry->revolve) {
             const gp_Ax1 axis(gp::Origin(), geometry->plane == 0 ? gp::DY() : gp::DZ());
@@ -1633,12 +1697,13 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     const std::vector<gp_Pnt2d>& points, int plane, double depth,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height, bool revolve,
-    const std::optional<ProfileCircularSection>& circle) noexcept {
+    const std::optional<ProfileCircularSection>& circle,
+    const std::vector<ProfileCircularHole>& holes) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || myDoc->Document().IsNull() || width == 0 || height == 0) { return {}; }
     try {
         double area = 0, volume = 0;
-        if (!ProfileDefinitionExpectedVolume(points, circle, plane, depth, revolve, area, volume)) { return {}; }
+        if (!ProfileDefinitionExpectedVolume(points, circle, holes, plane, depth, revolve, area, volume)) { return {}; }
         const auto snapshot = captureSceneSnapshot(width, height);
         if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
             || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
@@ -1648,7 +1713,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
         auto work = std::make_shared<ProfileSolidWork>();
         if (!admitNames(work->authority)) { return {}; }
         work->geometry->points = points; work->geometry->plane = plane; work->geometry->depth = depth;
-        work->geometry->revolve = revolve; work->geometry->circle = circle;
+        work->geometry->revolve = revolve; work->geometry->circle = circle; work->geometry->holes = holes;
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height;
         work->owner = myDoc; work->document = myDoc->Document();

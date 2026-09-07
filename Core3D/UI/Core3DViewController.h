@@ -608,6 +608,16 @@ typedef struct {
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createExtrudedProfile(points:plane:depth:expected:completion:));
+//! Extrude a polygon with up to16 exact circular through-holes. Center/radius
+//! arrays must have equal lengths. Holes require0.001mm minimum clearance from
+//! all polygon edges and other holes; one owned cancellable creation command.
+- (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
+                          holeCenters:(NSArray<NSValue *> *)holeCenters
+                            holeRadii:(NSArray<NSNumber *> *)holeRadii
+                                plane:(Core3DProfilePlane)plane depth:(double)depth
+                             expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createExtrudedProfile(points:holeCenters:holeRadii:plane:depth:expected:completion:));
 //! Revolve a simple closed section around its plane's vertical axis at horizontal
 //! coordinate zero (XY: Y axis; XZ/YZ: Z axis). All horizontal coordinates must
 //! be nonnegative. Positive sweep 0.001–360 degrees; one undoable solid creation.

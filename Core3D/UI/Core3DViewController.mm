@@ -720,6 +720,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                             plane:(Core3DProfilePlane)plane parameter:(double)parameter
                           revolve:(BOOL)revolve
                            circle:(const std::optional<core3d::ProfileCircularSection>&)circle
+                      holeCenters:(NSArray<NSValue *> *)holeCenters holeRadii:(NSArray<NSNumber *> *)holeRadii
                          expected:(Core3DSceneSnapshot *)expected
                        completion:(void(^)(Core3DProfileConstructionResult))completion;
 @end
@@ -5434,7 +5435,17 @@ void Core3DAddDebugOrphanVisualMaterial(
                                 depth:(double)depth
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
-    [self constructProfileWithPoints:points plane:plane parameter:depth revolve:NO circle:std::nullopt expected:expected completion:completion];
+    [self constructProfileWithPoints:points plane:plane parameter:depth revolve:NO circle:std::nullopt holeCenters:@[] holeRadii:@[] expected:expected completion:completion];
+}
+
+- (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
+                          holeCenters:(NSArray<NSValue *> *)holeCenters
+                            holeRadii:(NSArray<NSNumber *> *)holeRadii
+                                plane:(Core3DProfilePlane)plane depth:(double)depth
+                             expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self constructProfileWithPoints:points plane:plane parameter:depth revolve:NO circle:std::nullopt
+                        holeCenters:holeCenters holeRadii:holeRadii expected:expected completion:completion];
 }
 
 - (void)createRevolvedProfileWithPoints:(NSArray<NSValue *> *)points
@@ -5442,7 +5453,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                          angleDegrees:(double)angleDegrees
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
-    [self constructProfileWithPoints:points plane:plane parameter:angleDegrees revolve:YES circle:std::nullopt expected:expected completion:completion];
+    [self constructProfileWithPoints:points plane:plane parameter:angleDegrees revolve:YES circle:std::nullopt holeCenters:@[] holeRadii:@[] expected:expected completion:completion];
 }
 
 - (void)createCircularProfileWithCenter:(CGPoint)center outerRadius:(double)outerRadius
@@ -5451,7 +5462,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
     const std::optional<core3d::ProfileCircularSection> circle = core3d::ProfileCircularSection{
         gp_Pnt2d(center.x, center.y), outerRadius, innerRadius};
-    [self constructProfileWithPoints:@[] plane:plane parameter:depth revolve:NO circle:circle
+    [self constructProfileWithPoints:@[] plane:plane parameter:depth revolve:NO circle:circle holeCenters:@[] holeRadii:@[]
                            expected:expected completion:completion];
 }
 
@@ -5461,7 +5472,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
     const std::optional<core3d::ProfileCircularSection> circle = core3d::ProfileCircularSection{
         gp_Pnt2d(center.x, center.y), outerRadius, innerRadius};
-    [self constructProfileWithPoints:@[] plane:plane parameter:angleDegrees revolve:YES circle:circle
+    [self constructProfileWithPoints:@[] plane:plane parameter:angleDegrees revolve:YES circle:circle holeCenters:@[] holeRadii:@[]
                            expected:expected completion:completion];
 }
 
@@ -5469,6 +5480,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                             plane:(Core3DProfilePlane)plane parameter:(double)depth
                           revolve:(BOOL)revolve
                            circle:(const std::optional<core3d::ProfileCircularSection>&)circle
+                      holeCenters:(NSArray<NSValue *> *)holeCenters holeRadii:(NSArray<NSNumber *> *)holeRadii
                          expected:(Core3DSceneSnapshot *)expected
                        completion:(void(^)(Core3DProfileConstructionResult))completion {
     if (!completion) { return; }
@@ -5480,6 +5492,9 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
         || ![points isKindOfClass:[NSArray class]]
         || (circle ? points.count != 0 : (points.count < 3 || points.count > 64))
+        || ![holeCenters isKindOfClass:[NSArray class]] || ![holeRadii isKindOfClass:[NSArray class]]
+        || holeCenters.count != holeRadii.count || holeCenters.count > 16
+        || (holeCenters.count > 0 && (circle || revolve))
         || !std::isfinite(depth) || depth < 1e-3 || depth > (revolve ? 360.0 : 1e6)
         || plane < Core3DProfilePlaneXY || plane > Core3DProfilePlaneYZ
         || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
@@ -5508,6 +5523,22 @@ void Core3DAddDebugOrphanVisualMaterial(
             }
             outline.emplace_back(point.x, point.y);
         }
+        std::vector<core3d::ProfileCircularHole> holes;
+        holes.reserve(holeCenters.count);
+        for (NSUInteger i = 0; i < holeCenters.count; ++i) {
+            id centerValue = holeCenters[i], radiusValue = holeRadii[i];
+            if (![centerValue isKindOfClass:[NSValue class]]
+                || std::strcmp([centerValue objCType], @encode(CGPoint)) != 0
+                || ![radiusValue isKindOfClass:[NSNumber class]]) {
+                completion(Core3DProfileConstructionResultRejected); return;
+            }
+            const CGPoint center = [centerValue CGPointValue];
+            const double radius = [radiusValue doubleValue];
+            if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(radius)) {
+                completion(Core3DProfileConstructionResultRejected); return;
+            }
+            holes.push_back({gp_Pnt2d(center.x, center.y), radius});
+        }
         const char* publication = expected.publicationSourceIdentifier.UTF8String;
         if (!publication) { completion(Core3DProfileConstructionResultRejected); return; }
         core3d::ObjectFrameIdentity identity;
@@ -5517,7 +5548,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         identity.modelRevision = expected.revisions.modelRevision;
         const auto work = viewer->prepareProfileSolid(outline, static_cast<int>(plane), depth,
             identity, expected.revisions.presentationRevision,
-            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve, circle);
+            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve, circle, holes);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         _profileSolidWork = work; _profileSolidCancelled = NO;
         const auto geometry = core3d::Core3DViewer::profileSolidGeometry(work);
