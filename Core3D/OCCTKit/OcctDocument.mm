@@ -88,6 +88,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_MapOfShape.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <Graphic3d_TextureSet.hxx>
