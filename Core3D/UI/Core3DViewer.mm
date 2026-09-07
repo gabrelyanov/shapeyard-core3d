@@ -2392,6 +2392,38 @@ bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept 
         && _objectInteractor->verifyOrdinaryNameAuthority(ledger);
 }
 
+std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
+    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options) noexcept {
+    if (![NSThread isMainThread]) { return std::nullopt; }
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) { return std::nullopt; }
+    try {
+        if (width == 0 || height == 0 || identity.entityIdentifier.empty()
+            || identity.entityIdentifier.size() > 128 || identity.publicationSourceIdentifier.empty()
+            || identity.publicationSourceIdentifier.size() > 128) { return std::nullopt; }
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || myContext.IsNull() || myDoc.IsNull()) { return std::nullopt; }
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) { return std::nullopt; }
+        const auto selected = myContext->SelectedInteractive();
+        const auto presentation = Handle(AIS_Shape)::DownCast(selected);
+        const auto label = myDoc->ShapeLabel(selected);
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || presentation.IsNull() || label.IsNull()
+            || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { return std::nullopt; }
+        OcctObjectTransformState previous;
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return std::nullopt; }
+        if (options.version != 2) return std::nullopt;
+        TopoDS_Shape candidate; OcctMeshUVAtlasPreview preview;
+        if (!myDoc->PrepareTriangleUVAtlas(label,candidate,options,&preview)) return std::nullopt;
+        preview.authoredResolution=previous.meshUVAtlasSettings[0];
+        preview.authoredGutterPixels=previous.meshUVAtlasSettings[1];
+        return preview;
+    } catch (...) { return std::nullopt; }
+}
+
 OrdinaryEditResult Core3DViewer::generateTriangleUVAtlas(
     const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options) noexcept {
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }

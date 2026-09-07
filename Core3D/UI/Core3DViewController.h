@@ -504,6 +504,15 @@ typedef struct {
 @end
 
 
+//! Immutable read-only derivative; UV byte payload is six doubles per triangle.
+@interface Core3DMeshUVAtlasPreview : NSObject
+@property (nonatomic, readonly, copy) NSData *triangleUVData;
+@property (nonatomic, readonly) NSInteger authoredResolution;
+@property (nonatomic, readonly) NSInteger authoredGutterPixels;
+@property (nonatomic, readonly) NSInteger chartCount;
+@property (nonatomic, readonly) double occupancy;
+@end
+
 @interface Core3DViewController : UIViewController {
     UIStateChanging _currentStateChanging;
     PrimitiveSelectionType _currentSelectionType;
@@ -611,6 +620,11 @@ typedef struct {
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(generateTriangleUVAtlas(entityIdentifier:expected:));
+- (Core3DMeshUVAtlasPreview *_Nullable)previewCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
+                                                       resolution:(NSInteger)resolution
+                                                     gutterPixels:(NSInteger)gutterPixels
+                                                         expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(previewCoherentUVAtlas(entityIdentifier:resolution:gutterPixels:expected:));
 //! Coherent planar charts with common texel density; regenerates untextured v1/v2.
 - (Core3DMeshUVAtlasResult)generateCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                        resolution:(NSInteger)resolution

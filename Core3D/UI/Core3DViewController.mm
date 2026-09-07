@@ -693,6 +693,21 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 } // namespace
 
+@interface Core3DMeshUVAtlasPreview ()
+- (instancetype)initWithNativePreview:(const OcctMeshUVAtlasPreview&)preview;
+@end
+@implementation Core3DMeshUVAtlasPreview
+- (instancetype)initWithNativePreview:(const OcctMeshUVAtlasPreview&)preview {
+    self=[super init];
+    if(self) {
+        _triangleUVData=[NSData dataWithBytes:preview.triangleUVs.data() length:preview.triangleUVs.size()*sizeof(double)];
+        _chartCount=preview.chartCount;_occupancy=preview.occupancy;
+        _authoredResolution=preview.authoredResolution;_authoredGutterPixels=preview.authoredGutterPixels;
+    }
+    return self;
+}
+@end
+
 @interface Core3DViewController () {
     BOOL _isSetuped;
     NSURL *_shouldLoadBundleUrl;
@@ -5435,6 +5450,40 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
     } catch (...) {}
     return Core3DMeshUVAtlasResultRejected;
+}
+
+- (Core3DMeshUVAtlasPreview *)previewCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
+                                                       resolution:(NSInteger)resolution
+                                                     gutterPixels:(NSInteger)gutterPixels
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (resolution < 256 || resolution > 4096 || gutterPixels < 1 || gutterPixels > 32) return nil;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return nil; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return nil; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return nil; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->previewCoherentUVAtlas(identity,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),
+            OcctMeshUVAtlasOptions{2,static_cast<int>(resolution),static_cast<int>(gutterPixels)});
+        return result ? [[Core3DMeshUVAtlasPreview alloc] initWithNativePreview:*result] : nil;
+    } catch (...) {}
+    return nil;
 }
 
 - (Core3DMeshUVAtlasResult)generateCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier

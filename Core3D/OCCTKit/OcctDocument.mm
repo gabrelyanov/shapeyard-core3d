@@ -4227,8 +4227,9 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
 }
 
 Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
-    const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options) const noexcept {
+    const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options, OcctMeshUVAtlasPreview* preview) const noexcept {
     candidate.Nullify();
+    if (preview) *preview = {};
     if (![NSThread isMainThread]) { return Standard_False; }
     try {
         const shapeyard::uv::Settings settings{options.resolution, options.gutterPixels};
@@ -4335,6 +4336,15 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
             || !TriangleAtlasFace(result, copiedFace, copiedMesh) || copiedFace.IsSame(face)) { return Standard_False; }
         BRep_Builder builder; builder.UpdateFace(copiedFace, atlas);
         if (!GeometryClassMatchesRepresentation(ClassifyDefinitionGeometry(result, nullptr), OcctGeometryRepresentation::TriangleMesh)) { return Standard_False; }
+        if (preview && options.version == 2) {
+            OcctMeshUVAtlasPreview value;
+            value.triangleUVs.reserve(coherent.corners.size()*6);
+            for (const auto& triangle:coherent.corners) for (const auto& uv:triangle) {
+                value.triangleUVs.push_back(uv[0]);value.triangleUVs.push_back(uv[1]);
+            }
+            value.chartCount=coherent.chartCount;value.occupancy=coherent.occupancy;
+            *preview=std::move(value);
+        }
         candidate = result;
         return Standard_True;
     } catch (...) { candidate.Nullify(); return Standard_False; }

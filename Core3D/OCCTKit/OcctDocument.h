@@ -58,6 +58,14 @@ enum class OcctGeometryRepresentation : Standard_Integer
     TriangleMesh = 2,
 };
 
+struct OcctMeshUVAtlasPreview {
+    Standard_Integer authoredResolution = 0;
+    Standard_Integer authoredGutterPixels = 0;
+    std::vector<double> triangleUVs;
+    Standard_Integer chartCount = 0;
+    Standard_Real occupancy = 0;
+};
+
 struct OcctMeshUVAtlasOptions {
     Standard_Integer version = 1;
     Standard_Integer resolution = 0;
@@ -526,7 +534,7 @@ public:
         Handle(AIS_InteractiveObject) object,
         OcctGeometryRepresentation representation);
     //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
-    Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
+    Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}, OcctMeshUVAtlasPreview* preview = nullptr) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
     Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label, const OcctMeshUVAtlasOptions& options = {}) noexcept;
     //! False for a read-only XCAF component occurrence.
