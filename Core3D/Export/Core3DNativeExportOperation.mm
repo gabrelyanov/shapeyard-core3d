@@ -67,6 +67,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
@@ -93,6 +94,7 @@ struct NativeExportState {
     std::string primaryPath;
     ExportType exportType = ExportTypeObj;
     Core3DExportMeshQuality meshQuality = Core3DExportMeshQualityViewport;
+    Core3DOBJColorConvention objColorConvention = Core3DOBJColorConventionCurrent;
     core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer sourceScene;
     bool selectedObjectsOnly = false;
     bool usesSelectedRoots = false;
@@ -170,15 +172,15 @@ private:
 //! texture-copy failure inside RWObj_ObjMaterialMap.
 class ValidatedOBJWriter final : public RWObj_CafWriter {
 public:
-    explicit ValidatedOBJWriter(const TCollection_AsciiString& path)
-    : RWObj_CafWriter(path) {
+    explicit ValidatedOBJWriter(const TCollection_AsciiString& path, Core3DOBJColorConvention convention)
+    : RWObj_CafWriter(path), myConvention(convention) {
     }
 
     Standard_Integer ExpectedTextureCount() const {
         return myCreatesMaterialFile ? myTextures.Extent() : 0;
     }
 
-    using PBRScalars = std::array<double, 5>;
+    using PBRScalars = std::array<double, 6>; // RGB, metallic, roughness, PBR flag
     const std::unordered_map<std::string, PBRScalars>& MaterialScalars() const {
         return myMaterialScalars;
     }
@@ -190,13 +192,22 @@ protected:
         // OCCT registers the effective face material before writing positions.
         // Use that exact key; material names cannot be reconstructed from labels.
         const auto& material = face.FaceStyle().Material();
-        if (!material.IsNull() && material->HasPbrMaterial()
-            && !writer.ActiveMaterial().IsEmpty()) {
-            const auto& pbr = material->PbrMaterial();
-            const auto& color = face.HasFaceColor()
-                ? face.FaceColor().GetRGB() : pbr.BaseColor.GetRGB();
-            const PBRScalars values{color.Red(), color.Green(), color.Blue(),
-                                    pbr.Metallic, pbr.Roughness};
+        const bool hasPBR = !material.IsNull() && material->HasPbrMaterial();
+        if (!writer.ActiveMaterial().IsEmpty()
+            && (hasPBR || myConvention != Core3DOBJColorConventionCurrent)) {
+            // Match the writer's effective face color, including occurrence and
+            // face overrides, rather than deriving material names from labels.
+            Quantity_Color color = face.HasFaceColor() ? face.FaceColor().GetRGB()
+                : (!material.IsNull() ? material->BaseColor().GetRGB()
+                                     : XCAFDoc_VisMaterialCommon().DiffuseColor);
+            double r = color.Red(), g = color.Green(), b = color.Blue();
+            if (myConvention == Core3DOBJColorConventionSRGB) {
+                color.Values(r, g, b, Quantity_TOC_sRGB);
+            }
+            const PBRScalars values{r, g, b,
+                hasPBR ? material->PbrMaterial().Metallic : 0.0,
+                hasPBR ? material->PbrMaterial().Roughness : 0.0,
+                hasPBR ? 1.0 : 0.0};
             for (double value : values) {
                 if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
                     throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
@@ -242,13 +253,15 @@ protected:
     }
 
 private:
+    Core3DOBJColorConvention myConvention;
     std::unordered_map<std::string, PBRScalars> myMaterialScalars;
     NCollection_Map<Handle(Image_Texture)> myTextures;
     Standard_Boolean myCreatesMaterialFile = Standard_False;
 };
 
-//! Upgrade only writer-owned PBR sections. Keep legacy materials, texture
-//! references, opacity and common-material fallback directives intact.
+//! Rewrite only writer-owned coefficients under the captured convention.
+//! Current retains legacy common coefficients. Texture references, opacity and
+//! non-color scalar directives remain intact in every convention.
 void PreserveOBJMaterialScalars(
     const std::shared_ptr<NativeExportState>& state,
     const ValidatedOBJWriter& writer) {
@@ -286,8 +299,10 @@ void PreserveOBJMaterialScalars(
                     throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
                         "The OBJ material library repeats a PBR section.");
                 }
-                output << "Pm " << found->second[3] << '\n'
-                       << "Pr " << found->second[4] << '\n';
+                if (found->second[5] == 1.0) {
+                    output << "Pm " << found->second[3] << '\n'
+                           << "Pr " << found->second[4] << '\n';
+                }
             }
         } else if (line.rfind("Kd ", 0) == 0 && materials.count(active) != 0) {
             if (!colors.insert(active).second) {
@@ -296,6 +311,29 @@ void PreserveOBJMaterialScalars(
             }
             const auto& values = materials.at(active);
             output << "Kd " << values[0] << ' ' << values[1] << ' ' << values[2] << '\n';
+        } else if (state->objColorConvention == Core3DOBJColorConventionLinear
+                   && materials.count(active) != 0
+                   && (line.rfind("Ka ", 0) == 0 || line.rfind("Ks ", 0) == 0)) {
+            // OCCT emits these common fallback coefficients as sRGB. Convert
+            // color values only: Ns, Tr, Pm, Pr and encoded images are scalars/data.
+            std::istringstream values(line.substr(3));
+            values.imbue(std::locale::classic());
+            double rgb[3];
+            if (!(values >> rgb[0] >> rgb[1] >> rgb[2]) || !(values >> std::ws).eof()) {
+                throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                    "An OBJ material color is malformed.");
+            }
+            output << line.substr(0, 3);
+            for (int channel = 0; channel < 3; ++channel) {
+                const double value = rgb[channel];
+                if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                        "An OBJ material color is outside its supported range.");
+                }
+                output << (channel == 0 ? "" : " ")
+                       << (value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4));
+            }
+            output << '\n';
         } else {
             output << line << '\n';
         }
@@ -1726,7 +1764,7 @@ NativeExportResult RunNativeExport(
                 TColStd_IndexedDataMapOfStringString fileInfo;
                 fileInfo.Add("Author", "Shapeyard 3D");
                 ValidatedOBJWriter writer(
-                    TCollection_AsciiString(state->primaryPath.c_str()));
+                    TCollection_AsciiString(state->primaryPath.c_str()), state->objColorConvention);
                 const bool writerSucceeded = writer.Perform(
                     ocafDocument,
                     rootLabels,
@@ -1853,6 +1891,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
                           exportType:(ExportType)exportType
            selectedEntityIdentifiers:(NSArray<NSString *> *)selectedEntityIdentifiers
                          meshQuality:(Core3DExportMeshQuality)meshQuality
+                  objColorConvention:(Core3DOBJColorConvention)objColorConvention
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle
@@ -1872,6 +1911,9 @@ NSString *ErrorDescription(const NativeExportResult& result) {
             && exportType != ExportTypeStep
             && exportType != ExportTypeGltf)
         || ((exportType == ExportTypeGltf) != (sourceScene != nullptr))
+        || objColorConvention < Core3DOBJColorConventionCurrent
+        || objColorConvention > Core3DOBJColorConventionSRGB
+        || (exportType != ExportTypeObj && objColorConvention != Core3DOBJColorConventionCurrent)
         || meshQuality < Core3DExportMeshQualityViewport
         || meshQuality > Core3DExportMeshQualityFine
         || (meshQuality != Core3DExportMeshQualityViewport
@@ -1928,6 +1970,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->sourceScene = std::move(sourceScene);
     _state->selectedObjectsOnly = selectedObjectsOnly;
     _state->meshQuality = meshQuality;
+    _state->objColorConvention = objColorConvention;
     _state->usesSelectedRoots = selectedEntityIdentifiers != nil;
     _state->selectedEntityIdentifiers = std::move(selectedIdentifiers);
     const char *primaryFilename = exportType == ExportTypeStl
@@ -1943,6 +1986,10 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     _state->deviationAngle = deviationAngle;
     _state->maximalChordialDeviation = maximalChordialDeviation;
     return self;
+}
+
+- (Core3DOBJColorConvention)objColorConvention {
+    return _state == nullptr ? Core3DOBJColorConventionCurrent : _state->objColorConvention;
 }
 
 - (Core3DExportMeshQuality)meshQuality {

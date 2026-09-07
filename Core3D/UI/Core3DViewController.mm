@@ -4748,6 +4748,53 @@ void Core3DAddDebugOrphanVisualMaterial(
 		});
 }
 
+- (NSData *_Nullable)debugOBJColorConventionBinXCAFFixtureData {
+    return Core3DCreateDebugBinXCAFFixture(@"obj-color-conventions",
+        [](const Handle(TDocStd_Document)& document) {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const auto materials = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+            const auto colors = XCAFDoc_DocumentTool::ColorTool(document->Main());
+            const char* names[] = {"Common", "PBR", "TexturedPBR", "SurfaceColor"};
+            for (int index = 0; index < 4; ++index) {
+                const auto label = shapes->AddShape(BRepPrimAPI_MakeBox(
+                    gp_Pnt(index * 20.0, 0, 0), 10.0, 10.0, 10.0).Shape(), Standard_False);
+                TDataStd_Name::Set(label, TCollection_ExtendedString(names[index]));
+                if (index == 3) {
+                    colors->SetColor(label, Quantity_ColorRGBA(
+                        Quantity_Color(0.01, 0.09, 0.49, Quantity_TOC_RGB), 0.6f), XCAFDoc_ColorSurf);
+                    continue;
+                }
+                Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+                if (index == 0) {
+                    XCAFDoc_VisMaterialCommon common;
+                    common.DiffuseColor = Quantity_Color(0.04, 0.25, 0.64, Quantity_TOC_RGB);
+                    common.AmbientColor = Quantity_Color(0.01, 0.02, 0.03, Quantity_TOC_RGB);
+                    common.SpecularColor = Quantity_Color(0.16, 0.16, 0.16, Quantity_TOC_RGB);
+                    common.Transparency = 0.35f;
+                    material->SetCommonMaterial(common);
+                } else {
+                    XCAFDoc_VisMaterialPBR pbr;
+                    pbr.BaseColor = Quantity_ColorRGBA(index == 1
+                        ? Quantity_Color(0.16, 0.36, 0.81, Quantity_TOC_RGB)
+                        : Quantity_Color(0.25, 0.49, 0.09, Quantity_TOC_RGB), index == 1 ? 0.4f : 0.8f);
+                    pbr.Metallic = 0.3f;
+                    pbr.Roughness = 0.7f;
+                    if (index == 2) {
+                        NSData* png = [[NSData alloc] initWithBase64EncodedString:
+                            @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg==" options:0];
+                        Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+                            NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
+                        std::memcpy(buffer->ChangeData(), png.bytes, png.length);
+                        pbr.BaseColorTexture = new Image_Texture(buffer, TCollection_AsciiString("obj-color-fixture"));
+                    }
+                    material->SetPbrMaterial(pbr);
+                }
+                const auto materialLabel = materials->AddMaterial(material, TCollection_AsciiString(names[index]));
+                materials->SetShapeMaterial(label, materialLabel);
+            }
+        });
+}
+
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData {
     Handle(TDocStd_Application) application;
     Handle(TDocStd_Document) document;

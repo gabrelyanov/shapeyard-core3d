@@ -466,6 +466,15 @@ typedef struct {
                     selectedObjectsOnly:(BOOL)selectedObjectsOnly
                             meshQuality:(Core3DExportMeshQuality)meshQuality
     NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:meshQuality:));
+//! Capture an explicit OBJ color convention. Other formats require Current;
+//! unsupported values reject before private files are created. Older overloads
+//! retain Current. This preference never changes authored model appearance.
+- (Core3DNativeExportOperation *_Nullable)
+    prepareNativeExportOperationWithType:(ExportType)exportType
+                    selectedObjectsOnly:(BOOL)selectedObjectsOnly
+                            meshQuality:(Core3DExportMeshQuality)meshQuality
+                     objColorConvention:(Core3DOBJColorConvention)objColorConvention
+    NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:meshQuality:objColorConvention:));
 //! Capture only committed exportable geometry. Unlike the presentation
 //! snapshot seam, this returns nil while a Boolean, Mirror, Linear Array,
 //! Radial Array, or Shell trial is active or unresolved, or while the OCAF
@@ -1194,6 +1203,8 @@ typedef struct {
 //! Valid imported PBR material whose Common fallback owns an embedded PNG.
 //! Scalar authoring must remain read-only until that texture is app-owned.
 - (NSData *_Nullable)debugCommonTextureBinXCAFFixtureData;
+//! Independent mixed common/PBR/color-only fixture for OBJ color conventions.
+- (NSData *_Nullable)debugOBJColorConventionBinXCAFFixtureData;
 //! Valid XCAF material with a normal map that schema v6 cannot represent.
 //! Snapshot publication must fail closed so OCCT remains authoritative.
 - (NSData *_Nullable)debugUnsupportedPBRTextureBinXCAFFixtureData;

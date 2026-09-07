@@ -13,6 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
                           exportType:(ExportType)exportType
            selectedEntityIdentifiers:(NSArray<NSString *> *_Nullable)selectedEntityIdentifiers
                          meshQuality:(Core3DExportMeshQuality)meshQuality
+                  objColorConvention:(Core3DOBJColorConvention)objColorConvention
                       deflectionType:(NSInteger)deflectionType
                 deviationCoefficient:(double)deviationCoefficient
                        deviationAngle:(double)deviationAngle

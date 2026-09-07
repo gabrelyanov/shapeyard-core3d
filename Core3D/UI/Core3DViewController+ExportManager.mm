@@ -122,6 +122,21 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
 - (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
     (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
     meshQuality:(Core3DExportMeshQuality)meshQuality {
+    return [self prepareNativeExportOperationWithType:exportType
+                                 selectedObjectsOnly:selectedObjectsOnly
+                                         meshQuality:meshQuality
+                                  objColorConvention:Core3DOBJColorConventionCurrent];
+}
+
+- (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
+    (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality
+    objColorConvention:(Core3DOBJColorConvention)objColorConvention {
+    if (objColorConvention < Core3DOBJColorConventionCurrent
+        || objColorConvention > Core3DOBJColorConventionSRGB
+        || (exportType != ExportTypeObj && objColorConvention != Core3DOBJColorConventionCurrent)) {
+        return nil;
+    }
     if (meshQuality < Core3DExportMeshQualityViewport
         || meshQuality > Core3DExportMeshQualityFine
         || (meshQuality != Core3DExportMeshQualityViewport
@@ -296,6 +311,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
                 exportType:exportType
                 selectedEntityIdentifiers:selectedIdentifiers
                 meshQuality:meshQuality
+                objColorConvention:objColorConvention
                 deflectionType:static_cast<NSInteger>(deflectionType)
                 deviationCoefficient:deviationCoefficient
                 deviationAngle:deviationAngle

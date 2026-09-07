@@ -16,6 +16,16 @@ typedef NS_ENUM(NSInteger, Core3DExportMeshQuality) {
     Core3DExportMeshQualityFine,
 };
 
+//! OBJ material coefficient convention. Current preserves the existing mixed
+//! legacy output (linear authored PBR diffuse, OCCT sRGB common coefficients).
+//! Linear and SRGB explicitly encode all diffuse/ambient/specular coefficients;
+//! texture bytes and scalar opacity/metallic/roughness are never gamma converted.
+typedef NS_ENUM(NSInteger, Core3DOBJColorConvention) {
+    Core3DOBJColorConventionCurrent = 0,
+    Core3DOBJColorConventionLinear,
+    Core3DOBJColorConventionSRGB,
+};
+
 FOUNDATION_EXPORT NSErrorDomain const Core3DNativeExportErrorDomain;
 
 typedef NS_ERROR_ENUM(
@@ -59,6 +69,7 @@ NS_SWIFT_SENDABLE
 
 @property(atomic, readonly, getter=isCancelled) BOOL cancelled;
 @property(nonatomic, readonly) Core3DExportMeshQuality meshQuality;
+@property(nonatomic, readonly) Core3DOBJColorConvention objColorConvention;
 
 - (instancetype)init NS_UNAVAILABLE;
 - (void)startWithCompletion:(Core3DNativeExportCompletion)completion
