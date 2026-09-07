@@ -50,7 +50,7 @@ bool CanCaptureCommittedExport(
 
 // Derive scope from one committed publication, before creating any private
 // files. A missing or inconsistent selected item cannot widen the export.
-NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot) {
+NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snapshot) {
     constexpr NSUInteger maximumItems = 50'000;
     constexpr NSUInteger maximumIdentifierBytes = 128;
     if (snapshot == nil
@@ -126,7 +126,7 @@ NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot
             && exportType != ExportTypeObj && exportType != ExportTypeStl)) {
         return nil;
     }
-    if ((selectedObjectsOnly && exportType != ExportTypeStl)
+    if ((selectedObjectsOnly && exportType != ExportTypeStl && exportType != ExportTypeObj)
         || ![NSThread isMainThread]
         || (exportType != ExportTypeObj
             && exportType != ExportTypeStl
@@ -152,7 +152,7 @@ NSArray<NSString *> *CaptureSelectedSTLIdentifiers(Core3DSceneSnapshot *snapshot
 
         NSArray<NSString *> *selectedIdentifiers = nil;
         if (selectedObjectsOnly) {
-            selectedIdentifiers = CaptureSelectedSTLIdentifiers(
+            selectedIdentifiers = CaptureSelectedExportIdentifiers(
                 [self captureExportSceneSnapshot]);
             if (selectedIdentifiers == nil) {
                 return nil;

@@ -1651,7 +1651,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
 
     std::set<std::string> selectedIdentifiers;
     if (selectedEntityIdentifiers != nil) {
-        if (exportType != ExportTypeStl
+        if ((exportType != ExportTypeStl && exportType != ExportTypeObj)
             || selectedEntityIdentifiers.count == 0
             || selectedEntityIdentifiers.count > 50'000) {
             return nil;

@@ -450,7 +450,7 @@ typedef struct {
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
-//! Freeze the current visible whole-object selection for binary STL export.
+//! Freeze the current visible whole-object selection for OBJ or binary STL export.
 //! Other selected formats, empty/subshape selections and unresolved object
 //! identities reject. NO preserves the existing all-document behavior.
 - (Core3DNativeExportOperation *_Nullable)
