@@ -444,20 +444,22 @@ typedef struct {
 
 - (NSURL *_Nullable)exportWithType:(ExportType)exportType;
 //! Freeze the committed document into a private handoff and return a worker
-//! operation. OBJ, binary STL, and exact BRep STEP keep only the bounded XBF
+//! operation. GLB prepares immutable geometry for startSceneSnapshot; OBJ,
+//! binary STL, and exact BRep STEP produce files with start. All keep the bounded XBF
 //! save on the main thread; translation/writing, validation, and cleanup run
 //! off-main.
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType
     NS_SWIFT_NAME(prepareNativeExportOperation(with:));
-//! Freeze the current visible whole-object selection for OBJ or binary STL export.
+//! Freeze the current visible whole-object selection for GLB, OBJ or binary STL export.
 //! Other selected formats, empty/subshape selections and unresolved object
-//! identities reject. NO preserves the existing all-document behavior.
+//! identities reject. NO uses all-visible for GLB and existing all-document
+//! behavior for native file exporters.
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType
                     selectedObjectsOnly:(BOOL)selectedObjectsOnly
     NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:));
-//! Capture an immutable OBJ/STL mesh quality without changing the viewport or
+//! Capture an immutable GLB/OBJ/STL mesh quality without changing the viewport or
 //! editable source. Invalid qualities and non-viewport STEP presets reject.
 - (Core3DNativeExportOperation *_Nullable)
     prepareNativeExportOperationWithType:(ExportType)exportType

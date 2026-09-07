@@ -1,5 +1,3 @@
-#include <BRep_Builder.hxx>
-#include <TopoDS_Compound.hxx>
 //
 //  OcctSceneSnapshotBuilder.mm
 //  Core3D
@@ -16,6 +14,8 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <BRep_Tool.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_AspectFillArea3d.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
@@ -4427,7 +4427,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         for (const auto& occurrence : occurrences) {
             if (cancelled()) { return {}; }
             auto& item = result->instances[occurrence.instance];
-            const auto& definition = definitions[occurrence.definition];
+            auto& definition = definitions[occurrence.definition];
             auto& mesh = result->meshes[item.meshIndex];
             if (replaced.insert(item.meshIndex).second) {
                 if (mesh.primitives.size() != definition.mesh.primitives.size()) { return {}; }
@@ -4435,7 +4435,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     if (mesh.primitives[i].faceIndex != definition.mesh.primitives[i].faceIndex) { return {}; }
                 }
                 const auto revision = mesh.geometryRevision;
-                mesh = definition.mesh;
+                mesh = std::move(definition.mesh);
                 mesh.geometryRevision = revision; // frozen provenance, never a live publication
             }
             gp_Trsf origin;
