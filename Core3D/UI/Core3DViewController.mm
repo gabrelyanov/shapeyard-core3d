@@ -35,6 +35,7 @@
 #include "BRepBuilderAPI_MakePolygon.hxx"
 #include "BRepBuilderAPI_MakeFace.hxx"
 #include "BRepBuilderAPI_Transform.hxx"
+#include "BRepBuilderAPI_Copy.hxx"
 #include "BRep_Builder.hxx"
 #include "TopoDS_Compound.hxx"
 #include "TopoDS_CompSolid.hxx"
@@ -2566,7 +2567,11 @@ void Core3DAddDebugOrphanVisualMaterial(
                 gp_Trsf scale;
                 scale.SetScale(gp_Pnt(0, 0, 0), 2.0);
                 if (mode == 2) {
-                    change.shape = BRepBuilderAPI_Transform(before.shape, scale, Standard_True).Shape();
+                    // BRep transformation can be a no-op on a triangle-only
+                    // shape. The mesh rejection probe must actually replace it.
+                    change.shape = before.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh
+                        ? BRepBuilderAPI_Copy(before.shape, Standard_True, Standard_True).Shape()
+                        : BRepBuilderAPI_Transform(before.shape, scale, Standard_True).Shape();
                 } else {
                     change.transform.SetScaleFactor(2.0);
                     if (mode == 4) {
