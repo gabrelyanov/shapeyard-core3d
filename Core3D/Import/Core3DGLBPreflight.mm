@@ -2095,10 +2095,10 @@ private:
                 + output.linear[0][2]
                     * (output.linear[1][0] * output.linear[2][1]
                         - output.linear[1][1] * output.linear[2][0]);
-            if (!std::isfinite(determinant) || determinant <= 0.0) {
+            if (!std::isfinite(determinant) || determinant == 0.0) {
                 return Fail(
                     PreflightStatus::Unsupported,
-                    "GLB node matrix reflection is unsupported.");
+                    "GLB node matrix is singular.");
             }
             return true;
         }
@@ -2113,7 +2113,7 @@ private:
             }};
         }
 
-        double uniformScale = 1.0;
+        std::array<double, 3> axisScale = {{1.0, 1.0, 1.0}};
         if (node[@"scale"] != nil) {
             std::vector<double> scale;
             if (!ReadTransformArray(node[@"scale"], 3, scale)) {
@@ -2121,15 +2121,15 @@ private:
             }
             const double scaleTolerance = std::max(
                 1.0e-15,
-                scale[0] * 1.0e-6);
-            if (scale[0] <= 1.0e-9
-                || std::abs(scale[1] - scale[0]) > scaleTolerance
-                || std::abs(scale[2] - scale[0]) > scaleTolerance) {
+                std::abs(scale[0]) * 1.0e-6);
+            if (std::abs(scale[0]) <= 1.0e-9
+                || std::abs(std::abs(scale[1]) - std::abs(scale[0])) > scaleTolerance
+                || std::abs(std::abs(scale[2]) - std::abs(scale[0])) > scaleTolerance) {
                 return Fail(
                     PreflightStatus::Unsupported,
-                    "GLB node TRS must use positive uniform scale.");
+                    "GLB node TRS must use nonzero uniform scale magnitude.");
             }
-            uniformScale = scale[0];
+            axisScale = {{scale[0], scale[1], scale[2]}};
         }
 
         if (node[@"rotation"] != nil) {
@@ -2166,8 +2166,8 @@ private:
             }};
         }
         for (auto& row : output.linear) {
-            for (double& value : row) {
-                value *= uniformScale;
+            for (std::size_t column = 0; column < 3; ++column) {
+                row[column] *= axisScale[column];
             }
         }
         return true;

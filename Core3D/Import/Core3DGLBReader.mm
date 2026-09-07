@@ -855,6 +855,12 @@ private:
                      "The GLB contains invalid triangle indices.");
                 return false;
             }
+            // Removing a reflected occurrence location changes handedness.
+            // Reverse the detached mesh once, using the cumulative transform;
+            // two nested reflections therefore correctly cancel each other.
+            if (transform.IsNegative()) {
+                baked->SetTriangle(index, Poly_Triangle(first, third, second));
+            }
             const gp_Pnt p0 = baked->Node(first);
             const gp_Pnt p1 = baked->Node(second);
             const gp_Pnt p2 = baked->Node(third);
