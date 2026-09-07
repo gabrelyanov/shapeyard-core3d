@@ -6,6 +6,11 @@
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
 
+#include <BRep_Builder.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TDataStd_Name.hxx>
+#include <TopoDS_Face.hxx>
+#include <gp_Vec.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_CheckIterator.hxx>
 #include <Message_ProgressIndicator.hxx>
@@ -40,6 +45,10 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <cstdlib>
+#include <string_view>
+#include <xlocale.h>
 #include <fcntl.h>
 #include <filesystem>
 #include <memory>
@@ -99,6 +108,7 @@ struct NativeImportState {
     bool started = false;
     bool finished = false;
     std::size_t shapeCount = 0;
+    double stlMillimetersPerUnit = 1.0;
 };
 
 struct NativeImportResult {
@@ -281,6 +291,8 @@ bool IsSupportedImportPath(
             return extension == ".step" || extension == ".stp";
         case Core3DNativeImportFormatGLB:
             return extension == ".glb";
+        case Core3DNativeImportFormatSTL:
+            return extension == ".stl";
     }
     return false;
 }
@@ -2247,6 +2259,276 @@ void ImportGLB(
     scope.Next(1).Close();
 }
 
+// STL is unitless triangle geometry. Keep source winding, derive flat normals,
+// and retain separate facet vertices so sharp edges survive mesh round trips.
+constexpr std::size_t kMaximumSTLTriangles = 250'000;
+using STLTriangle = std::array<gp_Pnt, 3>;
+
+[[noreturn]] void InvalidSTL(const char *message) {
+    throw NativeImportFailure(Core3DNativeImportErrorReadFailed, message);
+}
+
+void AppendSTLTriangle(
+    std::vector<STLTriangle>& triangles,
+    STLTriangle triangle,
+    const std::shared_ptr<NativeImportState>& state) {
+    ThrowIfCancelled(state);
+    if (triangles.size() >= kMaximumSTLTriangles) {
+        throw NativeImportFailure(Core3DNativeImportErrorResourceLimit,
+            "STL import supports up to 250,000 triangles per file.");
+    }
+    for (gp_Pnt& point : triangle) {
+        point.SetCoord(point.X() * state->stlMillimetersPerUnit,
+                       point.Y() * state->stlMillimetersPerUnit,
+                       point.Z() * state->stlMillimetersPerUnit);
+        for (int axis = 1; axis <= 3; ++axis) {
+            if (!std::isfinite(point.Coord(axis))) {
+                InvalidSTL("The STL contains non-finite coordinates.");
+            }
+            if (std::abs(point.Coord(axis))
+                > core3d::limits::kMaximumModelCoordinateMagnitude) {
+                throw NativeImportFailure(Core3DNativeImportErrorResourceLimit,
+                    "The STL coordinates exceed the model size limit in the chosen units.");
+            }
+        }
+    }
+    const gp_Vec normal = gp_Vec(triangle[0], triangle[1]).Crossed(
+        gp_Vec(triangle[0], triangle[2]));
+    if (!std::isfinite(normal.SquareMagnitude())
+        || normal.SquareMagnitude() <= 1.0e-24) {
+        InvalidSTL("The STL contains a collapsed or degenerate triangle.");
+    }
+    triangles.push_back(std::move(triangle));
+}
+
+class ASCIISTLReader final {
+public:
+    explicit ASCIISTLReader(const std::vector<unsigned char>& bytes)
+    : myText(reinterpret_cast<const char *>(bytes.data()), bytes.size()),
+      myLocale(::newlocale(LC_NUMERIC_MASK, "C", nullptr)) {
+        if (myLocale == nullptr) {
+            throw NativeImportFailure(Core3DNativeImportErrorInternalFailure,
+                "The STL numeric reader could not be initialized.");
+        }
+    }
+    ~ASCIISTLReader() { ::freelocale(myLocale); }
+    ASCIISTLReader(const ASCIISTLReader&) = delete;
+    ASCIISTLReader& operator=(const ASCIISTLReader&) = delete;
+
+    std::string_view Next() {
+        while (myOffset < myText.size() && Space(myText[myOffset])) ++myOffset;
+        const std::size_t begin = myOffset;
+        while (myOffset < myText.size() && !Space(myText[myOffset])) {
+            const unsigned char value = myText[myOffset++];
+            if (value < 33 || value > 126 || myOffset - begin > 128) {
+                InvalidSTL("The ASCII STL contains an invalid or oversized token.");
+            }
+        }
+        return myText.substr(begin, myOffset - begin);
+    }
+
+    void Expect(std::string_view expected) {
+        if (Next() != expected) InvalidSTL("The ASCII STL structure is incomplete or invalid.");
+    }
+
+    void SkipNameLine() {
+        std::size_t count = 0;
+        while (myOffset < myText.size() && myText[myOffset] != '\n'
+               && myText[myOffset] != '\r') {
+            const unsigned char value = myText[myOffset++];
+            if (++count > 4096 || (value != '\t' && (value < 32 || value > 126))) {
+                InvalidSTL("The ASCII STL solid name is invalid or too long.");
+            }
+        }
+    }
+
+    double Number() {
+        const std::string_view token = Next();
+        // Accept decimal/scientific notation only. strtod would also accept
+        // hexadecimal, NaN, and infinity, which are not STL coordinates.
+        std::size_t index = 0;
+        if (index < token.size() && (token[index] == '+' || token[index] == '-')) ++index;
+        std::size_t digits = 0;
+        while (index < token.size() && Digit(token[index])) { ++index; ++digits; }
+        if (index < token.size() && token[index] == '.') {
+            ++index;
+            while (index < token.size() && Digit(token[index])) { ++index; ++digits; }
+        }
+        if (digits == 0) InvalidSTL("The ASCII STL contains an invalid number.");
+        if (index < token.size() && (token[index] == 'e' || token[index] == 'E')) {
+            ++index;
+            if (index < token.size() && (token[index] == '+' || token[index] == '-')) ++index;
+            const std::size_t exponentStart = index;
+            while (index < token.size() && Digit(token[index])) ++index;
+            if (index == exponentStart) InvalidSTL("The ASCII STL exponent is incomplete.");
+        }
+        if (index != token.size()) InvalidSTL("The ASCII STL contains an invalid number.");
+        const std::string owned(token);
+        char *end = nullptr;
+        errno = 0;
+        const double value = ::strtod_l(owned.c_str(), &end, myLocale);
+        if (errno == ERANGE || end != owned.c_str() + owned.size() || !std::isfinite(value)) {
+            InvalidSTL("The ASCII STL contains a non-finite or out-of-range number.");
+        }
+        return value;
+    }
+
+private:
+    static bool Digit(char c) { return c >= '0' && c <= '9'; }
+    static bool Space(char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+    }
+    std::string_view myText;
+    std::size_t myOffset = 0;
+    locale_t myLocale;
+};
+
+std::vector<STLTriangle> ReadSTL(
+    const std::shared_ptr<NativeImportState>& state,
+    const PinnedStagedFile& stagedFile) {
+    ValidatePinnedStagedFile(state, stagedFile, "before STL parsing");
+    std::vector<unsigned char> bytes(static_cast<std::size_t>(stagedFile.identity.size));
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        ThrowIfCancelled(state);
+        const std::size_t request = std::min<std::size_t>(64 * 1024, bytes.size() - offset);
+        ssize_t count;
+        do {
+            count = ::pread(stagedFile.descriptor.Get(), bytes.data() + offset,
+                            request, static_cast<off_t>(offset));
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0 || static_cast<std::size_t>(count) > request) {
+            InvalidSTL("The private STL staging file could not be read completely.");
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+    auto uint32LE = [&](std::size_t at) -> std::uint32_t {
+        return std::uint32_t(bytes[at]) | (std::uint32_t(bytes[at + 1]) << 8)
+            | (std::uint32_t(bytes[at + 2]) << 16) | (std::uint32_t(bytes[at + 3]) << 24);
+    };
+    const std::uint64_t count = bytes.size() >= 84 ? uint32LE(80) : 0;
+    const bool binary = bytes.size() >= 84 && 84ULL + count * 50ULL == bytes.size();
+    std::vector<STLTriangle> triangles;
+    if (binary) {
+        if (count > kMaximumSTLTriangles) {
+            throw NativeImportFailure(Core3DNativeImportErrorResourceLimit,
+                "STL import supports up to 250,000 triangles per file.");
+        }
+        triangles.reserve(static_cast<std::size_t>(count));
+        auto number = [&](std::size_t at) -> double {
+            const std::uint32_t bits = uint32LE(at);
+            float value;
+            static_assert(sizeof(value) == sizeof(bits));
+            std::memcpy(&value, &bits, sizeof(value));
+            if (!std::isfinite(value)) InvalidSTL("The binary STL contains a non-finite number.");
+            return static_cast<double>(value);
+        };
+        for (std::size_t facet = 0; facet < count; ++facet) {
+            const std::size_t base = 84 + facet * 50;
+            // Validate advisory normals but derive the actual normals from
+            // vertex winding. Optional, nonstandard color attributes are ignored.
+            for (std::size_t axis = 0; axis < 3; ++axis) (void)number(base + axis * 4);
+            STLTriangle triangle;
+            for (std::size_t vertex = 0; vertex < 3; ++vertex) {
+                const std::size_t at = base + 12 + vertex * 12;
+                triangle[vertex].SetCoord(number(at), number(at + 4), number(at + 8));
+            }
+            AppendSTLTriangle(triangles, triangle, state);
+        }
+    } else {
+        ASCIISTLReader reader(bytes);
+        std::string_view token = reader.Next();
+        if (token != "solid") InvalidSTL("The STL is neither valid binary nor ASCII geometry.");
+        while (token == "solid") {
+            ThrowIfCancelled(state);
+            reader.SkipNameLine();
+            token = reader.Next();
+            while (token == "facet") {
+                reader.Expect("normal");
+                for (int axis = 0; axis < 3; ++axis) (void)reader.Number();
+                reader.Expect("outer"); reader.Expect("loop");
+                STLTriangle triangle;
+                for (gp_Pnt& point : triangle) {
+                    reader.Expect("vertex");
+                    // Read sequentially: function-argument evaluation order must
+                    // never swap the three authored coordinate tokens.
+                    const double x = reader.Number(), y = reader.Number(), z = reader.Number();
+                    point.SetCoord(x, y, z);
+                }
+                reader.Expect("endloop"); reader.Expect("endfacet");
+                AppendSTLTriangle(triangles, triangle, state);
+                token = reader.Next();
+            }
+            if (token != "endsolid") InvalidSTL("The ASCII STL solid is incomplete.");
+            reader.SkipNameLine();
+            token = reader.Next();
+        }
+        if (!token.empty()) InvalidSTL("The ASCII STL contains unexpected trailing data.");
+    }
+    if (triangles.empty()) {
+        throw NativeImportFailure(Core3DNativeImportErrorNoGeometry,
+            "The STL contains no triangles.");
+    }
+    ValidatePinnedStagedFile(state, stagedFile, "during STL parsing");
+    return triangles;
+}
+
+void ImportSTL(
+    const std::shared_ptr<NativeImportState>& state,
+    const Handle(OcctDocument)& document,
+    const PinnedStagedFile& stagedFile) {
+    const std::vector<STLTriangle> triangles = ReadSTL(state, stagedFile);
+    document->InitDoc();
+    if (document->Document().IsNull() || document->Document()->HasOpenCommand()) {
+        throw NativeImportFailure(Core3DNativeImportErrorInternalFailure,
+            "The private import document could not be created.");
+    }
+    Handle(Poly_Triangulation) mesh = new Poly_Triangulation(
+        static_cast<Standard_Integer>(triangles.size() * 3),
+        static_cast<Standard_Integer>(triangles.size()), Standard_False, Standard_True);
+    for (std::size_t facet = 0; facet < triangles.size(); ++facet) {
+        ThrowIfCancelled(state);
+        const STLTriangle& points = triangles[facet];
+        const gp_Dir normal(gp_Vec(points[0], points[1]).Crossed(gp_Vec(points[0], points[2])));
+        const Standard_Integer first = static_cast<Standard_Integer>(facet * 3 + 1);
+        for (Standard_Integer vertex = 0; vertex < 3; ++vertex) {
+            mesh->SetNode(first + vertex, points[vertex]);
+            mesh->SetNormal(first + vertex, normal);
+        }
+        mesh->SetTriangle(static_cast<Standard_Integer>(facet + 1),
+            Poly_Triangle(first, first + 1, first + 2));
+    }
+    mesh->UpdateCachedMinMax();
+    TopoDS_Face face;
+    BRep_Builder builder;
+    builder.MakeFace(face, mesh);
+    Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+    const TDF_Label label = shapes->AddShape(face, Standard_False);
+    if (label.IsNull() || !document->MarkImportedTriangleMeshDefinitions()) {
+        throw NativeImportFailure(Core3DNativeImportErrorTransferFailed,
+            "The STL mesh could not be prepared for editing.");
+    }
+    TDataStd_Name::Set(label, "Imported STL");
+    std::size_t leafCount = 0;
+    if (ValidateImportedDocument(document, state, false, leafCount)
+            != ImportedDocumentValidation::Valid || leafCount != 1) {
+        throw NativeImportFailure(Core3DNativeImportErrorTransferFailed,
+            "The imported STL project is structurally invalid.");
+    }
+    ThrowIfCancelled(state);
+    if (!document->MigrateLegacyIdentifiers()) {
+        throw NativeImportFailure(Core3DNativeImportErrorMigrationFailed,
+            "The STL model could not be prepared for editing.");
+    }
+    std::size_t migratedCount = 0;
+    if (ValidateImportedDocument(document, state, true, migratedCount)
+            != ImportedDocumentValidation::Valid || migratedCount != 1) {
+        throw NativeImportFailure(Core3DNativeImportErrorMigrationFailed,
+            "The imported STL failed editable-project validation.");
+    }
+    state->shapeCount = 1;
+}
+
 void SerializeAndValidate(
     const std::shared_ptr<NativeImportState>& state,
     const Handle(OcctDocument)& document,
@@ -2326,6 +2608,15 @@ NativeImportResult RunNativeImport(
                 document = new OcctDocument();
                 ImportSTEP(state, document, stagedFile, whole.Next(4));
                 SerializeAndValidate(state, document, whole.Next(4));
+                break;
+            }
+            case Core3DNativeImportFormatSTL: {
+                PinnedStagedFile stagedFile = CopySourceIntoPrivateStaging(state);
+                Handle(Message_ProgressIndicator) progress =
+                    new NativeImportProgress(&state->cancelled);
+                document = new OcctDocument();
+                ImportSTL(state, document, stagedFile);
+                SerializeAndValidate(state, document, progress->Start());
                 break;
             }
             case Core3DNativeImportFormatGLB: {
@@ -2441,6 +2732,21 @@ NSString *ErrorDescription(const NativeImportResult& result) {
 
 @implementation Core3DNativeImportOperation
 
+- (instancetype)initWithSTLURL:(NSURL *)stlURL
+                           unit:(Core3DNativeImportSTLUnit)unit {
+    double scale;
+    switch (unit) {
+        case Core3DNativeImportSTLUnitMillimeters: scale = 1.0; break;
+        case Core3DNativeImportSTLUnitCentimeters: scale = 10.0; break;
+        case Core3DNativeImportSTLUnitMeters: scale = 1000.0; break;
+        case Core3DNativeImportSTLUnitInches: scale = 25.4; break;
+        default: return nil;
+    }
+    self = [self initWithSourceURL:stlURL format:Core3DNativeImportFormatSTL];
+    if (self) _state->stlMillimetersPerUnit = scale;
+    return self;
+}
+
 - (instancetype)initWithSTEPURL:(NSURL *)stepURL {
     return [self initWithSourceURL:stepURL
                            format:Core3DNativeImportFormatSTEP];
@@ -2463,7 +2769,8 @@ NSString *ErrorDescription(const NativeImportResult& result) {
     self = [super init];
     if (!self
         || (format != Core3DNativeImportFormatSTEP
-            && format != Core3DNativeImportFormatGLB)
+            && format != Core3DNativeImportFormatGLB
+            && format != Core3DNativeImportFormatSTL)
         || !sourceURL.isFileURL
         || !temporaryRoot.isFileURL) {
         return nil;
@@ -2500,7 +2807,7 @@ NSString *ErrorDescription(const NativeImportResult& result) {
         stagingDirectory.path.fileSystemRepresentation;
     NSString *stagedFileName = format == Core3DNativeImportFormatGLB
         ? @"model.glb"
-        : @"model.step";
+        : (format == Core3DNativeImportFormatSTL ? @"model.stl" : @"model.step");
     _state->stagedSourcePath =
         [stagingDirectory URLByAppendingPathComponent:stagedFileName]
             .path.fileSystemRepresentation;

@@ -7,6 +7,15 @@ FOUNDATION_EXPORT NSErrorDomain const Core3DNativeImportErrorDomain;
 typedef NS_ENUM(NSInteger, Core3DNativeImportFormat) {
     Core3DNativeImportFormatSTEP NS_SWIFT_NAME(step) = 1,
     Core3DNativeImportFormatGLB NS_SWIFT_NAME(glb) = 2,
+    Core3DNativeImportFormatSTL NS_SWIFT_NAME(stl) = 3,
+};
+
+//! STL has no embedded length units. The importer converts into millimeters.
+typedef NS_ENUM(NSInteger, Core3DNativeImportSTLUnit) {
+    Core3DNativeImportSTLUnitMillimeters NS_SWIFT_NAME(millimeters) = 0,
+    Core3DNativeImportSTLUnitCentimeters NS_SWIFT_NAME(centimeters) = 1,
+    Core3DNativeImportSTLUnitMeters NS_SWIFT_NAME(meters) = 2,
+    Core3DNativeImportSTLUnitInches NS_SWIFT_NAME(inches) = 3,
 };
 
 typedef NS_ERROR_ENUM(
@@ -61,6 +70,12 @@ NS_SWIFT_SENDABLE
     NS_SWIFT_NAME(init(sourceURL:format:));
 - (nullable instancetype)initWithSTEPURL:(NSURL *)stepURL
     NS_SWIFT_NAME(init(stepURL:));
+//! Binary/ASCII STL geometry import with explicit authored units. The generic
+//! sourceURL/format initializer defaults STL to millimeters. Nonstandard STL
+//! colors are not imported; vertex winding determines the flat mesh normals.
+- (nullable instancetype)initWithSTLURL:(NSURL *)stlURL
+                                  unit:(Core3DNativeImportSTLUnit)unit
+    NS_SWIFT_NAME(init(stlURL:unit:));
 - (void)startWithCompletion:(Core3DNativeImportCompletion)completion
     NS_SWIFT_NAME(start(completion:));
 - (void)cancel;
