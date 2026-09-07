@@ -133,7 +133,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
     meshQuality:(Core3DExportMeshQuality)meshQuality
     objColorConvention:(Core3DOBJColorConvention)objColorConvention {
     if (objColorConvention < Core3DOBJColorConventionCurrent
-        || objColorConvention > Core3DOBJColorConventionSRGB
+        || objColorConvention > Core3DOBJColorConventionEncoded
         || (exportType != ExportTypeObj && objColorConvention != Core3DOBJColorConventionCurrent)) {
         return nil;
     }

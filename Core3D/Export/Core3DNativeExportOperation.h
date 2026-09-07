@@ -23,7 +23,7 @@ typedef NS_ENUM(NSInteger, Core3DExportMeshQuality) {
 typedef NS_ENUM(NSInteger, Core3DOBJColorConvention) {
     Core3DOBJColorConventionCurrent = 0,
     Core3DOBJColorConventionLinear,
-    Core3DOBJColorConventionSRGB,
+    Core3DOBJColorConventionEncoded,
 };
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DNativeExportErrorDomain;

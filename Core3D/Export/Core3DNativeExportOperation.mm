@@ -201,7 +201,7 @@ protected:
                 : (!material.IsNull() ? material->BaseColor().GetRGB()
                                      : XCAFDoc_VisMaterialCommon().DiffuseColor);
             double r = color.Red(), g = color.Green(), b = color.Blue();
-            if (myConvention == Core3DOBJColorConventionSRGB) {
+            if (myConvention == Core3DOBJColorConventionEncoded) {
                 color.Values(r, g, b, Quantity_TOC_sRGB);
             }
             const PBRScalars values{r, g, b,
@@ -1912,7 +1912,7 @@ NSString *ErrorDescription(const NativeExportResult& result) {
             && exportType != ExportTypeGltf)
         || ((exportType == ExportTypeGltf) != (sourceScene != nullptr))
         || objColorConvention < Core3DOBJColorConventionCurrent
-        || objColorConvention > Core3DOBJColorConventionSRGB
+        || objColorConvention > Core3DOBJColorConventionEncoded
         || (exportType != ExportTypeObj && objColorConvention != Core3DOBJColorConventionCurrent)
         || meshQuality < Core3DExportMeshQualityViewport
         || meshQuality > Core3DExportMeshQualityFine
