@@ -18,6 +18,7 @@
 #include "TransformInspectorMeasurementController.hpp"
 #include "OrdinaryEditController.hpp"
 #include <gp_Pnt2d.hxx>
+#include <optional>
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -41,6 +42,11 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
+    struct ProfileCircularSection {
+        gp_Pnt2d center;
+        double outerRadius = 0;
+        double innerRadius = 0; // Zero is a disk; positive is a concentric hole.
+    };
     struct ProfileSolidWork;
     struct ProfileSolidGeometry;
     struct ObjectAlignmentWork;
@@ -61,11 +67,12 @@ namespace core3d {
         Standard_EXPORT NSString* addTestPrimitives();
         void addPrimitive(PrimitiveType primitiveType);
         void addPrimitivesFromJSON(NSString* json);
-        //! Closed polygon construction: main-thread admission/commit, private worker geometry.
+        //! Polygon or exact circular-section construction: owned private worker geometry.
         std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
             const std::vector<gp_Pnt2d>& points, int plane, double depth,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
-            std::uint32_t width, std::uint32_t height, bool revolve = false) noexcept;
+            std::uint32_t width, std::uint32_t height, bool revolve = false,
+            const std::optional<ProfileCircularSection>& circle = std::nullopt) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
             const std::shared_ptr<ProfileSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;

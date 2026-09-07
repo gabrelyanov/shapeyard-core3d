@@ -616,6 +616,14 @@ typedef struct {
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createRevolvedProfile(points:plane:angleDegrees:expected:completion:));
+//! Extrude an exact circle or concentric ring in mm on an explicit work plane.
+//! innerRadius zero creates a disk. Positive radii, depth and wall thickness
+//! have a 0.001 mm minimum. One owned, cancellable and undoable solid creation.
+- (void)createCircularProfileWithCenter:(CGPoint)center outerRadius:(double)outerRadius
+                          innerRadius:(double)innerRadius plane:(Core3DProfilePlane)plane
+                                depth:(double)depth expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createCircularProfile(center:outerRadius:innerRadius:plane:depth:expected:completion:));
 //! Keep the worker slot until completion; cancel at document load/close boundaries.
 - (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

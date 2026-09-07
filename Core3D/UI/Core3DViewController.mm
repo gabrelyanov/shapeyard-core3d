@@ -718,7 +718,9 @@ void Core3DAddDebugOrphanVisualMaterial(
 @interface Core3DViewController (ProfileConstructionPrivate)
 - (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
                             plane:(Core3DProfilePlane)plane parameter:(double)parameter
-                          revolve:(BOOL)revolve expected:(Core3DSceneSnapshot *)expected
+                          revolve:(BOOL)revolve
+                           circle:(const std::optional<core3d::ProfileCircularSection>&)circle
+                         expected:(Core3DSceneSnapshot *)expected
                        completion:(void(^)(Core3DProfileConstructionResult))completion;
 @end
 
@@ -5432,7 +5434,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                                 depth:(double)depth
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
-    [self constructProfileWithPoints:points plane:plane parameter:depth revolve:NO expected:expected completion:completion];
+    [self constructProfileWithPoints:points plane:plane parameter:depth revolve:NO circle:std::nullopt expected:expected completion:completion];
 }
 
 - (void)createRevolvedProfileWithPoints:(NSArray<NSValue *> *)points
@@ -5440,12 +5442,24 @@ void Core3DAddDebugOrphanVisualMaterial(
                          angleDegrees:(double)angleDegrees
                              expected:(Core3DSceneSnapshot *)expected
                            completion:(void(^)(Core3DProfileConstructionResult))completion {
-    [self constructProfileWithPoints:points plane:plane parameter:angleDegrees revolve:YES expected:expected completion:completion];
+    [self constructProfileWithPoints:points plane:plane parameter:angleDegrees revolve:YES circle:std::nullopt expected:expected completion:completion];
+}
+
+- (void)createCircularProfileWithCenter:(CGPoint)center outerRadius:(double)outerRadius
+                          innerRadius:(double)innerRadius plane:(Core3DProfilePlane)plane
+                                depth:(double)depth expected:(Core3DSceneSnapshot *)expected
+                           completion:(void(^)(Core3DProfileConstructionResult))completion {
+    const std::optional<core3d::ProfileCircularSection> circle = core3d::ProfileCircularSection{
+        gp_Pnt2d(center.x, center.y), outerRadius, innerRadius};
+    [self constructProfileWithPoints:@[] plane:plane parameter:depth revolve:NO circle:circle
+                           expected:expected completion:completion];
 }
 
 - (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
                             plane:(Core3DProfilePlane)plane parameter:(double)depth
-                          revolve:(BOOL)revolve expected:(Core3DSceneSnapshot *)expected
+                          revolve:(BOOL)revolve
+                           circle:(const std::optional<core3d::ProfileCircularSection>&)circle
+                         expected:(Core3DSceneSnapshot *)expected
                        completion:(void(^)(Core3DProfileConstructionResult))completion {
     if (!completion) { return; }
     if (![NSThread isMainThread]) {
@@ -5454,7 +5468,8 @@ void Core3DAddDebugOrphanVisualMaterial(
     }
     if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
-        || ![points isKindOfClass:[NSArray class]] || points.count < 3 || points.count > 64
+        || ![points isKindOfClass:[NSArray class]]
+        || (circle ? points.count != 0 : (points.count < 3 || points.count > 64))
         || !std::isfinite(depth) || depth < 1e-3 || depth > (revolve ? 360.0 : 1e6)
         || plane < Core3DProfilePlaneXY || plane > Core3DProfilePlaneYZ
         || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
@@ -5492,7 +5507,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         identity.modelRevision = expected.revisions.modelRevision;
         const auto work = viewer->prepareProfileSolid(outline, static_cast<int>(plane), depth,
             identity, expected.revisions.presentationRevision,
-            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve);
+            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve, circle);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         _profileSolidWork = work; _profileSolidCancelled = NO;
         const auto geometry = core3d::Core3DViewer::profileSolidGeometry(work);

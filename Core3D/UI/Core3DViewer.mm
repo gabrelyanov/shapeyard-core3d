@@ -42,6 +42,10 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Pln.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -1411,6 +1415,7 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
 
 struct ProfileSolidGeometry {
     std::vector<gp_Pnt2d> points;
+    std::optional<ProfileCircularSection> circle;
     int plane = 0; // 0 XY -> +Z, 1 XZ -> +Y, 2 YZ -> +X.
     double depth = 10; // Extrusion mm or revolution degrees.
     bool revolve = false;
@@ -1488,6 +1493,28 @@ bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane,
     return std::isfinite(volume) && volume > 1e-8;
 }
 
+bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
+    const std::optional<ProfileCircularSection>& circle, int plane, double parameter,
+    bool revolve, double& signedArea, double& volume) {
+    if (!circle) { return ProfileExpectedVolume(points, plane, parameter, revolve, signedArea, volume); }
+    // Circular sections currently support extrusion only. Never silently
+    // ignore a supplied polygon or treat an unsupported sweep as extrusion.
+    if (!points.empty() || revolve || plane < 0 || plane > 2) { return false; }
+    const auto& c = *circle;
+    constexpr double minimum = 1e-3, limit = 1e6;
+    for (const double value : {c.center.X(), c.center.Y(), c.outerRadius, c.innerRadius, parameter}) {
+        if (!std::isfinite(value)) { return false; }
+    }
+    if (parameter < minimum || parameter > limit || c.outerRadius < minimum
+        || c.innerRadius < 0 || (c.innerRadius > 0 && c.innerRadius < minimum)
+        || c.outerRadius - c.innerRadius < minimum
+        || std::abs(c.center.X()) + c.outerRadius > limit
+        || std::abs(c.center.Y()) + c.outerRadius > limit) { return false; }
+    signedArea = std::acos(-1.0) * (c.outerRadius - c.innerRadius) * (c.outerRadius + c.innerRadius);
+    volume = signedArea * parameter;
+    return std::isfinite(volume) && volume > 0;
+}
+
 gp_Pnt ProfilePointInPlane(const gp_Pnt2d& p, int plane) {
     switch (plane) {
         case 0: return gp_Pnt(p.X(), p.Y(), 0);
@@ -1502,28 +1529,56 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     try {
         OCC_CATCH_SIGNALS
         double signedArea = 0, expected = 0;
-        if (!ProfileExpectedVolume(geometry->points, geometry->plane, geometry->depth,
-                                   geometry->revolve, signedArea, expected)) { return false; }
-        auto points = geometry->points;
-        if (signedArea < 0) { std::reverse(points.begin(), points.end()); }
-        BRepBuilderAPI_MakePolygon polygon;
-        for (const auto& point : points) {
-            if (geometry->cancelled.load()) { return false; }
-            polygon.Add(ProfilePointInPlane(point, geometry->plane));
+        if (!ProfileDefinitionExpectedVolume(geometry->points, geometry->circle, geometry->plane,
+                geometry->depth, geometry->revolve, signedArea, expected)) { return false; }
+        TopoDS_Face profileFace;
+        if (geometry->circle) {
+            const auto& circle = *geometry->circle;
+            const gp_Pnt center = ProfilePointInPlane(circle.center, geometry->plane);
+            // Orient each analytic circle in the same U/V basis as polygons.
+            const gp_Dir normal = geometry->plane == 0 ? gp::DZ()
+                : (geometry->plane == 1 ? gp_Dir(0, -1, 0) : gp::DX());
+            const gp_Dir uDirection = geometry->plane == 2 ? gp::DY() : gp::DX();
+            const gp_Ax2 basis(center, normal, uDirection);
+            BRepBuilderAPI_MakeEdge outerEdge(gp_Circ(basis, circle.outerRadius));
+            if (!outerEdge.IsDone()) { return false; }
+            BRepBuilderAPI_MakeWire outerWire(outerEdge.Edge());
+            if (!outerWire.IsDone()) { return false; }
+            BRepBuilderAPI_MakeFace face(gp_Pln(center, normal), outerWire.Wire(), Standard_True);
+            if (!face.IsDone()) { return false; }
+            if (circle.innerRadius > 0) {
+                BRepBuilderAPI_MakeEdge innerEdge(gp_Circ(basis, circle.innerRadius));
+                if (!innerEdge.IsDone()) { return false; }
+                BRepBuilderAPI_MakeWire innerWire(innerEdge.Edge());
+                if (!innerWire.IsDone()) { return false; }
+                face.Add(TopoDS::Wire(innerWire.Wire().Reversed()));
+                if (!face.IsDone()) { return false; }
+            }
+            profileFace = face.Face();
+        } else {
+            auto points = geometry->points;
+            if (signedArea < 0) { std::reverse(points.begin(), points.end()); }
+            BRepBuilderAPI_MakePolygon polygon;
+            for (const auto& point : points) {
+                if (geometry->cancelled.load()) { return false; }
+                polygon.Add(ProfilePointInPlane(point, geometry->plane));
+            }
+            polygon.Close();
+            if (!polygon.IsDone()) { return false; }
+            BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
+            if (!face.IsDone()) { return false; }
+            profileFace = face.Face();
         }
-        polygon.Close();
-        if (!polygon.IsDone()) { return false; }
-        BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
-        if (!face.IsDone() || geometry->cancelled.load()) { return false; }
+        if (profileFace.IsNull() || geometry->cancelled.load()) { return false; }
         TopoDS_Shape result;
         if (geometry->revolve) {
             const gp_Ax1 axis(gp::Origin(), geometry->plane == 0 ? gp::DY() : gp::DZ());
             if (geometry->depth == 360.0) {
-                BRepPrimAPI_MakeRevol sweep(face.Face(), axis, Standard_True);
+                BRepPrimAPI_MakeRevol sweep(profileFace, axis, Standard_True);
                 if (!sweep.IsDone()) { return false; }
                 result = sweep.Shape();
             } else {
-                BRepPrimAPI_MakeRevol sweep(face.Face(), axis,
+                BRepPrimAPI_MakeRevol sweep(profileFace, axis,
                     geometry->depth * std::acos(-1.0) / 180.0, Standard_True);
                 if (!sweep.IsDone()) { return false; }
                 result = sweep.Shape();
@@ -1531,7 +1586,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         } else {
             const gp_Vec direction = geometry->plane == 0 ? gp_Vec(0, 0, geometry->depth)
                 : geometry->plane == 1 ? gp_Vec(0, geometry->depth, 0) : gp_Vec(geometry->depth, 0, 0);
-            BRepPrimAPI_MakePrism prism(face.Face(), direction, Standard_True, Standard_True);
+            BRepPrimAPI_MakePrism prism(profileFace, direction, Standard_True, Standard_True);
             if (!prism.IsDone()) { return false; }
             result = prism.Shape();
         }
@@ -1571,12 +1626,13 @@ struct ProfileSolidWork {
 std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     const std::vector<gp_Pnt2d>& points, int plane, double depth,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
-    std::uint32_t width, std::uint32_t height, bool revolve) noexcept {
+    std::uint32_t width, std::uint32_t height, bool revolve,
+    const std::optional<ProfileCircularSection>& circle) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || myDoc->Document().IsNull() || width == 0 || height == 0) { return {}; }
     try {
         double area = 0, volume = 0;
-        if (!ProfileExpectedVolume(points, plane, depth, revolve, area, volume)) { return {}; }
+        if (!ProfileDefinitionExpectedVolume(points, circle, plane, depth, revolve, area, volume)) { return {}; }
         const auto snapshot = captureSceneSnapshot(width, height);
         if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
             || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
@@ -1586,7 +1642,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
         auto work = std::make_shared<ProfileSolidWork>();
         if (!admitNames(work->authority)) { return {}; }
         work->geometry->points = points; work->geometry->plane = plane; work->geometry->depth = depth;
-        work->geometry->revolve = revolve;
+        work->geometry->revolve = revolve; work->geometry->circle = circle;
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height;
         work->owner = myDoc; work->document = myDoc->Document();
