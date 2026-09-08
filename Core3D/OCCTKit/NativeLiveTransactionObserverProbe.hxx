@@ -16,7 +16,8 @@ struct LiveTransactionObservation {
     enum class Kind : std::uint8_t { Attached, Open, Commit, Abort, UndoCompleted,
         RedoCompleted, Adopted, Detached } kind;
     std::uint64_t sequence=0;
-    // Diagnostic opening ordinal only; not a persisted/public authority token.
+    // Current active-session opening, including on inactive cleanup events.
+    // It is not the event document identity or a persisted/public authority token.
     std::uint64_t opening=0;
     bool active=false,commandOpen=false;
     int undos=0,redos=0;
