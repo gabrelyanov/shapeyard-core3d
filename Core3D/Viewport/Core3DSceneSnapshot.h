@@ -219,6 +219,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) BOOL hasMetallicRoughnessTexture;
 @property (nonatomic, assign, readonly) NSInteger occlusionTextureIndex;
 @property (nonatomic, assign, readonly) BOOL hasOcclusionTexture;
+@property (nonatomic, assign, readonly) NSInteger normalTextureIndex;
+@property (nonatomic, assign, readonly) BOOL hasNormalTexture;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -271,6 +273,11 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) uint32_t topologyVertexCount;
 
 //! Owned interleaved Core3DSceneVertex bytes.
+//! Empty together when absent. Tangents are float4 per index corner, not vertex.
+//! Identifier includes basis provenance and exact frame bytes for GPU cache keys.
+@property (nonatomic, copy, readonly) NSData *cornerTangentData;
+@property (nonatomic, copy, readonly) NSString *tangentIdentifier;
+@property (nonatomic, assign, readonly) BOOL hasCornerTangents;
 @property (nonatomic, copy, readonly) NSData *vertexData;
 //! Owned uint32_t index bytes.
 @property (nonatomic, copy, readonly) NSData *indexData;

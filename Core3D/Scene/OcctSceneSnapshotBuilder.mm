@@ -1089,7 +1089,8 @@ bool MaterialValuesEqual(const MaterialSnapshot& theLeft,
         && theLeft.emissiveTextureIndex
             == theRight.emissiveTextureIndex
         && theLeft.metallicRoughnessTextureIndex == theRight.metallicRoughnessTextureIndex
-        && theLeft.occlusionTextureIndex == theRight.occlusionTextureIndex;
+        && theLeft.occlusionTextureIndex == theRight.occlusionTextureIndex
+        && theLeft.normalTextureIndex == theRight.normalTextureIndex;
 }
 
 void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial)
@@ -1111,6 +1112,7 @@ void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial
     theHash.AddInteger(theMaterial.emissiveTextureIndex);
     theHash.AddInteger(theMaterial.metallicRoughnessTextureIndex);
     theHash.AddInteger(theMaterial.occlusionTextureIndex);
+    theHash.AddInteger(theMaterial.normalTextureIndex);
 }
 
 std::string HexIdentifier(const char* thePrefix, const std::uint64_t theValue)
@@ -2487,6 +2489,7 @@ bool ValidatePresentationOverlayPayload(
                 && (aMaterial.baseColorTextureIndex != -1
                     || aMaterial.emissiveTextureIndex != -1
             || aMaterial.metallicRoughnessTextureIndex != -1
+            || aMaterial.normalTextureIndex != -1
             || aMaterial.occlusionTextureIndex != -1))
             || !IsFinite(aMaterial.emission.x)
             || !IsFinite(aMaterial.emission.y)
@@ -3960,6 +3963,7 @@ OcctSceneSnapshotBuilder::PublishShellPreviewOverlay(
             || anItem.material.baseColorTextureIndex != -1
             || anItem.material.emissiveTextureIndex != -1
             || anItem.material.metallicRoughnessTextureIndex != -1
+            || anItem.material.normalTextureIndex != -1
             || anItem.material.occlusionTextureIndex != -1) {
             return {};
         }
@@ -4073,6 +4077,7 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
             || aSourceItem.material.baseColorTextureIndex != -1
             || aSourceItem.material.emissiveTextureIndex != -1
             || aSourceItem.material.metallicRoughnessTextureIndex != -1
+            || aSourceItem.material.normalTextureIndex != -1
             || aSourceItem.material.occlusionTextureIndex != -1) {
             return {};
         }
@@ -4253,6 +4258,7 @@ OcctSceneSnapshotBuilder::PublishRadialArrayPreviewOverlay(
             || aSourceItem.material.baseColorTextureIndex != -1
             || aSourceItem.material.emissiveTextureIndex != -1
             || aSourceItem.material.metallicRoughnessTextureIndex != -1
+            || aSourceItem.material.normalTextureIndex != -1
             || aSourceItem.material.occlusionTextureIndex != -1) {
             return {};
         }

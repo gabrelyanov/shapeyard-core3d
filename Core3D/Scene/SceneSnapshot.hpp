@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 //! Update the Swift Metal support and GLB export schema gates with this contract.
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 8;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 9;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 10;
 
 struct Float2 {
@@ -200,6 +200,8 @@ struct MaterialSnapshot {
     //! Linear data maps: roughness G / metallic B, and occlusion R.
     std::int32_t metallicRoughnessTextureIndex = -1;
     std::int32_t occlusionTextureIndex = -1;
+    //! Linear RGB, +Y tangent-space normal, scale 1. Requires corner frames.
+    std::int32_t normalTextureIndex = -1;
 };
 
 //! Immutable app-owned encoded raster copied from an embedded XCAF texture.
@@ -240,6 +242,9 @@ struct TopologyCardinality {
     std::uint32_t vertexCount = 0;
 };
 
+//! Basis provenance is independent of geometry revision and material presence.
+enum class TangentBasis : std::uint8_t { None = 0, MikkTSpace = 1, Authored = 2 };
+
 struct MeshSnapshot {
     std::string definitionIdentifier;
     std::uint64_t geometryRevision = 0;
@@ -248,6 +253,10 @@ struct MeshSnapshot {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<MeshPrimitive> primitives;
+    //! Optional unit tangent xyz / bitangent sign w, one float4 per INDEX
+    //! CORNER. Never average mirrored/discontinuous frames into shared vertices.
+    TangentBasis tangentBasis = TangentBasis::None;
+    std::vector<Float4> cornerTangents;
 };
 
 //! Definition-owned reference line resolved into true world space before mesh

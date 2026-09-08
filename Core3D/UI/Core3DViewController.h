@@ -1075,6 +1075,10 @@ typedef struct {
 //! must fail closed while texture removal remains available.
 - (BOOL)debugClearSelectedCachedTriangulationsForTextureTest;
 //! Renderer-only normal binding; never edits native material/history. Nil clears.
+//! DEBUG-only immutable derivative: rebinds the captured AO resource as normal.
+//! Modes 1–10 deliberately violate the DTO contract; 11 is an authored sign
+//! variant and 12 retains frames without a normal map. Never edits the document.
+- (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)validationMode;
 - (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data;
 - (NSUInteger)debugPreparedNativeTangentArrayCount;
 - (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden;

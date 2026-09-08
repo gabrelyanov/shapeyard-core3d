@@ -1,3 +1,4 @@
+#include "../Scene/MikkTangentSpace.hpp"
 //
 //  Core3DViewController.m
 //  Core3D
@@ -3472,6 +3473,62 @@ void Core3DAddDebugOrphanVisualMaterial(
         return nil;
     }
     return @(metersPerUnit);
+}
+
+- (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)mode {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer) { return nil; }
+    try {
+        const auto size = GLController.drawableSize;
+        if (!std::isfinite(size.width) || !std::isfinite(size.height)
+            || size.width < 1 || size.height < 1 || size.width > UINT32_MAX || size.height > UINT32_MAX) { return nil; }
+        const auto source = GLController.viewer->captureSceneSnapshot(
+            static_cast<uint32_t>(std::llround(size.width)), static_cast<uint32_t>(std::llround(size.height)));
+        if (!source || source->meshes.empty() || source->materials.empty()) { return nil; }
+        auto result = *source;
+        bool bound = false;
+        for (auto& material : result.materials) {
+            if (material.occlusionTextureIndex >= 0 && mode != 12) {
+                material.normalTextureIndex = material.occlusionTextureIndex;
+                material.occlusionTextureIndex = -1;
+                bound = true;
+            }
+        }
+        if (!bound && mode != 12) { return nil; }
+        using namespace core3d::scene;
+        for (auto& mesh : result.meshes) {
+            const bool hasUV = std::all_of(mesh.primitives.begin(), mesh.primitives.end(),
+                [](const auto& p) { return p.hasTextureCoordinates; });
+            if (GenerateMikkCornerTangents(mesh.vertices, mesh.indices, hasUV,
+                    mesh.cornerTangents) != TangentSpaceError::None) { return nil; }
+            mesh.tangentBasis = TangentBasis::MikkTSpace;
+        }
+        auto& mesh = result.meshes.front();
+        auto& tangent = mesh.cornerTangents.front();
+        switch (mode) {
+            case 0: case 12: break;
+            case 1: mesh.cornerTangents.pop_back(); break;
+            case 2: tangent.x = std::numeric_limits<float>::quiet_NaN(); break;
+            case 3: tangent.w = 0; break;
+            case 4: tangent.x *= 2; tangent.y *= 2; tangent.z *= 2; break;
+            case 5: {
+                const auto& vertex = mesh.vertices[mesh.indices.front()];
+                tangent = {vertex.normalX, vertex.normalY, vertex.normalZ, 1}; break;
+            }
+            case 6: mesh.primitives.front().hasTextureCoordinates = false; break;
+            case 7: mesh.tangentBasis = TangentBasis::None; break;
+            case 8: mesh.cornerTangents.clear(); mesh.tangentBasis = TangentBasis::None; break;
+            case 9: mesh.indices.front() = static_cast<uint32_t>(mesh.vertices.size()); break;
+            case 10: result.materials.front().normalTextureIndex = static_cast<int32_t>(result.textures.size()); break;
+            case 11:
+                for (auto& m : result.meshes) {
+                    m.tangentBasis = TangentBasis::Authored;
+                    for (auto& t : m.cornerTangents) { t.w = -t.w; }
+                }
+                break;
+            default: return nil;
+        }
+        return Core3DCreateSceneSnapshotDTO(result);
+    } catch (...) { return nil; }
 }
 
 - (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data {

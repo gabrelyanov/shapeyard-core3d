@@ -7,6 +7,7 @@
 #import "Core3DSceneSnapshot.h"
 #import "Core3DSceneSnapshotFactory.hpp"
 #import <ImageIO/ImageIO.h>
+#import <CommonCrypto/CommonDigest.h>
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../Scene/SceneSnapshot.hpp"
@@ -93,7 +94,8 @@ static_assert(sizeof(std::uint32_t) == 4,
               baseColorTextureIndex:(NSInteger)baseColorTextureIndex
                emissiveTextureIndex:(NSInteger)emissiveTextureIndex
       metallicRoughnessTextureIndex:(NSInteger)metallicRoughnessTextureIndex
-              occlusionTextureIndex:(NSInteger)occlusionTextureIndex;
+              occlusionTextureIndex:(NSInteger)occlusionTextureIndex
+                 normalTextureIndex:(NSInteger)normalTextureIndex;
 @end
 
 @interface Core3DSceneFacePrimitiveSnapshot ()
@@ -116,6 +118,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                                     faceCount:(uint32_t)faceCount
                                     edgeCount:(uint32_t)edgeCount
                            topologyVertexCount:(uint32_t)topologyVertexCount
+                            cornerTangentData:(NSData *)cornerTangentData
+                            tangentIdentifier:(NSString *)tangentIdentifier
                                    vertexData:(NSData *)vertexData
                                     indexData:(NSData *)indexData
                                   vertexCount:(NSUInteger)vertexCount
@@ -336,7 +340,8 @@ static_assert(sizeof(std::uint32_t) == 4,
               baseColorTextureIndex:(NSInteger)baseColorTextureIndex
                emissiveTextureIndex:(NSInteger)emissiveTextureIndex
       metallicRoughnessTextureIndex:(NSInteger)metallicRoughnessTextureIndex
-              occlusionTextureIndex:(NSInteger)occlusionTextureIndex {
+              occlusionTextureIndex:(NSInteger)occlusionTextureIndex
+                 normalTextureIndex:(NSInteger)normalTextureIndex {
     self = [super init];
     if (self) {
         _identifier = [identifier copy];
@@ -357,6 +362,8 @@ static_assert(sizeof(std::uint32_t) == 4,
         _hasMetallicRoughnessTexture = metallicRoughnessTextureIndex >= 0;
         _occlusionTextureIndex = occlusionTextureIndex;
         _hasOcclusionTexture = occlusionTextureIndex >= 0;
+        _normalTextureIndex = normalTextureIndex;
+        _hasNormalTexture = normalTextureIndex >= 0;
     }
     return self;
 }
@@ -408,6 +415,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                                     faceCount:(uint32_t)faceCount
                                     edgeCount:(uint32_t)edgeCount
                            topologyVertexCount:(uint32_t)topologyVertexCount
+                            cornerTangentData:(NSData *)cornerTangentData
+                            tangentIdentifier:(NSString *)tangentIdentifier
                                    vertexData:(NSData *)vertexData
                                     indexData:(NSData *)indexData
                                   vertexCount:(NSUInteger)vertexCount
@@ -426,6 +435,9 @@ static_assert(sizeof(std::uint32_t) == 4,
         _faceCount = faceCount;
         _edgeCount = edgeCount;
         _topologyVertexCount = topologyVertexCount;
+        _cornerTangentData = [cornerTangentData copy];
+        _tangentIdentifier = [tangentIdentifier copy];
+        _hasCornerTangents = cornerTangentData.length != 0;
         _vertexData = [vertexData copy];
         _indexData = [indexData copy];
         _vertexCount = vertexCount;
@@ -1146,8 +1158,34 @@ bool IsValid(const MaterialSnapshot& value) noexcept {
         && value.emissiveTextureIndex >= -1
         && value.metallicRoughnessTextureIndex >= -1
         && value.occlusionTextureIndex >= -1
+        && value.normalTextureIndex >= -1
         && IsValid(value.alphaMode)
         && IsValid(value.cullMode);
+}
+
+bool HasValidCornerTangents(const MeshSnapshot& mesh) noexcept {
+    if (mesh.cornerTangents.empty()) { return mesh.tangentBasis == TangentBasis::None; }
+    if ((mesh.tangentBasis != TangentBasis::MikkTSpace
+         && mesh.tangentBasis != TangentBasis::Authored)
+        || mesh.cornerTangents.size() != mesh.indices.size()
+        || mesh.indices.size() > kMaximumTangentTriangles * 3
+        || mesh.vertices.size() > kMaximumTangentVertices
+        || !std::all_of(mesh.primitives.begin(), mesh.primitives.end(),
+            [](const MeshPrimitive& p) { return p.hasTextureCoordinates; })) { return false; }
+    for (std::size_t i = 0; i < mesh.indices.size(); ++i) {
+        if (mesh.indices[i] >= mesh.vertices.size()) { return false; }
+        const auto& v = mesh.vertices[mesh.indices[i]];
+        const auto& t = mesh.cornerTangents[i];
+        const double n2 = double(v.normalX)*v.normalX + double(v.normalY)*v.normalY
+            + double(v.normalZ)*v.normalZ;
+        const double t2 = double(t.x)*t.x + double(t.y)*t.y + double(t.z)*t.z;
+        const double dot = double(t.x)*v.normalX + double(t.y)*v.normalY + double(t.z)*v.normalZ;
+        if (!IsFinite(t) || !std::isfinite(n2) || n2 < 1.0e-24
+            || std::abs(t2 - 1.0) > 1.0e-4
+            || std::abs(dot) > 1.0e-4 * std::sqrt(n2)
+            || (t.w != -1.0f && t.w != 1.0f)) { return false; }
+    }
+    return true;
 }
 
 bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
@@ -1257,6 +1295,11 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             }
             referencedTextures[textureIndex] = 1;
         }
+        if (material.normalTextureIndex >= 0) {
+            const auto index = static_cast<std::size_t>(material.normalTextureIndex);
+            if (index >= snapshot.textures.size()) { return false; }
+            referencedTextures[index] = 1;
+        }
         if (material.occlusionTextureIndex >= 0) {
             const std::size_t textureIndex = static_cast<std::size_t>(
                 material.occlusionTextureIndex);
@@ -1284,6 +1327,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !accountString(mesh.definitionIdentifier)
             || !definitionIdentifiers.insert(mesh.definitionIdentifier).second
             || mesh.geometryRevision == 0
+            || !HasValidCornerTangents(mesh)
             || mesh.vertices.empty() || mesh.indices.empty()
             || !mesh.localBounds.valid || !IsValid(mesh.localBounds)
             || !CheckedAdd(totalVertices, mesh.vertices.size(), totalVertices)
@@ -1299,6 +1343,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
 
         std::size_t vertexBytes = 0;
         std::size_t indexBytes = 0;
+        std::size_t tangentBytes = 0;
         if (!CheckedMultiply(mesh.vertices.size(), sizeof(Vertex), vertexBytes)
             || !CheckedMultiply(mesh.indices.size(),
                                 sizeof(std::uint32_t),
@@ -1309,6 +1354,8 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !CheckedAdd(totalNumericBytes,
                            indexBytes,
                            totalNumericBytes)
+            || !CheckedMultiply(mesh.cornerTangents.size(), sizeof(Float4), tangentBytes)
+            || !CheckedAdd(totalNumericBytes, tangentBytes, totalNumericBytes)
             || totalNumericBytes > kMaximumDTONumericBytes) {
             return false;
         }
@@ -1462,6 +1509,10 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                 || (!shouldBePickable && binding.pickToken != 0)) {
                 return false;
             }
+            const MaterialSnapshot& material = snapshot.materials[binding.materialIndex];
+            if (material.normalTextureIndex >= 0
+                && (mesh.cornerTangents.empty()
+                    || !mesh.primitives[primitiveIndex].hasTextureCoordinates)) { return false; }
             if (binding.pickToken == 0) {
                 continue;
             }
@@ -1937,6 +1988,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || material.emissiveTextureIndex != -1
             || material.metallicRoughnessTextureIndex != -1
             || material.occlusionTextureIndex != -1
+            || material.normalTextureIndex != -1
             || !hasExpectedAlpha
             || !isUnit(material.baseColor.x)
             || !isUnit(material.baseColor.y)
@@ -2008,6 +2060,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
                 && !IsCenteredLocalBounds(mesh.localBounds))
             || mesh.vertices.empty() || mesh.indices.empty()
             || mesh.primitives.empty()
+            || !mesh.cornerTangents.empty() || mesh.tangentBasis != TangentBasis::None
             || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
                     && !isLinearArrayMesh && !isRadialArrayMesh && !isShellMesh
                 && mesh.primitives.size() != 1)
@@ -2567,7 +2620,8 @@ Core3DSceneMaterialSnapshot *MaterialFromScene(const MaterialSnapshot& value) {
       baseColorTextureIndex:value.baseColorTextureIndex
        emissiveTextureIndex:value.emissiveTextureIndex
 metallicRoughnessTextureIndex:value.metallicRoughnessTextureIndex
-      occlusionTextureIndex:value.occlusionTextureIndex];
+      occlusionTextureIndex:value.occlusionTextureIndex
+         normalTextureIndex:value.normalTextureIndex];
 }
 
 Core3DSceneTextureSnapshot *TextureFromScene(
@@ -2622,6 +2676,18 @@ NSArray<Output *> *ObjectArrayFromVector(
 }
 
 Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
+    NSData *tangents = value.cornerTangents.empty() ? NSData.data :
+        [NSData dataWithBytes:value.cornerTangents.data()
+                       length:value.cornerTangents.size() * sizeof(Float4)];
+    NSString *tangentIdentifier = @"";
+    if (tangents.length != 0) {
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(tangents.bytes, static_cast<CC_LONG>(tangents.length), digest);
+        NSMutableString *identifier = [NSMutableString stringWithFormat:@"basis%u-",
+            static_cast<unsigned>(value.tangentBasis)];
+        for (unsigned char byte : digest) { [identifier appendFormat:@"%02x", byte]; }
+        tangentIdentifier = identifier;
+    }
     NSData *vertexData = value.vertices.empty()
         ? NSData.data
         : [NSData dataWithBytes:value.vertices.data()
@@ -2642,6 +2708,8 @@ Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
                            faceCount:value.topology.faceCount
                            edgeCount:value.topology.edgeCount
                   topologyVertexCount:value.topology.vertexCount
+                   cornerTangentData:tangents
+                   tangentIdentifier:tangentIdentifier
                           vertexData:vertexData
                            indexData:indexData
                          vertexCount:value.vertices.size()
