@@ -31,6 +31,9 @@
 #import <CommonCrypto/CommonDigest.h>
 
 #include "OcctDocument.h"
+#if DEBUG
+#include "Core3DBoundedAuthoredFrameDriver.hxx"
+#endif
 #include "CafShapePrs.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 
@@ -1314,6 +1317,12 @@ public:
     {
     }
 
+#if DEBUG
+    explicit Core3DBoundedBinXCAFRetrievalDriver(
+        std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> budget)
+        : Core3DBoundedBinXCAFRetrievalDriver() { myFrameBudget = std::move(budget); }
+#endif
+
     void Read(
         Standard_IStream& theStream,
         const Handle(Storage_Data)& theStorageData,
@@ -1324,7 +1333,7 @@ public:
         const Message_ProgressRange& theProgress =
             Message_ProgressRange()) override
     {
-        ResetAggregateTextureBytes();
+        ResetAggregateReadBudgets();
         if (theStorageData.IsNull() || theStorageData->TypeData().IsNull()) {
             RejectSafeBinaryRead();
             return;
@@ -1367,10 +1376,10 @@ public:
                 theFilter,
                 theProgress);
         } catch (...) {
-            ResetAggregateTextureBytes();
+            ResetAggregateReadBudgets();
             throw;
         }
-        ResetAggregateTextureBytes();
+        ResetAggregateReadBudgets();
     }
 
     Handle(BinMDF_ADriverTable) AttributeDrivers(
@@ -1424,24 +1433,35 @@ public:
         aTable->AddDriver(
             new Core3DFailClosedDriver<
                 BinMXCAFDoc_VisMaterialToolDriver>(theMessageDriver));
+#if DEBUG
+        if (myFrameBudget) aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
+            theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
+#endif
         return aTable;
     }
 
     void Clear() override
     {
-        BinDrivers_DocumentRetrievalDriver::Clear();
-        ResetAggregateTextureBytes();
+        try { BinDrivers_DocumentRetrievalDriver::Clear(); }
+        catch (...) { ResetAggregateReadBudgets(); throw; }
+        ResetAggregateReadBudgets();
     }
 
 private:
-    void ResetAggregateTextureBytes() noexcept
+    void ResetAggregateReadBudgets() noexcept
     {
+#if DEBUG
+        if (myFrameBudget) { myFrameBudget->bytes = 0; myFrameBudget->rejected = false; }
+#endif
         if (myAggregateTextureBytes != nullptr) {
             *myAggregateTextureBytes = 0;
         }
     }
 
     std::shared_ptr<Standard_Size> myAggregateTextureBytes;
+#if DEBUG
+    std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> myFrameBudget;
+#endif
 };
 
 // These GUIDs are persistent schema identifiers. They identify the attribute
@@ -3093,6 +3113,19 @@ void Core3DDefineSafeBinXCAFFormat(
         new Core3DBoundedBinXCAFRetrievalDriver(),
         new BinXCAFDrivers_DocumentStorageDriver());
 }
+
+#if DEBUG
+void Core3DDebugDefineFrameBinXCAFFormat(
+    const Handle(TDocStd_Application)& application,
+    const std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget>& budget)
+{
+    if (application.IsNull() || !budget) return;
+    application->DefineFormat(TCollection_AsciiString("BinXCAF"),
+        TCollection_AsciiString("Private frame test document"), TCollection_AsciiString("xbf"),
+        new Core3DBoundedBinXCAFRetrievalDriver(budget),
+        new BinXCAFDrivers_DocumentStorageDriver());
+}
+#endif
 
 // =======================================================================
 // function : OcctViewer

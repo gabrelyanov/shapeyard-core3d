@@ -27,8 +27,9 @@ struct AuthoredFrameReadBudget {
 class BoundedAuthoredFrameDriver final : public BinMDataStd_ByteArrayDriver {
 public:
     BoundedAuthoredFrameDriver(const Handle(Message_Messenger)& messenger,
-                              std::shared_ptr<AuthoredFrameReadBudget> budget)
-        : BinMDataStd_ByteArrayDriver(messenger), myBudget(std::move(budget)) {}
+                              std::shared_ptr<AuthoredFrameReadBudget> budget,
+                              void (*rejectRead)() noexcept = nullptr)
+        : BinMDataStd_ByteArrayDriver(messenger), myBudget(std::move(budget)), myRejectRead(rejectRead) {}
 
     Standard_Boolean Paste(const BinObjMgt_Persistent& source,
         const Handle(TDF_Attribute)& target, BinObjMgt_RRelocationTable& relocation) const override {
@@ -96,8 +97,10 @@ private:
     }
     Standard_Boolean Reject() const noexcept {
         if (myBudget) myBudget->rejected = true;
+        if (myRejectRead) myRejectRead();
         return Standard_False;
     }
     std::shared_ptr<AuthoredFrameReadBudget> myBudget;
+    void (*myRejectRead)() noexcept = nullptr;
 };
 } // namespace core3d::persistence

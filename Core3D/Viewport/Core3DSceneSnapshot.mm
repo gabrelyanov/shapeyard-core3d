@@ -497,6 +497,174 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
     } catch (...) { return @{@"error": @"Native frame association fixture failed"}; }
 }
 #endif
+#if DEBUG
++ (NSDictionary<NSString *, id> *)debugFrameDocument:(NSData *)archive
+                                       replacement:(NSData *)replacement mode:(NSInteger)mode {
+    using namespace core3d::persistence;
+    using core3d::scene::Float4;
+    if (mode < 0 || mode > 6) return @{@"error": @"Undefined frame document fixture"};
+    try {
+        const auto fixture = Core3DMakeAuthoredGeometryFixture(0);
+        std::vector<Float4> validated;
+        for (NSData* input in @[archive, replacement])
+            if (!DecodeNativeAuthoredFrames(fixture, static_cast<const std::uint8_t*>(input.bytes), input.length, validated))
+                return @{@"error": @"Invalid frame document source fixture"};
+        struct PrivateDocument {
+            Handle(TDocStd_Application) app = new TDocStd_Application();
+            Handle(TDocStd_Document) document;
+            void close() {
+                if (!document.IsNull()) { app->Close(document); document.Nullify(); }
+            }
+            ~PrivateDocument() noexcept { try { close(); } catch (...) {} }
+        };
+        auto start = [](PrivateDocument& owner) {
+            Core3DDefineSafeBinXCAFFormat(owner.app);
+            owner.app->NewDocument(TCollection_ExtendedString("BinXCAF"), owner.document);
+            XCAFDoc_DocumentTool::SetLengthUnit(owner.document, 0.001);
+        };
+        auto assign = [](const TDF_Label& label, NSData* bytes, bool defaultID) {
+            const auto& id = defaultID ? TDataStd_ByteArray::GetID() : AuthoredFrameAttributeID();
+            const auto attribute = TDataStd_ByteArray::Set(label, id, 0, Standard_Integer(bytes.length) - 1, Standard_False);
+            if (attribute->Length() != Standard_Integer(bytes.length)) attribute->Init(0, Standard_Integer(bytes.length) - 1);
+            const auto* source = static_cast<const std::uint8_t*>(bytes.bytes);
+            for (NSUInteger i = 0; i < bytes.length; ++i) attribute->SetValue(Standard_Integer(i), source[i]);
+        };
+        auto storedBytes = [](const TDF_Label& label) -> NSData* {
+            Handle(TDataStd_ByteArray) attribute;
+            if (!label.FindAttribute(AuthoredFrameAttributeID(), attribute)) return [NSData data];
+            if (attribute.IsNull() || attribute->Lower() != 0 || attribute->Upper() < 127
+                || attribute->Upper() >= int(core3d::scene::authored::kMaximumArchiveBytes) || attribute->GetDelta())
+                Standard_Failure::Raise("Invalid private frame attribute.");
+            NSMutableData* bytes = [NSMutableData dataWithLength:attribute->Length()];
+            auto* out = static_cast<std::uint8_t*>(bytes.mutableBytes);
+            for (int i = 0; i < attribute->Length(); ++i) out[i] = attribute->Value(i);
+            return bytes;
+        };
+        auto serialize = [](PrivateDocument& owner) {
+            if (owner.document->HasOpenCommand()) Standard_Failure::Raise("Open private command at save.");
+            std::ostringstream output(std::ios::binary | std::ios::out);
+            if (owner.app->SaveAs(owner.document, output) != PCDM_SS_OK) Standard_Failure::Raise("Private frame save failed.");
+            const auto bytes = output.str();
+            if (bytes.empty() || bytes.size() > 1024 * 1024) Standard_Failure::Raise("Private frame wire exceeded fixture bound.");
+            return bytes;
+        };
+        auto makeWire = [&](int count, int damage) {
+            PrivateDocument writer; start(writer);
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main());
+            for (int i = 0; i < std::max(count, 1); ++i) {
+                const auto label = shapes->AddShape(Core3DMakeAuthoredGeometryFixture(0), Standard_False);
+                if (label.IsNull()) Standard_Failure::Raise("Private frame shape creation failed.");
+                if (count) {
+                    NSMutableData* bytes = [archive mutableCopy];
+                    if (damage == 2) static_cast<std::uint8_t*>(bytes.mutableBytes)[bytes.length - 1] ^= 1;
+                    assign(label, bytes, damage == 1);
+                }
+            }
+            return serialize(writer);
+        };
+        NSMutableDictionary* result = [NSMutableDictionary dictionary];
+        std::vector<std::pair<std::string, int>> wires;
+        if (mode == 6) {
+            PrivateDocument writer; start(writer);
+            const auto label = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main())->AddShape(fixture, Standard_False);
+            writer.document->ClearUndos(); writer.document->SetUndoLimit(20);
+            NSMutableArray* history = [NSMutableArray array]; NSMutableArray* counts = [NSMutableArray array];
+            bool geometryStable = true;
+            GeometryIdentity original; NativeAuthoredGeometryIdentity(fixture, original);
+            auto capture = [&]() {
+                [history addObject:storedBytes(label)];
+                [counts addObject:@[@(writer.document->GetAvailableUndos()), @(writer.document->GetAvailableRedos())]];
+                GeometryIdentity current;
+                const auto shape = XCAFDoc_ShapeTool::GetShape(label);
+                geometryStable = geometryStable && !shape.IsNull() && shape.ShapeType() == TopAbs_FACE
+                    && NativeAuthoredGeometryIdentity(TopoDS::Face(shape), current) && current == original;
+            };
+            auto change = [&](NSData* bytes) {
+                writer.document->NewCommand(); assign(label, bytes, false);
+                if (!writer.document->CommitCommand()) Standard_Failure::Raise("Private frame command was empty.");
+                capture();
+            };
+            change(archive); change(replacement);
+            if (!writer.document->Undo()) Standard_Failure::Raise("Private frame undo failed."); capture();
+            if (!writer.document->Redo()) Standard_Failure::Raise("Private frame redo failed."); capture();
+            writer.document->NewCommand();
+            if (!label.ForgetAttribute(AuthoredFrameAttributeID()) || !writer.document->CommitCommand())
+                Standard_Failure::Raise("Private frame removal failed.");
+            capture();
+            if (!writer.document->Undo()) Standard_Failure::Raise("Private frame removal undo failed."); capture();
+            if (!writer.document->Redo()) Standard_Failure::Raise("Private frame removal redo failed."); capture();
+            if (!writer.document->Undo()) Standard_Failure::Raise("Private frame restore failed."); capture();
+            const int beforeUndo = writer.document->GetAvailableUndos();
+            writer.document->NewCommand(); assign(label, archive, false); writer.document->AbortCommand();
+            result[@"abortRestoredBytes"] = storedBytes(label);
+            result[@"abortAddedNoUndo"] = @(writer.document->GetAvailableUndos() == beforeUndo);
+            result[@"historyBytes"] = history; result[@"historyCounts"] = counts;
+            result[@"geometryStable"] = @(geometryStable);
+            const int beforeSaveUndo = writer.document->GetAvailableUndos(), beforeSaveRedo = writer.document->GetAvailableRedos();
+            wires.emplace_back(serialize(writer), 1);
+            result[@"savePreservedHistory"] = @(beforeSaveUndo == writer.document->GetAvailableUndos()
+                && beforeSaveRedo == writer.document->GetAvailableRedos());
+        } else if (mode == 1) {
+            wires.emplace_back(makeWire(2, 0), 2); wires.emplace_back(makeWire(1, 0), 1);
+            wires.emplace_back(makeWire(2, 0), 2); wires.emplace_back(makeWire(1, 0), 1);
+        } else if (mode == 2) {
+            wires.emplace_back(makeWire(2, 0), 2); wires.emplace_back(makeWire(2, 0), 2);
+        } else if (mode == 3 || mode == 4) {
+            wires.emplace_back(makeWire(1, int(mode - 2)), 1); wires.emplace_back(makeWire(1, 0), 1);
+        } else if (mode == 5) {
+            wires.emplace_back(makeWire(1, 0), 1); wires.emplace_back(makeWire(0, 0), 0);
+        } else {
+            wires.emplace_back(makeWire(1, 0), 1); wires.emplace_back(makeWire(1, 0), 1);
+        }
+        PrivateDocument reader;
+        auto budget = std::make_shared<AuthoredFrameReadBudget>();
+        budget->limit = archive.length * (mode == 1 || mode == 2 ? 2 : 1) - (mode == 1 ? 1 : 0);
+        if (mode == 5) Core3DDefineSafeBinXCAFFormat(reader.app);
+        else Core3DDebugDefineFrameBinXCAFFormat(reader.app, budget);
+        NSMutableArray* reads = [NSMutableArray array];
+        for (const auto& wire : wires) {
+            // Exercise entry reset as well as terminal/Clear reset on every read.
+            if (mode != 5) { budget->bytes = budget->limit; budget->rejected = true; }
+            const int documentsBefore = reader.app->NbDocuments();
+            Core3DBeginSafeBinaryRead(); int status = -1; bool threw = false;
+            std::istringstream input(wire.first, std::ios::binary | std::ios::in);
+            try { status = int(reader.app->Open(input, reader.document)); } catch (...) { threw = true; }
+            const bool rejected = Core3DSafeBinaryReadWasRejected();
+            bool accepted = !threw && status == int(PCDM_RS_OK) && !rejected && !reader.document.IsNull();
+            const bool budgetCleared = budget->bytes == 0 && !budget->rejected;
+            NSMutableArray* archives = [NSMutableArray array]; NSMutableArray* frameValues = [NSMutableArray array];
+            if (accepted) {
+                double unit = 0;
+                accepted = XCAFDoc_DocumentTool::GetLengthUnit(reader.document, unit) && unit == 0.001;
+                TDF_LabelSequence labels; XCAFDoc_DocumentTool::ShapeTool(reader.document->Main())->GetFreeShapes(labels);
+                accepted = accepted && labels.Length() == std::max(wire.second, 1);
+                for (int i = 1; accepted && i <= labels.Length(); ++i) {
+                    NSData* bytes = storedBytes(labels.Value(i));
+                    if (wire.second == 0) { accepted = bytes.length == 0; continue; }
+                    const auto shape = XCAFDoc_ShapeTool::GetShape(labels.Value(i));
+                    std::vector<Float4> frames;
+                    accepted = !shape.IsNull() && shape.ShapeType() == TopAbs_FACE
+                        && DecodeNativeAuthoredFrames(TopoDS::Face(shape), static_cast<const std::uint8_t*>(bytes.bytes), bytes.length, frames);
+                    if (accepted) {
+                        [archives addObject:bytes];
+                        [frameValues addObject:[NSData dataWithBytes:frames.data() length:frames.size() * sizeof(Float4)]];
+                    }
+                }
+            }
+            reader.close();
+            [reads addObject:@{@"accepted": @(accepted), @"rejected": @(rejected), @"status": @(status),
+                @"threw": @(threw), @"budgetCleared": @(budgetCleared),
+                @"rejectedAfterClose": @(Core3DSafeBinaryReadWasRejected()), @"closed": @(reader.document.IsNull()),
+                @"sessionCountRestored": @(reader.app->NbDocuments() == documentsBefore),
+                @"archives": archives, @"frames": frameValues}];
+        }
+        result[@"reads"] = reads; result[@"budgetLimit"] = @(budget->limit);
+        return result;
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (...) { return @{@"error": @"Private frame document fixture failed"}; }
+}
+#endif
 @end
 
 @implementation Core3DSceneRevisionVector

@@ -298,6 +298,15 @@ struct OcctGeometryDuplicationRequest
 //! untrusted import surface without a separately hardened OCCT shape parser.
 Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
     const Handle(TDocStd_Application)& application);
+#if DEBUG
+#include <memory>
+namespace core3d::persistence { struct AuthoredFrameReadBudget; }
+//! Isolated test applications only. Production registration stays unchanged.
+Standard_EXPORT void Core3DDebugDefineFrameBinXCAFFormat(
+    const Handle(TDocStd_Application)& application,
+    const std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget>& budget);
+#endif
+
 //! Reset/query the current thread's fail-closed retrieval signal. OCCT treats
 //! a driver Paste(false) as a warning, so every Open must bracket and inspect
 //! this signal before accepting the returned document.
