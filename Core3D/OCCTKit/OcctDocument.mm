@@ -4469,12 +4469,13 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
 }
 }
 
-Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
-    const TDF_Label& label) const noexcept {
-    if (![NSThread isMainThread]) return Standard_False;
+Standard_Boolean Core3DValidateNormalTextureGeometry(
+    const TDF_Label& label, Standard_Size* requiredNativeBytes) noexcept {
+    if (requiredNativeBytes != nullptr) *requiredNativeBytes = 0;
     try {
-        if (!IsEditableFreeSimpleDefinitionLabel(label)
-            || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh) return Standard_False;
+        if (label.IsNull() || !XCAFDoc_ShapeTool::IsFree(label)
+            || !XCAFDoc_ShapeTool::IsSimpleShape(label)
+            || XCAFDoc_ShapeTool::IsReference(label)) return Standard_False;
         const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
         TopoDS_Face face; Handle(Poly_Triangulation) mesh;
         if (shape.IsNull() || !TriangleAtlasFace(shape, face, mesh)
@@ -4518,7 +4519,19 @@ Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
         }
         it.Next(); if (it.More()) return Standard_False;
         std::vector<Float4> frames;
-        return GenerateMikkCornerTangents(vertices, indices, true, frames) == TangentSpaceError::None;
+        if (GenerateMikkCornerTangents(vertices, indices, true, frames) != TangentSpaceError::None) return Standard_False;
+        if (requiredNativeBytes != nullptr) *requiredNativeBytes = indices.size() * 64;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
+    const TDF_Label& label) const noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        return IsEditableFreeSimpleDefinitionLabel(label)
+            && GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::TriangleMesh
+            && Core3DValidateNormalTextureGeometry(label);
     } catch (...) { return Standard_False; }
 }
 

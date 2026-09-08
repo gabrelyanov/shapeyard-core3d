@@ -263,6 +263,10 @@ Core3DAccumulateEmbeddedTextureBudget(
 //! One whole-object PBR material update. Batch persistence uses the complete
 //! set to prove the final serialized texture-occurrence budget before it
 //! mutates the immutable visual-material table.
+//! Read-only geometry validation shared by live normal authoring and isolated
+//! saved-document admission. Never meshes or writes OCAF/cache attributes.
+Standard_EXPORT Standard_Boolean Core3DValidateNormalTextureGeometry(
+    const TDF_Label& label, Standard_Size* requiredNativeBytes = nullptr) noexcept;
 enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occlusion, Normal };
 Standard_EXPORT Handle(Image_Texture)& Core3DMaterialTexture(
     XCAFDoc_VisMaterialPBR& material, OcctMaterialTextureSlot slot);

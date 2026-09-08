@@ -897,6 +897,7 @@ bool ValidateVisualMaterials(
         }
     }
 
+    Standard_Size ownedNormalBytes = 0;
     TDF_LabelMap validatedLocalMaterialLabels;
     std::unordered_set<std::string> validatedCanonicalTextureIDs;
     const auto hasUnregisteredDirectMaterial =
@@ -977,6 +978,17 @@ bool ValidateVisualMaterials(
                 return false;
             }
         }
+        // Geometry and frame cost belong to each object binding, even when
+        // several objects share one already-validated material definition.
+        const Handle(XCAFDoc_VisMaterial) assignedMaterial =
+            XCAFDoc_VisMaterialTool::GetMaterial(assignedMaterialLabel);
+        if (!assignedMaterial.IsNull() && assignedMaterial->HasPbrMaterial()
+            && !assignedMaterial->PbrMaterial().NormalTexture.IsNull()) {
+            Standard_Size bytes = 0;
+            if (!Core3DValidateNormalTextureGeometry(label, &bytes)
+                || bytes > 64 * 1024 * 1024 - ownedNormalBytes) return false;
+            ownedNormalBytes += bytes;
+        }
         if (!validatedLocalMaterialLabels.Contains(
                 assignedMaterialLabel)) {
             const Handle(XCAFDoc_VisMaterial) material =
@@ -986,7 +998,8 @@ bool ValidateVisualMaterials(
                 return false;
             }
             const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-            if (!pbr.NormalTexture.IsNull()
+            if ((!pbr.NormalTexture.IsNull()
+                    && !Core3DValidateNumericTexture(pbr.NormalTexture))
                 || (!pbr.MetallicRoughnessTexture.IsNull()
                     && !Core3DValidateNumericTexture(pbr.MetallicRoughnessTexture))
                 || (!pbr.OcclusionTexture.IsNull()
@@ -1010,7 +1023,7 @@ bool ValidateVisualMaterials(
                 }
             }
             for (const Handle(Image_Texture)& texture : {
-                     pbrBase, pbr.EmissiveTexture, pbr.MetallicRoughnessTexture, pbr.OcclusionTexture}) {
+                     pbrBase, pbr.EmissiveTexture, pbr.MetallicRoughnessTexture, pbr.OcclusionTexture, pbr.NormalTexture}) {
                 if (texture.IsNull()) {
                     continue;
                 }
