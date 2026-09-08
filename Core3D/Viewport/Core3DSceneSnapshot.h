@@ -50,6 +50,10 @@ CORE3D_SCENE_FINAL_CLASS
                              geometryIdentity:(NSData *)geometryIdentity
                                         error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(debugDecodeAuthoredFrames(_:geometryIdentity:));
++ (NSDictionary<NSString *, id> *)debugPersistentFrameRecord:(NSData *)archive
+                                                      mode:(NSInteger)mode
+                                                    budget:(NSUInteger)limit
+    NS_SWIFT_NAME(debugPersistentFrameRecord(_:mode:budget:));
 #endif
 @end
 

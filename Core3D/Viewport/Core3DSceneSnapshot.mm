@@ -14,6 +14,9 @@
 #include "../Scene/MikkTangentSpace.hpp"
 #if DEBUG
 #include "../Scene/AuthoredTangentArchive.hpp"
+#include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
+#include <Message.hxx>
+#include <sstream>
 #endif
 #include <cstring>
 #include <Quantity_Color.hxx>
@@ -278,6 +281,107 @@ static_assert(sizeof(std::uint32_t) == 4,
     const auto status = Decode(static_cast<const std::uint8_t*>(archive.bytes), archive.length, identity, frames);
     if (status != ArchiveStatus::Valid) return reject(status);
     return [NSData dataWithBytes:frames.data() length:frames.size() * 16];
+}
+#endif
+#if DEBUG
++ (NSDictionary<NSString *, id> *)debugPersistentFrameRecord:(NSData *)archive
+                                                      mode:(NSInteger)mode
+                                                    budget:(NSUInteger)limit {
+    using namespace core3d::scene::authored;
+    using namespace core3d::persistence;
+    if (archive.length < 128 || archive.length > kMaximumArchiveBytes || mode < 0 || mode > 22)
+        return @{@"error": @"Invalid isolated frame fixture"};
+    try {
+        const auto messenger = Message::DefaultMessenger();
+        auto budget = std::make_shared<AuthoredFrameReadBudget>(); budget->limit = limit;
+        BoundedAuthoredFrameDriver bounded(messenger, budget);
+        BinMDataStd_ByteArrayDriver stock(messenger);
+        Handle(TDataStd_ByteArray) attribute = new TDataStd_ByteArray();
+        attribute->Init(0, Standard_Integer(archive.length) - 1);
+        attribute->SetID(AuthoredFrameAttributeID()); attribute->SetDelta(Standard_False);
+        const auto* input = static_cast<const std::uint8_t*>(archive.bytes);
+        for (NSUInteger i = 0; i < archive.length; ++i) attribute->SetValue(Standard_Integer(i), input[i]);
+        BinObjMgt_SRelocationTable writeRelocation;
+        BinObjMgt_Persistent record; record.SetTypeId(1); record.SetId(1);
+        stock.Paste(attribute, record, writeRelocation); record.Truncate();
+        auto wire = [](BinObjMgt_Persistent& value) {
+            std::ostringstream stream(std::ios::binary | std::ios::out);
+            value.Write(stream); return stream.str();
+        };
+        const auto stockBytes = wire(record);
+        // OCCT Write resets the record cursor and logical size. Read back only
+        // the bounded bytes just produced here; arbitrary outer headers are not admitted.
+        if (stockBytes.size() > kMaximumArchiveBytes + 64)
+            return @{@"error": @"Unexpected stock frame record size"};
+        std::istringstream stockStream(stockBytes, std::ios::binary | std::ios::in);
+        if (!record.Read(stockStream) || record.Length() < 0
+            || std::size_t(record.Length()) + 12 != stockBytes.size())
+            return @{@"error": @"Stock frame record reconstruction failed"};
+        BinObjMgt_Persistent written; written.SetTypeId(1); written.SetId(1);
+        if (mode >= 20) {
+            if (mode == 20) attribute->SetID(TDataStd_ByteArray::GetID());
+            if (mode == 21) attribute->SetValue(48, attribute->Value(48) ^ 1);
+            if (mode == 22) attribute->SetDelta(Standard_True);
+            const auto before = written.Position(); bool rejected = false;
+            try { bounded.Paste(attribute, written, writeRelocation); }
+            catch (const Standard_Failure&) { rejected = true; }
+            return @{@"writerRejected": @(rejected), @"writerPositionUnchanged": @(written.Position() == before)};
+        }
+        bounded.Paste(attribute, written, writeRelocation); written.Truncate();
+        const bool exactWriter = stockBytes == wire(written);
+        // Mutate only the small, internally built record. A huge declared
+        // array count never requires creating a correspondingly large array.
+        const Standard_Integer originalEnd = record.Length() + 12;
+        if (mode >= 1 && mode <= 4) {
+            record.SetPosition(12);
+            record << Standard_Integer(mode == 2 ? -1 : mode == 3 ? 1 : 0);
+            record << Standard_Integer(mode == 1 ? std::numeric_limits<Standard_Integer>::max()
+                : mode == 4 ? -1 : Standard_Integer(archive.length) - 1);
+        }
+        if (mode == 5 || mode == 6) {
+            record.SetPosition(mode == 5 ? 24 : originalEnd - 16); record.Truncate();
+        }
+        if (mode == 7 || mode == 8 || mode == 10) {
+            record.Init(); record.SetTypeId(1); record.SetId(1);
+            record << Standard_Integer(0) << Standard_Integer(archive.length - 1);
+            std::vector<std::uint8_t> bytes(input, input + archive.length);
+            if (mode == 10) bytes[48] ^= 1;
+            record.PutByteArray(bytes.data(), Standard_Integer(bytes.size()));
+            record << Standard_Byte(mode == 8 ? 1 : 0);
+            record << (mode == 7 ? TDataStd_ByteArray::GetID() : AuthoredFrameAttributeID());
+            record.Truncate();
+        }
+        if (mode == 9) { record.SetPosition(originalEnd); record << Standard_Byte(0x7f); record.Truncate(); }
+        if (mode > 14 && mode < 20) return @{@"error": @"Undefined isolated frame mode"};
+        BinObjMgt_RRelocationTable readRelocation;
+        if (mode != 12) {
+            Handle(Storage_HeaderData) header = new Storage_HeaderData();
+            header->SetStorageVersion(mode == 11 ? 9 : mode == 13 ? 99 : 12);
+            readRelocation.SetHeaderData(header);
+        }
+        record.SetPosition(12);
+        const auto firstTarget = bounded.NewEmpty();
+        const bool firstAccepted = bounded.Paste(record, firstTarget, readRelocation);
+        bool accepted = firstAccepted;
+        Handle(TDF_Attribute) target = firstTarget;
+        if (mode == 14 && firstAccepted) {
+            record.SetPosition(12); target = bounded.NewEmpty();
+            accepted = bounded.Paste(record, target, readRelocation);
+        }
+        NSMutableData* result = [NSMutableData data];
+        if (accepted) {
+            const auto value = Handle(TDataStd_ByteArray)::DownCast(target);
+            result.length = value->Length();
+            auto* out = static_cast<std::uint8_t*>(result.mutableBytes);
+            for (Standard_Integer i = 0; i < value->Length(); ++i) out[i] = value->Value(i);
+        }
+        return @{@"accepted": @(accepted), @"firstAccepted": @(firstAccepted),
+            @"rejected": @(budget->rejected), @"chargedBytes": @(budget->bytes),
+            @"bytes": result, @"stockWriterMatched": @(exactWriter),
+            @"consumedAll": @(record.Position() == record.Length() + 12)};
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (...) { return @{@"error": @"Isolated frame fixture failed"}; }
 }
 #endif
 @end
