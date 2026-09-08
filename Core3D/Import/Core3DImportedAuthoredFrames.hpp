@@ -9,6 +9,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
 
 namespace core3d::gltf {
 // Only call in the isolated worker after MarkImportedTriangleMeshDefinitions,
