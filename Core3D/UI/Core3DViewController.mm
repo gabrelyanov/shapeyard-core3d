@@ -3621,10 +3621,10 @@ void Core3DAddDebugOrphanVisualMaterial(
                                 if (!gl->GetResource(aspect->ShaderProgram()->GetId(), program) || program.IsNull()) return;
                                 const GLuint identifier = program->ProgramId();
                                 NSMutableDictionary* row = [NSMutableDictionary dictionaryWithDictionary:@{ @"program": @(identifier) }];
-                                for (const char* name : {"syNormalMap", "occModelWorldMatrix", "occWorldViewMatrix", "occTextureTrsf2d"}) {
+                                for (const char* name : {"syNormalMap", "occSamplerNormal", "occModelWorldMatrix", "occWorldViewMatrix", "occTextureTrsf2d"}) {
                                     const GLint location = glGetUniformLocation(identifier, name); if (location < 0) continue;
                                     NSMutableArray* values = [NSMutableArray array];
-                                    if (std::strcmp(name, "syNormalMap") == 0) { GLint value = -1; glGetUniformiv(identifier, location, &value); [values addObject:@(value)]; }
+                                    if (std::strcmp(name, "syNormalMap") == 0 || std::strcmp(name, "occSamplerNormal") == 0) { GLint value = -1; glGetUniformiv(identifier, location, &value); [values addObject:@(value)]; }
                                     else { GLfloat value[16] = {}; glGetUniformfv(identifier, location, value); for (int i = 0; i < 16; ++i) [values addObject:@(value[i])]; }
                                     row[[NSString stringWithUTF8String:name]] = values;
                                 }
@@ -3672,14 +3672,20 @@ void Core3DAddDebugOrphanVisualMaterial(
                 captures[[NSString stringWithFormat:@"%d",step]] = pixels;
             }
         };
-        keep(0, true, true); keep(1, false, false);
+        scope.document->NewCommand();
+        keep(0, true, true);
+        bool previewCommandsPreserved = scope.document->HasOpenCommand();
+        scope.document->AbortCommand(); keep(1, false, false);
         scope.document->NewCommand(); assign(replacement); scope.document->CommitCommand(); keep(2, true, true);
         if (!scope.document->Undo()) Standard_Failure::Raise("Native frame undo failed."); keep(3, true, false);
         if (!scope.document->Redo()) Standard_Failure::Raise("Native frame redo failed."); keep(4, true, false);
         context->Erase(scope.presentation, Standard_False);
         scope.document->NewCommand(); assign(archive); scope.document->CommitCommand(); keep(5, true, false);
         context->Display(scope.presentation, AIS_Shaded, -1, Standard_False); keep(6, false, false);
-        scope.document->NewCommand(); label.ForgetAttribute(AuthoredFrameAttributeID()); scope.document->CommitCommand(); keep(7, true, false);
+        scope.document->NewCommand(); label.ForgetAttribute(AuthoredFrameAttributeID()); scope.document->CommitCommand();
+        scope.document->NewCommand(); keep(7, true, false);
+        previewCommandsPreserved = previewCommandsPreserved && scope.document->HasOpenCommand();
+        scope.document->AbortCommand();
         if (!scope.document->Undo()) Standard_Failure::Raise("Native frame removal undo failed."); keep(8, true, false);
         scope.document->NewCommand(); NSMutableData* invalid = [archive mutableCopy]; static_cast<std::uint8_t*>(invalid.mutableBytes)[invalid.length-1] ^= 1; assign(invalid); scope.document->CommitCommand();
         const auto invalidOwners = selectedOwners(); const auto invalidModes = selectedModes();
@@ -3697,7 +3703,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (labels.Length() != 1) Standard_Failure::Raise("Native renderer fixture reopened owner missing."); label = labels.First(); display(); keep(10, true, true);
         context->Remove(scope.presentation, Standard_False); scope.presentation.Nullify();
         if (![[GLController debugFramebufferStatistics][@"captured"] boolValue] || viewer->DebugPreparedTangentArrayCount() != 0 || context->NbSelected() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
-        return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"selectionUnchanged": @(selectionUnchanged), @"invalidRejected": @(invalidRejected), @"cacheCleared": @YES};
+        return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"selectionUnchanged": @(selectionUnchanged), @"invalidRejected": @(invalidRejected), @"previewCommandsPreserved": @(previewCommandsPreserved), @"cacheCleared": @YES};
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure", @"step": @(fixtureStep)};
     } catch (...) { return @{@"error": @"Native authored-frame rendering fixture failed", @"step": @(fixtureStep)}; }

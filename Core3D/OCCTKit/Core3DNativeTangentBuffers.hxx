@@ -44,7 +44,9 @@ inline bool ReadNativeTangentOwner(const Handle(AIS_Shape)& shape,
     const auto label = caf->GetLabel();
     if (label.IsNull()) return false;
     const auto doc = TDocStd_Document::Get(label);
-    if (doc.IsNull() || doc->HasOpenCommand()) return false;
+    if (doc.IsNull()) return false;
+    // Native interactive previews may hold a command open. Validate the current
+    // owner/geometry without altering that command; publication has its own gate.
     const auto state = Core3DReadAuthoredFrameOwner(doc, label, owner.record);
     if (state == OcctAuthoredFrameReadState::Invalid) return false;
     if (state == OcctAuthoredFrameReadState::Absent) return true;
@@ -63,7 +65,7 @@ inline bool ReadNativeTangentOwner(const Handle(AIS_Shape)& shape,
         child.Next(); if (child.More()) return false;
     } else return false;
     CC_SHA256_CTX hash; CC_SHA256_Init(&hash);
-    CC_SHA256_Update(&hash, owner.record.identity.data(), owner.record.identity.size());
+    CC_SHA256_Update(&hash, owner.record.identity.data(), CC_LONG(owner.record.identity.size()));
     for (int row = 1; row <= 3; ++row) for (int column = 1; column <= 4; ++column) {
         const double value = owner.placement.Value(row, column);
         if (!std::isfinite(value)) return false;

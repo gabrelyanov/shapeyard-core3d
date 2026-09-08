@@ -20,13 +20,14 @@ Handle(Graphic3d_ShaderProgram) MakeCore3DDataMapShader(Standard_Integer bits)
     program->SetPBR(Standard_True);
     program->SetDefaultSampler(Standard_False);
     // OCCT's automatic normal-map prelude uses non-ES2 mat2x3 derivatives.
-    // Bind the existing normal texture unit explicitly and use our Mikk frame.
+    // Declare the standard normal sampler ourselves: OCCT initializes its unit
+    // on every GPU program creation. One-shot proxy variables are cleared after
+    // use and lose custom sampler bindings when a program is recreated.
     program->SetTextureSetBits(bits & ~Graphic3d_TextureSetBits_Normal);
     if (normal) {
         Graphic3d_ShaderAttributeList attributes;
         attributes.Append(new Graphic3d_ShaderAttribute("syTangent", 4));
         program->SetVertexAttributes(attributes);
-        program->PushVariableInt("syNormalMap", int(Graphic3d_TextureUnit_Normal));
     }
     program->SetNbLightsMax(0);
     program->SetNbClipPlanesMax(8);
@@ -61,7 +62,7 @@ varying vec3 syWorldPosition;
 varying vec3 syWorldNormal;
 varying vec2 syUV;
 #ifdef SY_HAS_NORMAL_MAP
-uniform sampler2D syNormalMap;
+uniform sampler2D occSamplerNormal;
 varying vec3 syWorldTangent;
 varying vec3 syWorldBitangent;
 #endif
@@ -95,7 +96,7 @@ void main() {
 #endif
     vec3 n = normalize(syWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
 #ifdef SY_HAS_NORMAL_MAP
-    vec3 mappedNormal = occTexture2D(syNormalMap, syUV).rgb * 2.0 - 1.0;
+    vec3 mappedNormal = occTexture2D(occSamplerNormal, syUV).rgb * 2.0 - 1.0;
     // Retain the interpolated vertex basis used by Mikk's inverse bake.
     n = normalize(mappedNormal.x * syWorldTangent + mappedNormal.y * syWorldBitangent + mappedNormal.z * syWorldNormal)
         * (gl_FrontFacing ? 1.0 : -1.0);
