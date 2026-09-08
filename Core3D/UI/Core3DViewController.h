@@ -1043,6 +1043,12 @@ typedef struct {
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit;
 //! Authoritative OCAF history depth for migration/transaction assertions.
 - (NSInteger)debugDocumentUndoCount;
+//! Read-only observation of the actual native application's lifecycle/history.
+//! These DEBUG diagnostics cannot authorize edits or persist an AI job.
+- (BOOL)debugStartLiveTransactionProbe;
+- (void)debugFailNextDocumentAdoption;
+- (void)debugStopLiveTransactionProbe;
+- (NSDictionary<NSString *, id> *_Nullable)debugLiveTransactionProbe;
 //! Deterministic projected gestures through the production transform/commit
 //! path, replacing only handle hit detection. 0 Move, 1 Rotate, 2 uniform
 //! Scale, 3 axis Scale. Values begin at offset/degrees 0 or scale factor 1.

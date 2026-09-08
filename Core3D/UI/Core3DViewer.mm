@@ -3303,6 +3303,12 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         myContext->UpdateCurrentViewer();
 
         myDoc->ChangeDocument() = candidate;
+#if DEBUG
+        if (_debugFailNextDocumentAdoption) {
+            _debugFailNextDocumentAdoption = false;
+            throw Standard_Failure("Injected failure after provisional document assignment");
+        }
+#endif
         if (!recreateFreshInteractorsForDocumentReplacement()) {
             throw Standard_Failure(
                 "Unable to create fresh document interactors");
@@ -3319,6 +3325,9 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         return AssetImportResult::InternalFailure;
     }
 
+#if DEBUG
+    myDoc->DebugObserveSuccessfulDocumentAdoption();
+#endif
     CloseDocumentNoThrow(app, previous);
     return AssetImportResult::Success;
 }

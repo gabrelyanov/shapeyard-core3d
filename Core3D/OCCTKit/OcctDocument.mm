@@ -1,3 +1,6 @@
+#if DEBUG
+#include "NativeLiveTransactionObserverProbe.hxx"
+#endif
 #include "../Scene/MikkTangentSpace.hpp"
 #include <RWMesh_FaceIterator.hxx>
 #include "CoherentMeshUVAtlas.hpp"
@@ -3170,7 +3173,12 @@ OcctDocument::OcctDocument()
   try
   {
     OCC_CATCH_SIGNALS
+#if DEBUG
+    myObservedApplication = new core3d::debug::LiveObservedApplication();
+    myApp = myObservedApplication;
+#else
     myApp = new TDocStd_Application();
+#endif
   }
   catch (const Standard_Failure& theFailure)
   {
@@ -3195,6 +3203,9 @@ void OcctDocument::InitDoc()
 {
     
     std::cout << "InitDoc()" << std::endl;
+#if DEBUG
+  if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
+#endif
   // close old document
   if (!myOcafDoc.IsNull())
   {
@@ -3234,7 +3245,52 @@ void OcctDocument::InitDoc()
 	myOcafDoc->ClearUndos();
 	myOcafDoc->SetUndoLimit(40);
   }
+#if DEBUG
+  DebugObserveSuccessfulDocumentAdoption();
+#endif
 }
+
+#if DEBUG
+bool OcctDocument::DebugStartLiveTransactionProbe() noexcept {
+    if (![NSThread isMainThread] || myLiveProbe || myObservedApplication == nullptr
+        || myApp.get() != myObservedApplication
+        || !myObservedApplication->ThreadContractValid()) return false;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || myOcafDoc->Application().get() != myApp.get()
+            || DocumentIdentifier().empty()) return false;
+        auto state = std::make_shared<core3d::debug::LiveTransactionProbeState>();
+        state->Adopt(myOcafDoc, true);
+        if (!state->IsValid() || !myObservedApplication->Observe(state)) return false;
+        myLiveProbe = std::move(state);
+        return true;
+    } catch (...) { return false; }
+}
+void OcctDocument::DebugStopLiveTransactionProbe() noexcept {
+    if (![NSThread isMainThread] || !myLiveProbe || myObservedApplication == nullptr
+        || !myLiveProbe->OnOwningThread()) return;
+    // Invalid/overflowed observation must still be detachable on its owner.
+    myLiveProbe->Detach(myOcafDoc);
+    myObservedApplication->Observe({});
+    myLiveProbe.reset();
+}
+std::shared_ptr<const core3d::debug::LiveTransactionProbeState>
+OcctDocument::DebugLiveTransactionProbe() const noexcept {
+    return [NSThread isMainThread] ? myLiveProbe : nullptr;
+}
+bool OcctDocument::DebugLiveTransactionProbeValid() const noexcept {
+    return [NSThread isMainThread] && myLiveProbe && myLiveProbe->IsValid()
+        && myObservedApplication != nullptr && myObservedApplication->ThreadContractValid();
+}
+void OcctDocument::DebugObserveSuccessfulDocumentAdoption() noexcept {
+    if (!myLiveProbe || !myLiveProbe->OnOwningThread()) return;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
+            || DocumentIdentifier().empty()) { myLiveProbe->valid = false; return; }
+        myLiveProbe->Adopt(myOcafDoc);
+    } catch (...) { myLiveProbe->valid = false; }
+}
+#endif
 
 std::string OcctDocument::DocumentIdentifier() const
 {
@@ -7141,6 +7197,10 @@ Standard_Boolean OcctDocument::undo() {
     }
     try {
         if (myOcafDoc->Undo()) {
+#if DEBUG
+            if (myLiveProbe) myLiveProbe->Record(
+                core3d::debug::LiveTransactionObservation::Kind::UndoCompleted, myOcafDoc);
+#endif
             NotifyChanges();
 			return Standard_True;
         }
@@ -7155,6 +7215,10 @@ Standard_Boolean OcctDocument::redo() {
     }
     try {
 		if (myOcafDoc->Redo()) {
+#if DEBUG
+            if (myLiveProbe) myLiveProbe->Record(
+                core3d::debug::LiveTransactionObservation::Kind::RedoCompleted, myOcafDoc);
+#endif
 			NotifyChanges();
 			return Standard_True;
 		}

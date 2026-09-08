@@ -349,6 +349,8 @@ namespace core3d {
         }
         //! Runtime proof that project publication used the bounded structural
         //! walk and did not enter Core3DViewer's geometric BRep checker.
+        //! Fail once after provisional document assignment, before adoption.
+        void DebugFailNextDocumentAdoption() noexcept { _debugFailNextDocumentAdoption = true; }
         void DebugResetProjectTopologyValidationCounters() const;
         Standard_Size DebugBoundedProjectTopologyValidationCount() const;
         Standard_Size DebugGeometricBRepValidationCount() const;
@@ -399,6 +401,7 @@ namespace core3d {
     private:
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
 #ifdef DEBUG
+        bool _debugFailNextDocumentAdoption = false;
         int _debugOrdinaryRepairFailures = 0;
         int _debugOrdinaryCreationAfterRepairFailures = 0;
         int _debugOrdinaryVisibilityAfterRepairFailures = 0;

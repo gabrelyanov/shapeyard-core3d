@@ -1,3 +1,6 @@
+#if DEBUG
+#include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
+#endif
 #include "../Scene/MikkTangentSpace.hpp"
 #if DEBUG
 #include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
@@ -3450,6 +3453,40 @@ void Core3DAddDebugOrphanVisualMaterial(
     [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
     [NSFileManager.defaultManager removeItemAtPath:cbfPath error:nil];
     return result;
+}
+
+- (void)debugFailNextDocumentAdoption {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return;
+    GLController.viewer->DebugFailNextDocumentAdoption();
+}
+- (BOOL)debugStartLiveTransactionProbe {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return NO;
+    auto document = GLController.viewer->getDocument();
+    return !document.IsNull() && document->DebugStartLiveTransactionProbe();
+}
+- (void)debugStopLiveTransactionProbe {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return;
+    auto document = GLController.viewer->getDocument();
+    if (!document.IsNull()) document->DebugStopLiveTransactionProbe();
+}
+- (NSDictionary<NSString *, id> *)debugLiveTransactionProbe {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return nil;
+    auto document = GLController.viewer->getDocument();
+    if (document.IsNull()) return nil;
+    const auto state = document->DebugLiveTransactionProbe();
+    if (!state) return nil;
+    static NSArray<NSString *> *names = @[@"attached", @"open", @"commit", @"abort",
+        @"undoCompleted", @"redoCompleted", @"adopted", @"detached"];
+    NSMutableArray *events = [NSMutableArray arrayWithCapacity:state->count];
+    for (std::size_t index = 0; index < state->count; ++index) {
+        const auto& event = state->events[index];
+        [events addObject:@{@"kind":names[static_cast<unsigned>(event.kind)],
+            @"sequence":@(event.sequence), @"opening":@(event.opening),
+            @"active":@(event.active), @"commandOpen":@(event.commandOpen),
+            @"undos":@(event.undos), @"redos":@(event.redos)}];
+    }
+    return @{@"valid":@(document->DebugLiveTransactionProbeValid()),
+        @"opening":@(state->opening), @"count":@(state->count), @"events":events};
 }
 
 - (NSInteger)debugDocumentUndoCount {

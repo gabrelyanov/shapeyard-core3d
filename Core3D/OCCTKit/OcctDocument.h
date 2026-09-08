@@ -338,6 +338,7 @@ Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
 #if DEBUG
 #include <memory>
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
+namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
 //! Isolated tests with a custom wire budget and no final geometry-owner gate.
 //! Production registration always validates owner association after retrieval.
 Standard_EXPORT void Core3DDebugDefineFrameBinXCAFFormat(
@@ -362,6 +363,16 @@ public:
   Standard_EXPORT virtual ~OcctDocument();
 
   Standard_EXPORT void InitDoc();
+#if DEBUG
+  //! Bounded diagnostic observation only; never a production AI edit token.
+  Standard_EXPORT bool DebugStartLiveTransactionProbe() noexcept;
+  Standard_EXPORT void DebugStopLiveTransactionProbe() noexcept;
+  Standard_EXPORT std::shared_ptr<const core3d::debug::LiveTransactionProbeState>
+      DebugLiveTransactionProbe() const noexcept;
+  Standard_EXPORT bool DebugLiveTransactionProbeValid() const noexcept;
+  //! Call only after the live viewer has successfully adopted its candidate.
+  void DebugObserveSuccessfulDocumentAdoption() noexcept;
+#endif
 
   //! Return persistent identifiers without modifying the document. An empty
   //! string means that the requested identifier has not been migrated yet.
@@ -712,6 +723,11 @@ private:
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels) const;
     
+#if DEBUG
+  // Exact pointer created below and kept alive by myApp; no foreign downcast.
+  core3d::debug::LiveObservedApplication* myObservedApplication = nullptr;
+  std::shared_ptr<core3d::debug::LiveTransactionProbeState> myLiveProbe;
+#endif
   Handle(TDocStd_Application) myApp;
   Handle(TDocStd_Document) myOcafDoc;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;

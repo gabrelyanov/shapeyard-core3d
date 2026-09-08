@@ -18,6 +18,7 @@
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/NativeTransactionObserverProbe.hxx"
+#include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
 #include "../Import/Core3DGLBReader.hpp"
 #include <Message_ProgressRange.hxx>
 #include <cstdio>
@@ -692,6 +693,75 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& e) {
         return @{@"error": [NSString stringWithUTF8String:e.GetMessageString() ?: "Private primitive probe failure"]};
     } catch (...) { return @{@"error": @"Private primitive ownership probe failed"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugLiveTransactionProbeLifecycle {
+    if (![NSThread isMainThread]) return @{@"error":@"Main thread required"};
+    using namespace core3d::debug;
+    try {
+        struct Owner {
+            Handle(OcctDocument) document = new OcctDocument();
+            ~Owner() noexcept {
+                try {
+                    document->DebugStopLiveTransactionProbe();
+                    const auto native = document->Document();
+                    if (!native.IsNull()) {
+                        if (native->HasOpenCommand()) native->AbortCommand();
+                        const auto app = Handle(TDocStd_Application)::DownCast(native->Application());
+                        if (!app.IsNull()) app->Close(native);
+                    }
+                } catch (...) {}
+            }
+        } owner;
+        const auto document = owner.document;
+        const bool unattachedRejected = !document->DebugStartLiveTransactionProbe();
+        document->InitDoc();
+        if (!document->DebugStartLiveTransactionProbe()) return @{@"error":@"Attach failed"};
+        auto state = document->DebugLiveTransactionProbe();
+        const auto oldNative = document->Document();
+        oldNative->NewCommand();
+        TDataStd_Integer::Set(oldNative->Main().FindChild(91), 42);
+        document->InitDoc();
+        NSMutableArray* lifecycle = [NSMutableArray array];
+        for (std::size_t i = 0; i < state->count; ++i) {
+            const auto& e = state->events[i];
+            [lifecycle addObject:@{@"kind":@(unsigned(e.kind)), @"opening":@(e.opening),
+                @"active":@(e.active), @"open":@(e.commandOpen), @"undos":@(e.undos), @"redos":@(e.redos)}];
+        }
+        const bool resetValid = document->DebugLiveTransactionProbeValid()
+            && state->opening == 2 && state->active == document->Document().get()
+            && document->Document() != oldNative && !document->Document()->HasOpenCommand();
+        std::weak_ptr<const LiveTransactionProbeState> released = state;
+        document->DebugStopLiveTransactionProbe(); state.reset();
+        const bool stateReleased = released.expired();
+        if (!document->DebugStartLiveTransactionProbe()) return @{@"error":@"Reattach failed"};
+        const auto native = document->Document();
+        for (int i = 0; i < 130; ++i) { native->NewCommand(); native->AbortCommand(); }
+        state = document->DebugLiveTransactionProbe();
+        const auto boundedCount = state->count;
+        const bool overflowRejected = !document->DebugLiveTransactionProbeValid()
+            && state->count == state->events.size() && !native->HasOpenCommand();
+        document->DebugStopLiveTransactionProbe(); state.reset();
+        const bool invalidDetached = !document->DebugLiveTransactionProbe();
+        if (!document->DebugStartLiveTransactionProbe()) return @{@"error":@"Attach after overflow failed"};
+        state = document->DebugLiveTransactionProbe();
+        const auto countBeforeForeign = state->count;
+        const auto app = Handle(TDocStd_Application)::DownCast(native->Application());
+        // Deliberately invoke only the diagnostic hook. No OCAF document is
+        // passed to, read by, or mutated on this foreign thread.
+        std::thread foreign([app] { app->OnOpenTransaction(Handle(TDocStd_Document)()); });
+        foreign.join();
+        const bool foreignRejected = !document->DebugLiveTransactionProbeValid()
+            && state->count == countBeforeForeign && !native->HasOpenCommand();
+        document->DebugStopLiveTransactionProbe(); state.reset();
+        const bool foreignDetached = !document->DebugLiveTransactionProbe();
+        return @{@"uninitializedAttachRejected":@(unattachedRejected), @"resetValid":@(resetValid),
+            @"lifecycle":lifecycle, @"stateReleased":@(stateReleased), @"boundedCount":@(boundedCount),
+            @"overflowRejected":@(overflowRejected), @"invalidDetached":@(invalidDetached),
+            @"foreignRejected":@(foreignRejected), @"foreignDetached":@(foreignDetached)};
+    } catch (const Standard_Failure& e) {
+        return @{@"error":[NSString stringWithUTF8String:e.GetMessageString() ?: "Lifecycle failure"]};
+    } catch (...) { return @{@"error":@"Live document lifecycle probe failed"}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugTransactionObserver {

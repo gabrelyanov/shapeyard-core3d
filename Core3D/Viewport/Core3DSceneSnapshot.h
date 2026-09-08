@@ -64,6 +64,8 @@ CORE3D_SCENE_FINAL_CLASS
 + (NSDictionary<NSString *, id> *)debugGLBPrimitiveOwnership:(NSData *)data NS_SWIFT_NAME(debugGLBPrimitiveOwnership(_:));
 // Isolated transaction dispatch proof; does not attach observers to live projects.
 + (NSDictionary<NSString *, id> *)debugTransactionObserver NS_SWIFT_NAME(debugTransactionObserver());
+// Exercises actual OcctDocument reset, bounded observation, and thread rejection.
++ (NSDictionary<NSString *, id> *)debugLiveTransactionProbeLifecycle NS_SWIFT_NAME(debugLiveTransactionProbeLifecycle());
 + (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameUVEdit(_:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
