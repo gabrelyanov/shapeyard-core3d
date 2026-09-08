@@ -4570,7 +4570,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             return {};
         }
         Standard_Size aFrameResidentBytes = 0;
-        if (!Core3DValidateAuthoredFrameOwners(aDocument, aFrameResidentBytes)) return {};
+        if (!Core3DValidateOwnedFrameUsage(aDocument,aFrameResidentBytes)) return {};
         const std::string aDocumentIdentifier =
             theDocument->DocumentIdentifier();
         if (aDocumentIdentifier.empty()
@@ -5231,7 +5231,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (!authored && !needsNormalFrames[index]) continue;
             // Bound recipes were checked against native ownership above. Supplied
             // frames keep their exact archive identity with or without a map.
-            if (needsNormalFrames[index] && !Core3DValidateNormalTextureBinding(
+            if (authored && needsNormalFrames[index] && !Core3DValidateNormalTextureBinding(
                     aDocument, aDefinitions[index].label)) return {};
             std::size_t frameBytes = 0;
             if (!CheckedMultiply(mesh.indices.size(), sizeof(Float4), frameBytes)
@@ -5241,7 +5241,10 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 if (!PublishAuthoredFrames(aDefinitions[index], record, mesh)) return {};
             } else {
                 std::size_t nativeBytes = 0;
-                if (!CheckedMultiply(mesh.indices.size(), 64U, nativeBytes)
+                // Owned Mikk bindings were included in the document-wide scan;
+                // reserve only legacy unowned normal derivatives here.
+                if ((Core3DNormalTextureRecipeForLabel(aDefinitions[index].label) != 1
+                        && !CheckedMultiply(mesh.indices.size(),64U,nativeBytes))
                     || aFrameResidentBytes > 64U * 1024U * 1024U
                     || nativeBytes > 64U * 1024U * 1024U - aFrameResidentBytes
                     || GenerateMikkCornerTangents(mesh.vertices, mesh.indices,

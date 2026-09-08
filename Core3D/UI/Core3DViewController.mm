@@ -4195,7 +4195,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (NSData *_Nullable)debugSuppliedFrameBinXCAFFixture:(NSData *)archive normalPNG:(NSData *)normalPNG mode:(NSInteger)mode {
-    if (![NSThread isMainThread] || mode < 0 || mode > 7 || archive.length < 128
+    if (![NSThread isMainThread] || mode < 0 || mode > 8 || archive.length < 128
         || archive.length > core3d::scene::authored::kMaximumArchiveBytes || normalPNG.length > 16384) return nil;
     struct Scope {
         Handle(OcctDocument) wrapper = new OcctDocument();
@@ -4211,9 +4211,19 @@ void Core3DAddDebugOrphanVisualMaterial(
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(scope.document->Main());
         scope.document->NewCommand();
         const auto label = shapes->AddShape(Core3DDebugAuthoredGeometryFixture(0), Standard_False);
+        if (mode == 8) {
+            const auto second = shapes->AddShape(Core3DDebugAuthoredGeometryFixture(0),Standard_False);
+            if (second.IsNull() || !scope.wrapper->SetGeometryRepresentationForLabel(second,OcctGeometryRepresentation::TriangleMesh))
+                Standard_Failure::Raise("Mixed native basis fixture setup failed.");
+        }
         if (label.IsNull() || !scope.wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh)
-            || !scope.document->CommitCommand() || !scope.wrapper->MigrateLegacyIdentifiers())
+            || !scope.document->CommitCommand())
             Standard_Failure::Raise("Supplied frame fixture geometry setup failed.");
+        // Schema migration is allowed only before user history. This fixture's
+        // seed geometry is construction setup, not a user edit to preserve.
+        scope.document->ClearUndos();
+        if (!scope.wrapper->MigrateLegacyIdentifiers())
+            Standard_Failure::Raise("Supplied frame fixture identity setup failed.");
         auto assign = [&](const TDF_Label& owner) {
             const auto attribute = TDataStd_ByteArray::Set(owner, AuthoredFrameAttributeID(), 0, int(archive.length)-1, Standard_False);
             const auto* bytes = static_cast<const std::uint8_t*>(archive.bytes);
@@ -4225,7 +4235,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         OcctAuthoredFrameRecord record;
         if (Core3DReadAuthoredFrameOwner(scope.document,label,record) != OcctAuthoredFrameReadState::Authored)
             Standard_Failure::Raise("Supplied frame fixture archive/geometry mismatch.");
-        if (mode != 0) {
+        if (mode != 0 && mode != 8) {
             XCAFDoc_VisMaterialPBR material; material.BaseColor = Quantity_ColorRGBA(1,1,1,1);
             material.Metallic = 0; material.Roughness = 0.8f;
             if (!Core3DCreateAuthoredTexture(static_cast<const Standard_Byte*>(normalPNG.bytes), normalPNG.length,
@@ -4249,6 +4259,8 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (app->SaveAs(scope.document,stream) != PCDM_SS_OK) return nil;
         const auto bytes=stream.str(); if (bytes.empty() || bytes.size()>1024*1024) return nil;
         return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+    } catch (const Standard_Failure& failure) {
+        NSLog(@"Supplied frame fixture failed: %s",failure.GetMessageString()); return nil;
     } catch (...) { return nil; }
 }
 
@@ -4256,7 +4268,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer) return nil;
     try {
         const auto wrapper = GLController.viewer->getDocument(); const auto document=wrapper->Document();
-        Standard_Size bytes=0; if (!Core3DValidateAuthoredFrameOwners(document,bytes)) return nil;
+        Standard_Size bytes=0,resident=0,exact=0,below=123;
+        if (!Core3DValidateAuthoredFrameOwners(document,bytes) || !Core3DValidateOwnedFrameUsage(document,resident)) return nil;
+        const bool fitsExact=Core3DValidateOwnedFrameUsage(document,exact,resident);
+        const bool rejectsBelow=resident>0 && !Core3DValidateOwnedFrameUsage(document,below,resident-1);
         TDF_LabelSequence roots; XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(roots);
         if (roots.Length()>32) return nil;
         NSMutableArray* result=[NSMutableArray array];
@@ -4267,7 +4282,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             [result addObject:@{@"entity": [NSString stringWithUTF8String:wrapper->EntityIdentifierForLabel(label).c_str()],
                 @"recipe": @(Core3DNormalTextureRecipeForLabel(label)), @"basis": @(basis),
                 @"archive": [NSData dataWithBytes:record.archive.data() length:record.archive.size()],
-                @"ownerBytes": @(record.nativeBytes), @"additionalNormalBytes": @(extra), @"allOwnerBytes": @(bytes)}];
+                @"ownerBytes": @(record.nativeBytes), @"additionalNormalBytes": @(extra), @"allOwnerBytes": @(bytes),
+                @"allResidentBytes": @(resident), @"exactLimitAccepted": @(fitsExact && exact==resident),
+                @"oneByteLessRejected": @(rejectsBelow), @"rejectedOutputCleared": @(below==0)}];
         }
         return result;
     } catch (...) { return nil; }

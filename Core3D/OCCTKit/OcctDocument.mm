@@ -3795,17 +3795,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
         }
 
         Standard_Size projectedNormalBytes = 0;
-        if (!Core3DValidateAuthoredFrameOwners(myOcafDoc, projectedNormalBytes)) return Standard_False;
-        TDF_LabelSequence normalRoots; shapeTool->GetFreeShapes(normalRoots);
-        if (normalRoots.Length() < 0 || normalRoots.Length() > 50000) return Standard_False;
-        for (Standard_Integer index = 1; index <= normalRoots.Length(); ++index) {
-            const auto& root = normalRoots.Value(index);
-            XCAFDoc_VisMaterialPBR material;
-            if (!TryPBRMaterialForLabel(root, material) || material.NormalTexture.IsNull()) continue;
-            Standard_Size bytes = 0;
-            if (!Core3DValidateNormalTextureBinding(myOcafDoc, root, &bytes)
-                || !AddMultipliedWithinLimit(projectedNormalBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
-        }
+        if (!Core3DValidateOwnedFrameUsage(myOcafDoc,projectedNormalBytes)) return Standard_False;
 
         GeometryValidationBudget projectedGeometry = current.geometry;
         Standard_Size projectedDefinitions = current.definitions;
@@ -4737,6 +4727,43 @@ Standard_Boolean Core3DValidateNormalTextureBinding(
     if (basis == 0 || Core3DNormalTextureRecipeForLabel(label) != basis) return Standard_False;
     if (additionalNativeBytes != nullptr) *additionalNativeBytes = bytes;
     return Standard_True;
+}
+
+Standard_Boolean Core3DValidateOwnedFrameUsage(
+    const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
+    Standard_Size maximumBytes) noexcept {
+    nativeBytes = 0;
+    try {
+        Standard_Size total = 0;
+        if (!Core3DValidateAuthoredFrameOwners(document,total,maximumBytes)) return Standard_False;
+        auto validate = [&](const TDF_Label& label) {
+            const auto recipe = Core3DNormalTextureRecipeForLabel(label);
+            if (recipe < 0) return false;
+            const auto material = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+            const bool normal = !material.IsNull() && material->HasPbrMaterial()
+                && !material->PbrMaterial().NormalTexture.IsNull();
+            if (!normal) return recipe == 0;
+            Handle(TDataStd_Integer) marker;
+            const bool owned = label.FindAttribute(LocalPBRMaterialAttributeID(),marker)
+                && !marker.IsNull() && marker->Get() == 1;
+            OcctAuthoredFrameRecord frame;
+            const auto state = Core3DReadAuthoredFrameOwner(document,label,frame);
+            if (state == OcctAuthoredFrameReadState::Invalid) return false;
+            // Preserve legacy imported materials without geometry-owned frames.
+            // Supplied normal bindings must have explicit native recipe ownership.
+            if (!owned && state == OcctAuthoredFrameReadState::Absent) return recipe == 0;
+            Standard_Size additional = 0;
+            return owned && Core3DValidateNormalTextureBinding(document,label,&additional)
+                && AddMultipliedWithinLimit(total,additional,1U,maximumBytes);
+        };
+        const auto root=document->GetData()->Root();
+        if (!validate(root)) return Standard_False;
+        Standard_Size count=0;
+        for (TDF_ChildIterator it(root,Standard_True);it.More();it.Next()) {
+            if (++count>kMaximumGeometryDocumentLabels || !validate(it.Value())) return Standard_False;
+        }
+        nativeBytes=total;return Standard_True;
+    } catch (...) { nativeBytes=0;return Standard_False; }
 }
 
 Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
@@ -6610,8 +6637,10 @@ Standard_Boolean OcctDocument::OpenPrivateExportSnapshot(
             progress);
         const Standard_Boolean wasRejected =
             Core3DSafeBinaryReadWasRejected();
+        Standard_Size frameBytes = 0;
         if (wasRejected || status != PCDM_RS_OK || candidate.IsNull()
-            || !ValidateGeometryRepresentations(candidate)) {
+            || !ValidateGeometryRepresentations(candidate)
+            || !Core3DValidateOwnedFrameUsage(candidate,frameBytes)) {
             if (!candidate.IsNull()) {
                 try {
                     myApp->Close(candidate);
@@ -7148,8 +7177,10 @@ std::string OcctDocument::save(const std::string& path) {
 std::string OcctDocument::save(
     const std::string& path,
     const Message_ProgressRange& progress) {
+    Standard_Size frameBytes = 0;
     if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-        || !ValidateGeometryRepresentations()) {
+        || !ValidateGeometryRepresentations()
+        || !Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes)) {
         return {};
     }
 

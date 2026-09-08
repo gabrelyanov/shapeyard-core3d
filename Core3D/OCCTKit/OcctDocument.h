@@ -302,6 +302,11 @@ Standard_EXPORT Standard_Integer Core3DNormalTextureBasisForLabel(
 Standard_EXPORT Standard_Boolean Core3DValidateNormalTextureBinding(
     const Handle(TDocStd_Document)& document, const TDF_Label& label,
     Standard_Size* additionalNativeBytes = nullptr) noexcept;
+//! Complete supplied-owner plus owned-normal usage, including hidden bindings
+//! and orphan recipe rejection. Legacy unowned/no-frame materials remain separate.
+Standard_EXPORT Standard_Boolean Core3DValidateOwnedFrameUsage(
+    const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
+    Standard_Size maximumBytes = 64U * 1024U * 1024U) noexcept;
 enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occlusion, Normal };
 Standard_EXPORT Handle(Image_Texture)& Core3DMaterialTexture(
     XCAFDoc_VisMaterialPBR& material, OcctMaterialTextureSlot slot);
