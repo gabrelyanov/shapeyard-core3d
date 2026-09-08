@@ -1077,6 +1077,7 @@ typedef struct {
 //! Renderer-only normal binding; never edits native material/history. Nil clears.
 - (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data;
 - (NSUInteger)debugPreparedNativeTangentArrayCount;
+- (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden;
 //! Standalone malformed BinXCAF fixture used to prove that loading rejects
 //! external texture paths and preserves the active document on failure.
 - (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData;

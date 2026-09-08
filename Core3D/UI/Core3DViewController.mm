@@ -3509,6 +3509,21 @@ void Core3DAddDebugOrphanVisualMaterial(
     return YES;
 }
 
+- (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden {
+    if (![NSThread isMainThread] || !GLController.viewer) return NO;
+    const auto context = GLController.viewer->AisContext();
+    if (context.IsNull()) return NO;
+    AIS_ListOfInteractive resident;
+    context->ObjectsInside(resident, AIS_KOI_Shape, -1);
+    if (resident.Size() != 1) return NO;
+    const auto shape = Handle(AIS_Shape)::DownCast(resident.First());
+    if (shape.IsNull()) return NO;
+    if (hidden) context->Erase(shape, Standard_False);
+    else context->Display(shape, Standard_False);
+    GLController.viewer->Invalidate();
+    return YES;
+}
+
 - (NSUInteger)debugPreparedNativeTangentArrayCount {
     return GLController.viewer ? GLController.viewer->DebugPreparedTangentArrayCount() : 0;
 }

@@ -108,9 +108,11 @@ inline bool PrepareNativeTangentPresentations(
     struct Pending { OpenGl_PrimitiveArray* primitive; Handle(Graphic3d_Buffer) attributes; };
     std::vector<Pending> pending;
     std::size_t totalBytes = 0;
-    AIS_ListOfInteractive displayed;
-    context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
-    for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+    AIS_ListOfInteractive resident;
+    // Erase retains OCCT presentations/VBOs. Keep their ready UIDs until the
+    // native object is actually removed, even while it is hidden.
+    context->ObjectsInside(resident, AIS_KOI_Shape, -1);
+    for (AIS_ListIteratorOfListOfInteractive it(resident); it.More(); it.Next()) {
         auto shape = Handle(AIS_Shape)::DownCast(it.Value());
         if (shape.IsNull()) continue;
         // Current normal authoring is whole-object only. Avoid visiting every
