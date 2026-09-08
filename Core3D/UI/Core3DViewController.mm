@@ -3888,6 +3888,10 @@ void Core3DAddDebugOrphanVisualMaterial(
             const auto materials = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
             const TDF_Label label = shapes->AddShape(Core3DMakeDebugTriangleMeshFace(),
                 Standard_False, Standard_True);
+            Core3DSetDebugGeometryRepresentation(label,
+                static_cast<Standard_Integer>(OcctGeometryRepresentation::TriangleMesh));
+            if (!Core3DValidateNormalTextureGeometry(label))
+                throw Standard_Failure("Normal recipe control geometry is invalid");
             NSData *png = [[NSData alloc] initWithBase64EncodedString:
                 @"iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAABGdBTUEAALGPC/xhBQAAABFJREFUeJxjcNvyEI4YiOMAAPqCHbEKj/fTAAAAAElFTkSuQmCC" options:0];
             XCAFDoc_VisMaterialPBR pbr;

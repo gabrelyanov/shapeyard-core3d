@@ -911,6 +911,7 @@ bool ValidateVisualMaterials(
         };
     const Handle(TDF_Data)& documentData = document->GetData();
     if (documentData.IsNull()
+        || Core3DNormalTextureRecipeForLabel(documentData->Root()) != 0
         || hasUnregisteredDirectMaterial(documentData->Root())
         || hasUnregisteredDirectMaterial(document->Main())) {
         return false;
