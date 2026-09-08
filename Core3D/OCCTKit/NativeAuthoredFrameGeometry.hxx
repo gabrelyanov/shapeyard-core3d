@@ -69,4 +69,36 @@ inline bool NativeAuthoredGeometryIdentity(const TopoDS_Face& face,
         identity = result; return true;
     } catch (...) { identity.fill(0); return false; }
 }
+// Decodes frames only for the matching native geometry and corner normals.
+// Local geometry is subject to the caller's existing physical mesh validation.
+inline bool DecodeNativeAuthoredFrames(const TopoDS_Face& face,
+                                      const std::uint8_t* bytes, std::size_t size,
+                                      std::vector<scene::Float4>& output) noexcept {
+    output.clear();
+    try {
+        using namespace scene::authored;
+        if (!bytes || size < kHeaderBytes + 48 + kDigestBytes || size > kMaximumArchiveBytes) return false;
+        GeometryIdentity identity;
+        if (!NativeAuthoredGeometryIdentity(face, identity)) return false;
+        TopLoc_Location location;
+        const auto& mesh = BRep_Tool::Triangulation(face, location);
+        // Reject a valid but differently sized archive before allocating frames.
+        if (Read32(bytes + 8) != std::uint32_t(mesh->NbTriangles()) * 3) return false;
+        std::vector<scene::Float4> frames;
+        if (Decode(bytes, size, identity, frames) != ArchiveStatus::Valid) return false;
+        for (int t = 1; t <= mesh->NbTriangles(); ++t) {
+            int nodes[3]; mesh->Triangle(t).Get(nodes[0], nodes[1], nodes[2]);
+            for (int c = 0; c < 3; ++c) {
+                gp_Vec3f normal; mesh->Normal(nodes[c], normal);
+                const auto& tangent = frames[std::size_t(t - 1) * 3 + c];
+                const double dot = double(normal.x()) * tangent.x
+                    + double(normal.y()) * tangent.y + double(normal.z()) * tangent.z;
+                const double normalLength = std::sqrt(double(normal.x()) * normal.x()
+                    + double(normal.y()) * normal.y() + double(normal.z()) * normal.z());
+                if (!std::isfinite(dot) || std::abs(dot) > 1.e-3 * normalLength) return false;
+            }
+        }
+        output.swap(frames); return true;
+    } catch (...) { output.clear(); return false; }
+}
 } // namespace core3d::persistence

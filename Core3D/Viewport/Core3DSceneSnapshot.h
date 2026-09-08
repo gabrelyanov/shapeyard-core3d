@@ -56,6 +56,8 @@ CORE3D_SCENE_FINAL_CLASS
     NS_SWIFT_NAME(debugPersistentFrameRecord(_:mode:budget:));
 + (NSDictionary<NSString *, id> *)debugAuthoredGeometryIdentity:(NSInteger)mode
     NS_SWIFT_NAME(debugAuthoredGeometryIdentity(_:));
++ (NSDictionary<NSString *, id> *)debugNativeFrameAssociation:(NSData *)archive mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugNativeFrameAssociation(_:mode:));
 #endif
 @end
 
