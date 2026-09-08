@@ -3604,7 +3604,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             const int time = wrapper->Document()->GetData()->Time(), undo = wrapper->Document()->GetAvailableUndos(), redo = wrapper->Document()->GetAvailableRedos();
             NSMutableData* frames = [NSMutableData data]; NSMutableArray* uids = [NSMutableArray array];
             bool observed = false;
-            struct ObserverReset { OcctViewer* viewer; ~ObserverReset() { viewer->DebugSetAfterTangentPreparation({}); } } observerReset{viewer};
+            struct ObserverReset { OcctViewer* viewer; ~ObserverReset() { viewer->DebugSetAfterTangentPreparation({}); } } observerReset{viewer.get()};
             viewer->DebugSetAfterTangentPreparation([&]() {
                 for (const auto& prs : scope.presentation->Presentations()) {
                     if (prs.IsNull()) continue;
