@@ -831,12 +831,7 @@ bool ValidateVisualMaterials(
     }
 
     Standard_Size authoredFrameBytes = 0;
-    if (!Core3DValidateAuthoredFrameOwners(document, authoredFrameBytes)
-        || authoredFrameBytes != 0) {
-        // Persistent supplied bases remain gated until native/Metal publication
-        // and editing/copy paths consume them. Never save a silently lost basis.
-        return false;
-    }
+    if (!Core3DValidateAuthoredFrameOwners(document, authoredFrameBytes)) return false;
 
     Handle(XCAFDoc_VisMaterialTool) materialTool;
     if (XCAFDoc_DocumentTool::CheckVisMaterialTool(document->Main())) {
@@ -905,7 +900,7 @@ bool ValidateVisualMaterials(
         }
     }
 
-    Standard_Size ownedNormalBytes = 0;
+    Standard_Size ownedNormalBytes = authoredFrameBytes;
     TDF_LabelMap validatedLocalMaterialLabels;
     std::unordered_set<std::string> validatedCanonicalTextureIDs;
     const auto hasUnregisteredDirectMaterial =
@@ -995,7 +990,7 @@ bool ValidateVisualMaterials(
         if (!assignedMaterial.IsNull() && assignedMaterial->HasPbrMaterial()
             && !assignedMaterial->PbrMaterial().NormalTexture.IsNull()) {
             Standard_Size bytes = 0;
-            if (normalRecipe != 1 || !Core3DValidateNormalTextureGeometry(label, &bytes)
+            if (!Core3DValidateNormalTextureBinding(document, label, &bytes)
                 || bytes > 64 * 1024 * 1024 - ownedNormalBytes) return false;
             ownedNormalBytes += bytes;
         } else if (normalRecipe != 0) {

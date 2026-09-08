@@ -4194,6 +4194,85 @@ void Core3DAddDebugOrphanVisualMaterial(
     return result;
 }
 
+- (NSData *_Nullable)debugSuppliedFrameBinXCAFFixture:(NSData *)archive normalPNG:(NSData *)normalPNG mode:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 7 || archive.length < 128
+        || archive.length > core3d::scene::authored::kMaximumArchiveBytes || normalPNG.length > 16384) return nil;
+    struct Scope {
+        Handle(OcctDocument) wrapper = new OcctDocument();
+        Handle(TDocStd_Document) document;
+        ~Scope() noexcept { try { if (!document.IsNull()) {
+            const auto app = Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!app.IsNull()) app->Close(document);
+        } } catch (...) {} }
+    } scope;
+    try {
+        using namespace core3d::persistence;
+        scope.wrapper->InitDoc(); scope.document = scope.wrapper->Document();
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(scope.document->Main());
+        scope.document->NewCommand();
+        const auto label = shapes->AddShape(Core3DDebugAuthoredGeometryFixture(0), Standard_False);
+        if (label.IsNull() || !scope.wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh)
+            || !scope.document->CommitCommand() || !scope.wrapper->MigrateLegacyIdentifiers())
+            Standard_Failure::Raise("Supplied frame fixture geometry setup failed.");
+        auto assign = [&](const TDF_Label& owner) {
+            const auto attribute = TDataStd_ByteArray::Set(owner, AuthoredFrameAttributeID(), 0, int(archive.length)-1, Standard_False);
+            const auto* bytes = static_cast<const std::uint8_t*>(archive.bytes);
+            for (NSUInteger i=0; i<archive.length; ++i) attribute->SetValue(int(i),bytes[i]);
+            return attribute;
+        };
+        scope.document->NewCommand();
+        auto frame = assign(label);
+        OcctAuthoredFrameRecord record;
+        if (Core3DReadAuthoredFrameOwner(scope.document,label,record) != OcctAuthoredFrameReadState::Authored)
+            Standard_Failure::Raise("Supplied frame fixture archive/geometry mismatch.");
+        if (mode != 0) {
+            XCAFDoc_VisMaterialPBR material; material.BaseColor = Quantity_ColorRGBA(1,1,1,1);
+            material.Metallic = 0; material.Roughness = 0.8f;
+            if (!Core3DCreateAuthoredTexture(static_cast<const Standard_Byte*>(normalPNG.bytes), normalPNG.length,
+                    "image/png", material.NormalTexture)
+                || !scope.wrapper->SaveObjectPBRMaterial(label,material)
+                || Core3DNormalTextureRecipeForLabel(label) != 2)
+                Standard_Failure::Raise("Supplied frame fixture normal binding failed.");
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(label)->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
+        }
+        if (!scope.document->CommitCommand()) Standard_Failure::Raise("Supplied frame fixture did not commit.");
+        scope.document->ClearUndos();
+        // Deliberate private malformed candidates exercise the actual production reader/adoption gate.
+        if (mode == 2) TDataStd_Integer::Set(label, Standard_GUID("98EAD304-EB49-4F0E-ABFC-AEF94C250161"),1);
+        if (mode == 3) label.ForgetAttribute(AuthoredFrameAttributeID());
+        if (mode == 4) shapes->SetShape(label,Core3DDebugAuthoredGeometryFixture(2));
+        if (mode == 5) { assign(scope.document->GetData()->Root()); label.ForgetAttribute(AuthoredFrameAttributeID()); }
+        if (mode == 6) frame->SetID(TDataStd_ByteArray::GetID());
+        if (mode == 7) frame->SetValue(frame->Upper(),frame->Value(frame->Upper()) ^ 1);
+        std::ostringstream stream(std::ios::out|std::ios::binary);
+        const auto app = Handle(TDocStd_Application)::DownCast(scope.document->Application());
+        if (app->SaveAs(scope.document,stream) != PCDM_SS_OK) return nil;
+        const auto bytes=stream.str(); if (bytes.empty() || bytes.size()>1024*1024) return nil;
+        return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+    } catch (...) { return nil; }
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *_Nullable)debugNativeSuppliedFrameState {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer) return nil;
+    try {
+        const auto wrapper = GLController.viewer->getDocument(); const auto document=wrapper->Document();
+        Standard_Size bytes=0; if (!Core3DValidateAuthoredFrameOwners(document,bytes)) return nil;
+        TDF_LabelSequence roots; XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(roots);
+        if (roots.Length()>32) return nil;
+        NSMutableArray* result=[NSMutableArray array];
+        for (int i=1;i<=roots.Length();++i) {
+            const auto& label=roots.Value(i); OcctAuthoredFrameRecord record;
+            if (Core3DReadAuthoredFrameOwner(document,label,record)==OcctAuthoredFrameReadState::Invalid) return nil;
+            Standard_Size extra=0; const auto basis=Core3DNormalTextureBasisForLabel(document,label,&extra);
+            [result addObject:@{@"entity": [NSString stringWithUTF8String:wrapper->EntityIdentifierForLabel(label).c_str()],
+                @"recipe": @(Core3DNormalTextureRecipeForLabel(label)), @"basis": @(basis),
+                @"archive": [NSData dataWithBytes:record.archive.data() length:record.archive.size()],
+                @"ownerBytes": @(record.nativeBytes), @"additionalNormalBytes": @(extra), @"allOwnerBytes": @(bytes)}];
+        }
+        return result;
+    } catch (...) { return nil; }
+}
+
 - (NSData *_Nullable)debugNormalRecipeBinXCAFFixtureData:(NSInteger)mode {
     if (mode < 0 || mode > 6) return nil;
     return Core3DCreateDebugBinXCAFFixture(@"normal-recipe-fixture",

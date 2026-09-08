@@ -1091,6 +1091,10 @@ typedef struct {
 - (NSArray<NSNumber *> *)debugNormalTextureRecipes;
 //! Isolated valid control0 or malformed normal-recipe cases1...6.
 - (NSData *_Nullable)debugNormalRecipeBinXCAFFixtureData:(NSInteger)mode;
+//! Private fixture bytes only:0 unbound,1 mapped supplied basis,2...7 malformed candidates.
+- (NSData *_Nullable)debugSuppliedFrameBinXCAFFixture:(NSData *)archive normalPNG:(NSData *)normalPNG mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugSuppliedFrameBinXCAFFixture(_:normalPNG:mode:));
+- (NSArray<NSDictionary<NSString *, id> *> *_Nullable)debugNativeSuppliedFrameState;
 - (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden;
 //! Standalone malformed BinXCAF fixture used to prove that loading rejects
 //! external texture paths and preserves the active document on failure.

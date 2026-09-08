@@ -292,6 +292,16 @@ Standard_EXPORT OcctAuthoredFrameReadState Core3DReadAuthoredFrameOwner(
 Standard_EXPORT Standard_Boolean Core3DValidateAuthoredFrameOwners(
     const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
     Standard_Size maximumBytes = 64U * 1024U * 1024U) noexcept;
+//! Native basis capability:0 invalid,1 Mikk,2 validated supplied frames.
+//! Additional bytes exclude supplied archives/expanded corners already charged
+//! by Core3DValidateAuthoredFrameOwners. Never replaces an invalid supplied basis.
+Standard_EXPORT Standard_Integer Core3DNormalTextureBasisForLabel(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    Standard_Size* additionalNativeBytes = nullptr) noexcept;
+//! A bound normal map must name the exact basis owned by its native geometry.
+Standard_EXPORT Standard_Boolean Core3DValidateNormalTextureBinding(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    Standard_Size* additionalNativeBytes = nullptr) noexcept;
 enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occlusion, Normal };
 Standard_EXPORT Handle(Image_Texture)& Core3DMaterialTexture(
     XCAFDoc_VisMaterialPBR& material, OcctMaterialTextureSlot slot);
@@ -323,7 +333,8 @@ Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
 #if DEBUG
 #include <memory>
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
-//! Isolated test applications only. Production registration stays unchanged.
+//! Isolated tests with a custom wire budget and no final geometry-owner gate.
+//! Production registration always validates owner association after retrieval.
 Standard_EXPORT void Core3DDebugDefineFrameBinXCAFFormat(
     const Handle(TDocStd_Application)& application,
     const std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget>& budget);

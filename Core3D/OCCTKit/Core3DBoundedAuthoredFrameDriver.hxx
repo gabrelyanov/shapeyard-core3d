@@ -1,5 +1,6 @@
 #pragma once
-// Isolated prototype; not registered in any production document format.
+// Exact-GUID bounded archive reader used by native project persistence.
+// Candidate admission separately validates native owner, geometry and materials.
 #include "../Scene/AuthoredTangentArchive.hpp"
 #include "AuthoredFrameAttributeID.hxx"
 #include <BinMDataStd_ByteArrayDriver.hxx>

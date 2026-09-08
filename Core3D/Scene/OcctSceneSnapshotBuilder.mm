@@ -5063,8 +5063,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     return {};
                 }
                 if (!aPbrMaterial.NormalTexture.IsNull()
-                    && (Core3DNormalTextureRecipeForLabel(anOccurrence.definitionLabel) != 1
-                        || !theDocument->SupportsNormalTextureGeometryForLabel(anOccurrence.definitionLabel))) return {};
+                    && !Core3DValidateNormalTextureBinding(aDocument, anOccurrence.definitionLabel)) return {};
                 aPbrOverride = WholeObjectPBRMaterial{
                     aPbrMaterial,
                     aVisualMaterial->AlphaMode(),
@@ -5230,9 +5229,10 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (state == OcctAuthoredFrameReadState::Invalid) return {};
             const bool authored = state == OcctAuthoredFrameReadState::Authored;
             if (!authored && !needsNormalFrames[index]) continue;
-            // Normal recipe2/native presentation transport is the next gate;
-            // a recipe1 map must not silently switch from Mikk to supplied data.
-            if (authored && needsNormalFrames[index]) return {};
+            // Bound recipes were checked against native ownership above. Supplied
+            // frames keep their exact archive identity with or without a map.
+            if (needsNormalFrames[index] && !Core3DValidateNormalTextureBinding(
+                    aDocument, aDefinitions[index].label)) return {};
             std::size_t frameBytes = 0;
             if (!CheckedMultiply(mesh.indices.size(), sizeof(Float4), frameBytes)
                 || !CheckedAdd(aSnapshotNumericBytes, frameBytes, aSnapshotNumericBytes)

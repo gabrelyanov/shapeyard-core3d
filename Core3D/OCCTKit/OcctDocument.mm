@@ -35,9 +35,7 @@
 #include "NativeAuthoredFrameGeometry.hxx"
 #include <TDataStd_ByteArray.hxx>
 #include <TDF_AttributeIterator.hxx>
-#if DEBUG
 #include "Core3DBoundedAuthoredFrameDriver.hxx"
-#endif
 #include "CafShapePrs.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 
@@ -1318,14 +1316,15 @@ class Core3DBoundedBinXCAFRetrievalDriver final
 {
 public:
     Core3DBoundedBinXCAFRetrievalDriver()
-    : myAggregateTextureBytes(std::make_shared<Standard_Size>(0))
+    : myAggregateTextureBytes(std::make_shared<Standard_Size>(0)),
+      myFrameBudget(std::make_shared<core3d::persistence::AuthoredFrameReadBudget>())
     {
     }
 
 #if DEBUG
     explicit Core3DBoundedBinXCAFRetrievalDriver(
         std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> budget)
-        : Core3DBoundedBinXCAFRetrievalDriver() { myFrameBudget = std::move(budget); }
+        : Core3DBoundedBinXCAFRetrievalDriver() { myFrameBudget = std::move(budget); myValidateFrameOwners = false; }
 #endif
 
     void Read(
@@ -1404,6 +1403,11 @@ public:
                 theApplication,
                 theFilter,
                 theProgress);
+            if (myValidateFrameOwners && myReaderStatus == PCDM_RS_OK) {
+                Standard_Size frameBytes = 0;
+                if (gSafeBinaryReadRejected || !Core3DValidateAuthoredFrameOwners(
+                        Handle(TDocStd_Document)::DownCast(theDocument), frameBytes)) rejectTypes();
+            }
         } catch (...) {
             ResetAggregateReadBudgets();
             throw;
@@ -1462,10 +1466,8 @@ public:
         aTable->AddDriver(
             new Core3DFailClosedDriver<
                 BinMXCAFDoc_VisMaterialToolDriver>(theMessageDriver));
-#if DEBUG
-        if (myFrameBudget) aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
+        aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
             theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
-#endif
         return aTable;
     }
 
@@ -1479,18 +1481,15 @@ public:
 private:
     void ResetAggregateReadBudgets() noexcept
     {
-#if DEBUG
         if (myFrameBudget) { myFrameBudget->bytes = 0; myFrameBudget->rejected = false; }
-#endif
         if (myAggregateTextureBytes != nullptr) {
             *myAggregateTextureBytes = 0;
         }
     }
 
     std::shared_ptr<Standard_Size> myAggregateTextureBytes;
-#if DEBUG
     std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> myFrameBudget;
-#endif
+    bool myValidateFrameOwners = true;
 };
 
 // These GUIDs are persistent schema identifiers. They identify the attribute
@@ -3804,10 +3803,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             XCAFDoc_VisMaterialPBR material;
             if (!TryPBRMaterialForLabel(root, material) || material.NormalTexture.IsNull()) continue;
             Standard_Size bytes = 0;
-            OcctAuthoredFrameRecord boundFrame;
-            if (Core3DReadAuthoredFrameOwner(myOcafDoc, root, boundFrame) != OcctAuthoredFrameReadState::Absent
-                || Core3DNormalTextureRecipeForLabel(root) != 1
-                || !Core3DValidateNormalTextureGeometry(root, &bytes)
+            if (!Core3DValidateNormalTextureBinding(myOcafDoc, root, &bytes)
                 || !AddMultipliedWithinLimit(projectedNormalBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
         }
 
@@ -3844,8 +3840,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             XCAFDoc_VisMaterialPBR sourceMaterial;
             if (TryPBRMaterialForLabel(source, sourceMaterial) && !sourceMaterial.NormalTexture.IsNull()) {
                 Standard_Size bytes = 0;
-                if (Core3DNormalTextureRecipeForLabel(source) != 1
-                    || !Core3DValidateNormalTextureGeometry(source, &bytes)
+                if (!Core3DValidateNormalTextureBinding(myOcafDoc, source, &bytes)
                     || !AddMultipliedWithinLimit(projectedNormalBytes, bytes, destinationCount,
                         64U * 1024U * 1024U)) return Standard_False;
             }
@@ -4576,7 +4571,7 @@ Standard_Integer Core3DNormalTextureRecipeForLabel(const TDF_Label& label) noexc
         Handle(TDF_Attribute) attribute;
         if (!label.FindAttribute(NormalTextureRecipeAttributeID(), attribute)) return 0;
         const auto value = Handle(TDataStd_Integer)::DownCast(attribute);
-        return !value.IsNull() && value->Get() == 1 ? 1 : -1;
+        return !value.IsNull() && (value->Get() == 1 || value->Get() == 2) ? value->Get() : -1;
     } catch (...) { return -1; }
 }
 
@@ -4715,13 +4710,42 @@ Standard_Boolean Core3DValidateNormalTextureGeometry(
     } catch (...) { return Standard_False; }
 }
 
+Standard_Integer Core3DNormalTextureBasisForLabel(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    Standard_Size* additionalNativeBytes) noexcept {
+    if (additionalNativeBytes != nullptr) *additionalNativeBytes = 0;
+    try {
+        if (document.IsNull() || label.IsNull() || label.Data() != document->GetData()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) return 0;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (ValidatedGeometryRepresentation(document, shapes, label) != OcctGeometryRepresentation::TriangleMesh)
+            return 0;
+        OcctAuthoredFrameRecord record;
+        const auto state = Core3DReadAuthoredFrameOwner(document, label, record);
+        if (state == OcctAuthoredFrameReadState::Invalid) return 0;
+        if (state == OcctAuthoredFrameReadState::Authored) return 2;
+        return Core3DValidateNormalTextureGeometry(label, additionalNativeBytes) ? 1 : 0;
+    } catch (...) { if (additionalNativeBytes != nullptr) *additionalNativeBytes = 0; return 0; }
+}
+
+Standard_Boolean Core3DValidateNormalTextureBinding(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    Standard_Size* additionalNativeBytes) noexcept {
+    if (additionalNativeBytes != nullptr) *additionalNativeBytes = 0;
+    Standard_Size bytes = 0;
+    const auto basis = Core3DNormalTextureBasisForLabel(document, label, &bytes);
+    if (basis == 0 || Core3DNormalTextureRecipeForLabel(label) != basis) return Standard_False;
+    if (additionalNativeBytes != nullptr) *additionalNativeBytes = bytes;
+    return Standard_True;
+}
+
 Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
     const TDF_Label& label) const noexcept {
     if (![NSThread isMainThread]) return Standard_False;
     try {
         return IsEditableFreeSimpleDefinitionLabel(label)
             && GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::TriangleMesh
-            && Core3DValidateNormalTextureGeometry(label);
+            && Core3DNormalTextureBasisForLabel(myOcafDoc, label) != 0;
     } catch (...) { return Standard_False; }
 }
 
@@ -4797,8 +4821,8 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
                 }
             }
         }
-        // Charge geometry-owned records even when hidden or mapless. Production
-        // recipe2 admission remains separate; a mapped owner is rejected here.
+        // Charge geometry-owned records even when hidden or mapless. Project
+        // the replacement owner before writes without changing a bound recipe.
         if (!frame.archive.empty() || !previousFrame.archive.empty()) {
             Standard_Size residentBytes = 0;
             if (!Core3DValidateAuthoredFrameOwners(myOcafDoc, residentBytes)
@@ -4816,10 +4840,11 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
                 OcctAuthoredFrameRecord boundFrame;
                 const auto state = Core3DReadAuthoredFrameOwner(myOcafDoc, label, boundFrame);
                 Standard_Size bytes = 0;
-                if (state != OcctAuthoredFrameReadState::Absent
-                    || (label.IsEqual(destination) && !frame.archive.empty())
-                    || Core3DNormalTextureRecipeForLabel(label) != 1
-                    || !Core3DValidateNormalTextureGeometry(label, &bytes)
+                if (state == OcctAuthoredFrameReadState::Invalid) return Standard_False;
+                const bool projectedSupplied = label.IsEqual(destination)
+                    ? !frame.archive.empty() : state == OcctAuthoredFrameReadState::Authored;
+                if (Core3DNormalTextureRecipeForLabel(label) != (projectedSupplied ? 2 : 1)
+                    || (!projectedSupplied && !Core3DValidateNormalTextureGeometry(label, &bytes))
                     || !AddMultipliedWithinLimit(residentBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
             }
         }
@@ -5615,14 +5640,10 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
         if (update != updates.end()) material = update->material;
         else if (!TryPBRMaterialForLabel(root, material)) continue;
         if (material.NormalTexture.IsNull()) continue;
-        OcctAuthoredFrameRecord frame;
-        if (Core3DReadAuthoredFrameOwner(myOcafDoc, root, frame) != OcctAuthoredFrameReadState::Absent) return Standard_False;
-        TopoDS_Face face; Handle(Poly_Triangulation) mesh;
-        const auto shape = XCAFDoc_ShapeTool::GetShape(root);
-        if (shape.IsNull() || !TriangleAtlasFace(shape, face, mesh)) return Standard_False;
-        const std::size_t bytes = std::size_t(mesh->NbTriangles()) * 3 * 64;
-        if (bytes > 64 * 1024 * 1024 - normalBytes) return Standard_False;
-        normalBytes += bytes;
+        Standard_Size bytes = 0;
+        const auto basis = Core3DNormalTextureBasisForLabel(myOcafDoc, root, &bytes);
+        if (basis == 0 || (update == updates.end() && Core3DNormalTextureRecipeForLabel(root) != basis)
+            || !AddMultipliedWithinLimit(normalBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
     }
 
     struct ExistingDefinition {
@@ -6015,7 +6036,9 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
         TDataStd_Integer::Set(
             update.label, LocalPBRMaterialAttributeID(), 1);
         if (!update.material->PbrMaterial().NormalTexture.IsNull()) {
-            TDataStd_Integer::Set(update.label, NormalTextureRecipeAttributeID(), 1);
+            const auto basis = Core3DNormalTextureBasisForLabel(myOcafDoc, update.label);
+            if (basis == 0) return Standard_False;
+            TDataStd_Integer::Set(update.label, NormalTextureRecipeAttributeID(), basis);
         } else {
             update.label.ForgetAttribute(NormalTextureRecipeAttributeID());
         }
@@ -6084,9 +6107,8 @@ Standard_Boolean OcctDocument::CopyObjectAppearance(
     const bool hasOwnedNormal = hasLocalPBR && !sourceVisual.IsNull()
         && sourceVisual->HasPbrMaterial() && !sourceVisual->PbrMaterial().NormalTexture.IsNull();
     const auto normalRecipe = Core3DNormalTextureRecipeForLabel(source);
-    if ((hasOwnedNormal && (normalRecipe != 1
-            || !Core3DValidateNormalTextureGeometry(source)
-            || !Core3DValidateNormalTextureGeometry(destination)))
+    if ((hasOwnedNormal && (!Core3DValidateNormalTextureBinding(myOcafDoc, source)
+            || Core3DNormalTextureBasisForLabel(myOcafDoc, destination) != normalRecipe))
         || (!hasOwnedNormal && normalRecipe != 0)) return Standard_False;
     const Standard_Boolean hasAutoPromotedEmissiveFactor =
         IsEmissiveTextureFactorAutoPromotedForLabel(source);
@@ -6316,8 +6338,7 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
         if (!pbr.NormalTexture.IsNull() && (!hasLocalPBR
-            || Core3DNormalTextureRecipeForLabel(label) != 1
-            || !SupportsNormalTextureGeometryForLabel(label))) return Standard_False;
+            || !Core3DValidateNormalTextureBinding(myOcafDoc, label))) return Standard_False;
         const Handle(Image_Texture)& base = pbr.BaseColorTexture;
         const Handle(Image_Texture) common = material->HasCommonMaterial()
             ? material->CommonMaterial().DiffuseTexture
@@ -6363,7 +6384,7 @@ Standard_Boolean OcctDocument::SupportsMaterialTextureEditingForLabel(
     const bool owned = label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
         && !marker.IsNull() && marker->Get() == 1;
     if (owned && !pbr.NormalTexture.IsNull()
-        && Core3DNormalTextureRecipeForLabel(label) != 1) return Standard_False;
+        && !Core3DValidateNormalTextureBinding(myOcafDoc, label)) return Standard_False;
     if (slot != OcctMaterialTextureSlot::BaseColor
         && (!pbr.BaseColorTexture.IsNull() || !common.IsNull())
         && (!owned || pbr.BaseColorTexture.IsNull() || common.IsNull())) return Standard_False;
