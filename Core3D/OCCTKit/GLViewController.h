@@ -264,6 +264,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count;
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
+- (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
 - (NSDictionary<NSString *, NSNumber *> *)
     debugFramebufferStatistics;
 #endif

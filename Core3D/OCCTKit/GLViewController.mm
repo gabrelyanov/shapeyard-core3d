@@ -4751,6 +4751,11 @@ private:
         && _viewer->DebugMutateFirstBevelSourcePersistedTransform();
 }
 
+- (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
+    GLView *view = self.isViewLoaded ? [self viewportView] : nil;
+    return _viewer == nullptr || view == nil ? nil : [view debugDrawAndReadViewportRGBA];
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
     GLView *view = self.isViewLoaded ? [self viewportView] : nil;
     constexpr NSUInteger width = 96;

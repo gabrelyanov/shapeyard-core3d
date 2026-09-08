@@ -4561,6 +4561,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     return [GLController debugDisplayedShapePresentationStates];
 }
 
+- (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA {
+    return [GLController debugViewportRGBA];
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics {
     return [GLController debugFramebufferStatistics];
 }

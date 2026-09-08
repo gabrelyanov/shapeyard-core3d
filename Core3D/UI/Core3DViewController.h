@@ -1160,6 +1160,7 @@ typedef struct {
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
     debugDisplayedShapePresentationStates;
 //! Bounded color evidence from the current OpenGL view after an actual redraw.
+- (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
 //! Current OpenGL selection size. Assembly occurrences are expected to remain
 //! zero after select-all because definition-addressed edits are unsafe.

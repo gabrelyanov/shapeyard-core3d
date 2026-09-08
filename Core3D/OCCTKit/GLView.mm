@@ -353,13 +353,14 @@ private:
 }
 
 #ifdef DEBUG
-- (NSData *_Nullable)debugDrawAndReadCenteredRGBAWithWidth:(NSUInteger)width
+- (NSData *_Nullable)debugDrawAndReadBoundedRGBAWithWidth:(NSUInteger)width
                                                    height:(NSUInteger)height
 {
     NSAssert(NSThread.isMainThread, @"The viewport renderer is main-thread owned.");
     if (!_hasDrawable || _isDrawing || myController == nil
         || width == 0 || height == 0
-        || width > 256 || height > 256
+        || width > 4096 || height > 4096
+        || width * height > 4 * 1024 * 1024
         || width > static_cast<NSUInteger>(myBackingWidth)
         || height > static_cast<NSUInteger>(myBackingHeight)) {
         return nil;
@@ -407,6 +408,20 @@ private:
     }];
     return hadContext ? result : nil;
 }
+- (NSData *_Nullable)debugDrawAndReadCenteredRGBAWithWidth:(NSUInteger)width
+                                                   height:(NSUInteger)height {
+    if (width > 256 || height > 256) return nil;
+    return [self debugDrawAndReadBoundedRGBAWithWidth:width height:height];
+}
+
+- (NSDictionary<NSString *, id> *_Nullable)debugDrawAndReadViewportRGBA {
+    if (![NSThread isMainThread] || myBackingWidth <= 0 || myBackingHeight <= 0) return nil;
+    const NSUInteger width = static_cast<NSUInteger>(myBackingWidth);
+    const NSUInteger height = static_cast<NSUInteger>(myBackingHeight);
+    NSData *pixels = [self debugDrawAndReadBoundedRGBAWithWidth:width height:height];
+    return pixels == nil ? nil : @{ @"width": @(width), @"height": @(height), @"rgba": pixels };
+}
+
 #endif
 
 // =======================================================================
