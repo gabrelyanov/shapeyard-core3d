@@ -17,6 +17,7 @@
 #include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/NativeTransactionObserverProbe.hxx"
 #include "../UI/OrdinaryEditController.hpp"
 #include <BRep_Builder.hxx>
 #include <TopoDS.hxx>
@@ -619,6 +620,113 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
     } catch (...) { return @{@"error": @"Frame-owner fixture failed"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugTransactionObserver {
+    if (![NSThread isMainThread]) return @{@"error": @"Main thread required"};
+    using namespace core3d::debug;
+    try {
+        struct Owner {
+            std::shared_ptr<TransactionProbeState> state = std::make_shared<TransactionProbeState>();
+            Handle(TDocStd_Application) app = new ObservedApplication(state);
+            std::vector<Handle(TDocStd_Document)> documents;
+            ~Owner() noexcept {
+                state->adopted = nullptr;
+                for (const auto& doc : documents) {
+                    try { if (doc->HasOpenCommand()) doc->AbortCommand(); app->Close(doc); } catch (...) {}
+                }
+            }
+            Handle(TDocStd_Document) make() {
+                Handle(TDocStd_Document) doc;
+                app->NewDocument(TCollection_ExtendedString("BinXCAF"), doc);
+                if (doc.IsNull()) Standard_Failure::Raise("Observer fixture document missing");
+                documents.push_back(doc);
+                doc->SetUndoLimit(20);
+                TDataStd_Integer::Set(doc->Main().FindChild(91), 0);
+                doc->ClearUndos();
+                return doc;
+            }
+        } owner;
+        Core3DDefineSafeBinXCAFFormat(owner.app);
+        const auto live = owner.make();
+        const auto candidate = owner.make();
+        owner.state->adopted = live.get();
+        NSMutableArray* rows = [NSMutableArray array];
+        std::size_t cursor = 0;
+        auto row = [&](NSString* name, const Handle(TDocStd_Document)& doc) {
+            NSMutableArray* events = [NSMutableArray array];
+            for (; cursor < owner.state->count; ++cursor) {
+                const auto& e = owner.state->events[cursor];
+                [events addObject:@{@"kind": @(static_cast<int>(e.kind)), @"adopted": @(e.adopted),
+                    @"open": @(e.commandOpen), @"undos": @(e.undos), @"redos": @(e.redos)}];
+            }
+            Handle(TDataStd_Integer) value;
+            if (!doc->Main().FindChild(91, Standard_False).FindAttribute(TDataStd_Integer::GetID(), value))
+                Standard_Failure::Raise("Observer fixture integer lost");
+            [rows addObject:@{@"step": name, @"events": events, @"value": @(value->Get()),
+                @"adopted": @(doc.get() == owner.state->adopted), @"open": @(doc->HasOpenCommand()),
+                @"undos": @(doc->GetAvailableUndos()), @"redos": @(doc->GetAvailableRedos()),
+                @"observerValid": @(owner.state->valid)}];
+        };
+        auto write = [&](const Handle(TDocStd_Document)& doc, int value) {
+            TDataStd_Integer::Set(doc->Main().FindChild(91, Standard_False), value);
+        };
+        // Ignore setup callbacks: no adopted document existed during construction.
+        cursor = owner.state->count;
+        row(@"initial", live);
+        live->NewCommand(); live->CommitCommand(); row(@"empty", live);
+        live->NewCommand(); write(live, 1); live->CommitCommand(); row(@"commit", live);
+        // Deliberate private presentation seam: the already committed authority cannot rewind.
+        bool presentationFailed = false;
+        try { Standard_Failure::Raise("Deliberate after-commit presentation failure"); }
+        catch (const Standard_Failure&) { presentationFailed = true; }
+        row(@"afterPresentationFailure", live);
+        live->NewCommand(); write(live, 2); live->AbortCommand(); row(@"abort", live);
+        live->Undo(); row(@"undo", live);
+        live->Redo(); row(@"redo", live);
+        candidate->NewCommand(); write(candidate, 8); candidate->CommitCommand(); row(@"candidateCommit", candidate);
+        row(@"liveAfterCandidate", live);
+        const auto rejected = owner.make();
+        rejected->NewCommand(); write(rejected, 7); rejected->CommitCommand(); row(@"rejectedCandidate", rejected);
+        owner.app->Close(rejected);
+        owner.documents.erase(std::remove(owner.documents.begin(), owner.documents.end(), rejected), owner.documents.end());
+        row(@"afterRejectedClose", live);
+        // Explicit adoption identity is independent of commit observation.
+        owner.state->adopted = candidate.get(); row(@"adoptCandidate", candidate);
+        candidate->NewCommand(); write(candidate, 9); candidate->CommitCommand(); row(@"adoptedCommit", candidate);
+        owner.state->adopted = live.get();
+        live->NewCommand(); write(live, 3); live->NewCommand(); row(@"implicitNewCommand", live);
+        live->AbortCommand(); row(@"abortImplicitEmpty", live);
+        live->NewCommand(); write(live, 4); live->SetUndoLimit(10); row(@"implicitUndoLimit", live);
+        if (live->HasOpenCommand()) live->AbortCommand();
+        live->SetUndoLimit(0); row(@"undoDisabled", live);
+        live->NewCommand(); write(live, 5); live->CommitCommand(); row(@"disabledCommit", live);
+        write(live, 6); row(@"directWrite", live);
+        const auto countBeforePrivate = owner.state->count;
+        {
+            Owner isolated;
+            Core3DDefineSafeBinXCAFFormat(isolated.app);
+            const auto doc = isolated.make();
+            doc->NewCommand(); write(doc, 99); doc->CommitCommand();
+        }
+        row(@"privateApplication", live);
+        const bool privateIgnored = countBeforePrivate == owner.state->count;
+        // Losing the observer cannot leave a retained native ownership cycle.
+        auto expiring = std::make_shared<TransactionProbeState>();
+        std::weak_ptr<TransactionProbeState> expired = expiring;
+        Handle(TDocStd_Application) expiredApp = new ObservedApplication(expiring);
+        expiring.reset();
+        expiredApp->OnCommitTransaction(live); // Explicit lifetime seam, not a native commit.
+        // Capacity seam uses virtual dispatch only; never label it a kernel mutation.
+        auto bounded = std::make_shared<TransactionProbeState>();
+        Handle(TDocStd_Application) boundedApp = new ObservedApplication(bounded);
+        for (int i = 0; i < 129; ++i) boundedApp->OnOpenTransaction(live);
+        return @{@"rows": rows, @"presentationFailureObserved": @(presentationFailed), @"privateApplicationIgnored": @(privateIgnored),
+            @"expiredStateReleased": @(expired.expired()), @"boundedCount": @(bounded->count),
+            @"overflowRejected": @(!bounded->valid), @"observerValid": @(owner.state->valid)};
+    } catch (const Standard_Failure& e) {
+        return @{@"error": [NSString stringWithUTF8String:e.GetMessageString() ?: "OCCT observer failure"]};
+    } catch (...) { return @{@"error": @"Observer fixture failed"}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode {

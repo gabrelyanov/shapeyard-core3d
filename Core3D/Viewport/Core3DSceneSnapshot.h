@@ -60,6 +60,8 @@ CORE3D_SCENE_FINAL_CLASS
     NS_SWIFT_NAME(debugNativeFrameAssociation(_:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameOwner:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameOwner(_:replacement:mode:));
+// Isolated transaction dispatch proof; does not attach observers to live projects.
++ (NSDictionary<NSString *, id> *)debugTransactionObserver NS_SWIFT_NAME(debugTransactionObserver());
 + (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameUVEdit(_:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
