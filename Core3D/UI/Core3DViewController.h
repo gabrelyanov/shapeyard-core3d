@@ -1074,6 +1074,9 @@ typedef struct {
 //! Remove cached face triangulations without remeshing. Texture assignment
 //! must fail closed while texture removal remains available.
 - (BOOL)debugClearSelectedCachedTriangulationsForTextureTest;
+//! Renderer-only normal binding; never edits native material/history. Nil clears.
+- (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data;
+- (NSUInteger)debugPreparedNativeTangentArrayCount;
 //! Standalone malformed BinXCAF fixture used to prove that loading rejects
 //! external texture paths and preserves the active document on failure.
 - (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData;

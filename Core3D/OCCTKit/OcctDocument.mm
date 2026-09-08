@@ -2926,7 +2926,9 @@ void Core3DPrepareRendererTextures(
     }
     const bool hasDataMaps = (bits & (Graphic3d_TextureSetBits_MetallicRoughness | Graphic3d_TextureSetBits_Occlusion)) != 0;
     if (hasDataMaps && (ownsShader || aspect->ShaderProgram().IsNull())) {
-        if (!ownsShader || aspect->ShaderProgram()->TextureSetBits() != bits) {
+        const auto expectedID = TCollection_AsciiString((bits & Graphic3d_TextureSetBits_Normal)
+            ? "shapeyard-data-maps-v1-normal-" : "shapeyard-data-maps-v1-") + bits;
+        if (!ownsShader || aspect->ShaderProgram()->GetId() != expectedID) {
             aspect->SetShaderProgram(MakeCore3DDataMapShader(bits));
         }
     } else if (ownsShader) {

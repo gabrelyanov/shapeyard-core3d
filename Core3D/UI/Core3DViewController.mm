@@ -3474,6 +3474,45 @@ void Core3DAddDebugOrphanVisualMaterial(
     return @(metersPerUnit);
 }
 
+- (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data {
+    if (![NSThread isMainThread] || !GLController.viewer) return NO;
+    const auto context = GLController.viewer->AisContext();
+    if (context.IsNull()) return NO;
+    Handle(Image_Texture) source;
+    if (data && (!Core3DCreateAuthoredTexture(static_cast<const Standard_Byte*>(data.bytes),
+        data.length, "image/png", source) || !Core3DValidateNumericTexture(source))) return NO;
+    AIS_ListOfInteractive displayed;
+    context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+    if (displayed.Size() != 1) return NO;
+    const auto shape = Handle(AIS_Shape)::DownCast(displayed.First());
+    if (shape.IsNull() || !Handle(CafShapePrs)::DownCast(shape).IsNull()
+        || shape->Attributes()->ShadingAspect().IsNull()) return NO;
+    const auto aspect = shape->Attributes()->ShadingAspect()->Aspect();
+    if (aspect.IsNull() || aspect->TextureSet().IsNull()) return NO;
+    std::vector<Handle(Graphic3d_TextureMap)> bindings;
+    for (Graphic3d_TextureSet::Iterator it(aspect->TextureSet()); it.More(); it.Next()) {
+        if (it.Value().IsNull() || it.Value()->GetParams().IsNull()) return NO;
+        if (it.Value()->GetParams()->TextureUnit() != Graphic3d_TextureUnit_Normal) bindings.push_back(it.Value());
+    }
+    if (data) bindings.push_back(new XCAFPrs_Texture(source, Graphic3d_TextureUnit_Normal));
+    std::sort(bindings.begin(), bindings.end(), [](const auto& a, const auto& b) {
+        return a->GetParams()->TextureUnit() < b->GetParams()->TextureUnit();
+    });
+    if (bindings.empty()) return NO;
+    Handle(Graphic3d_TextureSet) textures = new Graphic3d_TextureSet(int(bindings.size()));
+    for (int i = 0; i < bindings.size(); ++i) textures->SetValue(i, bindings[i]);
+    aspect->SetTextureSet(textures); aspect->SetTextureMapOn();
+    Core3DPrepareRendererTextures(aspect);
+    shape->SetToUpdate();
+    context->Redisplay(shape, Standard_False, Standard_True);
+    GLController.viewer->Invalidate();
+    return YES;
+}
+
+- (NSUInteger)debugPreparedNativeTangentArrayCount {
+    return GLController.viewer ? GLController.viewer->DebugPreparedTangentArrayCount() : 0;
+}
+
 - (NSInteger)debugVisualMaterialDefinitionCount {
     auto document = GLController.viewer->getDocument()->ChangeDocument();
     if (document.IsNull()

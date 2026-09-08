@@ -22,6 +22,7 @@
 #include "OcctViewer.h"
 #include "OcctDocument.h"
 #include "Core3DSTEPExchangeLock.h"
+#include "Core3DNativeTangentBuffers.hxx"
 
 #include <OpenGl_GraphicDriver.hxx>
 #include <Standard_Failure.hxx>
@@ -188,6 +189,7 @@ OcctViewer::~OcctViewer()
 // =======================================================================
 void OcctViewer::release() noexcept
 {
+    myPreparedTangentArrays.clear();
     if (!myDoc.IsNull() && !myDoc->Document().IsNull()) {
         try {
             const Handle(TDocStd_Document) document = myDoc->Document();
@@ -317,6 +319,9 @@ bool OcctViewer::RenderFrame()
         return false;
     }
     try {
+        const auto driver = Handle(OpenGl_GraphicDriver)::DownCast(myViewer->Driver());
+        if (driver.IsNull() || !core3d::render::PrepareNativeTangentPresentations(
+                myContext, driver->GetSharedContext(true), myPreparedTangentArrays)) return false;
         myView->RenderFrame();
         return true;
     } catch (const Standard_Failure&) {

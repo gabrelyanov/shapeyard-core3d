@@ -4,6 +4,7 @@
 #include <Graphic3d_ShaderObject.hxx>
 #include <Graphic3d_ShaderProgram.hxx>
 #include <Graphic3d_TextureSetBits.hxx>
+#include <Graphic3d_ShaderAttribute.hxx>
 
 namespace {
 bool IsCore3DDataMapShader(const Handle(Graphic3d_ShaderProgram)& program)
@@ -14,10 +15,19 @@ bool IsCore3DDataMapShader(const Handle(Graphic3d_ShaderProgram)& program)
 Handle(Graphic3d_ShaderProgram) MakeCore3DDataMapShader(Standard_Integer bits)
 {
     Handle(Graphic3d_ShaderProgram) program = new Graphic3d_ShaderProgram();
-    program->SetId(TCollection_AsciiString("shapeyard-data-maps-v1-") + bits);
+    const bool normal = (bits & Graphic3d_TextureSetBits_Normal) != 0;
+    program->SetId(TCollection_AsciiString(normal ? "shapeyard-data-maps-v1-normal-" : "shapeyard-data-maps-v1-") + bits);
     program->SetPBR(Standard_True);
     program->SetDefaultSampler(Standard_False);
-    program->SetTextureSetBits(bits);
+    // OCCT's automatic normal-map prelude uses non-ES2 mat2x3 derivatives.
+    // Bind the existing normal texture unit explicitly and use our Mikk frame.
+    program->SetTextureSetBits(bits & ~Graphic3d_TextureSetBits_Normal);
+    if (normal) {
+        Graphic3d_ShaderAttributeList attributes;
+        attributes.Append(new Graphic3d_ShaderAttribute("syTangent", 4));
+        program->SetVertexAttributes(attributes);
+        program->PushVariableInt("syNormalMap", int(Graphic3d_TextureUnit_Normal));
+    }
     program->SetNbLightsMax(0);
     program->SetNbClipPlanesMax(8);
     program->SetHeader("#version 100");
@@ -25,10 +35,21 @@ Handle(Graphic3d_ShaderProgram) MakeCore3DDataMapShader(Standard_Integer bits)
 varying vec3 syWorldPosition;
 varying vec3 syWorldNormal;
 varying vec2 syUV;
+#ifdef SY_HAS_NORMAL_MAP
+attribute vec4 syTangent;
+varying vec3 syWorldTangent;
+varying vec3 syWorldBitangent;
+#endif
 void main() {
     vec4 world = occModelWorldMatrix * occVertex;
     syWorldPosition = world.xyz / world.w;
     syWorldNormal = normalize((occModelWorldMatrixInverseTranspose * vec4(occNormal, 0.0)).xyz);
+#ifdef SY_HAS_NORMAL_MAP
+    vec3 t = (occModelWorldMatrix * vec4(syTangent.xyz, 0.0)).xyz;
+    syWorldTangent = normalize(t - syWorldNormal * dot(syWorldNormal, t));
+    float determinant = dot(cross(occModelWorldMatrix[0].xyz, occModelWorldMatrix[1].xyz), occModelWorldMatrix[2].xyz);
+    syWorldBitangent = cross(syWorldNormal, syWorldTangent) * syTangent.w * (determinant < 0.0 ? -1.0 : 1.0);
+#endif
     float s = occTextureTrsf_RotationSin(), c = occTextureTrsf_RotationCos();
     vec2 uv = vec2(occTexCoord.x * c - occTexCoord.y * s, occTexCoord.x * s + occTexCoord.y * c);
     syUV = (uv + occTextureTrsf_Translation()) * occTextureTrsf_Scale();
@@ -39,6 +60,11 @@ void main() {
 varying vec3 syWorldPosition;
 varying vec3 syWorldNormal;
 varying vec2 syUV;
+#ifdef SY_HAS_NORMAL_MAP
+uniform sampler2D syNormalMap;
+varying vec3 syWorldTangent;
+varying vec3 syWorldBitangent;
+#endif
 #ifdef THE_HAS_TEXTURE_COLOR
 uniform sampler2D occSamplerBaseColor;
 #endif
@@ -68,6 +94,12 @@ void main() {
     occlusion = clamp(occTexture2D(occSamplerOcclusion, syUV).r, 0.0, 1.0);
 #endif
     vec3 n = normalize(syWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+#ifdef SY_HAS_NORMAL_MAP
+    vec3 mappedNormal = occTexture2D(syNormalMap, syUV).rgb * 2.0 - 1.0;
+    // Retain the interpolated vertex basis used by Mikk's inverse bake.
+    n = normalize(mappedNormal.x * syWorldTangent + mappedNormal.y * syWorldBitangent + mappedNormal.z * syWorldNormal)
+        * (gl_FrontFacing ? 1.0 : -1.0);
+#endif
     vec3 light = normalize(vec3(0.35, 0.45, 0.82));
     vec3 eye = (occWorldViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 view = normalize(eye - syWorldPosition);
@@ -102,8 +134,9 @@ void main() {
     occSetFragColor(vec4(encoded, surface.a));
 }
 )GLSL";
-    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, vertex));
-    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_FRAGMENT, fragment));
+    const TCollection_AsciiString prefix = normal ? "#define SY_HAS_NORMAL_MAP\n" : "";
+    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, prefix + vertex));
+    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_FRAGMENT, prefix + fragment));
     return program;
 }
 } // namespace
