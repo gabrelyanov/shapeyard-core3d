@@ -90,7 +90,16 @@ void main() {
     vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * base / 3.14159265;
     vec3 direct = (diffuse + specular) * nl * 2.2;
     vec3 ambient = base * (0.055 + 0.075 * (1.0 - metallic)) + f0 * (0.025 * (1.0 - roughness));
-    occSetFragColor(vec4(ambient * occlusion + direct + emission, surface.a));
+    // GLView explicitly owns an ES2 RGBA8 drawable, and OCCT's ES2 path has
+    // no sRGB framebuffer encoding. Texture color samples and PBR factors
+    // are linear, so encode the final light sum once for that display target.
+    vec3 linear = max(ambient * occlusion + direct + emission, vec3(0.0));
+    vec3 low = linear * 12.92;
+    vec3 high = 1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055;
+    vec3 encoded = vec3(linear.r <= 0.0031308 ? low.r : high.r,
+                        linear.g <= 0.0031308 ? low.g : high.g,
+                        linear.b <= 0.0031308 ? low.b : high.b);
+    occSetFragColor(vec4(encoded, surface.a));
 }
 )GLSL";
     program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, vertex));
