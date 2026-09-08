@@ -203,7 +203,7 @@ supportsOcclusionTextureEditing:supportsOcclusionTextureEditing];
         editablePBR.Roughness = legacyPBR.NormalizedRoughness();
         editablePBR.RefractionIndex = legacyPBR.IOR();
         Core3DPBRMaterial* pbr = Core3DSelectionPBRMaterial(
-            editablePBR, YES, YES, YES);
+            editablePBR, YES, YES, YES, YES, YES);
         if (pbr != nil) {
             [pbrMaterials addObject:pbr];
         }
