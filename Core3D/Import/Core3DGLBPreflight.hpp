@@ -37,6 +37,21 @@ struct EmbeddedImage {
     std::string mimeType;
 };
 
+// Exact source records. Offsets identify bytes in the original pinned GLB;
+// definition indices are used only to build a private parser view, never to
+// infer native face ownership from parser traversal order.
+struct GLBAccessorSource {
+    std::uint64_t definition = 0;
+    ByteRange view;
+    std::uint64_t offset = 0, count = 0, stride = 0;
+    std::uint64_t elementBytes = 0, componentType = 0;
+    [[nodiscard]] bool IsPresent() const noexcept { return count != 0; }
+};
+struct GLBPrimitiveSource {
+    std::uint64_t mesh = 0, primitive = 0;
+    GLBAccessorSource position, normal, uv, indices, tangent;
+};
+
 struct PreflightResult {
     PreflightStatus status = PreflightStatus::Invalid;
     std::string message;
@@ -51,6 +66,8 @@ struct PreflightResult {
     std::uint64_t vertexEstimate = 0;
     std::uint64_t indexEstimate = 0;
     std::vector<EmbeddedImage> embeddedImages;
+    std::vector<GLBPrimitiveSource> primitiveSources;
+    std::uint64_t suppliedFrameResidentEstimate = 0;
 
     [[nodiscard]] bool IsValid() const noexcept {
         return status == PreflightStatus::Valid;

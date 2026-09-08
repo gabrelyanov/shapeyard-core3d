@@ -6,6 +6,7 @@
 #import <Foundation/Foundation.h>
 
 #include "Core3DGLBPreflight.hpp"
+#include "../Scene/AuthoredTangentArchive.hpp"
 
 #include <algorithm>
 #include <array>
@@ -776,6 +777,7 @@ struct MeshRecord {
     std::uint64_t primitiveCount = 0;
     std::uint64_t vertices = 0;
     std::uint64_t indices = 0;
+    std::uint64_t suppliedFrameResidentBytes = 0;
     std::vector<std::uint64_t> positionAccessors;
 };
 
@@ -1074,6 +1076,8 @@ private:
                 record.componentCount = 2;
             } else if (record.type == "VEC3") {
                 record.componentCount = 3;
+            } else if (record.type == "VEC4") {
+                record.componentCount = 4;
             } else {
                 return Fail(
                     PreflightStatus::Unsupported,
@@ -1084,7 +1088,7 @@ private:
                     && (record.componentType == 5121
                         || record.componentType == 5123
                         || record.componentType == 5125))
-                || ((record.type == "VEC2" || record.type == "VEC3")
+                || ((record.type == "VEC2" || record.type == "VEC3" || record.type == "VEC4")
                     && record.componentType == 5126);
             if (!supportedLayout || accessor[@"normalized"] != nil) {
                 return Fail(
@@ -1128,8 +1132,8 @@ private:
     bool ValidateAccessorBounds(
         NSDictionary *accessor,
         const AccessorRecord& record) {
-        std::array<double, 3> minimum{};
-        std::array<double, 3> maximum{};
+        std::array<double, 4> minimum{};
+        std::array<double, 4> maximum{};
         bool hasMinimum = false;
         bool hasMaximum = false;
         for (NSString *key in @[@"min", @"max"]) {
@@ -1614,9 +1618,9 @@ private:
                     PreflightStatus::ResourceLimit,
                     "GLB exceeds the mesh-primitive definition budget.");
             }
-            for (NSDictionary *primitiveValue in primitives) {
-                NSDictionary *primitive = Dictionary(primitiveValue);
-                if (primitive == nil || !ValidatePrimitive(primitive, meshRecord)) {
+            for (NSUInteger primitiveIndex = 0; primitiveIndex < primitives.count; ++primitiveIndex) {
+                NSDictionary *primitive = Dictionary(primitives[primitiveIndex]);
+                if (primitive == nil || !ValidatePrimitive(primitive, meshRecord, meshIndex, primitiveIndex)) {
                     return primitive != nil
                         ? false
                         : Fail(PreflightStatus::Invalid, "GLB mesh primitive is invalid.");
@@ -1633,7 +1637,8 @@ private:
         return true;
     }
 
-    bool ValidatePrimitive(NSDictionary *primitive, MeshRecord& mesh) {
+    bool ValidatePrimitive(NSDictionary *primitive, MeshRecord& mesh,
+                           std::uint64_t meshIndex, std::uint64_t primitiveIndex) {
         if (!RejectExtensions(primitive, "GLB mesh primitive")) {
             return false;
         }
@@ -1660,7 +1665,8 @@ private:
             if (key == nil
                 || (![key isEqualToString:@"POSITION"]
                     && ![key isEqualToString:@"NORMAL"]
-                    && ![key isEqualToString:@"TEXCOORD_0"])) {
+                    && ![key isEqualToString:@"TEXCOORD_0"]
+                    && ![key isEqualToString:@"TANGENT"])) {
                 return Fail(
                     PreflightStatus::Unsupported,
                     "GLB primitive contains an unsupported vertex attribute.");
@@ -1748,6 +1754,30 @@ private:
                 PreflightStatus::Invalid,
                 "Textured GLB primitives must provide TEXCOORD_0.");
         }
+        const AccessorRecord* tangent = AccessorAt(attributes[@"TANGENT"]);
+        if (attributes[@"TANGENT"] != nil) {
+            const auto* normal = AccessorAt(normalValue);
+            if (!tangent || tangent->type != "VEC4" || tangent->componentType != 5126
+                || tangent->count != position->count || !normal || texCoordValue == nil
+                || !RequireVertexBuffer(*tangent))
+                return Fail(PreflightStatus::Unsupported,
+                    "GLB TANGENT requires matching float VEC4, NORMAL and TEXCOORD_0.");
+            if (position->count > core3d::scene::kMaximumTangentVertices
+                || indices->count > core3d::scene::authored::kMaximumFrames)
+                return Fail(PreflightStatus::ResourceLimit,
+                    "Supplied GLB frames exceed the bounded native mesh limits.");
+            if (!ValidateSuppliedFrames(*tangent, *normal, *indices)) return false;
+            const auto bytes = core3d::scene::authored::kHeaderBytes
+                + core3d::scene::authored::kDigestBytes + indices->count * 80;
+            if (!Accumulate(mesh.suppliedFrameResidentBytes, bytes, 64ULL * 1024ULL * 1024ULL))
+                return Fail(PreflightStatus::ResourceLimit, "Supplied GLB frames exceed the native memory budget.");
+        }
+        GLBPrimitiveSource source;
+        source.mesh = meshIndex; source.primitive = primitiveIndex;
+        source.position = SourceRecord(position); source.normal = SourceRecord(AccessorAt(normalValue));
+        source.uv = SourceRecord(AccessorAt(texCoordValue)); source.indices = SourceRecord(indices);
+        source.tangent = SourceRecord(tangent);
+        myResult.primitiveSources.push_back(std::move(source));
         const std::uint64_t positionIndex = static_cast<std::uint64_t>(
             position - myAccessors.data());
         mesh.positionAccessors.push_back(positionIndex);
@@ -1757,6 +1787,78 @@ private:
             : Fail(
                 PreflightStatus::ResourceLimit,
                 "GLB mesh exceeds geometry budgets.");
+    }
+
+
+    GLBAccessorSource SourceRecord(const AccessorRecord* accessor) const {
+        if (!accessor) return {};
+        const auto& view = myBufferViews[accessor->bufferView];
+        GLBAccessorSource result;
+        result.definition = std::uint64_t(accessor - myAccessors.data());
+        result.view = {myBinaryChunk.offset + view.offset, view.length};
+        result.offset = result.view.offset + accessor->byteOffset;
+        result.count = accessor->count;
+        result.stride = view.stride ? view.stride : accessor->elementBytes;
+        result.elementBytes = accessor->elementBytes; result.componentType = accessor->componentType;
+        return result;
+    }
+
+    bool ValidateSuppliedFrames(const AccessorRecord& tangent, const AccessorRecord& normal,
+                               const AccessorRecord& indices) {
+        const auto t = SourceRecord(&tangent), n = SourceRecord(&normal), ix = SourceRecord(&indices);
+        // Bounds are checked before allocating either node handedness or blocks.
+        if (!t.count || t.count > core3d::scene::kMaximumTangentVertices
+            || t.count != n.count || ix.count > core3d::scene::authored::kMaximumFrames)
+            return Fail(PreflightStatus::ResourceLimit, "Supplied GLB frame payload exceeds native limits.");
+        std::vector<float> handedness(t.count);
+        auto readBlock = [&](const GLBAccessorSource& source, std::uint64_t first,
+                             std::uint64_t count, std::vector<std::uint8_t>& bytes) {
+            const auto size = (count - 1) * source.stride + source.elementBytes;
+            bytes.resize(size);
+            return PreadExactly(myDescriptor, bytes.data(), bytes.size(),
+                source.offset + first * source.stride, myCancelled, myResult);
+        };
+        for (std::uint64_t first = 0; first < t.count;) {
+            if (!CheckCancelled()) return false;
+            const auto count = std::min<std::uint64_t>(4096, t.count - first);
+            std::vector<std::uint8_t> tb, nb;
+            if (!readBlock(t,first,count,tb) || !readBlock(n,first,count,nb)) return false;
+            for (std::uint64_t i = 0; i < count; ++i) {
+                const auto* tp = tb.data() + i * t.stride;
+                const auto* np = nb.data() + i * n.stride;
+                const core3d::scene::Float4 frame{
+                    core3d::scene::authored::ReadFloat(tp), core3d::scene::authored::ReadFloat(tp+4),
+                    core3d::scene::authored::ReadFloat(tp+8), core3d::scene::authored::ReadFloat(tp+12)};
+                const double nx = core3d::scene::authored::ReadFloat(np);
+                const double ny = core3d::scene::authored::ReadFloat(np+4);
+                const double nz = core3d::scene::authored::ReadFloat(np+8);
+                const double square = nx*nx + ny*ny + nz*nz;
+                const double dot = nx*frame.x + ny*frame.y + nz*frame.z;
+                if (!core3d::scene::authored::ValidFrame(frame) || !std::isfinite(square)
+                    || std::abs(square - 1.0) > 1.e-3 || !std::isfinite(dot) || std::abs(dot) > 1.e-4 * std::sqrt(square))
+                    return Fail(PreflightStatus::Invalid,
+                        "GLB supplied frames must be unit, orthogonal and have exact signed handedness.");
+                handedness[first+i] = frame.w;
+            }
+            first += count;
+        }
+        // Indices were already bounded/range-checked; validate the original
+        // indexed corner signs too, without any normalization or Mikk fallback.
+        std::vector<std::uint8_t> bytes;
+        if (!readBlock(ix,0,ix.count,bytes)) return false;
+        float triangleSign = 0;
+        for (std::uint64_t i = 0; i < ix.count; ++i) {
+            if ((i & 255U) == 0 && !CheckCancelled()) return false;
+            const auto* item = bytes.data() + i * ix.stride;
+            std::uint32_t vertex = item[0];
+            if (ix.elementBytes >= 2) vertex |= std::uint32_t(item[1]) << 8;
+            if (ix.elementBytes == 4) vertex |= (std::uint32_t(item[2]) << 16) | (std::uint32_t(item[3]) << 24);
+            if (vertex >= handedness.size()) return Fail(PreflightStatus::Invalid, "GLB supplied frame index changed.");
+            if (i % 3 == 0) triangleSign = handedness[vertex];
+            else if (triangleSign != handedness[vertex])
+                return Fail(PreflightStatus::Unsupported, "Mixed tangent handedness within one triangle is unsupported.");
+        }
+        return true;
     }
 
     enum class PayloadRole : std::uint8_t {
@@ -2331,7 +2433,9 @@ private:
                     || !Accumulate(
                         myResult.indexEstimate,
                         mesh.indices,
-                        kMaximumIndices)) {
+                        kMaximumIndices)
+                    || !Accumulate(myResult.suppliedFrameResidentEstimate,
+                        mesh.suppliedFrameResidentBytes, 64ULL * 1024ULL * 1024ULL)) {
                     return Fail(
                         PreflightStatus::ResourceLimit,
                         "Flattened GLB occurrences exceed mobile geometry budgets.");

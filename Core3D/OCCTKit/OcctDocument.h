@@ -269,7 +269,7 @@ Core3DAccumulateEmbeddedTextureBudget(
 //! saved-document admission. Never meshes or writes OCAF/cache attributes.
 Standard_EXPORT Standard_Boolean Core3DValidateNormalTextureGeometry(
     const TDF_Label& label, Standard_Size* requiredNativeBytes = nullptr) noexcept;
-//! Persisted owned-normal recipe: 0 absent, 1 pinned Mikk v1, -1 invalid/unknown.
+//! Persisted owned-normal recipe: 0 absent, 1 pinned Mikk v1, 2 supplied frames, -1 invalid/unknown.
 Standard_EXPORT Standard_Integer Core3DNormalTextureRecipeForLabel(
     const TDF_Label& label) noexcept;
 

@@ -2,6 +2,7 @@
 
 #include "Core3DGLBPreflight.hpp"
 #include "Core3DGLBReader.hpp"
+#include "Core3DImportedAuthoredFrames.hpp"
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -2213,6 +2214,11 @@ void ImportGLB(
         throw NativeImportFailure(
             Core3DNativeImportErrorTransferFailed,
             "The imported GLB mesh geometry is not valid for editing.");
+    }
+    if (!core3d::gltf::FinalizeImportedAuthoredFrames(*document,readResult.authoredFrames,&state->cancelled)) {
+        ThrowIfCancelled(state);
+        throw NativeImportFailure(Core3DNativeImportErrorTransferFailed,
+            "The imported GLB supplied frames could not be finalized safely.");
     }
     std::size_t leafCount = 0;
     const ImportedDocumentValidation initialValidation =

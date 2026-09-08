@@ -4,6 +4,8 @@
 //
 
 #include "Core3DGLBReader.hpp"
+#include "Core3DGLBSourceAdapter.hpp"
+#include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -18,8 +20,8 @@
 #include <Poly_Triangle.hxx>
 #include <RWGltf_CafReader.hxx>
 #include <RWGltf_GltfLatePrimitiveArray.hxx>
-#if DEBUG
 #include <RWGltf_GltfPrimArrayData.hxx>
+#if DEBUG
 #include <TDF_Tool.hxx>
 #endif
 #include <RWGltf_TriangulationReader.hxx>
@@ -87,6 +89,7 @@ bool IsCancelled(const std::atomic_bool *cancelled) noexcept {
 }
 
 struct DescriptorReadState {
+    std::shared_ptr<const GLBReaderSource> source;
     const std::atomic_bool *cancelled = nullptr;
     bool ioFailure = false;
 };
@@ -120,14 +123,14 @@ protected:
         const std::size_t request = static_cast<std::size_t>(
             std::min<std::uint64_t>(remaining, myBuffer.size()));
         ssize_t count = -1;
-        do {
-            count = ::pread(
-                myDescriptor,
-                myBuffer.data(),
-                request,
-                static_cast<off_t>(position));
-        } while (count < 0 && errno == EINTR
-                 && !IsCancelled(myState->cancelled));
+        if (myState->source) {
+            count = myState->source->Read(position,myBuffer.data(),request,
+                myState->cancelled,myState->ioFailure) ? ssize_t(request) : -1;
+        } else {
+            do {
+                count = ::pread(myDescriptor,myBuffer.data(),request,static_cast<off_t>(position));
+            } while (count < 0 && errno == EINTR && !IsCancelled(myState->cancelled));
+        }
         if (count <= 0) {
             if (!IsCancelled(myState->cancelled)) {
                 myState->ioFailure = true;
@@ -406,6 +409,8 @@ public:
         int descriptor,
         std::uint64_t size,
         const PreflightResult& preflight,
+        const PreflightResult& originalPreflight,
+        std::uint64_t originalSize,
         const std::atomic_bool *cancelled,
         const std::shared_ptr<DescriptorReadState>& streamState
 #if DEBUG
@@ -415,6 +420,8 @@ public:
     : myDescriptor(descriptor),
       mySize(size),
       myPreflight(preflight),
+      myOriginalPreflight(originalPreflight),
+      myOriginalSize(originalSize),
       myCancelled(cancelled),
       myStreamState(streamState),
       myFileSystem(new PinnedGLBFileSystem(descriptor, size, streamState)) {
@@ -447,6 +454,7 @@ public:
     std::uint64_t ObjectCount() const noexcept { return myObjectCount; }
     std::uint64_t VertexCount() const noexcept { return myVertexCount; }
     std::uint64_t IndexCount() const noexcept { return myIndexCount; }
+    std::vector<GLBImportedFrames> TakeAuthoredFrames() { return std::move(myImportedFrames); }
 
 protected:
     Standard_Boolean readLateData(
@@ -517,6 +525,11 @@ protected:
                 myDebugSourceFaces.push_back(face);
             }
 #endif
+            std::size_t sourcePrimitive=0;
+            if (myStreamState->source->IsAdapted() && !MatchReaderSource(deferred,sourcePrimitive)) {
+                Fail(GLBReadStatus::Invalid,"An adapted GLB primitive lost its exact source-stream ownership.");
+                return Standard_False;
+            }
             const Handle(Poly_Triangulation) loaded =
                 deferred->DetachedLoadDeferredData(myFileSystem);
             if (loaded.IsNull()
@@ -529,6 +542,11 @@ protected:
                         ? GLBReadStatus::IOFailure
                         : GLBReadStatus::Invalid,
                     "The pinned GLB primitive data could not be loaded exactly.");
+                return Standard_False;
+            }
+            if (myStreamState->source->IsAdapted() && !CaptureSourceFace(face,sourcePrimitive,loaded)) {
+                Fail(IsCancelled(myCancelled)?GLBReadStatus::Cancelled:GLBReadStatus::Invalid,
+                    "The loaded GLB geometry or supplied basis does not match its pinned source.");
                 return Standard_False;
             }
             builder.UpdateFace(face, loaded, Standard_True);
@@ -580,13 +598,184 @@ protected:
 
         if (myObjectCount != myPreflight.objectOccurrenceEstimate
             || myVertexCount != myPreflight.vertexEstimate
-            || myIndexCount != myPreflight.indexEstimate) {
+            || myIndexCount != myPreflight.indexEstimate
+            || myAuthoredFrameBytes != myOriginalPreflight.suppliedFrameResidentEstimate) {
             Fail(GLBReadStatus::Invalid,
                  "The transferred GLB geometry does not match its bounded preflight.");
         }
     }
 
 private:
+    struct SourceFace {
+        TopoDS_Face face;
+        std::size_t primitive=0;
+        std::vector<core3d::scene::Float4> axisFrames;
+    };
+
+    bool MatchReaderSource(const Handle(RWGltf_GltfLatePrimitiveArray)& deferred,
+                           std::size_t& primitive) {
+        primitive=std::numeric_limits<std::size_t>::max();
+        const RWGltf_GltfPrimArrayData* position=nullptr;
+        for (NCollection_Sequence<RWGltf_GltfPrimArrayData>::Iterator it(deferred->Data());it.More();it.Next())
+            if (it.Value().Type==RWGltf_GltfArrayType_Position) {
+                if (position) return false;
+                position=&it.Value();
+            }
+        if (!position || position->StreamOffset<0) return false;
+        for (std::size_t i=0;i<myPreflight.primitiveSources.size();++i)
+            if (myPreflight.primitiveSources[i].position.offset==std::uint64_t(position->StreamOffset)) {
+                if (primitive!=std::numeric_limits<std::size_t>::max()) return false;
+                primitive=i;
+            }
+        if (primitive==std::numeric_limits<std::size_t>::max()) return false;
+        const auto& expected=myPreflight.primitiveSources[primitive];
+        unsigned mask=0;
+        for (NCollection_Sequence<RWGltf_GltfPrimArrayData>::Iterator it(deferred->Data());it.More();it.Next()) {
+            const auto& actual=it.Value(); const GLBAccessorSource* record=nullptr;
+            RWGltf_GltfAccessorLayout layout=RWGltf_GltfAccessorLayout_UNKNOWN;unsigned bit=0;
+            switch (actual.Type) {
+                case RWGltf_GltfArrayType_Position:record=&expected.position;layout=RWGltf_GltfAccessorLayout_Vec3;bit=1;break;
+                case RWGltf_GltfArrayType_Normal:record=&expected.normal;layout=RWGltf_GltfAccessorLayout_Vec3;bit=2;break;
+                case RWGltf_GltfArrayType_TCoord0:record=&expected.uv;layout=RWGltf_GltfAccessorLayout_Vec2;bit=4;break;
+                case RWGltf_GltfArrayType_Indices:record=&expected.indices;layout=RWGltf_GltfAccessorLayout_Scalar;bit=8;break;
+                default:return false;
+            }
+            if (!record->IsPresent() || (mask&bit) || !actual.StreamUri.IsEqual(kPinnedToken)
+                || actual.StreamOffset<0 || std::uint64_t(actual.StreamOffset)!=record->offset
+                || actual.StreamLength<0 || std::uint64_t(actual.StreamLength)!=record->view.length
+                || actual.Accessor.Count<0 || std::uint64_t(actual.Accessor.Count)!=record->count
+                || actual.Accessor.ByteOffset<0 || std::uint64_t(actual.Accessor.ByteOffset)!=record->offset-record->view.offset
+                || actual.Accessor.ByteStride<0
+                || std::uint64_t(actual.Accessor.ByteStride?actual.Accessor.ByteStride:record->elementBytes)!=record->stride
+                || actual.Accessor.Type!=layout || std::uint64_t(actual.Accessor.ComponentType)!=record->componentType
+                || actual.Accessor.IsCompressed) return false;
+            mask|=bit;
+        }
+        return mask==(1U|8U|(expected.normal.IsPresent()?2U:0U)|(expected.uv.IsPresent()?4U:0U))
+            && std::uint64_t(deferred->NbDeferredNodes())==expected.position.count
+            && std::uint64_t(deferred->NbDeferredTriangles())*3==expected.indices.count;
+    }
+
+    bool ReadSourcePayload(const GLBAccessorSource& source,std::vector<std::uint8_t>& bytes) {
+        bytes.clear();
+        if (!source.IsPresent() || source.count>core3d::scene::kMaximumTangentVertices
+            || source.stride<source.elementBytes || source.stride>252
+            || source.elementBytes==0 || source.elementBytes>16
+            || source.view.offset>myOriginalSize || source.view.length>myOriginalSize-source.view.offset
+            || source.offset<source.view.offset || source.offset-source.view.offset>source.view.length) return false;
+        const auto span=(source.count-1)*source.stride+source.elementBytes;
+        if (span>source.view.length-(source.offset-source.view.offset)) return false;
+        bytes.resize(span);
+        return ReadExact(myDescriptor,source.offset,bytes.data(),bytes.size(),myCancelled);
+    }
+
+    static bool SameSourceFloat(double actual,double expected) {
+        const float rounded=float(expected);
+        if (!std::isfinite(actual) || !std::isfinite(expected) || !std::isfinite(rounded)) return false;
+        const double up=std::nextafter(rounded,std::numeric_limits<float>::infinity());
+        const double down=std::nextafter(rounded,-std::numeric_limits<float>::infinity());
+        const double tolerance=2*std::max(std::abs(up-rounded),std::abs(double(rounded)-down));
+        return std::abs(actual-double(rounded))<=tolerance;
+    }
+
+    bool CaptureSourceFace(const TopoDS_Face& face,std::size_t primitive,
+                           const Handle(Poly_Triangulation)& loaded) {
+        if (mySourceFaces.size()>=2048 || primitive>=myOriginalPreflight.primitiveSources.size()) return false;
+        const auto& source=myOriginalPreflight.primitiveSources[primitive];
+        SourceFace captured{face,primitive,{}};
+        if (source.tangent.IsPresent()) {
+            if (!loaded->HasNormals() || !loaded->HasUVNodes()
+                || source.position.count>core3d::scene::kMaximumTangentVertices
+                || source.indices.count>core3d::scene::authored::kMaximumFrames) return false;
+            std::vector<std::uint8_t> p,n,uv,t,ix;
+            if (!ReadSourcePayload(source.position,p) || !ReadSourcePayload(source.normal,n)
+                || !ReadSourcePayload(source.uv,uv) || !ReadSourcePayload(source.tangent,t)
+                || !ReadSourcePayload(source.indices,ix)) return false;
+            Graphic3d_Vec3 axisX(1,0,0),axisY(0,1,0),axisZ(0,0,1);
+            const auto& converter=CoordinateSystemConverter();
+            converter.TransformNormal(axisX);converter.TransformNormal(axisY);converter.TransformNormal(axisZ);
+            const gp_Vec x(axisX.x(),axisX.y(),axisX.z()),y(axisY.x(),axisY.y(),axisY.z()),z(axisZ.x(),axisZ.y(),axisZ.z());
+            const double determinant=x.Crossed(y).Dot(z);
+            if (!std::isfinite(determinant) || std::abs(std::abs(determinant)-1)>1.e-4) return false;
+            const float axisSign=determinant<0?-1.0f:1.0f;
+            auto read=[](const std::vector<std::uint8_t>& bytes,const GLBAccessorSource& a,std::size_t i,int c) {
+                return core3d::scene::authored::ReadFloat(bytes.data()+i*a.stride+c*4);
+            };
+            captured.axisFrames.reserve(source.position.count);
+            for (std::size_t i=0;i<source.position.count;++i) {
+                if ((i&255U)==0 && IsCancelled(myCancelled)) return false;
+                gp_XYZ point(read(p,source.position,i,0),read(p,source.position,i,1),read(p,source.position,i,2));
+                converter.TransformPosition(point);
+                const auto actual=loaded->Node(int(i)+1);
+                if (!SameSourceFloat(actual.X(),point.X()) || !SameSourceFloat(actual.Y(),point.Y())
+                    || !SameSourceFloat(actual.Z(),point.Z())) return false;
+                Graphic3d_Vec3 normal(read(n,source.normal,i,0),read(n,source.normal,i,1),read(n,source.normal,i,2));
+                converter.TransformNormal(normal);gp_Dir expectedNormal(normal.x(),normal.y(),normal.z());
+                const auto actualNormal=loaded->Normal(int(i)+1);
+                if (!SameSourceFloat(actualNormal.X(),expectedNormal.X()) || !SameSourceFloat(actualNormal.Y(),expectedNormal.Y())
+                    || !SameSourceFloat(actualNormal.Z(),expectedNormal.Z())) return false;
+                const auto actualUV=loaded->UVNode(int(i)+1);
+                if (!SameSourceFloat(actualUV.X(),read(uv,source.uv,i,0))
+                    || !SameSourceFloat(actualUV.Y(),1.0-double(read(uv,source.uv,i,1)))) return false;
+                Graphic3d_Vec3 tangent(read(t,source.tangent,i,0),read(t,source.tangent,i,1),read(t,source.tangent,i,2));
+                converter.TransformNormal(tangent);gp_Dir direction(tangent.x(),tangent.y(),tangent.z());
+                core3d::scene::Float4 frame{float(direction.X()),float(direction.Y()),float(direction.Z()),read(t,source.tangent,i,3)*axisSign};
+                if (!core3d::scene::authored::ValidFrame(frame)
+                    || std::abs(actualNormal.X()*frame.x+actualNormal.Y()*frame.y+actualNormal.Z()*frame.z)>1.e-4) return false;
+                captured.axisFrames.push_back(frame);
+            }
+            for (int triangle=1;triangle<=loaded->NbTriangles();++triangle) {
+                int nodes[3];loaded->Triangle(triangle).Get(nodes[0],nodes[1],nodes[2]);
+                for (int corner=0;corner<3;++corner) {
+                    const auto* value=ix.data()+(std::size_t(triangle-1)*3+corner)*source.indices.stride;
+                    std::uint32_t index=value[0];
+                    if (source.indices.elementBytes>=2) index|=std::uint32_t(value[1])<<8;
+                    if (source.indices.elementBytes==4) index|=(std::uint32_t(value[2])<<16)|(std::uint32_t(value[3])<<24);
+                    if (nodes[corner]<1 || std::uint64_t(nodes[corner]-1)!=index) return false;
+                }
+            }
+        }
+        mySourceFaces.push_back(std::move(captured));return true;
+    }
+
+    bool RecordImportedFrames(const TopoDS_Face& located,const TopoDS_Face& independent,const TDF_Label& label) {
+        if (!myStreamState->source->IsAdapted()) return true;
+        const SourceFace* source=nullptr;
+        for (const auto& value:mySourceFaces) if (value.face.IsPartner(located)) {
+            if (source) return false;source=&value;
+        }
+        if (!source) return false;
+        if (source->axisFrames.empty()) return true;
+        TopLoc_Location location;const auto& mesh=BRep_Tool::Triangulation(independent,location);
+        if (mesh.IsNull() || !location.IsIdentity() || mesh->NbTriangles()>int(core3d::scene::kMaximumTangentTriangles)) return false;
+        const auto transform=located.Location().Transformation();
+        std::vector<core3d::scene::Float4> frames;frames.reserve(std::size_t(mesh->NbTriangles())*3);
+        for (int triangle=1;triangle<=mesh->NbTriangles();++triangle) {
+            if ((triangle&255)==0 && IsCancelled(myCancelled)) return false;
+            int nodes[3];mesh->Triangle(triangle).Get(nodes[0],nodes[1],nodes[2]);
+            for (int node:nodes) {
+                if (node<1 || std::size_t(node)>source->axisFrames.size()) return false;
+                const auto& original=source->axisFrames[std::size_t(node-1)];
+                gp_Dir tangent(original.x,original.y,original.z);tangent.Transform(transform);
+                core3d::scene::Float4 frame{float(tangent.X()),float(tangent.Y()),float(tangent.Z()),
+                    original.w*(transform.IsNegative()?-1.0f:1.0f)};
+                const auto normal=mesh->Normal(node);
+                if (!core3d::scene::authored::ValidFrame(frame)
+                    || std::abs(normal.X()*frame.x+normal.Y()*frame.y+normal.Z()*frame.z)>1.e-4) return false;
+                frames.push_back(frame);
+            }
+        }
+        core3d::scene::authored::GeometryIdentity identity;
+        GLBImportedFrames record;record.label=label;
+        if (!core3d::persistence::NativeAuthoredGeometryIdentity(independent,identity)
+            || core3d::scene::authored::Encode(frames,identity,record.archive)!=core3d::scene::authored::ArchiveStatus::Valid)
+            return false;
+        std::vector<core3d::scene::Float4> verified;
+        if (!core3d::persistence::DecodeNativeAuthoredFrames(independent,record.archive.data(),record.archive.size(),verified)
+            || !AddWithin(myAuthoredFrameBytes,record.archive.size()+64U*frames.size(),64ULL*1024ULL*1024ULL)) return false;
+        myImportedFrames.push_back(std::move(record));return true;
+    }
+
     void Fail(GLBReadStatus status, const std::string& message) noexcept {
         if (myStatus == GLBReadStatus::Imported) {
             myStatus = status;
@@ -646,12 +835,8 @@ private:
             return false;
         }
         std::vector<Standard_Byte> bytes(static_cast<std::size_t>(length));
-        if (!ReadExact(
-                myDescriptor,
-                offset,
-                bytes.data(),
-                bytes.size(),
-                myCancelled)) {
+        if (!myStreamState->source->Read(offset,bytes.data(),bytes.size(),
+                myCancelled,myStreamState->ioFailure)) {
             Fail(
                 IsCancelled(myCancelled)
                     ? GLBReadStatus::Cancelled
@@ -1006,6 +1191,11 @@ private:
             }
             TDataStd_Name::Set(label, PersistentName(name));
             setShapeStyle(tools, label, attributes.Style);
+            if (!RecordImportedFrames(located,independent,label)) {
+                Fail(IsCancelled(myCancelled)?GLBReadStatus::Cancelled:GLBReadStatus::Invalid,
+                    "Supplied GLB frames cannot be bound to the exact final native geometry.");
+                return false;
+            }
             ++myObjectCount;
             return true;
         }
@@ -1036,6 +1226,11 @@ private:
     int myDescriptor;
     std::uint64_t mySize;
     const PreflightResult& myPreflight;
+    const PreflightResult& myOriginalPreflight;
+    std::uint64_t myOriginalSize;
+    std::vector<SourceFace> mySourceFaces;
+    std::vector<GLBImportedFrames> myImportedFrames;
+    std::uint64_t myAuthoredFrameBytes=0;
     const std::atomic_bool *myCancelled;
     std::shared_ptr<DescriptorReadState> myStreamState;
     Handle(OSD_FileSystem) myFileSystem;
@@ -1154,18 +1349,29 @@ GLBReadResult ImportPinnedGLB(
                 "GLB import requires an isolated document with no edit history.");
         }
 
+        PreparedGLBReader prepared;
+        std::string adapterMessage;
+        const auto adapter=PrepareGLBReaderSource(descriptor,expectedSize,preflight,cancelled,prepared,adapterMessage);
+        if (adapter!=GLBAdapterStatus::Ready) {
+            return Failure(adapter==GLBAdapterStatus::Cancelled?GLBReadStatus::Cancelled:
+                adapter==GLBAdapterStatus::ResourceLimit?GLBReadStatus::ResourceLimit:
+                adapter==GLBAdapterStatus::IOFailure?GLBReadStatus::IOFailure:GLBReadStatus::Invalid,adapterMessage);
+        }
         const std::shared_ptr<DescriptorReadState> streamState =
             std::make_shared<DescriptorReadState>();
         streamState->cancelled = cancelled;
+        streamState->source = prepared.bytes;
         const std::shared_ptr<std::streambuf> sourceBuffer =
             std::make_shared<PreadStreamBuffer>(
-                descriptor, expectedSize, 0, streamState);
+                descriptor, prepared.bytes->Size(), 0, streamState);
         std::istream source(sourceBuffer.get());
 
         PinnedCafReader reader(
             descriptor,
-            expectedSize,
+            prepared.bytes->Size(),
+            prepared.preflight,
             preflight,
+            expectedSize,
             cancelled,
             streamState
 #if DEBUG
@@ -1211,6 +1417,7 @@ GLBReadResult ImportPinnedGLB(
         result.flattenedObjectCount = reader.ObjectCount();
         result.vertexCount = reader.VertexCount();
         result.indexCount = reader.IndexCount();
+        result.authoredFrames = reader.TakeAuthoredFrames();
         return result;
     } catch (const std::bad_alloc&) {
         return Failure(

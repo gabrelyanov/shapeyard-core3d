@@ -11,10 +11,12 @@
 #include "Core3DGLBPreflight.hpp"
 
 #include <TDocStd_Document.hxx>
+#include <TDF_Label.hxx>
 
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class Message_ProgressRange;
 
@@ -30,12 +32,17 @@ enum class GLBReadStatus {
     InternalFailure,
 };
 
+// Pending exact records belong only to the private worker candidate. The
+// worker installs them after canonical mesh markers and before adoption.
+struct GLBImportedFrames { TDF_Label label; std::vector<std::uint8_t> archive; };
+
 struct GLBReadResult {
     GLBReadStatus status = GLBReadStatus::Invalid;
     std::string message;
     std::uint64_t flattenedObjectCount = 0;
     std::uint64_t vertexCount = 0;
     std::uint64_t indexCount = 0;
+    std::vector<GLBImportedFrames> authoredFrames;
 
     [[nodiscard]] bool IsSuccess() const noexcept {
         return status == GLBReadStatus::Imported;

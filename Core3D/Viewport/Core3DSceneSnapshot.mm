@@ -671,6 +671,13 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                 @"positions": numbers(occurrence.positions), @"normals": numbers(occurrence.normals),
                 @"uvs": numbers(occurrence.uvs), @"indices": numbers(occurrence.indices)}];
         }
+        NSMutableArray* pendingFrames=[NSMutableArray array];
+        for (const auto& frame:result.authoredFrames) {
+            TCollection_AsciiString entry;TDF_Tool::Entry(frame.label,entry);
+            NSData* archive=[NSData dataWithBytes:frame.archive.data() length:frame.archive.size()];
+            [pendingFrames addObject:@{@"label":[NSString stringWithUTF8String:entry.ToCString()],
+                @"archiveBase64":[archive base64EncodedStringWithOptions:0]}];
+        }
         std::vector<std::uint8_t> after(data.length);
         const auto read = ::pread(descriptor, after.data(), after.size(), 0);
         const bool unchanged = read == ssize_t(data.length) && std::memcmp(after.data(), data.bytes, data.length) == 0;
@@ -679,6 +686,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
             @"sourceUnchanged": @(unchanged), @"objects": @(result.flattenedObjectCount),
             @"vertices": @(result.vertexCount), @"indices": @(result.indexCount),
             @"primitives": primitives, @"occurrences": occurrences,
+            @"pendingFrameCount": @(pendingFrames.count), @"pendingFrames": pendingFrames,
             @"undos": @(owner.document->GetAvailableUndos()), @"redos": @(owner.document->GetAvailableRedos()),
             @"open": @(owner.document->HasOpenCommand())};
     } catch (const Standard_Failure& e) {
