@@ -1406,6 +1406,7 @@ private:
         }
         myMaterialCount = materials.count;
         myMaterialUsesTexture.reserve(materials.count);
+        myMaterialUsesNormalTexture.reserve(materials.count);
         for (NSDictionary *materialValue in materials) {
             if (!CheckCancelled()) {
                 return false;
@@ -1420,11 +1421,13 @@ private:
                 return false;
             }
             NSDictionary *pbr = Dictionary(material[@"pbrMetallicRoughness"]);
-            const bool usesTexture = material[@"emissiveTexture"] != nil
+            const bool usesTexture = material[@"normalTexture"] != nil
+                || material[@"emissiveTexture"] != nil
                 || material[@"occlusionTexture"] != nil
                 || (pbr != nil && (pbr[@"baseColorTexture"] != nil
                                   || pbr[@"metallicRoughnessTexture"] != nil));
             myMaterialUsesTexture.push_back(usesTexture);
+            myMaterialUsesNormalTexture.push_back(material[@"normalTexture"] != nil);
         }
         return true;
     }
@@ -1444,17 +1447,13 @@ private:
                     PreflightStatus::Unsupported,
                     "Every GLB material must provide PBR metallic-roughness metadata.");
         }
-        if (material[@"normalTexture"] != nil) {
-            return Fail(
-                PreflightStatus::Unsupported,
-                "GLB normal maps require tangent support and are unsupported.");
-        }
         if (!ValidateFactorArray(pbr, @"baseColorFactor", 4, 0.0, 1.0)
             || !ValidateFactor(pbr, @"metallicFactor", 0.0, 1.0)
             || !ValidateFactor(pbr, @"roughnessFactor", 0.0, 1.0)
             || !ValidateTextureInfo(pbr, @"baseColorTexture", false, false)
             || !ValidateTextureInfo(pbr, @"metallicRoughnessTexture", false, false)
-            || !ValidateTextureInfo(material, @"occlusionTexture", false, true)) {
+            || !ValidateTextureInfo(material, @"occlusionTexture", false, true)
+            || !ValidateTextureInfo(material, @"normalTexture", true, false)) {
             return false;
         }
         if (!ValidateFactorArray(material, @"emissiveFactor", 3, 0.0, 1.0)
@@ -1753,6 +1752,11 @@ private:
             return Fail(
                 PreflightStatus::Invalid,
                 "Textured GLB primitives must provide TEXCOORD_0.");
+        }
+        if (materialValue != nil && myMaterialUsesNormalTexture[material]
+            && attributes[@"TANGENT"] == nil) {
+            return Fail(PreflightStatus::Unsupported,
+                "GLB normal maps require validated supplied TANGENT attributes on every bound primitive.");
         }
         const AccessorRecord* tangent = AccessorAt(attributes[@"TANGENT"]);
         if (attributes[@"TANGENT"] != nil) {
@@ -2562,6 +2566,7 @@ private:
     std::uint64_t myTextureCount = 0;
     std::uint64_t myMaterialCount = 0;
     std::vector<bool> myMaterialUsesTexture;
+    std::vector<bool> myMaterialUsesNormalTexture;
     std::vector<BufferViewRecord> myBufferViews;
     std::vector<AccessorRecord> myAccessors;
     std::vector<bool> myAccessorBufferViews;

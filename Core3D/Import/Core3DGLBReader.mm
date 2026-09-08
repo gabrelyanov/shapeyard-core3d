@@ -906,7 +906,7 @@ private:
                 || !ChargeTexture(pbr.NormalTexture)) {
                 return false;
             }
-            for (const Handle(Image_Texture)& texture : {pbr.MetallicRoughnessTexture, pbr.OcclusionTexture}) {
+            for (const Handle(Image_Texture)& texture : {pbr.MetallicRoughnessTexture, pbr.OcclusionTexture, pbr.NormalTexture}) {
                 if (!texture.IsNull() && myValidatedNumericTextures.insert(texture.get()).second
                     && !Core3DValidateNumericTexture(texture)) {
                     Fail(GLBReadStatus::Unsupported,
