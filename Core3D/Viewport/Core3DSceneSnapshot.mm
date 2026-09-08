@@ -639,10 +639,14 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         const auto label = XCAFDoc_DocumentTool::ShapeTool(owner.document->Main())->AddShape(shape, Standard_False);
         owner.document->SetUndoLimit(20); owner.document->NewCommand();
         Handle(AIS_Shape) presentation = new AIS_Shape(shape);
-        if (!wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh)
-            || !wrapper->SaveObjectTransform(label, presentation)) Standard_Failure::Raise("Frame UV fixture setup failed.");
+        if (!wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh))
+            Standard_Failure::Raise("Frame UV fixture representation failed.");
         owner.document->CommitCommand(); owner.document->ClearUndos();
         if (!wrapper->MigrateLegacyIdentifiers()) Standard_Failure::Raise("Frame UV fixture migration failed.");
+        // SaveObjectTransform seals an immutable state and requires IDs first.
+        owner.document->NewCommand();
+        if (!wrapper->SaveObjectTransform(label, presentation)) Standard_Failure::Raise("Frame UV fixture transform failed.");
+        owner.document->CommitCommand(); owner.document->ClearUndos();
         if (archive.length < 128 || archive.length > core3d::scene::authored::kMaximumArchiveBytes) Standard_Failure::Raise("Invalid UV frame archive length.");
         const auto bytes = TDataStd_ByteArray::Set(label, AuthoredFrameAttributeID(), 0, Standard_Integer(archive.length)-1, Standard_False);
         const auto* data = static_cast<const std::uint8_t*>(archive.bytes);
