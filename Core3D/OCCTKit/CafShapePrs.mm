@@ -38,6 +38,7 @@ Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
   aShading->Aspect()->SetTextureMapOff();
   aShading->Aspect()->SetTextureSet(
       Handle(Graphic3d_TextureSet)());
+  Core3DPrepareRendererTextures(aShading->Aspect());
   return aShading->Aspect();
 }
 
@@ -86,6 +87,7 @@ void CopyDrawerTextureMapping(
     // renderer texture set produced for the authoritative root material.
     aDestinationAspect->SetTextureSet(aSourceAspect->TextureSet());
     aDestinationAspect->SetTextureMapOn();
+    Core3DPrepareRendererTextures(aDestinationAspect);
   }
 }
 

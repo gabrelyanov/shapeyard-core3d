@@ -22,6 +22,7 @@
 #import <Foundation/Foundation.h>
 
 #import "GLViewController.h"
+#include <Graphic3d_ShaderProgram.hxx>
 #import "GLView.h"
 
 #import "NSString+StdString.h"
@@ -4925,6 +4926,11 @@ private:
                     effectivePresentationMaterial.EmissiveTexture;
             }
         }
+        bool hasAppDataMapShader = false;
+        const auto isDataMapShader = [](const Handle(Graphic3d_AspectFillArea3d)& aspect) {
+            return !aspect.IsNull() && !aspect->ShaderProgram().IsNull()
+                && aspect->ShaderProgram()->GetId().StartsWith("shapeyard-data-maps-v1-");
+        };
         const Handle(Prs3d_Drawer)& drawer = shape->Attributes();
         if (!drawer.IsNull() && !drawer->ShadingAspect().IsNull()) {
             const Graphic3d_PBRMaterial& pbrMaterial =
@@ -4933,6 +4939,7 @@ private:
             roughness = pbrMaterial.NormalizedRoughness();
             const Handle(Graphic3d_AspectFillArea3d)& fillAspect =
                 drawer->ShadingAspect()->Aspect();
+            hasAppDataMapShader = isDataMapShader(fillAspect);
             if (!fillAspect.IsNull()) {
                 alphaMode = static_cast<Standard_Integer>(
                     fillAspect->AlphaMode());
@@ -5104,6 +5111,7 @@ private:
         Standard_Integer customMaterialOverrideCount = 0;
         Standard_Integer customColorOverrideCount = 0;
         Standard_Integer customTextureMapOnCount = 0;
+        Standard_Integer customDataMapShaderCount = 0;
         Standard_Integer customNonDefaultAlphaCount = 0;
         Standard_Integer customNonAutoFaceCullingCount = 0;
         if (!cafShape.IsNull()) {
@@ -5126,6 +5134,7 @@ private:
                     if (aspect->ToMapTexture()) {
                         ++customTextureMapOnCount;
                     }
+                    if (isDataMapShader(aspect)) ++customDataMapShaderCount;
                     if (aspect->AlphaMode()
                             != Graphic3d_AlphaMode_BlendAuto
                         || std::abs(aspect->AlphaCutoff() - 0.5f)
@@ -5273,6 +5282,8 @@ private:
                 customColorOverrideCount),
             @"customTextureMapOnCount": @(
                 customTextureMapOnCount),
+            @"hasAppDataMapShader": @(hasAppDataMapShader),
+            @"customDataMapShaderCount": @(customDataMapShaderCount),
             @"customNonDefaultAlphaCount": @(
                 customNonDefaultAlphaCount),
             @"customNonAutoFaceCullingCount": @(

@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C03D90910000000000000002 /* mikktspace.c in Sources */ = {isa = PBXBuildFile; fileRef = C03D90920000000000000002 /* mikktspace.c */; };
+		C03D90910000000000000001 /* MikkTangentSpace.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C03D90920000000000000001 /* MikkTangentSpace.cpp */; };
 		1804F28D2C51140A0045084A /* CylinderDriver.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 1804F28C2C51140A0045084A /* CylinderDriver.hpp */; };
 		1804F28E2C51140A0045084A /* CylinderDriver.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1804F28B2C51140A0045084A /* CylinderDriver.cpp */; };
 		1804F2912C5114A80045084A /* BaseDriver.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1804F28F2C5114A80045084A /* BaseDriver.cpp */; };
@@ -200,6 +202,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C03D90920000000000000002 /* mikktspace.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "../ThirdParty/MikkTSpace/mikktspace.c"; sourceTree = "<group>"; };
+		C03D90920000000000000001 /* MikkTangentSpace.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = "MikkTangentSpace.cpp"; sourceTree = "<group>"; };
 		C3D0F1022F30000100000002 /* ThirdPartyNotices */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ThirdPartyNotices; sourceTree = "<group>"; };
 		1804F28B2C51140A0045084A /* CylinderDriver.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CylinderDriver.cpp; sourceTree = "<group>"; };
 		1804F28C2C51140A0045084A /* CylinderDriver.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = CylinderDriver.hpp; sourceTree = "<group>"; };
@@ -542,6 +546,8 @@
 				C03D50120000000000000001 /* SceneSnapshot.hpp */,
 				C03D50130000000000000001 /* OcctSceneSnapshotBuilder.hpp */,
 				C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */,
+				C03D90920000000000000002 /* mikktspace.c */,
+				C03D90920000000000000001 /* MikkTangentSpace.cpp */,
 			);
 			path = Scene;
 			sourceTree = "<group>";
@@ -999,6 +1005,8 @@
 				C3D1B0012F21000100000001 /* Core3DGLBPreflight.mm in Sources */,
 				C3D1B0022F21000100000002 /* Core3DGLBReader.mm in Sources */,
 				C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */,
+				C03D90910000000000000002 /* mikktspace.c in Sources */,
+				C03D90910000000000000001 /* MikkTangentSpace.cpp in Sources */,
 				C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */,
 				18A0062A2BD2A23C004931B1 /* ObjectInteractor.cpp in Sources */,
 				1A2200022F50000100000002 /* LinearArrayOperationController.cpp in Sources */,

@@ -106,3 +106,7 @@ Set `OCCT_GLTF_KEEP_WORK_DIR=1` to retain an automatic work directory for
 diagnostics. Alternatively, set `OCCT_GLTF_WORK_DIR` to an empty,
 single-component `/tmp/shapeyard-*` directory to retain source, build,
 validation, staged output, and rollback evidence at that explicit location.
+
+## MikkTSpace
+
+The normal-map tangent foundation vendors unmodified MikkTSpace at commit `3e895b49d05ea07e4c2133156cfa94369e19e409`. Its copyright/license and exact hashes are retained in [MikkTSpace](MikkTSpace/README.md). This does not yet qualify native normal-map assignment or rendering.

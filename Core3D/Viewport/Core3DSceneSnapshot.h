@@ -30,6 +30,18 @@ typedef struct NS_SWIFT_SENDABLE Core3DSceneVertex {
     float textureV;
 } Core3DSceneVertex;
 
+//! Private derivative: one packed float4 (tangent xyz, bitangent sign w) per
+//! triangle index corner. The eight-float scene vertex ABI is unchanged.
+//! This helper does not publish normal-map support or mutate a document.
+CORE3D_SCENE_FINAL_CLASS
+@interface Core3DSceneTangentSpace : NSObject
++ (nullable NSData *)cornerTangentsForVertexData:(NSData *)vertexData
+                              triangleIndexData:(NSData *)triangleIndexData
+                          hasTextureCoordinates:(BOOL)hasTextureCoordinates
+                                          error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(cornerTangents(vertexData:triangleIndexData:hasTextureCoordinates:));
+@end
+
 typedef NS_ENUM(NSInteger, Core3DSceneProjection) {
     Core3DSceneProjectionPerspective = 0,
     Core3DSceneProjectionOrthographic = 1,

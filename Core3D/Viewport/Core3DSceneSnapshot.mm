@@ -10,6 +10,8 @@
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../Scene/SceneSnapshot.hpp"
+#include "../Scene/MikkTangentSpace.hpp"
+#include <cstring>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 
@@ -194,6 +196,41 @@ static_assert(sizeof(std::uint32_t) == 4,
                              selection:(Core3DSceneSelectionSnapshot *)selection;
 @end
 
+
+@implementation Core3DSceneTangentSpace
++ (nullable NSData *)cornerTangentsForVertexData:(NSData *)vertexData
+                              triangleIndexData:(NSData *)triangleIndexData
+                          hasTextureCoordinates:(BOOL)hasTextureCoordinates
+                                          error:(NSError * _Nullable * _Nullable)error {
+    auto reject = [error](TangentSpaceError reason) -> NSData* {
+        if (error) *error = [NSError errorWithDomain:@"Core3DSceneTangentSpace"
+            code:static_cast<NSInteger>(reason)
+            userInfo:@{NSLocalizedDescriptionKey: @"This mesh cannot produce supported tangent frames."}];
+        return nil;
+    };
+    if (error) *error = nil;
+    if (!hasTextureCoordinates) return reject(TangentSpaceError::MissingUVs);
+    if (vertexData.length == 0 || vertexData.length % sizeof(Vertex) != 0
+        || triangleIndexData.length == 0 || triangleIndexData.length % (3*sizeof(uint32_t)) != 0)
+        return reject(TangentSpaceError::InvalidLayout);
+    if (vertexData.length / sizeof(Vertex) > kMaximumTangentVertices
+        || triangleIndexData.length / (3*sizeof(uint32_t)) > kMaximumTangentTriangles)
+        return reject(TangentSpaceError::ResourceLimit);
+    try {
+        // NSData's byte address need not be aligned. Own aligned inputs before
+        // C++ access; the immutable caller buffers and their indices survive.
+        std::vector<Vertex> vertices(vertexData.length / sizeof(Vertex));
+        std::vector<uint32_t> indices(triangleIndexData.length / sizeof(uint32_t));
+        std::memcpy(vertices.data(), vertexData.bytes, vertexData.length);
+        std::memcpy(indices.data(), triangleIndexData.bytes, triangleIndexData.length);
+        std::vector<Float4> frames;
+        const auto result = GenerateMikkCornerTangents(vertices, indices, true, frames);
+        if (result != TangentSpaceError::None) return reject(result);
+        static_assert(sizeof(Float4) == 4*sizeof(float));
+        return [NSData dataWithBytes:frames.data() length:frames.size()*sizeof(Float4)];
+    } catch (...) { return reject(TangentSpaceError::GenerationFailed); }
+}
+@end
 
 @implementation Core3DSceneRevisionVector
 
