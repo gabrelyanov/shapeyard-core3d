@@ -1,4 +1,5 @@
 #pragma once
+#include <OpenGLES/ES2/gl.h>
 #include "../Scene/MikkTangentSpace.hpp"
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
