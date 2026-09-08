@@ -323,9 +323,12 @@ bool OcctViewer::RenderFrame()
         if (driver.IsNull() || !core3d::render::PrepareNativeTangentPresentations(
                 myContext, driver->GetSharedContext(true), myPreparedTangentArrays)) return false;
 #if DEBUG
-        if (myDebugAfterTangentPreparation && !myDebugAfterTangentPreparation()) return false;
+        if (myDebugFrameObserver && !myDebugFrameObserver(false)) return false;
 #endif
         myView->RenderFrame();
+#if DEBUG
+        if (myDebugFrameObserver && !myDebugFrameObserver(true)) return false;
+#endif
         return true;
     } catch (const Standard_Failure&) {
         // GLView owns the bounded consecutive-failure policy and emits one

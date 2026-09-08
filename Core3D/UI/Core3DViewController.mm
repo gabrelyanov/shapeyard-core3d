@@ -2,6 +2,8 @@
 #if DEBUG
 #include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
 #include "../OCCTKit/Core3DNativeTangentBuffers.hxx"
+#include <OpenGl_ShaderProgram.hxx>
+#include <OpenGl_GraphicDriver.hxx>
 #include <sstream>
 #endif
 //
@@ -3603,9 +3605,40 @@ void Core3DAddDebugOrphanVisualMaterial(
             const auto ownersBefore = selectedOwners(); const auto modesBefore = selectedModes();
             const int time = wrapper->Document()->GetData()->Time(), undo = wrapper->Document()->GetAvailableUndos(), redo = wrapper->Document()->GetAvailableRedos();
             NSMutableData* frames = [NSMutableData data]; NSMutableArray* uids = [NSMutableArray array];
-            bool observed = false;
-            struct ObserverReset { OcctViewer* viewer; ~ObserverReset() { viewer->DebugSetAfterTangentPreparation({}); } } observerReset{viewer.get()};
-            viewer->DebugSetAfterTangentPreparation([&]() {
+            bool observed = false; NSMutableArray* shaderState = [NSMutableArray array];
+            struct ObserverReset { OcctViewer* viewer; ~ObserverReset() { viewer->DebugSetFrameObserver({}); } } observerReset{viewer.get()};
+            viewer->DebugSetFrameObserver([&](bool rendered) {
+                if (rendered) {
+                    const auto driver = Handle(OpenGl_GraphicDriver)::DownCast(viewer->V3dViewer()->Driver());
+                    const auto gl = driver->GetSharedContext(true);
+                    for (const auto& prs : scope.presentation->Presentations()) {
+                        if (prs.IsNull()) continue;
+                        for (const auto& generic : prs->Groups()) {
+                            const auto group = Handle(OpenGl_Group)::DownCast(generic); if (group.IsNull()) continue;
+                            auto inspect = [&](const Handle(Graphic3d_Aspects)& aspect) {
+                                if (!core3d::render::NeedsNativeTangents(aspect)) return;
+                                Handle(OpenGl_ShaderProgram) program;
+                                if (!gl->GetResource(aspect->ShaderProgram()->GetId(), program) || program.IsNull()) return;
+                                const GLuint identifier = program->ProgramId();
+                                NSMutableDictionary* row = [NSMutableDictionary dictionaryWithDictionary:@{ @"program": @(identifier) }];
+                                for (const char* name : {"syNormalMap", "occModelWorldMatrix", "occWorldViewMatrix", "occTextureTrsf2d"}) {
+                                    const GLint location = glGetUniformLocation(identifier, name); if (location < 0) continue;
+                                    NSMutableArray* values = [NSMutableArray array];
+                                    if (std::strcmp(name, "syNormalMap") == 0) { GLint value = -1; glGetUniformiv(identifier, location, &value); [values addObject:@(value)]; }
+                                    else { GLfloat value[16] = {}; glGetUniformfv(identifier, location, value); for (int i = 0; i < 16; ++i) [values addObject:@(value[i])]; }
+                                    row[[NSString stringWithUTF8String:name]] = values;
+                                }
+                                GLint front = 0; glGetIntegerv(GL_FRONT_FACE, &front); row[@"frontFaceAfterDraw"] = @(front);
+                                row[@"highlighted"] = @(context->IsHilighted(scope.presentation));
+                                [shaderState addObject:row];
+                            };
+                            inspect(group->Aspects());
+                            for (auto* node = group->FirstNode(); node; node = node->next)
+                                if (const auto aspect = dynamic_cast<OpenGl_Aspects*>(node->elem)) inspect(aspect->Aspect());
+                        }
+                    }
+                    return true;
+                }
                 for (const auto& prs : scope.presentation->Presentations()) {
                     if (prs.IsNull()) continue;
                     for (const auto& generic : prs->Groups()) {
@@ -3627,11 +3660,11 @@ void Core3DAddDebugOrphanVisualMaterial(
                 observed = true; return true;
             });
             const auto stats = [GLController debugFramebufferStatistics];
-            viewer->DebugSetAfterTangentPreparation({});
+            viewer->DebugSetFrameObserver({});
             if (!observed || ![stats[@"captured"] boolValue]) Standard_Failure::Raise("Native framebuffer preparation or capture failed.");
             selectionUnchanged = selectionUnchanged && ownersBefore == selectedOwners() && modesBefore == selectedModes();
             readOnly = readOnly && time == wrapper->Document()->GetData()->Time() && undo == wrapper->Document()->GetAvailableUndos() && redo == wrapper->Document()->GetAvailableRedos();
-            [states addObject:@{@"step": @(step), @"frames": frames, @"uids": uids, @"stats": stats,
+            [states addObject:@{@"step": @(step), @"frames": frames, @"uids": uids, @"stats": stats, @"shaderState": shaderState,
                 @"prepared": @(viewer->DebugPreparedTangentArrayCount()), @"selectedOwners": @(ownersBefore.size()), @"selectionUnchanged": @(selectionUnchanged), @"history": @[@(undo),@(redo)]}];
             if (captureImage) {
                 const auto pixels = [GLController debugViewportRGBA];

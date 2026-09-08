@@ -47,7 +47,7 @@ class OcctViewer
 {
     std::unordered_map<Standard_Size, core3d::render::NativeTangentArrayState> myPreparedTangentArrays;
 #if DEBUG
-    std::function<bool()> myDebugAfterTangentPreparation;
+    std::function<bool(bool)> myDebugFrameObserver;
 #endif
 public:
     
@@ -102,8 +102,9 @@ public:
 #ifdef DEBUG
     std::size_t DebugPreparedTangentArrayCount() const { return myPreparedTangentArrays.size(); }
     // Observe preparation only inside the viewport-owned GL draw boundary.
-    void DebugSetAfterTangentPreparation(std::function<bool()> callback) {
-        myDebugAfterTangentPreparation = std::move(callback);
+    // Callback runs with the owned rendering context: false before upload, true after draw.
+    void DebugSetFrameObserver(std::function<bool(bool)> callback) {
+        myDebugFrameObserver = std::move(callback);
     }
     //! Test-only traversal ceiling used to exercise aggregate multi-root
     //! admission without constructing tens of thousands of AIS objects.
