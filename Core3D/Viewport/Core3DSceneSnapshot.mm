@@ -18,6 +18,10 @@
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/NativeTransactionObserverProbe.hxx"
+#include "../Import/Core3DGLBReader.hpp"
+#include <Message_ProgressRange.hxx>
+#include <cstdio>
+#include <unistd.h>
 #include "../UI/OrdinaryEditController.hpp"
 #include <BRep_Builder.hxx>
 #include <TopoDS.hxx>
@@ -620,6 +624,66 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
     } catch (...) { return @{@"error": @"Frame-owner fixture failed"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugGLBPrimitiveOwnership:(NSData *)data {
+    if (![NSThread isMainThread] || data.length == 0 || data.length > 16384)
+        return @{@"error": @"Private primitive probe requires1–16384bytes on the main thread"};
+    try {
+        const std::unique_ptr<FILE, int(*)(FILE*)> file(std::tmpfile(), &std::fclose);
+        if (!file || std::fwrite(data.bytes, 1, data.length, file.get()) != data.length || std::fflush(file.get()) != 0)
+            return @{@"error": @"Private pinned probe storage unavailable"};
+        const int descriptor = ::fileno(file.get());
+        const auto preflight = core3d::gltf::PreflightPinnedGLB(descriptor, data.length, nullptr);
+        if (!preflight.IsValid()) return @{@"preflight": @(int(preflight.status)),
+            @"message": [NSString stringWithUTF8String:preflight.message.c_str()]};
+        struct Owner {
+            Handle(TDocStd_Application) app = new TDocStd_Application();
+            Handle(TDocStd_Document) document;
+            ~Owner() noexcept { try { if (!document.IsNull()) app->Close(document); } catch (...) {} }
+        } owner;
+        Core3DDefineSafeBinXCAFFormat(owner.app);
+        owner.app->NewDocument(TCollection_ExtendedString("BinXCAF"), owner.document);
+        XCAFDoc_DocumentTool::SetLengthUnit(owner.document, 0.001);
+        core3d::gltf::GLBDebugTrace trace;
+        const auto result = core3d::gltf::ImportPinnedGLB(descriptor, data.length, preflight,
+            owner.document, nullptr, Message_ProgressRange(), &trace);
+        NSMutableArray* primitives = [NSMutableArray array];
+        for (const auto& primitive : trace.primitives) {
+            NSMutableArray* streams = [NSMutableArray array];
+            for (const auto& stream : primitive.streams) {
+                [streams addObject:@{@"type": @(stream.type), @"accessorID": @(stream.accessorID),
+                    @"streamOffset": @(stream.streamOffset), @"streamLength": @(stream.streamLength),
+                    @"accessorOffset": @(stream.accessorOffset), @"count": @(stream.count),
+                    @"stride": @(stream.stride), @"pinned": @(stream.pinned)}];
+            }
+            [primitives addObject:@{@"meshID": [NSString stringWithUTF8String:primitive.meshID.c_str()], @"streams": streams}];
+        }
+        auto numbers = [](const auto& values) {
+            NSMutableArray* result = [NSMutableArray arrayWithCapacity:values.size()];
+            for (const auto& value : values) [result addObject:@(value)];
+            return result;
+        };
+        NSMutableArray* occurrences = [NSMutableArray array];
+        for (const auto& occurrence : trace.occurrences) {
+            [occurrences addObject:@{@"primitive": @(occurrence.primitive),
+                @"label": [NSString stringWithUTF8String:occurrence.label.c_str()],
+                @"positions": numbers(occurrence.positions), @"normals": numbers(occurrence.normals),
+                @"uvs": numbers(occurrence.uvs), @"indices": numbers(occurrence.indices)}];
+        }
+        std::vector<std::uint8_t> after(data.length);
+        const auto read = ::pread(descriptor, after.data(), after.size(), 0);
+        const bool unchanged = read == ssize_t(data.length) && std::memcmp(after.data(), data.bytes, data.length) == 0;
+        return @{@"preflight": @(int(preflight.status)), @"status": @(int(result.status)),
+            @"message": [NSString stringWithUTF8String:result.message.c_str()],
+            @"sourceUnchanged": @(unchanged), @"objects": @(result.flattenedObjectCount),
+            @"vertices": @(result.vertexCount), @"indices": @(result.indexCount),
+            @"primitives": primitives, @"occurrences": occurrences,
+            @"undos": @(owner.document->GetAvailableUndos()), @"redos": @(owner.document->GetAvailableRedos()),
+            @"open": @(owner.document->HasOpenCommand())};
+    } catch (const Standard_Failure& e) {
+        return @{@"error": [NSString stringWithUTF8String:e.GetMessageString() ?: "Private primitive probe failure"]};
+    } catch (...) { return @{@"error": @"Private primitive ownership probe failed"}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugTransactionObserver {

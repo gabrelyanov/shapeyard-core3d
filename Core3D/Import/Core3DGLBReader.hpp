@@ -42,6 +42,30 @@ struct GLBReadResult {
     }
 };
 
+#if DEBUG
+// Bounded read-only trace for bundled parser ownership qualification.
+struct GLBDebugStream {
+    int type = 0, accessorID = -1;
+    std::int64_t streamOffset = 0, streamLength = 0, accessorOffset = 0, count = 0;
+    std::int32_t stride = 0;
+    bool pinned = false;
+};
+struct GLBDebugPrimitive {
+    std::string meshID;
+    std::vector<GLBDebugStream> streams;
+};
+struct GLBDebugOccurrence {
+    std::uint64_t primitive = 0;
+    std::string label;
+    std::vector<double> positions, normals, uvs;
+    std::vector<int> indices;
+};
+struct GLBDebugTrace {
+    std::vector<GLBDebugPrimitive> primitives;
+    std::vector<GLBDebugOccurrence> occurrences;
+};
+#endif
+
 //! Transfers a GLB admitted by `PreflightPinnedGLB()` through the already-open
 //! source descriptor. No source pathname is accepted or reopened. `descriptor`
 //! and `cancelled` must remain valid for the duration of the call.
@@ -56,7 +80,11 @@ struct GLBReadResult {
     const PreflightResult& preflight,
     const Handle(TDocStd_Document)& document,
     const std::atomic_bool *cancelled,
-    const Message_ProgressRange& progress) noexcept;
+    const Message_ProgressRange& progress
+#if DEBUG
+    , GLBDebugTrace* debugTrace = nullptr
+#endif
+    ) noexcept;
 
 } // namespace core3d::gltf
 

@@ -18,6 +18,10 @@
 #include <Poly_Triangle.hxx>
 #include <RWGltf_CafReader.hxx>
 #include <RWGltf_GltfLatePrimitiveArray.hxx>
+#if DEBUG
+#include <RWGltf_GltfPrimArrayData.hxx>
+#include <TDF_Tool.hxx>
+#endif
 #include <RWGltf_TriangulationReader.hxx>
 #include <RWMesh_CoordinateSystem.hxx>
 #include <Standard_Failure.hxx>
@@ -403,13 +407,20 @@ public:
         std::uint64_t size,
         const PreflightResult& preflight,
         const std::atomic_bool *cancelled,
-        const std::shared_ptr<DescriptorReadState>& streamState)
+        const std::shared_ptr<DescriptorReadState>& streamState
+#if DEBUG
+        , GLBDebugTrace* debugTrace
+#endif
+        )
     : myDescriptor(descriptor),
       mySize(size),
       myPreflight(preflight),
       myCancelled(cancelled),
       myStreamState(streamState),
       myFileSystem(new PinnedGLBFileSystem(descriptor, size, streamState)) {
+#if DEBUG
+        myDebugTrace = debugTrace;
+#endif
         SetParallel(false);
         SetFillIncompleteDocument(Standard_False);
         SetSkipEmptyNodes(true);
@@ -487,6 +498,25 @@ protected:
                      "OCCT produced an invalid deferred GLB primitive.");
                 return Standard_False;
             }
+#if DEBUG
+            if (myDebugTrace != nullptr) {
+                if (myDebugTrace->primitives.size() >= 32 || deferred->Data().Length() > 8
+                    || deferred->NbDeferredNodes() > 64 || deferred->NbDeferredTriangles() > 64) {
+                    Fail(GLBReadStatus::ResourceLimit, "The private ownership probe exceeded its bound.");
+                    return Standard_False;
+                }
+                GLBDebugPrimitive primitive;
+                primitive.meshID = deferred->Id().ToCString();
+                for (NCollection_Sequence<RWGltf_GltfPrimArrayData>::Iterator data(deferred->Data()); data.More(); data.Next()) {
+                    const auto& value = data.Value();
+                    primitive.streams.push_back({int(value.Type), value.Accessor.Id,
+                        value.StreamOffset, value.StreamLength, value.Accessor.ByteOffset,
+                        value.Accessor.Count, value.Accessor.ByteStride, value.StreamUri.IsEqual(kPinnedToken)});
+                }
+                myDebugTrace->primitives.push_back(std::move(primitive));
+                myDebugSourceFaces.push_back(face);
+            }
+#endif
             const Handle(Poly_Triangulation) loaded =
                 deferred->DetachedLoadDeferredData(myFileSystem);
             if (loaded.IsNull()
@@ -946,6 +976,28 @@ private:
                      "An editable GLB object could not be created.");
                 return false;
             }
+#if DEBUG
+            if (myDebugTrace != nullptr) {
+                const auto source = std::find_if(myDebugSourceFaces.begin(), myDebugSourceFaces.end(),
+                    [&](const auto& value) { return value.IsPartner(located); });
+                if (source == myDebugSourceFaces.end() || myDebugTrace->occurrences.size() >= 32) {
+                    Fail(GLBReadStatus::Invalid, "A private probe occurrence lost its native source face.");
+                    return false;
+                }
+                GLBDebugOccurrence occurrence;
+                occurrence.primitive = std::uint64_t(source - myDebugSourceFaces.begin());
+                TCollection_AsciiString entry; TDF_Tool::Entry(label, entry); occurrence.label = entry.ToCString();
+                for (int i = 1; i <= baked->NbNodes(); ++i) {
+                    const auto p = baked->Node(i); occurrence.positions.insert(occurrence.positions.end(), {p.X(),p.Y(),p.Z()});
+                    if (baked->HasNormals()) { const auto n = baked->Normal(i); occurrence.normals.insert(occurrence.normals.end(), {n.X(),n.Y(),n.Z()}); }
+                    if (baked->HasUVNodes()) { const auto uv = baked->UVNode(i); occurrence.uvs.insert(occurrence.uvs.end(), {uv.X(),uv.Y()}); }
+                }
+                for (int i = 1; i <= baked->NbTriangles(); ++i) {
+                    int a=0,b=0,c=0; baked->Triangle(i).Get(a,b,c); occurrence.indices.insert(occurrence.indices.end(), {a,b,c});
+                }
+                myDebugTrace->occurrences.push_back(std::move(occurrence));
+            }
+#endif
             TCollection_AsciiString name = attributes.Name;
             if (name.IsEmpty()) {
                 std::ostringstream generated;
@@ -977,6 +1029,10 @@ private:
         return true;
     }
 
+#if DEBUG
+    GLBDebugTrace* myDebugTrace = nullptr;
+    std::vector<TopoDS_Face> myDebugSourceFaces;
+#endif
     int myDescriptor;
     std::uint64_t mySize;
     const PreflightResult& myPreflight;
@@ -1015,8 +1071,15 @@ GLBReadResult ImportPinnedGLB(
     const PreflightResult& preflight,
     const Handle(TDocStd_Document)& document,
     const std::atomic_bool *cancelled,
-    const Message_ProgressRange& progress) noexcept {
+    const Message_ProgressRange& progress
+#if DEBUG
+    , GLBDebugTrace* debugTrace
+#endif
+    ) noexcept {
     try {
+#if DEBUG
+        if (debugTrace != nullptr) *debugTrace = {};
+#endif
         if (IsCancelled(cancelled) || progress.UserBreak()) {
             return Failure(GLBReadStatus::Cancelled, "The GLB import was cancelled.");
         }
@@ -1104,7 +1167,11 @@ GLBReadResult ImportPinnedGLB(
             expectedSize,
             preflight,
             cancelled,
-            streamState);
+            streamState
+#if DEBUG
+            , debugTrace
+#endif
+            );
         reader.SetDocument(document);
         const Standard_Boolean performed = reader.Perform(
             source,
