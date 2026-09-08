@@ -2393,7 +2393,8 @@ bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept 
 }
 
 std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
-    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options) noexcept {
+    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height,
+    const std::optional<OcctMeshUVAtlasOptions>& options) noexcept {
     if (![NSThread isMainThread]) { return std::nullopt; }
     if (!canBeginCommittedEdit() || !_ordinaryEditController) { return std::nullopt; }
     try {
@@ -2415,14 +2416,18 @@ std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
             || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { return std::nullopt; }
         OcctObjectTransformState previous;
         if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return std::nullopt; }
-        if (options.version != 2) return std::nullopt;
+        if (options && options->version != 2) return std::nullopt;
         TopoDS_Shape candidate; OcctMeshUVAtlasPreview preview;
-        if (previous.meshUVAtlasVersion==2 && previous.meshUVAtlasSettings[0]==options.resolution
-            && previous.meshUVAtlasSettings[1]==options.gutterPixels) {
+        if (!options) {
+            // Discover the current settings without attempting replacement at
+            // guessed defaults. This remains available under attached images.
+            if (!myDoc->CaptureMeshUVAtlasPreview(label,preview)) return std::nullopt;
+        } else if (previous.meshUVAtlasVersion==2 && previous.meshUVAtlasSettings[0]==options->resolution
+            && previous.meshUVAtlasSettings[1]==options->gutterPixels) {
             // Match Generate's Unchanged semantics after later geometry edits.
             // Reading a stored atlas does not authorize replacement under images.
             if (!myDoc->CaptureMeshUVAtlasPreview(label,preview)) return std::nullopt;
-        } else if (!myDoc->PrepareTriangleUVAtlas(label,candidate,options,&preview)) return std::nullopt;
+        } else if (!myDoc->PrepareTriangleUVAtlas(label,candidate,*options,&preview)) return std::nullopt;
         preview.authoredResolution=previous.meshUVAtlasSettings[0];
         preview.authoredGutterPixels=previous.meshUVAtlasSettings[1];
         return preview;

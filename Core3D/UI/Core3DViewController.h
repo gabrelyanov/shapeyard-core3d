@@ -622,6 +622,11 @@ typedef struct {
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(generateTriangleUVAtlas(entityIdentifier:expected:));
+//! Inspect an owned v2 atlas and its saved settings without proposing regeneration.
+//! Read-only under the exact selected entity and publication, including textured meshes.
+- (Core3DMeshUVAtlasPreview *_Nullable)currentMeshUVAtlasPreviewForEntityIdentifier:(NSString *)entityIdentifier
+                                                                    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(currentMeshUVAtlasPreview(entityIdentifier:expected:));
 - (Core3DMeshUVAtlasPreview *_Nullable)previewCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                        resolution:(NSInteger)resolution
                                                      gutterPixels:(NSInteger)gutterPixels

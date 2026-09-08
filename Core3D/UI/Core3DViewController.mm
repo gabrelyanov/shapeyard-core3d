@@ -725,6 +725,9 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)core3d_canBeginCommittedEdit;
+- (Core3DMeshUVAtlasPreview *)meshUVPreviewForEntityIdentifier:(NSString *)entityIdentifier
+                                                   options:(const std::optional<OcctMeshUVAtlasOptions>&)options
+                                                  expected:(Core3DSceneSnapshot *)expected;
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity;
@@ -5452,11 +5455,23 @@ void Core3DAddDebugOrphanVisualMaterial(
     return Core3DMeshUVAtlasResultRejected;
 }
 
+- (Core3DMeshUVAtlasPreview *)currentMeshUVAtlasPreviewForEntityIdentifier:(NSString *)entityIdentifier
+                                                               expected:(Core3DSceneSnapshot *)expected {
+    return [self meshUVPreviewForEntityIdentifier:entityIdentifier options:std::nullopt expected:expected];
+}
+
 - (Core3DMeshUVAtlasPreview *)previewCoherentUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                        resolution:(NSInteger)resolution
                                                      gutterPixels:(NSInteger)gutterPixels
                                                          expected:(Core3DSceneSnapshot *)expected {
     if (resolution < 256 || resolution > 4096 || gutterPixels < 1 || gutterPixels > 32) return nil;
+    return [self meshUVPreviewForEntityIdentifier:entityIdentifier
+        options:OcctMeshUVAtlasOptions{2,static_cast<int>(resolution),static_cast<int>(gutterPixels)} expected:expected];
+}
+
+- (Core3DMeshUVAtlasPreview *)meshUVPreviewForEntityIdentifier:(NSString *)entityIdentifier
+                                                   options:(const std::optional<OcctMeshUVAtlasOptions>&)options
+                                                  expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
         || GLController.viewer == nullptr || expected == nil
         || entityIdentifier.length == 0 || entityIdentifier.length > 128
@@ -5480,7 +5495,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         const auto result = GLController.viewer->previewCoherentUVAtlas(identity,
             static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)),
-            OcctMeshUVAtlasOptions{2,static_cast<int>(resolution),static_cast<int>(gutterPixels)});
+            options);
         return result ? [[Core3DMeshUVAtlasPreview alloc] initWithNativePreview:*result] : nil;
     } catch (...) {}
     return nil;
