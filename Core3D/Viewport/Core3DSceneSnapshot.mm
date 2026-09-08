@@ -709,7 +709,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 }
 
 + (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode {
-    if (mode < 0 || mode > 8 || ![NSThread isMainThread]) return @{@"error": @"Undefined frame-copy fixture"};
+    if (mode < 0 || mode > 9 || ![NSThread isMainThread]) return @{@"error": @"Undefined frame-copy fixture"};
     try {
         using namespace core3d::persistence;
         struct PrivateDocument {
@@ -728,7 +728,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
             if (mode == 2) { BRep_Builder builder; TopoDS_Compound compound; builder.MakeCompound(compound); builder.Add(compound, shape); shape = compound; }
             return shape;
         };
-        auto a = makeShape(mode == 4 ? 22 : 0);
+        auto a = makeShape(mode == 9 ? 2 : mode == 4 ? 22 : 0);
         auto b = makeShape(mode == 4 ? 22 : mode == 5 ? 2 : mode == 6 ? 6 : mode == 7 ? 4 : mode == 8 ? 3 : 0);
         const auto source = shapes->AddShape(a, Standard_False), destination = shapes->AddShape(b, Standard_False);
         if (source.IsNull() || destination.IsNull() || source.IsEqual(destination)) Standard_Failure::Raise("Missing copy definitions.");
@@ -751,7 +751,8 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         }
         owner.document->CommitCommand(); owner.document->ClearUndos();
         if (!wrapper.MigrateLegacyIdentifiers()) Standard_Failure::Raise("Copy fixture identifier migration failed.");
-        assign(source, archive); if (mode <= 4) assign(destination, replacement);
+        if (mode != 9) assign(source, archive);
+        if (mode <= 4 || mode == 9) assign(destination, replacement);
         auto capture = [&](const TDF_Label& label) { OcctObjectTransformState value; if (!wrapper.CaptureObjectTransformStateForLabel(label,value)) Standard_Failure::Raise("Copy fixture capture failed."); return value; };
         auto stored = [&](const TDF_Label& label, const Handle(TDocStd_Document)& doc) -> NSData* {
             OcctAuthoredFrameRecord record;

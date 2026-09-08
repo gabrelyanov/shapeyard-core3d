@@ -4777,8 +4777,10 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
             return Standard_False;
         if (before.meshUVAtlasVersion == 0 && target.meshUVAtlasVersion == 0
             && frame.archive.empty() && previousFrame.archive.empty()) return Standard_True;
+        // Clearing a destination's metadata is still an exact-copy operation.
+        // An unannotated but different source cannot erase another mesh's basis.
+        if (!SameStoredMeshCopyPayload(before.shape, target.shape)) return Standard_False;
         if (before.meshUVAtlasVersion != 0 || !frame.archive.empty()) {
-            if (!SameStoredMeshCopyPayload(before.shape, target.shape)) return Standard_False;
             if (before.meshUVAtlasVersion != 0) {
                 TopoDS_Face face; Handle(Poly_Triangulation) mesh;
                 if (!TriangleAtlasFace(before.shape, face, mesh) || !mesh->HasUVNodes()) return Standard_False;
