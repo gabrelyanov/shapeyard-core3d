@@ -3523,6 +3523,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
     } scope;
     scope.context = context; scope.view = view; scope.camera = new Graphic3d_Camera(view->Camera());
+    int fixtureStep = -1;
     try {
         using namespace core3d::persistence;
         Core3DDebugDefineFrameBinXCAFFormat(scope.app, std::make_shared<AuthoredFrameReadBudget>());
@@ -3539,6 +3540,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             placement.SetRotation(gp_Ax1(gp_Pnt(0,0,0), gp_Dir(0,0,1)), M_PI / 2);
             placement.SetTranslationPart(gp_Vec(2,3,4)); shape.Location(TopLoc_Location(placement)); shapes->SetShape(label, shape);
         }
+        scope.document->SetUndoLimit(20); scope.document->NewCommand();
         if (!wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh)) Standard_Failure::Raise("Native fixture representation failed.");
         Handle(Image_Texture) image;
         if (!Core3DCreateAuthoredTexture(static_cast<const Standard_Byte*>(normalPNG.bytes), normalPNG.length, "image/png", image)
@@ -3554,7 +3556,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             const auto* bytes = static_cast<const std::uint8_t*>(value.bytes);
             for (NSUInteger i = 0; i < value.length; ++i) attribute->SetValue(int(i), bytes[i]);
         };
-        assign(archive); scope.document->SetUndoLimit(20); scope.document->ClearUndos();
+        assign(archive); scope.document->CommitCommand(); scope.document->ClearUndos();
         auto display = [&]() {
             const auto nativeMaterial = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
             XCAFPrs_Style style; style.SetMaterial(nativeMaterial);
@@ -3574,6 +3576,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         NSMutableArray* states = [NSMutableArray array]; NSMutableDictionary* captures = [NSMutableDictionary dictionary];
         bool readOnly = true;
         auto keep = [&](int step, bool freshBuffer, bool captureImage) {
+            fixtureStep = step;
             const int time = wrapper->Document()->GetData()->Time(), undo = wrapper->Document()->GetAvailableUndos(), redo = wrapper->Document()->GetAvailableRedos();
             if (!viewer->DebugPrepareNativeTangentArrays()) Standard_Failure::Raise("Native frame preparation rejected.");
             NSMutableData* frames = [NSMutableData data]; NSMutableArray* uids = [NSMutableArray array];
@@ -3631,8 +3634,8 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (!viewer->DebugPrepareNativeTangentArrays() || viewer->DebugPreparedTangentArrayCount() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
         return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"invalidRejected": @(invalidRejected), @"cacheCleared": @YES};
     } catch (const Standard_Failure& failure) {
-        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
-    } catch (...) { return @{@"error": @"Native authored-frame rendering fixture failed"}; }
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure", @"step": @(fixtureStep)};
+    } catch (...) { return @{@"error": @"Native authored-frame rendering fixture failed", @"step": @(fixtureStep)}; }
 }
 
 - (NSDictionary<NSString *, id> *)debugAuthoredFramePublications:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode {
