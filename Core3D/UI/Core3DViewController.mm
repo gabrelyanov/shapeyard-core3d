@@ -3602,28 +3602,33 @@ void Core3DAddDebugOrphanVisualMaterial(
             fixtureStep = step;
             const auto ownersBefore = selectedOwners(); const auto modesBefore = selectedModes();
             const int time = wrapper->Document()->GetData()->Time(), undo = wrapper->Document()->GetAvailableUndos(), redo = wrapper->Document()->GetAvailableRedos();
-            if (!viewer->DebugPrepareNativeTangentArrays()) Standard_Failure::Raise("Native frame preparation rejected.");
             NSMutableData* frames = [NSMutableData data]; NSMutableArray* uids = [NSMutableArray array];
-            for (const auto& prs : scope.presentation->Presentations()) {
-                if (prs.IsNull()) continue;
-                for (const auto& generic : prs->Groups()) {
-                    auto group = Handle(OpenGl_Group)::DownCast(generic); if (group.IsNull()) continue;
-                    for (auto* node = group->FirstNode(); node; node = node->next) {
-                        auto* primitive = dynamic_cast<OpenGl_PrimitiveArray*>(node->elem);
-                        if (!primitive || !primitive->IsFillDrawMode()) continue;
-                        [uids addObject:@(primitive->GetUID())];
-                        const auto attributes = primitive->Attributes();
-                        if (!freshBuffer) continue;
-                        if (attributes.IsNull() || !attributes->Data()) Standard_Failure::Raise("New native frame buffer missing.");
-                        int index = -1; Standard_Size stride = 0;
-                        const auto bytes = attributes->AttributeData(Graphic3d_TOA_CUSTOM, index, stride);
-                        if (!bytes || index < 0 || attributes->Attribute(index).DataType != Graphic3d_TOD_VEC4) Standard_Failure::Raise("Native tangent attribute missing.");
-                        for (int corner = 0; corner < attributes->NbElements; ++corner) [frames appendBytes:bytes+std::size_t(corner)*stride length:16];
+            bool observed = false;
+            struct ObserverReset { OcctViewer* viewer; ~ObserverReset() { viewer->DebugSetAfterTangentPreparation({}); } } observerReset{viewer};
+            viewer->DebugSetAfterTangentPreparation([&]() {
+                for (const auto& prs : scope.presentation->Presentations()) {
+                    if (prs.IsNull()) continue;
+                    for (const auto& generic : prs->Groups()) {
+                        auto group = Handle(OpenGl_Group)::DownCast(generic); if (group.IsNull()) continue;
+                        for (auto* node = group->FirstNode(); node; node = node->next) {
+                            auto* primitive = dynamic_cast<OpenGl_PrimitiveArray*>(node->elem);
+                            if (!primitive || !primitive->IsFillDrawMode()) continue;
+                            [uids addObject:@(primitive->GetUID())];
+                            const auto attributes = primitive->Attributes();
+                            if (!freshBuffer) continue;
+                            if (attributes.IsNull() || !attributes->Data()) Standard_Failure::Raise("New native frame buffer missing.");
+                            int index = -1; Standard_Size stride = 0;
+                            const auto bytes = attributes->AttributeData(Graphic3d_TOA_CUSTOM, index, stride);
+                            if (!bytes || index < 0 || attributes->Attribute(index).DataType != Graphic3d_TOD_VEC4) Standard_Failure::Raise("Native tangent attribute missing.");
+                            for (int corner = 0; corner < attributes->NbElements; ++corner) [frames appendBytes:bytes+std::size_t(corner)*stride length:16];
+                        }
                     }
                 }
-            }
+                observed = true; return true;
+            });
             const auto stats = [GLController debugFramebufferStatistics];
-            if (![stats[@"captured"] boolValue]) Standard_Failure::Raise("Native framebuffer capture failed.");
+            viewer->DebugSetAfterTangentPreparation({});
+            if (!observed || ![stats[@"captured"] boolValue]) Standard_Failure::Raise("Native framebuffer preparation or capture failed.");
             selectionUnchanged = selectionUnchanged && ownersBefore == selectedOwners() && modesBefore == selectedModes();
             readOnly = readOnly && time == wrapper->Document()->GetData()->Time() && undo == wrapper->Document()->GetAvailableUndos() && redo == wrapper->Document()->GetAvailableRedos();
             [states addObject:@{@"step": @(step), @"frames": frames, @"uids": uids, @"stats": stats,
@@ -3645,7 +3650,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (!scope.document->Undo()) Standard_Failure::Raise("Native frame removal undo failed."); keep(8, true, false);
         scope.document->NewCommand(); NSMutableData* invalid = [archive mutableCopy]; static_cast<std::uint8_t*>(invalid.mutableBytes)[invalid.length-1] ^= 1; assign(invalid); scope.document->CommitCommand();
         const auto invalidOwners = selectedOwners(); const auto invalidModes = selectedModes();
-        const bool invalidRejected = !viewer->DebugPrepareNativeTangentArrays();
+        const bool invalidRejected = ![[GLController debugFramebufferStatistics][@"captured"] boolValue];
         selectionUnchanged = selectionUnchanged && invalidOwners == selectedOwners() && invalidModes == selectedModes();
         if (!scope.document->Undo()) Standard_Failure::Raise("Invalid native frame cleanup failed."); keep(9, false, false);
         std::ostringstream output(std::ios::binary | std::ios::out);
@@ -3658,7 +3663,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         TDF_LabelSequence labels; XCAFDoc_DocumentTool::ShapeTool(scope.reopened->Main())->GetFreeShapes(labels);
         if (labels.Length() != 1) Standard_Failure::Raise("Native renderer fixture reopened owner missing."); label = labels.First(); display(); keep(10, true, true);
         context->Remove(scope.presentation, Standard_False); scope.presentation.Nullify();
-        if (!viewer->DebugPrepareNativeTangentArrays() || viewer->DebugPreparedTangentArrayCount() != 0 || context->NbSelected() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
+        if (![[GLController debugFramebufferStatistics][@"captured"] boolValue] || viewer->DebugPreparedTangentArrayCount() != 0 || context->NbSelected() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
         return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"selectionUnchanged": @(selectionUnchanged), @"invalidRejected": @(invalidRejected), @"cacheCleared": @YES};
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure", @"step": @(fixtureStep)};
