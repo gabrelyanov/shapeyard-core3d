@@ -1721,6 +1721,8 @@ namespace core3d {
 				}
 				if (!myDoc->CopyGeometryRepresentation(
 						duplicate.sourceLabel, label)
+					|| !myDoc->CopyGeometryOwnedMeshMetadata(
+						duplicate.sourceLabel, label)
 					|| !myDoc->CopyObjectAppearance(
 						duplicate.sourceLabel, label)
 					|| !myDoc->CopyReferenceAxis(

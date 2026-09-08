@@ -60,6 +60,10 @@ CORE3D_SCENE_FINAL_CLASS
     NS_SWIFT_NAME(debugNativeFrameAssociation(_:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameOwner:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameOwner(_:replacement:mode:));
++ (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugFrameUVEdit(_:mode:));
++ (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugFrameCopy(_:replacement:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameDocument:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameDocument(_:replacement:mode:));
 #endif

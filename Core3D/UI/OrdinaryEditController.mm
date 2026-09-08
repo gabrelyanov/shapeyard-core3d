@@ -1,5 +1,6 @@
 #include "OrdinaryEditController.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
+#include "../OCCTKit/AuthoredFrameAttributeID.hxx"
 #import <Foundation/Foundation.h>
 #include <gp_Quaternion.hxx>
 #include <Standard_Failure.hxx>
@@ -980,6 +981,12 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             }
 #endif
             ++index;
+            // UV regeneration changes the exact local geometry digest. Clear
+            // its validated mapless frame owner in the same owned command so
+            // failed staging, cancellation and Undo restore both atomically.
+            if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
+                record.previous.label.ForgetAttribute(persistence::AuthoredFrameAttributeID());
+            }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
             if ((!record.previous.shape.IsEqual(record.requested.shape)
@@ -996,13 +1003,18 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
+                if (record.candidate.authoredFramesPresent) {
+                    throw Standard_Failure("Ordinary UV retained stale authored frames");
+                }
                 const auto& options=record.requested.meshUVAtlasOptions;
                 if (options.version == 2 && (record.candidate.meshUVAtlasSettings[0]!=options.resolution
                     || record.candidate.meshUVAtlasSettings[1]!=options.gutterPixels)) {
                     throw Standard_Failure("Ordinary UV settings readback failed");
                 }
-            } else if (record.candidate.meshUVAtlasSettings != record.previous.meshUVAtlasSettings) {
-                throw Standard_Failure("Ordinary transform changed UV settings");
+            } else if (record.candidate.meshUVAtlasSettings != record.previous.meshUVAtlasSettings
+                || record.candidate.authoredFramesPresent != record.previous.authoredFramesPresent
+                || record.candidate.authoredFramesIdentity != record.previous.authoredFramesIdentity) {
+                throw Standard_Failure("Ordinary transform changed geometry-owned metadata");
             }
             gp_Ax1 referenceAxis;
             if (!_document->ResolveReferenceAxisInWorld(record.candidate.label,

@@ -408,6 +408,11 @@ public:
   Standard_EXPORT Standard_Boolean CopyGeometryRepresentation(
       const TDF_Label& source,
       const TDF_Label& destination);
+  //! Copy geometry-owned UV/frame metadata between exact local mesh payloads.
+  //! Requires this document's open command; the caller owns abort/reconciliation.
+  //! Appearance copying is separate because Boolean/mirror may replace geometry.
+  Standard_EXPORT Standard_Boolean CopyGeometryOwnedMeshMetadata(
+      const TDF_Label& source, const TDF_Label& destination);
   //! Stamp every unmarked analytic definition produced by a fresh STEP
   //! transfer. This isolated-import schema operation requires zero user
   //! history, creates no retained undo entry, and is never called for legacy

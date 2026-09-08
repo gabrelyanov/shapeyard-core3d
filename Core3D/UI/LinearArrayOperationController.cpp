@@ -1550,6 +1550,8 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     aResult.transform)
                 || !_document->CopyGeometryRepresentation(
                     _source->label, aLabel)
+                || !_document->CopyGeometryOwnedMeshMetadata(
+                    _source->label, aLabel)
                 || !_document->CopyObjectAppearance(
                     _source->label, aLabel)
                 || !_document->CopyReferenceAxis(

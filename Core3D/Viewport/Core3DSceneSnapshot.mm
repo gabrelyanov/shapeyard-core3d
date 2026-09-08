@@ -17,12 +17,16 @@
 #include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../UI/OrdinaryEditController.hpp"
 #include <BRep_Builder.hxx>
 #include <TopoDS.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDataStd_Integer.hxx>
+#include <TDataStd_Real.hxx>
+#include <TDF_Tool.hxx>
+#include <gp_Ax1.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TopoDS_Compound.hxx>
 #include <XCAFDoc_ColorTool.hxx>
@@ -615,6 +619,187 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
     } catch (...) { return @{@"error": @"Frame-owner fixture failed"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode {
+    if (mode < 0 || mode > 4 || ![NSThread isMainThread]) return @{@"error": @"Undefined frame UV fixture"};
+    try {
+        using namespace core3d;
+        using namespace core3d::persistence;
+        struct PrivateDocument {
+            Handle(TDocStd_Application) app = new TDocStd_Application();
+            Handle(TDocStd_Document) document;
+            ~PrivateDocument() noexcept { try { if (!document.IsNull()) app->Close(document); } catch (...) {} }
+        } owner;
+        Core3DDebugDefineFrameBinXCAFFormat(owner.app, std::make_shared<AuthoredFrameReadBudget>());
+        owner.app->NewDocument(TCollection_ExtendedString("BinXCAF"), owner.document);
+        XCAFDoc_DocumentTool::SetLengthUnit(owner.document, 0.001);
+        Handle(OcctDocument) wrapper = new OcctDocument(); wrapper->ChangeDocument() = owner.document;
+        const auto shape = Core3DDebugAuthoredGeometryFixture(0);
+        const auto label = XCAFDoc_DocumentTool::ShapeTool(owner.document->Main())->AddShape(shape, Standard_False);
+        owner.document->SetUndoLimit(20); owner.document->NewCommand();
+        Handle(AIS_Shape) presentation = new AIS_Shape(shape);
+        if (!wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh)
+            || !wrapper->SaveObjectTransform(label, presentation)) Standard_Failure::Raise("Frame UV fixture setup failed.");
+        owner.document->CommitCommand(); owner.document->ClearUndos();
+        if (!wrapper->MigrateLegacyIdentifiers()) Standard_Failure::Raise("Frame UV fixture migration failed.");
+        if (archive.length < 128 || archive.length > core3d::scene::authored::kMaximumArchiveBytes) Standard_Failure::Raise("Invalid UV frame archive length.");
+        const auto bytes = TDataStd_ByteArray::Set(label, AuthoredFrameAttributeID(), 0, Standard_Integer(archive.length)-1, Standard_False);
+        const auto* data = static_cast<const std::uint8_t*>(archive.bytes);
+        for (NSUInteger i=0; i<archive.length; ++i) bytes->SetValue(Standard_Integer(i), data[i]);
+        auto capture = [&]() { OcctObjectTransformState state; if (!wrapper->CaptureObjectTransformStateForLabel(label,state)) Standard_Failure::Raise("Frame UV capture failed."); return state; };
+        const auto original = capture();
+        if (mode == 3) bytes->SetValue(bytes->Upper(), bytes->Value(bytes->Upper()) ^ 1);
+        const int beforeTime = owner.document->GetData()->Time();
+        TopoDS_Shape candidate; const OcctMeshUVAtlasOptions options{2,2048,8};
+        const bool prepared = wrapper->PrepareTriangleUVAtlas(label,candidate,options);
+        NSMutableDictionary* result = [@{@"prepared": @(prepared), @"prepareReadOnly": @(beforeTime == owner.document->GetData()->Time())} mutableCopy];
+        if (mode == 3) {
+            result[@"corruptPreserved"] = @(!prepared && bytes->Value(bytes->Upper()) == (data[archive.length-1] ^ 1)
+                && owner.document->GetAvailableUndos() == 0 && !owner.document->HasOpenCommand());
+            return result;
+        }
+        if (!prepared) Standard_Failure::Raise("Frame UV preparation failed.");
+        struct Host final : OrdinaryEditPresentationHost {
+            bool admitTransform(OrdinaryTransformLedger&) noexcept override { return true; }
+            bool repairTransform(const OrdinaryTransformLedger& ledger, bool committed) noexcept override {
+                try { for (const auto& record : ledger.records) {
+                    const auto& expected = committed ? record.candidate : record.previous;
+                    record.requested.presentation->SetShape(expected.shape);
+                    record.requested.presentation->SetLocalTransformation(expected.transform);
+                } return true; } catch (...) { return false; }
+            }
+        } host;
+        const auto controller = std::make_shared<OrdinaryEditController>(wrapper,host);
+        OrdinaryTransformChange change; change.label=label; change.presentation=presentation;
+        change.shape=candidate; change.transform=original.transform; change.operation=OrdinaryTransformOperation::MeshUVAtlas;
+        change.meshUVAtlasOptions=options;
+        if (mode == 4) { change.shape=original.shape; change.operation=OrdinaryTransformOperation::Translate; change.transform.SetTranslationPart(gp_Vec(12,3,4)); }
+        if (mode == 2) controller->debugCommandStamp().debugSetCommitMode(1);
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = controller->beginTransform({change},&failure);
+        if (!lease) Standard_Failure::Raise("Frame UV ordinary admission failed.");
+        const auto outcome = mode == 1 ? lease.cancel() : lease.stageAndCommit();
+        const auto after = capture();
+        result[@"outcome"] = @(int(outcome)); result[@"closed"] = @(!owner.document->HasOpenCommand());
+        result[@"idle"] = @(controller->state() == OrdinaryEditState::Idle);
+        result[@"undoCount"] = @(owner.document->GetAvailableUndos());
+        if (mode == 1 || mode == 2) {
+            result[@"exactOriginalRestored"] = @(original.IsEqual(after));
+        } else {
+            result[@"idsPreserved"] = @(after.entityIdentifier == original.entityIdentifier && after.definitionIdentifier == original.definitionIdentifier);
+            result[@"framesPresent"] = @(after.authoredFramesPresent);
+            result[@"frameIdentityPreserved"] = @(after.authoredFramesIdentity == original.authoredFramesIdentity);
+            result[@"shapeChanged"] = @(!after.shape.IsEqual(original.shape));
+            result[@"atlasVersion"] = @(after.meshUVAtlasVersion);
+            result[@"atlasSettings"] = @[@(after.meshUVAtlasSettings[0]),@(after.meshUVAtlasSettings[1]),@(after.meshUVAtlasSettings[2])];
+            if (!owner.document->Undo()) Standard_Failure::Raise("Frame UV undo failed.");
+            result[@"undoRestoresOriginal"] = @(original.IsEqual(capture()));
+            if (!owner.document->Redo()) Standard_Failure::Raise("Frame UV redo failed.");
+            result[@"redoRestoresCandidate"] = @(after.IsEqual(capture()));
+        }
+        Standard_Size resident=0; result[@"ownersValid"] = @(Core3DValidateAuthoredFrameOwners(owner.document,resident));
+        return result;
+    } catch (const Standard_Failure& failure) { return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"}; }
+      catch (...) { return @{@"error": @"Native frame UV fixture failed"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode {
+    if (mode < 0 || mode > 8 || ![NSThread isMainThread]) return @{@"error": @"Undefined frame-copy fixture"};
+    try {
+        using namespace core3d::persistence;
+        struct PrivateDocument {
+            Handle(TDocStd_Application) app = new TDocStd_Application();
+            Handle(TDocStd_Document) document;
+            ~PrivateDocument() noexcept { try { if (!document.IsNull()) app->Close(document); } catch (...) {} }
+        } owner, reader;
+        Core3DDebugDefineFrameBinXCAFFormat(owner.app, std::make_shared<AuthoredFrameReadBudget>());
+        Core3DDebugDefineFrameBinXCAFFormat(reader.app, std::make_shared<AuthoredFrameReadBudget>());
+        owner.app->NewDocument(TCollection_ExtendedString("BinXCAF"), owner.document);
+        XCAFDoc_DocumentTool::SetLengthUnit(owner.document, 0.001);
+        OcctDocument wrapper; wrapper.ChangeDocument() = owner.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner.document->Main());
+        auto makeShape = [&](int fixtureMode) {
+            TopoDS_Shape shape = Core3DDebugAuthoredGeometryFixture(fixtureMode);
+            if (mode == 2) { BRep_Builder builder; TopoDS_Compound compound; builder.MakeCompound(compound); builder.Add(compound, shape); shape = compound; }
+            return shape;
+        };
+        auto a = makeShape(mode == 4 ? 22 : 0);
+        auto b = makeShape(mode == 4 ? 22 : mode == 5 ? 2 : mode == 6 ? 6 : mode == 7 ? 4 : mode == 8 ? 3 : 0);
+        const auto source = shapes->AddShape(a, Standard_False), destination = shapes->AddShape(b, Standard_False);
+        if (source.IsNull() || destination.IsNull() || source.IsEqual(destination)) Standard_Failure::Raise("Missing copy definitions.");
+        if (mode == 1 || mode == 2) {
+            gp_Trsf placed; placed.SetRotation(gp_Ax1(gp_Pnt(0,0,0), gp_Dir(0,0,1)), M_PI / 2);
+            placed.SetTranslationPart(gp_Vec(2,3,4)); b.Location(TopLoc_Location(placed)); shapes->SetShape(destination, b);
+        }
+        auto assign = [](const TDF_Label& label, NSData* data) {
+            if (data.length < 128 || data.length > core3d::scene::authored::kMaximumArchiveBytes) Standard_Failure::Raise("Invalid fixture archive size.");
+            const auto bytes = TDataStd_ByteArray::Set(label, AuthoredFrameAttributeID(), 0, Standard_Integer(data.length)-1, Standard_False);
+            const auto* input = static_cast<const std::uint8_t*>(data.bytes);
+            for (NSUInteger i=0; i<data.length; ++i) bytes->SetValue(Standard_Integer(i), input[i]);
+        };
+        owner.document->SetUndoLimit(20); owner.document->NewCommand();
+        if (!wrapper.SetGeometryRepresentationForLabel(source, OcctGeometryRepresentation::TriangleMesh)
+            || !wrapper.SetGeometryRepresentationForLabel(destination, OcctGeometryRepresentation::TriangleMesh)) Standard_Failure::Raise("Copy representation fixture failed.");
+        if (mode == 3) {
+            TDataStd_Real::Set(source.FindChild(8, Standard_True), -2.0);
+            TDataStd_Real::Set(destination.FindChild(8, Standard_True), 3.0);
+        }
+        owner.document->CommitCommand(); owner.document->ClearUndos();
+        if (!wrapper.MigrateLegacyIdentifiers()) Standard_Failure::Raise("Copy fixture identifier migration failed.");
+        assign(source, archive); if (mode <= 4) assign(destination, replacement);
+        auto capture = [&](const TDF_Label& label) { OcctObjectTransformState value; if (!wrapper.CaptureObjectTransformStateForLabel(label,value)) Standard_Failure::Raise("Copy fixture capture failed."); return value; };
+        auto stored = [&](const TDF_Label& label, const Handle(TDocStd_Document)& doc) -> NSData* {
+            OcctAuthoredFrameRecord record;
+            if (Core3DReadAuthoredFrameOwner(doc,label,record) == OcctAuthoredFrameReadState::Invalid) Standard_Failure::Raise("Copied frame owner invalid.");
+            return [NSData dataWithBytes:record.archive.data() length:record.archive.size()];
+        };
+        const auto original = capture(source), previous = capture(destination);
+        const bool closedRejected = !wrapper.CopyGeometryOwnedMeshMetadata(source,destination);
+        owner.document->NewCommand();
+        const int beforeTime = owner.document->GetData()->Time();
+        const bool accepted = wrapper.CopyGeometryOwnedMeshMetadata(source,destination);
+        NSMutableDictionary* result = [@{@"accepted": @(accepted), @"closedRejected": @(closedRejected)} mutableCopy];
+        if (mode >= 5) {
+            result[@"rejectedWithoutMutation"] = @(!accepted && original.IsEqual(capture(source)) && previous.IsEqual(capture(destination)) && beforeTime == owner.document->GetData()->Time());
+            owner.document->AbortCommand(); return result;
+        }
+        if (!accepted || !owner.document->CommitCommand()) Standard_Failure::Raise("Frame copy did not commit.");
+        const auto copied = capture(destination);
+        result[@"sourceUnchanged"] = @(original.IsEqual(capture(source)));
+        result[@"targetGeometryAndTransformPreserved"] = @(copied.shape.IsEqual(previous.shape) && copied.scalars == previous.scalars
+            && copied.entityIdentifier == previous.entityIdentifier && copied.definitionIdentifier == previous.definitionIdentifier
+            && copied.entityIdentifier != original.entityIdentifier && copied.definitionIdentifier != original.definitionIdentifier);
+        NSMutableArray* bytes = [NSMutableArray arrayWithObject:stored(destination,owner.document)];
+        NSMutableArray* history = [NSMutableArray arrayWithObject:@[@(owner.document->GetAvailableUndos()),@(owner.document->GetAvailableRedos())]];
+        auto keep = [&]() { [bytes addObject:stored(destination,owner.document)]; [history addObject:@[@(owner.document->GetAvailableUndos()),@(owner.document->GetAvailableRedos())]]; };
+        if (!owner.document->Undo()) Standard_Failure::Raise("Frame copy undo failed."); keep();
+        if (!owner.document->Redo()) Standard_Failure::Raise("Frame copy redo failed."); keep();
+        owner.document->NewCommand(); source.ForgetAttribute(AuthoredFrameAttributeID());
+        if (!wrapper.CopyGeometryOwnedMeshMetadata(source,destination) || !owner.document->CommitCommand()) Standard_Failure::Raise("Absent-source frame clear failed."); keep();
+        if (!owner.document->Undo()) Standard_Failure::Raise("Absent-source frame clear undo failed."); keep();
+        owner.document->NewCommand(); assign(source,replacement);
+        if (!wrapper.CopyGeometryOwnedMeshMetadata(source,destination)) Standard_Failure::Raise("Aborted frame copy stage failed.");
+        owner.document->AbortCommand(); keep();
+        result[@"sourceRestoredAfterAbort"] = @(original.IsEqual(capture(source)));
+        owner.document->NewCommand();
+        Handle(TDocStd_Document) foreign = new TDocStd_Document(TCollection_ExtendedString("BinXCAF"));
+        result[@"foreignAndSelfRejected"] = @(!wrapper.CopyGeometryOwnedMeshMetadata(foreign->Main(),destination)
+            && !wrapper.CopyGeometryOwnedMeshMetadata(source,foreign->Main()) && !wrapper.CopyGeometryOwnedMeshMetadata(source,source));
+        owner.document->AbortCommand();
+        TCollection_AsciiString entry; TDF_Tool::Entry(destination,entry);
+        std::ostringstream output(std::ios::binary | std::ios::out);
+        if (owner.app->SaveAs(owner.document,output) != PCDM_SS_OK) Standard_Failure::Raise("Copied private document save failed.");
+        const auto wire=output.str(); if (wire.empty() || wire.size()>1024*1024) Standard_Failure::Raise("Copied private document bound exceeded.");
+        Core3DBeginSafeBinaryRead(); std::istringstream input(wire,std::ios::binary | std::ios::in);
+        if (reader.app->Open(input,reader.document) != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected() || reader.document.IsNull()) Standard_Failure::Raise("Copied private document reopen failed.");
+        TDF_Label reopened; TDF_Tool::Label(reader.document->GetData(),entry.ToCString(),reopened,Standard_False);
+        result[@"reopenedArchive"] = stored(reopened,reader.document);
+        result[@"archives"] = bytes; result[@"history"] = history;
+        Standard_Size nativeBytes=0; result[@"ownersValid"] = @(Core3DValidateAuthoredFrameOwners(reader.document,nativeBytes)); result[@"nativeBytes"] = @(nativeBytes);
+        return result;
+    } catch (const Standard_Failure& failure) { return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"}; }
+      catch (...) { return @{@"error": @"Native frame copy fixture failed"}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugFrameDocument:(NSData *)archive

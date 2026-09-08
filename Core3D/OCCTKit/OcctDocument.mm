@@ -3796,6 +3796,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
         }
 
         Standard_Size projectedNormalBytes = 0;
+        if (!Core3DValidateAuthoredFrameOwners(myOcafDoc, projectedNormalBytes)) return Standard_False;
         TDF_LabelSequence normalRoots; shapeTool->GetFreeShapes(normalRoots);
         if (normalRoots.Length() < 0 || normalRoots.Length() > 50000) return Standard_False;
         for (Standard_Integer index = 1; index <= normalRoots.Length(); ++index) {
@@ -3803,7 +3804,9 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             XCAFDoc_VisMaterialPBR material;
             if (!TryPBRMaterialForLabel(root, material) || material.NormalTexture.IsNull()) continue;
             Standard_Size bytes = 0;
-            if (Core3DNormalTextureRecipeForLabel(root) != 1
+            OcctAuthoredFrameRecord boundFrame;
+            if (Core3DReadAuthoredFrameOwner(myOcafDoc, root, boundFrame) != OcctAuthoredFrameReadState::Absent
+                || Core3DNormalTextureRecipeForLabel(root) != 1
                 || !Core3DValidateNormalTextureGeometry(root, &bytes)
                 || !AddMultipliedWithinLimit(projectedNormalBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
         }
@@ -3832,6 +3835,11 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                     == OcctGeometryRepresentation::Invalid) {
                 return Standard_False;
             }
+
+            OcctAuthoredFrameRecord sourceFrame;
+            if (Core3DReadAuthoredFrameOwner(myOcafDoc, source, sourceFrame) == OcctAuthoredFrameReadState::Invalid
+                || !AddMultipliedWithinLimit(projectedNormalBytes, sourceFrame.nativeBytes, destinationCount,
+                    64U * 1024U * 1024U)) return Standard_False;
 
             XCAFDoc_VisMaterialPBR sourceMaterial;
             if (TryPBRMaterialForLabel(source, sourceMaterial) && !sourceMaterial.NormalTexture.IsNull()) {
@@ -4717,6 +4725,119 @@ Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
     } catch (...) { return Standard_False; }
 }
 
+namespace {
+// Copy policy compares local stored payload, not positions rounded for rendering.
+// Strip only the outer placement; preserve child placement/orientation and all
+// unused nodes. UV-only sources may have no normals and cannot use SYTG hashing.
+bool SameStoredMeshCopyPayload(TopoDS_Shape source, TopoDS_Shape destination) {
+    source.Location(TopLoc_Location()); destination.Location(TopLoc_Location());
+    TopoDS_Face a, b; Handle(Poly_Triangulation) x, y;
+    if (source.ShapeType() != destination.ShapeType()
+        || source.Orientation() != destination.Orientation()
+        || !TriangleAtlasFace(source, a, x) || !TriangleAtlasFace(destination, b, y)
+        || a.Orientation() != b.Orientation() || !a.Location().IsEqual(b.Location())
+        || x->NbNodes() != y->NbNodes() || x->NbTriangles() != y->NbTriangles()
+        || x->HasNormals() != y->HasNormals() || x->HasUVNodes() != y->HasUVNodes()) return false;
+    const auto same = [](const auto left, const auto right) {
+        return std::memcmp(&left, &right, sizeof(left)) == 0;
+    };
+    for (int n = 1; n <= x->NbNodes(); ++n) {
+        const auto p = x->Node(n), q = y->Node(n);
+        for (int c = 1; c <= 3; ++c) if (!same(p.Coord(c), q.Coord(c))) return false;
+        if (x->HasUVNodes()) {
+            const auto u = x->UVNode(n), v = y->UVNode(n);
+            if (!same(u.X(), v.X()) || !same(u.Y(), v.Y())) return false;
+        }
+        if (x->HasNormals()) {
+            gp_Vec3f u, v; x->Normal(n, u); y->Normal(n, v);
+            for (int c = 0; c < 3; ++c) if (!same(u[c], v[c])) return false;
+        }
+    }
+    for (int t = 1; t <= x->NbTriangles(); ++t) {
+        int u[3], v[3]; x->Triangle(t).Get(u[0], u[1], u[2]); y->Triangle(t).Get(v[0], v[1], v[2]);
+        for (int c = 0; c < 3; ++c) if (u[c] != v[c]) return false;
+    }
+    return true;
+}
+}
+
+Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
+    const TDF_Label& source, const TDF_Label& destination) {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || source.IsNull() || destination.IsNull() || source.IsEqual(destination)) return Standard_False;
+        OcctObjectTransformState before, target;
+        if (!CaptureObjectTransformStateForLabel(source, before)
+            || !CaptureObjectTransformStateForLabel(destination, target)
+            || before.resolvedRepresentation != target.resolvedRepresentation) return Standard_False;
+        OcctAuthoredFrameRecord frame, previousFrame;
+        if (Core3DReadAuthoredFrameOwner(myOcafDoc, source, frame) == OcctAuthoredFrameReadState::Invalid
+            || Core3DReadAuthoredFrameOwner(myOcafDoc, destination, previousFrame) == OcctAuthoredFrameReadState::Invalid)
+            return Standard_False;
+        if (before.meshUVAtlasVersion == 0 && target.meshUVAtlasVersion == 0
+            && frame.archive.empty() && previousFrame.archive.empty()) return Standard_True;
+        if (before.meshUVAtlasVersion != 0 || !frame.archive.empty()) {
+            if (!SameStoredMeshCopyPayload(before.shape, target.shape)) return Standard_False;
+            if (before.meshUVAtlasVersion != 0) {
+                TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+                if (!TriangleAtlasFace(before.shape, face, mesh) || !mesh->HasUVNodes()) return Standard_False;
+                const int originals = mesh->NbNodes() - 3 * mesh->NbTriangles();
+                if (originals <= 0 || originals > 12288
+                    || (before.meshUVAtlasVersion == 2 && before.meshUVAtlasSettings[2] != originals)) return Standard_False;
+                for (int t = 1; t <= mesh->NbTriangles(); ++t) {
+                    int ids[3]; mesh->Triangle(t).Get(ids[0], ids[1], ids[2]);
+                    for (int c = 0; c < 3; ++c) if (ids[c] != originals + (t - 1) * 3 + c + 1) return Standard_False;
+                }
+                if (before.meshUVAtlasVersion == 2) {
+                    OcctMeshUVAtlasPreview preview;
+                    if (!CaptureMeshUVAtlasPreview(source, preview)) return Standard_False;
+                }
+            }
+        }
+        // Charge geometry-owned records even when hidden or mapless. Production
+        // recipe2 admission remains separate; a mapped owner is rejected here.
+        if (!frame.archive.empty() || !previousFrame.archive.empty()) {
+            Standard_Size residentBytes = 0;
+            if (!Core3DValidateAuthoredFrameOwners(myOcafDoc, residentBytes)
+                || previousFrame.nativeBytes > residentBytes) return Standard_False;
+            residentBytes -= previousFrame.nativeBytes;
+            if (!AddMultipliedWithinLimit(residentBytes, frame.nativeBytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
+            TDF_LabelSequence roots;
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+            shapes->GetFreeShapes(roots);
+            if (roots.Length() < 0 || roots.Length() > 50000) return Standard_False;
+            for (int i = 1; i <= roots.Length(); ++i) {
+                const auto& label = roots.Value(i);
+                XCAFDoc_VisMaterialPBR material;
+                if (!TryPBRMaterialForLabel(label, material) || material.NormalTexture.IsNull()) continue;
+                OcctAuthoredFrameRecord boundFrame;
+                const auto state = Core3DReadAuthoredFrameOwner(myOcafDoc, label, boundFrame);
+                Standard_Size bytes = 0;
+                if (state != OcctAuthoredFrameReadState::Absent
+                    || (label.IsEqual(destination) && !frame.archive.empty())
+                    || Core3DNormalTextureRecipeForLabel(label) != 1
+                    || !Core3DValidateNormalTextureGeometry(label, &bytes)
+                    || !AddMultipliedWithinLimit(residentBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
+            }
+        }
+        // Validation is complete before any writes. Caller owns command/abort.
+        if (frame.archive.empty()) destination.ForgetAttribute(core3d::persistence::AuthoredFrameAttributeID());
+        else {
+            const auto bytes = TDataStd_ByteArray::Set(destination, core3d::persistence::AuthoredFrameAttributeID(),
+                0, Standard_Integer(frame.archive.size()) - 1, Standard_False);
+            for (Standard_Size i = 0; i < frame.archive.size(); ++i) bytes->SetValue(Standard_Integer(i), frame.archive[i]);
+        }
+        if (before.meshUVAtlasVersion == 0) destination.ForgetAttribute(MeshUVAtlasAttributeID());
+        else TDataStd_Integer::Set(destination, MeshUVAtlasAttributeID(), before.meshUVAtlasVersion);
+        for (int i = 0; i < 3; ++i) {
+            if (before.meshUVAtlasVersion == 2) TDataStd_Integer::Set(destination, MeshUVAtlasSettingsAttributeID(i), before.meshUVAtlasSettings[i]);
+            else destination.ForgetAttribute(MeshUVAtlasSettingsAttributeID(i));
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::CaptureMeshUVAtlasPreview(
     const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept {
     preview={};
@@ -5482,7 +5603,8 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
     if (shapeTool.IsNull()) return Standard_False;
     TDF_LabelSequence roots; shapeTool->GetFreeShapes(roots);
     if (roots.Length() < 0 || roots.Length() > 50000) return Standard_False;
-    std::size_t normalBytes = 0;
+    Standard_Size normalBytes = 0;
+    if (!Core3DValidateAuthoredFrameOwners(myOcafDoc, normalBytes)) return Standard_False;
     for (int index = 1; index <= roots.Length(); ++index) {
         const auto& root = roots.Value(index);
         const auto update = std::find_if(updates.begin(), updates.end(),
@@ -5491,6 +5613,8 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
         if (update != updates.end()) material = update->material;
         else if (!TryPBRMaterialForLabel(root, material)) continue;
         if (material.NormalTexture.IsNull()) continue;
+        OcctAuthoredFrameRecord frame;
+        if (Core3DReadAuthoredFrameOwner(myOcafDoc, root, frame) != OcctAuthoredFrameReadState::Absent) return Standard_False;
         TopoDS_Face face; Handle(Poly_Triangulation) mesh;
         const auto shape = XCAFDoc_ShapeTool::GetShape(root);
         if (shape.IsNull() || !TriangleAtlasFace(shape, face, mesh)) return Standard_False;
