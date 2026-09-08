@@ -93,6 +93,7 @@
 #include <TopTools_MapOfShape.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <Graphic3d_TextureSet.hxx>
+#include "Core3DDataMapShader.hxx"
 #include <Graphic3d_TextureParams.hxx>
 #include <XCAFPrs_Texture.hxx>
 #include <Image_PixMap.hxx>
@@ -153,6 +154,9 @@ Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
     // XCAFDoc_VisMaterial::FillAspect() deliberately does not clear an
     // existing texture set when the new material has no maps. Reset both the
     // enable bit and the owning handle before every full material transition.
+    if (IsCore3DDataMapShader(aShading->Aspect()->ShaderProgram())) {
+        aShading->Aspect()->SetShaderProgram({});
+    }
     aShading->Aspect()->SetTextureMapOff();
     aShading->Aspect()->SetTextureSet(
         Handle(Graphic3d_TextureSet)());
@@ -2890,7 +2894,12 @@ Standard_Boolean Core3DAccumulateEmbeddedTextureBudget(
 void Core3DPrepareRendererTextures(
     const Handle(Graphic3d_AspectFillArea3d)& aspect)
 {
-    if (aspect.IsNull() || aspect->TextureSet().IsNull()) return;
+    if (aspect.IsNull()) return;
+    const bool ownsShader = IsCore3DDataMapShader(aspect->ShaderProgram());
+    if (aspect->TextureSet().IsNull() || aspect->TextureSet()->IsEmpty()) {
+        if (ownsShader) aspect->SetShaderProgram({});
+        return;
+    }
     const Handle(Graphic3d_TextureSet)& original = aspect->TextureSet();
     if (original->IsEmpty()) return;
     Handle(Graphic3d_TextureSet) replacement = new Graphic3d_TextureSet(original->Size());
@@ -2906,6 +2915,23 @@ void Core3DPrepareRendererTextures(
         changed = true;
     }
     if (changed) aspect->SetTextureSet(replacement);
+    Standard_Integer bits = 0;
+    for (Standard_Integer i = 0; i < replacement->Size(); ++i) {
+        const auto& texture = replacement->Value(i);
+        if (texture.IsNull() || texture->GetParams().IsNull()) continue;
+        const auto unit = texture->GetParams()->TextureUnit();
+        if (unit >= Graphic3d_TextureUnit_BaseColor && unit <= Graphic3d_TextureUnit_MetallicRoughness) {
+            bits |= (1 << static_cast<int>(unit));
+        }
+    }
+    const bool hasDataMaps = (bits & (Graphic3d_TextureSetBits_MetallicRoughness | Graphic3d_TextureSetBits_Occlusion)) != 0;
+    if (hasDataMaps && (ownsShader || aspect->ShaderProgram().IsNull())) {
+        if (!ownsShader || aspect->ShaderProgram()->TextureSetBits() != bits) {
+            aspect->SetShaderProgram(MakeCore3DDataMapShader(bits));
+        }
+    } else if (ownsShader) {
+        aspect->SetShaderProgram({});
+    }
 }
 
 Handle(Image_Texture)& Core3DMaterialTexture(XCAFDoc_VisMaterialPBR& material,
