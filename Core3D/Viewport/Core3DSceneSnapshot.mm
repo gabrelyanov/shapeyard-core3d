@@ -22,6 +22,10 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDataStd_Integer.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TopoDS_Compound.hxx>
+#include <XCAFDoc_ColorTool.hxx>
 #include <Message.hxx>
 #include <sstream>
 #endif
@@ -499,6 +503,116 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
 }
 #endif
 #if DEBUG
++ (NSDictionary<NSString *, id> *)debugFrameOwner:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode {
+    if (mode < 0 || mode > 30 || ![NSThread isMainThread]) return @{@"error": @"Undefined frame-owner fixture"};
+    try {
+        using namespace core3d::persistence;
+        struct PrivateDocument {
+            Handle(TDocStd_Application) app = new TDocStd_Application();
+            Handle(TDocStd_Document) document;
+            ~PrivateDocument() noexcept { try { if (!document.IsNull()) app->Close(document); } catch (...) {} }
+        } owner;
+        Core3DDefineSafeBinXCAFFormat(owner.app);
+        owner.app->NewDocument(TCollection_ExtendedString("BinXCAF"), owner.document);
+        owner.document->SetUndoLimit(20);
+        XCAFDoc_DocumentTool::SetLengthUnit(owner.document, mode == 5 ? 1.0 : 0.001);
+        OcctDocument wrapper; wrapper.ChangeDocument() = owner.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner.document->Main());
+        auto fixture = Core3DMakeAuthoredGeometryFixture(mode == 15 ? 2 : mode == 26 ? 4 : mode == 27 ? 1 : 0);
+        if (mode == 17) fixture.Reverse();
+        if (mode == 16) { gp_Trsf move; move.SetTranslation(gp_Vec(1,2,3)); fixture.Location(TopLoc_Location(move)); }
+        TopoDS_Shape shape = fixture;
+        if (mode == 1 || mode == 3 || mode == 16) {
+            BRep_Builder builder; TopoDS_Compound compound; builder.MakeCompound(compound); builder.Add(compound, fixture); shape = compound;
+        }
+        if (mode == 2 || mode == 3) { gp_Trsf move; move.SetTranslation(gp_Vec(2,3,4)); shape.Location(TopLoc_Location(move)); }
+        auto unplaced = shape; unplaced.Location(TopLoc_Location());
+        const auto label = shapes->AddShape(unplaced, Standard_False);
+        if (label.IsNull()) Standard_Failure::Raise("No frame-owner definition.");
+        if (!shape.Location().IsIdentity()) shapes->SetShape(label, shape);
+        TDF_Label second;
+        if (mode == 20 || mode == 21) second = shapes->AddShape(Core3DMakeAuthoredGeometryFixture(0), Standard_False);
+        owner.document->NewCommand();
+        if (!wrapper.SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh))
+            Standard_Failure::Raise("Could not mark fixture mesh.");
+        if (!second.IsNull() && !wrapper.SetGeometryRepresentationForLabel(second, OcctGeometryRepresentation::TriangleMesh))
+            Standard_Failure::Raise("Could not mark second fixture mesh.");
+        owner.document->CommitCommand(); owner.document->ClearUndos();
+        if (!wrapper.MigrateLegacyIdentifiers(owner.document)) Standard_Failure::Raise("Fixture identity migration failed.");
+        if (mode == 4) label.ForgetAttribute(Standard_GUID("67E669F4-00C0-4C45-BC55-9CC5DA22A2B5"));
+        auto assign = [&](const TDF_Label& target, NSData* value, bool defaultID = false) {
+            const int first = mode == 18 ? 1 : 0;
+            const auto array = TDataStd_ByteArray::Set(target,
+                defaultID ? TDataStd_ByteArray::GetID() : mode == 29 ? Standard_GUID("1BF816B1-BDFA-488D-B209-C06851D26C18") : AuthoredFrameAttributeID(),
+                first, first + int(value.length) - 1, mode == 19);
+            const auto* input = static_cast<const std::uint8_t*>(value.bytes);
+            for (NSUInteger i = 0; i < value.length; ++i) array->SetValue(first + int(i), input[i]);
+        };
+        TDF_Label frameLabel = label;
+        if (mode == 7) frameLabel = owner.document->GetData()->Root();
+        if (mode == 8) frameLabel = owner.document->Main();
+        if (mode == 9) frameLabel = label.FindChild(91, Standard_True);
+        if (mode == 10) shapes->RemoveShape(label, Standard_True);
+        if (mode == 11) {
+            const auto assembly = shapes->NewShape();
+            frameLabel = shapes->AddComponent(assembly, label, TopLoc_Location());
+            if (frameLabel.IsNull()) Standard_Failure::Raise("No reference fixture label.");
+        }
+        if (mode == 28) XCAFDoc_DocumentTool::ColorTool(owner.document->Main())->SetVisibility(label, Standard_False);
+        NSMutableData* input = [archive mutableCopy];
+        if (mode == 14 && input.length) static_cast<std::uint8_t*>(input.mutableBytes)[input.length - 1] ^= 1;
+        owner.document->NewCommand();
+        if (mode == 12) TDataStd_Integer::Set(frameLabel, AuthoredFrameAttributeID(), 1);
+        else if (mode != 22) assign(frameLabel, input, mode == 13);
+        if (!second.IsNull()) assign(second, archive);
+        if (mode == 23) assign(owner.document->GetData()->Root(), archive, true);
+        if (mode == 24) TDataStd_Integer::Set(owner.document->GetData()->Root(), AuthoredFrameAttributeID(), 1);
+        owner.document->CommitCommand();
+        auto countLabels = [&]() { int count = 0; for (TDF_ChildIterator it(owner.document->GetData()->Root(), Standard_True); it.More(); it.Next()) ++count; return count; };
+        const int beforeTime = owner.document->GetData()->Time(), beforeLabels = countLabels();
+        const int beforeUndo = owner.document->GetAvailableUndos(), beforeRedo = owner.document->GetAvailableRedos();
+        Handle(TDocStd_Document) foreign = new TDocStd_Document(TCollection_ExtendedString("BinXCAF"));
+        const auto readLabel = mode == 6 ? foreign->Main() : frameLabel;
+        OcctAuthoredFrameRecord record; record.archive = {42}; record.identity.fill(42); record.nativeBytes = 777; record.cornerCount = 99;
+        const auto state = Core3DReadAuthoredFrameOwner(owner.document, readLabel, record);
+        Standard_Size documentBytes = 777;
+        const Standard_Size limit = mode == 20 ? 640 : mode == 21 ? 639 : mode == 22 ? 0 : mode == 25 ? 64U * 1024U * 1024U + 1U : 64U * 1024U * 1024U;
+        const bool validDocument = Core3DValidateAuthoredFrameOwners(owner.document, documentBytes, limit);
+        OcctObjectTransformState snapshot;
+        const bool captured = wrapper.CaptureObjectTransformStateForLabel(readLabel, snapshot);
+        NSMutableDictionary* result = [@{@"readState": @(int(state)), @"archive": [NSData dataWithBytes:record.archive.data() length:record.archive.size()],
+            @"identity": [NSData dataWithBytes:record.identity.data() length:record.identity.size()], @"cornerCount": @(record.cornerCount), @"nativeBytes": @(record.nativeBytes),
+            @"documentAccepted": @(validDocument), @"documentNativeBytes": @(documentBytes), @"captureAccepted": @(captured),
+            @"snapshotPresent": @(snapshot.authoredFramesPresent), @"snapshotIdentity": [NSData dataWithBytes:snapshot.authoredFramesIdentity.data() length:snapshot.authoredFramesIdentity.size()],
+            @"readOnly": @(beforeTime == owner.document->GetData()->Time() && beforeLabels == countLabels()
+                && beforeUndo == owner.document->GetAvailableUndos() && beforeRedo == owner.document->GetAvailableRedos())} mutableCopy];
+        if (mode == 30) {
+            if (!captured || state != OcctAuthoredFrameReadState::Authored) Standard_Failure::Raise("Missing initial edit state.");
+            auto capture = [&]() { OcctObjectTransformState value; if (!wrapper.CaptureObjectTransformStateForLabel(label, value)) Standard_Failure::Raise("Frame edit state capture failed."); return value; };
+            owner.document->NewCommand(); assign(label, replacement);
+            if (!owner.document->CommitCommand()) Standard_Failure::Raise("No frame replacement delta.");
+            const auto changed = capture();
+            result[@"replacementInvalidatesOriginal"] = @(!snapshot.IsEqual(changed));
+            result[@"originalSnapshotUnchanged"] = @(snapshot.authoredFramesIdentity == record.identity);
+            if (!owner.document->Undo()) Standard_Failure::Raise("Frame edit undo failed.");
+            result[@"undoRestoresOriginal"] = @(snapshot.IsEqual(capture()));
+            if (!owner.document->Redo()) Standard_Failure::Raise("Frame edit redo failed.");
+            result[@"redoRestoresReplacement"] = @(changed.IsEqual(capture()));
+            owner.document->NewCommand(); assign(label, archive); owner.document->AbortCommand();
+            result[@"abortRestoresReplacement"] = @(changed.IsEqual(capture()));
+            owner.document->NewCommand(); label.ForgetAttribute(AuthoredFrameAttributeID());
+            if (!owner.document->CommitCommand()) Standard_Failure::Raise("No frame removal delta.");
+            const auto absent = capture();
+            result[@"removalInvalidatesReplacement"] = @(!absent.authoredFramesPresent && !changed.IsEqual(absent));
+            if (!owner.document->Undo()) Standard_Failure::Raise("Frame removal undo failed.");
+            result[@"removalUndoRestoresReplacement"] = @(changed.IsEqual(capture()));
+        }
+        return result;
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (...) { return @{@"error": @"Frame-owner fixture failed"}; }
+}
+
 + (NSDictionary<NSString *, id> *)debugFrameDocument:(NSData *)archive
                                        replacement:(NSData *)replacement mode:(NSInteger)mode {
     using namespace core3d::persistence;

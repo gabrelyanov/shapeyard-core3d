@@ -1,6 +1,7 @@
 #pragma once
 // Isolated prototype; not registered in any production document format.
 #include "../Scene/AuthoredTangentArchive.hpp"
+#include "AuthoredFrameAttributeID.hxx"
 #include <BinMDataStd_ByteArrayDriver.hxx>
 #include <BinObjMgt_Persistent.hxx>
 #include <BinObjMgt_RRelocationTable.hxx>
@@ -14,10 +15,6 @@
 
 namespace core3d::persistence {
 
-// Reserved in persistent-driver-design.md; not yet used by any production record.
-inline const Standard_GUID& AuthoredFrameAttributeID() {
-    static const Standard_GUID id("7AE0E058-6ABE-4561-AD01-8A1ECE250D36"); return id;
-}
 struct AuthoredFrameReadBudget {
     std::size_t bytes = 0;
     std::size_t limit = 64 * 1024 * 1024;

@@ -87,6 +87,8 @@ struct OcctObjectTransformState
     std::string definitionIdentifier;
     Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 triangle grid, 2 coherent planar atlas
     std::array<Standard_Integer, 3> meshUVAtlasSettings = {}; // resolution, gutter, original-node prefix; v2 only
+    Standard_Boolean authoredFramesPresent = Standard_False;
+    std::array<Standard_Byte, 32> authoredFramesIdentity = {}; // validated immutable archive digest
     OcctGeometryRepresentation storedRepresentation = OcctGeometryRepresentation::Invalid;
     OcctGeometryRepresentation resolvedRepresentation = OcctGeometryRepresentation::Invalid;
 
@@ -270,6 +272,26 @@ Standard_EXPORT Standard_Boolean Core3DValidateNormalTextureGeometry(
 //! Persisted owned-normal recipe: 0 absent, 1 pinned Mikk v1, -1 invalid/unknown.
 Standard_EXPORT Standard_Integer Core3DNormalTextureRecipeForLabel(
     const TDF_Label& label) noexcept;
+
+enum class OcctAuthoredFrameReadState { Invalid = -1, Absent = 0, Authored = 1 };
+struct OcctAuthoredFrameRecord {
+    std::vector<Standard_Byte> archive;
+    std::array<Standard_Byte, 32> identity = {};
+    Standard_Size cornerCount = 0;
+    Standard_Size nativeBytes = 0; // retained archive plus 64 bytes per expanded corner
+};
+//! Read-only local mesh ownership and exact geometry association. Clears output
+//! on absence/failure; never returns a mutable OCAF attribute to an edit lease.
+Standard_EXPORT OcctAuthoredFrameReadState Core3DReadAuthoredFrameOwner(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    OcctAuthoredFrameRecord& record) noexcept;
+//! Scans every label, including hidden/unbound/orphan records and foreign arrays.
+//! This validates frame ownership, not the rest of the document schema. Callers
+//! must combine it with their existing geometry/material admission and budgets.
+//! A smaller cap supports exact-limit checks; a cap above 64 MiB is rejected.
+Standard_EXPORT Standard_Boolean Core3DValidateAuthoredFrameOwners(
+    const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
+    Standard_Size maximumBytes = 64U * 1024U * 1024U) noexcept;
 enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occlusion, Normal };
 Standard_EXPORT Handle(Image_Texture)& Core3DMaterialTexture(
     XCAFDoc_VisMaterialPBR& material, OcctMaterialTextureSlot slot);

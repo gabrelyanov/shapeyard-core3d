@@ -830,6 +830,14 @@ bool ValidateVisualMaterials(
         return false;
     }
 
+    Standard_Size authoredFrameBytes = 0;
+    if (!Core3DValidateAuthoredFrameOwners(document, authoredFrameBytes)
+        || authoredFrameBytes != 0) {
+        // Persistent supplied bases remain gated until native/Metal publication
+        // and editing/copy paths consume them. Never save a silently lost basis.
+        return false;
+    }
+
     Handle(XCAFDoc_VisMaterialTool) materialTool;
     if (XCAFDoc_DocumentTool::CheckVisMaterialTool(document->Main())) {
         materialTool = XCAFDoc_DocumentTool::VisMaterialTool(

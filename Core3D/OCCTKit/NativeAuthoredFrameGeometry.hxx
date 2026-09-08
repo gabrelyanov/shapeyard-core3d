@@ -1,5 +1,5 @@
 #pragma once
-// Private geometry association foundation; not used by document admission.
+// Exact local geometry association for native authored-frame ownership.
 #include "../Scene/AuthoredTangentArchive.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include <BRep_Tool.hxx>

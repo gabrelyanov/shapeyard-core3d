@@ -31,6 +31,10 @@
 #import <CommonCrypto/CommonDigest.h>
 
 #include "OcctDocument.h"
+#include "AuthoredFrameAttributeID.hxx"
+#include "NativeAuthoredFrameGeometry.hxx"
+#include <TDataStd_ByteArray.hxx>
+#include <TDF_AttributeIterator.hxx>
 #if DEBUG
 #include "Core3DBoundedAuthoredFrameDriver.hxx"
 #endif
@@ -4568,6 +4572,85 @@ Standard_Integer Core3DNormalTextureRecipeForLabel(const TDF_Label& label) noexc
     } catch (...) { return -1; }
 }
 
+OcctAuthoredFrameReadState Core3DReadAuthoredFrameOwner(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    OcctAuthoredFrameRecord& record) noexcept {
+    record = {};
+    try {
+        using namespace core3d::persistence;
+        using namespace core3d::scene::authored;
+        if (document.IsNull() || document->GetData().IsNull() || label.IsNull()
+            || label.Data() != document->GetData()) return OcctAuthoredFrameReadState::Invalid;
+        Handle(TDF_Attribute) attribute;
+        if (!label.FindAttribute(AuthoredFrameAttributeID(), attribute)) return OcctAuthoredFrameReadState::Absent;
+        const auto bytes = Handle(TDataStd_ByteArray)::DownCast(attribute);
+        if (bytes.IsNull() || bytes->Lower() != 0 || bytes->Upper() < 127
+            || bytes->Upper() >= Standard_Integer(kMaximumArchiveBytes) || bytes->GetDelta()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) return OcctAuthoredFrameReadState::Invalid;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (!IsGeometryDefinitionLabel(document, shapes, label) || !shapes->IsTopLevel(label)
+            || !XCAFDoc_ShapeTool::IsFree(label)
+            || ValidatedGeometryRepresentation(document, shapes, label) != OcctGeometryRepresentation::TriangleMesh)
+            return OcctAuthoredFrameReadState::Invalid;
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, unit) || unit != 0.001)
+            return OcctAuthoredFrameReadState::Invalid;
+        // Validate the placed definition above, then remove only its outer
+        // placement. Child orientation/location remain part of the contract.
+        auto local = XCAFDoc_ShapeTool::GetShape(label);
+        local.Location(TopLoc_Location());
+        TopoDS_Face face;
+        if (local.ShapeType() == TopAbs_FACE) face = TopoDS::Face(local);
+        else if (local.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator children(local);
+            if (!children.More() || children.Value().ShapeType() != TopAbs_FACE)
+                return OcctAuthoredFrameReadState::Invalid;
+            face = TopoDS::Face(children.Value());
+            children.Next(); if (children.More()) return OcctAuthoredFrameReadState::Invalid;
+        } else return OcctAuthoredFrameReadState::Invalid;
+        OcctAuthoredFrameRecord result;
+        result.archive.resize(Standard_Size(bytes->Upper()) + 1);
+        for (Standard_Integer i = 0; i <= bytes->Upper(); ++i) result.archive[Standard_Size(i)] = bytes->Value(i);
+        std::vector<core3d::scene::Float4> frames;
+        if (!DecodeNativeAuthoredFrames(face, result.archive.data(), result.archive.size(), frames))
+            return OcctAuthoredFrameReadState::Invalid;
+        result.cornerCount = frames.size();
+        result.nativeBytes = result.archive.size() + result.cornerCount * 64U;
+        std::copy(result.archive.end() - kDigestBytes, result.archive.end(), result.identity.begin());
+        record = std::move(result);
+        return OcctAuthoredFrameReadState::Authored;
+    } catch (...) { record = {}; return OcctAuthoredFrameReadState::Invalid; }
+}
+
+Standard_Boolean Core3DValidateAuthoredFrameOwners(
+    const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
+    Standard_Size maximumBytes) noexcept {
+    nativeBytes = 0;
+    try {
+        if (document.IsNull() || document->GetData().IsNull() || maximumBytes > 64U * 1024U * 1024U)
+            return Standard_False;
+        Standard_Size total = 0;
+        auto validate = [&](const TDF_Label& label) {
+            for (TDF_AttributeIterator it(label); it.More(); it.Next()) {
+                const auto& attribute = it.Value();
+                if (!Handle(TDataStd_ByteArray)::DownCast(attribute).IsNull()
+                    && attribute->ID() != core3d::persistence::AuthoredFrameAttributeID()) return false;
+            }
+            OcctAuthoredFrameRecord record;
+            if (Core3DReadAuthoredFrameOwner(document, label, record) == OcctAuthoredFrameReadState::Invalid)
+                return false;
+            return AddMultipliedWithinLimit(total, record.nativeBytes, 1U, maximumBytes);
+        };
+        const auto root = document->GetData()->Root();
+        if (!validate(root)) return Standard_False;
+        Standard_Size count = 0;
+        for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
+            if (++count > kMaximumGeometryDocumentLabels || !validate(it.Value())) return Standard_False;
+        }
+        nativeBytes = total; return Standard_True;
+    } catch (...) { nativeBytes = 0; return Standard_False; }
+}
+
 Standard_Boolean Core3DValidateNormalTextureGeometry(
     const TDF_Label& label, Standard_Size* requiredNativeBytes) noexcept {
     if (requiredNativeBytes != nullptr) *requiredNativeBytes = 0;
@@ -6543,6 +6626,8 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && resolvedRepresentation == other.resolvedRepresentation
             && meshUVAtlasVersion == other.meshUVAtlasVersion
             && meshUVAtlasSettings == other.meshUVAtlasSettings
+            && authoredFramesPresent == other.authoredFramesPresent
+            && authoredFramesIdentity == other.authoredFramesIdentity
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -6569,6 +6654,11 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         captured.definitionIdentifier = DefinitionIdentifierForLabel(label);
         captured.storedRepresentation = StoredGeometryRepresentationForLabel(label);
         captured.resolvedRepresentation = GeometryRepresentationForLabel(label);
+        OcctAuthoredFrameRecord frames;
+        const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
+        if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;
+        captured.authoredFramesPresent = frameState == OcctAuthoredFrameReadState::Authored;
+        captured.authoredFramesIdentity = frames.identity;
         Handle(TDF_Attribute) atlasAttribute;
         if (label.FindAttribute(MeshUVAtlasAttributeID(), atlasAttribute)) {
             const auto version = Handle(TDataStd_Integer)::DownCast(atlasAttribute);
