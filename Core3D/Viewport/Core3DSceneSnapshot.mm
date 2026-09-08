@@ -19,6 +19,11 @@
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/NativeTransactionObserverProbe.hxx"
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
+#include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepTools.hxx>
 #include "../Import/Core3DGLBReader.hpp"
 #include <Message_ProgressRange.hxx>
 #include <cstdio>
@@ -693,6 +698,122 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& e) {
         return @{@"error": [NSString stringWithUTF8String:e.GetMessageString() ?: "Private primitive probe failure"]};
     } catch (...) { return @{@"error": @"Private primitive ownership probe failed"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugCurrentTessellationMeshCopy:(NSInteger)mode {
+    if (![NSThread isMainThread]) return @{@"error":@"Main thread required"};
+    using namespace core3d::meshcopy;
+    try {
+        TopoDS_Shape source = BRepPrimAPI_MakeBox(20,30,40).Shape();
+        if (mode == 1) {
+            source = BRepAlgoAPI_Cut(
+                BRepPrimAPI_MakeBox(gp_Pnt(-60,-40,0),120,80,40).Shape(),
+                BRepPrimAPI_MakeBox(gp_Pnt(-58,-38,2),116,76,38).Shape()).Shape();
+        }
+        if (source.IsNull()) return @{@"error":@"Fixture construction failed"};
+        BRepMesh_IncrementalMesh mesher(source,0.1,false,0.5,false);
+        if (!mesher.IsDone()) return @{@"error":@"Fixture tessellation failed"};
+        if (mode == 2) {
+            gp_Trsf tr; tr.SetTranslation(gp_Vec(71,-19,23));
+            source.Location(TopLoc_Location(tr));
+        } else if (mode == 3) {
+            gp_Trsf tr; tr.SetMirror(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(1,0,0)));
+            // Adversarial private fixture: default TopoDS setter forbids reflection.
+            source.Location(TopLoc_Location(tr),Standard_False);
+        } else if (mode == 4) source.Reverse();
+        const auto firstFace = TopoDS::Face(TopExp_Explorer(source,TopAbs_FACE).Current());
+        TopLoc_Location firstLocation;
+        auto firstMesh = BRep_Tool::Triangulation(firstFace,firstLocation);
+        if (firstMesh.IsNull()) return @{@"error":@"Fixture has no first mesh"};
+        if (mode == 5) BRepTools::Clean(source);
+        else if (mode == 6) firstMesh->SetNode(1,gp_Pnt(std::numeric_limits<double>::quiet_NaN(),0,0));
+        else if (mode == 7) firstMesh->SetTriangle(1,Poly_Triangle(1,1,1));
+        else if (mode == 8) {
+            Handle(Poly_Triangulation) large = new Poly_Triangulation(3,4097,false);
+            large->SetNode(1,gp_Pnt(0,0,0)); large->SetNode(2,gp_Pnt(1,0,0)); large->SetNode(3,gp_Pnt(0,1,0));
+            for (int t=1;t<=4097;++t) large->SetTriangle(t,Poly_Triangle(1,2,3));
+            BRep_Builder().UpdateFace(firstFace,large);
+        } else if (mode == 9) {
+            Handle(Poly_Triangulation) invalid = new Poly_Triangulation(4,1,false);
+            invalid->SetNode(1,gp_Pnt(0,0,0)); invalid->SetNode(2,gp_Pnt(1,0,0)); invalid->SetNode(3,gp_Pnt(0,1,0));
+            invalid->SetNode(4,gp_Pnt(0,std::numeric_limits<double>::infinity(),0));
+            invalid->SetTriangle(1,Poly_Triangle(1,2,3)); BRep_Builder().UpdateFace(firstFace,invalid);
+        }
+        else if (mode == 11) {
+            Handle(Poly_Triangulation) large = new Poly_Triangulation(12289,1,false);
+            for (int n=1;n<=12289;++n) large->SetNode(n,gp_Pnt(n%2,n%3,0));
+            large->SetTriangle(1,Poly_Triangle(1,2,3)); BRep_Builder().UpdateFace(firstFace,large);
+        } else if (mode == 12) firstMesh->SetTriangle(1,Poly_Triangle(0,2,3));
+        else if (mode == 13) firstMesh->SetNode(1,gp_Pnt(1000001,0,0));
+        // Capture actual source handles and exact stored node/triangle bytes,
+        // including NaN payloads in rejected inputs, without serializing copies.
+        struct MeshProof {
+            TopoDS_Face face; Handle(Poly_Triangulation) mesh; TopLoc_Location location;
+            std::vector<std::array<double,3>> nodes;
+            std::vector<std::array<int,3>> triangles;
+        };
+        std::vector<MeshProof> proof;
+        for (TopExp_Explorer it(source,TopAbs_FACE);it.More();it.Next()) {
+            MeshProof p; p.face=TopoDS::Face(it.Current()); p.mesh=BRep_Tool::Triangulation(p.face,p.location);
+            if (!p.mesh.IsNull()) {
+                for (int n=1;n<=p.mesh->NbNodes();++n) {
+                    const auto point=p.mesh->Node(n);p.nodes.push_back({point.X(),point.Y(),point.Z()});
+                }
+                for (int t=1;t<=p.mesh->NbTriangles();++t) {
+                    std::array<int,3> ids; p.mesh->Triangle(t).Get(ids[0],ids[1],ids[2]); p.triangles.push_back(ids);
+                }
+            }
+            proof.push_back(std::move(p));
+        }
+        std::atomic_bool cancelled(mode==10);
+        CurrentTessellationCopy copy;
+        copy.face=firstFace;copy.triangles=99; // Reject paths must clear a prior output too.
+        const auto result=PrepareCurrentTessellationCopy(source,copy,cancelled);
+        bool unchanged=true,independent=true;
+        for (const auto& p:proof) {
+            TopLoc_Location location; const auto mesh=BRep_Tool::Triangulation(p.face,location);
+            unchanged &= mesh==p.mesh && location.IsEqual(p.location);
+            if (mesh.IsNull()) continue;
+            unchanged &= mesh->NbNodes()==p.nodes.size() && mesh->NbTriangles()==p.triangles.size();
+            for (int n=1;n<=mesh->NbNodes();++n) {
+                const auto point=mesh->Node(n);const std::array<double,3> now={point.X(),point.Y(),point.Z()};
+                unchanged &= std::memcmp(now.data(),p.nodes[n-1].data(),sizeof(double)*3)==0;
+            }
+            for (int t=1;t<=mesh->NbTriangles();++t) {
+                std::array<int,3> ids;mesh->Triangle(t).Get(ids[0],ids[1],ids[2]); unchanged &= ids==p.triangles[t-1];
+            }
+        }
+        NSMutableDictionary* report=[@{@"result":@(int(result)),@"sourceUnchanged":@(unchanged),
+            @"outputEmpty":@(copy.face.IsNull()),@"sourceFaces":@(copy.sourceFaces),@"triangles":@(copy.triangles)} mutableCopy];
+        if (result!=PreparationResult::Ready) return report;
+        TopLoc_Location location; const auto mesh=BRep_Tool::Triangulation(copy.face,location);
+        if (mesh.IsNull()) return @{@"error":@"Ready output has no triangulation"};
+        for (const auto& p:proof) independent &= p.mesh!=mesh;
+        std::array<double,6> bounds={INFINITY,INFINITY,INFINITY,-INFINITY,-INFINITY,-INFINITY};
+        double volume=0;bool normals=true,corners=true;
+        for (int t=1;t<=mesh->NbTriangles();++t) {
+            int a,b,c;mesh->Triangle(t).Get(a,b,c);corners &= a==3*t-2 && b==3*t-1 && c==3*t;
+            const auto p=mesh->Node(a),q=mesh->Node(b),r=mesh->Node(c);
+            volume+=gp_Vec(p.XYZ()).Dot(gp_Vec(q.XYZ()).Crossed(gp_Vec(r.XYZ())))/6;
+            const gp_Dir normal(gp_Vec(p,q).Crossed(gp_Vec(p,r)));
+            for (int n:{a,b,c}) {
+                const auto point=mesh->Node(n);
+                for(int axis=0;axis<3;++axis) {
+                    bounds[axis]=std::min(bounds[axis],point.Coord(axis+1));
+                    bounds[axis+3]=std::max(bounds[axis+3],point.Coord(axis+1));
+                }
+                normals &= mesh->HasNormals() && mesh->Normal(n).Dot(normal)>1-1e-6;
+            }
+        }
+        NSMutableArray* boundArray=[NSMutableArray array];for (double x:bounds) [boundArray addObject:@(x)];
+        report[@"bounds"]=boundArray;report[@"signedVolume"]=@(volume);report[@"independentMesh"]=@(independent);
+        report[@"flatNormalsAgree"]=@(normals);report[@"independentCorners"]=@(corners);
+        report[@"nodes"]=@(mesh->NbNodes());report[@"hasUV"]=@(mesh->HasUVNodes());
+        report[@"meshOnly"]=@(BRep_Tool::Surface(copy.face).IsNull());
+        return report;
+    } catch (const Standard_Failure& e) {
+        return @{@"error":[NSString stringWithUTF8String:e.GetMessageString() ?: "Mesh copy probe failed"]};
+    } catch (...) {return @{@"error":@"Mesh copy probe failed"};}
 }
 
 + (NSDictionary<NSString *, id> *)debugLiveTransactionProbeLifecycle {

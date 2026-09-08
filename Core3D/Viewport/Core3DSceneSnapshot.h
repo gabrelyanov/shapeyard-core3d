@@ -66,6 +66,7 @@ CORE3D_SCENE_FINAL_CLASS
 + (NSDictionary<NSString *, id> *)debugTransactionObserver NS_SWIFT_NAME(debugTransactionObserver());
 // Exercises actual OcctDocument reset, bounded observation, and thread rejection.
 + (NSDictionary<NSString *, id> *)debugLiveTransactionProbeLifecycle NS_SWIFT_NAME(debugLiveTransactionProbeLifecycle());
++ (NSDictionary<NSString *, id> *)debugCurrentTessellationMeshCopy:(NSInteger)mode NS_SWIFT_NAME(debugCurrentTessellationMeshCopy(_:));
 + (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameUVEdit(_:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
