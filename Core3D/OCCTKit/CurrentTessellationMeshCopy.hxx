@@ -9,6 +9,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <gp_Vec.hxx>
 #include <algorithm>
 #include <atomic>
@@ -39,10 +40,23 @@ inline PreparationResult PrepareCurrentTessellationCopy(
     struct FaceSource { Handle(Poly_Triangulation) mesh; gp_Trsf location; bool reverse=false; };
     try {
         if (cancelled.load(std::memory_order_relaxed)) return PreparationResult::Cancelled;
-        if (source.IsNull() || source.ShapeType()!=TopAbs_SOLID) return PreparationResult::Unsupported;
+        if (source.IsNull()) return PreparationResult::Unsupported;
+        // Boolean results may wrap a single solid. Unwrap only an exact chain
+        // of one-child compounds, preserving cumulative location/orientation.
+        // Never flatten a mixed compound or silently choose one of many solids.
+        TopoDS_Shape solid=source;int wrapperDepth=0;
+        while (solid.ShapeType()==TopAbs_COMPOUND) {
+            if (++wrapperDepth>8) return PreparationResult::TooLarge;
+            TopoDS_Iterator child(solid,Standard_True,Standard_True);
+            if (!child.More()) return PreparationResult::Unsupported;
+            const auto only=child.Value();child.Next();
+            if (child.More() || only.IsNull()) return PreparationResult::Unsupported;
+            solid=only;
+        }
+        if (solid.ShapeType()!=TopAbs_SOLID) return PreparationResult::Unsupported;
         std::vector<FaceSource> faces;faces.reserve(maxFaces);
         int triangles=0,nodes=0;double deflection=0;
-        for (TopExp_Explorer it(source,TopAbs_FACE);it.More();it.Next()) {
+        for (TopExp_Explorer it(solid,TopAbs_FACE);it.More();it.Next()) {
             if (cancelled.load(std::memory_order_relaxed)) return PreparationResult::Cancelled;
             if (faces.size()==maxFaces) return PreparationResult::TooLarge;
             const auto face=TopoDS::Face(it.Current());

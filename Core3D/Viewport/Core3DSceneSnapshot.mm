@@ -745,6 +745,19 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
             large->SetTriangle(1,Poly_Triangle(1,2,3)); BRep_Builder().UpdateFace(firstFace,large);
         } else if (mode == 12) firstMesh->SetTriangle(1,Poly_Triangle(0,2,3));
         else if (mode == 13) firstMesh->SetNode(1,gp_Pnt(1000001,0,0));
+        if (mode>=14 && mode<=18) {
+            const int depth=mode==17?9:1;
+            for (int i=0;i<depth;++i) {
+                TopoDS_Compound wrapper;BRep_Builder builder;builder.MakeCompound(wrapper);
+                if (mode!=18) builder.Add(wrapper,source);
+                if (mode==15) {
+                    gp_Trsf tr;tr.SetTranslation(gp_Vec(100,0,0));
+                    builder.Add(wrapper,source.Located(TopLoc_Location(tr)));
+                }
+                if (mode==16) builder.Add(wrapper,firstFace);
+                source=wrapper;
+            }
+        }
         // Capture actual source handles and exact stored node/triangle bytes,
         // including NaN payloads in rejected inputs, without serializing copies.
         struct MeshProof {
@@ -784,7 +797,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
             }
         }
         NSMutableDictionary* report=[@{@"result":@(int(result)),@"sourceUnchanged":@(unchanged),
-            @"outputEmpty":@(copy.face.IsNull()),@"sourceFaces":@(copy.sourceFaces),@"triangles":@(copy.triangles)} mutableCopy];
+            @"sourceKind":@(int(source.ShapeType())),@"outputEmpty":@(copy.face.IsNull()),@"sourceFaces":@(copy.sourceFaces),@"triangles":@(copy.triangles)} mutableCopy];
         if (result!=PreparationResult::Ready) return report;
         TopLoc_Location location; const auto mesh=BRep_Tool::Triangulation(copy.face,location);
         if (mesh.IsNull()) return @{@"error":@"Ready output has no triangulation"};
