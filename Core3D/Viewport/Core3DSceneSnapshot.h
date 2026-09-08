@@ -54,6 +54,8 @@ CORE3D_SCENE_FINAL_CLASS
                                                       mode:(NSInteger)mode
                                                     budget:(NSUInteger)limit
     NS_SWIFT_NAME(debugPersistentFrameRecord(_:mode:budget:));
++ (NSDictionary<NSString *, id> *)debugAuthoredGeometryIdentity:(NSInteger)mode
+    NS_SWIFT_NAME(debugAuthoredGeometryIdentity(_:));
 #endif
 @end
 

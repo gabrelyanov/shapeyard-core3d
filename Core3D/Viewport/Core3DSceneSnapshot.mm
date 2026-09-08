@@ -15,6 +15,12 @@
 #if DEBUG
 #include "../Scene/AuthoredTangentArchive.hpp"
 #include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
+#include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
+#include "../OCCTKit/OcctDocument.h"
+#include <BRep_Builder.hxx>
+#include <TopoDS.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <TDF_LabelSequence.hxx>
 #include <Message.hxx>
 #include <sstream>
 #endif
@@ -382,6 +388,92 @@ static_assert(sizeof(std::uint32_t) == 4,
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
     } catch (...) { return @{@"error": @"Isolated frame fixture failed"}; }
+}
+#endif
+#if DEBUG
++ (NSDictionary<NSString *, id> *)debugAuthoredGeometryIdentity:(NSInteger)mode {
+    using namespace core3d::persistence;
+    if (mode < 0 || mode > 21) return @{@"error": @"Undefined geometry fixture"};
+    try {
+        Handle(Poly_Triangulation) mesh = new Poly_Triangulation(4, 1, Standard_True, Standard_True);
+        mesh->SetNode(1, gp_Pnt(9, -0.0, 3)); // Deliberately unused, still authoritative.
+        mesh->SetNode(2, gp_Pnt(0, 0, 0)); mesh->SetNode(3, gp_Pnt(0, 0, 10));
+        mesh->SetNode(4, gp_Pnt(8, -6, 0));
+        mesh->SetUVNode(1, gp_Pnt2d(-0.0, 0.25)); mesh->SetUVNode(2, gp_Pnt2d(0, 0));
+        mesh->SetUVNode(3, gp_Pnt2d(1, 0)); mesh->SetUVNode(4, gp_Pnt2d(0, 1));
+        for (int n = 1; n <= 4; ++n) mesh->SetNormal(n, gp_Vec3f(0.6f, 0.8f, -0.0f));
+        mesh->SetTriangle(1, Poly_Triangle(2, 3, 4));
+        if (mode == 1) mesh = mesh->Copy();
+        if (mode == 2) mesh->SetNode(3, gp_Pnt(0, 0, 11));
+        if (mode == 3) mesh->SetNormal(3, gp_Vec3f(0.8f, 0.6f, 0));
+        if (mode == 4) mesh->SetUVNode(4, gp_Pnt2d(0, 0.75));
+        if (mode == 5) mesh->SetTriangle(1, Poly_Triangle(2, 4, 3));
+        if (mode == 6) mesh->SetNode(1, gp_Pnt(9, 0, 4));
+        if (mode == 9) mesh->RemoveNormals();
+        if (mode == 10) mesh->RemoveUVNodes();
+        if (mode == 11) mesh->SetTriangle(1, Poly_Triangle(2, 3, 5));
+        if (mode == 12) mesh->SetNode(1, gp_Pnt(std::numeric_limits<double>::infinity(), 0, 0));
+        if (mode == 13) mesh->SetNormal(1, gp_Vec3f(0, 0, 0));
+        if (mode == 15) mesh->ResizeNodes(int(core3d::scene::kMaximumTangentVertices) + 1, Standard_True);
+        if (mode == 16) mesh->ResizeTriangles(int(core3d::scene::kMaximumTangentTriangles) + 1, Standard_True);
+        if (mode == 17) mesh->SetUVNode(1, gp_Pnt2d(std::numeric_limits<double>::infinity(), 0));
+        if (mode == 18) mesh->SetNode(1, gp_Pnt(1.e6 + 1, 0, 0));
+        if (mode == 19) mesh->SetNormal(1, gp_Vec3f(std::numeric_limits<float>::quiet_NaN(), 0, 0));
+        if (mode == 20) mesh->SetTriangle(1, Poly_Triangle(2, 2, 4));
+        BRep_Builder builder; TopoDS_Face face;
+        if (mode == 21) builder.MakeFace(face); else builder.MakeFace(face, mesh);
+        if (mode == 7) face.Reverse();
+        if (mode == 8) { gp_Trsf move; move.SetTranslation(gp_Vec(1, 2, 3)); face.Location(TopLoc_Location(move)); }
+        GeometryIdentity identity; const bool accepted = NativeAuthoredGeometryIdentity(face, identity);
+        NSMutableDictionary* result = [@{@"accepted": @(accepted),
+            @"identity": [NSData dataWithBytes:identity.data() length:identity.size()]} mutableCopy];
+        if (mode == 14 && accepted) {
+            // Private documents only, using the existing safe application format.
+            // This proves geometry serialization, not a live project adoption.
+            struct PrivateDocument {
+                Handle(TDocStd_Application) app = new TDocStd_Application();
+                Handle(TDocStd_Document) document;
+                ~PrivateDocument() noexcept {
+                    try { if (!document.IsNull()) app->Close(document); } catch (...) {}
+                }
+            } writer, reader;
+            Core3DDefineSafeBinXCAFFormat(writer.app); Core3DDefineSafeBinXCAFFormat(reader.app);
+            writer.app->NewDocument(TCollection_ExtendedString("BinXCAF"), writer.document);
+            XCAFDoc_DocumentTool::SetLengthUnit(writer.document, 0.001);
+            auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main());
+            const TDF_Label label = shapeTool->AddShape(face, Standard_False);
+            if (label.IsNull()) return @{@"error": @"Private geometry label creation failed"};
+            std::ostringstream output(std::ios::binary | std::ios::out);
+            const auto storeStatus = writer.app->SaveAs(writer.document, output);
+            const auto bytes = output.str();
+            if (storeStatus != PCDM_SS_OK || bytes.empty() || bytes.size() > 1024 * 1024)
+                return @{@"error": @"Private geometry serialization failed"};
+            std::istringstream input(bytes, std::ios::binary | std::ios::in);
+            Core3DBeginSafeBinaryRead();
+            const auto readStatus = reader.app->Open(input, reader.document);
+            if (readStatus != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected() || reader.document.IsNull())
+                return @{@"error": @"Private geometry retrieval failed"};
+            double metersPerUnit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(reader.document, metersPerUnit) || metersPerUnit != 0.001)
+                return @{@"error": @"Private geometry retrieval changed units"};
+            result[@"metersPerUnit"] = @(metersPerUnit);
+            TDF_LabelSequence labels;
+            XCAFDoc_DocumentTool::ShapeTool(reader.document->Main())->GetFreeShapes(labels);
+            if (labels.Length() != 1) return @{@"error": @"Private geometry retrieval changed roots"};
+            const auto reopenedShape = XCAFDoc_ShapeTool::GetShape(labels.Value(1));
+            if (reopenedShape.IsNull() || reopenedShape.ShapeType() != TopAbs_FACE)
+                return @{@"error": @"Private geometry retrieval changed shape kind"};
+            GeometryIdentity reopened;
+            const bool reopenedAccepted = NativeAuthoredGeometryIdentity(TopoDS::Face(reopenedShape), reopened);
+            result[@"reopenedAccepted"] = @(reopenedAccepted);
+            result[@"reopenedIdentity"] = [NSData dataWithBytes:reopened.data() length:reopened.size()];
+            result[@"serializedBytes"] = @(bytes.size());
+            result[@"freshNativeDocument"] = @(reader.document != writer.document);
+        }
+        return result;
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (...) { return @{@"error": @"Geometry fixture failed"}; }
 }
 #endif
 @end
