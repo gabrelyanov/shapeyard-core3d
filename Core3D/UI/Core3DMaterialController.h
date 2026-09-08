@@ -55,6 +55,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign, readonly) BOOL supportsMetallicRoughnessTextureEditing;
 @property (nonatomic, assign, readonly) BOOL hasOcclusionTexture;
 @property (nonatomic, assign, readonly) BOOL supportsOcclusionTextureEditing;
+@property (nonatomic, assign, readonly) BOOL hasNormalTexture;
+@property (nonatomic, assign, readonly) BOOL supportsNormalTextureEditing;
 //! True for scalar materials and for Shapeyard-owned base-color/emissive
 //! textured materials. Imported texture-backed materials remain scalar
 //! read-only until the user explicitly authors the relevant texture slot.
@@ -93,6 +95,20 @@ NS_ASSUME_NONNULL_BEGIN
               supportsMetallicRoughnessTextureEditing:(BOOL)supportsMetallicRoughnessTextureEditing
               hasOcclusionTexture:(BOOL)hasOcclusionTexture
               supportsOcclusionTextureEditing:(BOOL)supportsOcclusionTextureEditing;
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                 metallic:(CGFloat)metallic
+                                roughness:(CGFloat)roughness
+                    supportsScalarEditing:(BOOL)supportsScalarEditing
+                      hasBaseColorTexture:(BOOL)hasBaseColorTexture
+          supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing
+                      hasEmissiveTexture:(BOOL)hasEmissiveTexture
+          supportsEmissiveTextureEditing:(BOOL)supportsEmissiveTextureEditing
+              hasMetallicRoughnessTexture:(BOOL)hasMetallicRoughnessTexture
+              supportsMetallicRoughnessTextureEditing:(BOOL)supportsMetallicRoughnessTextureEditing
+              hasOcclusionTexture:(BOOL)hasOcclusionTexture
+              supportsOcclusionTextureEditing:(BOOL)supportsOcclusionTextureEditing
+              hasNormalTexture:(BOOL)hasNormalTexture
+              supportsNormalTextureEditing:(BOOL)supportsNormalTextureEditing;
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other;
 
 @end
@@ -125,6 +141,10 @@ NS_ASSUME_NONNULL_BEGIN
 -(BOOL)updateSelectionWithOcclusionTextureData:(NSData*)textureData mediaType:(NSString*)mediaType
     error:(NSError* _Nullable * _Nullable)error;
 -(BOOL)clearSelectionOcclusionTextureWithError:(NSError* _Nullable * _Nullable)error;
+-(BOOL)updateSelectionWithNormalTextureData:(NSData*)textureData mediaType:(NSString*)mediaType
+    error:(NSError* _Nullable * _Nullable)error;
+-(BOOL)clearSelectionNormalTextureWithError:(NSError* _Nullable * _Nullable)error;
+
 
 @end
 
@@ -155,6 +175,10 @@ NS_ASSUME_NONNULL_BEGIN
 -(BOOL)updateSelectionWithOcclusionTextureData:(NSData*)textureData mediaType:(NSString*)mediaType
     error:(NSError* _Nullable * _Nullable)error;
 -(BOOL)clearSelectionOcclusionTextureWithError:(NSError* _Nullable * _Nullable)error;
+-(BOOL)updateSelectionWithNormalTextureData:(NSData*)textureData mediaType:(NSString*)mediaType
+    error:(NSError* _Nullable * _Nullable)error;
+-(BOOL)clearSelectionNormalTextureWithError:(NSError* _Nullable * _Nullable)error;
+
 -(void) didChangeSelectionWithMaterials:(NSArray<Core3DMaterial*>*)materials
                                  colors:(NSArray<Core3DColor*>*) colors;
 -(void) didChangeSelectionWithPBRMaterials:(NSArray<Core3DPBRMaterial*>*)materials;

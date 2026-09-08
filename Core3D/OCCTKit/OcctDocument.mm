@@ -1,3 +1,5 @@
+#include "../Scene/MikkTangentSpace.hpp"
+#include <RWMesh_FaceIterator.hxx>
 #include "CoherentMeshUVAtlas.hpp"
 #include <TDataStd_UAttribute.hxx>
 #include <XCAFDoc_ColorTool.hxx>
@@ -2924,7 +2926,7 @@ void Core3DPrepareRendererTextures(
             bits |= (1 << static_cast<int>(unit));
         }
     }
-    const bool hasDataMaps = (bits & (Graphic3d_TextureSetBits_MetallicRoughness | Graphic3d_TextureSetBits_Occlusion)) != 0;
+    const bool hasDataMaps = (bits & (Graphic3d_TextureSetBits_MetallicRoughness | Graphic3d_TextureSetBits_Occlusion | Graphic3d_TextureSetBits_Normal)) != 0;
     if (hasDataMaps && (ownsShader || aspect->ShaderProgram().IsNull())) {
         const auto expectedID = TCollection_AsciiString((bits & Graphic3d_TextureSetBits_Normal)
             ? "shapeyard-data-maps-v1-normal-" : "shapeyard-data-maps-v1-") + bits;
@@ -2944,6 +2946,7 @@ Handle(Image_Texture)& Core3DMaterialTexture(XCAFDoc_VisMaterialPBR& material,
         case OcctMaterialTextureSlot::Emissive: return material.EmissiveTexture;
         case OcctMaterialTextureSlot::MetallicRoughness: return material.MetallicRoughnessTexture;
         case OcctMaterialTextureSlot::Occlusion: return material.OcclusionTexture;
+        case OcctMaterialTextureSlot::Normal: return material.NormalTexture;
     }
     throw Standard_Failure("Invalid material texture slot");
 }
@@ -4466,6 +4469,59 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
 }
 }
 
+Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
+    const TDF_Label& label) const noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        if (!IsEditableFreeSimpleDefinitionLabel(label)
+            || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh) return Standard_False;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+        TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+        if (shape.IsNull() || !TriangleAtlasFace(shape, face, mesh)
+            || !mesh->HasUVNodes() || !mesh->HasNormals()) return Standard_False;
+        RWMesh_FaceIterator it(label, TopLoc_Location(), Standard_False);
+        if (!it.More() || !it.Face().IsSame(face) || !it.HasNormals() || !it.HasTexCoords()
+            || it.NbNodes() != mesh->NbNodes() || it.NbTriangles() != mesh->NbTriangles()) return Standard_False;
+        using namespace core3d::scene;
+        std::vector<Vertex> vertices;
+        std::vector<std::uint32_t> indices;
+        vertices.reserve(it.NbNodes()); indices.reserve(3 * it.NbTriangles());
+        // Use the same centered float geometry as immutable publication.
+        gp_XYZ lower, upper;
+        bool first = true;
+        for (int n = it.NodeLower(); n <= it.NodeUpper(); ++n) {
+            const gp_XYZ point = it.NodeTransformed(n).XYZ();
+            if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) return Standard_False;
+            if (first) { lower = upper = point; first = false; }
+            else for (int c = 1; c <= 3; ++c) {
+                lower.SetCoord(c, std::min(lower.Coord(c), point.Coord(c)));
+                upper.SetCoord(c, std::max(upper.Coord(c), point.Coord(c)));
+            }
+        }
+        const gp_XYZ origin = (lower + upper) * 0.5;
+        for (int n = it.NodeLower(); n <= it.NodeUpper(); ++n) {
+            const gp_XYZ point = it.NodeTransformed(n).XYZ() - origin;
+            const gp_Dir normal = it.NormalTransformed(n);
+            const gp_Pnt2d uv = it.NodeTexCoord(n);
+            const double maximumFloat = std::numeric_limits<float>::max();
+            for (const double value : {point.X(), point.Y(), point.Z(), uv.X(), uv.Y()})
+                if (!std::isfinite(value) || std::abs(value) > maximumFloat) return Standard_False;
+            vertices.push_back({float(point.X()), float(point.Y()), float(point.Z()),
+                float(normal.X()), float(normal.Y()), float(normal.Z()), float(uv.X()), float(uv.Y())});
+        }
+        for (int t = it.ElemLower(); t <= it.ElemUpper(); ++t) {
+            int nodes[3]; it.TriangleOriented(t).Get(nodes[0], nodes[1], nodes[2]);
+            for (int n : nodes) {
+                if (n < it.NodeLower() || n > it.NodeUpper()) return Standard_False;
+                indices.push_back(static_cast<std::uint32_t>(n - it.NodeLower()));
+            }
+        }
+        it.Next(); if (it.More()) return Standard_False;
+        std::vector<Float4> frames;
+        return GenerateMikkCornerTangents(vertices, indices, true, frames) == TangentSpaceError::None;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::CaptureMeshUVAtlasPreview(
     const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept {
     preview={};
@@ -5224,6 +5280,30 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
         static_cast<Standard_Size>(
             kMaximumVisualMaterialDefinitions));
 
+    // Reserve the native per-corner derivative for the final free-object
+    // material bindings, including hidden objects and unchanged normal maps.
+    // 64 bytes includes every admitted source field plus a float4 tangent.
+    const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    if (shapeTool.IsNull()) return Standard_False;
+    TDF_LabelSequence roots; shapeTool->GetFreeShapes(roots);
+    if (roots.Length() < 0 || roots.Length() > 50000) return Standard_False;
+    std::size_t normalBytes = 0;
+    for (int index = 1; index <= roots.Length(); ++index) {
+        const auto& root = roots.Value(index);
+        const auto update = std::find_if(updates.begin(), updates.end(),
+            [&](const auto& value) { return value.label.IsEqual(root); });
+        XCAFDoc_VisMaterialPBR material;
+        if (update != updates.end()) material = update->material;
+        else if (!TryPBRMaterialForLabel(root, material)) continue;
+        if (material.NormalTexture.IsNull()) continue;
+        TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+        const auto shape = XCAFDoc_ShapeTool::GetShape(root);
+        if (shape.IsNull() || !TriangleAtlasFace(shape, face, mesh)) return Standard_False;
+        const std::size_t bytes = std::size_t(mesh->NbTriangles()) * 3 * 64;
+        if (bytes > 64 * 1024 * 1024 - normalBytes) return Standard_False;
+        normalBytes += bytes;
+    }
+
     struct ExistingDefinition {
         TDF_Label label;
         Handle(XCAFDoc_VisMaterial) material;
@@ -5500,7 +5580,9 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
             || material.EmissiveFactor.x() > kMaximumEmissionFactor
             || material.EmissiveFactor.y() > kMaximumEmissionFactor
             || material.EmissiveFactor.z() > kMaximumEmissionFactor
-            || !material.NormalTexture.IsNull()
+            || (!material.NormalTexture.IsNull()
+                && (!Core3DValidateNumericTexture(material.NormalTexture)
+                    || !SupportsNormalTextureGeometryForLabel(update.label)))
             || (!material.MetallicRoughnessTexture.IsNull()
                 && !Core3DValidateNumericTexture(material.MetallicRoughnessTexture))
             || (!material.OcclusionTexture.IsNull()
@@ -5893,15 +5975,15 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
         && !marker.IsNull() && marker->Get() == 1;
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-        if (!pbr.NormalTexture.IsNull()) {
-            return Standard_False;
-        }
+        if (!pbr.NormalTexture.IsNull() && (!hasLocalPBR
+            || !SupportsNormalTextureGeometryForLabel(label))) return Standard_False;
         const Handle(Image_Texture)& base = pbr.BaseColorTexture;
         const Handle(Image_Texture) common = material->HasCommonMaterial()
             ? material->CommonMaterial().DiffuseTexture
             : Handle(Image_Texture)();
         if (!base.IsNull() || !pbr.EmissiveTexture.IsNull()
-            || !pbr.MetallicRoughnessTexture.IsNull() || !pbr.OcclusionTexture.IsNull()) {
+            || !pbr.MetallicRoughnessTexture.IsNull() || !pbr.OcclusionTexture.IsNull()
+            || !pbr.NormalTexture.IsNull()) {
             return hasLocalPBR
                 && base.IsNull() == common.IsNull()
                 && (base.IsNull()
@@ -5925,13 +6007,13 @@ Standard_Boolean OcctDocument::SupportsEmissiveTextureEditingForLabel(
 
 Standard_Boolean OcctDocument::SupportsMaterialTextureEditingForLabel(
     const TDF_Label& label, OcctMaterialTextureSlot slot) const {
-    if (label.IsNull()) return Standard_False;
+    if (label.IsNull() || (slot == OcctMaterialTextureSlot::Normal
+        && !SupportsNormalTextureGeometryForLabel(label))) return Standard_False;
     const Handle(XCAFDoc_VisMaterial) material = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
     if (material.IsNull()) return Standard_True;
     if (!material->HasPbrMaterial() && !material->HasCommonMaterial()) return Standard_False;
     XCAFDoc_VisMaterialPBR pbr = material->HasPbrMaterial()
         ? material->PbrMaterial() : material->ConvertToPbrMaterial();
-    if (!pbr.NormalTexture.IsNull()) return Standard_False;
     const Handle(Image_Texture) common = material->HasCommonMaterial()
         ? material->CommonMaterial().DiffuseTexture : Handle(Image_Texture)();
     if (!pbr.BaseColorTexture.IsNull() && !common.IsNull()
@@ -5943,7 +6025,7 @@ Standard_Boolean OcctDocument::SupportsMaterialTextureEditingForLabel(
         && (!pbr.BaseColorTexture.IsNull() || !common.IsNull())
         && (!owned || pbr.BaseColorTexture.IsNull() || common.IsNull())) return Standard_False;
     for (const auto other : {OcctMaterialTextureSlot::BaseColor, OcctMaterialTextureSlot::Emissive,
-                            OcctMaterialTextureSlot::MetallicRoughness, OcctMaterialTextureSlot::Occlusion}) {
+                            OcctMaterialTextureSlot::MetallicRoughness, OcctMaterialTextureSlot::Occlusion, OcctMaterialTextureSlot::Normal}) {
         if (other == slot) continue;
         const Handle(Image_Texture)& texture = Core3DMaterialTexture(pbr, other);
         // Replacing one imported map is explicit. Preserving a different

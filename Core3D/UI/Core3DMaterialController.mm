@@ -104,6 +104,30 @@
               supportsMetallicRoughnessTextureEditing:(BOOL)supportsMetallicRoughnessTextureEditing
               hasOcclusionTexture:(BOOL)hasOcclusionTexture
               supportsOcclusionTextureEditing:(BOOL)supportsOcclusionTextureEditing {
+    return [self initWithBaseColor:baseColor metallic:metallic roughness:roughness
+        supportsScalarEditing:supportsScalarEditing hasBaseColorTexture:hasBaseColorTexture
+        supportsBaseColorTextureEditing:supportsBaseColorTextureEditing
+        hasEmissiveTexture:hasEmissiveTexture supportsEmissiveTextureEditing:supportsEmissiveTextureEditing
+        hasMetallicRoughnessTexture:hasMetallicRoughnessTexture
+        supportsMetallicRoughnessTextureEditing:supportsMetallicRoughnessTextureEditing
+        hasOcclusionTexture:hasOcclusionTexture supportsOcclusionTextureEditing:supportsOcclusionTextureEditing
+        hasNormalTexture:NO supportsNormalTextureEditing:NO];
+}
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                  metallic:(CGFloat)metallic
+                                 roughness:(CGFloat)roughness
+                     supportsScalarEditing:(BOOL)supportsScalarEditing
+                       hasBaseColorTexture:(BOOL)hasBaseColorTexture
+           supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing
+                       hasEmissiveTexture:(BOOL)hasEmissiveTexture
+           supportsEmissiveTextureEditing:(BOOL)supportsEmissiveTextureEditing
+              hasMetallicRoughnessTexture:(BOOL)hasMetallicRoughnessTexture
+              supportsMetallicRoughnessTextureEditing:(BOOL)supportsMetallicRoughnessTextureEditing
+              hasOcclusionTexture:(BOOL)hasOcclusionTexture
+              supportsOcclusionTextureEditing:(BOOL)supportsOcclusionTextureEditing
+              hasNormalTexture:(BOOL)hasNormalTexture
+              supportsNormalTextureEditing:(BOOL)supportsNormalTextureEditing {
     if(baseColor == nil || !std::isfinite(metallic) || !std::isfinite(roughness)
        || metallic < 0.0 || metallic > 1.0
        || roughness < 0.0 || roughness > 1.0) {
@@ -124,6 +148,8 @@
         _supportsMetallicRoughnessTextureEditing = supportsMetallicRoughnessTextureEditing;
         _hasOcclusionTexture = hasOcclusionTexture;
         _supportsOcclusionTextureEditing = supportsOcclusionTextureEditing;
+        _hasNormalTexture = hasNormalTexture;
+        _supportsNormalTextureEditing = supportsNormalTextureEditing;
     }
     return self;
 }
@@ -141,7 +167,9 @@ supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing
 hasMetallicRoughnessTexture:self.hasMetallicRoughnessTexture
 supportsMetallicRoughnessTextureEditing:self.supportsMetallicRoughnessTextureEditing
 hasOcclusionTexture:self.hasOcclusionTexture
-supportsOcclusionTextureEditing:self.supportsOcclusionTextureEditing];
+supportsOcclusionTextureEditing:self.supportsOcclusionTextureEditing
+hasNormalTexture:self.hasNormalTexture
+supportsNormalTextureEditing:self.supportsNormalTextureEditing];
 }
 
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other {
@@ -159,7 +187,9 @@ supportsOcclusionTextureEditing:self.supportsOcclusionTextureEditing];
         && self.hasMetallicRoughnessTexture == other.hasMetallicRoughnessTexture
         && self.supportsMetallicRoughnessTextureEditing == other.supportsMetallicRoughnessTextureEditing
         && self.hasOcclusionTexture == other.hasOcclusionTexture
-        && self.supportsOcclusionTextureEditing == other.supportsOcclusionTextureEditing;
+        && self.supportsOcclusionTextureEditing == other.supportsOcclusionTextureEditing
+        && self.hasNormalTexture == other.hasNormalTexture
+        && self.supportsNormalTextureEditing == other.supportsNormalTextureEditing;
 }
 
 -(BOOL)isEqual:(id)object {
@@ -180,7 +210,9 @@ supportsOcclusionTextureEditing:self.supportsOcclusionTextureEditing];
         ^ @(self.hasMetallicRoughnessTexture).hash
         ^ @(self.supportsMetallicRoughnessTextureEditing).hash
         ^ @(self.hasOcclusionTexture).hash
-        ^ @(self.supportsOcclusionTextureEditing).hash;
+        ^ @(self.supportsOcclusionTextureEditing).hash
+        ^ @(self.hasNormalTexture).hash
+        ^ @(self.supportsNormalTextureEditing).hash;
 }
 
 @end
@@ -445,6 +477,53 @@ supportsOcclusionTextureEditing:self.supportsOcclusionTextureEditing];
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey:
                                          @"The occlusion texture could not be removed."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+-(BOOL)updateSelectionWithNormalTextureData:(NSData*)textureData
+                                    mediaType:(NSString*)mediaType
+                                        error:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(updateSelectionWithNormalTextureData:mediaType:error:)]) {
+        const BOOL succeeded = [_pass
+            updateSelectionWithNormalTextureData:textureData
+            mediaType:mediaType
+            error:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The normal texture could not be applied."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)clearSelectionNormalTextureWithError:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(clearSelectionNormalTextureWithError:)]) {
+        const BOOL succeeded = [_pass
+            clearSelectionNormalTextureWithError:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The normal texture could not be removed."}];
         }
         return succeeded;
     }

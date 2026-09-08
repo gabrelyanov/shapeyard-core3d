@@ -47,7 +47,8 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
     const BOOL supportsBaseColorTextureEditing,
     const BOOL supportsEmissiveTextureEditing,
     const BOOL supportsMetallicRoughnessTextureEditing,
-    const BOOL supportsOcclusionTextureEditing) {
+    const BOOL supportsOcclusionTextureEditing,
+    const BOOL supportsNormalTextureEditing) {
     if (!material.IsDefined || !std::isfinite(material.Metallic)
         || !std::isfinite(material.Roughness)) {
         return nil;
@@ -73,7 +74,9 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing
 hasMetallicRoughnessTexture:!material.MetallicRoughnessTexture.IsNull()
 supportsMetallicRoughnessTextureEditing:supportsMetallicRoughnessTextureEditing
 hasOcclusionTexture:!material.OcclusionTexture.IsNull()
-supportsOcclusionTextureEditing:supportsOcclusionTextureEditing];
+supportsOcclusionTextureEditing:supportsOcclusionTextureEditing
+hasNormalTexture:!material.NormalTexture.IsNull()
+supportsNormalTextureEditing:supportsNormalTextureEditing];
 }
 
 } // namespace
@@ -162,7 +165,8 @@ supportsOcclusionTextureEditing:supportsOcclusionTextureEditing];
                 document->SupportsBaseColorTextureEditingForLabel(label),
                 document->SupportsEmissiveTextureEditingForLabel(label),
                 document->SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::MetallicRoughness),
-                document->SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::Occlusion));
+                document->SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::Occlusion),
+                document->SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::Normal));
             if (pbr != nil) {
                 [pbrMaterials addObject:pbr];
             }
@@ -203,7 +207,8 @@ supportsOcclusionTextureEditing:supportsOcclusionTextureEditing];
         editablePBR.Roughness = legacyPBR.NormalizedRoughness();
         editablePBR.RefractionIndex = legacyPBR.IOR();
         Core3DPBRMaterial* pbr = Core3DSelectionPBRMaterial(
-            editablePBR, YES, YES, YES, YES, YES);
+            editablePBR, YES, YES, YES, YES, YES,
+            document->SupportsNormalTextureGeometryForLabel(label));
         if (pbr != nil) {
             [pbrMaterials addObject:pbr];
         }

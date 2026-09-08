@@ -263,7 +263,7 @@ Core3DAccumulateEmbeddedTextureBudget(
 //! One whole-object PBR material update. Batch persistence uses the complete
 //! set to prove the final serialized texture-occurrence budget before it
 //! mutates the immutable visual-material table.
-enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occlusion };
+enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occlusion, Normal };
 Standard_EXPORT Handle(Image_Texture)& Core3DMaterialTexture(
     XCAFDoc_VisMaterialPBR& material, OcctMaterialTextureSlot slot);
 
@@ -591,6 +591,7 @@ public:
         const TDF_Label& label) const;
     //! True when emissive texture assignment/removal can be represented without
     //! discarding unsupported maps or a non-authored base/Common resource.
+    Standard_Boolean SupportsNormalTextureGeometryForLabel(const TDF_Label& label) const noexcept;
     Standard_Boolean SupportsMaterialTextureEditingForLabel(
         const TDF_Label& label, OcctMaterialTextureSlot slot) const;
     Standard_Boolean SupportsEmissiveTextureEditingForLabel(

@@ -1,3 +1,4 @@
+#include "MikkTangentSpace.hpp"
 //
 //  OcctSceneSnapshotBuilder.mm
 //  Core3D
@@ -930,13 +931,15 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      Handle(Image_Texture)& theBaseColorTexture,
                      Handle(Image_Texture)& theEmissiveTexture,
                      Handle(Image_Texture)& theMetallicRoughnessTexture,
-                     Handle(Image_Texture)& theOcclusionTexture)
+                     Handle(Image_Texture)& theOcclusionTexture,
+                     Handle(Image_Texture)& theNormalTexture)
 {
     theResult = DefaultMaterial(theClosed);
     theBaseColorTexture.Nullify();
     theEmissiveTexture.Nullify();
     theMetallicRoughnessTexture.Nullify();
     theOcclusionTexture.Nullify();
+    theNormalTexture.Nullify();
     const XCAFPrs_Style& aStyle = theFace.FaceStyle();
     const Handle(XCAFDoc_VisMaterial)& aVisualMaterial = aStyle.Material();
     if (!aVisualMaterial.IsNull()) {
@@ -997,8 +1000,7 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
     if (thePbrOverride.has_value()) {
         const WholeObjectPBRMaterial& anOverride = *thePbrOverride;
         const XCAFDoc_VisMaterialPBR& aPbr = anOverride.pbr;
-        if (!aPbr.IsDefined
-            || !aPbr.NormalTexture.IsNull()) {
+        if (!aPbr.IsDefined) {
             return false;
         }
         SetColor(theResult, aPbr.BaseColor);
@@ -1032,6 +1034,7 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
         theEmissiveTexture = aPbr.EmissiveTexture;
         theMetallicRoughnessTexture = aPbr.MetallicRoughnessTexture;
         theOcclusionTexture = aPbr.OcclusionTexture;
+        theNormalTexture = aPbr.NormalTexture;
     } else {
         if (theMaterialOverride.has_value()
             && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {
@@ -4995,6 +4998,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     || !aVisualMaterial->HasPbrMaterial()) {
                     return {};
                 }
+                if (!aPbrMaterial.NormalTexture.IsNull()
+                    && !theDocument->SupportsNormalTextureGeometryForLabel(anOccurrence.definitionLabel)) return {};
                 aPbrOverride = WholeObjectPBRMaterial{
                     aPbrMaterial,
                     aVisualMaterial->AlphaMode(),
@@ -5035,6 +5040,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 Handle(Image_Texture) anEmissiveTexture;
                 Handle(Image_Texture) aMetallicRoughnessTexture;
                 Handle(Image_Texture) anOcclusionTexture;
+                Handle(Image_Texture) aNormalTexture;
                 if (!ResolveMaterial(aFace,
                                      aMaterialOverride,
                                      aColorOverride,
@@ -5044,7 +5050,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                      aBaseColorTexture,
                                      anEmissiveTexture,
                                      aMetallicRoughnessTexture,
-                                     anOcclusionTexture)
+                                     anOcclusionTexture,
+                                     aNormalTexture)
                     || !AddTextureResource(
                         aScene,
                         aTextureTable,
@@ -5058,12 +5065,15 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     || !AddTextureResource(aScene, aTextureTable, aMetallicRoughnessTexture,
                                            aMaterial.metallicRoughnessTextureIndex)
                     || !AddTextureResource(aScene, aTextureTable, anOcclusionTexture,
-                                           aMaterial.occlusionTextureIndex)) {
+                                           aMaterial.occlusionTextureIndex)
+                    || !AddTextureResource(aScene, aTextureTable, aNormalTexture,
+                                           aMaterial.normalTextureIndex)) {
                     return {};
                 }
                 for (const auto& binding : {
                          std::make_pair(aMaterial.metallicRoughnessTextureIndex, aMetallicRoughnessTexture),
-                         std::make_pair(aMaterial.occlusionTextureIndex, anOcclusionTexture)}) {
+                         std::make_pair(aMaterial.occlusionTextureIndex, anOcclusionTexture),
+                         std::make_pair(aMaterial.normalTextureIndex, aNormalTexture)}) {
                     if (binding.first >= 0
                         && aTextureTable.validatedNumericResources.insert(binding.first).second
                         && !Core3DValidateNumericTexture(binding.second)) return {};
@@ -5137,6 +5147,30 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aDefinitionToInstances[anOccurrence.definitionIdentifier]
                 .push_back(anInstanceIndex);
             aScene.instances.push_back(std::move(anInstance));
+        }
+
+        // Frames are a bounded derivative of owned UV/normal geometry. An
+        // ordinary mesh does not allocate or generate them. Imported authored
+        // frames remain gated until durable native basis ownership is added.
+        std::vector<bool> needsNormalFrames(aScene.meshes.size(), false);
+        for (const auto& instance : aScene.instances) {
+            for (const auto& binding : instance.primitiveBindings) {
+                if (aScene.materials[binding.materialIndex].normalTextureIndex >= 0)
+                    needsNormalFrames[instance.meshIndex] = true;
+            }
+        }
+        for (std::size_t index = 0; index < aScene.meshes.size(); ++index) {
+            if (!needsNormalFrames[index]) continue;
+            auto& mesh = aScene.meshes[index];
+            std::size_t frameBytes = 0;
+            if (!CheckedMultiply(mesh.indices.size(), sizeof(Float4), frameBytes)
+                || !CheckedAdd(aSnapshotNumericBytes, frameBytes, aSnapshotNumericBytes)
+                || aSnapshotNumericBytes > kMaxSnapshotNumericBytes
+                || GenerateMikkCornerTangents(mesh.vertices, mesh.indices,
+                    std::all_of(mesh.primitives.begin(), mesh.primitives.end(),
+                        [](const auto& primitive) { return primitive.hasTextureCoordinates; }),
+                    mesh.cornerTangents) != TangentSpaceError::None) return {};
+            mesh.tangentBasis = TangentBasis::MikkTSpace;
         }
 
         std::size_t anInstanceBytes = 0;
