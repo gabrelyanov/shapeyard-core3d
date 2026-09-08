@@ -1,6 +1,14 @@
 #pragma once
 #include <OpenGLES/ES2/gl.h>
 #include "../Scene/MikkTangentSpace.hpp"
+#include "Core3DNativeTangentState.hxx"
+#include "NativeAuthoredFrameGeometry.hxx"
+#include "OcctDocument.h"
+#include "CafShapePrs.h"
+#include <TDocStd_Document.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <OpenGl_Group.hxx>
@@ -19,12 +27,96 @@ inline bool NeedsNativeTangents(const Handle(Graphic3d_Aspects)& aspect) {
         && aspect->ShaderProgram()->GetId().StartsWith("shapeyard-data-maps-v1-normal-");
 }
 
+// Resolve only a validated native owner. Presentation geometry is located,
+// unlike the local mesh payload published by the scene snapshot builder.
+struct NativeTangentOwner {
+    OcctAuthoredFrameRecord record;
+    TopoDS_Face localFace;
+    gp_Trsf placement;
+    std::array<std::uint8_t, 32> identity = {};
+};
+
+inline bool ReadNativeTangentOwner(const Handle(AIS_Shape)& shape,
+                                  NativeTangentOwner& owner) {
+    owner = {};
+    const auto caf = Handle(CafShapePrs)::DownCast(shape);
+    if (caf.IsNull()) return true;
+    const auto label = caf->GetLabel();
+    if (label.IsNull()) return false;
+    const auto doc = TDocStd_Document::Get(label);
+    if (doc.IsNull() || doc->HasOpenCommand()) return false;
+    const auto state = Core3DReadAuthoredFrameOwner(doc, label, owner.record);
+    if (state == OcctAuthoredFrameReadState::Invalid) return false;
+    if (state == OcctAuthoredFrameReadState::Absent) return true;
+    auto local = XCAFDoc_ShapeTool::GetShape(label);
+    owner.placement = local.Location().Transformation();
+    // Native owned geometry admits rigid outer placement. Signed object scale
+    // remains in AIS's local transform and the normal shader's world matrix.
+    if (std::abs(owner.placement.ScaleFactor() - 1.0) > 1.e-12
+        || owner.placement.VectorialPart().Determinant() <= 0) return false;
+    local.Location(TopLoc_Location());
+    if (local.ShapeType() == TopAbs_FACE) owner.localFace = TopoDS::Face(local);
+    else if (local.ShapeType() == TopAbs_COMPOUND) {
+        TopoDS_Iterator child(local);
+        if (!child.More() || child.Value().ShapeType() != TopAbs_FACE) return false;
+        owner.localFace = TopoDS::Face(child.Value());
+        child.Next(); if (child.More()) return false;
+    } else return false;
+    CC_SHA256_CTX hash; CC_SHA256_Init(&hash);
+    CC_SHA256_Update(&hash, owner.record.identity.data(), owner.record.identity.size());
+    for (int row = 1; row <= 3; ++row) for (int column = 1; column <= 4; ++column) {
+        const double value = owner.placement.Value(row, column);
+        if (!std::isfinite(value)) return false;
+        CC_SHA256_Update(&hash, &value, sizeof(value));
+    }
+    CC_SHA256_Final(owner.identity.data(), &hash);
+    return true;
+}
+
+inline bool NativeSuppliedCornerTangents(const NativeTangentOwner& owner,
+                                        const std::vector<scene::Vertex>& vertices,
+                                        const std::vector<std::uint32_t>& indices,
+                                        std::vector<scene::Float4>& output) {
+    output.clear();
+    std::vector<scene::Float4> frames;
+    if (!persistence::DecodeNativeAuthoredFrames(owner.localFace,
+            owner.record.archive.data(), owner.record.archive.size(), frames)
+        || frames.size() != indices.size()) return false;
+    TopLoc_Location location;
+    const auto mesh = BRep_Tool::Triangulation(owner.localFace, location);
+    if (mesh.IsNull() || !location.IsIdentity()) return false;
+    // Compare expanded corners, not arbitrary presentation vertex numbering.
+    // This preserves different authored frames at shared source indices.
+    for (int t = 1; t <= mesh->NbTriangles(); ++t) {
+        int nodes[3]; mesh->Triangle(t).Get(nodes[0], nodes[1], nodes[2]);
+        for (int c = 0; c < 3; ++c) {
+            const auto corner = std::size_t(t - 1) * 3 + c;
+            if (indices[corner] >= vertices.size()) return false;
+            const auto point = mesh->Node(nodes[c]).Transformed(owner.placement);
+            const auto normal = mesh->Normal(nodes[c]).Transformed(owner.placement);
+            const auto uv = mesh->UVNode(nodes[c]);
+            const scene::Vertex expected = {float(point.X()), float(point.Y()), float(point.Z()),
+                float(normal.X()), float(normal.Y()), float(normal.Z()), float(uv.X()), float(uv.Y())};
+            const auto& actual = vertices[indices[corner]];
+            if (std::memcmp(&expected, &actual, sizeof(expected)) != 0) return false;
+            auto& frame = frames[corner];
+            // Keep identity placement byte-exact, including signed zero.
+            if (owner.placement.Form() != gp_Identity) {
+                const auto tangent = gp_Vec(frame.x, frame.y, frame.z).Transformed(owner.placement);
+                frame.x = float(tangent.X()); frame.y = float(tangent.Y()); frame.z = float(tangent.Z());
+            }
+        }
+    }
+    output.swap(frames); return true;
+}
+
 // Convert an OCCT presentation array into a private unindexed derivative.
 // Original indices/attributes stay untouched; all original attributes are
 // copied per corner, with a separate float4 custom tangent at location 4.
 inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
     const Handle(Graphic3d_Buffer)& attributes,
-    const Handle(Graphic3d_IndexBuffer)& indexBuffer) {
+    const Handle(Graphic3d_IndexBuffer)& indexBuffer,
+    const NativeTangentOwner* owner = nullptr) {
     using namespace core3d::scene;
     if (attributes.IsNull() || attributes->Data() == nullptr
         || attributes->NbElements < 1 || attributes->NbElements > kMaximumTangentVertices
@@ -83,7 +175,9 @@ inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
         indices[i] = value;
     }
     std::vector<Float4> frames;
-    if (GenerateMikkCornerTangents(vertices, indices, true, frames) != TangentSpaceError::None) return {};
+    if (owner && !owner->record.archive.empty()) {
+        if (!NativeSuppliedCornerTangents(*owner, vertices, indices, frames)) return {};
+    } else if (GenerateMikkCornerTangents(vertices, indices, true, frames) != TangentSpaceError::None) return {};
     descriptors.push_back({Graphic3d_TOA_CUSTOM, Graphic3d_TOD_VEC4});
     Handle(Graphic3d_Buffer) result = new Graphic3d_Buffer(Graphic3d_Buffer::DefaultAllocator());
     if (!result->Init(count, descriptors.data(), int(descriptors.size()))) return {};
@@ -102,9 +196,9 @@ inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
 inline bool PrepareNativeTangentPresentations(
     const Handle(AIS_InteractiveContext)& context,
     const Handle(OpenGl_Context)& gl,
-    std::unordered_map<Standard_Size, std::size_t>& prepared) {
+    std::unordered_map<Standard_Size, NativeTangentArrayState>& prepared) {
     if (context.IsNull() || gl.IsNull()) return false;
-    std::unordered_map<Standard_Size, std::size_t> active;
+    std::unordered_map<Standard_Size, NativeTangentArrayState> active;
     struct Pending { OpenGl_PrimitiveArray* primitive; Handle(Graphic3d_Buffer) attributes; };
     std::vector<Pending> pending;
     std::size_t totalBytes = 0;
@@ -120,6 +214,31 @@ inline bool PrepareNativeTangentPresentations(
         const auto drawer = shape->Attributes();
         if (drawer.IsNull() || drawer->ShadingAspect().IsNull()
             || !NeedsNativeTangents(drawer->ShadingAspect()->Aspect())) continue;
+        NativeTangentOwner owner;
+        if (!ReadNativeTangentOwner(shape, owner)) return false;
+        bool changedBasis = false;
+        for (const auto& presentation : shape->Presentations()) {
+            if (presentation.IsNull()) continue;
+            for (const auto& genericGroup : presentation->Groups()) {
+                auto group = Handle(OpenGl_Group)::DownCast(genericGroup);
+                if (group.IsNull()) continue;
+                for (auto* node = group->FirstNode(); node; node = node->next) {
+                    auto* primitive = dynamic_cast<OpenGl_PrimitiveArray*>(node->elem);
+                    if (!primitive) continue;
+                    const auto old = prepared.find(primitive->GetUID());
+                    if (old != prepared.end() && old->second.basisIdentity != owner.identity) changedBasis = true;
+                }
+            }
+        }
+        if (changedBasis) {
+            // Recompute from authoritative geometry before examining any array.
+            // Uploaded private arrays must never be interpreted as source.
+            const auto caf = Handle(CafShapePrs)::DownCast(shape);
+            if (caf.IsNull()) return false;
+            caf->DispatchStyles(Standard_False);
+            shape->SetToUpdate();
+            context->Redisplay(shape, Standard_False, Standard_True);
+        }
         for (const auto& presentation : shape->Presentations()) {
             if (presentation.IsNull()) continue;
             for (const auto& genericGroup : presentation->Groups()) {
@@ -135,13 +254,18 @@ inline bool PrepareNativeTangentPresentations(
                     if (!primitive || !primitive->IsFillDrawMode()) continue;
                     if (primitive->DrawMode() != GL_TRIANGLES) return false;
                     const auto uid = primitive->GetUID();
-                    if (active.count(uid)) continue;
+                    const auto alreadyActive = active.find(uid);
+                    if (alreadyActive != active.end()) {
+                        if (alreadyActive->second.basisIdentity != owner.identity) return false;
+                        continue;
+                    }
                     const auto existing = prepared.find(uid);
                     std::size_t bytes = 0;
                     if (existing != prepared.end()) {
-                        bytes = existing->second;
+                        if (existing->second.basisIdentity != owner.identity) return false;
+                        bytes = existing->second.bytes;
                     } else {
-                        const auto attributes = BuildNativeTangentBuffer(primitive->Attributes(), primitive->Indices());
+                        const auto attributes = BuildNativeTangentBuffer(primitive->Attributes(), primitive->Indices(), &owner);
                         if (attributes.IsNull()) return false;
                         const auto& bounds = primitive->Bounds();
                         if (!bounds.IsNull()) {
@@ -154,12 +278,12 @@ inline bool PrepareNativeTangentPresentations(
                             }
                             if (corners != attributes->NbElements) return false;
                         }
-                        bytes = std::size_t(attributes->Stride) * attributes->NbElements;
+                        bytes = std::size_t(attributes->Stride) * attributes->NbElements + owner.record.archive.size();
                         pending.push_back({primitive, attributes});
                     }
                     totalBytes += bytes;
                     if (totalBytes > 64*1024*1024) return false;
-                    active.emplace(uid, bytes);
+                    active.emplace(uid, NativeTangentArrayState{bytes, owner.identity});
                 }
             }
         }

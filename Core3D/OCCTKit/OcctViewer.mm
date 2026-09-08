@@ -313,6 +313,16 @@ void OcctViewer::Resize()
     myView->Invalidate();
 }
 
+#if DEBUG
+bool OcctViewer::DebugPrepareNativeTangentArrays() {
+    try {
+        const auto driver = Handle(OpenGl_GraphicDriver)::DownCast(myViewer->Driver());
+        return !driver.IsNull() && core3d::render::PrepareNativeTangentPresentations(
+            myContext, driver->GetSharedContext(true), myPreparedTangentArrays);
+    } catch (...) { return false; }
+}
+#endif
+
 bool OcctViewer::RenderFrame()
 {
     if (myView.IsNull()) {

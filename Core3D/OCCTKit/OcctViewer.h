@@ -39,11 +39,12 @@
 #include "Core3DView.hpp"
 #include "Core3DContext.hpp"
 #include <unordered_map>
+#include "Core3DNativeTangentState.hxx"
 
 //! OCCT 3D Viewer holder.
 class OcctViewer
 {
-    std::unordered_map<Standard_Size, std::size_t> myPreparedTangentArrays;
+    std::unordered_map<Standard_Size, core3d::render::NativeTangentArrayState> myPreparedTangentArrays;
 public:
     
     //! Empty constructor.
@@ -96,6 +97,7 @@ public:
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);
 #ifdef DEBUG
     std::size_t DebugPreparedTangentArrayCount() const { return myPreparedTangentArrays.size(); }
+    bool DebugPrepareNativeTangentArrays();
     //! Test-only traversal ceiling used to exercise aggregate multi-root
     //! admission without constructing tens of thousands of AIS objects.
     void SetDebugMaximumDisplayTraversalNodes(const Standard_Size theLimit)

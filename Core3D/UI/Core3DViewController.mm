@@ -1,6 +1,7 @@
 #include "../Scene/MikkTangentSpace.hpp"
 #if DEBUG
 #include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
+#include "../OCCTKit/Core3DNativeTangentBuffers.hxx"
 #include <sstream>
 #endif
 //
@@ -3496,6 +3497,142 @@ void Core3DAddDebugOrphanVisualMaterial(
         return nil;
     }
     return @(metersPerUnit);
+}
+
+- (NSDictionary<NSString *, id> *)debugNativeAuthoredFrameRendering:(NSData *)archive replacement:(NSData *)replacement normalPNG:(NSData *)normalPNG mode:(NSInteger)mode {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer || mode < 0 || mode > 4)
+        return @{@"error": @"Unavailable native frame fixture"};
+    const auto viewer = GLController.viewer;
+    const auto context = viewer->AisContext(); const auto view = viewer->ActiveView();
+    if (context.IsNull() || view.IsNull()) return @{@"error": @"No native viewport"};
+    AIS_ListOfInteractive resident; context->ObjectsInside(resident, AIS_KOI_Shape, -1);
+    if (!resident.IsEmpty()) return @{@"error": @"Native fixture requires an empty viewport"};
+    struct Scope {
+        Handle(TDocStd_Application) app = new TDocStd_Application();
+        Handle(TDocStd_Application) reopenApp = new TDocStd_Application();
+        Handle(TDocStd_Document) document, reopened;
+        Handle(AIS_InteractiveContext) context;
+        Handle(V3d_View) view;
+        Handle(Graphic3d_Camera) camera;
+        Handle(CafShapePrs) presentation;
+        ~Scope() noexcept {
+            try { if (!presentation.IsNull()) context->Remove(presentation, Standard_False); } catch (...) {}
+            try { view->SetCamera(camera); } catch (...) {}
+            try { if (!document.IsNull()) app->Close(document); } catch (...) {}
+            try { if (!reopened.IsNull()) reopenApp->Close(reopened); } catch (...) {}
+        }
+    } scope;
+    scope.context = context; scope.view = view; scope.camera = new Graphic3d_Camera(view->Camera());
+    try {
+        using namespace core3d::persistence;
+        Core3DDebugDefineFrameBinXCAFFormat(scope.app, std::make_shared<AuthoredFrameReadBudget>());
+        Core3DDebugDefineFrameBinXCAFFormat(scope.reopenApp, std::make_shared<AuthoredFrameReadBudget>());
+        scope.app->NewDocument(TCollection_ExtendedString("BinXCAF"), scope.document);
+        XCAFDoc_DocumentTool::SetLengthUnit(scope.document, 0.001);
+        const Handle(OcctDocument) wrapper = new OcctDocument(); wrapper->ChangeDocument() = scope.document;
+        auto shapes = XCAFDoc_DocumentTool::ShapeTool(scope.document->Main());
+        auto shape = TopoDS_Shape(Core3DDebugAuthoredGeometryFixture(mode == 4 ? 22 : 0));
+        if (mode == 2) { BRep_Builder b; TopoDS_Compound compound; b.MakeCompound(compound); b.Add(compound, shape); shape = compound; }
+        TDF_Label label = shapes->AddShape(shape, Standard_False);
+        gp_Trsf placement;
+        if (mode == 1 || mode == 2) {
+            placement.SetRotation(gp_Ax1(gp_Pnt(0,0,0), gp_Dir(0,0,1)), M_PI / 2);
+            placement.SetTranslationPart(gp_Vec(2,3,4)); shape.Location(TopLoc_Location(placement)); shapes->SetShape(label, shape);
+        }
+        if (!wrapper->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh)) Standard_Failure::Raise("Native fixture representation failed.");
+        Handle(Image_Texture) image;
+        if (!Core3DCreateAuthoredTexture(static_cast<const Standard_Byte*>(normalPNG.bytes), normalPNG.length, "image/png", image)
+            || !Core3DValidateNumericTexture(image)) Standard_Failure::Raise("Native fixture image rejected.");
+        Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+        XCAFDoc_VisMaterialPBR pbr; pbr.BaseColor = Quantity_ColorRGBA(1,1,1,1); pbr.Metallic = 0; pbr.Roughness = 0.8f; pbr.NormalTexture = image;
+        material->SetPbrMaterial(pbr); material->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
+        const auto materials = XCAFDoc_DocumentTool::VisMaterialTool(scope.document->Main());
+        const auto materialLabel = materials->AddMaterial(material, "Native frame fixture"); materials->SetShapeMaterial(label, materialLabel);
+        auto assign = [&](NSData* value) {
+            if (value.length < 128 || value.length > core3d::scene::authored::kMaximumArchiveBytes) Standard_Failure::Raise("Invalid native frame archive bound.");
+            const auto attribute = TDataStd_ByteArray::Set(label, AuthoredFrameAttributeID(), 0, int(value.length)-1, Standard_False);
+            const auto* bytes = static_cast<const std::uint8_t*>(value.bytes);
+            for (NSUInteger i = 0; i < value.length; ++i) attribute->SetValue(int(i), bytes[i]);
+        };
+        assign(archive); scope.document->SetUndoLimit(20); scope.document->ClearUndos();
+        auto display = [&]() {
+            const auto nativeMaterial = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+            XCAFPrs_Style style; style.SetMaterial(nativeMaterial);
+            scope.presentation = new CafShapePrs(label, style, Graphic3d_MaterialAspect(Graphic3d_NameOfMaterial_ShinyPlastified));
+            scope.presentation->DispatchStyles(Standard_False);
+            if (mode == 3) { gp_Trsf scalar; scalar.SetScale(gp_Pnt(0,0,0), -2); scope.presentation->SetLocalTransformation(scalar); }
+            context->Display(scope.presentation, AIS_Shaded, -1, Standard_False);
+        };
+        display();
+        const auto direction = gp_Dir(0.6,0.8,0).Transformed(placement);
+        view->SetProj(direction.X(), direction.Y(), direction.Z());
+        view->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
+        view->Camera()->SetUp(gp_Dir(0,0,1));
+        auto center = gp_Pnt(8.0/3, -2, 10.0/3).Transformed(placement);
+        if (mode == 3) { center.SetCoord(-2*center.X(), -2*center.Y(), -2*center.Z()); }
+        view->Camera()->SetCenter(center); view->Camera()->SetScale(mode == 3 ? 26 : 13);
+        NSMutableArray* states = [NSMutableArray array]; NSMutableDictionary* captures = [NSMutableDictionary dictionary];
+        bool readOnly = true;
+        auto keep = [&](int step, bool freshBuffer, bool captureImage) {
+            const int time = wrapper->Document()->GetData()->Time(), undo = wrapper->Document()->GetAvailableUndos(), redo = wrapper->Document()->GetAvailableRedos();
+            if (!viewer->DebugPrepareNativeTangentArrays()) Standard_Failure::Raise("Native frame preparation rejected.");
+            NSMutableData* frames = [NSMutableData data]; NSMutableArray* uids = [NSMutableArray array];
+            for (const auto& prs : scope.presentation->Presentations()) {
+                if (prs.IsNull()) continue;
+                for (const auto& generic : prs->Groups()) {
+                    auto group = Handle(OpenGl_Group)::DownCast(generic); if (group.IsNull()) continue;
+                    for (auto* node = group->FirstNode(); node; node = node->next) {
+                        auto* primitive = dynamic_cast<OpenGl_PrimitiveArray*>(node->elem);
+                        if (!primitive || !primitive->IsFillDrawMode()) continue;
+                        [uids addObject:@(primitive->GetUID())];
+                        const auto attributes = primitive->Attributes();
+                        if (!freshBuffer) continue;
+                        if (attributes.IsNull() || !attributes->Data()) Standard_Failure::Raise("New native frame buffer missing.");
+                        int index = -1; Standard_Size stride = 0;
+                        const auto bytes = attributes->AttributeData(Graphic3d_TOA_CUSTOM, index, stride);
+                        if (!bytes || index < 0 || attributes->Attribute(index).DataType != Graphic3d_TOD_VEC4) Standard_Failure::Raise("Native tangent attribute missing.");
+                        for (int corner = 0; corner < attributes->NbElements; ++corner) [frames appendBytes:bytes+std::size_t(corner)*stride length:16];
+                    }
+                }
+            }
+            const auto stats = [GLController debugFramebufferStatistics];
+            if (![stats[@"captured"] boolValue]) Standard_Failure::Raise("Native framebuffer capture failed.");
+            readOnly = readOnly && time == wrapper->Document()->GetData()->Time() && undo == wrapper->Document()->GetAvailableUndos() && redo == wrapper->Document()->GetAvailableRedos();
+            [states addObject:@{@"step": @(step), @"frames": frames, @"uids": uids, @"stats": stats,
+                @"prepared": @(viewer->DebugPreparedTangentArrayCount()), @"history": @[@(undo),@(redo)]}];
+            if (captureImage) {
+                const auto pixels = [GLController debugViewportRGBA];
+                if (!pixels) Standard_Failure::Raise("Native viewport image failed.");
+                captures[[NSString stringWithFormat:@"%d",step]] = pixels;
+            }
+        };
+        keep(0, true, true); keep(1, false, false);
+        scope.document->NewCommand(); assign(replacement); scope.document->CommitCommand(); keep(2, true, true);
+        if (!scope.document->Undo()) Standard_Failure::Raise("Native frame undo failed."); keep(3, true, false);
+        if (!scope.document->Redo()) Standard_Failure::Raise("Native frame redo failed."); keep(4, true, false);
+        context->Erase(scope.presentation, Standard_False);
+        scope.document->NewCommand(); assign(archive); scope.document->CommitCommand(); keep(5, true, false);
+        context->Display(scope.presentation, AIS_Shaded, -1, Standard_False); keep(6, false, false);
+        scope.document->NewCommand(); label.ForgetAttribute(AuthoredFrameAttributeID()); scope.document->CommitCommand(); keep(7, true, false);
+        if (!scope.document->Undo()) Standard_Failure::Raise("Native frame removal undo failed."); keep(8, true, false);
+        scope.document->NewCommand(); NSMutableData* invalid = [archive mutableCopy]; static_cast<std::uint8_t*>(invalid.mutableBytes)[invalid.length-1] ^= 1; assign(invalid); scope.document->CommitCommand();
+        const bool invalidRejected = !viewer->DebugPrepareNativeTangentArrays();
+        if (!scope.document->Undo()) Standard_Failure::Raise("Invalid native frame cleanup failed."); keep(9, false, false);
+        std::ostringstream output(std::ios::binary | std::ios::out);
+        if (scope.app->SaveAs(scope.document, output) != PCDM_SS_OK) Standard_Failure::Raise("Native renderer fixture save failed.");
+        const auto binary = output.str(); if (binary.empty() || binary.size() > 1024*1024) Standard_Failure::Raise("Native renderer fixture save exceeded bound.");
+        Core3DBeginSafeBinaryRead(); std::istringstream input(binary, std::ios::binary | std::ios::in);
+        if (scope.reopenApp->Open(input, scope.reopened) != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected() || scope.reopened.IsNull()) Standard_Failure::Raise("Native renderer fixture reopen failed.");
+        context->Remove(scope.presentation, Standard_False); scope.presentation.Nullify();
+        wrapper->ChangeDocument() = scope.reopened;
+        TDF_LabelSequence labels; XCAFDoc_DocumentTool::ShapeTool(scope.reopened->Main())->GetFreeShapes(labels);
+        if (labels.Length() != 1) Standard_Failure::Raise("Native renderer fixture reopened owner missing."); label = labels.First(); display(); keep(10, true, true);
+        context->Remove(scope.presentation, Standard_False); scope.presentation.Nullify();
+        if (!viewer->DebugPrepareNativeTangentArrays() || viewer->DebugPreparedTangentArrayCount() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
+        return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"invalidRejected": @(invalidRejected), @"cacheCleared": @YES};
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (...) { return @{@"error": @"Native authored-frame rendering fixture failed"}; }
 }
 
 - (NSDictionary<NSString *, id> *)debugAuthoredFramePublications:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode {

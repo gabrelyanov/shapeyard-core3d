@@ -1081,6 +1081,8 @@ typedef struct {
 //! the node; 15 has mirrored UVs; 16 mixes culling; 17 mixes signs within a
 //! triangle and must reject. Never edits the document.
 //! Private OCAF documents through the production builder; does not adopt or edit the live project.
+- (NSDictionary<NSString *, id> *)debugNativeAuthoredFrameRendering:(NSData *)archive replacement:(NSData *)replacement normalPNG:(NSData *)normalPNG mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugNativeAuthoredFrameRendering(_:replacement:normalPNG:mode:));
 - (NSDictionary<NSString *, id> *)debugAuthoredFramePublications:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
     NS_SWIFT_NAME(debugAuthoredFramePublications(_:replacement:mode:));
 - (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)validationMode;
