@@ -1176,6 +1176,9 @@ bool HasValidCornerTangents(const MeshSnapshot& mesh) noexcept {
         if (mesh.indices[i] >= mesh.vertices.size()) { return false; }
         const auto& v = mesh.vertices[mesh.indices[i]];
         const auto& t = mesh.cornerTangents[i];
+        // Interpolating opposite handedness inside one triangle has no defined
+        // tangent space. UV seams must split between triangles, not within one.
+        if (i % 3 != 0 && t.w != mesh.cornerTangents[i - i % 3].w) { return false; }
         const double n2 = double(v.normalX)*v.normalX + double(v.normalY)*v.normalY
             + double(v.normalZ)*v.normalZ;
         const double t2 = double(t.x)*t.x + double(t.y)*t.y + double(t.z)*t.z;

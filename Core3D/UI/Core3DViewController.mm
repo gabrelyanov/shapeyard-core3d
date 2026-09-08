@@ -3530,6 +3530,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             case 1: mesh.cornerTangents.pop_back(); break;
             case 2: tangent.x = std::numeric_limits<float>::quiet_NaN(); break;
             case 3: tangent.w = 0; break;
+            case 17: tangent.w = -tangent.w; break;
             case 4: tangent.x *= 2; tangent.y *= 2; tangent.z *= 2; break;
             case 5: {
                 const auto& vertex = mesh.vertices[mesh.indices.front()];
