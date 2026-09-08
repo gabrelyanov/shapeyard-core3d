@@ -3519,7 +3519,12 @@ void Core3DAddDebugOrphanVisualMaterial(
     const auto shape = Handle(AIS_Shape)::DownCast(resident.First());
     if (shape.IsNull()) return NO;
     if (hidden) context->Erase(shape, Standard_False);
-    else context->Display(shape, Standard_False);
+    else {
+        context->Display(shape, Standard_False);
+        // Display may activate OCCT's default whole-object selection. Restore
+        // the editor's exact selection authority before snapshot publication.
+        if ([self trySetSelectionType:_currentSelectionType] != Core3DSelectionTypeChangeResultSucceeded) return NO;
+    }
     GLController.viewer->Invalidate();
     return YES;
 }
