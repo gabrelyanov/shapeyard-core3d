@@ -1174,6 +1174,8 @@ typedef struct {
 //! Bounded color evidence from the current OpenGL view after an actual redraw.
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
 - (NSDictionary<NSString *, NSNumber *> *)debugFramebufferStatistics;
+//! Read-only last native tangent-preparation failure and render counters.
+- (NSDictionary<NSString *, NSNumber *> *)debugNativeFramePreparationState;
 //! Current OpenGL selection size. Assembly occurrences are expected to remain
 //! zero after select-all because definition-addressed edits are unsafe.
 - (NSInteger)debugSelectedShapeCount;

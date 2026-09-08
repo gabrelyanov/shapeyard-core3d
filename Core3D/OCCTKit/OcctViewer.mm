@@ -320,23 +320,43 @@ bool OcctViewer::RenderFrame()
     }
     try {
         const auto driver = Handle(OpenGl_GraphicDriver)::DownCast(myViewer->Driver());
+#if DEBUG
+        core3d::render::NativeTangentPreparationTrace trace;
+        trace.stage = 1;
+        if (driver.IsNull() || !core3d::render::PrepareNativeTangentPresentations(
+                myContext, driver->GetSharedContext(true), myPreparedTangentArrays, &trace)) {
+            myDebugNativeFrameFailure = trace;
+            if (myDebugNativeFrameFailures < UINT64_MAX) ++myDebugNativeFrameFailures;
+            return false;
+        }
+#else
         if (driver.IsNull() || !core3d::render::PrepareNativeTangentPresentations(
                 myContext, driver->GetSharedContext(true), myPreparedTangentArrays)) return false;
+#endif
 #if DEBUG
         if (myDebugFrameObserver && !myDebugFrameObserver(false)) return false;
 #endif
         myView->RenderFrame();
 #if DEBUG
         if (myDebugFrameObserver && !myDebugFrameObserver(true)) return false;
+        if (myDebugNativeFrameSuccesses < UINT64_MAX) ++myDebugNativeFrameSuccesses;
 #endif
         return true;
     } catch (const Standard_Failure&) {
+#if DEBUG
+        myDebugNativeFrameFailure = {}; myDebugNativeFrameFailure.stage = 90;
+        if (myDebugNativeFrameFailures < UINT64_MAX) ++myDebugNativeFrameFailures;
+#endif
         // GLView owns the bounded consecutive-failure policy and emits one
         // terminal pause diagnostic. Never log here per render attempt: a
         // damaged graphics context can otherwise grow CoreSimulator.log at
         // display-link frequency while recovery is being scheduled.
         return false;
     } catch (...) {
+#if DEBUG
+        myDebugNativeFrameFailure = {}; myDebugNativeFrameFailure.stage = 91;
+        if (myDebugNativeFrameFailures < UINT64_MAX) ++myDebugNativeFrameFailures;
+#endif
         return false;
     }
 }

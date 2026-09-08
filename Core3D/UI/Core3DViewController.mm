@@ -5032,6 +5032,18 @@ void Core3DAddDebugOrphanVisualMaterial(
     return [GLController debugFramebufferStatistics];
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)debugNativeFramePreparationState {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return @{};
+    const auto viewer = GLController.viewer;
+    const auto& trace = viewer->DebugNativeFrameFailure();
+    return @{ @"failures": @(viewer->DebugNativeFrameFailures()),
+              @"successes": @(viewer->DebugNativeFrameSuccesses()),
+              @"stage": @(trace.stage), @"elements": @(trace.sourceElements),
+              @"attributes": @(trace.sourceAttributes), @"cpu": @(trace.sourceCPUData),
+              @"corner": @(trace.mismatchCorner), @"component": @(trace.mismatchComponent),
+              @"expected": @(trace.expectedBits), @"actual": @(trace.actualBits) };
+}
+
 - (NSInteger)debugSelectedShapeCount {
     return [GLController debugSelectedShapeCount];
 }

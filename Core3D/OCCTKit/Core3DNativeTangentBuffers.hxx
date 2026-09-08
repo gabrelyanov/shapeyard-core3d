@@ -78,12 +78,15 @@ inline bool ReadNativeTangentOwner(const Handle(AIS_Shape)& shape,
 inline bool NativeSuppliedCornerTangents(const NativeTangentOwner& owner,
                                         const std::vector<scene::Vertex>& vertices,
                                         const std::vector<std::uint32_t>& indices,
-                                        std::vector<scene::Float4>& output) {
+                                        std::vector<scene::Float4>& output,
+                                        NativeTangentPreparationTrace* trace = nullptr) {
+    if (trace) trace->stage = 130;
     output.clear();
     std::vector<scene::Float4> frames;
     if (!persistence::DecodeNativeAuthoredFrames(owner.localFace,
             owner.record.archive.data(), owner.record.archive.size(), frames)
         || frames.size() != indices.size()) return false;
+    if (trace) trace->stage = 131;
     TopLoc_Location location;
     const auto mesh = BRep_Tool::Triangulation(owner.localFace, location);
     if (mesh.IsNull() || !location.IsIdentity()) return false;
@@ -100,7 +103,23 @@ inline bool NativeSuppliedCornerTangents(const NativeTangentOwner& owner,
             const scene::Vertex expected = {float(point.X()), float(point.Y()), float(point.Z()),
                 float(normal.X()), float(normal.Y()), float(normal.Z()), float(uv.X()), float(uv.Y())};
             const auto& actual = vertices[indices[corner]];
-            if (std::memcmp(&expected, &actual, sizeof(expected)) != 0) return false;
+            if (std::memcmp(&expected, &actual, sizeof(expected)) != 0) {
+                if (trace) {
+                    trace->stage = 132; trace->mismatchCorner = int(corner + 1);
+                    std::uint32_t expectedWords[8], actualWords[8];
+                    static_assert(sizeof(expectedWords) == sizeof(expected));
+                    std::memcpy(expectedWords, &expected, sizeof(expected));
+                    std::memcpy(actualWords, &actual, sizeof(actual));
+                    for (int component = 0; component < 8; ++component) {
+                        if (expectedWords[component] != actualWords[component]) {
+                            trace->mismatchComponent = component + 1;
+                            trace->expectedBits = expectedWords[component];
+                            trace->actualBits = actualWords[component]; break;
+                        }
+                    }
+                }
+                return false;
+            }
             auto& frame = frames[corner];
             // Keep identity placement byte-exact, including signed zero.
             if (owner.placement.Form() != gp_Identity) {
@@ -118,8 +137,15 @@ inline bool NativeSuppliedCornerTangents(const NativeTangentOwner& owner,
 inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
     const Handle(Graphic3d_Buffer)& attributes,
     const Handle(Graphic3d_IndexBuffer)& indexBuffer,
-    const NativeTangentOwner* owner = nullptr) {
+    const NativeTangentOwner* owner = nullptr,
+    NativeTangentPreparationTrace* trace = nullptr) {
     using namespace core3d::scene;
+    if (trace) {
+        trace->stage = 10;
+        trace->sourceElements = attributes.IsNull() ? 0 : attributes->NbElements;
+        trace->sourceAttributes = attributes.IsNull() ? 0 : attributes->NbAttributes;
+        trace->sourceCPUData = !attributes.IsNull() && attributes->Data() != nullptr;
+    }
     if (attributes.IsNull() || attributes->Data() == nullptr
         || attributes->NbElements < 1 || attributes->NbElements > kMaximumTangentVertices
         || attributes->NbAttributes < 3 || attributes->NbAttributes > 4)
@@ -129,6 +155,7 @@ inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
     const int count = indexBuffer.IsNull() ? attributes->NbElements : indexBuffer->NbElements;
     if (count <= 0 || count % 3 != 0 || count / 3 > kMaximumTangentTriangles) return {};
 
+    if (trace) trace->stage = 11;
     struct Field { const Standard_Byte* bytes; Standard_Size stride; int offset; int size; };
     std::vector<Field> fields;
     std::vector<Graphic3d_Attribute> descriptors;
@@ -154,6 +181,7 @@ inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
         vertexStride += descriptor.Stride();
     }
     if ((found & 7) != 7) return {};
+    if (trace) trace->stage = 12;
     std::vector<Vertex> vertices(attributes->NbElements);
     for (std::size_t i = 0; i < fields.size(); ++i) {
         const auto& field = fields[i];
@@ -177,9 +205,11 @@ inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
         indices[i] = value;
     }
     std::vector<Float4> frames;
+    if (trace) trace->stage = 13;
     if (owner && !owner->record.archive.empty()) {
-        if (!NativeSuppliedCornerTangents(*owner, vertices, indices, frames)) return {};
+        if (!NativeSuppliedCornerTangents(*owner, vertices, indices, frames, trace)) return {};
     } else if (GenerateMikkCornerTangents(vertices, indices, true, frames) != TangentSpaceError::None) return {};
+    if (trace) trace->stage = 14;
     descriptors.push_back({Graphic3d_TOA_CUSTOM, Graphic3d_TOD_VEC4});
     Handle(Graphic3d_Buffer) result = new Graphic3d_Buffer(Graphic3d_Buffer::DefaultAllocator());
     if (!result->Init(count, descriptors.data(), int(descriptors.size()))) return {};
@@ -198,7 +228,9 @@ inline Handle(Graphic3d_Buffer) BuildNativeTangentBuffer(
 inline bool PrepareNativeTangentPresentations(
     const Handle(AIS_InteractiveContext)& context,
     const Handle(OpenGl_Context)& gl,
-    std::unordered_map<Standard_Size, NativeTangentArrayState>& prepared) {
+    std::unordered_map<Standard_Size, NativeTangentArrayState>& prepared,
+    NativeTangentPreparationTrace* trace = nullptr) {
+    if (trace) { *trace = {}; trace->stage = 1; }
     if (context.IsNull() || gl.IsNull()) return false;
     std::unordered_map<Standard_Size, NativeTangentArrayState> active;
     struct Pending { OpenGl_PrimitiveArray* primitive; Handle(Graphic3d_Buffer) attributes; };
@@ -217,7 +249,9 @@ inline bool PrepareNativeTangentPresentations(
         if (drawer.IsNull() || drawer->ShadingAspect().IsNull()
             || !NeedsNativeTangents(drawer->ShadingAspect()->Aspect())) continue;
         NativeTangentOwner owner;
+        if (trace) trace->stage = 2;
         if (!ReadNativeTangentOwner(shape, owner)) return false;
+        if (trace) trace->stage = 3;
         bool changedBasis = false;
         for (const auto& presentation : shape->Presentations()) {
             if (presentation.IsNull()) continue;
@@ -268,8 +302,9 @@ inline bool PrepareNativeTangentPresentations(
                         if (existing->second.basisIdentity != owner.identity) return false;
                         bytes = existing->second.bytes;
                     } else {
-                        const auto attributes = BuildNativeTangentBuffer(primitive->Attributes(), primitive->Indices(), &owner);
+                        const auto attributes = BuildNativeTangentBuffer(primitive->Attributes(), primitive->Indices(), &owner, trace);
                         if (attributes.IsNull()) return false;
+                        if (trace) trace->stage = 4;
                         const auto& bounds = primitive->Bounds();
                         if (!bounds.IsNull()) {
                             std::size_t corners = 0;
@@ -291,6 +326,7 @@ inline bool PrepareNativeTangentPresentations(
             }
         }
     }
+    if (trace) trace->stage = 5;
     for (const auto& item : pending) {
         const auto bounds = item.primitive->Bounds();
         item.primitive->InitBuffers(gl, Graphic3d_TOPA_TRIANGLES, {}, item.attributes, bounds);
@@ -299,6 +335,7 @@ inline bool PrepareNativeTangentPresentations(
         prepared[item.primitive->GetUID()] = active.at(item.primitive->GetUID());
     }
     prepared.swap(active);
+    if (trace) trace->stage = 0;
     return true;
 }
 } // namespace core3d::render

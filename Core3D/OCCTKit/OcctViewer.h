@@ -48,6 +48,9 @@ class OcctViewer
     std::unordered_map<Standard_Size, core3d::render::NativeTangentArrayState> myPreparedTangentArrays;
 #if DEBUG
     std::function<bool(bool)> myDebugFrameObserver;
+    core3d::render::NativeTangentPreparationTrace myDebugNativeFrameFailure;
+    std::uint64_t myDebugNativeFrameFailures = 0;
+    std::uint64_t myDebugNativeFrameSuccesses = 0;
 #endif
 public:
     
@@ -100,6 +103,9 @@ public:
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);
 #ifdef DEBUG
+    const auto& DebugNativeFrameFailure() const { return myDebugNativeFrameFailure; }
+    std::uint64_t DebugNativeFrameFailures() const { return myDebugNativeFrameFailures; }
+    std::uint64_t DebugNativeFrameSuccesses() const { return myDebugNativeFrameSuccesses; }
     std::size_t DebugPreparedTangentArrayCount() const { return myPreparedTangentArrays.size(); }
     // Observe preparation only inside the viewport-owned GL draw boundary.
     // Callback runs with the owned rendering context: false before upload, true after draw.
