@@ -42,15 +42,6 @@ varying vec2 syUV;
 #ifdef THE_HAS_TEXTURE_COLOR
 uniform sampler2D occSamplerBaseColor;
 #endif
-#ifdef THE_HAS_TEXTURE_EMISSIVE
-uniform sampler2D occSamplerEmissive;
-#endif
-#ifdef THE_HAS_TEXTURE_METALROUGHNESS
-uniform sampler2D occSamplerMetallicRoughness;
-#endif
-#ifdef THE_HAS_TEXTURE_OCCLUSION
-uniform sampler2D occSamplerOcclusion;
-#endif
 void main() {
     if (occFragEarlyReturn()) return;
     // Fixed loop bounds keep ES 2 uniform indexing valid; a satisfied member
