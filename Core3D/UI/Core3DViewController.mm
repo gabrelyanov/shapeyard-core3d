@@ -3495,6 +3495,27 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
         if (!bound && mode != 12) { return nil; }
         using namespace core3d::scene;
+        if (mode == 15) {
+            // A synthetic immutable export fixture with shared source indices
+            // across opposite UV handedness. The live OCAF document is untouched.
+            result.meshes.resize(1); result.instances.resize(1);
+            auto& mesh = result.meshes.front();
+            mesh.geometryRevision += 1;
+            mesh.vertices = {{0,0,0, 0,0,1, 0,0}, {10,0,0, 0,0,1, 1,0},
+                {0,10,0, 0,0,1, 0,1}, {-10,0,0, 0,0,1, 1,0}};
+            mesh.indices = {0,1,2, 0,2,3};
+            mesh.primitives = {{0,6,0,true}};
+            mesh.topology = {1,0,0};
+            mesh.localBounds = {{-10,0,0}, {10,10,0}, true};
+            auto& instance = result.instances.front();
+            instance.meshIndex = 0; instance.selected = false;
+            instance.primitiveBindings = {{0,1,true}};
+            result.selectionMode = ElementKind::Object;
+            result.selection = {};
+            result.pickTable = {ElementIdentifier(), {instance.entityIdentifier,
+                ElementKind::Object, 0, mesh.geometryRevision}};
+            result.revisions.model += 1; result.revisions.snapshot += 1;
+        }
         for (auto& mesh : result.meshes) {
             const bool hasUV = std::all_of(mesh.primitives.begin(), mesh.primitives.end(),
                 [](const auto& p) { return p.hasTextureCoordinates; });
@@ -3505,7 +3526,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         auto& mesh = result.meshes.front();
         auto& tangent = mesh.cornerTangents.front();
         switch (mode) {
-            case 0: case 12: break;
+            case 0: case 12: case 15: break;
             case 1: mesh.cornerTangents.pop_back(); break;
             case 2: tangent.x = std::numeric_limits<float>::quiet_NaN(); break;
             case 3: tangent.w = 0; break;
@@ -3519,6 +3540,31 @@ void Core3DAddDebugOrphanVisualMaterial(
             case 8: mesh.cornerTangents.clear(); mesh.tangentBasis = TangentBasis::None; break;
             case 9: mesh.indices.front() = static_cast<uint32_t>(mesh.vertices.size()); break;
             case 10: result.materials.front().normalTextureIndex = static_cast<int32_t>(result.textures.size()); break;
+            case 16: {
+                auto front = result.materials.front();
+                front.identifier += "-front"; front.cullMode = CullMode::Front;
+                const auto index = static_cast<uint32_t>(result.materials.size());
+                result.materials.push_back(front);
+                for (auto& item : result.instances) {
+                    for (size_t i = 1; i < item.primitiveBindings.size(); i += 2) {
+                        item.primitiveBindings[i].materialIndex = index;
+                    }
+                }
+                break;
+            }
+            case 13: case 14:
+                for (auto& material : result.materials) { material.cullMode = CullMode::Front; }
+                if (mode == 14) {
+                    for (auto& item : result.instances) {
+                        for (int r = 0; r < 3; ++r) {
+                            item.worldFromObject.values[r] *= -2;
+                            item.worldFromObject.values[4+r] *= 3;
+                            item.worldFromObject.values[8+r] *= 1.5;
+                        }
+                        item.reversesWinding = !item.reversesWinding;
+                    }
+                }
+                break;
             case 11:
                 for (auto& m : result.meshes) {
                     m.tangentBasis = TangentBasis::Authored;

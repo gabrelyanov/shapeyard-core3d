@@ -1077,7 +1077,8 @@ typedef struct {
 //! Renderer-only normal binding; never edits native material/history. Nil clears.
 //! DEBUG-only immutable derivative: rebinds the captured AO resource as normal.
 //! Modes 1–10 deliberately violate the DTO contract; 11 is an authored sign
-//! variant and 12 retains frames without a normal map. Never edits the document.
+//! variant; 12 retains frames without a map; 13/14 reverse culling and reflect
+//! the node; 15 has mirrored UVs; 16 mixes front/back culling. Never edits the document.
 - (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)validationMode;
 - (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data;
 - (NSUInteger)debugPreparedNativeTangentArrayCount;
