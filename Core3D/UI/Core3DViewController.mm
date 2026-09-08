@@ -3880,6 +3880,41 @@ void Core3DAddDebugOrphanVisualMaterial(
     return result;
 }
 
+- (NSData *_Nullable)debugNormalRecipeBinXCAFFixtureData:(NSInteger)mode {
+    if (mode < 0 || mode > 6) return nil;
+    return Core3DCreateDebugBinXCAFFixture(@"normal-recipe-fixture",
+        [mode](const Handle(TDocStd_Document)& document) {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            const auto materials = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+            const TDF_Label label = shapes->AddShape(Core3DMakeDebugTriangleMeshFace(),
+                Standard_False, Standard_True);
+            NSData *png = [[NSData alloc] initWithBase64EncodedString:
+                @"iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAABGdBTUEAALGPC/xhBQAAABFJREFUeJxjcNvyEI4YiOMAAPqCHbEKj/fTAAAAAElFTkSuQmCC" options:0];
+            XCAFDoc_VisMaterialPBR pbr;
+            pbr.IsDefined = Standard_True;
+            if (label.IsNull() || !Core3DCreateAuthoredTexture(
+                    static_cast<const Standard_Byte *>(png.bytes), png.length,
+                    "image/png", pbr.NormalTexture)
+                || !Core3DValidateNumericTexture(pbr.NormalTexture))
+                throw Standard_Failure("Unable to construct normal recipe control");
+            if (mode == 6) pbr.NormalTexture.Nullify();
+            Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+            material->SetPbrMaterial(pbr);
+            material->SetCommonMaterial(material->ConvertToCommonMaterial());
+            const auto materialLabel = materials->AddMaterial(material, "Normal recipe fixture");
+            materials->SetShapeMaterial(label, materialLabel);
+            TDataStd_Integer::Set(label,
+                Standard_GUID("248A5203-4A22-4F2B-85C4-BE0BA89A5E4D"), 1);
+            const Standard_GUID recipe("98EAD304-EB49-4F0E-ABFC-AEF94C250161");
+            if (mode != 1) {
+                if (mode == 3) TDataStd_Real::Set(label, recipe, 1.0);
+                else TDataStd_Integer::Set(label, recipe, mode == 2 ? 2 : 1);
+            }
+            if (mode == 4) TDataStd_Integer::Set(document->GetData()->Root(), recipe, 1);
+            if (mode == 5) TDataStd_Integer::Set(label.FindChild(97, Standard_True), recipe, 1);
+        });
+}
+
 - (NSData *_Nullable)debugOrphanVisualMaterialBinXCAFFixtureData {
     return Core3DCreateDebugBinXCAFFixture(
         @"orphan-visual-material-fixture",
