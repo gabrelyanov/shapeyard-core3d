@@ -3656,6 +3656,20 @@ void Core3DAddDebugOrphanVisualMaterial(
     return GLController.viewer ? GLController.viewer->DebugPreparedTangentArrayCount() : 0;
 }
 
+- (NSArray<NSNumber *> *)debugNormalTextureRecipes {
+    if (![NSThread isMainThread] || !GLController.viewer) return @[];
+    const auto document = GLController.viewer->getDocument()->ChangeDocument();
+    if (document.IsNull()) return @[];
+    const auto tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    if (tool.IsNull()) return @[];
+    TDF_LabelSequence roots; tool->GetFreeShapes(roots);
+    if (roots.Length() < 0 || roots.Length() > 50000) return @[];
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:roots.Length()];
+    for (Standard_Integer index = 1; index <= roots.Length(); ++index)
+        [values addObject:@(Core3DNormalTextureRecipeForLabel(roots.Value(index)))];
+    return values;
+}
+
 - (NSInteger)debugVisualMaterialDefinitionCount {
     auto document = GLController.viewer->getDocument()->ChangeDocument();
     if (document.IsNull()

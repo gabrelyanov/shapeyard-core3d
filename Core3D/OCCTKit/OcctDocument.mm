@@ -2527,6 +2527,14 @@ const Standard_GUID& LocalPBRMaterialAttributeID()
     return anId;
 }
 
+//! Per-object recipe, independent of deduplicated image/material definitions.
+//! Version1 fixes the pinned Mikk generator and owned canonical UV/normal input.
+const Standard_GUID& NormalTextureRecipeAttributeID()
+{
+    static const Standard_GUID anId("98EAD304-EB49-4F0E-ABFC-AEF94C250161");
+    return anId;
+}
+
 //! Records that Shapeyard promoted the default black emissive factor to white
 //! solely to make the first authored emissive texture visible. This lives on
 //! the shape label so it follows OCAF history and appearance-copy operations.
@@ -3725,6 +3733,19 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             return Standard_False;
         }
 
+        Standard_Size projectedNormalBytes = 0;
+        TDF_LabelSequence normalRoots; shapeTool->GetFreeShapes(normalRoots);
+        if (normalRoots.Length() < 0 || normalRoots.Length() > 50000) return Standard_False;
+        for (Standard_Integer index = 1; index <= normalRoots.Length(); ++index) {
+            const auto& root = normalRoots.Value(index);
+            XCAFDoc_VisMaterialPBR material;
+            if (!TryPBRMaterialForLabel(root, material) || material.NormalTexture.IsNull()) continue;
+            Standard_Size bytes = 0;
+            if (Core3DNormalTextureRecipeForLabel(root) != 1
+                || !Core3DValidateNormalTextureGeometry(root, &bytes)
+                || !AddMultipliedWithinLimit(projectedNormalBytes, bytes, 1U, 64U * 1024U * 1024U)) return Standard_False;
+        }
+
         GeometryValidationBudget projectedGeometry = current.geometry;
         Standard_Size projectedDefinitions = current.definitions;
         Standard_Size projectedLabels = current.labels;
@@ -3748,6 +3769,15 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                     myOcafDoc, shapeTool, source, &sourceGeometry)
                     == OcctGeometryRepresentation::Invalid) {
                 return Standard_False;
+            }
+
+            XCAFDoc_VisMaterialPBR sourceMaterial;
+            if (TryPBRMaterialForLabel(source, sourceMaterial) && !sourceMaterial.NormalTexture.IsNull()) {
+                Standard_Size bytes = 0;
+                if (Core3DNormalTextureRecipeForLabel(source) != 1
+                    || !Core3DValidateNormalTextureGeometry(source, &bytes)
+                    || !AddMultipliedWithinLimit(projectedNormalBytes, bytes, destinationCount,
+                        64U * 1024U * 1024U)) return Standard_False;
             }
 
             // AddShape creates one definition label and eight transform
@@ -4467,6 +4497,17 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
         && mesh->NbTriangles() > 0 && mesh->NbTriangles() <= 4096
         && mesh->NbNodes() > 0 && mesh->NbNodes() <= 24576;
 }
+}
+
+Standard_Integer Core3DNormalTextureRecipeForLabel(const TDF_Label& label) noexcept
+{
+    try {
+        if (label.IsNull()) return 0;
+        Handle(TDF_Attribute) attribute;
+        if (!label.FindAttribute(NormalTextureRecipeAttributeID(), attribute)) return 0;
+        const auto value = Handle(TDataStd_Integer)::DownCast(attribute);
+        return !value.IsNull() && value->Get() == 1 ? 1 : -1;
+    } catch (...) { return -1; }
 }
 
 Standard_Boolean Core3DValidateNormalTextureGeometry(
@@ -5706,6 +5747,11 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
         aTool->SetShapeMaterial(update.label, aMaterialLabel);
         TDataStd_Integer::Set(
             update.label, LocalPBRMaterialAttributeID(), 1);
+        if (!update.material->PbrMaterial().NormalTexture.IsNull()) {
+            TDataStd_Integer::Set(update.label, NormalTextureRecipeAttributeID(), 1);
+        } else {
+            update.label.ForgetAttribute(NormalTextureRecipeAttributeID());
+        }
 
         // Canonical PBR and legacy preset tags must never compete for
         // precedence.
@@ -5745,6 +5791,7 @@ Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
         }
     }
     label.ForgetAttribute(LocalPBRMaterialAttributeID());
+    label.ForgetAttribute(NormalTextureRecipeAttributeID());
     label.ForgetAttribute(AutoPromotedEmissiveFactorAttributeID());
     return Standard_True;
 }
@@ -5766,6 +5813,14 @@ Standard_Boolean OcctDocument::CopyObjectAppearance(
             LocalPBRMaterialAttributeID(), aLocalPBRMarker)
         && !aLocalPBRMarker.IsNull()
         && aLocalPBRMarker->Get() == 1;
+    const auto sourceVisual = XCAFDoc_VisMaterialTool::GetShapeMaterial(source);
+    const bool hasOwnedNormal = hasLocalPBR && !sourceVisual.IsNull()
+        && sourceVisual->HasPbrMaterial() && !sourceVisual->PbrMaterial().NormalTexture.IsNull();
+    const auto normalRecipe = Core3DNormalTextureRecipeForLabel(source);
+    if ((hasOwnedNormal && (normalRecipe != 1
+            || !Core3DValidateNormalTextureGeometry(source)
+            || !Core3DValidateNormalTextureGeometry(destination)))
+        || (!hasOwnedNormal && normalRecipe != 0)) return Standard_False;
     const Standard_Boolean hasAutoPromotedEmissiveFactor =
         IsEmissiveTextureFactorAutoPromotedForLabel(source);
     Graphic3d_NameOfMaterial aLegacyMaterial;
@@ -5811,6 +5866,11 @@ Standard_Boolean OcctDocument::CopyObjectAppearance(
                 destination, LocalPBRMaterialAttributeID(), 1);
         } else {
             destination.ForgetAttribute(LocalPBRMaterialAttributeID());
+        }
+        if (hasOwnedNormal) {
+            TDataStd_Integer::Set(destination, NormalTextureRecipeAttributeID(), normalRecipe);
+        } else {
+            destination.ForgetAttribute(NormalTextureRecipeAttributeID());
         }
         if (hasLocalPBR && hasAutoPromotedEmissiveFactor) {
             TDataStd_Integer::Set(
@@ -5989,6 +6049,7 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
         if (!pbr.NormalTexture.IsNull() && (!hasLocalPBR
+            || Core3DNormalTextureRecipeForLabel(label) != 1
             || !SupportsNormalTextureGeometryForLabel(label))) return Standard_False;
         const Handle(Image_Texture)& base = pbr.BaseColorTexture;
         const Handle(Image_Texture) common = material->HasCommonMaterial()
@@ -6034,6 +6095,8 @@ Standard_Boolean OcctDocument::SupportsMaterialTextureEditingForLabel(
     Handle(TDataStd_Integer) marker;
     const bool owned = label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
         && !marker.IsNull() && marker->Get() == 1;
+    if (owned && !pbr.NormalTexture.IsNull()
+        && Core3DNormalTextureRecipeForLabel(label) != 1) return Standard_False;
     if (slot != OcctMaterialTextureSlot::BaseColor
         && (!pbr.BaseColorTexture.IsNull() || !common.IsNull())
         && (!owned || pbr.BaseColorTexture.IsNull() || common.IsNull())) return Standard_False;

@@ -1083,6 +1083,7 @@ typedef struct {
 - (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)validationMode;
 - (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data;
 - (NSUInteger)debugPreparedNativeTangentArrayCount;
+- (NSArray<NSNumber *> *)debugNormalTextureRecipes;
 - (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden;
 //! Standalone malformed BinXCAF fixture used to prove that loading rejects
 //! external texture paths and preserves the active document on failure.

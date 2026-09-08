@@ -4999,7 +4999,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     return {};
                 }
                 if (!aPbrMaterial.NormalTexture.IsNull()
-                    && !theDocument->SupportsNormalTextureGeometryForLabel(anOccurrence.definitionLabel)) return {};
+                    && (Core3DNormalTextureRecipeForLabel(anOccurrence.definitionLabel) != 1
+                        || !theDocument->SupportsNormalTextureGeometryForLabel(anOccurrence.definitionLabel))) return {};
                 aPbrOverride = WholeObjectPBRMaterial{
                     aPbrMaterial,
                     aVisualMaterial->AlphaMode(),

@@ -943,13 +943,14 @@ bool ValidateVisualMaterials(
         }
 
         Handle(TDataStd_Integer) marker;
+        const auto normalRecipe = Core3DNormalTextureRecipeForLabel(label);
         Handle(TDataStd_Integer) autoPromotedEmissiveFactor;
         const bool hasAutoPromotedEmissiveFactor = label.FindAttribute(
             AutoPromotedEmissiveFactorValidationAttributeID(),
             autoPromotedEmissiveFactor);
         if (!label.FindAttribute(
                 LocalPBRMaterialValidationAttributeID(), marker)) {
-            if (hasAutoPromotedEmissiveFactor) {
+            if (hasAutoPromotedEmissiveFactor || normalRecipe != 0) {
                 return false;
             }
             continue;
@@ -985,9 +986,11 @@ bool ValidateVisualMaterials(
         if (!assignedMaterial.IsNull() && assignedMaterial->HasPbrMaterial()
             && !assignedMaterial->PbrMaterial().NormalTexture.IsNull()) {
             Standard_Size bytes = 0;
-            if (!Core3DValidateNormalTextureGeometry(label, &bytes)
+            if (normalRecipe != 1 || !Core3DValidateNormalTextureGeometry(label, &bytes)
                 || bytes > 64 * 1024 * 1024 - ownedNormalBytes) return false;
             ownedNormalBytes += bytes;
+        } else if (normalRecipe != 0) {
+            return false;
         }
         if (!validatedLocalMaterialLabels.Contains(
                 assignedMaterialLabel)) {
