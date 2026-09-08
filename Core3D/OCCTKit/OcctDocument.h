@@ -218,6 +218,12 @@ Standard_EXPORT Standard_Boolean Core3DTexturesMatch(
     const Handle(Image_Texture)& first,
     const Handle(Image_Texture)& second);
 
+//! Replace XCAF renderer wrappers with role-aware, presentation-only wrappers.
+//! Persistent image IDs/bytes remain unchanged; GPU identity includes whether
+//! the binding carries color or numeric samples. Safe to call repeatedly.
+Standard_EXPORT void Core3DPrepareRendererTextures(
+    const Handle(Graphic3d_AspectFillArea3d)& aspect);
+
 //! Source-compatible spellings retained for existing native clients. New code
 //! should use the semantic-neutral helpers above.
 Standard_EXPORT Standard_Boolean Core3DCreateAuthoredBaseColorTexture(

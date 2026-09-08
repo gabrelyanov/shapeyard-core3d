@@ -12,6 +12,7 @@
 // commercial license or contractual agreement.
 
 #include "CafShapePrs.h"
+#include "OcctDocument.h"
 
 #import <Foundation/Foundation.h>
 
@@ -125,6 +126,22 @@ CafShapePrs::CafShapePrs(const TDF_Label&                theDefinitionLabel,
 void CafShapePrs::DispatchStyles(const Standard_Boolean theToSyncStyles)
 {
   XCAFPrs_AISObject::DispatchStyles(theToSyncStyles);
+  // The parent recreates wrappers for default and imported sub-shape styles.
+  // Normalize every own aspect after dispatch, before Compute consumes it.
+  if (!Attributes()->ShadingAspect().IsNull())
+  {
+    Core3DPrepareRendererTextures(Attributes()->ShadingAspect()->Aspect());
+  }
+  for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
+       anOverride.More(); anOverride.Next())
+  {
+    const Handle(AIS_ColoredDrawer)& aDrawer = anOverride.Value();
+    if (!aDrawer.IsNull() && aDrawer->HasOwnShadingAspect()
+        && !aDrawer->ShadingAspect().IsNull())
+    {
+      Core3DPrepareRendererTextures(aDrawer->ShadingAspect()->Aspect());
+    }
+  }
   if (!IsEditablePresentation() && !Shape().IsNull())
   {
     // CollectStyleSettings(definition) repeats the definition's whole-object
@@ -171,6 +188,7 @@ void CafShapePrs::ApplyAuthoredVisualMaterial(
     return;
   }
   theMaterial->FillAspect(aRootAspect);
+  Core3DPrepareRendererTextures(aRootAspect);
   for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
        anOverride.More(); anOverride.Next())
   {

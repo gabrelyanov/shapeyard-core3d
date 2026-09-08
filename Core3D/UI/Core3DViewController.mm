@@ -27,6 +27,10 @@
 #include "XCAFDoc_VisMaterial.hxx"
 #include "XCAFDoc_VisMaterialTool.hxx"
 #include "Image_Texture.hxx"
+#include <Image_PixMap.hxx>
+#include <XCAFPrs_Texture.hxx>
+#include <Graphic3d_TextureSet.hxx>
+#include <Graphic3d_TextureParams.hxx>
 #include "BRep_Tool.hxx"
 #include "BRepCheck_Analyzer.hxx"
 #include "BRepTools.hxx"
@@ -3458,6 +3462,64 @@ void Core3DAddDebugOrphanVisualMaterial(
         document->SetMaximumDecodedTextureResourceBytesForTesting(
             static_cast<Standard_Size>(limit));
     }
+}
+
+- (NSDictionary<NSString *, NSDictionary *> *)debugTextureRolePreparation:(NSData *)data {
+    Handle(Image_Texture) image;
+    const std::string type = data.length >= 2
+        && static_cast<const unsigned char*>(data.bytes)[0] == 0xff
+        ? "image/jpeg" : "image/png";
+    if (!Core3DCreateAuthoredTexture(static_cast<const Standard_Byte*>(data.bytes),
+                                    data.length, type, image)) return nil;
+    Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+    XCAFDoc_VisMaterialPBR pbr;
+    pbr.BaseColorTexture = image;
+    pbr.EmissiveTexture = image;
+    pbr.MetallicRoughnessTexture = image;
+    pbr.OcclusionTexture = image;
+    material->SetPbrMaterial(pbr);
+    Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d();
+    material->FillAspect(aspect);
+    Core3DPrepareRendererTextures(aspect);
+    const Handle(Graphic3d_TextureSet) first = aspect->TextureSet();
+    Core3DPrepareRendererTextures(aspect);
+    NSMutableDictionary* result = [NSMutableDictionary dictionary];
+    for (Graphic3d_TextureSet::Iterator iterator(aspect->TextureSet());
+         iterator.More(); iterator.Next()) {
+        Handle(XCAFPrs_Texture) texture = Handle(XCAFPrs_Texture)::DownCast(iterator.Value());
+        if (texture.IsNull()) return nil;
+        NSString* role = nil;
+        switch (texture->GetParams()->TextureUnit()) {
+            case Graphic3d_TextureUnit_BaseColor: role = @"baseColor"; break;
+            case Graphic3d_TextureUnit_Emissive: role = @"emissive"; break;
+            case Graphic3d_TextureUnit_MetallicRoughness: role = @"metallicRoughness"; break;
+            case Graphic3d_TextureUnit_Occlusion: role = @"occlusion"; break;
+            default: return nil;
+        }
+        NSMutableDictionary* record = [@{
+            @"gpuID": [NSString stringWithUTF8String:texture->GetId().ToCString()],
+            @"sourceID": [NSString stringWithUTF8String:texture->GetImageSource()->TextureId().ToCString()],
+            @"color": @(texture->IsColorMap()),
+            @"sourceMatches": @(Core3DTexturesMatch(image, texture->GetImageSource())),
+            @"sourceValidated": @(Core3DValidateAuthoredTexture(texture->GetImageSource())),
+            @"idempotent": @(first == aspect->TextureSet())
+        } mutableCopy];
+        const Handle(Image_PixMap) decoded = texture->GetImage(Handle(Image_SupportedFormats)());
+        if (!decoded.IsNull() && decoded->Format() == Image_Format_RGBA) {
+            // This inspection seam is only for small deterministic test vectors.
+            // Decode itself still follows the production limits above.
+            if (decoded->SizeX() * decoded->SizeY() > 1024) return nil;
+            NSMutableData* pixels = [NSMutableData data];
+            for (Standard_Size y = 0; y < decoded->SizeY(); ++y)
+                [pixels appendBytes:decoded->Row(y) length:decoded->SizeX() * 4];
+            record[@"rgba"] = pixels;
+            record[@"width"] = @(decoded->SizeX());
+            record[@"height"] = @(decoded->SizeY());
+            record[@"topDown"] = @(decoded->IsTopDown());
+        }
+        result[role] = record;
+    }
+    return result;
 }
 
 - (void)debugSetMaximumVisualMaterialDefinitions:(NSUInteger)limit {

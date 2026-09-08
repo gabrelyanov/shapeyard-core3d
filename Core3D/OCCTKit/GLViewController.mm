@@ -4958,11 +4958,10 @@ private:
                             && !source->DataBuffer().IsNull()) {
                             textureSourceByteCount =
                                 source->DataBuffer()->Size();
-                            // Exercise the authoritative source decoder
-                            // directly. TextureSet/source-handle state alone
-                            // cannot prove that OpenGL received any texels.
+                            // Exercise the renderer wrapper: numeric bindings
+                            // deliberately decode differently from color ones.
                             const Handle(Image_PixMap) decoded =
-                                source->ReadImage(
+                                texture->GetImage(
                                     Handle(Image_SupportedFormats)());
                             if (!decoded.IsNull()
                                 && !decoded->IsEmpty()) {

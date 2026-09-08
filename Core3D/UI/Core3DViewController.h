@@ -1062,6 +1062,12 @@ typedef struct {
 - (void)debugSetMaximumSerializedTextureOccurrenceBytes:(NSUInteger)limit;
 //! Lower the aggregate decoded unique-resource ceiling for writer tests.
 - (void)debugSetMaximumDecodedTextureResourceBytes:(NSUInteger)limit;
+//! Exercise production XCAF role wrappers without changing a document. Returns
+//! decoded RGBA data and GPU/source identities for the same embedded image in
+//! color and numeric roles; missing decoded data means numeric admission failed.
+- (NSDictionary<NSString *, NSDictionary *> *_Nullable)
+    debugTextureRolePreparation:(NSData *)data
+    NS_SWIFT_NAME(debugTextureRolePreparation(_:));
 //! Lower the immutable visual-material definition cap for batch replacement
 //! tests. Values above 2048 reset to the production cap.
 - (void)debugSetMaximumVisualMaterialDefinitions:(NSUInteger)limit;

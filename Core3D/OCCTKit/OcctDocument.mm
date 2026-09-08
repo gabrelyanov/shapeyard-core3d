@@ -93,6 +93,8 @@
 #include <TopTools_MapOfShape.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <Graphic3d_TextureSet.hxx>
+#include <Graphic3d_TextureParams.hxx>
+#include <XCAFPrs_Texture.hxx>
 #include <Image_PixMap.hxx>
 #include <Image_Texture.hxx>
 #include <NCollection_Buffer.hxx>
@@ -195,6 +197,7 @@ void ApplyVisualMaterialToPlainPresentation(
         return;
     }
     theMaterial->FillAspect(aFillAspect);
+    Core3DPrepareRendererTextures(aFillAspect);
     thePresentation->SynchronizeAspects();
 }
 
@@ -766,6 +769,171 @@ Handle(Image_PixMap) DecodeRendererTextureWithImageIO(
     }
     return aPixMap;
 }
+
+// Numeric PNGs are sampled as stored channel codes. Do not draw through a
+// color-managed CGContext: a linear-tagged roughness value of 128 is not an
+// sRGB color. The narrow admission matches the mobile numeric importer.
+template<class T> struct ScopedNumericCF {
+    T value;
+    explicit ScopedNumericCF(T v) : value(v) {}
+    ~ScopedNumericCF() { if (value != nullptr) CFRelease(value); }
+    ScopedNumericCF(const ScopedNumericCF&) = delete;
+    ScopedNumericCF& operator=(const ScopedNumericCF&) = delete;
+};
+
+Handle(Image_PixMap) DecodeNumericRendererPNG(
+    const Handle(NCollection_Buffer)& buffer)
+{
+    Standard_Size outputBytes = 0;
+    if (!TryTextureDecodedBytes(buffer, outputBytes)
+        || buffer.IsNull() || buffer->Size() < 33) return {};
+    const Standard_Byte* header = buffer->Data();
+    static const unsigned char prefix[] = {
+        137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82};
+    if (std::memcmp(header, prefix, sizeof(prefix)) != 0
+        || header[24] != 8
+        || !(header[25] == 0 || header[25] == 2
+             || header[25] == 4 || header[25] == 6)) return {};
+    ScopedNumericCF<CFDataRef> data(CFDataCreateWithBytesNoCopy(
+        kCFAllocatorDefault, header, static_cast<CFIndex>(buffer->Size()),
+        kCFAllocatorNull));
+    if (data.value == nullptr) return {};
+    NSDictionary* options = @{(__bridge NSString*)kCGImageSourceShouldCache: @NO};
+    ScopedNumericCF<CGImageSourceRef> source(CGImageSourceCreateWithData(
+        data.value, (__bridge CFDictionaryRef)options));
+    if (source.value == nullptr || CGImageSourceGetCount(source.value) != 1
+        || CGImageSourceGetStatus(source.value) != kCGImageStatusComplete
+        || CGImageSourceGetStatusAtIndex(source.value, 0) != kCGImageStatusComplete)
+        return {};
+    ScopedNumericCF<CFDictionaryRef> properties(CGImageSourceCopyPropertiesAtIndex(
+        source.value, 0, (__bridge CFDictionaryRef)options));
+    if (properties.value == nullptr) return {};
+    CFTypeRef orientation = CFDictionaryGetValue(properties.value,
+                                                 kCGImagePropertyOrientation);
+    if (orientation != nullptr) {
+        double value = 0;
+        if (CFGetTypeID(orientation) != CFNumberGetTypeID()
+            || !CFNumberGetValue(static_cast<CFNumberRef>(orientation),
+                                kCFNumberDoubleType, &value) || value != 1) return {};
+    }
+    ScopedNumericCF<CGImageRef> image(CGImageSourceCreateImageAtIndex(
+        source.value, 0, (__bridge CFDictionaryRef)options));
+    if (image.value == nullptr || CGImageGetBitsPerComponent(image.value) != 8
+        || (CGImageGetBitmapInfo(image.value) & kCGBitmapFloatComponents)) return {};
+    const size_t width = CGImageGetWidth(image.value);
+    const size_t height = CGImageGetHeight(image.value);
+    std::uint64_t renderWidth = 0, renderHeight = 0;
+    if (!TryRendererTextureDimensions(width, height, renderWidth, renderHeight)
+        || renderWidth * renderHeight * 4 != outputBytes) return {};
+    CGColorSpaceRef space = CGImageGetColorSpace(image.value);
+    if (space == nullptr) return {};
+    const CGColorSpaceModel model = CGColorSpaceGetModel(space);
+    if (model != kCGColorSpaceModelRGB && model != kCGColorSpaceModelMonochrome)
+        return {};
+    const int channels = model == kCGColorSpaceModelMonochrome ? 1 : 3;
+    if (CGColorSpaceGetNumberOfComponents(space) != channels) return {};
+    const CGFloat* decode = CGImageGetDecode(image.value);
+    for (int c = 0; decode != nullptr && c < channels; ++c)
+        if (decode[c * 2] != 0 || decode[c * 2 + 1] != 1) return {};
+    const size_t bits = CGImageGetBitsPerPixel(image.value);
+    if (bits % 8 != 0) return {};
+    const size_t stride = bits / 8;
+    int colorStart = 0, alphaIndex = -1;
+    const CGImageAlphaInfo alpha = CGImageGetAlphaInfo(image.value);
+    switch (alpha) {
+        case kCGImageAlphaNone:
+            if (stride != channels) return {};
+            break;
+        case kCGImageAlphaLast: case kCGImageAlphaPremultipliedLast:
+        case kCGImageAlphaNoneSkipLast:
+            if (stride != channels + 1) return {};
+            alphaIndex = alpha == kCGImageAlphaNoneSkipLast ? -1 : channels;
+            break;
+        case kCGImageAlphaFirst: case kCGImageAlphaPremultipliedFirst:
+        case kCGImageAlphaNoneSkipFirst:
+            if (stride != channels + 1) return {};
+            colorStart = 1;
+            alphaIndex = alpha == kCGImageAlphaNoneSkipFirst ? -1 : 0;
+            break;
+        default: return {};
+    }
+    const CGBitmapInfo order = CGImageGetBitmapInfo(image.value) & kCGBitmapByteOrderMask;
+    const bool reverse = stride == 4 && order == kCGBitmapByteOrder32Little;
+    if (!(order == kCGBitmapByteOrderDefault
+          || (stride == 4 && order == kCGBitmapByteOrder32Big) || reverse)) return {};
+    CGDataProviderRef provider = CGImageGetDataProvider(image.value);
+    if (provider == nullptr) return {};
+    const size_t rowBytes = CGImageGetBytesPerRow(image.value);
+    if (rowBytes < width * stride
+        || rowBytes > (kMaximumDecodedTextureBytes - outputBytes) / height) return {};
+    ScopedNumericCF<CFDataRef> raw(CGDataProviderCopyData(provider));
+    if (raw.value == nullptr || CFDataGetLength(raw.value) < 0) return {};
+    const auto rawSize = static_cast<std::uint64_t>(CFDataGetLength(raw.value));
+    if (rowBytes < width * stride || rowBytes > rawSize / height
+        || rawSize > kMaximumDecodedTextureBytes - outputBytes) return {};
+    const UInt8* bytes = CFDataGetBytePtr(raw.value);
+    if (bytes == nullptr) return {};
+    const auto sample = [&](size_t x, size_t y, int c) -> unsigned int {
+        return bytes[y * rowBytes + x * stride + (reverse ? stride - 1 - c : c)];
+    };
+    // Validate every source sample, including ones down/up-sampling may skip.
+    if (alphaIndex >= 0)
+        for (size_t y = 0; y < height; ++y)
+            for (size_t x = 0; x < width; ++x)
+                if (sample(x, y, alphaIndex) != 255) return {};
+    Handle(Image_PixMap) result = new Image_PixMap();
+    if (!result->InitTrash(Image_Format_RGBA, renderWidth, renderHeight,
+                           renderWidth * 4)) return {};
+    result->SetTopDown(true);
+    // OCCT ES2 needs a POT mipmapped backing. Interpolate numeric codes in
+    // linear space only on NPOT axes; POT images preserve each code exactly.
+    for (size_t y = 0; y < renderHeight; ++y) {
+        const double sy = std::max(0.0, std::min(double(height - 1),
+            (double(y) + 0.5) * height / renderHeight - 0.5));
+        const size_t y0 = static_cast<size_t>(sy), y1 = std::min(y0 + 1, height - 1);
+        const double fy = sy - y0;
+        Standard_Byte* out = result->ChangeRow(y);
+        for (size_t x = 0; x < renderWidth; ++x, out += 4) {
+            const double sx = std::max(0.0, std::min(double(width - 1),
+                (double(x) + 0.5) * width / renderWidth - 0.5));
+            const size_t x0 = static_cast<size_t>(sx), x1 = std::min(x0 + 1, width - 1);
+            const double fx = sx - x0;
+            for (int c = 0; c < 3; ++c) {
+                const int channel = colorStart + (channels == 1 ? 0 : c);
+                const double top = (1 - fx) * sample(x0, y0, channel) + fx * sample(x1, y0, channel);
+                const double bottom = (1 - fx) * sample(x0, y1, channel) + fx * sample(x1, y1, channel);
+                out[c] = static_cast<Standard_Byte>(std::lround((1 - fy) * top + fy * bottom));
+            }
+            out[3] = 255;
+        }
+    }
+    return result;
+}
+
+// Slot interpretation belongs to the renderer binding, never to Image_Texture
+// or its persisted content address. XCAFPrs_Texture otherwise shares the same
+// GPU key for identical bytes even when one binding is sRGB and another linear.
+class Core3DRoleAwareTexture final : public XCAFPrs_Texture {
+    DEFINE_STANDARD_RTTI_INLINE(Core3DRoleAwareTexture, XCAFPrs_Texture)
+public:
+    explicit Core3DRoleAwareTexture(const Handle(XCAFPrs_Texture)& original)
+    : XCAFPrs_Texture(original->GetImageSource(), original->GetParams()->TextureUnit()) {
+        myParams = original->GetParams();
+        myHasMipmaps = original->HasMipmaps();
+        myTexId += IsColorMap() ? "|shapeyard-color-v1" : "|shapeyard-data-v1";
+    }
+    Handle(Image_CompressedPixMap) GetCompressedImage(
+        const Handle(Image_SupportedFormats)&) override { return {}; }
+    Handle(Image_PixMap) GetImage(
+        const Handle(Image_SupportedFormats)& supported) override {
+        if (IsColorMap()) return XCAFPrs_Texture::GetImage(supported);
+        Handle(Image_PixMap) result = GetImageSource().IsNull()
+            ? Handle(Image_PixMap)()
+            : DecodeNumericRendererPNG(GetImageSource()->DataBuffer());
+        if (!result.IsNull() && !supported.IsNull()) convertToCompatible(supported, result);
+        return result;
+    }
+};
 
 class Core3DImageIOTexture final : public Image_Texture {
     DEFINE_STANDARD_RTTI_INLINE(
@@ -2717,6 +2885,27 @@ Standard_Boolean Core3DAccumulateEmbeddedTextureBudget(
     state.resourcesByIdentifier.emplace(
         canonicalIdentifier, buffer);
     return Standard_True;
+}
+
+void Core3DPrepareRendererTextures(
+    const Handle(Graphic3d_AspectFillArea3d)& aspect)
+{
+    if (aspect.IsNull() || aspect->TextureSet().IsNull()) return;
+    const Handle(Graphic3d_TextureSet)& original = aspect->TextureSet();
+    if (original->IsEmpty()) return;
+    Handle(Graphic3d_TextureSet) replacement = new Graphic3d_TextureSet(original->Size());
+    bool changed = false;
+    for (Standard_Integer i = 0; i < original->Size(); ++i) {
+        const Handle(Graphic3d_TextureMap)& current = original->Value(i);
+        replacement->SetValue(i, current);
+        const Handle(XCAFPrs_Texture) texture = Handle(XCAFPrs_Texture)::DownCast(current);
+        if (texture.IsNull() || !Handle(Core3DRoleAwareTexture)::DownCast(texture).IsNull()
+            || texture->GetParams().IsNull()) continue;
+        Handle(Core3DRoleAwareTexture) prepared = new Core3DRoleAwareTexture(texture);
+        replacement->SetValue(i, prepared);
+        changed = true;
+    }
+    if (changed) aspect->SetTextureSet(replacement);
 }
 
 Standard_Boolean Core3DCreateAuthoredTexture(
