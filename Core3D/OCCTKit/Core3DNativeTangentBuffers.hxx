@@ -235,9 +235,10 @@ inline bool PrepareNativeTangentPresentations(
             // Uploaded private arrays must never be interpreted as source.
             const auto caf = Handle(CafShapePrs)::DownCast(shape);
             if (caf.IsNull()) return false;
-            caf->DispatchStyles(Standard_False);
-            shape->SetToUpdate();
-            context->Redisplay(shape, Standard_False, Standard_True);
+            if (!caf->Shape().IsEqual(XCAFDoc_ShapeTool::GetShape(caf->GetLabel())))
+                caf->DispatchStyles(Standard_False);
+            // Basis derivatives must not rebuild selectable entity owners.
+            context->RecomputePrsOnly(shape, Standard_False, Standard_True);
         }
         for (const auto& presentation : shape->Presentations()) {
             if (presentation.IsNull()) continue;

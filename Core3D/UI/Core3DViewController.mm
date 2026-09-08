@@ -3515,14 +3515,23 @@ void Core3DAddDebugOrphanVisualMaterial(
         Handle(V3d_View) view;
         Handle(Graphic3d_Camera) camera;
         Handle(CafShapePrs) presentation;
+        Handle(V3d_Viewer) viewer;
+        bool gridActive = false, automaticHilight = true;
+        Aspect_GridType gridType = Aspect_GT_Rectangular;
+        Aspect_GridDrawMode gridDrawMode = Aspect_GDM_Lines;
         ~Scope() noexcept {
             try { if (!presentation.IsNull()) context->Remove(presentation, Standard_False); } catch (...) {}
-            try { view->SetCamera(camera); } catch (...) {}
+            try { view->SetCamera(camera); context->SetAutomaticHilight(automaticHilight); } catch (...) {}
+            try { if (gridActive) viewer->ActivateGrid(gridType, gridDrawMode); else viewer->DeactivateGrid(); } catch (...) {}
             try { if (!document.IsNull()) app->Close(document); } catch (...) {}
             try { if (!reopened.IsNull()) reopenApp->Close(reopened); } catch (...) {}
         }
     } scope;
     scope.context = context; scope.view = view; scope.camera = new Graphic3d_Camera(view->Camera());
+    scope.viewer = viewer->V3dViewer(); scope.gridActive = scope.viewer->IsGridActive();
+    scope.gridType = scope.viewer->GridType(); scope.gridDrawMode = scope.viewer->GridDrawMode();
+    scope.automaticHilight = context->AutomaticHilight();
+    scope.viewer->DeactivateGrid(); context->SetAutomaticHilight(Standard_False);
     int fixtureStep = -1;
     try {
         using namespace core3d::persistence;
@@ -3566,6 +3575,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             context->Display(scope.presentation, AIS_Shaded, -1, Standard_False);
         };
         display();
+        context->Activate(scope.presentation, 0, Standard_False);
+        context->AddOrRemoveSelected(scope.presentation, Standard_False);
+        if (context->NbSelected() != 1) Standard_Failure::Raise("Native fixture selection unavailable.");
         const auto direction = gp_Dir(0.6,0.8,0).Transformed(placement);
         view->SetProj(direction.X(), direction.Y(), direction.Z());
         view->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
@@ -3574,9 +3586,21 @@ void Core3DAddDebugOrphanVisualMaterial(
         if (mode == 3) { center.SetCoord(-2*center.X(), -2*center.Y(), -2*center.Z()); }
         view->Camera()->SetCenter(center); view->Camera()->SetScale(mode == 3 ? 26 : 13);
         NSMutableArray* states = [NSMutableArray array]; NSMutableDictionary* captures = [NSMutableDictionary dictionary];
-        bool readOnly = true;
+        bool readOnly = true, selectionUnchanged = true;
+        auto selectedOwners = [&]() {
+            std::vector<Handle(SelectMgr_EntityOwner)> owners;
+            for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) owners.push_back(context->SelectedOwner());
+            return owners;
+        };
+        auto selectedModes = [&]() {
+            TColStd_ListOfInteger modes; context->ActivatedModes(scope.presentation, modes);
+            std::vector<int> result;
+            for (TColStd_ListIteratorOfListOfInteger it(modes); it.More(); it.Next()) result.push_back(it.Value());
+            std::sort(result.begin(), result.end()); return result;
+        };
         auto keep = [&](int step, bool freshBuffer, bool captureImage) {
             fixtureStep = step;
+            const auto ownersBefore = selectedOwners(); const auto modesBefore = selectedModes();
             const int time = wrapper->Document()->GetData()->Time(), undo = wrapper->Document()->GetAvailableUndos(), redo = wrapper->Document()->GetAvailableRedos();
             if (!viewer->DebugPrepareNativeTangentArrays()) Standard_Failure::Raise("Native frame preparation rejected.");
             NSMutableData* frames = [NSMutableData data]; NSMutableArray* uids = [NSMutableArray array];
@@ -3600,9 +3624,10 @@ void Core3DAddDebugOrphanVisualMaterial(
             }
             const auto stats = [GLController debugFramebufferStatistics];
             if (![stats[@"captured"] boolValue]) Standard_Failure::Raise("Native framebuffer capture failed.");
+            selectionUnchanged = selectionUnchanged && ownersBefore == selectedOwners() && modesBefore == selectedModes();
             readOnly = readOnly && time == wrapper->Document()->GetData()->Time() && undo == wrapper->Document()->GetAvailableUndos() && redo == wrapper->Document()->GetAvailableRedos();
             [states addObject:@{@"step": @(step), @"frames": frames, @"uids": uids, @"stats": stats,
-                @"prepared": @(viewer->DebugPreparedTangentArrayCount()), @"history": @[@(undo),@(redo)]}];
+                @"prepared": @(viewer->DebugPreparedTangentArrayCount()), @"selectedOwners": @(ownersBefore.size()), @"selectionUnchanged": @(selectionUnchanged), @"history": @[@(undo),@(redo)]}];
             if (captureImage) {
                 const auto pixels = [GLController debugViewportRGBA];
                 if (!pixels) Standard_Failure::Raise("Native viewport image failed.");
@@ -3619,7 +3644,9 @@ void Core3DAddDebugOrphanVisualMaterial(
         scope.document->NewCommand(); label.ForgetAttribute(AuthoredFrameAttributeID()); scope.document->CommitCommand(); keep(7, true, false);
         if (!scope.document->Undo()) Standard_Failure::Raise("Native frame removal undo failed."); keep(8, true, false);
         scope.document->NewCommand(); NSMutableData* invalid = [archive mutableCopy]; static_cast<std::uint8_t*>(invalid.mutableBytes)[invalid.length-1] ^= 1; assign(invalid); scope.document->CommitCommand();
+        const auto invalidOwners = selectedOwners(); const auto invalidModes = selectedModes();
         const bool invalidRejected = !viewer->DebugPrepareNativeTangentArrays();
+        selectionUnchanged = selectionUnchanged && invalidOwners == selectedOwners() && invalidModes == selectedModes();
         if (!scope.document->Undo()) Standard_Failure::Raise("Invalid native frame cleanup failed."); keep(9, false, false);
         std::ostringstream output(std::ios::binary | std::ios::out);
         if (scope.app->SaveAs(scope.document, output) != PCDM_SS_OK) Standard_Failure::Raise("Native renderer fixture save failed.");
@@ -3631,8 +3658,8 @@ void Core3DAddDebugOrphanVisualMaterial(
         TDF_LabelSequence labels; XCAFDoc_DocumentTool::ShapeTool(scope.reopened->Main())->GetFreeShapes(labels);
         if (labels.Length() != 1) Standard_Failure::Raise("Native renderer fixture reopened owner missing."); label = labels.First(); display(); keep(10, true, true);
         context->Remove(scope.presentation, Standard_False); scope.presentation.Nullify();
-        if (!viewer->DebugPrepareNativeTangentArrays() || viewer->DebugPreparedTangentArrayCount() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
-        return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"invalidRejected": @(invalidRejected), @"cacheCleared": @YES};
+        if (!viewer->DebugPrepareNativeTangentArrays() || viewer->DebugPreparedTangentArrayCount() != 0 || context->NbSelected() != 0) Standard_Failure::Raise("Native frame cache cleanup failed.");
+        return @{@"states": states, @"captures": captures, @"readOnly": @(readOnly), @"selectionUnchanged": @(selectionUnchanged), @"invalidRejected": @(invalidRejected), @"cacheCleared": @YES};
     } catch (const Standard_Failure& failure) {
         return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure", @"step": @(fixtureStep)};
     } catch (...) { return @{@"error": @"Native authored-frame rendering fixture failed", @"step": @(fixtureStep)}; }
