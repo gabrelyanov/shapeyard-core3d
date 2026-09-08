@@ -21,6 +21,7 @@
 #include <TopoDS.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDataStd_Name.hxx>
 #include <Message.hxx>
 #include <sstream>
 #endif
@@ -502,7 +503,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
                                        replacement:(NSData *)replacement mode:(NSInteger)mode {
     using namespace core3d::persistence;
     using core3d::scene::Float4;
-    if (mode < 0 || mode > 6) return @{@"error": @"Undefined frame document fixture"};
+    if (mode < 0 || mode > 10) return @{@"error": @"Undefined frame document fixture"};
     try {
         const auto fixture = Core3DMakeAuthoredGeometryFixture(0);
         std::vector<Float4> validated;
@@ -548,12 +549,14 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
             if (bytes.empty() || bytes.size() > 1024 * 1024) Standard_Failure::Raise("Private frame wire exceeded fixture bound.");
             return bytes;
         };
-        auto makeWire = [&](int count, int damage) {
+        auto makeWire = [&](int count, int damage, int version = 12) {
             PrivateDocument writer; start(writer);
+            writer.document->ChangeStorageFormatVersion(static_cast<TDocStd_FormatVersion>(version));
             const auto shapes = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main());
             for (int i = 0; i < std::max(count, 1); ++i) {
                 const auto label = shapes->AddShape(Core3DMakeAuthoredGeometryFixture(0), Standard_False);
                 if (label.IsNull()) Standard_Failure::Raise("Private frame shape creation failed.");
+                TDataStd_Name::Set(label, TCollection_ExtendedString("Private frame geometry"));
                 if (count) {
                     NSMutableData* bytes = [archive mutableCopy];
                     if (damage == 2) static_cast<std::uint8_t*>(bytes.mutableBytes)[bytes.length - 1] ^= 1;
@@ -564,7 +567,18 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
         };
         NSMutableDictionary* result = [NSMutableDictionary dictionary];
         std::vector<std::pair<std::string, int>> wires;
-        if (mode == 6) {
+        if (mode >= 7 && mode <= 9) {
+            auto damaged = makeWire(0, 0);
+            const std::string oldText = mode == 7 ? "START_TYPES" : mode == 8 ? "END_TYPES" : "TDataStd_Name";
+            const std::string newText = mode == 7 ? "WRONG_TYPES" : mode == 8 ? "BAD_TYPES" : "TDataStd_Xxxx";
+            const auto at = damaged.find(oldText);
+            if (at == std::string::npos || damaged.find(oldText, at + oldText.size()) != std::string::npos
+                || oldText.size() != newText.size()) Standard_Failure::Raise("Ambiguous type-table fixture.");
+            damaged.replace(at, oldText.size(), newText);
+            wires.emplace_back(std::move(damaged), 0); wires.emplace_back(makeWire(0, 0), 0);
+        } else if (mode == 10) {
+            wires.emplace_back(makeWire(0, 0, 7), 0); wires.emplace_back(makeWire(0, 0, 7), 0);
+        } else if (mode == 6) {
             PrivateDocument writer; start(writer);
             const auto label = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main())->AddShape(fixture, Standard_False);
             writer.document->ClearUndos(); writer.document->SetUndoLimit(20);
@@ -619,18 +633,20 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
         PrivateDocument reader;
         auto budget = std::make_shared<AuthoredFrameReadBudget>();
         budget->limit = archive.length * (mode == 1 || mode == 2 ? 2 : 1) - (mode == 1 ? 1 : 0);
-        if (mode == 5) Core3DDefineSafeBinXCAFFormat(reader.app);
+        const bool prototype = mode <= 4 || mode == 6;
+        if (!prototype) Core3DDefineSafeBinXCAFFormat(reader.app);
         else Core3DDebugDefineFrameBinXCAFFormat(reader.app, budget);
         NSMutableArray* reads = [NSMutableArray array];
         for (const auto& wire : wires) {
             // Exercise entry reset as well as terminal/Clear reset on every read.
-            if (mode != 5) { budget->bytes = budget->limit; budget->rejected = true; }
+            if (prototype) { budget->bytes = budget->limit; budget->rejected = true; }
             const int documentsBefore = reader.app->NbDocuments();
             Core3DBeginSafeBinaryRead(); int status = -1; bool threw = false;
             std::istringstream input(wire.first, std::ios::binary | std::ios::in);
             try { status = int(reader.app->Open(input, reader.document)); } catch (...) { threw = true; }
             const bool rejected = Core3DSafeBinaryReadWasRejected();
-            bool accepted = !threw && status == int(PCDM_RS_OK) && !rejected && !reader.document.IsNull();
+            const bool readerAccepted = !threw && status == int(PCDM_RS_OK) && !rejected && !reader.document.IsNull();
+            bool accepted = readerAccepted;
             const bool budgetCleared = budget->bytes == 0 && !budget->rejected;
             NSMutableArray* archives = [NSMutableArray array]; NSMutableArray* frameValues = [NSMutableArray array];
             if (accepted) {
@@ -652,7 +668,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
                 }
             }
             reader.close();
-            [reads addObject:@{@"accepted": @(accepted), @"rejected": @(rejected), @"status": @(status),
+            [reads addObject:@{@"accepted": @(accepted), @"readerAccepted": @(readerAccepted), @"rejected": @(rejected), @"status": @(status),
                 @"threw": @(threw), @"budgetCleared": @(budgetCleared),
                 @"rejectedAfterClose": @(Core3DSafeBinaryReadWasRejected()), @"closed": @(reader.document.IsNull()),
                 @"sessionCountRestored": @(reader.app->NbDocuments() == documentsBefore),

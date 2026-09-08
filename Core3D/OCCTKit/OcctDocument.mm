@@ -66,7 +66,8 @@
 #include <BinMXCAFDoc_VisMaterialDriver.hxx>
 #include <BinMXCAFDoc_VisMaterialToolDriver.hxx>
 #include <BinObjMgt_Persistent.hxx>
-#include <Storage_TypeData.hxx>
+#include <Storage_HeaderData.hxx>
+#include <Storage_Schema.hxx>
 
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -1334,36 +1335,58 @@ public:
             Message_ProgressRange()) override
     {
         ResetAggregateReadBudgets();
-        if (theStorageData.IsNull() || theStorageData->TypeData().IsNull()) {
+        const auto rejectTypes = [&]() {
+            myReaderStatus = PCDM_RS_TypeFailure;
             RejectSafeBinaryRead();
-            return;
+        };
+        if (theStorageData.IsNull() || theStorageData->HeaderData().IsNull()) {
+            rejectTypes(); return;
         }
-        const Handle(TColStd_HSequenceOfAsciiString) aPersistentTypes =
-            theStorageData->TypeData()->Types();
-        if (aPersistentTypes.IsNull()
-            || aPersistentTypes->Length() < 0
-            || aPersistentTypes->Length() > 128) {
-            RejectSafeBinaryRead();
-            return;
+        const auto header = theStorageData->HeaderData();
+        if (!header->StorageVersion().IsIntegerValue()) { rejectTypes(); return; }
+        const auto version = header->StorageVersion().IntegerValue();
+        if (version < TDocStd_FormatVersion_LOWER || version > TDocStd_FormatVersion_CURRENT) {
+            rejectTypes(); return;
         }
+        // BinLDrivers resolves attribute IDs from this UserInfo section,
+        // not Storage_Data::TypeData (the unrelated storage-object table).
+        // Reject unsupported attributes before OCCT can silently skip them.
+        const auto& info = header->UserInfo();
+        if (info.Length() < 2 || info.Length() > 1024) { rejectTypes(); return; }
         TColStd_SequenceOfAsciiString aTypeNames;
-        for (Standard_Integer anIndex = 1;
-             anIndex <= aPersistentTypes->Length(); ++anIndex) {
-            const TCollection_AsciiString& aName =
-                aPersistentTypes->Value(anIndex);
-            if (aName.IsEmpty() || aName.Length() > 128) {
-                RejectSafeBinaryRead();
-                return;
+        bool began = false, ended = false;
+        for (Standard_Integer i = 1; i <= info.Length(); ++i) {
+            const auto& line = info.Value(i);
+            if (line == "START_TYPES") {
+                if (began || ended) { rejectTypes(); return; }
+                began = true; continue;
             }
-            aTypeNames.Append(aName);
+            if (line == "END_TYPES") {
+                if (!began || ended) { rejectTypes(); return; }
+                ended = true; continue;
+            }
+            if (!began || ended) continue;
+            if (line.IsEmpty() || line.Length() > 128 || aTypeNames.Length() >= 128) {
+                rejectTypes(); return;
+            }
+            TCollection_AsciiString name = line;
+            if (version < TDocStd_FormatVersion_VERSION_8) {
+                TCollection_AsciiString migrated;
+                if (Storage_Schema::CheckTypeMigration(name, migrated)) name = migrated;
+            }
+            if (name.IsEmpty() || name.Length() > 128) { rejectTypes(); return; }
+            for (Standard_Integer j = 1; j <= aTypeNames.Length(); ++j)
+                if (aTypeNames.Value(j) == name) { rejectTypes(); return; }
+            aTypeNames.Append(name);
         }
+        if (!began || !ended) { rejectTypes(); return; }
         Handle(BinMDF_ADriverTable) aSupportedDrivers =
             AttributeDrivers(Message::DefaultMessenger());
         aSupportedDrivers->AssignIds(aTypeNames);
         for (Standard_Integer anIndex = 1;
              anIndex <= aTypeNames.Length(); ++anIndex) {
             if (aSupportedDrivers->GetDriver(anIndex).IsNull()) {
-                RejectSafeBinaryRead();
+                rejectTypes();
                 return;
             }
         }
