@@ -1346,7 +1346,9 @@ public:
         if (!header->StorageVersion().IsIntegerValue()) { rejectTypes(); return; }
         const auto version = header->StorageVersion().IntegerValue();
         if (version < TDocStd_FormatVersion_LOWER || version > TDocStd_FormatVersion_CURRENT) {
-            rejectTypes(); return;
+            // Preserve the caller's UnsupportedVersion result for a different
+            // document format; this is distinct from malformed attribute data.
+            myReaderStatus = PCDM_RS_NoVersion; return;
         }
         // BinLDrivers resolves attribute IDs from this UserInfo section,
         // not Storage_Data::TypeData (the unrelated storage-object table).

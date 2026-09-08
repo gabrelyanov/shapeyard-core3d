@@ -503,7 +503,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
                                        replacement:(NSData *)replacement mode:(NSInteger)mode {
     using namespace core3d::persistence;
     using core3d::scene::Float4;
-    if (mode < 0 || mode > 10) return @{@"error": @"Undefined frame document fixture"};
+    if (mode < 0 || mode > 11) return @{@"error": @"Undefined frame document fixture"};
     try {
         const auto fixture = Core3DMakeAuthoredGeometryFixture(0);
         std::vector<Float4> validated;
@@ -576,6 +576,8 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
                 || oldText.size() != newText.size()) Standard_Failure::Raise("Ambiguous type-table fixture.");
             damaged.replace(at, oldText.size(), newText);
             wires.emplace_back(std::move(damaged), 0); wires.emplace_back(makeWire(0, 0), 0);
+        } else if (mode == 11) {
+            wires.emplace_back(makeWire(0, 0, 99), 0); wires.emplace_back(makeWire(0, 0), 0);
         } else if (mode == 10) {
             wires.emplace_back(makeWire(0, 0, 7), 0); wires.emplace_back(makeWire(0, 0, 7), 0);
         } else if (mode == 6) {
