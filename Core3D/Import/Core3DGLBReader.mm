@@ -718,8 +718,11 @@ private:
                 if (!SameSourceFloat(actualUV.X(),read(uv,source.uv,i,0))
                     || !SameSourceFloat(actualUV.Y(),1.0-double(read(uv,source.uv,i,1)))) return false;
                 Graphic3d_Vec3 tangent(read(t,source.tangent,i,0),read(t,source.tangent,i,1),read(t,source.tangent,i,2));
-                converter.TransformNormal(tangent);gp_Dir direction(tangent.x(),tangent.y(),tangent.z());
-                core3d::scene::Float4 frame{float(direction.X()),float(direction.Y()),float(direction.Z()),read(t,source.tangent,i,3)*axisSign};
+                // The source already passed unit/orthogonality validation.
+                // Rotate its components without gp_Dir's implicit normalization,
+                // which would change admitted source bits even for identity axes.
+                converter.TransformNormal(tangent);
+                core3d::scene::Float4 frame{tangent.x(),tangent.y(),tangent.z(),read(t,source.tangent,i,3)*axisSign};
                 if (!core3d::scene::authored::ValidFrame(frame)
                     || std::abs(actualNormal.X()*frame.x+actualNormal.Y()*frame.y+actualNormal.Z()*frame.z)>1.e-4) return false;
                 captured.axisFrames.push_back(frame);
@@ -756,7 +759,11 @@ private:
             for (int node:nodes) {
                 if (node<1 || std::size_t(node)>source->axisFrames.size()) return false;
                 const auto& original=source->axisFrames[std::size_t(node-1)];
-                gp_Dir tangent(original.x,original.y,original.z);tangent.Transform(transform);
+                // HVectorialPart excludes uniform magnitude. Restore only its
+                // sign for reflections, preserving the validated source length.
+                gp_XYZ tangent(original.x,original.y,original.z);
+                tangent.Multiply(transform.HVectorialPart());
+                if (transform.IsNegative()) tangent.Multiply(-1.0);
                 core3d::scene::Float4 frame{float(tangent.X()),float(tangent.Y()),float(tangent.Z()),
                     original.w*(transform.IsNegative()?-1.0f:1.0f)};
                 const auto normal=mesh->Normal(node);
