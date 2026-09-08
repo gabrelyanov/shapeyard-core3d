@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 //! Update the Swift Metal support and GLB export schema gates with this contract.
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 7;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 8;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 10;
 
 struct Float2 {
@@ -197,6 +197,9 @@ struct MaterialSnapshot {
     //! Indices into SceneSnapshot::textures, or -1 when that map is absent.
     std::int32_t baseColorTextureIndex = -1;
     std::int32_t emissiveTextureIndex = -1;
+    //! Linear data maps: roughness G / metallic B, and occlusion R.
+    std::int32_t metallicRoughnessTextureIndex = -1;
+    std::int32_t occlusionTextureIndex = -1;
 };
 
 //! Immutable app-owned encoded raster copied from an embedded XCAF texture.

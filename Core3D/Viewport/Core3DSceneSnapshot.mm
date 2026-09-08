@@ -89,7 +89,9 @@ static_assert(sizeof(std::uint32_t) == 4,
                         alphaCutoff:(float)alphaCutoff
                            cullMode:(Core3DSceneCullMode)cullMode
               baseColorTextureIndex:(NSInteger)baseColorTextureIndex
-               emissiveTextureIndex:(NSInteger)emissiveTextureIndex;
+               emissiveTextureIndex:(NSInteger)emissiveTextureIndex
+      metallicRoughnessTextureIndex:(NSInteger)metallicRoughnessTextureIndex
+              occlusionTextureIndex:(NSInteger)occlusionTextureIndex;
 @end
 
 @interface Core3DSceneFacePrimitiveSnapshot ()
@@ -295,7 +297,9 @@ static_assert(sizeof(std::uint32_t) == 4,
                         alphaCutoff:(float)alphaCutoff
                            cullMode:(Core3DSceneCullMode)cullMode
               baseColorTextureIndex:(NSInteger)baseColorTextureIndex
-               emissiveTextureIndex:(NSInteger)emissiveTextureIndex {
+               emissiveTextureIndex:(NSInteger)emissiveTextureIndex
+      metallicRoughnessTextureIndex:(NSInteger)metallicRoughnessTextureIndex
+              occlusionTextureIndex:(NSInteger)occlusionTextureIndex {
     self = [super init];
     if (self) {
         _identifier = [identifier copy];
@@ -312,6 +316,10 @@ static_assert(sizeof(std::uint32_t) == 4,
         _hasBaseColorTexture = baseColorTextureIndex >= 0;
         _emissiveTextureIndex = emissiveTextureIndex;
         _hasEmissiveTexture = emissiveTextureIndex >= 0;
+        _metallicRoughnessTextureIndex = metallicRoughnessTextureIndex;
+        _hasMetallicRoughnessTexture = metallicRoughnessTextureIndex >= 0;
+        _occlusionTextureIndex = occlusionTextureIndex;
+        _hasOcclusionTexture = occlusionTextureIndex >= 0;
     }
     return self;
 }
@@ -1099,6 +1107,8 @@ bool IsValid(const MaterialSnapshot& value) noexcept {
         && value.alphaCutoff >= 0.0f && value.alphaCutoff <= 1.0f
         && value.baseColorTextureIndex >= -1
         && value.emissiveTextureIndex >= -1
+        && value.metallicRoughnessTextureIndex >= -1
+        && value.occlusionTextureIndex >= -1
         && IsValid(value.alphaMode)
         && IsValid(value.cullMode);
 }
@@ -1197,6 +1207,22 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         if (material.emissiveTextureIndex >= 0) {
             const std::size_t textureIndex = static_cast<std::size_t>(
                 material.emissiveTextureIndex);
+            if (textureIndex >= snapshot.textures.size()) {
+                return false;
+            }
+            referencedTextures[textureIndex] = 1;
+        }
+        if (material.metallicRoughnessTextureIndex >= 0) {
+            const std::size_t textureIndex = static_cast<std::size_t>(
+                material.metallicRoughnessTextureIndex);
+            if (textureIndex >= snapshot.textures.size()) {
+                return false;
+            }
+            referencedTextures[textureIndex] = 1;
+        }
+        if (material.occlusionTextureIndex >= 0) {
+            const std::size_t textureIndex = static_cast<std::size_t>(
+                material.occlusionTextureIndex);
             if (textureIndex >= snapshot.textures.size()) {
                 return false;
             }
@@ -1872,6 +1898,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || !IsValid(material)
             || material.baseColorTextureIndex != -1
             || material.emissiveTextureIndex != -1
+            || material.metallicRoughnessTextureIndex != -1
+            || material.occlusionTextureIndex != -1
             || !hasExpectedAlpha
             || !isUnit(material.baseColor.x)
             || !isUnit(material.baseColor.y)
@@ -2500,7 +2528,9 @@ Core3DSceneMaterialSnapshot *MaterialFromScene(const MaterialSnapshot& value) {
                 alphaCutoff:value.alphaCutoff
                    cullMode:CullModeFromScene(value.cullMode)
       baseColorTextureIndex:value.baseColorTextureIndex
-       emissiveTextureIndex:value.emissiveTextureIndex];
+       emissiveTextureIndex:value.emissiveTextureIndex
+metallicRoughnessTextureIndex:value.metallicRoughnessTextureIndex
+      occlusionTextureIndex:value.occlusionTextureIndex];
 }
 
 Core3DSceneTextureSnapshot *TextureFromScene(

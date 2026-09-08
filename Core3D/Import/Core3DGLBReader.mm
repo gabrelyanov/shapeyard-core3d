@@ -691,6 +691,14 @@ private:
                 || !ChargeTexture(pbr.NormalTexture)) {
                 return false;
             }
+            for (const Handle(Image_Texture)& texture : {pbr.MetallicRoughnessTexture, pbr.OcclusionTexture}) {
+                if (!texture.IsNull() && myValidatedNumericTextures.insert(texture.get()).second
+                    && !Core3DValidateNumericTexture(texture)) {
+                    Fail(GLBReadStatus::Unsupported,
+                         "Data maps require upright opaque 8-bit RGB or grayscale PNG images.");
+                    return false;
+                }
+            }
             material->SetPbrMaterial(pbr);
         }
         if (material->HasCommonMaterial()) {
@@ -981,6 +989,7 @@ private:
     std::uint64_t myVertexCount = 0;
     std::uint64_t myIndexCount = 0;
     std::uint64_t myTraversalNodes = 0;
+    std::set<const Image_Texture*> myValidatedNumericTextures;
     std::map<TextureRangeKey, Handle(Image_Texture)> myCanonicalTextures;
     Core3DEmbeddedTextureBudgetState myTextureBudget;
 };

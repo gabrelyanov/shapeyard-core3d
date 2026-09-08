@@ -986,9 +986,11 @@ bool ValidateVisualMaterials(
                 return false;
             }
             const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-            if (!pbr.MetallicRoughnessTexture.IsNull()
-                || !pbr.OcclusionTexture.IsNull()
-                || !pbr.NormalTexture.IsNull()) {
+            if (!pbr.NormalTexture.IsNull()
+                || (!pbr.MetallicRoughnessTexture.IsNull()
+                    && !Core3DValidateNumericTexture(pbr.MetallicRoughnessTexture))
+                || (!pbr.OcclusionTexture.IsNull()
+                    && !Core3DValidateNumericTexture(pbr.OcclusionTexture))) {
                 return false;
             }
             const Handle(Image_Texture)& pbrBase = pbr.BaseColorTexture;
@@ -1008,7 +1010,7 @@ bool ValidateVisualMaterials(
                 }
             }
             for (const Handle(Image_Texture)& texture : {
-                     pbrBase, pbr.EmissiveTexture}) {
+                     pbrBase, pbr.EmissiveTexture, pbr.MetallicRoughnessTexture, pbr.OcclusionTexture}) {
                 if (texture.IsNull()) {
                     continue;
                 }

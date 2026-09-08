@@ -301,7 +301,9 @@ Core3DPBRMaterial* Core3DMakePBRMaterial(
     const XCAFDoc_VisMaterialPBR& material,
     const BOOL supportsScalarEditing,
     const BOOL supportsBaseColorTextureEditing,
-    const BOOL supportsEmissiveTextureEditing) {
+    const BOOL supportsEmissiveTextureEditing,
+    const BOOL supportsMetallicRoughnessTextureEditing,
+    const BOOL supportsOcclusionTextureEditing) {
     if (!material.IsDefined) {
         return nil;
     }
@@ -326,7 +328,11 @@ Core3DPBRMaterial* Core3DMakePBRMaterial(
       hasBaseColorTexture:!material.BaseColorTexture.IsNull()
 supportsBaseColorTextureEditing:supportsBaseColorTextureEditing
       hasEmissiveTexture:!material.EmissiveTexture.IsNull()
-supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
+supportsEmissiveTextureEditing:supportsEmissiveTextureEditing
+hasMetallicRoughnessTexture:!material.MetallicRoughnessTexture.IsNull()
+supportsMetallicRoughnessTextureEditing:supportsMetallicRoughnessTextureEditing
+hasOcclusionTexture:!material.OcclusionTexture.IsNull()
+supportsOcclusionTextureEditing:supportsOcclusionTextureEditing];
 }
 
 bool Core3DApplyNativePBRScalars(Core3DPBRMaterial* source,
@@ -736,6 +742,10 @@ void Core3DAddDebugOrphanVisualMaterial(
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity;
 
+- (BOOL)core3d_updateSelectionWithTextureData:(NSData*)data mediaType:(NSString*)mediaType
+    slot:(OcctMaterialTextureSlot)slot error:(NSError* _Nullable * _Nullable)error;
+- (BOOL)core3d_clearSelectionTexture:(OcctMaterialTextureSlot)slot
+    error:(NSError* _Nullable * _Nullable)error;
 @end
 
 @interface Core3DViewController (ProfileConstructionPrivate)
@@ -938,7 +948,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 		editable.Roughness = preset.NormalizedRoughness();
 		editable.RefractionIndex = preset.IOR();
 			Core3DPBRMaterial* pbr = Core3DMakePBRMaterial(
-	            editable, YES, YES, YES);
+	            editable, YES, YES, YES, YES, YES);
 		if (pbr != nil) {
 			[selectedPBR addObject:pbr];
 		}
@@ -996,9 +1006,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                 doc->MaterialNameForLabel(label),
                 doc->ColorNameForLabel(label));
         }
-        if (!nativeMaterial.MetallicRoughnessTexture.IsNull()
-            || !nativeMaterial.OcclusionTexture.IsNull()
-            || !nativeMaterial.NormalTexture.IsNull()
+        if (!nativeMaterial.NormalTexture.IsNull()
             || !Core3DApplyNativePBRScalars(
                 material, nativeMaterial)) {
             return;
@@ -1080,7 +1088,9 @@ void Core3DAddDebugOrphanVisualMaterial(
                 style.material,
                 doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
                 doc->SupportsBaseColorTextureEditingForLabel(style.label),
-                doc->SupportsEmissiveTextureEditingForLabel(style.label));
+                doc->SupportsEmissiveTextureEditingForLabel(style.label),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::MetallicRoughness),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::Occlusion));
         if (publishedMaterial != nil) {
             [selectedPBR addObject:publishedMaterial];
         }
@@ -1285,7 +1295,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             style.material,
             doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
             doc->SupportsBaseColorTextureEditingForLabel(style.label),
-            doc->SupportsEmissiveTextureEditingForLabel(style.label));
+            doc->SupportsEmissiveTextureEditingForLabel(style.label),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::MetallicRoughness),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::Occlusion));
         if (published != nil) {
             [selectedPBR addObject:published];
         }
@@ -1461,7 +1473,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             style.material,
             doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
             doc->SupportsBaseColorTextureEditingForLabel(style.label),
-            doc->SupportsEmissiveTextureEditingForLabel(style.label));
+            doc->SupportsEmissiveTextureEditingForLabel(style.label),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::MetallicRoughness),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::Occlusion));
         if (published != nil) {
             [selectedPBR addObject:published];
         }
@@ -1476,7 +1490,38 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 -(BOOL)updateSelectionWithEmissiveTextureData:(NSData*)textureData
+                                  mediaType:(NSString*)mediaType
+                                      error:(NSError* _Nullable * _Nullable)error {
+    return [self core3d_updateSelectionWithTextureData:textureData mediaType:mediaType
+        slot:OcctMaterialTextureSlot::Emissive error:error];
+}
+-(BOOL)clearSelectionEmissiveTextureWithError:(NSError* _Nullable * _Nullable)error {
+    return [self core3d_clearSelectionTexture:OcctMaterialTextureSlot::Emissive error:error];
+}
+
+-(BOOL)updateSelectionWithMetallicRoughnessTextureData:(NSData*)textureData
+                                  mediaType:(NSString*)mediaType
+                                      error:(NSError* _Nullable * _Nullable)error {
+    return [self core3d_updateSelectionWithTextureData:textureData mediaType:mediaType
+        slot:OcctMaterialTextureSlot::MetallicRoughness error:error];
+}
+-(BOOL)clearSelectionMetallicRoughnessTextureWithError:(NSError* _Nullable * _Nullable)error {
+    return [self core3d_clearSelectionTexture:OcctMaterialTextureSlot::MetallicRoughness error:error];
+}
+
+-(BOOL)updateSelectionWithOcclusionTextureData:(NSData*)textureData
+                                  mediaType:(NSString*)mediaType
+                                      error:(NSError* _Nullable * _Nullable)error {
+    return [self core3d_updateSelectionWithTextureData:textureData mediaType:mediaType
+        slot:OcctMaterialTextureSlot::Occlusion error:error];
+}
+-(BOOL)clearSelectionOcclusionTextureWithError:(NSError* _Nullable * _Nullable)error {
+    return [self core3d_clearSelectionTexture:OcctMaterialTextureSlot::Occlusion error:error];
+}
+
+-(BOOL)core3d_updateSelectionWithTextureData:(NSData*)textureData
                                      mediaType:(NSString*)mediaType
+                                          slot:(OcctMaterialTextureSlot)slot
                                          error:(NSError* _Nullable * _Nullable)error {
     if (error != nullptr) {
         *error = nil;
@@ -1497,6 +1542,11 @@ void Core3DAddDebugOrphanVisualMaterial(
         return Core3DTextureAuthoringFailure(
             error, Core3DTextureAuthoringErrorInvalidInput,
             @"The image is invalid or exceeds the texture safety limits.");
+    }
+    if ((slot == OcctMaterialTextureSlot::MetallicRoughness || slot == OcctMaterialTextureSlot::Occlusion)
+        && !Core3DValidateNumericTexture(authoredTexture)) {
+        return Core3DTextureAuthoringFailure(error, Core3DTextureAuthoringErrorInvalidInput,
+            @"Data maps require an upright, opaque 8-bit RGB or grayscale PNG.");
     }
     if (GLController == nil || GLController.viewer == nullptr) {
         return Core3DTextureAuthoringFailure(
@@ -1557,7 +1607,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         const TDF_Label label = doc->ShapeLabel(selected);
         if (label.IsNull()
             || !doc->IsEditableFreeSimpleDefinitionLabel(label)
-            || !doc->SupportsEmissiveTextureEditingForLabel(label)) {
+            || !doc->SupportsMaterialTextureEditingForLabel(label, slot)) {
             return Core3DTextureAuthoringFailure(
                 error, Core3DTextureAuthoringErrorUnsupportedSelection,
                 @"This material contains texture maps that cannot be edited safely.");
@@ -1588,16 +1638,16 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
 
         bool hasIdenticalTexture = false;
-        if (!nativeMaterial.EmissiveTexture.IsNull()) {
+        if (!Core3DMaterialTexture(nativeMaterial, slot).IsNull()) {
             const std::string existingIdentifier(
-                nativeMaterial.EmissiveTexture->TextureId().ToCString());
+                Core3DMaterialTexture(nativeMaterial, slot)->TextureId().ToCString());
             const auto cached = identicalExistingTextureByIdentifier.find(
                 existingIdentifier);
             if (cached != identicalExistingTextureByIdentifier.end()) {
                 hasIdenticalTexture = cached->second;
             } else {
                 hasIdenticalTexture = Core3DTexturesMatch(
-                    nativeMaterial.EmissiveTexture, authoredTexture);
+                    Core3DMaterialTexture(nativeMaterial, slot), authoredTexture);
                 identicalExistingTextureByIdentifier.emplace(
                     existingIdentifier, hasIdenticalTexture);
             }
@@ -1605,10 +1655,10 @@ void Core3DAddDebugOrphanVisualMaterial(
         const bool isOwnedIdenticalTexture = hasIdenticalTexture
             && doc->SupportsScalarPBRMaterialEditingForLabel(label);
         const bool isFirstEmissiveTexture =
-            nativeMaterial.EmissiveTexture.IsNull();
+            Core3DMaterialTexture(nativeMaterial, slot).IsNull();
         bool autoPromotedEmissiveFactor =
             doc->IsEmissiveTextureFactorAutoPromotedForLabel(label);
-        if (isFirstEmissiveTexture
+        if (slot == OcctMaterialTextureSlot::Emissive && isFirstEmissiveTexture
             && nativeMaterial.EmissiveFactor.x() == 0.0f
             && nativeMaterial.EmissiveFactor.y() == 0.0f
             && nativeMaterial.EmissiveFactor.z() == 0.0f) {
@@ -1619,7 +1669,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                 1.0f, 1.0f, 1.0f);
             autoPromotedEmissiveFactor = true;
         }
-        nativeMaterial.EmissiveTexture = authoredTexture;
+        Core3DMaterialTexture(nativeMaterial, slot) = authoredTexture;
         const bool changed = !isOwnedIdenticalTexture;
         pendingStyles.push_back({
             shape, label, nativeMaterial,
@@ -1649,7 +1699,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             if (style.changed) {
                 materialUpdates.push_back({
                     style.label, style.material,
-                    style.prevalidatedBaseColorTexture, authoredTexture});
+                    style.prevalidatedBaseColorTexture, style.material.EmissiveTexture});
             }
         }
         if (materialUpdates.empty()
@@ -1698,7 +1748,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             style.material,
             doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
             doc->SupportsBaseColorTextureEditingForLabel(style.label),
-            doc->SupportsEmissiveTextureEditingForLabel(style.label));
+            doc->SupportsEmissiveTextureEditingForLabel(style.label),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::MetallicRoughness),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::Occlusion));
         if (published != nil) {
             [selectedPBR addObject:published];
         }
@@ -1712,7 +1764,7 @@ void Core3DAddDebugOrphanVisualMaterial(
     return YES;
 }
 
--(BOOL)clearSelectionEmissiveTextureWithError:(NSError* _Nullable * _Nullable)error {
+-(BOOL)core3d_clearSelectionTexture:(OcctMaterialTextureSlot)slot error:(NSError* _Nullable * _Nullable)error {
     if (error != nullptr) {
         *error = nil;
     }
@@ -1777,7 +1829,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         const TDF_Label label = doc->ShapeLabel(selected);
         if (label.IsNull()
             || !doc->IsEditableFreeSimpleDefinitionLabel(label)
-            || !doc->SupportsEmissiveTextureEditingForLabel(label)) {
+            || !doc->SupportsMaterialTextureEditingForLabel(label, slot)) {
             return Core3DTextureAuthoringFailure(
                 error, Core3DTextureAuthoringErrorUnsupportedSelection,
                 @"This material contains texture maps that cannot be edited safely.");
@@ -1808,11 +1860,11 @@ void Core3DAddDebugOrphanVisualMaterial(
             }
             validatedBaseColorTexture = nativeMaterial.BaseColorTexture;
         }
-        const bool changed = !nativeMaterial.EmissiveTexture.IsNull();
+        const bool changed = !Core3DMaterialTexture(nativeMaterial, slot).IsNull();
         const bool autoPromotedEmissiveFactor =
             doc->IsEmissiveTextureFactorAutoPromotedForLabel(label);
-        nativeMaterial.EmissiveTexture.Nullify();
-        if (autoPromotedEmissiveFactor) {
+        Core3DMaterialTexture(nativeMaterial, slot).Nullify();
+        if (slot == OcctMaterialTextureSlot::Emissive && autoPromotedEmissiveFactor) {
             nativeMaterial.EmissiveFactor = Graphic3d_Vec3(
                 0.0f, 0.0f, 0.0f);
         }
@@ -1858,7 +1910,8 @@ void Core3DAddDebugOrphanVisualMaterial(
         for (const PendingTextureStyle& style : pendingStyles) {
             if (style.changed
                 && !doc->SetEmissiveTextureFactorAutoPromotedForLabel(
-                    style.label, Standard_False)) {
+                    style.label, slot == OcctMaterialTextureSlot::Emissive
+                        ? Standard_False : style.autoPromotedEmissiveFactor)) {
                 Core3DAbortCommandNoThrow(transaction);
                 return Core3DTextureAuthoringFailure(
                     error, Core3DTextureAuthoringErrorTransactionFailed,
@@ -1892,7 +1945,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             style.material,
             doc->SupportsScalarPBRMaterialEditingForLabel(style.label),
             doc->SupportsBaseColorTextureEditingForLabel(style.label),
-            doc->SupportsEmissiveTextureEditingForLabel(style.label));
+            doc->SupportsEmissiveTextureEditingForLabel(style.label),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::MetallicRoughness),
+                doc->SupportsMaterialTextureEditingForLabel(style.label, OcctMaterialTextureSlot::Occlusion));
         if (published != nil) {
             [selectedPBR addObject:published];
         }

@@ -84,6 +84,26 @@
            supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing
                        hasEmissiveTexture:(BOOL)hasEmissiveTexture
            supportsEmissiveTextureEditing:(BOOL)supportsEmissiveTextureEditing {
+    return [self initWithBaseColor:baseColor metallic:metallic roughness:roughness
+        supportsScalarEditing:supportsScalarEditing hasBaseColorTexture:hasBaseColorTexture
+        supportsBaseColorTextureEditing:supportsBaseColorTextureEditing
+        hasEmissiveTexture:hasEmissiveTexture supportsEmissiveTextureEditing:supportsEmissiveTextureEditing
+        hasMetallicRoughnessTexture:NO supportsMetallicRoughnessTextureEditing:supportsScalarEditing
+        hasOcclusionTexture:NO supportsOcclusionTextureEditing:supportsScalarEditing];
+}
+
+-(nullable instancetype)initWithBaseColor:(UIColor*)baseColor
+                                  metallic:(CGFloat)metallic
+                                 roughness:(CGFloat)roughness
+                     supportsScalarEditing:(BOOL)supportsScalarEditing
+                       hasBaseColorTexture:(BOOL)hasBaseColorTexture
+           supportsBaseColorTextureEditing:(BOOL)supportsBaseColorTextureEditing
+                       hasEmissiveTexture:(BOOL)hasEmissiveTexture
+           supportsEmissiveTextureEditing:(BOOL)supportsEmissiveTextureEditing
+              hasMetallicRoughnessTexture:(BOOL)hasMetallicRoughnessTexture
+              supportsMetallicRoughnessTextureEditing:(BOOL)supportsMetallicRoughnessTextureEditing
+              hasOcclusionTexture:(BOOL)hasOcclusionTexture
+              supportsOcclusionTextureEditing:(BOOL)supportsOcclusionTextureEditing {
     if(baseColor == nil || !std::isfinite(metallic) || !std::isfinite(roughness)
        || metallic < 0.0 || metallic > 1.0
        || roughness < 0.0 || roughness > 1.0) {
@@ -100,6 +120,10 @@
         _hasEmissiveTexture = hasEmissiveTexture;
         _supportsEmissiveTextureEditing =
             supportsEmissiveTextureEditing;
+        _hasMetallicRoughnessTexture = hasMetallicRoughnessTexture;
+        _supportsMetallicRoughnessTextureEditing = supportsMetallicRoughnessTextureEditing;
+        _hasOcclusionTexture = hasOcclusionTexture;
+        _supportsOcclusionTextureEditing = supportsOcclusionTextureEditing;
     }
     return self;
 }
@@ -113,7 +137,11 @@
       hasBaseColorTexture:self.hasBaseColorTexture
 supportsBaseColorTextureEditing:self.supportsBaseColorTextureEditing
       hasEmissiveTexture:self.hasEmissiveTexture
-supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing];
+supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing
+hasMetallicRoughnessTexture:self.hasMetallicRoughnessTexture
+supportsMetallicRoughnessTextureEditing:self.supportsMetallicRoughnessTextureEditing
+hasOcclusionTexture:self.hasOcclusionTexture
+supportsOcclusionTextureEditing:self.supportsOcclusionTextureEditing];
 }
 
 -(BOOL)isEqualToPBRMaterial:(Core3DPBRMaterial*)other {
@@ -127,7 +155,11 @@ supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing];
             == other.supportsBaseColorTextureEditing
         && self.hasEmissiveTexture == other.hasEmissiveTexture
         && self.supportsEmissiveTextureEditing
-            == other.supportsEmissiveTextureEditing;
+            == other.supportsEmissiveTextureEditing
+        && self.hasMetallicRoughnessTexture == other.hasMetallicRoughnessTexture
+        && self.supportsMetallicRoughnessTextureEditing == other.supportsMetallicRoughnessTextureEditing
+        && self.hasOcclusionTexture == other.hasOcclusionTexture
+        && self.supportsOcclusionTextureEditing == other.supportsOcclusionTextureEditing;
 }
 
 -(BOOL)isEqual:(id)object {
@@ -144,7 +176,11 @@ supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing];
         ^ @(self.hasBaseColorTexture).hash
         ^ @(self.supportsBaseColorTextureEditing).hash
         ^ @(self.hasEmissiveTexture).hash
-        ^ @(self.supportsEmissiveTextureEditing).hash;
+        ^ @(self.supportsEmissiveTextureEditing).hash
+        ^ @(self.hasMetallicRoughnessTexture).hash
+        ^ @(self.supportsMetallicRoughnessTextureEditing).hash
+        ^ @(self.hasOcclusionTexture).hash
+        ^ @(self.supportsOcclusionTextureEditing).hash;
 }
 
 @end
@@ -313,6 +349,102 @@ supportsEmissiveTextureEditing:self.supportsEmissiveTextureEditing];
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey:
                                          @"The emissive texture could not be removed."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)updateSelectionWithMetallicRoughnessTextureData:(NSData*)textureData
+                                    mediaType:(NSString*)mediaType
+                                        error:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(updateSelectionWithMetallicRoughnessTextureData:mediaType:error:)]) {
+        const BOOL succeeded = [_pass
+            updateSelectionWithMetallicRoughnessTextureData:textureData
+            mediaType:mediaType
+            error:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The metallic/roughness texture could not be applied."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)clearSelectionMetallicRoughnessTextureWithError:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(clearSelectionMetallicRoughnessTextureWithError:)]) {
+        const BOOL succeeded = [_pass
+            clearSelectionMetallicRoughnessTextureWithError:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The metallic/roughness texture could not be removed."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)updateSelectionWithOcclusionTextureData:(NSData*)textureData
+                                    mediaType:(NSString*)mediaType
+                                        error:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(updateSelectionWithOcclusionTextureData:mediaType:error:)]) {
+        const BOOL succeeded = [_pass
+            updateSelectionWithOcclusionTextureData:textureData
+            mediaType:mediaType
+            error:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The occlusion texture could not be applied."}];
+        }
+        return succeeded;
+    }
+    if (error != nullptr) {
+        *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                     code:1
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     @"The material editor is unavailable."}];
+    }
+    return NO;
+}
+
+-(BOOL)clearSelectionOcclusionTextureWithError:(NSError* _Nullable * _Nullable)error {
+    if(_pass && [_pass respondsToSelector:
+            @selector(clearSelectionOcclusionTextureWithError:)]) {
+        const BOOL succeeded = [_pass
+            clearSelectionOcclusionTextureWithError:error];
+        if (!succeeded && error != nullptr && *error == nil) {
+            *error = [NSError errorWithDomain:@"Core3DMaterialControllerError"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"The occlusion texture could not be removed."}];
         }
         return succeeded;
     }

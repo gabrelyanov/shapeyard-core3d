@@ -2908,6 +2908,24 @@ void Core3DPrepareRendererTextures(
     if (changed) aspect->SetTextureSet(replacement);
 }
 
+Handle(Image_Texture)& Core3DMaterialTexture(XCAFDoc_VisMaterialPBR& material,
+                                            OcctMaterialTextureSlot slot)
+{
+    switch (slot) {
+        case OcctMaterialTextureSlot::BaseColor: return material.BaseColorTexture;
+        case OcctMaterialTextureSlot::Emissive: return material.EmissiveTexture;
+        case OcctMaterialTextureSlot::MetallicRoughness: return material.MetallicRoughnessTexture;
+        case OcctMaterialTextureSlot::Occlusion: return material.OcclusionTexture;
+    }
+    throw Standard_Failure("Invalid material texture slot");
+}
+
+Standard_Boolean Core3DValidateNumericTexture(const Handle(Image_Texture)& texture)
+{
+    if (texture.IsNull() || !Core3DValidateAuthoredTexture(texture)) return Standard_False;
+    return !DecodeNumericRendererPNG(texture->DataBuffer()).IsNull();
+}
+
 Standard_Boolean Core3DCreateAuthoredTexture(
     const Standard_Byte* bytes,
     const Standard_Size size,
@@ -5454,9 +5472,11 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
             || material.EmissiveFactor.x() > kMaximumEmissionFactor
             || material.EmissiveFactor.y() > kMaximumEmissionFactor
             || material.EmissiveFactor.z() > kMaximumEmissionFactor
-            || !material.MetallicRoughnessTexture.IsNull()
-            || !material.OcclusionTexture.IsNull()
             || !material.NormalTexture.IsNull()
+            || (!material.MetallicRoughnessTexture.IsNull()
+                && !Core3DValidateNumericTexture(material.MetallicRoughnessTexture))
+            || (!material.OcclusionTexture.IsNull()
+                && !Core3DValidateNumericTexture(material.OcclusionTexture))
             || !validateAuthoredTextureBinding(
                 material.BaseColorTexture,
                 update.prevalidatedBaseColorTexture)
@@ -5845,16 +5865,15 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
         && !marker.IsNull() && marker->Get() == 1;
     if (material->HasPbrMaterial()) {
         const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-        if (!pbr.MetallicRoughnessTexture.IsNull()
-            || !pbr.OcclusionTexture.IsNull()
-            || !pbr.NormalTexture.IsNull()) {
+        if (!pbr.NormalTexture.IsNull()) {
             return Standard_False;
         }
         const Handle(Image_Texture)& base = pbr.BaseColorTexture;
         const Handle(Image_Texture) common = material->HasCommonMaterial()
             ? material->CommonMaterial().DiffuseTexture
             : Handle(Image_Texture)();
-        if (!base.IsNull() || !pbr.EmissiveTexture.IsNull()) {
+        if (!base.IsNull() || !pbr.EmissiveTexture.IsNull()
+            || !pbr.MetallicRoughnessTexture.IsNull() || !pbr.OcclusionTexture.IsNull()) {
             return hasLocalPBR
                 && base.IsNull() == common.IsNull()
                 && (base.IsNull()
@@ -5868,93 +5887,42 @@ Standard_Boolean OcctDocument::SupportsScalarPBRMaterialEditingForLabel(
 
 Standard_Boolean OcctDocument::SupportsBaseColorTextureEditingForLabel(
     const TDF_Label& label) const {
-    if (label.IsNull()) {
-        return Standard_False;
-    }
-    const Handle(XCAFDoc_VisMaterial) material =
-        XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
-    if (material.IsNull()) {
-        return Standard_True;
-    }
-    if (!material->HasPbrMaterial()
-        && !material->HasCommonMaterial()) {
-        return Standard_False;
-    }
-
-    Handle(Image_Texture) pbrBase;
-    Handle(Image_Texture) emissive;
-    if (material->HasPbrMaterial()) {
-        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-        if (!pbr.MetallicRoughnessTexture.IsNull()
-            || !pbr.OcclusionTexture.IsNull()
-            || !pbr.NormalTexture.IsNull()) {
-            return Standard_False;
-        }
-        pbrBase = pbr.BaseColorTexture;
-        emissive = pbr.EmissiveTexture;
-    }
-
-    const Handle(Image_Texture) commonBase = material->HasCommonMaterial()
-        ? material->CommonMaterial().DiffuseTexture
-        : Handle(Image_Texture)();
-    if (!pbrBase.IsNull() && !commonBase.IsNull()) {
-        if (!Core3DTexturesMatch(pbrBase, commonBase)) {
-            return Standard_False;
-        }
-    }
-    if (!emissive.IsNull()) {
-        Handle(TDataStd_Integer) marker;
-        const Standard_Boolean hasLocalPBR =
-            label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
-            && !marker.IsNull() && marker->Get() == 1;
-        if (!hasLocalPBR) {
-            // Base-color edits preserve emissive. Never silently take ownership
-            // of an imported emissive map as a side effect of editing base.
-            return Standard_False;
-        }
-    }
-    return Standard_True;
+    return SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::BaseColor);
 }
 
 Standard_Boolean OcctDocument::SupportsEmissiveTextureEditingForLabel(
     const TDF_Label& label) const {
-    if (label.IsNull()) {
-        return Standard_False;
-    }
-    const Handle(XCAFDoc_VisMaterial) material =
-        XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
-    if (material.IsNull()) {
-        return Standard_True;
-    }
-    if (!material->HasPbrMaterial()
-        && !material->HasCommonMaterial()) {
-        return Standard_False;
-    }
+    return SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::Emissive);
+}
 
-    Handle(Image_Texture) pbrBase;
-    if (material->HasPbrMaterial()) {
-        const XCAFDoc_VisMaterialPBR& pbr = material->PbrMaterial();
-        if (!pbr.MetallicRoughnessTexture.IsNull()
-            || !pbr.OcclusionTexture.IsNull()
-            || !pbr.NormalTexture.IsNull()) {
-            return Standard_False;
-        }
-        pbrBase = pbr.BaseColorTexture;
-    }
-    const Handle(Image_Texture) commonBase = material->HasCommonMaterial()
-        ? material->CommonMaterial().DiffuseTexture
-        : Handle(Image_Texture)();
-    if (pbrBase.IsNull() && commonBase.IsNull()) {
-        return Standard_True;
-    }
-
+Standard_Boolean OcctDocument::SupportsMaterialTextureEditingForLabel(
+    const TDF_Label& label, OcctMaterialTextureSlot slot) const {
+    if (label.IsNull()) return Standard_False;
+    const Handle(XCAFDoc_VisMaterial) material = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+    if (material.IsNull()) return Standard_True;
+    if (!material->HasPbrMaterial() && !material->HasCommonMaterial()) return Standard_False;
+    XCAFDoc_VisMaterialPBR pbr = material->HasPbrMaterial()
+        ? material->PbrMaterial() : material->ConvertToPbrMaterial();
+    if (!pbr.NormalTexture.IsNull()) return Standard_False;
+    const Handle(Image_Texture) common = material->HasCommonMaterial()
+        ? material->CommonMaterial().DiffuseTexture : Handle(Image_Texture)();
+    if (!pbr.BaseColorTexture.IsNull() && !common.IsNull()
+        && !Core3DTexturesMatch(pbr.BaseColorTexture, common)) return Standard_False;
     Handle(TDataStd_Integer) marker;
-    const Standard_Boolean hasLocalPBR =
-        label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
+    const bool owned = label.FindAttribute(LocalPBRMaterialAttributeID(), marker)
         && !marker.IsNull() && marker->Get() == 1;
-    return hasLocalPBR
-        && !pbrBase.IsNull() && !commonBase.IsNull()
-        && Core3DTexturesMatch(pbrBase, commonBase);
+    if (slot != OcctMaterialTextureSlot::BaseColor
+        && (!pbr.BaseColorTexture.IsNull() || !common.IsNull())
+        && (!owned || pbr.BaseColorTexture.IsNull() || common.IsNull())) return Standard_False;
+    for (const auto other : {OcctMaterialTextureSlot::BaseColor, OcctMaterialTextureSlot::Emissive,
+                            OcctMaterialTextureSlot::MetallicRoughness, OcctMaterialTextureSlot::Occlusion}) {
+        if (other == slot) continue;
+        const Handle(Image_Texture)& texture = Core3DMaterialTexture(pbr, other);
+        // Replacing one imported map is explicit. Preserving a different
+        // imported map must never silently change its ownership.
+        if (!texture.IsNull() && !owned) return Standard_False;
+    }
+    return Standard_True;
 }
 
 Standard_Boolean

@@ -45,7 +45,9 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
     const XCAFDoc_VisMaterialPBR& material,
     const BOOL supportsScalarEditing,
     const BOOL supportsBaseColorTextureEditing,
-    const BOOL supportsEmissiveTextureEditing) {
+    const BOOL supportsEmissiveTextureEditing,
+    const BOOL supportsMetallicRoughnessTextureEditing,
+    const BOOL supportsOcclusionTextureEditing) {
     if (!material.IsDefined || !std::isfinite(material.Metallic)
         || !std::isfinite(material.Roughness)) {
         return nil;
@@ -67,7 +69,11 @@ Core3DPBRMaterial* Core3DSelectionPBRMaterial(
       hasBaseColorTexture:!material.BaseColorTexture.IsNull()
 supportsBaseColorTextureEditing:supportsBaseColorTextureEditing
       hasEmissiveTexture:!material.EmissiveTexture.IsNull()
-supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
+supportsEmissiveTextureEditing:supportsEmissiveTextureEditing
+hasMetallicRoughnessTexture:!material.MetallicRoughnessTexture.IsNull()
+supportsMetallicRoughnessTextureEditing:supportsMetallicRoughnessTextureEditing
+hasOcclusionTexture:!material.OcclusionTexture.IsNull()
+supportsOcclusionTextureEditing:supportsOcclusionTextureEditing];
 }
 
 } // namespace
@@ -154,7 +160,9 @@ supportsEmissiveTextureEditing:supportsEmissiveTextureEditing];
                 nativePBR,
                 document->SupportsScalarPBRMaterialEditingForLabel(label),
                 document->SupportsBaseColorTextureEditingForLabel(label),
-                document->SupportsEmissiveTextureEditingForLabel(label));
+                document->SupportsEmissiveTextureEditingForLabel(label),
+                document->SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::MetallicRoughness),
+                document->SupportsMaterialTextureEditingForLabel(label, OcctMaterialTextureSlot::Occlusion));
             if (pbr != nil) {
                 [pbrMaterials addObject:pbr];
             }

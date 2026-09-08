@@ -1417,7 +1417,9 @@ private:
             }
             NSDictionary *pbr = Dictionary(material[@"pbrMetallicRoughness"]);
             const bool usesTexture = material[@"emissiveTexture"] != nil
-                || (pbr != nil && pbr[@"baseColorTexture"] != nil);
+                || material[@"occlusionTexture"] != nil
+                || (pbr != nil && (pbr[@"baseColorTexture"] != nil
+                                  || pbr[@"metallicRoughnessTexture"] != nil));
             myMaterialUsesTexture.push_back(usesTexture);
         }
         return true;
@@ -1438,17 +1440,17 @@ private:
                     PreflightStatus::Unsupported,
                     "Every GLB material must provide PBR metallic-roughness metadata.");
         }
-        if (pbr[@"metallicRoughnessTexture"] != nil
-            || material[@"normalTexture"] != nil
-            || material[@"occlusionTexture"] != nil) {
+        if (material[@"normalTexture"] != nil) {
             return Fail(
                 PreflightStatus::Unsupported,
-                "GLB normal, occlusion, and metallic-roughness texture maps are unsupported.");
+                "GLB normal maps require tangent support and are unsupported.");
         }
         if (!ValidateFactorArray(pbr, @"baseColorFactor", 4, 0.0, 1.0)
             || !ValidateFactor(pbr, @"metallicFactor", 0.0, 1.0)
             || !ValidateFactor(pbr, @"roughnessFactor", 0.0, 1.0)
-            || !ValidateTextureInfo(pbr, @"baseColorTexture", false, false)) {
+            || !ValidateTextureInfo(pbr, @"baseColorTexture", false, false)
+            || !ValidateTextureInfo(pbr, @"metallicRoughnessTexture", false, false)
+            || !ValidateTextureInfo(material, @"occlusionTexture", false, true)) {
             return false;
         }
         if (!ValidateFactorArray(material, @"emissiveFactor", 3, 0.0, 1.0)

@@ -202,6 +202,11 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) BOOL hasBaseColorTexture;
 @property (nonatomic, assign, readonly) NSInteger emissiveTextureIndex;
 @property (nonatomic, assign, readonly) BOOL hasEmissiveTexture;
+//! Linear maps; encoded resource identity is independent of binding role.
+@property (nonatomic, assign, readonly) NSInteger metallicRoughnessTextureIndex;
+@property (nonatomic, assign, readonly) BOOL hasMetallicRoughnessTexture;
+@property (nonatomic, assign, readonly) NSInteger occlusionTextureIndex;
+@property (nonatomic, assign, readonly) BOOL hasOcclusionTexture;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

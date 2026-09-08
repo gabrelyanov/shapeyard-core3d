@@ -698,6 +698,7 @@ std::string SHA256Identifier(const Standard_Byte* theBytes,
 }
 
 struct TextureTableState {
+    std::unordered_set<std::int32_t> validatedNumericResources;
     std::size_t aggregateEncodedBytes = 0;
     std::size_t aggregateDecodedBytes = 0;
     std::unordered_map<std::string, std::vector<std::size_t>> resourcesByDigest;
@@ -927,11 +928,15 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      const bool theClosed,
                      MaterialSnapshot& theResult,
                      Handle(Image_Texture)& theBaseColorTexture,
-                     Handle(Image_Texture)& theEmissiveTexture)
+                     Handle(Image_Texture)& theEmissiveTexture,
+                     Handle(Image_Texture)& theMetallicRoughnessTexture,
+                     Handle(Image_Texture)& theOcclusionTexture)
 {
     theResult = DefaultMaterial(theClosed);
     theBaseColorTexture.Nullify();
     theEmissiveTexture.Nullify();
+    theMetallicRoughnessTexture.Nullify();
+    theOcclusionTexture.Nullify();
     const XCAFPrs_Style& aStyle = theFace.FaceStyle();
     const Handle(XCAFDoc_VisMaterial)& aVisualMaterial = aStyle.Material();
     if (!aVisualMaterial.IsNull()) {
@@ -993,8 +998,6 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
         const WholeObjectPBRMaterial& anOverride = *thePbrOverride;
         const XCAFDoc_VisMaterialPBR& aPbr = anOverride.pbr;
         if (!aPbr.IsDefined
-            || !aPbr.MetallicRoughnessTexture.IsNull()
-            || !aPbr.OcclusionTexture.IsNull()
             || !aPbr.NormalTexture.IsNull()) {
             return false;
         }
@@ -1027,6 +1030,8 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
         }
         theBaseColorTexture = aPbr.BaseColorTexture;
         theEmissiveTexture = aPbr.EmissiveTexture;
+        theMetallicRoughnessTexture = aPbr.MetallicRoughnessTexture;
+        theOcclusionTexture = aPbr.OcclusionTexture;
     } else {
         if (theMaterialOverride.has_value()
             && !ApplyPreset(theResult, *theMaterialOverride, theClosed)) {
@@ -1049,15 +1054,14 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
             && aVisualMaterial->HasPbrMaterial()) {
             const XCAFDoc_VisMaterialPBR& aPbr =
                 aVisualMaterial->PbrMaterial();
-            // The scene schema represents base color and emissive. Preserve
-            // rendering fidelity by keeping OCCT active whenever another map
-            // matters.
-            if (!aPbr.MetallicRoughnessTexture.IsNull()
-                || !aPbr.OcclusionTexture.IsNull()
-                || !aPbr.NormalTexture.IsNull()) {
+            // Tangent-space normal maps remain unsupported until their
+            // explicitly versioned tangent stream is implemented.
+            if (!aPbr.NormalTexture.IsNull()) {
                 return false;
             }
             theEmissiveTexture = aPbr.EmissiveTexture;
+        theMetallicRoughnessTexture = aPbr.MetallicRoughnessTexture;
+        theOcclusionTexture = aPbr.OcclusionTexture;
         }
         theBaseColorTexture = aStyle.BaseColorTexture();
     }
@@ -1083,7 +1087,9 @@ bool MaterialValuesEqual(const MaterialSnapshot& theLeft,
         && theLeft.baseColorTextureIndex
             == theRight.baseColorTextureIndex
         && theLeft.emissiveTextureIndex
-            == theRight.emissiveTextureIndex;
+            == theRight.emissiveTextureIndex
+        && theLeft.metallicRoughnessTextureIndex == theRight.metallicRoughnessTextureIndex
+        && theLeft.occlusionTextureIndex == theRight.occlusionTextureIndex;
 }
 
 void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial)
@@ -1103,6 +1109,8 @@ void AddMaterialValues(Fingerprint& theHash, const MaterialSnapshot& theMaterial
     theHash.AddInteger(static_cast<std::uint8_t>(theMaterial.cullMode));
     theHash.AddInteger(theMaterial.baseColorTextureIndex);
     theHash.AddInteger(theMaterial.emissiveTextureIndex);
+    theHash.AddInteger(theMaterial.metallicRoughnessTextureIndex);
+    theHash.AddInteger(theMaterial.occlusionTextureIndex);
 }
 
 std::string HexIdentifier(const char* thePrefix, const std::uint64_t theValue)
@@ -2477,7 +2485,9 @@ bool ValidatePresentationOverlayPayload(
                     || isRadialArrayMaterial
                     || isShellMaterial)
                 && (aMaterial.baseColorTextureIndex != -1
-                    || aMaterial.emissiveTextureIndex != -1))
+                    || aMaterial.emissiveTextureIndex != -1
+            || aMaterial.metallicRoughnessTextureIndex != -1
+            || aMaterial.occlusionTextureIndex != -1))
             || !IsFinite(aMaterial.emission.x)
             || !IsFinite(aMaterial.emission.y)
             || !IsFinite(aMaterial.emission.z)
@@ -3948,7 +3958,9 @@ OcctSceneSnapshotBuilder::PublishShellPreviewOverlay(
                          kMaxOverlayPrimitiveBindings),
                 anItem)
             || anItem.material.baseColorTextureIndex != -1
-            || anItem.material.emissiveTextureIndex != -1) {
+            || anItem.material.emissiveTextureIndex != -1
+            || anItem.material.metallicRoughnessTextureIndex != -1
+            || anItem.material.occlusionTextureIndex != -1) {
             return {};
         }
 
@@ -4059,7 +4071,9 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
             || !IsTranslationOnlyWorldTransform(
                 aSourceItem.instance.worldFromObject)
             || aSourceItem.material.baseColorTextureIndex != -1
-            || aSourceItem.material.emissiveTextureIndex != -1) {
+            || aSourceItem.material.emissiveTextureIndex != -1
+            || aSourceItem.material.metallicRoughnessTextureIndex != -1
+            || aSourceItem.material.occlusionTextureIndex != -1) {
             return {};
         }
 
@@ -4237,7 +4251,9 @@ OcctSceneSnapshotBuilder::PublishRadialArrayPreviewOverlay(
             || !IsProperRigidBoundedWorldTransform(
                 aSourceItem.instance.worldFromObject)
             || aSourceItem.material.baseColorTextureIndex != -1
-            || aSourceItem.material.emissiveTextureIndex != -1) {
+            || aSourceItem.material.emissiveTextureIndex != -1
+            || aSourceItem.material.metallicRoughnessTextureIndex != -1
+            || aSourceItem.material.occlusionTextureIndex != -1) {
             return {};
         }
 
@@ -5011,6 +5027,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 MaterialSnapshot aMaterial;
                 Handle(Image_Texture) aBaseColorTexture;
                 Handle(Image_Texture) anEmissiveTexture;
+                Handle(Image_Texture) aMetallicRoughnessTexture;
+                Handle(Image_Texture) anOcclusionTexture;
                 if (!ResolveMaterial(aFace,
                                      aMaterialOverride,
                                      aColorOverride,
@@ -5018,7 +5036,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                      aDefinition.closed,
                                      aMaterial,
                                      aBaseColorTexture,
-                                     anEmissiveTexture)
+                                     anEmissiveTexture,
+                                     aMetallicRoughnessTexture,
+                                     anOcclusionTexture)
                     || !AddTextureResource(
                         aScene,
                         aTextureTable,
@@ -5028,8 +5048,19 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         aScene,
                         aTextureTable,
                         anEmissiveTexture,
-                        aMaterial.emissiveTextureIndex)) {
+                        aMaterial.emissiveTextureIndex)
+                    || !AddTextureResource(aScene, aTextureTable, aMetallicRoughnessTexture,
+                                           aMaterial.metallicRoughnessTextureIndex)
+                    || !AddTextureResource(aScene, aTextureTable, anOcclusionTexture,
+                                           aMaterial.occlusionTextureIndex)) {
                     return {};
+                }
+                for (const auto& binding : {
+                         std::make_pair(aMaterial.metallicRoughnessTextureIndex, aMetallicRoughnessTexture),
+                         std::make_pair(aMaterial.occlusionTextureIndex, anOcclusionTexture)}) {
+                    if (binding.first >= 0
+                        && aTextureTable.validatedNumericResources.insert(binding.first).second
+                        && !Core3DValidateNumericTexture(binding.second)) return {};
                 }
                 aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);
             }
