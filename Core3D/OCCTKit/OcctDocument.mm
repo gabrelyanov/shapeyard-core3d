@@ -4768,7 +4768,11 @@ Standard_Boolean Core3DValidateOwnedFrameUsage(
 
 Standard_Boolean OcctDocument::SupportsNormalTextureGeometryForLabel(
     const TDF_Label& label) const noexcept {
-    if (![NSThread isMainThread]) return Standard_False;
+    return [NSThread isMainThread] && HasNativeNormalTextureGeometry(label);
+}
+
+Standard_Boolean OcctDocument::HasNativeNormalTextureGeometry(
+    const TDF_Label& label) const noexcept {
     try {
         return IsEditableFreeSimpleDefinitionLabel(label)
             && GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::TriangleMesh
@@ -5951,7 +5955,7 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
             || material.EmissiveFactor.z() > kMaximumEmissionFactor
             || (!material.NormalTexture.IsNull()
                 && (!Core3DValidateNumericTexture(material.NormalTexture)
-                    || !SupportsNormalTextureGeometryForLabel(update.label)))
+                    || !HasNativeNormalTextureGeometry(update.label)))
             || (!material.MetallicRoughnessTexture.IsNull()
                 && !Core3DValidateNumericTexture(material.MetallicRoughnessTexture))
             || (!material.OcclusionTexture.IsNull()

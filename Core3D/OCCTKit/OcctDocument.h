@@ -705,6 +705,9 @@ public:
     void NotifyChanges();
 
 private:
+  // Pure native eligibility for an exclusively owned document, including the
+  // private import worker. UI-facing admission retains its main-thread guard.
+  Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;
     Standard_Boolean CanSaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels) const;
