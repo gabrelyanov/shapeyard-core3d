@@ -1,4 +1,8 @@
 #include "../Scene/MikkTangentSpace.hpp"
+#if DEBUG
+#include "../OCCTKit/Core3DBoundedAuthoredFrameDriver.hxx"
+#include <sstream>
+#endif
 //
 //  Core3DViewController.m
 //  Core3D
@@ -3492,6 +3496,105 @@ void Core3DAddDebugOrphanVisualMaterial(
         return nil;
     }
     return @(metersPerUnit);
+}
+
+- (NSDictionary<NSString *, id> *)debugAuthoredFramePublications:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer || mode < 0 || mode > 8)
+        return @{@"error": @"Unavailable authored-frame publication fixture"};
+    try {
+        using namespace core3d::persistence;
+        using namespace core3d::scene;
+        struct PrivateDocument {
+            Handle(TDocStd_Application) app = new TDocStd_Application();
+            Handle(TDocStd_Document) document;
+            ~PrivateDocument() noexcept { try { if (!document.IsNull()) app->Close(document); } catch (...) {} }
+        } writer, reader;
+        Core3DDebugDefineFrameBinXCAFFormat(writer.app, std::make_shared<AuthoredFrameReadBudget>());
+        Core3DDebugDefineFrameBinXCAFFormat(reader.app, std::make_shared<AuthoredFrameReadBudget>());
+        writer.app->NewDocument(TCollection_ExtendedString("BinXCAF"), writer.document);
+        XCAFDoc_DocumentTool::SetLengthUnit(writer.document, 0.001);
+        const Handle(OcctDocument) document = new OcctDocument(); document->ChangeDocument() = writer.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main());
+        XCAFDoc_DocumentTool::ColorTool(writer.document->Main());
+        XCAFDoc_DocumentTool::LayerTool(writer.document->Main());
+        TopoDS_Shape shape = Core3DDebugAuthoredGeometryFixture(mode == 8 ? 22 : 0);
+        if (mode == 2 || mode == 5) {
+            BRep_Builder builder; TopoDS_Compound compound; builder.MakeCompound(compound); builder.Add(compound, shape); shape = compound;
+        }
+        const auto label = shapes->AddShape(shape, Standard_False);
+        if (label.IsNull()) Standard_Failure::Raise("No publication fixture definition.");
+        if (mode == 1 || mode == 2 || mode == 5) {
+            gp_Trsf placed; placed.SetRotation(gp_Ax1(gp_Pnt(0,0,0), gp_Dir(0,0,1)), M_PI / 2);
+            placed.SetTranslationPart(gp_Vec(2,3,4));
+            shape.Location(TopLoc_Location(placed)); shapes->SetShape(label, shape);
+        }
+        writer.document->SetUndoLimit(20); writer.document->NewCommand();
+        if (!document->SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh))
+            Standard_Failure::Raise("Publication fixture representation failed.");
+        if (mode >= 3 && mode <= 5) {
+            TDataStd_Real::Set(label.FindChild(8, Standard_True), mode == 3 ? 2.0 : -2.0);
+            for (int axis = 1; axis <= 3; ++axis) TDataStd_Real::Set(label.FindChild(axis, Standard_True), axis * 10.0);
+        }
+        writer.document->CommitCommand(); writer.document->ClearUndos();
+        if (!document->MigrateLegacyIdentifiers()) Standard_Failure::Raise("Publication fixture identity migration failed.");
+        OcctSceneSnapshotBuilder builder;
+        NSMutableArray* snapshots = [NSMutableArray array]; NSMutableArray* history = [NSMutableArray array];
+        bool readOnly = true;
+        auto capture = [&]() {
+            const auto doc = document->Document();
+            const int beforeTime = doc->GetData()->Time(), beforeUndo = doc->GetAvailableUndos(), beforeRedo = doc->GetAvailableRedos();
+            const auto scene = builder.Build(document, GLController.viewer->AisContext(), GLController.viewer->ActiveView(), {800,600}, ElementKind::Object);
+            readOnly = readOnly && beforeTime == doc->GetData()->Time() && beforeUndo == doc->GetAvailableUndos() && beforeRedo == doc->GetAvailableRedos();
+            return scene;
+        };
+        auto keep = [&]() {
+            const auto scene = capture();
+            if (!scene) Standard_Failure::Raise("Native authored-frame publication rejected.");
+            auto dto = Core3DCreateSceneSnapshotDTO(*scene);
+            if (!dto) Standard_Failure::Raise("Authored-frame DTO rejected.");
+            [snapshots addObject:dto];
+            [history addObject:@[@(document->Document()->GetAvailableUndos()), @(document->Document()->GetAvailableRedos())]];
+        };
+        auto assign = [&](const TDF_Label& target, NSData* value) {
+            if (value.length < 128 || value.length > core3d::scene::authored::kMaximumArchiveBytes)
+                Standard_Failure::Raise("Invalid fixture archive bound.");
+            const auto record = TDataStd_ByteArray::Set(target, AuthoredFrameAttributeID(), 0, int(value.length) - 1, Standard_False);
+            const auto* bytes = static_cast<const std::uint8_t*>(value.bytes);
+            for (NSUInteger i = 0; i < value.length; ++i) record->SetValue(int(i), bytes[i]);
+        };
+        keep();
+        NSMutableDictionary* result = [NSMutableDictionary dictionary];
+        if (mode == 6 || mode == 7) {
+            writer.document->NewCommand();
+            NSMutableData* invalid = [archive mutableCopy];
+            if (mode == 6) static_cast<std::uint8_t*>(invalid.mutableBytes)[invalid.length - 1] ^= 1;
+            assign(mode == 7 ? writer.document->GetData()->Root() : label, invalid);
+            writer.document->CommitCommand();
+            result[@"invalidPublicationRejected"] = @(!capture());
+            if (!writer.document->Undo()) Standard_Failure::Raise("Invalid publication cleanup failed.");
+            keep();
+        } else {
+            auto change = [&](NSData* value) { writer.document->NewCommand(); assign(label, value); if (!writer.document->CommitCommand()) Standard_Failure::Raise("Empty frame edit."); keep(); };
+            change(archive); change(replacement);
+            if (!writer.document->Undo()) Standard_Failure::Raise("Publication frame undo failed."); keep();
+            if (!writer.document->Redo()) Standard_Failure::Raise("Publication frame redo failed."); keep();
+            writer.document->NewCommand(); label.ForgetAttribute(AuthoredFrameAttributeID());
+            if (!writer.document->CommitCommand()) Standard_Failure::Raise("Publication frame removal failed."); keep();
+            if (!writer.document->Undo()) Standard_Failure::Raise("Publication removal undo failed."); keep();
+            std::ostringstream output(std::ios::binary | std::ios::out);
+            if (writer.app->SaveAs(writer.document, output) != PCDM_SS_OK) Standard_Failure::Raise("Publication fixture save failed.");
+            const auto bytes = output.str();
+            if (bytes.empty() || bytes.size() > 1024 * 1024) Standard_Failure::Raise("Publication fixture save exceeded bound.");
+            Core3DBeginSafeBinaryRead(); std::istringstream input(bytes, std::ios::binary | std::ios::in);
+            if (reader.app->Open(input, reader.document) != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected() || reader.document.IsNull())
+                Standard_Failure::Raise("Publication fixture reopen failed.");
+            document->ChangeDocument() = reader.document; keep();
+        }
+        result[@"snapshots"] = snapshots; result[@"history"] = history; result[@"readOnly"] = @(readOnly);
+        return result;
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (...) { return @{@"error": @"Authored-frame publication fixture failed"}; }
 }
 
 - (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)mode {

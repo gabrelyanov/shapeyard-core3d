@@ -8,6 +8,7 @@
 #import <ImageIO/ImageIO.h>
 
 #include "OcctSceneSnapshotBuilder.hpp"
+#include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -1751,7 +1752,13 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     theDefinition.faces.Clear();
     theDefinition.edges.Clear();
     theDefinition.vertices.Clear();
-    TopExp::MapShapes(theDefinition.shape, TopAbs_FACE, theDefinition.faces);
+    // The label-based RWMesh iterator below replaces the definition's outer
+    // placement with identity. Keep mesh face lookup in that same local space;
+    // DocumentExplorer supplies the outer placement to the instance matrix.
+    TopoDS_Shape extractionShape = theDefinition.shape;
+    if (theDefinition.representation == OcctGeometryRepresentation::TriangleMesh)
+        extractionShape.Location(TopLoc_Location());
+    TopExp::MapShapes(extractionShape, TopAbs_FACE, theDefinition.faces);
     if (theDefinition.faces.IsEmpty()
         || !FitsUInt32(static_cast<std::size_t>(theDefinition.faces.Extent()))
         || static_cast<std::size_t>(theDefinition.faces.Extent()) > kMaxFacesPerMesh) {
@@ -2025,6 +2032,50 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     return true;
 }
 
+// Publish a supplied local basis only after proving that the ordinary mesh
+// extraction preserved every node attribute and every triangle corner. The
+// definition's outer placement remains in worldFromObject, not in these frames.
+bool PublishAuthoredFrames(const DefinitionData& definition,
+                           const OcctAuthoredFrameRecord& record,
+                           MeshSnapshot& mesh)
+{
+    if (record.archive.empty() || record.cornerCount != mesh.indices.size()
+        || definition.representation != OcctGeometryRepresentation::TriangleMesh
+        || mesh.primitives.size() != 1 || mesh.primitives.front().firstIndex != 0
+        || mesh.primitives.front().indexCount != mesh.indices.size()
+        || mesh.primitives.front().faceIndex != 0
+        || !mesh.primitives.front().hasTextureCoordinates) return false;
+    RWMesh_FaceIterator face(definition.label, TopLoc_Location(), Standard_False);
+    if (!face.More() || !face.HasNormals() || !face.HasTexCoords()
+        || face.NbNodes() != mesh.vertices.size()
+        || std::size_t(face.NbTriangles()) * 3 != mesh.indices.size()) return false;
+    for (int node = face.NodeLower(); node <= face.NodeUpper(); ++node) {
+        const auto point = face.NodeTransformed(node);
+        const auto normal = face.NormalTransformed(node);
+        const auto uv = face.NodeTexCoord(node);
+        const Vertex expected = {
+            float(point.X() - definition.sourceOrigin.x),
+            float(point.Y() - definition.sourceOrigin.y),
+            float(point.Z() - definition.sourceOrigin.z),
+            float(normal.X()), float(normal.Y()), float(normal.Z()),
+            float(uv.X()), float(uv.Y())};
+        if (std::memcmp(&expected, &mesh.vertices[std::size_t(node - 1)], sizeof(Vertex)) != 0) return false;
+    }
+    for (int triangle = face.ElemLower(); triangle <= face.ElemUpper(); ++triangle) {
+        int nodes[3]; face.TriangleOriented(triangle).Get(nodes[0], nodes[1], nodes[2]);
+        for (int corner = 0; corner < 3; ++corner)
+            if (nodes[corner] < 1 || mesh.indices[std::size_t(triangle - 1) * 3 + corner]
+                != std::uint32_t(nodes[corner] - 1)) return false;
+    }
+    std::vector<Float4> frames;
+    if (!core3d::persistence::DecodeNativeAuthoredFrames(face.Face(),
+            record.archive.data(), record.archive.size(), frames)) return false;
+    face.Next(); if (face.More()) return false;
+    mesh.cornerTangents = std::move(frames);
+    mesh.tangentBasis = TangentBasis::Authored;
+    return true;
+}
+
 bool BuildCamera(const Handle(V3d_View)& theView,
                  const UInt2& theViewportPixels,
                  CameraSnapshot& theCamera)
@@ -2148,6 +2199,17 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
 {
     Fingerprint aHash;
     aHash.AddInteger(static_cast<std::uint8_t>(theScene.selectionMode));
+    // Frame edits change appearance even without a normal-map binding. Keep
+    // the geometry revision stable while invalidating presentation consumers.
+    aHash.AddInteger<std::uint64_t>(theScene.meshes.size());
+    for (const auto& mesh : theScene.meshes) {
+        aHash.AddInteger(static_cast<std::uint8_t>(mesh.tangentBasis));
+        aHash.AddInteger<std::uint64_t>(mesh.cornerTangents.size());
+        for (const auto& frame : mesh.cornerTangents) {
+            aHash.AddFloat(frame.x); aHash.AddFloat(frame.y);
+            aHash.AddFloat(frame.z); aHash.AddFloat(frame.w);
+        }
+    }
     aHash.AddInteger<std::uint64_t>(theScene.textures.size());
     for (const TextureResourceSnapshot& aTexture : theScene.textures) {
         // The identifier is a SHA-256 of the exact payload, so hashing it plus
@@ -4507,6 +4569,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
             return {};
         }
+        Standard_Size aFrameResidentBytes = 0;
+        if (!Core3DValidateAuthoredFrameOwners(aDocument, aFrameResidentBytes)) return {};
         const std::string aDocumentIdentifier =
             theDocument->DocumentIdentifier();
         if (aDocumentIdentifier.empty()
@@ -5150,9 +5214,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aScene.instances.push_back(std::move(anInstance));
         }
 
-        // Frames are a bounded derivative of owned UV/normal geometry. An
-        // ordinary mesh does not allocate or generate them. Imported authored
-        // frames remain gated until durable native basis ownership is added.
+        // Supplied geometry frames persist independently of normal material.
+        // Mikk-only normal bindings share the existing resident frame budget.
         std::vector<bool> needsNormalFrames(aScene.meshes.size(), false);
         for (const auto& instance : aScene.instances) {
             for (const auto& binding : instance.primitiveBindings) {
@@ -5161,17 +5224,33 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             }
         }
         for (std::size_t index = 0; index < aScene.meshes.size(); ++index) {
-            if (!needsNormalFrames[index]) continue;
             auto& mesh = aScene.meshes[index];
+            OcctAuthoredFrameRecord record;
+            const auto state = Core3DReadAuthoredFrameOwner(aDocument, aDefinitions[index].label, record);
+            if (state == OcctAuthoredFrameReadState::Invalid) return {};
+            const bool authored = state == OcctAuthoredFrameReadState::Authored;
+            if (!authored && !needsNormalFrames[index]) continue;
+            // Normal recipe2/native presentation transport is the next gate;
+            // a recipe1 map must not silently switch from Mikk to supplied data.
+            if (authored && needsNormalFrames[index]) return {};
             std::size_t frameBytes = 0;
             if (!CheckedMultiply(mesh.indices.size(), sizeof(Float4), frameBytes)
                 || !CheckedAdd(aSnapshotNumericBytes, frameBytes, aSnapshotNumericBytes)
-                || aSnapshotNumericBytes > kMaxSnapshotNumericBytes
-                || GenerateMikkCornerTangents(mesh.vertices, mesh.indices,
+                || aSnapshotNumericBytes > kMaxSnapshotNumericBytes) return {};
+            if (authored) {
+                if (!PublishAuthoredFrames(aDefinitions[index], record, mesh)) return {};
+            } else {
+                std::size_t nativeBytes = 0;
+                if (!CheckedMultiply(mesh.indices.size(), 64U, nativeBytes)
+                    || aFrameResidentBytes > 64U * 1024U * 1024U
+                    || nativeBytes > 64U * 1024U * 1024U - aFrameResidentBytes
+                    || GenerateMikkCornerTangents(mesh.vertices, mesh.indices,
                     std::all_of(mesh.primitives.begin(), mesh.primitives.end(),
                         [](const auto& primitive) { return primitive.hasTextureCoordinates; }),
                     mesh.cornerTangents) != TangentSpaceError::None) return {};
-            mesh.tangentBasis = TangentBasis::MikkTSpace;
+                aFrameResidentBytes += nativeBytes;
+                mesh.tangentBasis = TangentBasis::MikkTSpace;
+            }
         }
 
         std::size_t anInstanceBytes = 0;

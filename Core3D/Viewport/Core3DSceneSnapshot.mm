@@ -219,8 +219,8 @@ static_assert(sizeof(std::uint32_t) == 4,
 
 
 #if DEBUG
-static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
-    Handle(Poly_Triangulation) mesh = new Poly_Triangulation(4, 1, Standard_True, Standard_True);
+TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
+    Handle(Poly_Triangulation) mesh = new Poly_Triangulation(mode == 22 ? 5 : 4, mode == 22 ? 2 : 1, Standard_True, Standard_True);
     mesh->SetNode(1, gp_Pnt(9, -0.0, 3)); // Deliberately unused, still authoritative.
     mesh->SetNode(2, gp_Pnt(0, 0, 0)); mesh->SetNode(3, gp_Pnt(0, 0, 10));
     mesh->SetNode(4, gp_Pnt(8, -6, 0));
@@ -228,6 +228,10 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
     mesh->SetUVNode(3, gp_Pnt2d(1, 0)); mesh->SetUVNode(4, gp_Pnt2d(0, 1));
     for (int n = 1; n <= 4; ++n) mesh->SetNormal(n, gp_Vec3f(0.6f, 0.8f, -0.0f));
     mesh->SetTriangle(1, Poly_Triangle(2, 3, 4));
+    if (mode == 22) {
+        mesh->SetNode(5, gp_Pnt(8,-6,10)); mesh->SetUVNode(5, gp_Pnt2d(1,1));
+        mesh->SetNormal(5, gp_Vec3f(0.6f,0.8f,-0.0f)); mesh->SetTriangle(2, Poly_Triangle(3,5,4));
+    }
     if (mode == 1) mesh = mesh->Copy();
     if (mode == 2) mesh->SetNode(3, gp_Pnt(0, 0, 11));
     if (mode == 3) mesh->SetNormal(3, gp_Vec3f(0.8f, 0.6f, 0));
@@ -435,7 +439,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
     using namespace core3d::persistence;
     if (mode < 0 || mode > 21) return @{@"error": @"Undefined geometry fixture"};
     try {
-        const TopoDS_Face face = Core3DMakeAuthoredGeometryFixture(mode);
+        const TopoDS_Face face = Core3DDebugAuthoredGeometryFixture(mode);
         GeometryIdentity identity; const bool accepted = NativeAuthoredGeometryIdentity(face, identity);
         NSMutableDictionary* result = [@{@"accepted": @(accepted),
             @"identity": [NSData dataWithBytes:identity.data() length:identity.size()]} mutableCopy];
@@ -492,7 +496,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
 + (NSDictionary<NSString *, id> *)debugNativeFrameAssociation:(NSData *)archive mode:(NSInteger)mode {
     if (mode < 0 || mode > 21) return @{@"error": @"Undefined geometry fixture"};
     try {
-        const auto face = Core3DMakeAuthoredGeometryFixture(mode);
+        const auto face = Core3DDebugAuthoredGeometryFixture(mode);
         // Seed an old value to verify rejected reads clear existing output.
         std::vector<core3d::scene::Float4> frames(1, {1, 0, 0, 1});
         const bool accepted = core3d::persistence::DecodeNativeAuthoredFrames(face,
@@ -518,7 +522,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
         XCAFDoc_DocumentTool::SetLengthUnit(owner.document, mode == 5 ? 1.0 : 0.001);
         OcctDocument wrapper; wrapper.ChangeDocument() = owner.document;
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner.document->Main());
-        auto fixture = Core3DMakeAuthoredGeometryFixture(mode == 15 ? 2 : mode == 26 ? 4 : mode == 27 ? 1 : 0);
+        auto fixture = Core3DDebugAuthoredGeometryFixture(mode == 15 ? 2 : mode == 26 ? 4 : mode == 27 ? 1 : 0);
         if (mode == 17) fixture.Reverse();
         if (mode == 16) { gp_Trsf move; move.SetTranslation(gp_Vec(1,2,3)); fixture.Location(TopLoc_Location(move)); }
         TopoDS_Shape shape = fixture;
@@ -531,7 +535,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
         if (label.IsNull()) Standard_Failure::Raise("No frame-owner definition.");
         if (!shape.Location().IsIdentity()) shapes->SetShape(label, shape);
         TDF_Label second;
-        if (mode == 20 || mode == 21) second = shapes->AddShape(Core3DMakeAuthoredGeometryFixture(0), Standard_False);
+        if (mode == 20 || mode == 21) second = shapes->AddShape(Core3DDebugAuthoredGeometryFixture(0), Standard_False);
         owner.document->NewCommand();
         if (!wrapper.SetGeometryRepresentationForLabel(label, OcctGeometryRepresentation::TriangleMesh))
             Standard_Failure::Raise("Could not mark fixture mesh.");
@@ -619,7 +623,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
     using core3d::scene::Float4;
     if (mode < 0 || mode > 11) return @{@"error": @"Undefined frame document fixture"};
     try {
-        const auto fixture = Core3DMakeAuthoredGeometryFixture(0);
+        const auto fixture = Core3DDebugAuthoredGeometryFixture(0);
         std::vector<Float4> validated;
         for (NSData* input in @[archive, replacement])
             if (!DecodeNativeAuthoredFrames(fixture, static_cast<const std::uint8_t*>(input.bytes), input.length, validated))
@@ -668,7 +672,7 @@ static TopoDS_Face Core3DMakeAuthoredGeometryFixture(NSInteger mode) {
             writer.document->ChangeStorageFormatVersion(static_cast<TDocStd_FormatVersion>(version));
             const auto shapes = XCAFDoc_DocumentTool::ShapeTool(writer.document->Main());
             for (int i = 0; i < std::max(count, 1); ++i) {
-                const auto label = shapes->AddShape(Core3DMakeAuthoredGeometryFixture(0), Standard_False);
+                const auto label = shapes->AddShape(Core3DDebugAuthoredGeometryFixture(0), Standard_False);
                 if (label.IsNull()) Standard_Failure::Raise("Private frame shape creation failed.");
                 TDataStd_Name::Set(label, TCollection_ExtendedString("Private frame geometry"));
                 if (count) {

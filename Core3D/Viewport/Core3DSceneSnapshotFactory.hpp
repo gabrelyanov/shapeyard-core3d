@@ -23,6 +23,12 @@ struct SceneSnapshot;
 }
 }
 
+#if DEBUG
+class TopoDS_Face;
+// Shared exact native fixture for private ownership and publication tests.
+TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode);
+#endif
+
 NS_ASSUME_NONNULL_BEGIN
 
 //! Deep-copies a validated renderer-neutral C++ snapshot into the public

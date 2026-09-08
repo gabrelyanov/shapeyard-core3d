@@ -1080,6 +1080,9 @@ typedef struct {
 //! variant; 12 retains frames without a map; 13/14 reverse culling and reflect
 //! the node; 15 has mirrored UVs; 16 mixes culling; 17 mixes signs within a
 //! triangle and must reject. Never edits the document.
+//! Private OCAF documents through the production builder; does not adopt or edit the live project.
+- (NSDictionary<NSString *, id> *)debugAuthoredFramePublications:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugAuthoredFramePublications(_:replacement:mode:));
 - (Core3DSceneSnapshot *_Nullable)debugCaptureNormalMappedSceneSnapshot:(NSInteger)validationMode;
 - (BOOL)debugSetPresentationNormalTexture:(NSData *_Nullable)data;
 - (NSUInteger)debugPreparedNativeTangentArrayCount;
