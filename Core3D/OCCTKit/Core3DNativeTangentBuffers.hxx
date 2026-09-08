@@ -252,28 +252,42 @@ inline bool PrepareNativeTangentPresentations(
         if (trace) trace->stage = 2;
         if (!ReadNativeTangentOwner(shape, owner)) return false;
         if (trace) trace->stage = 3;
-        bool changedBasis = false;
+        bool changedBasis = false, sourceArraysReleased = false;
         for (const auto& presentation : shape->Presentations()) {
             if (presentation.IsNull()) continue;
             for (const auto& genericGroup : presentation->Groups()) {
                 auto group = Handle(OpenGl_Group)::DownCast(genericGroup);
                 if (group.IsNull()) continue;
+                Handle(Graphic3d_Aspects) aspect = group->Aspects();
                 for (auto* node = group->FirstNode(); node; node = node->next) {
+                    if (auto* inlineAspect = dynamic_cast<OpenGl_Aspects*>(node->elem)) {
+                        aspect = inlineAspect->Aspect(); continue;
+                    }
                     auto* primitive = dynamic_cast<OpenGl_PrimitiveArray*>(node->elem);
                     if (!primitive) continue;
                     const auto old = prepared.find(primitive->GetUID());
                     if (old != prepared.end() && old->second.basisIdentity != owner.identity) changedBasis = true;
+                    if (old == prepared.end() && primitive->IsFillDrawMode() && NeedsNativeTangents(aspect)) {
+                        const auto& attributes = primitive->Attributes();
+                        const auto& indices = primitive->Indices();
+                        sourceArraysReleased = sourceArraysReleased || attributes.IsNull()
+                            || attributes->Data() == nullptr
+                            || (!indices.IsNull() && indices->Data() == nullptr);
+                    }
                 }
             }
         }
-        if (changedBasis) {
-            // Recompute from authoritative geometry before examining any array.
-            // Uploaded private arrays must never be interpreted as source.
+        if (changedBasis || sourceArraysReleased) {
+            // An earlier ordinary draw can upload and release its CPU arrays
+            // before the normal shader becomes active. Rebuild once from the
+            // exact native shape; never reinterpret a VBO/private derivative as
+            // source or bypass supplied-corner validation to recover a frame.
             const auto caf = Handle(CafShapePrs)::DownCast(shape);
             if (caf.IsNull()) return false;
             if (!caf->Shape().IsEqual(XCAFDoc_ShapeTool::GetShape(caf->GetLabel())))
                 caf->DispatchStyles(Standard_False);
-            // Basis derivatives must not rebuild selectable entity owners.
+            // Presentation-only recomputation preserves selectable owners and
+            // OCAF history. The normal budget/array checks below still apply.
             context->RecomputePrsOnly(shape, Standard_False, Standard_True);
         }
         for (const auto& presentation : shape->Presentations()) {
