@@ -12,6 +12,9 @@
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../Scene/SceneSnapshot.hpp"
 #include "../Scene/MikkTangentSpace.hpp"
+#if DEBUG
+#include "../Scene/AuthoredTangentArchive.hpp"
+#endif
 #include <cstring>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
@@ -234,6 +237,49 @@ static_assert(sizeof(std::uint32_t) == 4,
         return [NSData dataWithBytes:frames.data() length:frames.size()*sizeof(Float4)];
     } catch (...) { return reject(TangentSpaceError::GenerationFailed); }
 }
+#if DEBUG
++ (nullable NSData *)debugEncodeAuthoredFrames:(NSData *)frames
+                             geometryIdentity:(NSData *)geometryIdentity
+                                        error:(NSError * _Nullable * _Nullable)error {
+    using namespace core3d::scene::authored;
+    auto reject = [error](ArchiveStatus status) -> NSData* {
+        if (error) *error = [NSError errorWithDomain:@"Core3DAuthoredFrameArchive" code:NSInteger(status)
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid bounded authored-frame archive."}];
+        return nil;
+    };
+    if (error) *error = nil;
+    if (geometryIdentity.length != 32 || frames.length == 0 || frames.length % 16)
+        return reject(ArchiveStatus::InvalidLayout);
+    if (frames.length / 16 > kMaximumFrames) return reject(ArchiveStatus::ResourceLimit);
+    try {
+        GeometryIdentity identity; std::memcpy(identity.data(), geometryIdentity.bytes, 32);
+        std::vector<Float4> values(frames.length / 16);
+        static_assert(sizeof(Float4) == 16);
+        std::memcpy(values.data(), frames.bytes, frames.length);
+        std::vector<std::uint8_t> archive;
+        const auto status = Encode(values, identity, archive);
+        if (status != ArchiveStatus::Valid) return reject(status);
+        return [NSData dataWithBytes:archive.data() length:archive.size()];
+    } catch (...) { return reject(ArchiveStatus::AllocationFailure); }
+}
++ (nullable NSData *)debugDecodeAuthoredFrames:(NSData *)archive
+                             geometryIdentity:(NSData *)geometryIdentity
+                                        error:(NSError * _Nullable * _Nullable)error {
+    using namespace core3d::scene::authored;
+    auto reject = [error](ArchiveStatus status) -> NSData* {
+        if (error) *error = [NSError errorWithDomain:@"Core3DAuthoredFrameArchive" code:NSInteger(status)
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid bounded authored-frame archive."}];
+        return nil;
+    };
+    if (error) *error = nil;
+    if (geometryIdentity.length != 32) return reject(ArchiveStatus::InvalidLayout);
+    GeometryIdentity identity; std::memcpy(identity.data(), geometryIdentity.bytes, 32);
+    std::vector<Float4> frames;
+    const auto status = Decode(static_cast<const std::uint8_t*>(archive.bytes), archive.length, identity, frames);
+    if (status != ArchiveStatus::Valid) return reject(status);
+    return [NSData dataWithBytes:frames.data() length:frames.size() * 16];
+}
+#endif
 @end
 
 @implementation Core3DSceneRevisionVector

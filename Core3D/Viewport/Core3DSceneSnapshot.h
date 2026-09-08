@@ -40,6 +40,17 @@ CORE3D_SCENE_FINAL_CLASS
                           hasTextureCoordinates:(BOOL)hasTextureCoordinates
                                           error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(cornerTangents(vertexData:triangleIndexData:hasTextureCoordinates:));
+#if DEBUG
+// Codec qualification seam only. No native document ownership or GLB admission.
++ (nullable NSData *)debugEncodeAuthoredFrames:(NSData *)frames
+                             geometryIdentity:(NSData *)geometryIdentity
+                                        error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(debugEncodeAuthoredFrames(_:geometryIdentity:));
++ (nullable NSData *)debugDecodeAuthoredFrames:(NSData *)archive
+                             geometryIdentity:(NSData *)geometryIdentity
+                                        error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(debugDecodeAuthoredFrames(_:geometryIdentity:));
+#endif
 @end
 
 typedef NS_ENUM(NSInteger, Core3DSceneProjection) {
