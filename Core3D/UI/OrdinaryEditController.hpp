@@ -146,7 +146,19 @@ struct OrdinaryCreationRoot {
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
 };
 using OrdinaryCreationCatalog = std::map<std::string, OrdinaryCreationRoot>;
+//! Exact retained source and intended derived-copy metadata.
+struct OrdinaryMeshCopySource {
+    Handle(AIS_Shape) presentation;
+    OcctObjectVisibilityState previous;
+    OcctObjectVisibilityState candidate;
+    OcctScalarAppearanceState appearance;
+    OcctReferenceAxisReadState axisState = OcctReferenceAxisReadState::Invalid;
+    OcctReferenceAxis axis;
+    TCollection_ExtendedString destinationName;
+};
+
 struct OrdinaryCreationLedger {
+    std::optional<OrdinaryMeshCopySource> meshCopy;
     OrdinaryCreationCatalog previousRoots;
     OcctSavedGroupState groups;
     std::vector<OrdinaryCreationRecord> records;
@@ -162,6 +174,8 @@ public:
     virtual ~OrdinaryEditPresentationHost() = default;
     virtual bool admitTransform(OrdinaryTransformLedger& ledger) noexcept = 0;
     virtual bool admitCreation(OrdinaryCreationLedger&) noexcept { return false; }
+    virtual bool admitMeshCopy(OrdinaryCreationLedger&) noexcept { return false; }
+    virtual bool repairMeshCopy(const OrdinaryCreationLedger&, bool) noexcept { return false; }
     virtual bool repairCreation(const OrdinaryCreationLedger&, bool) noexcept { return false; }
     virtual bool admitGrouping(OrdinaryGroupingLedger&) noexcept { return false; }
     virtual bool repairGrouping(const OrdinaryGroupingLedger&, bool) noexcept { return false; }
@@ -216,6 +230,8 @@ public:
     OrdinaryEditController& operator=(const OrdinaryEditController&) = delete;
     OrdinaryEditLease beginTransform(const std::vector<OrdinaryTransformChange>& changes,
                                      OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginMeshCopy(const Handle(AIS_Shape)& source,
+        const TCollection_ExtendedString& name, OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginCreation(const std::vector<OrdinaryCreationRequest>& requests,
                                    OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginGrouping(const std::vector<OcctSavedGroup>& groups,
@@ -241,6 +257,9 @@ private:
     OrdinaryEditResult stageCreationAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileCreationImpl() noexcept;
     bool creationMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept;
+    OrdinaryEditLease beginCreationImpl(const std::vector<OrdinaryCreationRequest>& requests,
+        std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure) noexcept;
+    bool meshCopySourceMatches(const OrdinaryMeshCopySource& source, bool candidate) const noexcept;
     OrdinaryEditResult stageGroupingAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileGroupingImpl() noexcept;
     bool groupingMatches(const OrdinaryGroupingLedger& ledger, bool candidate) const noexcept;

@@ -58,6 +58,25 @@ enum class OcctGeometryRepresentation : Standard_Integer
     TriangleMesh = 2,
 };
 
+//! Exact admitted whole-object scalar appearance for source-retained mesh copies.
+//! No textures, per-face styles or imported color links are silently discarded.
+struct OcctScalarAppearanceState {
+    TDF_Label materialLabel;
+    std::array<bool,2> legacyPresent = {};
+    std::array<Standard_Integer,2> legacyValues = {};
+    bool localPBR = false;
+    // Captured numeric values, never a mutable material handle or tolerant
+    // Quantity_Color comparison. Fixed field order is internal, not a schema.
+    std::vector<double> visualValues;
+    bool IsEqual(const OcctScalarAppearanceState& other) const noexcept {
+        const bool sameLabel = materialLabel.IsNull() ? other.materialLabel.IsNull()
+            : !other.materialLabel.IsNull() && materialLabel.IsEqual(other.materialLabel)
+                && materialLabel.Data()==other.materialLabel.Data();
+        return sameLabel && legacyPresent==other.legacyPresent && legacyValues==other.legacyValues
+            && localPBR==other.localPBR && visualValues==other.visualValues;
+    }
+};
+
 struct OcctMeshUVAtlasPreview {
     Standard_Integer authoredResolution = 0;
     Standard_Integer authoredGutterPixels = 0;
@@ -603,6 +622,8 @@ public:
         const TDF_Label& source,
         const TDF_Label& destination);
     void LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForMeshCopy(
+        const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
     //! Apply only Shapeyard-owned whole-object overrides. Imported XCAF
     //! material is deliberately excluded because an occurrence presentation
     //! already owns the explorer-resolved definition/instance style.

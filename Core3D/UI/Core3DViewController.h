@@ -66,6 +66,15 @@ typedef NS_ENUM(NSInteger, Core3DSavedGroupEditResult) {
     Core3DSavedGroupEditResultBlockedByLayer,
 };
 
+typedef NS_ENUM(NSInteger, Core3DMeshCopyResult) {
+    Core3DMeshCopyResultUnchanged,
+    Core3DMeshCopyResultCommitted,
+    Core3DMeshCopyResultRejected,
+    Core3DMeshCopyResultBusy,
+    Core3DMeshCopyResultRecoveryRequired,
+    Core3DMeshCopyResultFailed,
+};
+
 typedef NS_ENUM(NSInteger, Core3DMeshUVAtlasResult) {
     Core3DMeshUVAtlasResultUnchanged,
     Core3DMeshUVAtlasResultCommitted,
@@ -618,6 +627,10 @@ typedef struct {
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(setSavedGroupVisibility(identifier:visible:expected:));
 - (BOOL)selectSavedGroup:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectSavedGroup(identifier:expected:));
+//! Create an independent mesh at current tessellation; retain/hide source; one Undo.
+- (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(createSourceRetainedMeshCopy(entityIdentifier:expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
@@ -854,6 +867,7 @@ typedef struct {
 - (NSInteger)debugReconcileViewerOrdinaryEdit;
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryCreationFault:(NSInteger)mode;
+- (BOOL)debugConfigureMeshCopyFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;

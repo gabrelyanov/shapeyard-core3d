@@ -144,6 +144,8 @@ namespace core3d {
             std::uint32_t width, std::uint32_t height, bool* blockedByLayer = nullptr) noexcept;
         bool selectSavedGroup(const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height, bool& selectionWasTouched) noexcept;
+        OrdinaryEditResult createSourceRetainedMeshCopy(const ObjectFrameIdentity& identity,
+            std::uint32_t width, std::uint32_t height) noexcept;
         std::optional<OcctMeshUVAtlasPreview> previewCoherentUVAtlas(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height,
             const std::optional<OcctMeshUVAtlasOptions>& options) noexcept;
@@ -414,6 +416,8 @@ namespace core3d {
         bool repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
         OrdinaryEditResult publishCreatedPrimitives(const std::vector<OrdinaryCreationRequest>& requests) noexcept;
         bool admitCreation(OrdinaryCreationLedger& ledger) noexcept override;
+        bool admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept override;
+        bool repairMeshCopy(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
         bool repairCreation(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
         bool admitGrouping(OrdinaryGroupingLedger& ledger) noexcept override;
         bool repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept override;

@@ -1,4 +1,5 @@
 #include "OrdinaryEditController.hpp"
+#include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/AuthoredFrameAttributeID.hxx"
 #import <Foundation/Foundation.h>
@@ -309,8 +310,73 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
 }
 
 
+OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
+    const Handle(AIS_Shape)& source, const TCollection_ExtendedString& name,
+    OrdinaryEditResult* failure) noexcept {
+    const auto reject=[&](OrdinaryEditResult result) {
+        if (failure) *failure=result;
+        return OrdinaryEditLease();
+    };
+    if (![NSThread isMainThread]) return reject(OrdinaryEditResult::Invalid);
+    if (blocksNormalWork()) return reject(OrdinaryEditResult::Busy);
+    try {
+        if (_document.IsNull() || _document->Document().IsNull()
+            || _document->Document()->HasOpenCommand() || source.IsNull()
+            || !OcctObjectNameIsValid(name) || !_document->IsPresentationEditable(source)
+            || !_document->ValidateGeometryRepresentations()) return reject(OrdinaryEditResult::Invalid);
+        OrdinaryMeshCopySource copy;copy.presentation=source;copy.destinationName=name;
+        const auto label=_document->ShapeLabel(source);
+        if (!_document->CaptureObjectVisibilityStateForLabel(label,copy.previous)
+            || !copy.previous.IsEffectivelyVisible()
+            || copy.previous.object.object.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            || !copy.previous.object.object.shape.IsEqual(source->Shape())
+            || !MatricesEqual(copy.previous.object.object.transform,source->LocalTransformation())
+            || !_document->CaptureScalarAppearanceForMeshCopy(label,copy.appearance)) return reject(OrdinaryEditResult::Invalid);
+        copy.axisState=_document->ReadReferenceAxisForLabel(label,copy.axis);
+        if (copy.axisState==OcctReferenceAxisReadState::Invalid) return reject(OrdinaryEditResult::Invalid);
+        std::atomic_bool cancelled(false);
+        meshcopy::CurrentTessellationCopy geometry;
+        if (meshcopy::PrepareCurrentTessellationCopy(source->Shape(),geometry,cancelled)
+            !=meshcopy::PreparationResult::Ready) return reject(OrdinaryEditResult::Invalid);
+        Handle(AIS_Shape) presentation=new AIS_Shape(geometry.face);
+        presentation->SetLocalTransformation(copy.previous.object.object.transform);
+        _document->LoadObjectMeterial(label,presentation);
+        OrdinaryCreationRequest request;
+        request.presentation=presentation;request.representation=OcctGeometryRepresentation::TriangleMesh;
+        request.material=_document->MaterialNameForLabel(label);request.color=_document->ColorNameForLabel(label);
+        return beginCreationImpl({request},std::move(copy),failure);
+    } catch (...) {return reject(OrdinaryEditResult::Invalid);}
+}
+
+bool OrdinaryEditController::meshCopySourceMatches(
+    const OrdinaryMeshCopySource& source,bool candidate) const noexcept {
+    try {
+        OcctObjectVisibilityState actual;
+        OcctScalarAppearanceState appearance;
+        const auto label=source.previous.object.object.label;
+        const auto& expected=candidate?source.candidate:source.previous;
+        if (!_document->CaptureObjectVisibilityStateForLabel(label,actual) || !expected.IsEqual(actual)
+            || !_document->CaptureScalarAppearanceForMeshCopy(label,appearance)
+            || !source.appearance.IsEqual(appearance)) return false;
+        OcctReferenceAxis axis;
+        if (_document->ReadReferenceAxisForLabel(label,axis)!=source.axisState
+            || axis.pivotSpace!=source.axis.pivotSpace || axis.directionSpace!=source.axis.directionSpace) return false;
+        for (int i=1;i<=3;++i)
+            if (axis.pivot.Coord(i)!=source.axis.pivot.Coord(i)
+                || axis.direction.Coord(i)!=source.axis.direction.Coord(i)) return false;
+        return true;
+    } catch (...) {return false;}
+}
+
+
 OrdinaryEditLease OrdinaryEditController::beginCreation(
     const std::vector<OrdinaryCreationRequest>& requests, OrdinaryEditResult* failure) noexcept {
+    return beginCreationImpl(requests,std::nullopt,failure);
+}
+
+OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
+    const std::vector<OrdinaryCreationRequest>& requests,
+    std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure) noexcept {
     const auto reject = [&](OrdinaryEditResult result) {
         if (failure) { *failure = result; }
         return OrdinaryEditLease();
@@ -327,6 +393,9 @@ OrdinaryEditLease OrdinaryEditController::beginCreation(
         const auto document = _document->Document();
         if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
         OrdinaryCreationLedger ledger;
+        ledger.meshCopy=std::move(meshCopy);
+        if (ledger.meshCopy && (requests.size()!=1 || !meshCopySourceMatches(*ledger.meshCopy,false)))
+            return reject(OrdinaryEditResult::Invalid);
         if (!CaptureCreationRoots(_document, ledger.previousRoots)
             || ledger.previousRoots.size() + requests.size() > 50000
             || !_document->CaptureSavedGroups(ledger.groups)) { return reject(OrdinaryEditResult::Invalid); }
@@ -342,7 +411,8 @@ OrdinaryEditLease OrdinaryEditController::beginCreation(
             ledger.records.push_back({request, request.presentation->Shape(),
                                       request.presentation->LocalTransformation(), {}});
         }
-        if (!_host.admitCreation(ledger) || !creationMatches(ledger, false)) { return reject(OrdinaryEditResult::Invalid); }
+        if (!_host.admitCreation(ledger) || (ledger.meshCopy && !_host.admitMeshCopy(ledger))
+            || !creationMatches(ledger, false)) { return reject(OrdinaryEditResult::Invalid); }
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
         _activeToken = ++_nextToken;
@@ -367,6 +437,7 @@ OrdinaryEditLease OrdinaryEditController::beginCreation(
 
 bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept {
     try {
+        if (ledger.meshCopy && !meshCopySourceMatches(*ledger.meshCopy,candidate)) return false;
         OrdinaryCreationCatalog actual;
         OcctSavedGroupState groups;
         if (!CaptureCreationRoots(_document, actual) || !_document->CaptureSavedGroups(groups)
@@ -387,10 +458,21 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                 || !entities.insert(expected.object.entityIdentifier).second
                 || !definitions.insert(expected.object.definitionIdentifier).second
                 || !_document->CaptureObjectNameStateForLabel(expected.object.label, stored)
-                || !expected.IsEqual(stored)
-                || !CreationIntegerEquals(expected.object.label, 11, record.requested.material)
-                || !CreationIntegerEquals(expected.object.label, 12, record.requested.color)
-                || _document->ReadReferenceAxisForLabel(expected.object.label, axis) != OcctReferenceAxisReadState::ImplicitDefault) { return false; }
+                || !expected.IsEqual(stored)) { return false; }
+            if (ledger.meshCopy) {
+                const auto& source=*ledger.meshCopy;
+                OcctScalarAppearanceState appearance;
+                if (!_document->CaptureScalarAppearanceForMeshCopy(expected.object.label,appearance)
+                    || !source.appearance.IsEqual(appearance)
+                    || _document->ReadReferenceAxisForLabel(expected.object.label,axis)!=source.axisState
+                    || axis.pivotSpace!=source.axis.pivotSpace || axis.directionSpace!=source.axis.directionSpace
+                    || !stored.namePresent || !stored.name.IsEqual(source.destinationName)) return false;
+                for (int i=1;i<=3;++i)
+                    if (axis.pivot.Coord(i)!=source.axis.pivot.Coord(i)
+                        || axis.direction.Coord(i)!=source.axis.direction.Coord(i)) return false;
+            } else if (!CreationIntegerEquals(expected.object.label,11,record.requested.material)
+                || !CreationIntegerEquals(expected.object.label,12,record.requested.color)
+                || _document->ReadReferenceAxisForLabel(expected.object.label,axis)!=OcctReferenceAxisReadState::ImplicitDefault) return false;
         }
         for (const auto& entry : ledger.previousRoots) {
             if (entities.count(entry.second.entityIdentifier) || definitions.count(entry.second.definitionIdentifier)) { return false; }
@@ -419,8 +501,34 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             }
             const auto label = _document->AddShape(record.requested.presentation, record.requested.representation);
             if (label.IsNull()) { throw Standard_Failure("Creation returned no root"); }
-            _document->SaveObjectMaterial(label, record.requested.material);
-            _document->SaveObjectColor(label, record.requested.color);
+            if (ledger.meshCopy) {
+                auto& source=*ledger.meshCopy;
+                const auto from=source.previous.object.object.label;
+                if (!_document->CopyObjectAppearance(from,label)
+                    || !_document->CopyReferenceAxis(from,label)
+                    || !_document->SetObjectNameForLabel(label,source.destinationName))
+                    throw Standard_Failure("Mesh copy metadata staging failed");
+                // Preserve dormant legacy fields too: CopyObjectAppearance deliberately
+                // omits them under an owned PBR material; our exact ledger retains them.
+                if (source.appearance.legacyPresent[0])
+                    _document->SaveObjectMaterial(label,static_cast<Graphic3d_NameOfMaterial>(source.appearance.legacyValues[0]));
+                if (source.appearance.legacyPresent[1])
+                    _document->SaveObjectColor(label,static_cast<Quantity_NameOfColor>(source.appearance.legacyValues[1]));
+#ifdef DEBUG
+                if (_stageFailureIndex==2) { _stageFailureIndex=-1;throw Standard_Failure("Mesh copy metadata fault"); }
+#endif
+                if (!_document->SetObjectVisibilityForLabel(from,Standard_False)
+                    || !_document->CaptureObjectVisibilityStateForLabel(from,source.candidate)
+                    || !source.previous.HasSameObjectAndLayers(source.candidate)
+                    || source.candidate.IsEffectivelyVisible())
+                    throw Standard_Failure("Mesh copy source-hide staging failed");
+#ifdef DEBUG
+                if (_stageFailureIndex==3) { _stageFailureIndex=-1;throw Standard_Failure("Mesh copy source-hide fault"); }
+#endif
+            } else {
+                _document->SaveObjectMaterial(label,record.requested.material);
+                _document->SaveObjectColor(label,record.requested.color);
+            }
             if (!_document->CaptureObjectNameStateForLabel(label, record.candidate)
                 || !record.candidate.object.shape.IsEqual(record.shape)
                 || record.candidate.object.scalars != EncodedTransform(record.transform)
@@ -437,7 +545,8 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             _stageFailureIndex = -1; throw Standard_Failure("Creation staged abort fault");
         }
 #endif
-        if (!creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
+        if ((ledger.meshCopy && !_document->ValidateGeometryRepresentations())
+            || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
             _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return OrdinaryEditResult::OutcomeUnknown;
@@ -462,7 +571,8 @@ OrdinaryEditResult OrdinaryEditController::reconcileCreationImpl() noexcept {
             _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
         }
         _committed = candidate; _state = OrdinaryEditState::RepairPending;
-        if (!_host.repairCreation(ledger, candidate)) { return OrdinaryEditResult::OutcomeUnknown; }
+        const bool repaired=ledger.meshCopy ? _host.repairMeshCopy(ledger,candidate) : _host.repairCreation(ledger,candidate);
+        if (!repaired) { return OrdinaryEditResult::OutcomeUnknown; }
         if (!creationMatches(ledger, candidate)) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
         _state = OrdinaryEditState::Publishing;
         if (!_command.releaseClosed()) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }

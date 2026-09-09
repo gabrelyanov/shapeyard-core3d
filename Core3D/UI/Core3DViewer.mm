@@ -2313,6 +2313,72 @@ OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
     return lease ? lease.stageAndCommit() : failure;
 }
 
+bool Core3DViewer::admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept {
+    try {
+        if (!ledger.meshCopy || ledger.records.size()!=1 || !_shapeInteractor || !_objectInteractor
+            || _shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape
+            || !_shapeInteractor->selectionModeAuthorityIsExact()
+            || ledger.authority.selectionOwners.size()!=1
+            || ledger.authority.selectedPresentations.size()!=1
+            || ledger.authority.selectedPresentations.front().presentation!=ledger.meshCopy->presentation
+            || ledger.authority.selectionOwners.front()!=ledger.meshCopy->presentation->GlobalSelOwner()
+            || !myDoc->ShapeLabel(ledger.meshCopy->presentation).IsEqual(ledger.meshCopy->previous.object.object.label)) return false;
+        return _objectInteractor->verifyOrdinaryNameAuthority(ledger.authority);
+    } catch (...) {return false;}
+}
+
+bool Core3DViewer::repairMeshCopy(const OrdinaryCreationLedger& ledger,bool committed) noexcept {
+    if (!committed) return repairCreation(ledger,false);
+    if (![NSThread isMainThread] || !_ordinaryEditController
+        || _ordinaryEditController->state()!=OrdinaryEditState::RepairPending
+        || !_objectInteractor || !_shapeInteractor || myDoc.IsNull() || myContext.IsNull()
+        || HasActiveOperationLedger(_objectInteractor,_shapeInteractor)
+        || _shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape
+        || !_shapeInteractor->selectionModeAuthorityIsExact()) return false;
+#ifdef DEBUG
+    if (_debugOrdinaryRepairFailures>0) {--_debugOrdinaryRepairFailures;return false;}
+#endif
+    if (!_objectInteractor->repairCommittedMeshCopyPresentation(ledger)) return false;
+#ifdef DEBUG
+    if (_debugOrdinaryCreationAfterRepairFailures>0) {--_debugOrdinaryCreationAfterRepairFailures;return false;}
+#endif
+    return _shapeInteractor->selectionModeAuthorityIsExact();
+}
+
+OrdinaryEditResult Core3DViewer::createSourceRetainedMeshCopy(
+    const ObjectFrameIdentity& identity,std::uint32_t width,std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) return OrdinaryEditResult::Busy;
+    try {
+        if (width==0 || height==0 || identity.entityIdentifier.empty() || identity.entityIdentifier.size()>128
+            || identity.publicationSourceIdentifier.empty() || identity.publicationSourceIdentifier.size()>128
+            || identity.entityIdentifier.find('\0')!=std::string::npos
+            || identity.publicationSourceIdentifier.find('\0')!=std::string::npos
+            || !_shapeInteractor || _shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape)
+            return OrdinaryEditResult::Invalid;
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if (!snapshot || snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration!=identity.documentGeneration
+            || snapshot->revisions.model!=identity.modelRevision || myContext.IsNull() || myDoc.IsNull())
+            return OrdinaryEditResult::Invalid;
+        myContext->InitSelected();if (!myContext->MoreSelected()) return OrdinaryEditResult::Invalid;
+        const auto presentation=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();if (myContext->MoreSelected() || presentation.IsNull()) return OrdinaryEditResult::Invalid;
+        const auto label=myDoc->ShapeLabel(presentation);
+        OcctObjectNameState source;
+        if (label.IsNull() || myDoc->EntityIdentifierForLabel(label)!=identity.entityIdentifier
+            || !myDoc->CaptureObjectNameStateForLabel(label,source)) return OrdinaryEditResult::Invalid;
+        TCollection_ExtendedString name("Mesh copy");
+        if (source.namePresent && !source.name.IsEmpty()) {
+            auto candidate=source.name;candidate.AssignCat(TCollection_ExtendedString(" mesh"));
+            if (OcctObjectNameIsValid(candidate)) name=candidate;
+        }
+        OrdinaryEditResult failure=OrdinaryEditResult::Invalid;
+        auto lease=_ordinaryEditController->beginMeshCopy(presentation,name,&failure);
+        return lease?lease.stageAndCommit():failure;
+    } catch (...) {return OrdinaryEditResult::Invalid;}
+}
+
 bool Core3DViewer::admitCreation(OrdinaryCreationLedger& ledger) noexcept {
     try {
         if (myContext.IsNull() || myDoc.IsNull() || !admitNames(ledger.authority)) { return false; }

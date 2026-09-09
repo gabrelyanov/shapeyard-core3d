@@ -6173,6 +6173,66 @@ Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
     return Standard_True;
 }
 
+Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
+    const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {
+    output={};
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
+        // Subshape styling needs a deliberate triangle/material mapping. The
+        // first copy rejects these labels rather than flattening their styles.
+        TDF_LabelSequence children; XCAFDoc_ShapeTool::GetSubShapes(label,children);
+        if (!children.IsEmpty()) return Standard_False;
+        for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
+            if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
+        if (label.IsAttribute(NormalTextureRecipeAttributeID())
+            || label.IsAttribute(AutoPromotedEmissiveFactorAttributeID())) return Standard_False;
+        OcctScalarAppearanceState state;
+        for (int i=0;i<2;++i) {
+            const auto child=label.FindChild(11+i,Standard_False);
+            if (child.IsNull()) continue;
+            Handle(TDF_Attribute) attribute;
+            if (!child.FindAttribute(TDataStd_Integer::GetID(),attribute)) continue;
+            const auto integer=Handle(TDataStd_Integer)::DownCast(attribute);
+            if (integer.IsNull()) return Standard_False;
+            state.legacyPresent[i]=true;state.legacyValues[i]=integer->Get();
+        }
+        Handle(TDF_Attribute) marker;
+        if (label.FindAttribute(LocalPBRMaterialAttributeID(),marker)) {
+            const auto integer=Handle(TDataStd_Integer)::DownCast(marker);
+            if (integer.IsNull() || integer->Get()!=1) return Standard_False;
+            state.localPBR=true;
+        }
+        const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(label,state.materialLabel);
+        const auto material=XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if (linked != !material.IsNull() || linked != !state.materialLabel.IsNull()
+            || (state.localPBR && (material.IsNull() || !material->HasPbrMaterial()))) return Standard_False;
+        if (!material.IsNull()) {
+            if (state.materialLabel.Data()!=myOcafDoc->GetData() || material->IsEmpty()) return Standard_False;
+            const auto& p=material->PbrMaterial();const auto& c=material->CommonMaterial();
+            // Reject even disabled-model texture handles: the source state is
+            // captured completely and no payload aliases enter this contract.
+            if (!p.BaseColorTexture.IsNull() || !p.MetallicRoughnessTexture.IsNull()
+                || !p.NormalTexture.IsNull() || !p.OcclusionTexture.IsNull()
+                || !p.EmissiveTexture.IsNull() || !c.DiffuseTexture.IsNull()) return Standard_False;
+            auto& values=state.visualValues;
+            values={double(material->FaceCulling()),double(material->AlphaMode()),material->AlphaCutOff(),
+                double(p.IsDefined),double(c.IsDefined)};
+            const auto rgb=[&values](const Quantity_Color& color) {
+                values.push_back(color.Red());values.push_back(color.Green());values.push_back(color.Blue());
+            };
+            rgb(p.BaseColor.GetRGB());values.push_back(p.BaseColor.Alpha());
+            for (int i=0;i<3;++i) values.push_back(p.EmissiveFactor[i]);
+            values.push_back(p.Metallic);values.push_back(p.Roughness);values.push_back(p.RefractionIndex);
+            rgb(c.AmbientColor);rgb(c.DiffuseColor);rgb(c.SpecularColor);rgb(c.EmissiveColor);
+            values.push_back(c.Shininess);values.push_back(c.Transparency);
+            for (double value:values) if (!std::isfinite(value)) return Standard_False;
+        }
+        output=std::move(state);return Standard_True;
+    } catch (...) {output={};return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::CopyObjectAppearance(
     const TDF_Label& source,
     const TDF_Label& destination) {

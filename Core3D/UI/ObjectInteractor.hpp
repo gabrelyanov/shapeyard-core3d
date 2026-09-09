@@ -36,6 +36,7 @@ namespace core3d {
     struct OrdinaryTransformLedger;
     struct OrdinaryNameLedger;
     struct OrdinaryVisibilityLedger;
+    struct OrdinaryCreationLedger;
 
     enum struct PrimitiveManipulatorType {
         PrimitiveGizmoTypeNone = 0,
@@ -103,6 +104,7 @@ namespace core3d {
         bool captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept;
         bool captureOrdinaryVisibilityAuthority(OrdinaryVisibilityLedger& ledger) const noexcept;
         bool repairOrdinaryVisibilityPresentation(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept;
+        bool repairCommittedMeshCopyPresentation(const OrdinaryCreationLedger& ledger) noexcept;
         bool captureOrdinaryNameAuthority(OrdinaryNameLedger& ledger) const noexcept;
         bool verifyOrdinaryNameAuthority(const OrdinaryNameLedger& ledger) const noexcept;
         bool repairOrdinaryTransformPresentation(const OrdinaryTransformLedger& ledger, bool committed) noexcept;

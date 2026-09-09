@@ -2728,6 +2728,13 @@ void Core3DAddDebugOrphanVisualMaterial(
     return YES;
 }
 
+- (BOOL)debugConfigureMeshCopyFault:(NSInteger)mode {
+    if (mode<0 || mode>16 || ![self debugConfigureOrdinaryCreationFault:mode<=13?mode:0]) return NO;
+    const auto controller=GLController.viewer->debugOrdinaryEditController();
+    if (mode>=14) controller->debugSetStageFailureIndex(mode==14?2:mode==15?3:0);
+    return YES;
+}
+
 - (BOOL)debugConfigureOrdinaryCreationFault:(NSInteger)mode {
     if (mode < 0 || mode > 13 || ![self debugConfigureOrdinaryGestureFault:mode <= 5 ? mode : 0]) { return NO; }
     const auto viewer = GLController.viewer;
@@ -6226,6 +6233,48 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
         return selected;
     } catch (...) { return NO; }
+}
+
+- (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DMeshCopyResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DMeshCopyResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DMeshCopyResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->createSourceRetainedMeshCopy(identity,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DMeshCopyResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+                [self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DMeshCopyResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DMeshCopyResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DMeshCopyResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DMeshCopyResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DMeshCopyResultFailed;
+        }
+    } catch (...) {}
+    return Core3DMeshCopyResultRejected;
 }
 
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
