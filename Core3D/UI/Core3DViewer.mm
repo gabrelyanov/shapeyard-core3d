@@ -2423,6 +2423,9 @@ OrdinaryEditResult Core3DViewer::commitMeshVertexEdit(const std::string& session
     const auto work=_meshVertexEditWork;
     if(!work || work->consumed || work->sessionIdentifier!=sessionIdentifier)return OrdinaryEditResult::Invalid;
     work->consumed=true;
+    // Any uncertain outcome is retained by the ordinary command ledger. The
+    // consumed UI session must not keep an older document/selection alive.
+    _meshVertexEditWork.reset();
     if(!canBeginCommittedEdit())return OrdinaryEditResult::Busy;
     try {
         if(myDoc!=work->owner || myDoc->Document()!=work->document
@@ -3508,6 +3511,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         return AssetImportResult::InternalFailure;
     }
 
+    _meshVertexEditWork.reset();
 #if DEBUG
     myDoc->DebugObserveSuccessfulDocumentAdoption();
 #endif
