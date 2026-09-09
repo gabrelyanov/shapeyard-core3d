@@ -35,6 +35,8 @@
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+#include <cstdint>
 
 #include <TDF_Data.hxx>
 #include <TCollection_ExtendedString.hxx>
@@ -643,6 +645,14 @@ public:
     Standard_EXPORT Standard_Boolean CaptureMeshUVAtlasPreview(const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept;
     //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
     Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}, OcctMeshUVAtlasPreview* preview = nullptr) const noexcept;
+    //! Bounded flat-corner editing; preserves atlas/maps, rejects supplied frames.
+    Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
+    Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
+        const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
+        TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshVertexMove(const TDF_Label& label,
+        const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
+        const TopoDS_Shape& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
     Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label, const OcctMeshUVAtlasOptions& options = {}) noexcept;
     //! False for a read-only XCAF component occurrence.

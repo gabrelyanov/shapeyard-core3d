@@ -75,6 +75,24 @@ typedef NS_ENUM(NSInteger, Core3DMeshCopyResult) {
     Core3DMeshCopyResultFailed,
 };
 
+typedef NS_ENUM(NSInteger, Core3DMeshVertexEditResult) {
+    Core3DMeshVertexEditResultUnchanged,
+    Core3DMeshVertexEditResultCommitted,
+    Core3DMeshVertexEditResultRejected,
+    Core3DMeshVertexEditResultBusy,
+    Core3DMeshVertexEditResultRecoveryRequired,
+    Core3DMeshVertexEditResultFailed,
+};
+
+//! Immutable session-local vertex IDs are array indices; positions are world mm.
+//! The native viewer retains exact edit authority and all OCCT handles.
+@interface Core3DMeshVertexEditSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *worldVertices;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DMeshUVAtlasResult) {
     Core3DMeshUVAtlasResultUnchanged,
     Core3DMeshUVAtlasResultCommitted,
@@ -628,6 +646,13 @@ typedef struct {
 - (BOOL)selectSavedGroup:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectSavedGroup(identifier:expected:));
 //! Create an independent mesh at current tessellation; retain/hide source; one Undo.
+- (Core3DMeshVertexEditSnapshot *_Nullable)prepareMeshVertexEditForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(prepareMeshVertexEdit(entityIdentifier:expected:));
+- (Core3DMeshVertexEditResult)commitMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected
+    vertexIndices:(NSArray<NSNumber *> *)vertexIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ
+    NS_SWIFT_NAME(commitMeshVertexEdit(_:vertexIndices:deltaX:deltaY:deltaZ:));
+- (void)cancelMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected;
+
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(createSourceRetainedMeshCopy(entityIdentifier:expected:));

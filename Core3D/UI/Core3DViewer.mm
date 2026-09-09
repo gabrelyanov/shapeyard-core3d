@@ -1,3 +1,4 @@
+#include "../OCCTKit/NativeMeshVertexMove.hxx"
 //
 //  Core3DViewer.m
 //  Core3D
@@ -1069,6 +1070,7 @@ void Core3DViewer::release() noexcept {
     // GLViewController calls this while the viewport EAGL context is current,
     // so release them before the base handles and before that context is
     // restored. Repeated calls are intentionally harmless.
+    _meshVertexEditWork.reset();
     _interactiveCallback = {};
     _booleanPreviewStateChangedCallback = {};
     _linearArrayPreviewStateChangedCallback = {};
@@ -2343,6 +2345,121 @@ bool Core3DViewer::repairMeshCopy(const OrdinaryCreationLedger& ledger,bool comm
     if (_debugOrdinaryCreationAfterRepairFailures>0) {--_debugOrdinaryCreationAfterRepairFailures;return false;}
 #endif
     return _shapeInteractor->selectionModeAuthorityIsExact();
+}
+
+struct MeshVertexEditWork {
+    Handle(OcctDocument) owner;
+    Handle(TDocStd_Document) document;
+    Standard_Integer documentTime=0;
+    OrdinaryTransformLedger authority;
+    meshedit::NativeTopologyCapture geometry;
+    ObjectFrameIdentity identity;
+    std::uint64_t presentationRevision=0;
+    std::uint32_t width=0,height=0;
+    std::string sessionIdentifier;
+    bool consumed=false;
+};
+
+std::optional<MeshVertexEditSnapshot> Core3DViewer::prepareMeshVertexEdit(
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    if(![NSThread isMainThread] || !canBeginCommittedEdit() || myDoc.IsNull()
+        || myContext.IsNull() || width==0 || height==0)return std::nullopt;
+    try {
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if(!snapshot || snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration!=identity.documentGeneration
+            || snapshot->revisions.model!=identity.modelRevision
+            || snapshot->revisions.presentation!=presentationRevision
+            || snapshot->selectionMode!=scene::ElementKind::Object
+            || snapshot->selection.selected.size()!=1
+            || snapshot->selection.selected[0].kind!=scene::ElementKind::Object
+            || snapshot->selection.selected[0].entityIdentifier!=identity.entityIdentifier)return std::nullopt;
+        myContext->InitSelected();if(!myContext->MoreSelected())return std::nullopt;
+        const auto presentation=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();if(myContext->MoreSelected() || presentation.IsNull())return std::nullopt;
+        const auto label=myDoc->ShapeLabel(presentation);
+        OrdinaryTransformRecord record;
+        if(!myDoc->CaptureObjectTransformStateForLabel(label,record.previous)
+            || record.previous.entityIdentifier!=identity.entityIdentifier
+            || record.previous.resolvedRepresentation!=OcctGeometryRepresentation::TriangleMesh
+            || record.previous.authoredFramesPresent)return std::nullopt;
+        auto work=std::make_shared<MeshVertexEditWork>();
+        std::atomic_bool cancelled{false};
+        if(meshedit::CaptureNativeTopology(record.previous.shape,work->geometry,cancelled)
+            !=meshedit::TopologyResult::Ready)return std::nullopt;
+        if(!myDoc->CanEditMeshVertices(label))return std::nullopt;
+        record.requested.label=label;record.requested.presentation=presentation;
+        record.requested.shape=record.previous.shape;record.requested.transform=record.previous.transform;
+        work->authority.records.push_back(record);
+        if(!admitTransform(work->authority))return std::nullopt;
+        work->owner=myDoc;work->document=myDoc->Document();
+        if(work->document.IsNull())return std::nullopt;
+        work->documentTime=work->document->GetData()->Time();
+        work->identity=identity;work->presentationRevision=presentationRevision;
+        work->width=width;work->height=height;
+        work->sessionIdentifier=[[NSUUID UUID].UUIDString UTF8String];
+        MeshVertexEditSnapshot result;result.sessionIdentifier=work->sessionIdentifier;
+        result.entityIdentifier=identity.entityIdentifier;
+        const auto placed=record.previous.transform*work->geometry.meshLocation.Transformation();
+        for(const auto& v:work->geometry.topology.vertices) {
+            const auto p=gp_Pnt(v.point[0],v.point[1],v.point[2]).Transformed(placed);
+            for(int a=1;a<=3;++a)
+                if(!std::isfinite(p.Coord(a)) || std::abs(p.Coord(a))>1.e6)return std::nullopt;
+            result.worldVertices.push_back({p.X(),p.Y(),p.Z()});
+        }
+        _meshVertexEditWork=std::move(work);return result;
+    } catch(...) {return std::nullopt;}
+}
+
+void Core3DViewer::cancelMeshVertexEdit(const std::string& sessionIdentifier) noexcept {
+    if([NSThread isMainThread] && _meshVertexEditWork
+        && _meshVertexEditWork->sessionIdentifier==sessionIdentifier)_meshVertexEditWork.reset();
+}
+
+OrdinaryEditResult Core3DViewer::commitMeshVertexEdit(const std::string& sessionIdentifier,
+    const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta) noexcept {
+    if(![NSThread isMainThread])return OrdinaryEditResult::Invalid;
+    const auto work=_meshVertexEditWork;
+    if(!work || work->consumed || work->sessionIdentifier!=sessionIdentifier)return OrdinaryEditResult::Invalid;
+    work->consumed=true;
+    if(!canBeginCommittedEdit())return OrdinaryEditResult::Busy;
+    try {
+        if(myDoc!=work->owner || myDoc->Document()!=work->document
+            || work->document->GetData()->Time()!=work->documentTime)return OrdinaryEditResult::Invalid;
+        const auto snapshot=captureSceneSnapshot(work->width,work->height);
+        if(!snapshot || snapshot->publicationSourceIdentifier!=work->identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration!=work->identity.documentGeneration
+            || snapshot->revisions.model!=work->identity.modelRevision
+            || snapshot->revisions.presentation!=work->presentationRevision
+            || snapshot->selectionMode!=scene::ElementKind::Object)return OrdinaryEditResult::Invalid;
+        const auto& previous=work->authority.records.front().previous;
+        OcctObjectTransformState actual;
+        if(!myDoc->CaptureObjectTransformStateForLabel(previous.label,actual)
+            || !previous.IsEqual(actual))return OrdinaryEditResult::Invalid;
+        auto authority=work->authority;
+        if(!admitTransform(authority) || authority.selectionOwners!=work->authority.selectionOwners
+            || authority.manipulatorType!=work->authority.manipulatorType
+            || authority.hadManipulator!=work->authority.hadManipulator)return OrdinaryEditResult::Invalid;
+        std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture fresh;
+        if(meshedit::CaptureNativeTopology(actual.shape,fresh,cancelled)!=meshedit::TopologyResult::Ready
+            || fresh.sourceMesh!=work->geometry.sourceMesh
+            || !fresh.face.IsEqual(work->geometry.face)
+            || !fresh.meshLocation.IsEqual(work->geometry.meshLocation)
+            || fresh.storedNodes!=work->geometry.storedNodes
+            || fresh.storedUVs!=work->geometry.storedUVs
+            || fresh.storedNormals!=work->geometry.storedNormals
+            || fresh.deflection!=work->geometry.deflection
+            || fresh.triangleNodeIDs!=work->geometry.triangleNodeIDs)return OrdinaryEditResult::Invalid;
+        TopoDS_Shape candidate;
+        if(!myDoc->PrepareMeshVertexMove(previous.label,vertices,worldDelta,candidate))return OrdinaryEditResult::Invalid;
+        OrdinaryTransformChange request=work->authority.records.front().requested;
+        request.shape=candidate;request.operation=OrdinaryTransformOperation::MeshVertexMove;
+        request.meshVertexMove=OrdinaryMeshVertexMove{vertices,worldDelta};
+        OrdinaryEditResult failure=OrdinaryEditResult::Invalid;
+        auto lease=_ordinaryEditController->beginTransform({request},&failure);
+        return lease?lease.stageAndCommit():failure;
+    } catch(...) {return OrdinaryEditResult::Invalid;}
 }
 
 OrdinaryEditResult Core3DViewer::createSourceRetainedMeshCopy(

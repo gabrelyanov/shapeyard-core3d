@@ -1,3 +1,4 @@
+#include "NativeMeshVertexMove.hxx"
 #if DEBUG
 #include "NativeLiveTransactionObserverProbe.hxx"
 #endif
@@ -4700,18 +4701,14 @@ Standard_Boolean Core3DValidateAuthoredFrameOwners(
     } catch (...) { nativeBytes = 0; return Standard_False; }
 }
 
-Standard_Boolean Core3DValidateNormalTextureGeometry(
-    const TDF_Label& label, Standard_Size* requiredNativeBytes) noexcept {
-    if (requiredNativeBytes != nullptr) *requiredNativeBytes = 0;
+namespace {
+bool ValidateNormalTextureShape(const TopoDS_Shape& shape, Standard_Size* requiredNativeBytes) noexcept {
+    if(requiredNativeBytes!=nullptr)*requiredNativeBytes=0;
     try {
-        if (label.IsNull() || !XCAFDoc_ShapeTool::IsFree(label)
-            || !XCAFDoc_ShapeTool::IsSimpleShape(label)
-            || XCAFDoc_ShapeTool::IsReference(label)) return Standard_False;
-        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
         TopoDS_Face face; Handle(Poly_Triangulation) mesh;
         if (shape.IsNull() || !TriangleAtlasFace(shape, face, mesh)
             || !mesh->HasUVNodes() || !mesh->HasNormals()) return Standard_False;
-        RWMesh_FaceIterator it(label, TopLoc_Location(), Standard_False);
+        RWMesh_FaceIterator it(shape);
         if (!it.More() || !it.Face().IsSame(face) || !it.HasNormals() || !it.HasTexCoords()
             || it.NbNodes() != mesh->NbNodes() || it.NbTriangles() != mesh->NbTriangles()) return Standard_False;
         using namespace core3d::scene;
@@ -4754,6 +4751,18 @@ Standard_Boolean Core3DValidateNormalTextureGeometry(
         if (requiredNativeBytes != nullptr) *requiredNativeBytes = indices.size() * 64;
         return Standard_True;
     } catch (...) { return Standard_False; }
+}
+
+} // namespace
+
+Standard_Boolean Core3DValidateNormalTextureGeometry(
+    const TDF_Label& label,Standard_Size* requiredNativeBytes) noexcept {
+    if(requiredNativeBytes!=nullptr)*requiredNativeBytes=0;
+    try {
+        if(label.IsNull() || !XCAFDoc_ShapeTool::IsFree(label)
+            || !XCAFDoc_ShapeTool::IsSimpleShape(label) || XCAFDoc_ShapeTool::IsReference(label))return Standard_False;
+        return ValidateNormalTextureShape(XCAFDoc_ShapeTool::GetShape(label),requiredNativeBytes);
+    } catch(...) {return Standard_False;}
 }
 
 Standard_Integer Core3DNormalTextureBasisForLabel(
@@ -5120,6 +5129,107 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
         candidate = result;
         return Standard_True;
     } catch (...) { candidate.Nullify(); return Standard_False; }
+}
+
+namespace {
+bool CaptureEditableMeshSource(const OcctDocument& document,const TDF_Label& label,
+    OcctObjectTransformState& source,core3d::meshedit::NativeTopologyCapture& captured,
+    int& prefix,Standard_Size& resident) noexcept {
+    source={};captured={};prefix=0;resident=0;
+    if(![NSThread isMainThread])return false;
+    try {
+        double unit=0;
+        if (!document.CaptureObjectTransformStateForLabel(label,source)
+            || source.resolvedRepresentation!=OcctGeometryRepresentation::TriangleMesh
+            || source.authoredFramesPresent
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document.Document(),unit) || unit!=0.001)
+            return Standard_False;
+        const auto recipe=Core3DNormalTextureRecipeForLabel(label);
+        if(recipe<0 || recipe>1)return Standard_False;
+        XCAFDoc_VisMaterialPBR material;
+        const bool hasNormal=TryPBRMaterialForLabel(label,material) && !material.NormalTexture.IsNull();
+        if(hasNormal!=(recipe==1))return Standard_False;
+        if(!Core3DValidateOwnedFrameUsage(document.Document(),resident))return Standard_False;
+        std::atomic_bool cancelled{false};
+        if(core3d::meshedit::CaptureNativeTopology(source.shape,captured,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        prefix=0;
+        if(source.meshUVAtlasVersion!=0) {
+            prefix=captured.sourceMesh->NbNodes()-3*captured.sourceMesh->NbTriangles();
+            if(prefix<=0 || (source.meshUVAtlasVersion==2 && prefix!=source.meshUVAtlasSettings[2]))
+                return Standard_False;
+        } else if(captured.sourceMesh->HasUVNodes()) {
+            // Imported arbitrary layouts require an explicit shading contract.
+            return Standard_False;
+        }
+        return core3d::meshedit::HasFlatCornerLayout(captured,prefix);
+    } catch(...) {source={};captured={};return false;}
+}
+} // namespace
+
+Standard_Boolean OcctDocument::CanEditMeshVertices(const TDF_Label& label) const noexcept {
+    OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
+    int prefix=0;Standard_Size resident=0;
+    return CaptureEditableMeshSource(*this,label,source,captured,prefix,resident);
+}
+
+// All public entry points run on the native owner thread. No writes here.
+Standard_Boolean OcctDocument::PrepareMeshVertexMove(const TDF_Label& label,
+    const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
+    TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
+        int prefix=0;Standard_Size resident=0;
+        if(!CaptureEditableMeshSource(*this,label,source,captured,prefix,resident))return Standard_False;
+        const auto recipe=Core3DNormalTextureRecipeForLabel(label);
+        std::atomic_bool cancelled{false};
+        const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
+        for(int a=1;a<=3;++a)
+            if(!std::isfinite(worldDelta.Coord(a)) || std::abs(worldDelta.Coord(a))>1.e6)return Standard_False;
+        const gp_Vec localDelta=worldDelta.Transformed(placed.Inverted());
+        TopoDS_Shape result;
+        if(core3d::meshedit::PrepareFlatVertexMove(captured,vertices,
+            {localDelta.X(),localDelta.Y(),localDelta.Z()},prefix,result,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        core3d::meshedit::NativeTopologyCapture edited;
+        if(core3d::meshedit::CaptureNativeTopology(result,edited,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        for(const auto& p:edited.storedNodes) {
+            const auto world=gp_Pnt(p[0],p[1],p[2]).Transformed(placed);
+            for(int a=1;a<=3;++a)
+                if(!std::isfinite(world.Coord(a)) || std::abs(world.Coord(a))>1.e6)return Standard_False;
+        }
+        if(recipe==1) {
+            Standard_Size beforeBytes=0,afterBytes=0;
+            if(!Core3DValidateNormalTextureBinding(myOcafDoc,label,&beforeBytes)
+                || !ValidateNormalTextureShape(result,&afterBytes) || beforeBytes>resident)
+                return Standard_False;
+            resident-=beforeBytes;
+            if(!AddMultipliedWithinLimit(resident,afterBytes,1U,64U*1024U*1024U))return Standard_False;
+        }
+        candidate=result;return Standard_True;
+    } catch(...) {candidate.Nullify();return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::ValidateMeshVertexMove(const TDF_Label& label,
+    const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta,
+    const TopoDS_Shape& candidate) const noexcept {
+    try {
+        TopoDS_Shape expected;
+        if(!PrepareMeshVertexMove(label,vertices,worldDelta,expected))return Standard_False;
+        std::atomic_bool cancelled{false};
+        core3d::meshedit::NativeTopologyCapture a,b;
+        if(core3d::meshedit::CaptureNativeTopology(expected,a,cancelled)!=core3d::meshedit::TopologyResult::Ready
+            || core3d::meshedit::CaptureNativeTopology(candidate,b,cancelled)!=core3d::meshedit::TopologyResult::Ready)
+            return Standard_False;
+        return expected.ShapeType()==candidate.ShapeType() && expected.Orientation()==candidate.Orientation()
+            && expected.Location().IsEqual(candidate.Location()) && a.face.Orientation()==b.face.Orientation()
+            && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
+            && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals && a.deflection==b.deflection
+            && a.triangleNodeIDs==b.triangleNodeIDs;
+    } catch(...) {return Standard_False;}
 }
 
 Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(

@@ -717,6 +717,26 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 } // namespace
 
+@interface Core3DMeshVertexEditSnapshot ()
+@property(nonatomic,copy,readonly) NSString *sessionIdentifier;
+- (instancetype)initWithNativeSnapshot:(const core3d::MeshVertexEditSnapshot&)snapshot;
+@end
+@implementation Core3DMeshVertexEditSnapshot
+- (instancetype)initWithNativeSnapshot:(const core3d::MeshVertexEditSnapshot&)snapshot {
+    self=[super init];
+    if(self) {
+        _sessionIdentifier=[[NSString alloc] initWithBytes:snapshot.sessionIdentifier.data()
+            length:snapshot.sessionIdentifier.size() encoding:NSUTF8StringEncoding];
+        _entityIdentifier=[[NSString alloc] initWithBytes:snapshot.entityIdentifier.data()
+            length:snapshot.entityIdentifier.size() encoding:NSUTF8StringEncoding];
+        NSMutableArray *positions=[NSMutableArray arrayWithCapacity:snapshot.worldVertices.size()];
+        for(const auto& point:snapshot.worldVertices)[positions addObject:@[@(point[0]),@(point[1]),@(point[2])]];
+        _worldVertices=[positions copy];
+    }
+    return self;
+}
+@end
+
 @interface Core3DMeshUVAtlasPreview ()
 - (instancetype)initWithNativePreview:(const OcctMeshUVAtlasPreview&)preview;
 @end
@@ -6233,6 +6253,74 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
         return selected;
     } catch (...) { return NO; }
+}
+
+- (Core3DMeshVertexEditSnapshot *)prepareMeshVertexEditForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return nil; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return nil; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return nil; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result=GLController.viewer->prepareMeshVertexEdit(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        return result ? [[Core3DMeshVertexEditSnapshot alloc] initWithNativeSnapshot:*result] : nil;
+    } catch(...) {return nil;}
+}
+
+- (void)cancelMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected {
+    if(![NSThread isMainThread] || !_isSetuped || GLController==nil || GLController.viewer==nullptr
+        || expected==nil || expected.sessionIdentifier.length==0 || expected.sessionIdentifier.length>128)return;
+    const char *identifier=expected.sessionIdentifier.UTF8String;
+    if(identifier!=nullptr)GLController.viewer->cancelMeshVertexEdit(identifier);
+}
+
+- (Core3DMeshVertexEditResult)commitMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected
+    vertexIndices:(NSArray<NSNumber *> *)vertexIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ {
+    if(![NSThread isMainThread] || !_isSetuped || GLController==nil || GLController.viewer==nullptr
+        || expected==nil || expected.sessionIdentifier.length==0 || expected.sessionIdentifier.length>128
+        || vertexIndices.count==0 || vertexIndices.count>64 || !std::isfinite(deltaX)
+        || !std::isfinite(deltaY) || !std::isfinite(deltaZ))return Core3DMeshVertexEditResultRejected;
+    try {
+        std::vector<std::uint32_t> vertices;vertices.reserve(vertexIndices.count);
+        for(NSNumber *value in vertexIndices) {
+            if(![value isKindOfClass:[NSNumber class]] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID())
+                return Core3DMeshVertexEditResultRejected;
+            const double number=value.doubleValue;
+            if(!std::isfinite(number) || number<0 || number>=12288 || std::floor(number)!=number)
+                return Core3DMeshVertexEditResultRejected;
+            vertices.push_back(static_cast<std::uint32_t>(number));
+        }
+        const char *identifier=expected.sessionIdentifier.UTF8String;
+        if(identifier==nullptr)return Core3DMeshVertexEditResultRejected;
+        const auto result=GLController.viewer->commitMeshVertexEdit(identifier,vertices,gp_Vec(deltaX,deltaY,deltaZ));
+        switch(result) {
+            case core3d::OrdinaryEditResult::NoChange:return Core3DMeshVertexEditResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];[GLController requestRender];[self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];return Core3DMeshVertexEditResultCommitted;
+            case core3d::OrdinaryEditResult::Busy:return Core3DMeshVertexEditResultBusy;
+            case core3d::OrdinaryEditResult::Invalid:return Core3DMeshVertexEditResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown:return Core3DMeshVertexEditResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure:return Core3DMeshVertexEditResultFailed;
+        }
+    } catch(...) {}
+    return Core3DMeshVertexEditResultRejected;
 }
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier

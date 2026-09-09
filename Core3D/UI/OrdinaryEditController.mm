@@ -182,7 +182,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
             if (request.operation != OrdinaryTransformOperation::Translate
                 && request.operation != OrdinaryTransformOperation::Rotate
                 && request.operation != OrdinaryTransformOperation::Scale
-                && request.operation != OrdinaryTransformOperation::MeshUVAtlas) {
+                && request.operation != OrdinaryTransformOperation::MeshUVAtlas
+                && request.operation != OrdinaryTransformOperation::MeshVertexMove) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.presentation.IsNull() || request.shape.IsNull()
@@ -242,7 +246,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
             }
             const bool geometryChanges = !record.previous.shape.IsEqual(request.shape);
             if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale
-                && request.operation != OrdinaryTransformOperation::MeshUVAtlas) {
+                && request.operation != OrdinaryTransformOperation::MeshUVAtlas
+                && request.operation != OrdinaryTransformOperation::MeshVertexMove) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             const auto representation = record.previous.resolvedRepresentation;
@@ -251,6 +256,14 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                     || representation != OcctGeometryRepresentation::TriangleMesh
                     || !MatricesEqual(record.previous.transform, request.transform)
                     || !_document->ValidateTriangleUVAtlas(request.label, request.shape, request.meshUVAtlasOptions))) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.operation == OrdinaryTransformOperation::MeshVertexMove
+                && (changes.size()!=1 || !geometryChanges
+                    || representation!=OcctGeometryRepresentation::TriangleMesh
+                    || !MatricesEqual(record.previous.transform,request.transform)
+                    || !_document->ValidateMeshVertexMove(request.label,request.meshVertexMove->vertices,
+                        request.meshVertexMove->worldDelta,request.shape))) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if ((representation != OcctGeometryRepresentation::BRep
@@ -1097,6 +1110,13 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
                 record.previous.label.ForgetAttribute(persistence::AuthoredFrameAttributeID());
             }
+            if(record.requested.operation==OrdinaryTransformOperation::MeshVertexMove
+                && (!record.requested.meshVertexMove
+                    || !_document->ValidateMeshVertexMove(record.previous.label,
+                        record.requested.meshVertexMove->vertices,record.requested.meshVertexMove->worldDelta,
+                        record.requested.shape))) {
+                throw Standard_Failure("Stale mesh vertex candidate");
+            }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
             if ((!record.previous.shape.IsEqual(record.requested.shape)
@@ -1125,6 +1145,11 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || record.candidate.authoredFramesPresent != record.previous.authoredFramesPresent
                 || record.candidate.authoredFramesIdentity != record.previous.authoredFramesIdentity) {
                 throw Standard_Failure("Ordinary transform changed geometry-owned metadata");
+            }
+            if(record.requested.operation==OrdinaryTransformOperation::MeshVertexMove) {
+                Standard_Size bytes=0;
+                if(!Core3DValidateOwnedFrameUsage(_document->Document(),bytes))
+                    throw Standard_Failure("Mesh vertex normal frame readback failed");
             }
             gp_Ax1 referenceAxis;
             if (!_document->ResolveReferenceAxisInWorld(record.candidate.label,

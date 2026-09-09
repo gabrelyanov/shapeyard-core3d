@@ -53,6 +53,12 @@ namespace core3d {
     };
     struct ProfileSolidWork;
     struct ProfileSolidGeometry;
+    struct MeshVertexEditWork;
+    struct MeshVertexEditSnapshot {
+        std::string sessionIdentifier;
+        std::string entityIdentifier;
+        std::vector<std::array<double,3>> worldVertices;
+    };
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
     enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps };
@@ -144,6 +150,11 @@ namespace core3d {
             std::uint32_t width, std::uint32_t height, bool* blockedByLayer = nullptr) noexcept;
         bool selectSavedGroup(const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height, bool& selectionWasTouched) noexcept;
+        std::optional<MeshVertexEditSnapshot> prepareMeshVertexEdit(const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept;
+        OrdinaryEditResult commitMeshVertexEdit(const std::string& sessionIdentifier,
+            const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta) noexcept;
+        void cancelMeshVertexEdit(const std::string& sessionIdentifier) noexcept;
         OrdinaryEditResult createSourceRetainedMeshCopy(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height) noexcept;
         std::optional<OcctMeshUVAtlasPreview> previewCoherentUVAtlas(const ObjectFrameIdentity& identity,
@@ -402,6 +413,7 @@ namespace core3d {
 
     private:
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
+        std::shared_ptr<MeshVertexEditWork> _meshVertexEditWork;
 #ifdef DEBUG
         bool _debugFailNextDocumentAdoption = false;
         int _debugOrdinaryRepairFailures = 0;
