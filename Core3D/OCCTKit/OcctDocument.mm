@@ -5147,7 +5147,7 @@ bool CaptureEditableMeshSource(const OcctDocument& document,const TDF_Label& lab
         const auto recipe=Core3DNormalTextureRecipeForLabel(label);
         if(recipe<0 || recipe>1)return Standard_False;
         XCAFDoc_VisMaterialPBR material;
-        const bool hasNormal=TryPBRMaterialForLabel(label,material) && !material.NormalTexture.IsNull();
+        const bool hasNormal=document.TryPBRMaterialForLabel(label,material) && !material.NormalTexture.IsNull();
         if(hasNormal!=(recipe==1))return Standard_False;
         if(!Core3DValidateOwnedFrameUsage(document.Document(),resident))return Standard_False;
         std::atomic_bool cancelled{false};
