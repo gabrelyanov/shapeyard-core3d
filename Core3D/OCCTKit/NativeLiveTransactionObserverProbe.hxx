@@ -1,4 +1,5 @@
 #pragma once
+#include "NativeObservedApplication.hxx"
 // DEBUG-only bounded diagnostic. Observes actual application callbacks and explicit
 // adoption/history boundaries; never grants AI execution authority.
 #include <TDocStd_Application.hxx>
@@ -70,7 +71,7 @@ struct LiveTransactionProbeState {
         active=nullptr;
     }
 };
-class LiveObservedApplication final : public TDocStd_Application {
+class LiveObservedApplication final : public core3d::authority::NativeObservedApplication {
 public:
     // The document wrapper owns the state. The application and callbacks never
     // prolong it; normal instances remain inert until explicitly attached.
@@ -84,9 +85,9 @@ public:
         return thread_==std::this_thread::get_id()
             && !foreignCallback_.load(std::memory_order_relaxed);
     }
-    void OnOpenTransaction(const Handle(TDocStd_Document)& doc) override { Record(LiveTransactionObservation::Kind::Open,doc); }
-    void OnCommitTransaction(const Handle(TDocStd_Document)& doc) override { Record(LiveTransactionObservation::Kind::Commit,doc); }
-    void OnAbortTransaction(const Handle(TDocStd_Document)& doc) override { Record(LiveTransactionObservation::Kind::Abort,doc); }
+    void OnOpenTransaction(const Handle(TDocStd_Document)& doc) override { NativeObservedApplication::OnOpenTransaction(doc); Record(LiveTransactionObservation::Kind::Open,doc); }
+    void OnCommitTransaction(const Handle(TDocStd_Document)& doc) override { NativeObservedApplication::OnCommitTransaction(doc); Record(LiveTransactionObservation::Kind::Commit,doc); }
+    void OnAbortTransaction(const Handle(TDocStd_Document)& doc) override { NativeObservedApplication::OnAbortTransaction(doc); Record(LiveTransactionObservation::Kind::Abort,doc); }
 private:
     void Record(LiveTransactionObservation::Kind kind,const Handle(TDocStd_Document)& doc) noexcept {
         // Do not even access the shared weak_ptr or foreign OCAF document from

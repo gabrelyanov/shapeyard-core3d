@@ -1,3 +1,4 @@
+#include "NativeObservedApplication.hxx"
 #include "NativeMeshVertexMove.hxx"
 #if DEBUG
 #include "NativeLiveTransactionObserverProbe.hxx"
@@ -3176,10 +3177,15 @@ OcctDocument::OcctDocument()
     OCC_CATCH_SIGNALS
 #if DEBUG
     myObservedApplication = new core3d::debug::LiveObservedApplication();
-    myApp = myObservedApplication;
+    myAuthorityApplication = myObservedApplication;
 #else
-    myApp = new TDocStd_Application();
+    myAuthorityApplication = new core3d::authority::NativeObservedApplication();
 #endif
+    myApp = myAuthorityApplication;
+    std::array<std::uint8_t, 16> nonce{};
+    [[NSUUID UUID] getUUIDBytes:nonce.data()];
+    myNativeAuthority = std::make_shared<core3d::authority::NativeEditAuthority>(nonce);
+    if (!myAuthorityApplication->ObserveAuthority(myNativeAuthority)) myNativeAuthority.reset();
   }
   catch (const Standard_Failure& theFailure)
   {
@@ -3204,6 +3210,7 @@ void OcctDocument::InitDoc()
 {
     
     std::cout << "InitDoc()" << std::endl;
+  if (myNativeAuthority) myNativeAuthority->Detach();
 #if DEBUG
   if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
 #endif
@@ -3246,12 +3253,32 @@ void OcctDocument::InitDoc()
 	myOcafDoc->ClearUndos();
 	myOcafDoc->SetUndoLimit(40);
   }
+  ObserveSuccessfulNativeDocumentAdoption();
 #if DEBUG
   DebugObserveSuccessfulDocumentAdoption();
 #endif
 }
 
+void OcctDocument::ObserveSuccessfulNativeDocumentAdoption() noexcept {
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
+            || DocumentIdentifier().empty()) {
+            myNativeAuthority->Detach(); return;
+        }
+        myNativeAuthority->Adopt(myOcafDoc.get());
+    } catch (...) { myNativeAuthority->Detach(); }
+}
+
 #if DEBUG
+std::optional<core3d::authority::Stamp> OcctDocument::DebugNativeMutationStamp() noexcept {
+    // Diagnostic read only: selection and owner/preview fences are not wired.
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid() || myOcafDoc.IsNull())
+        return std::nullopt;
+    return myNativeAuthority->Capture(myOcafDoc.get(), true, myOcafDoc->HasOpenCommand());
+}
 bool OcctDocument::DebugStartLiveTransactionProbe() noexcept {
     if (![NSThread isMainThread] || myLiveProbe || myObservedApplication == nullptr
         || myApp.get() != myObservedApplication
@@ -7362,11 +7389,13 @@ void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(
 }
 
 Standard_Boolean OcctDocument::undo() {
+    if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
     if (!canUndo()) {
 		return Standard_False;
     }
     try {
         if (myOcafDoc->Undo()) {
+            if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
                 core3d::debug::LiveTransactionObservation::Kind::UndoCompleted, myOcafDoc);
@@ -7380,11 +7409,13 @@ Standard_Boolean OcctDocument::undo() {
 	return Standard_False;
 }
 Standard_Boolean OcctDocument::redo() {
+    if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
     if (!canRedo()) {
 		return Standard_False;
     }
     try {
 		if (myOcafDoc->Redo()) {
+            if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
                 core3d::debug::LiveTransactionObservation::Kind::RedoCompleted, myOcafDoc);

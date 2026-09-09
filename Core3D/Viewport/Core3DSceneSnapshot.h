@@ -66,6 +66,8 @@ CORE3D_SCENE_FINAL_CLASS
 + (NSDictionary<NSString *, id> *)debugTransactionObserver NS_SWIFT_NAME(debugTransactionObserver());
 // Exercises actual OcctDocument reset, bounded observation, and thread rejection.
 + (NSDictionary<NSString *, id> *)debugLiveTransactionProbeLifecycle NS_SWIFT_NAME(debugLiveTransactionProbeLifecycle());
+// Isolated policy proof only; does not issue tokens or attach to live documents.
++ (NSDictionary<NSString *, NSNumber *> *)debugNativeIntentPolicy:(NSInteger)family NS_SWIFT_NAME(debugNativeIntentPolicy(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugMeshElementSelectionPolicy NS_SWIFT_NAME(debugMeshElementSelectionPolicy());
 + (NSDictionary<NSString *, id> *)debugCurrentTessellationMeshCopy:(NSInteger)mode NS_SWIFT_NAME(debugCurrentTessellationMeshCopy(_:));
 + (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode

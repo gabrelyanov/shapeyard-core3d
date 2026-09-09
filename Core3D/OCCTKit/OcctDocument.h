@@ -356,8 +356,10 @@ struct OcctGeometryDuplicationRequest
 //! untrusted import surface without a separately hardened OCCT shape parser.
 Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
     const Handle(TDocStd_Application)& application);
-#if DEBUG
+#include "NativeEditAuthority.hpp"
 #include <memory>
+namespace core3d::authority { class NativeObservedApplication; }
+#if DEBUG
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
 //! Isolated tests with a custom wire budget and no final geometry-owner gate.
@@ -384,6 +386,11 @@ public:
   Standard_EXPORT virtual ~OcctDocument();
 
   Standard_EXPORT void InitDoc();
+  // Internal committed-adoption boundary; no public AI token is exposed.
+  void ObserveSuccessfulNativeDocumentAdoption() noexcept;
+#if DEBUG
+  std::optional<core3d::authority::Stamp> DebugNativeMutationStamp() noexcept;
+#endif
 #if DEBUG
   //! Bounded diagnostic observation only; never a production AI edit token.
   Standard_EXPORT bool DebugStartLiveTransactionProbe() noexcept;
@@ -759,6 +766,8 @@ private:
   core3d::debug::LiveObservedApplication* myObservedApplication = nullptr;
   std::shared_ptr<core3d::debug::LiveTransactionProbeState> myLiveProbe;
 #endif
+  std::shared_ptr<core3d::authority::NativeEditAuthority> myNativeAuthority;
+  core3d::authority::NativeObservedApplication* myAuthorityApplication = nullptr;
   Handle(TDocStd_Application) myApp;
   Handle(TDocStd_Document) myOcafDoc;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;

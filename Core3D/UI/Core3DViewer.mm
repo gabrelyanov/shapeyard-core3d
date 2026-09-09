@@ -3626,6 +3626,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
     }
 
     _meshVertexEditWork.reset();
+    myDoc->ObserveSuccessfulNativeDocumentAdoption();
 #if DEBUG
     myDoc->DebugObserveSuccessfulDocumentAdoption();
 #endif

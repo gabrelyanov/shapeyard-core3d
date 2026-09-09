@@ -3500,6 +3500,119 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return;
     GLController.viewer->DebugFailNextDocumentAdoption();
 }
++ (NSDictionary<NSString *, NSNumber *> *)debugNativeMutationLifecycle {
+    if (![NSThread isMainThread]) return @{@"mainThread":@NO};
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    try {
+        Handle(OcctDocument) document = new OcctDocument();
+        document->InitDoc();
+        const auto initial = document->DebugNativeMutationStamp();
+        result[@"initialized"] = @(initial.has_value());
+        if (!initial) return result;
+        auto native = document->ChangeDocument();
+        native->NewCommand();
+        result[@"openCommandRefused"] = @(!document->DebugNativeMutationStamp().has_value());
+        native->AbortCommand();
+        auto current = document->DebugNativeMutationStamp();
+        result[@"closedAbortAdvanced"] = @(current && current->edit > initial->edit
+            && current->opening == initial->opening && native->GetAvailableUndos() == 0);
+        if (!current) return result;
+        const auto aborted = *current;
+        native->NewCommand();
+        (void)native->CommitCommand();
+        current = document->DebugNativeMutationStamp();
+        result[@"emptyCommitAdvancedWithoutHistory"] = @(current && current->edit > aborted.edit
+            && native->GetAvailableUndos() == 0);
+        if (!current) return result;
+        const auto beforeHistory = *current;
+        const bool unavailableUndo = !document->undo();
+        const bool unavailableRedo = !document->redo();
+        current = document->DebugNativeMutationStamp();
+        result[@"unavailableHistoryAttemptsAdvanced"] = @(unavailableUndo && unavailableRedo
+            && current && current->edit > beforeHistory.edit && native->GetAvailableUndos() == 0);
+        if (!current) return result;
+        const auto beforeReset = *current;
+        const auto identifier = document->DocumentIdentifier();
+        document->InitDoc();
+        current = document->DebugNativeMutationStamp();
+        result[@"resetCreatesNewOpening"] = @(current && current->opening > beforeReset.opening
+            && current->edit > beforeReset.edit && current->selection > beforeReset.selection
+            && current->instanceNonce == beforeReset.instanceNonce
+            && document->DocumentIdentifier() != identifier);
+        // Exhaust the separate bounded DEBUG event log using actual native
+        // callbacks, then prove production observation still advances.
+        bool diagnosticIndependent = document->DebugStartLiveTransactionProbe();
+        if (diagnosticIndependent) {
+            native = document->ChangeDocument();
+            for (unsigned attempt = 0; attempt < 140; ++attempt) {
+                native->NewCommand();
+                native->AbortCommand();
+            }
+            const auto afterLogOverflow = document->DebugNativeMutationStamp();
+            diagnosticIndependent = !document->DebugLiveTransactionProbeValid()
+                && afterLogOverflow.has_value();
+            native->NewCommand();
+            native->AbortCommand();
+            const auto afterMoreWork = document->DebugNativeMutationStamp();
+            diagnosticIndependent = diagnosticIndependent && afterMoreWork
+                && afterMoreWork->edit > afterLogOverflow->edit
+                && afterMoreWork->opening == afterLogOverflow->opening
+                && native->GetAvailableUndos() == 0;
+            document->DebugStopLiveTransactionProbe();
+        }
+        result[@"diagnosticOverflowDoesNotLimitProductionObservation"] = @(diagnosticIndependent);
+        // Keep the application strongly owned on this thread. The foreign
+        // notification passes an empty handle; adapter guards must reject it
+        // before dereferencing any native document or accessing the weak state.
+        const auto application = document->Document()->Application();
+        auto* applicationPointer = application.get();
+        std::thread foreignCallback([applicationPointer] {
+            const Handle(TDocStd_Document) empty;
+            applicationPointer->OnOpenTransaction(empty);
+        });
+        foreignCallback.join();
+        result[@"foreignNotificationPoisonsActualAdapter"] = @(!document->DebugNativeMutationStamp().has_value());
+        // Separate pure-policy tests. Identity sentinels are never dereferenced
+        // as OCAF documents and do not qualify live selection coverage.
+        std::array<std::uint8_t, 16> nonce{}; nonce[0] = 1;
+        for (unsigned counter = 0; counter < 3; ++counter) {
+            core3d::authority::NativeEditAuthority policy(nonce);
+            int first = 0, second = 0;
+            bool checked = policy.Adopt(&first) && policy.DebugExhaustCounter(counter);
+            if (counter == 0) (void)policy.Adopt(&second);
+            else if (counter == 1) policy.TransactionBoundary(&first);
+            else policy.SelectionBoundary(&first);
+            checked = checked && !policy.Valid() && !policy.Capture(&first, true, false)
+                && !policy.Adopt(&second);
+            result[[NSString stringWithFormat:@"counter%uSaturatesWithoutWrap", counter]] = @(checked);
+        }
+        core3d::authority::NativeEditAuthority policy(nonce);
+        int identity = 0;
+        (void)policy.Adopt(&identity);
+        std::thread foreignPolicy([&policy, &identity] { policy.SelectionBoundary(&identity); });
+        foreignPolicy.join();
+        result[@"foreignPolicyAccessPoisons"] = @(!policy.Valid() && !policy.Capture(&identity, true, false));
+    } catch (...) {
+        result[@"exception"] = @YES;
+    }
+    return result;
+}
+
+- (NSDictionary<NSString *, id> *)debugNativeMutationStamp {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return nil;
+    const auto document = GLController.viewer->getDocument();
+    if (document.IsNull()) return nil;
+    const auto stamp = document->DebugNativeMutationStamp();
+    if (!stamp) return nil;
+    const auto nonce = [[NSData dataWithBytes:stamp->instanceNonce.data()
+                                      length:stamp->instanceNonce.size()] base64EncodedStringWithOptions:0];
+    NSString *identifier = [NSString stringWithUTF8String:document->DocumentIdentifier().c_str()];
+    if (identifier.length == 0) return nil;
+    return @{@"instanceNonce":nonce, @"documentIdentifier":identifier,
+             @"opening":@(stamp->opening), @"edit":@(stamp->edit),
+             @"selection":@(stamp->selection)};
+}
+
 - (BOOL)debugStartLiveTransactionProbe {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return NO;
     auto document = GLController.viewer->getDocument();

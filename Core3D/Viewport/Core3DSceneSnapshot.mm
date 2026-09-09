@@ -19,6 +19,9 @@
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/NativeTransactionObserverProbe.hxx"
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
+#include "../OCCTKit/NativeManualIntentPolicyProbe.hxx"
+#include "../OCCTKit/NativeReplacementPolicyProbe.hxx"
+#include "../OCCTKit/NativeIntentReplacementPromotionProbe.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
 #include "../OCCTKit/NativeMeshElementSelectionTests.hxx"
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -838,6 +841,22 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& e) {
         return @{@"error":[NSString stringWithUTF8String:e.GetMessageString() ?: "Mesh copy probe failed"]};
     } catch (...) {return @{@"error":@"Mesh copy probe failed"};}
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugNativeIntentPolicy:(NSInteger)family {
+    if (![NSThread isMainThread] || family < 0 || family > 2) return @{};
+    try {
+        NSMutableDictionary<NSString *, NSNumber *> *report = [NSMutableDictionary dictionary];
+        auto retain = [&](const auto& outcomes) {
+            for (std::size_t index = 0; index < outcomes.size(); ++index) {
+                report[[NSString stringWithFormat:@"case%zu", index]] = @(outcomes[index]);
+            }
+        };
+        if (family == 0) retain(core3d::debug::RunNativeManualIntentPolicyProbe());
+        else if (family == 1) retain(core3d::debug::RunNativeReplacementPolicyProbe());
+        else retain(core3d::debug::RunNativeIntentReplacementPromotionProbe());
+        return report;
+    } catch (...) { return @{}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugLiveTransactionProbeLifecycle {

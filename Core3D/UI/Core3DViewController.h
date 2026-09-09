@@ -1117,6 +1117,10 @@ typedef struct {
 - (NSInteger)debugDocumentUndoCount;
 //! Read-only observation of the actual native application's lifecycle/history.
 //! These DEBUG diagnostics cannot authorize edits or persist an AI job.
+//! Diagnostic fixed-memory mutation stamp; NOT a public edit token/readiness lease.
+- (NSDictionary<NSString *, id> *_Nullable)debugNativeMutationStamp;
+//! Private real-document lifecycle plus isolated policy saturation/thread fixtures.
++ (NSDictionary<NSString *, NSNumber *> *)debugNativeMutationLifecycle;
 - (BOOL)debugStartLiveTransactionProbe;
 - (void)debugFailNextDocumentAdoption;
 - (void)debugStopLiveTransactionProbe;
