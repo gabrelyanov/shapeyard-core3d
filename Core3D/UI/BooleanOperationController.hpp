@@ -58,6 +58,9 @@ struct BooleanPreviewDebugState {
     std::uint64_t pendingReplacementCount = 0;
     std::uint64_t acceptedCount = 0;
     std::uint64_t staleSuppressionCount = 0;
+    // Authoritative selected source operands, independent of rendered trials.
+    std::uint64_t actorOperandCount = 0;
+    std::uint64_t subjectOperandCount = 0;
     Standard_Boolean activeOperation = Standard_False;
     Standard_Boolean workerActive = Standard_False;
     Standard_Boolean workerPending = Standard_False;

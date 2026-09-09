@@ -4362,6 +4362,8 @@ private:
         @"pendingReplacementCount": @(state.pendingReplacementCount),
         @"acceptedCount": @(state.acceptedCount),
         @"staleSuppressionCount": @(state.staleSuppressionCount),
+        @"actorOperandCount": @(state.actorOperandCount),
+        @"subjectOperandCount": @(state.subjectOperandCount),
         @"activeOperation": @(state.activeOperation != Standard_False),
         @"workerActive": @(state.workerActive != Standard_False),
         @"workerPending": @(state.workerPending != Standard_False),

@@ -1081,6 +1081,13 @@ BooleanOperationController::debugPreviewState() const noexcept
     aState.state = _previewState;
     aState.generation = _previewGeneration;
     aState.activeOperation = _activeAction.has_value();
+    for (const auto& selection : _selectionMap) {
+        if (selection.second.selectionType == BooleanSelectionType::Actor) {
+            ++aState.actorOperandCount;
+        } else if (selection.second.selectionType == BooleanSelectionType::Subject) {
+            ++aState.subjectOperandCount;
+        }
+    }
     aState.canApply = canApply();
     aState.documentCommandUnresolved = _documentCommandUnresolved;
     try {
