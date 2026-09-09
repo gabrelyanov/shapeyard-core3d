@@ -1682,7 +1682,35 @@ bool ExtractWorldPreviewItem(
     if (!ApplyPreset(aMaterial,
                      thePresentation->Material(),
                      isClosed)) {
-        return false;
+        // Authored PBR is represented by an actual material aspect, not an
+        // OCCT preset name. Boolean highlights still use the fixed role color,
+        // but must preserve the admitted opaque scalar appearance. Other
+        // overlay kinds retain their existing preset-only contract.
+        const bool isBoolean = theRole == RenderRole::BooleanActor
+            || theRole == RenderRole::BooleanSubject;
+        const auto aMaterialName = thePresentation->Material();
+        if (!isBoolean || !theColorOverride.has_value()
+            || (aMaterialName != Graphic3d_NameOfMaterial_UserDefined
+                && aMaterialName != Graphic3d_NameOfMaterial_DEFAULT)
+            || HasUnsupportedPresentationTexture(thePresentation)) {
+            return false;
+        }
+        const auto& anAspect =
+            thePresentation->Attributes()->ShadingAspect()->Aspect();
+        if (!anAspect->ShaderProgram().IsNull()
+            || (anAspect->AlphaMode() != Graphic3d_AlphaMode_Opaque
+                && anAspect->AlphaMode() != Graphic3d_AlphaMode_BlendAuto)) {
+            return false;
+        }
+        const auto& aPbr = anAspect->FrontMaterial().PBRMaterial();
+        if (!IsFinite(aPbr.Alpha()) || aPbr.Alpha() != 1.0f) {
+            return false;
+        }
+        const auto anEmission = aPbr.Emission();
+        aMaterial.emission = {anEmission.x(), anEmission.y(), anEmission.z()};
+        aMaterial.metallic = aPbr.Metallic();
+        aMaterial.roughness = aPbr.NormalizedRoughness();
+        aMaterial.indexOfRefraction = aPbr.IOR();
     }
     Quantity_Color aColor;
     if (theColorOverride.has_value()) {
