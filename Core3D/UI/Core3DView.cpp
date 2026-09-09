@@ -124,9 +124,22 @@ void Core3DView::OrientedRotate(const Standard_Real ax, const Standard_Real ay, 
         aTrsf.Invert();
         myCamStartOpToEye    = gp_Vec(myRotateGravity, aCamera->Eye()).Transformed (aTrsf);
         myCamStartOpToCenter = gp_Vec(myRotateGravity, aCamera->Center()).Transformed (aTrsf);
-
+        myOrbitStartCamera = new Graphic3d_Camera(aCamera);
+        // Touch-down only captures the orbit origin. Reconstructing Euler
+        // angles here clamps a pole view and discards roll before a tap can
+        // select the object at its displayed coordinate.
+        return;
     }
-    
+    if (ax == 0.0 && ay == 0.0 && az == 0.0) {
+        // A zero-motion sample, including dragging back to the exact origin,
+        // preserves the complete starting camera rather than its Euler approximation.
+        if (!myOrbitStartCamera.IsNull()) {
+            aCamera->Copy(myOrbitStartCamera);
+            ImmediateUpdate();
+        }
+        return;
+    }
+
     Graphic3d_Vec2i aWinXY;
     Window()->Size (aWinXY.x(), aWinXY.y());
     double aYawAngleDelta   = -ax;

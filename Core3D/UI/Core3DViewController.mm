@@ -6220,6 +6220,27 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 #ifdef DEBUG
+- (BOOL)debugReplayCameraTouch:(NSInteger)mode {
+    if (!NSThread.isMainThread || !_isSetuped || !GLController.isViewLoaded
+        || mode < 0 || mode > 3 || _currentGizmoType != PrimitiveGizmoTypeNone)
+        return NO;
+    const auto viewer = GLController.viewer;
+    if (!viewer || !viewer->canBeginCommittedEdit()) return NO;
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 100 || size.height < 100) return NO;
+    const int x = static_cast<int>(size.width * 0.5);
+    const int y = static_cast<int>(size.height * 0.5);
+    try {
+        viewer->StartRotation(x, y);
+        if (mode == 1) viewer->Rotation(x, y);
+        if (mode >= 2) viewer->Rotation(x + 24, y + 16);
+        if (mode == 3) viewer->Rotation(x, y);
+        viewer->FinishInteraction(x, y);
+        [GLController requestRender];
+        return YES;
+    } catch (...) { return NO; }
+}
 - (void)debugFailNextNativeViewportDraw {
     if (!NSThread.isMainThread || !GLController.isViewLoaded) return;
     const auto viewer = GLController.viewer;

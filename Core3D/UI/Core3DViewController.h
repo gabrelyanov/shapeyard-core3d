@@ -624,6 +624,8 @@ typedef struct {
 - (void)cancelNativeViewportPresentation:(NSUUID *)identifier;
 - (BOOL)isNativeViewportPresentationCurrent:(NSUUID *)identifier;
 #ifdef DEBUG
+// Replay native orbit touch-down/zero sample/drag/return-to-origin (modes0..3).
+- (BOOL)debugReplayCameraTouch:(NSInteger)mode;
 - (void)debugFailNextNativeViewportDraw;
 - (void)debugSkipNextNativeViewportPresentation;
 #endif

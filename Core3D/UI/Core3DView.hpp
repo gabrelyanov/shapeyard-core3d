@@ -48,6 +48,7 @@ private:
     Graphic3d_Vertex myGravityReferencePoint;
     Graphic3d_Vec3d myRotateStartYawPitchRoll;
     
+    Handle(Graphic3d_Camera) myOrbitStartCamera;
     gp_Vec              myCamStartOpToCenter;
     gp_Vec              myCamStartOpToEye;
     mutable Standard_Boolean myIsRenderingFrame = Standard_False;
