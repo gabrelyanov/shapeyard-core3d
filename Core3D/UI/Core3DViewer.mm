@@ -4513,6 +4513,15 @@ void Core3DViewer::DebugSetBooleanTransactionFailureCount(
     }
 }
 
+void Core3DViewer::DebugSetBooleanMetadataFailurePhase(
+    const Standard_Size thePhase) noexcept
+{
+    if (_objectInteractor != nullptr) {
+        _objectInteractor->debugSetBooleanMetadataFailurePhase(
+            thePhase);
+    }
+}
+
 void Core3DViewer::DebugSetBooleanAbortFailureCount(
     const Standard_Size theCount) noexcept
 {

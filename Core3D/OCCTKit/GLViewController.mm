@@ -4409,6 +4409,13 @@ private:
     }
 }
 
+- (void)debugSetBooleanMetadataFailurePhase:(NSUInteger)phase {
+    if (_viewer != nullptr) {
+        _viewer->DebugSetBooleanMetadataFailurePhase(
+            static_cast<Standard_Size>(phase));
+    }
+}
+
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count {
     if (_viewer != nullptr) {
         _viewer->DebugSetBooleanAbortFailureCount(

@@ -3544,6 +3544,11 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		_booleanOpController->debugSetTransactionFailureCount(count);
 	}
 
+	void ObjectInteractor::debugSetBooleanMetadataFailurePhase(
+		const Standard_Size phase) noexcept {
+		_booleanOpController->debugSetMetadataFailurePhase(phase);
+	}
+
 		void ObjectInteractor::debugSetBooleanAbortFailureCount(
 			const Standard_Size count) noexcept {
 			_booleanOpController->debugSetAbortFailureCount(count);

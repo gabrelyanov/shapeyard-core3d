@@ -1005,6 +1005,7 @@ typedef struct {
 - (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit;
 //! Force the next N Ready Boolean applies through transaction rollback.
 - (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetBooleanMetadataFailurePhase:(NSUInteger)phase;
 //! Make the next N Boolean transaction abort attempts fail before touching it.
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
 //! Make the next N post-commit Boolean document inspections unavailable.

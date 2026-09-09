@@ -4,6 +4,7 @@
 //
 
 #include "BooleanOperationController.hpp"
+#include "BooleanMetadataTransfer.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 
@@ -1147,6 +1148,12 @@ void BooleanOperationController::debugSetTransactionFailureCount(
     _debugTransactionFailureCount = theCount;
 }
 
+void BooleanOperationController::debugSetMetadataFailurePhase(
+    const Standard_Size thePhase) noexcept
+{
+    _debugMetadataFailurePhase = thePhase <= 2 ? thePhase : 0;
+}
+
 void BooleanOperationController::debugSetAbortFailureCount(
     const Standard_Size theCount) noexcept
 {
@@ -1359,6 +1366,9 @@ BooleanOperationController::inspectPendingTransaction() const noexcept
                     aSource.expectedReferenceAxis)) {
                 return DocumentState::PartialOrMismatched;
             }
+            OcctObjectNameState aName;
+            if (!myDoc->CaptureObjectNameStateForLabel(aSource.label, aName)
+                || !aSource.expectedName.IsEqual(aName)) return DocumentState::PartialOrMismatched;
             ++aPresentSourceCount;
         }
 
@@ -1403,6 +1413,9 @@ BooleanOperationController::inspectPendingTransaction() const noexcept
                     aResult.expectedReferenceAxis)) {
                 return DocumentState::PartialOrMismatched;
             }
+            OcctObjectNameState aName;
+            if (!myDoc->CaptureObjectNameStateForLabel(aResult.label, aName)
+                || !aResult.expectedName.IsEqual(aName)) return DocumentState::PartialOrMismatched;
             ++aPresentResultCount;
         }
 
@@ -1414,6 +1427,12 @@ BooleanOperationController::inspectPendingTransaction() const noexcept
             && aPresentSourceCount == _pendingSources.size();
         if ((isCommitted || isAbsent)
             && !myDoc->ValidateGeometryRepresentations()) {
+            return DocumentState::PartialOrMismatched;
+        }
+        OcctSavedGroupState aGroups;
+        if ((isCommitted || isAbsent)
+            && (!myDoc->CaptureSavedGroups(aGroups)
+                || !(isCommitted ? _pendingGroupsAfter : _pendingGroupsBefore).IsEqual(aGroups))) {
             return DocumentState::PartialOrMismatched;
         }
         if (isCommitted) {
@@ -2637,7 +2656,8 @@ void BooleanOperationController::persistResultMetadata(
     const TDF_Label& theLabel,
     const TemporalBooleanObject& theStyle,
     OcctReferenceAxisReadState& theExpectedReferenceAxisState,
-    OcctReferenceAxis& theExpectedReferenceAxis)
+    OcctReferenceAxis& theExpectedReferenceAxis,
+    OcctObjectNameState& theExpectedName)
 {
     theExpectedReferenceAxisState =
         OcctReferenceAxisReadState::Invalid;
@@ -2672,6 +2692,10 @@ void BooleanOperationController::persistResultMetadata(
             theLabel,
             aBakeTransform)) {
         throw Standard_Failure("Unable to preserve Boolean metadata");
+    }
+    if (!boolean_metadata::CopyBooleanName(*myDoc, theStyle.documentLabel,
+                                          theLabel, theExpectedName)) {
+        throw Standard_Failure("Unable to preserve Boolean result name");
     }
     OcctReferenceAxis aStoredReferenceAxis;
     const OcctReferenceAxisReadState aStoredReferenceAxisState =
@@ -2932,7 +2956,8 @@ BooleanApplyResult BooleanOperationController::apply(
                 || !myDoc->TryObjectTransformForLabel(
                     aSourceLabel, aPending.expectedTransform)
                 || aPending.expectedReferenceAxisState
-                    == OcctReferenceAxisReadState::Invalid) {
+                    == OcctReferenceAxisReadState::Invalid
+                || !myDoc->CaptureObjectNameStateForLabel(aSourceLabel, aPending.expectedName)) {
                 return failWithoutMutation();
             }
             aPendingSources.push_back(std::move(aPending));
@@ -2940,6 +2965,10 @@ BooleanApplyResult BooleanOperationController::apply(
         _pendingSources = std::move(aPendingSources);
         _pendingResults.clear();
         _pendingResults.reserve(aResults.size());
+        _pendingGroupsBefore = {}; _pendingGroupsAfter = {};
+        if (!myDoc->CaptureSavedGroups(_pendingGroupsBefore)) return failWithoutMutation();
+        std::vector<boolean_metadata::BooleanLabelReplacement> aMetadataReplacements;
+        aMetadataReplacements.reserve(aResults.size());
 
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
@@ -2976,11 +3005,13 @@ BooleanApplyResult BooleanOperationController::apply(
             OcctReferenceAxisReadState anExpectedReferenceAxisState =
                 OcctReferenceAxisReadState::Invalid;
             OcctReferenceAxis anExpectedReferenceAxis;
+            OcctObjectNameState anExpectedName;
             persistResultMetadata(
                 aResultLabel,
                 aResult.second,
                 anExpectedReferenceAxisState,
-                anExpectedReferenceAxis);
+                anExpectedReferenceAxis,
+                anExpectedName);
             _pendingResults.push_back({
                 aResultLabel,
                 myDoc->EntityIdentifierForLabel(aResultLabel),
@@ -2989,7 +3020,9 @@ BooleanApplyResult BooleanOperationController::apply(
                 aResult.first->LocalTransformation(),
                 anExpectedReferenceAxisState,
                 anExpectedReferenceAxis,
+                anExpectedName,
             });
+            aMetadataReplacements.push_back({aResult.second.documentLabel, aResultLabel});
             const PendingResult& aPending = _pendingResults.back();
             if (aPending.entityIdentifier.empty()
                 || aPending.definitionIdentifier.empty()
@@ -3000,6 +3033,27 @@ BooleanApplyResult BooleanOperationController::apply(
                 return BooleanApplyResult::NoChange;
             }
         }
+#ifdef DEBUG
+        if (_debugMetadataFailurePhase == 1) {
+            _debugMetadataFailurePhase = 0;
+            rollbackFailedTransaction(aDocument);
+            return BooleanApplyResult::NoChange;
+        }
+#endif
+        OcctSavedGroupState aGroupsAtStaging;
+        if (!boolean_metadata::StageBooleanGroupTransfer(*myDoc, aSourceLabels,
+                aMetadataReplacements, aGroupsAtStaging, _pendingGroupsAfter)
+            || !_pendingGroupsBefore.IsEqual(aGroupsAtStaging)) {
+            rollbackFailedTransaction(aDocument);
+            return BooleanApplyResult::NoChange;
+        }
+#ifdef DEBUG
+        if (_debugMetadataFailurePhase == 2) {
+            _debugMetadataFailurePhase = 0;
+            rollbackFailedTransaction(aDocument);
+            return BooleanApplyResult::NoChange;
+        }
+#endif
         for (const TDF_Label& aLabel : aSourceLabels) {
             if (!myDoc->RemoveShape(aLabel)) {
                 rollbackFailedTransaction(aDocument);
@@ -3165,6 +3219,7 @@ void BooleanOperationController::clearOperationState() noexcept
     _subjectSelectionOrder.clear();
     _pendingSources.clear();
     _pendingResults.clear();
+    _pendingGroupsBefore = {}; _pendingGroupsAfter = {};
     _ownedPresentations.clear();
     _singleTrialResult.Nullify();
     _activeAction.reset();

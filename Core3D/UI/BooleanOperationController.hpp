@@ -145,6 +145,8 @@ public:
     void debugSetMaximumResultTopologyNodes(Standard_Size limit) noexcept;
     void debugSetMaximumResultSolids(Standard_Size limit) noexcept;
     void debugSetTransactionFailureCount(Standard_Size count) noexcept;
+    // One-shot metadata failure: 1 after names, 2 after groups, 0 disabled.
+    void debugSetMetadataFailurePhase(Standard_Size phase) noexcept;
     void debugSetAbortFailureCount(Standard_Size count) noexcept;
     void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
 #endif
@@ -168,6 +170,7 @@ private:
         OcctReferenceAxisReadState expectedReferenceAxisState =
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
+        OcctObjectNameState expectedName;
     };
     struct PendingResult {
         TDF_Label label;
@@ -178,6 +181,7 @@ private:
         OcctReferenceAxisReadState expectedReferenceAxisState =
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
+        OcctObjectNameState expectedName;
     };
 
     Standard_Boolean actionMatches(BooleanAction action) const noexcept;
@@ -224,7 +228,8 @@ private:
         const TDF_Label& label,
         const TemporalBooleanObject& style,
         OcctReferenceAxisReadState& expectedReferenceAxisState,
-        OcctReferenceAxis& expectedReferenceAxis);
+        OcctReferenceAxis& expectedReferenceAxis,
+        OcctObjectNameState& expectedName);
     Handle(AIS_InteractiveObject) ioCopyWithStyle(
         const Handle(AIS_InteractiveObject)& original,
         const TemporalBooleanObject& style);
@@ -235,6 +240,8 @@ private:
     std::vector<TDF_Label> _subjectSelectionOrder;
     std::vector<PendingSource> _pendingSources;
     std::vector<PendingResult> _pendingResults;
+    OcctSavedGroupState _pendingGroupsBefore;
+    OcctSavedGroupState _pendingGroupsAfter;
     Handle(AIS_Shape) _singleTrialResult;
     std::vector<Handle(AIS_InteractiveObject)> _ownedPresentations;
     std::optional<BooleanAction> _activeAction;
@@ -256,6 +263,7 @@ private:
         kMaxResultTopologyNodes;
     Standard_Size _debugMaximumResultSolids = kMaxResultSolids;
     Standard_Size _debugTransactionFailureCount = 0;
+    Standard_Size _debugMetadataFailurePhase = 0;
     Standard_Size _debugAbortFailureCount = 0;
     mutable Standard_Size _debugPostCommitInspectFailureCount = 0;
     std::uint64_t _debugAcceptedCount = 0;

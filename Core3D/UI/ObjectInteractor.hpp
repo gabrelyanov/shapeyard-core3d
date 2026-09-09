@@ -241,6 +241,8 @@ namespace core3d {
 			Standard_Size limit) noexcept;
 		void debugSetBooleanTransactionFailureCount(
 			Standard_Size count) noexcept;
+		void debugSetBooleanMetadataFailurePhase(
+			Standard_Size phase) noexcept;
 			void debugSetBooleanAbortFailureCount(
 				Standard_Size count) noexcept;
 			void debugSetBooleanPostCommitInspectFailureCount(

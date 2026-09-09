@@ -7929,6 +7929,10 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController debugSetBooleanTransactionFailureCount:count];
 }
 
+- (void)debugSetBooleanMetadataFailurePhase:(NSUInteger)phase {
+    [GLController debugSetBooleanMetadataFailurePhase:phase];
+}
+
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count {
     [GLController debugSetBooleanAbortFailureCount:count];
 }

@@ -260,6 +260,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetMaximumBooleanResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBooleanResultSolids:(NSUInteger)limit;
 - (void)debugSetBooleanTransactionFailureCount:(NSUInteger)count;
+- (void)debugSetBooleanMetadataFailurePhase:(NSUInteger)phase;
 - (void)debugSetBooleanAbortFailureCount:(NSUInteger)count;
 - (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count;
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *)
