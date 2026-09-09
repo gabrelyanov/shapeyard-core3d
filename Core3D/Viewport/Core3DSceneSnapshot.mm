@@ -20,6 +20,7 @@
 #include "../OCCTKit/NativeTransactionObserverProbe.hxx"
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
+#include "../OCCTKit/NativeMeshElementSelectionTests.hxx"
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -698,6 +699,16 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& e) {
         return @{@"error": [NSString stringWithUTF8String:e.GetMessageString() ?: "Private primitive probe failure"]};
     } catch (...) { return @{@"error": @"Private primitive ownership probe failed"}; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugMeshElementSelectionPolicy {
+    try {
+        NSMutableDictionary<NSString *, NSNumber *> *result=[NSMutableDictionary dictionary];
+        for (const auto& check:core3d::meshedit::DebugElementSelectionPolicy()) {
+            result[[NSString stringWithUTF8String:check.first.c_str()]]=@(check.second);
+        }
+        return [result copy];
+    } catch (...) { return @{}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugCurrentTessellationMeshCopy:(NSInteger)mode {

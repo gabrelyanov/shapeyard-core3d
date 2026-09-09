@@ -84,11 +84,21 @@ typedef NS_ENUM(NSInteger, Core3DMeshVertexEditResult) {
     Core3DMeshVertexEditResultFailed,
 };
 
+typedef NS_ENUM(NSInteger, Core3DMeshElementKind) {
+    Core3DMeshElementKindVertex = 0,
+    Core3DMeshElementKindEdge,
+    Core3DMeshElementKindTriangle,
+};
+
 //! Immutable session-local vertex IDs are array indices; positions are world mm.
 //! The native viewer retains exact edit authority and all OCCT handles.
 @interface Core3DMeshVertexEditSnapshot : NSObject
 @property(nonatomic,copy,readonly) NSString *entityIdentifier;
 @property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *worldVertices;
+@property(nonatomic,readonly) Core3DMeshElementKind elementKind;
+//! Session-local native vertex indices. Only the requested domain is populated.
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *edgeVertexIndices;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *triangleVertexIndices;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -666,6 +676,12 @@ typedef struct {
 - (Core3DMeshVertexEditResult)commitMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected
     vertexIndices:(NSArray<NSNumber *> *)vertexIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ
     NS_SWIFT_NAME(commitMeshVertexEdit(_:vertexIndices:deltaX:deltaY:deltaZ:));
+- (Core3DMeshVertexEditSnapshot *_Nullable)prepareMeshElementEditForEntityIdentifier:(NSString *)entityIdentifier
+    kind:(Core3DMeshElementKind)kind expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(prepareMeshElementEdit(entityIdentifier:kind:expected:));
+- (Core3DMeshVertexEditResult)commitMeshElementEdit:(Core3DMeshVertexEditSnapshot *)expected
+    elementIndices:(NSArray<NSNumber *> *)elementIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ
+    NS_SWIFT_NAME(commitMeshElementEdit(_:elementIndices:deltaX:deltaY:deltaZ:));
 - (void)cancelMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected;
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier

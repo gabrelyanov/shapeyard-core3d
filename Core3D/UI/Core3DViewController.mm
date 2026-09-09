@@ -733,6 +733,13 @@ void Core3DAddDebugOrphanVisualMaterial(
         NSMutableArray *positions=[NSMutableArray arrayWithCapacity:snapshot.worldVertices.size()];
         for(const auto& point:snapshot.worldVertices)[positions addObject:@[@(point[0]),@(point[1]),@(point[2])]];
         _worldVertices=[positions copy];
+        _elementKind=static_cast<Core3DMeshElementKind>(snapshot.elementKind);
+        NSMutableArray *edges=[NSMutableArray arrayWithCapacity:snapshot.edgeVertices.size()];
+        for(const auto& edge:snapshot.edgeVertices)[edges addObject:@[@(edge[0]),@(edge[1])]];
+        _edgeVertexIndices=[edges copy];
+        NSMutableArray *triangles=[NSMutableArray arrayWithCapacity:snapshot.triangleVertices.size()];
+        for(const auto& triangle:snapshot.triangleVertices)[triangles addObject:@[@(triangle[0]),@(triangle[1]),@(triangle[2])]];
+        _triangleVertexIndices=[triangles copy];
     }
     return self;
 }
@@ -6298,11 +6305,22 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (Core3DMeshVertexEditSnapshot *)prepareMeshVertexEditForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected {
+    return [self prepareMeshElementEditForEntityIdentifier:entityIdentifier kind:Core3DMeshElementKindVertex expected:expected];
+}
+
+- (Core3DMeshVertexEditSnapshot *)prepareMeshElementEditForEntityIdentifier:(NSString *)entityIdentifier
+    kind:(Core3DMeshElementKind)kind expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
         || GLController.viewer == nullptr || expected == nil
         || entityIdentifier.length == 0 || entityIdentifier.length > 128
         || expected.publicationSourceIdentifier.length == 0
         || expected.publicationSourceIdentifier.length > 128) { return nil; }
+    switch(kind) {
+        case Core3DMeshElementKindVertex:
+        case Core3DMeshElementKindEdge:
+        case Core3DMeshElementKindTriangle:break;
+        default:return nil;
+    }
     const CGSize size = GLController.drawableSize;
     if (!std::isfinite(size.width) || !std::isfinite(size.height)
         || size.width < 1 || size.height < 1
@@ -6318,8 +6336,9 @@ void Core3DAddDebugOrphanVisualMaterial(
             [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
-        const auto result=GLController.viewer->prepareMeshVertexEdit(identity,expected.revisions.presentationRevision,
-            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        const auto result=GLController.viewer->prepareMeshElementEdit(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)),
+            static_cast<core3d::meshedit::ElementKind>(kind));
         return result ? [[Core3DMeshVertexEditSnapshot alloc] initWithNativeSnapshot:*result] : nil;
     } catch(...) {return nil;}
 }
@@ -6333,10 +6352,23 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (Core3DMeshVertexEditResult)commitMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected
     vertexIndices:(NSArray<NSNumber *> *)vertexIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ {
+    if(![NSThread isMainThread] || expected==nil || expected.elementKind!=Core3DMeshElementKindVertex)
+        return Core3DMeshVertexEditResultRejected;
+    return [self commitMeshElementEdit:expected elementIndices:vertexIndices deltaX:deltaX deltaY:deltaY deltaZ:deltaZ];
+}
+
+- (Core3DMeshVertexEditResult)commitMeshElementEdit:(Core3DMeshVertexEditSnapshot *)expected
+    elementIndices:(NSArray<NSNumber *> *)vertexIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ {
     if(![NSThread isMainThread] || !_isSetuped || GLController==nil || GLController.viewer==nullptr
         || expected==nil || expected.sessionIdentifier.length==0 || expected.sessionIdentifier.length>128
         || vertexIndices.count==0 || vertexIndices.count>64 || !std::isfinite(deltaX)
         || !std::isfinite(deltaY) || !std::isfinite(deltaZ))return Core3DMeshVertexEditResultRejected;
+    switch(expected.elementKind) {
+        case Core3DMeshElementKindVertex:
+        case Core3DMeshElementKindEdge:
+        case Core3DMeshElementKindTriangle:break;
+        default:return Core3DMeshVertexEditResultRejected;
+    }
     try {
         std::vector<std::uint32_t> vertices;vertices.reserve(vertexIndices.count);
         for(NSNumber *value in vertexIndices) {
@@ -6349,7 +6381,8 @@ void Core3DAddDebugOrphanVisualMaterial(
         }
         const char *identifier=expected.sessionIdentifier.UTF8String;
         if(identifier==nullptr)return Core3DMeshVertexEditResultRejected;
-        const auto result=GLController.viewer->commitMeshVertexEdit(identifier,vertices,gp_Vec(deltaX,deltaY,deltaZ));
+        const auto result=GLController.viewer->commitMeshElementEdit(identifier,
+            static_cast<core3d::meshedit::ElementKind>(expected.elementKind),vertices,gp_Vec(deltaX,deltaY,deltaZ));
         switch(result) {
             case core3d::OrdinaryEditResult::NoChange:return Core3DMeshVertexEditResultUnchanged;
             case core3d::OrdinaryEditResult::Committed:

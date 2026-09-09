@@ -19,6 +19,7 @@
 #include "OrdinaryEditController.hpp"
 #include <gp_Pnt2d.hxx>
 #include <optional>
+#include "../OCCTKit/NativeMeshElementSelection.hpp"
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -58,6 +59,9 @@ namespace core3d {
         std::string sessionIdentifier;
         std::string entityIdentifier;
         std::vector<std::array<double,3>> worldVertices;
+        meshedit::ElementKind elementKind = meshedit::ElementKind::Vertex;
+        std::vector<std::array<std::uint32_t,2>> edgeVertices;
+        std::vector<std::array<std::uint32_t,3>> triangleVertices;
     };
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
@@ -154,6 +158,12 @@ namespace core3d {
             std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept;
         OrdinaryEditResult commitMeshVertexEdit(const std::string& sessionIdentifier,
             const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta) noexcept;
+        std::optional<MeshVertexEditSnapshot> prepareMeshElementEdit(const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+            meshedit::ElementKind kind) noexcept;
+        OrdinaryEditResult commitMeshElementEdit(const std::string& sessionIdentifier,
+            meshedit::ElementKind kind,const std::vector<std::uint32_t>& elements,
+            const gp_Vec& worldDelta) noexcept;
         void cancelMeshVertexEdit(const std::string& sessionIdentifier) noexcept;
         OrdinaryEditResult createSourceRetainedMeshCopy(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height) noexcept;

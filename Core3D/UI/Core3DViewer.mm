@@ -2357,14 +2357,27 @@ struct MeshVertexEditWork {
     std::uint64_t presentationRevision=0;
     std::uint32_t width=0,height=0;
     std::string sessionIdentifier;
+    meshedit::ElementKind elementKind=meshedit::ElementKind::Vertex;
     bool consumed=false;
 };
 
 std::optional<MeshVertexEditSnapshot> Core3DViewer::prepareMeshVertexEdit(
     const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
     std::uint32_t width,std::uint32_t height) noexcept {
+    return prepareMeshElementEdit(identity,presentationRevision,width,height,meshedit::ElementKind::Vertex);
+}
+
+std::optional<MeshVertexEditSnapshot> Core3DViewer::prepareMeshElementEdit(
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,meshedit::ElementKind kind) noexcept {
     if(![NSThread isMainThread] || !canBeginCommittedEdit() || myDoc.IsNull()
         || myContext.IsNull() || width==0 || height==0)return std::nullopt;
+    switch(kind) {
+        case meshedit::ElementKind::Vertex:
+        case meshedit::ElementKind::Edge:
+        case meshedit::ElementKind::Triangle:break;
+        default:return std::nullopt;
+    }
     try {
         const auto snapshot=captureSceneSnapshot(width,height);
         if(!snapshot || snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
@@ -2408,6 +2421,13 @@ std::optional<MeshVertexEditSnapshot> Core3DViewer::prepareMeshVertexEdit(
                 if(!std::isfinite(p.Coord(a)) || std::abs(p.Coord(a))>1.e6)return std::nullopt;
             result.worldVertices.push_back({p.X(),p.Y(),p.Z()});
         }
+        work->elementKind=kind;result.elementKind=kind;
+        if(kind==meshedit::ElementKind::Edge) {
+            result.edgeVertices.reserve(work->geometry.topology.edges.size());
+            for(const auto& edge:work->geometry.topology.edges)result.edgeVertices.push_back(edge.vertices);
+        } else if(kind==meshedit::ElementKind::Triangle) {
+            result.triangleVertices=work->geometry.topology.triangleVertices;
+        }
         _meshVertexEditWork=std::move(work);return result;
     } catch(...) {return std::nullopt;}
 }
@@ -2419,9 +2439,15 @@ void Core3DViewer::cancelMeshVertexEdit(const std::string& sessionIdentifier) no
 
 OrdinaryEditResult Core3DViewer::commitMeshVertexEdit(const std::string& sessionIdentifier,
     const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta) noexcept {
+    return commitMeshElementEdit(sessionIdentifier,meshedit::ElementKind::Vertex,vertices,worldDelta);
+}
+
+OrdinaryEditResult Core3DViewer::commitMeshElementEdit(const std::string& sessionIdentifier,
+    meshedit::ElementKind kind,const std::vector<std::uint32_t>& elements,const gp_Vec& worldDelta) noexcept {
     if(![NSThread isMainThread])return OrdinaryEditResult::Invalid;
     const auto work=_meshVertexEditWork;
-    if(!work || work->consumed || work->sessionIdentifier!=sessionIdentifier)return OrdinaryEditResult::Invalid;
+    if(!work || work->consumed || work->sessionIdentifier!=sessionIdentifier
+        || work->elementKind!=kind)return OrdinaryEditResult::Invalid;
     work->consumed=true;
     // Any uncertain outcome is retained by the ordinary command ledger. The
     // consumed UI session must not keep an older document/selection alive.
@@ -2454,6 +2480,12 @@ OrdinaryEditResult Core3DViewer::commitMeshVertexEdit(const std::string& session
             || fresh.storedNormals!=work->geometry.storedNormals
             || fresh.deflection!=work->geometry.deflection
             || fresh.triangleNodeIDs!=work->geometry.triangleNodeIDs)return OrdinaryEditResult::Invalid;
+        // Resolve domain-qualified element IDs only after proving the exact
+        // retained native geometry. UI/provider endpoint arrays never authorize
+        // a move, and the same ordinal cannot change domains mid-session.
+        std::vector<std::uint32_t> vertices;
+        if(meshedit::ResolveElementVertices(work->geometry.topology,kind,elements,vertices,cancelled)
+            !=meshedit::ElementSelectionResult::Ready)return OrdinaryEditResult::Invalid;
         TopoDS_Shape candidate;
         if(!myDoc->PrepareMeshVertexMove(previous.label,vertices,worldDelta,candidate))return OrdinaryEditResult::Invalid;
         OrdinaryTransformChange request=work->authority.records.front().requested;
