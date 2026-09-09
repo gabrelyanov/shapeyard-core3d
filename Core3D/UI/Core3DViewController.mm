@@ -3496,6 +3496,11 @@ void Core3DAddDebugOrphanVisualMaterial(
     return result;
 }
 
+- (void)debugSetDocumentReplacementPreparationFailure:(BOOL)preparation restorationAttempts:(NSInteger)attempts {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return;
+    GLController.viewer->DebugSetDocumentReplacementFaults(preparation, (int)std::max<NSInteger>(0, std::min<NSInteger>(attempts, 100)));
+}
+
 - (void)debugFailNextDocumentAdoption {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return;
     GLController.viewer->DebugFailNextDocumentAdoption();

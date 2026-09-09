@@ -3271,6 +3271,29 @@ void OcctDocument::ObserveSuccessfulNativeDocumentAdoption() noexcept {
     } catch (...) { myNativeAuthority->Detach(); }
 }
 
+std::optional<core3d::authority::ReplacementReservation> OcctDocument::BeginNativeReplacement() noexcept {
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return std::nullopt;
+        return myNativeAuthority->BeginReplacement(myOcafDoc.get(), true, myOcafDoc->HasOpenCommand());
+    } catch (...) { return std::nullopt; }
+}
+
+core3d::authority::ReplacementEnd OcctDocument::EndNativeReplacement(
+    const core3d::authority::ReplacementReservation& reservation,
+    bool accepted, bool restored) noexcept {
+    using core3d::authority::ReplacementEnd;
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return ReplacementEnd::Unavailable;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
+            || DocumentIdentifier().empty()) return ReplacementEnd::Unavailable;
+        return myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
+            restored, myOcafDoc->HasOpenCommand());
+    } catch (...) { return ReplacementEnd::Unavailable; }
+}
+
 #if DEBUG
 std::optional<core3d::authority::Stamp> OcctDocument::DebugNativeMutationStamp() noexcept {
     // Diagnostic read only: selection and owner/preview fences are not wired.

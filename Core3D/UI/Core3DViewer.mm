@@ -1065,6 +1065,19 @@ bool IsProjectFileWithinSizeLimit(const std::string& path) {
 
 } // namespace
 
+// Retain both documents and original AIS handles until actual restoration is
+// confirmed. A previous OCAF pointer alone never releases the replacement fence.
+struct DocumentReplacementWork {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) previous, candidate;
+    AIS_ListOfInteractive presentations;
+    PrimitiveManipulatorType manipulator;
+    ShapeSelectionMode selection;
+    std::optional<authority::ReplacementReservation> reservation;
+    enum class Phase { Installing, RestorePending, Restoring };
+    Phase phase = Phase::Installing;
+};
+
 void Core3DViewer::release() noexcept {
     // Interactors retain the view, context, document, and manipulator graphics.
     // GLViewController calls this while the viewport EAGL context is current,
@@ -1090,6 +1103,12 @@ void Core3DViewer::release() noexcept {
     _shapeInteractor.reset();
     _objectInteractor.reset();
     OcctViewer::release();
+    // Graphics and interactors are gone. The failed candidate is never saved or
+    // promoted; release its application ownership during final viewer teardown.
+    if (_documentReplacementWork) {
+        CloseDocumentNoThrow(_documentReplacementWork->application, _documentReplacementWork->candidate);
+        _documentReplacementWork.reset();
+    }
 }
 
 NSString* Core3DViewer::addTestPrimitives() {
@@ -2056,7 +2075,8 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
 }
 
 bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
-    return _ordinaryEditController != nullptr && _ordinaryEditController->blocksNormalWork();
+    return _documentReplacementWork != nullptr
+        || (_ordinaryEditController != nullptr && _ordinaryEditController->blocksNormalWork());
 }
 bool Core3DViewer::hasUnresolvedEdit() const noexcept {
     return hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate();
@@ -2070,6 +2090,9 @@ OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
     return _ordinaryEditController->beginTransform(changes, failure);
 }
 OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
+    if (_documentReplacementWork) {
+        return restoreDocumentReplacement() ? OrdinaryEditResult::NoChange : OrdinaryEditResult::OutcomeUnknown;
+    }
     return _ordinaryEditController ? _ordinaryEditController->reconcile() : OrdinaryEditResult::NoChange;
 }
 bool Core3DViewer::admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept {
@@ -3451,8 +3474,48 @@ DebugSetTransformInspectorPositionPublicationFallbackMode(
 }
 #endif
 
+bool Core3DViewer::restoreDocumentReplacement(bool afterImportFailure) noexcept {
+    if (![NSThread isMainThread] || !_documentReplacementWork || myDoc.IsNull() || myContext.IsNull()) return false;
+    const auto work = _documentReplacementWork;
+    if (!work->reservation || work->previous.IsNull()) return false;
+    using Phase = DocumentReplacementWork::Phase;
+    if (work->phase == Phase::Restoring || (work->phase == Phase::Installing && !afterImportFailure)) return false;
+    work->phase = Phase::Restoring;
+    myDoc->ChangeDocument() = work->previous;
+    bool restored = false;
+    for (int route = 0; route < 2 && !restored; ++route) {
+        try {
+#if DEBUG
+            if (_debugDocumentRestorationFailures > 0) {
+                --_debugDocumentRestorationFailures;
+                throw Standard_Failure("Injected document presentation restoration failure");
+            }
+#endif
+            clearContext();
+            if (route == 0) {
+                if (traverseDocument(work->previous)) throw Standard_Failure("Prior document traversal failed");
+            } else {
+                for (AIS_ListIteratorOfListOfInteractive item(work->presentations); item.More(); item.Next()) {
+                    if (!Handle(AIS_Shape)::DownCast(item.Value()).IsNull()) myContext->Display(item.Value(), Standard_False);
+                }
+            }
+            if (!recreateInteractors(work->manipulator, work->selection)) throw Standard_Failure("Prior interactors unavailable");
+            myContext->UpdateCurrentViewer();
+            restored = true;
+        } catch (...) { /* Keep exact documents, presentations and reservation for a later retry. */ }
+    }
+    const auto end = myDoc->EndNativeReplacement(*work->reservation, false, restored);
+    if (!restored || end != authority::ReplacementEnd::Restored) {
+        work->phase = Phase::RestorePending;
+        return false;
+    }
+    CloseDocumentNoThrow(work->application, work->candidate);
+    _documentReplacementWork.reset();
+    return true;
+}
+
 AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
-    assert(!myContext.IsNull());
+    if (![NSThread isMainThread] || myContext.IsNull() || myDoc.IsNull()) return AssetImportResult::InternalFailure;
     if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // Replacement is a hard document boundary. Never cancel or recreate
         // an operation here: its controller may own previews, an open command,
@@ -3488,45 +3551,6 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         : _shapeInteractor->getSelectionMode();
 	AIS_ListOfInteractive previousPresentations;
 	myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
-	auto restorePreviousState = [&]() noexcept {
-		myDoc->ChangeDocument() = previous;
-		try {
-			clearContext();
-			if (traverseDocument(previous)
-				|| !recreateInteractors(
-					previousManipulatorType, previousSelectionMode)) {
-				throw Standard_Failure(
-					"Unable to restore prior document interactors");
-			}
-			myContext->UpdateCurrentViewer();
-			return;
-		} catch (...) {
-			// Reuse the exact pre-load AIS handles if rebuilding presentations
-			// from OCAF fails. RemoveAll() does not destroy these retained handles.
-		}
-
-		try {
-			clearContext();
-			for (AIS_ListIteratorOfListOfInteractive presentation(
-					 previousPresentations);
-				 presentation.More(); presentation.Next()) {
-				const Handle(AIS_InteractiveObject)& object =
-					presentation.Value();
-				if (!Handle(AIS_Shape)::DownCast(object).IsNull()) {
-					myContext->Display(object, Standard_False);
-				}
-			}
-			if (!recreateInteractors(
-					previousManipulatorType, previousSelectionMode)) {
-				throw Standard_Failure(
-					"Unable to restore retained document interactors");
-			}
-			myContext->UpdateCurrentViewer();
-		} catch (...) {
-			// The persistent previous document remains authoritative even if the
-			// graphics driver itself can no longer restore a presentation.
-		}
-	};
 
     Handle(TDocStd_Document) candidate;
     try {
@@ -3587,12 +3611,45 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
 		}
 		candidate->SetUndoLimit(40);
 
+#if DEBUG
+        if (_debugFailNextDocumentPreparation) {
+            _debugFailNextDocumentPreparation = false;
+            throw Standard_Failure("Injected failure during private candidate preparation");
+        }
+#endif
+    } catch (...) {
+        // No live presentation or document assignment has occurred.
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    }
+
+    try {
+        auto work = std::make_shared<DocumentReplacementWork>();
+        work->application = app; work->previous = previous; work->candidate = candidate;
+        work->presentations = previousPresentations;
+        work->manipulator = previousManipulatorType; work->selection = previousSelectionMode;
+        work->reservation = myDoc->BeginNativeReplacement();
+        if (!work->reservation) {
+            CloseDocumentNoThrow(app, candidate);
+            return AssetImportResult::Busy;
+        }
+        // Install the retained owner before the first context mutation. Assignment
+        // of shared_ptr is noexcept; every subsequent failure goes through recovery.
+        _documentReplacementWork = std::move(work);
+    } catch (...) {
+        CloseDocumentNoThrow(app, candidate);
+        return AssetImportResult::InternalFailure;
+    }
+
+    try {
+        OCC_CATCH_SIGNALS
+
         // Keep the previous OCAF document alive until the candidate has been
         // fully traversed and displayed. Only the presentation is temporary.
+        _meshVertexEditWork.reset();
         clearContext();
         if (traverseDocument(candidate)) {
-			restorePreviousState();
-			CloseDocumentNoThrow(app, candidate);
+			(void)restoreDocumentReplacement(true);
 			// Both isolated and live document validation have succeeded. This
 			// failure belongs to presentation: display budgets, AIS allocation,
 			// or graphics-driver errors can all make traversal fail. Reporting
@@ -3616,17 +3673,20 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         myContext->UpdateCurrentViewer();
     } catch (const Standard_Failure& failure) {
         std::cout << "Display CBF failure: " << failure.GetMessageString() << std::endl;
-		restorePreviousState();
-        CloseDocumentNoThrow(app, candidate);
+		(void)restoreDocumentReplacement(true);
         return AssetImportResult::InternalFailure;
     } catch (...) {
-		restorePreviousState();
-        CloseDocumentNoThrow(app, candidate);
+		(void)restoreDocumentReplacement(true);
         return AssetImportResult::InternalFailure;
     }
 
     _meshVertexEditWork.reset();
-    myDoc->ObserveSuccessfulNativeDocumentAdoption();
+    if (myDoc->EndNativeReplacement(*_documentReplacementWork->reservation, true, true)
+        != authority::ReplacementEnd::Adopted) {
+        (void)restoreDocumentReplacement(true);
+        return AssetImportResult::InternalFailure;
+    }
+    _documentReplacementWork.reset();
 #if DEBUG
     myDoc->DebugObserveSuccessfulDocumentAdoption();
 #endif
@@ -4075,6 +4135,7 @@ void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
     }
 
 void Core3DViewer::StartRotation(int theX, int theY) {
+    if (_documentReplacementWork) return;
     if(_objectInteractor == nullptr) {
         return;
     }
@@ -4926,6 +4987,7 @@ Core3DViewer::DebugMutateFirstBevelSourcePersistedTransform() noexcept
 #endif
 
 void Core3DViewer::Rotation(int theX, int theY) {
+    if (_documentReplacementWork) return;
     if(_objectInteractor == nullptr) {
         return;
     }
@@ -4943,6 +5005,7 @@ void Core3DViewer::Rotation(int theX, int theY) {
 }
 
 void Core3DViewer::FinishInteraction(int theX, int theY) {
+    if (_documentReplacementWork) return;
     if(_objectInteractor != nullptr) {
 		if (_objectInteractor->isPickingMirrorPlane()) {
 			return;
@@ -4952,6 +5015,7 @@ void Core3DViewer::FinishInteraction(int theX, int theY) {
 }
 
 void Core3DViewer::CancelInteraction(int theX, int theY) {
+    if (_documentReplacementWork) return;
     if(_objectInteractor != nullptr) {
 		if (_objectInteractor->isPickingMirrorPlane()) {
 			return;

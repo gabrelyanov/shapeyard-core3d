@@ -388,6 +388,12 @@ public:
   Standard_EXPORT void InitDoc();
   // Internal committed-adoption boundary; no public AI token is exposed.
   void ObserveSuccessfulNativeDocumentAdoption() noexcept;
+  // Private live-import ownership; native readiness is checked by the viewer.
+  std::optional<core3d::authority::ReplacementReservation> BeginNativeReplacement() noexcept;
+  core3d::authority::ReplacementEnd EndNativeReplacement(
+      const core3d::authority::ReplacementReservation& reservation,
+      bool accepted, bool restored) noexcept;
+
 #if DEBUG
   std::optional<core3d::authority::Stamp> DebugNativeMutationStamp() noexcept;
 #endif

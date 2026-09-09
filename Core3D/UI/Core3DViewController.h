@@ -1123,6 +1123,7 @@ typedef struct {
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeMutationLifecycle;
 - (BOOL)debugStartLiveTransactionProbe;
 - (void)debugFailNextDocumentAdoption;
+- (void)debugSetDocumentReplacementPreparationFailure:(BOOL)preparation restorationAttempts:(NSInteger)restorationAttempts;
 - (void)debugStopLiveTransactionProbe;
 - (NSDictionary<NSString *, id> *_Nullable)debugLiveTransactionProbe;
 //! Deterministic projected gestures through the production transform/commit

@@ -63,6 +63,7 @@ namespace core3d {
         std::vector<std::array<std::uint32_t,2>> edgeVertices;
         std::vector<std::array<std::uint32_t,3>> triangleVertices;
     };
+    struct DocumentReplacementWork;
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
     enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps };
@@ -377,6 +378,11 @@ namespace core3d {
         //! walk and did not enter Core3DViewer's geometric BRep checker.
         //! Fail once after provisional document assignment, before adoption.
         void DebugFailNextDocumentAdoption() noexcept { _debugFailNextDocumentAdoption = true; }
+        void DebugSetDocumentReplacementFaults(bool preparation, int restorationAttempts) noexcept {
+            _debugFailNextDocumentPreparation = preparation;
+            _debugDocumentRestorationFailures = restorationAttempts < 0 ? 0 : restorationAttempts > 100 ? 100 : restorationAttempts;
+        }
+
         void DebugResetProjectTopologyValidationCounters() const;
         Standard_Size DebugBoundedProjectTopologyValidationCount() const;
         Standard_Size DebugGeometricBRepValidationCount() const;
@@ -427,8 +433,12 @@ namespace core3d {
     private:
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
         std::shared_ptr<MeshVertexEditWork> _meshVertexEditWork;
+        std::shared_ptr<DocumentReplacementWork> _documentReplacementWork;
+        bool restoreDocumentReplacement(bool afterImportFailure = false) noexcept;
 #ifdef DEBUG
         bool _debugFailNextDocumentAdoption = false;
+        bool _debugFailNextDocumentPreparation = false;
+        int _debugDocumentRestorationFailures = 0;
         int _debugOrdinaryRepairFailures = 0;
         int _debugOrdinaryCreationAfterRepairFailures = 0;
         int _debugOrdinaryVisibilityAfterRepairFailures = 0;
