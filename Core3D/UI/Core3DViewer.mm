@@ -3878,9 +3878,10 @@ bool Core3DViewer::frameModel(
         cameraWasMutated = true;
         myView->FitAll(bounds, 0.15, Standard_False);
         const auto& camera = myView->Camera();
-        if (targetX != 0.0 || targetY != 0.0
-            || targetWidth != 1.0 || targetHeight != 1.0) {
-            // Keep projection, aspect and orientation intact. First shrink the
+        {
+            // Verify full-viewport fits too: FitAll alone can clip tall
+            // perspective models. Keep projection, aspect and orientation
+            // intact. First shrink the
             // full-view fit, then translate the camera parallel to its image
             // plane. Verify every bounding-box corner after perspective divide:
             // deep geometry must fit as well as the center plane.
