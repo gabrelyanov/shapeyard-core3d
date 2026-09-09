@@ -893,6 +893,7 @@ typedef struct {
 - (NSInteger)debugApplyViewerOrdinaryPivotRotation:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryCreationFault:(NSInteger)mode;
 - (BOOL)debugConfigureMeshCopyFault:(NSInteger)mode;
+- (BOOL)debugProbeMeshVertexStorageChange:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;

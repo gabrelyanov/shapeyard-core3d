@@ -2465,6 +2465,88 @@ OrdinaryEditResult Core3DViewer::commitMeshVertexEdit(const std::string& session
     } catch(...) {return OrdinaryEditResult::Invalid;}
 }
 
+#ifdef DEBUG
+// Synchronous test-only corruption window. Restore the exact original storage
+// before returning, including handle identity; never leave a fixture mutated.
+bool Core3DViewer::debugProbeMeshVertexStorageChange(int mode) noexcept {
+    if(![NSThread isMainThread] || mode<0 || mode>8 || !_meshVertexEditWork
+        || !canBeginCommittedEdit())return false;
+    const auto work=_meshVertexEditWork;
+    const auto mesh=work->geometry.sourceMesh;
+    const int prefix=mesh.IsNull()?0:3*mesh->NbTriangles();
+    if(mesh.IsNull() || prefix<=0 || mesh->NbNodes()!=2*prefix
+        || !mesh->HasUVNodes() || !mesh->HasNormals())return false;
+    Handle(Poly_Triangulation) saved;
+    try {saved=mesh->Copy();}catch(...){return false;}
+    if(saved.IsNull() || saved==mesh)return false;
+    const auto document=work->document;
+    const auto beforeTime=document->GetData()->Time();
+    const auto beforeUndo=document->GetAvailableUndos();
+    const auto beforeRedo=document->GetAvailableRedos();
+    const auto restore=[&]() noexcept -> bool {
+        try {
+            for(int node=1;node<=mesh->NbNodes();++node) {
+                mesh->SetNode(node,saved->Node(node));
+                mesh->SetUVNode(node,saved->UVNode(node));
+                gp_Vec3f n;saved->Normal(node,n);mesh->SetNormal(node,n);
+            }
+            for(int t=1;t<=mesh->NbTriangles();++t)mesh->SetTriangle(t,saved->Triangle(t));
+            mesh->Deflection(saved->Deflection());
+            if(mode==8)BRep_Builder().UpdateFace(work->geometry.face,mesh);
+            return true;
+        }catch(...){return false;}
+    };
+    OrdinaryEditResult result=OrdinaryEditResult::RetryableFailure;
+    bool invoked=false;
+    try {
+        const int active=prefix+1;
+        switch(mode) {
+            case 0: {
+                // Move all exact coincident stored positions together, leaving
+                // topology valid; stale data alone must reject the old session.
+                const auto point=mesh->Node(active);
+                for(int node=1;node<=mesh->NbNodes();++node)
+                    if(mesh->Node(node).IsEqual(point,0.0))
+                        mesh->SetNode(node,gp_Pnt(point.X()+0.01,point.Y(),point.Z()));
+                break;
+            }
+            case 1: {auto p=mesh->Node(1);p.SetX(p.X()+0.01);mesh->SetNode(1,p);break;}
+            case 2: case 3: {
+                const int node=mode==2?active:1;auto uv=mesh->UVNode(node);
+                uv.SetX(uv.X()+0.01);mesh->SetUVNode(node,uv);break;
+            }
+            case 4: case 5: {
+                const int node=mode==4?active:1;gp_Vec3f n;mesh->Normal(node,n);
+                mesh->SetNormal(node,gp_Vec3f(-n[0],-n[1],-n[2]));break;
+            }
+            case 6: mesh->Deflection(mesh->Deflection()+0.01);break;
+            case 7: {
+                int a,b,c;mesh->Triangle(1).Get(a,b,c);
+                mesh->SetTriangle(1,Poly_Triangle(b,c,a));break;
+            }
+            case 8: BRep_Builder().UpdateFace(work->geometry.face,mesh->Copy());break;
+        }
+        invoked=true;
+        result=commitMeshVertexEdit(work->sessionIdentifier,{0},gp_Vec(0.5,0,0));
+    }catch(...){invoked=false;}
+    const bool restored=restore();
+    if(!restored || !invoked || result!=OrdinaryEditResult::Invalid
+        || _meshVertexEditWork || document->GetData()->Time()!=beforeTime
+        || document->GetAvailableUndos()!=beforeUndo || document->GetAvailableRedos()!=beforeRedo)
+        return false;
+    std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture after;
+    return meshedit::CaptureNativeTopology(work->geometry.shape,after,cancelled)==meshedit::TopologyResult::Ready
+        && after.sourceMesh==work->geometry.sourceMesh
+        && after.face.IsEqual(work->geometry.face)
+        && after.meshLocation.IsEqual(work->geometry.meshLocation)
+        && after.storedNodes==work->geometry.storedNodes
+        && after.storedUVs==work->geometry.storedUVs
+        && after.storedNormals==work->geometry.storedNormals
+        && after.deflection==work->geometry.deflection
+        && after.triangleNodeIDs==work->geometry.triangleNodeIDs;
+}
+#endif
+
 OrdinaryEditResult Core3DViewer::createSourceRetainedMeshCopy(
     const ObjectFrameIdentity& identity,std::uint32_t width,std::uint32_t height) noexcept {
     if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
