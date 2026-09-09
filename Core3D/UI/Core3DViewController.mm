@@ -3564,7 +3564,12 @@ void Core3DAddDebugOrphanVisualMaterial(
         // Keep the application strongly owned on this thread. The foreign
         // notification passes an empty handle; adapter guards must reject it
         // before dereferencing any native document or accessing the weak state.
-        const auto application = document->Document()->Application();
+        const auto application = Handle(TDocStd_Application)::DownCast(
+            document->Document()->Application());
+        if (application.IsNull()) {
+            result[@"foreignNotificationPoisonsActualAdapter"] = @NO;
+            return result;
+        }
         auto* applicationPointer = application.get();
         std::thread foreignCallback([applicationPointer] {
             const Handle(TDocStd_Document) empty;
