@@ -31,6 +31,8 @@
 
 #import "GLViewController.h"
 
+@class Core3DSceneFrameSnapshot;
+
 //! OpenGL view
 @interface GLView : UIView {
 
@@ -51,11 +53,22 @@
 @property (nonatomic, readonly, getter=isRenderLoopRunning) BOOL renderLoopRunning;
 @property (nonatomic, readonly) EAGLRenderingAPI renderingAPI;
 
+//! One bounded main-thread observer. A successful actual presentation supplies
+//! its post-Draw camera; a later invalidation supplies nil exactly once and
+//! releases the observer. CaptureFrame carries cached geometry revisions, so
+//! callers must independently validate fresh scene and native edit authority.
+- (BOOL)observeNextPresentation:(NSUUID *)identifier
+                       capture:(Core3DSceneFrameSnapshot * _Nullable (^)(void))capture
+                       changed:(void (^)(Core3DSceneFrameSnapshot * _Nullable, CGSize))changed;
+- (void)cancelPresentationObservation:(NSUUID *)identifier;
+- (BOOL)isPresentationObservationCurrent:(NSUUID *)identifier;
+
 - (void)requestRender;
 - (void)beginInteractiveRendering;
 - (void)endInteractiveRendering;
 - (BOOL)performWithRenderingContext:(void (^)(void))work;
 #ifdef DEBUG
+- (void)debugSkipNextPresentation;
 //! Draw the existing viewport once and read a bounded center crop before the
 //! non-retained renderbuffer is presented. Test-only renderer truth.
 - (NSDictionary<NSString *, id> *_Nullable)debugDrawAndReadViewportRGBA;

@@ -603,6 +603,21 @@ typedef struct {
 //! committed Shell result remains indeterminate, or before the native viewer
 //! has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
+//! Observe one native frame and its invalidation, main-thread only. The callback
+//! receives a camera only after actual Draw and successful presentation; a later
+//! redraw/edit/lifecycle invalidation reports nil and releases the observer.
+//! Caller supplies request identity and must cancel on owner disappearance.
+//! Cached frame model revisions are not geometry or edit authority.
+- (BOOL)observeNativeViewportPresentation:(NSUUID *)identifier
+    changed:(void (^)(Core3DSceneFrameSnapshot *_Nullable frame, CGSize drawableSize))changed
+    NS_SWIFT_NAME(observeNativeViewportPresentation(_:changed:));
+- (void)cancelNativeViewportPresentation:(NSUUID *)identifier;
+- (BOOL)isNativeViewportPresentationCurrent:(NSUUID *)identifier;
+#ifdef DEBUG
+- (void)debugFailNextNativeViewportDraw;
+- (void)debugSkipNextNativeViewportPresentation;
+#endif
+
 //! Change camera projection without changing target-plane scale or the model.
 //! Returns NO when the viewer is unavailable or a modeling operation is active.
 - (BOOL)setCameraOrthographic:(BOOL)orthographic

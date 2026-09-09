@@ -17,6 +17,7 @@
 //
 
 #import "GLViewController.h"
+#import "GLView.h"
 #import "Core3DViewController.h"
 #import "Core3DViewController+AvailabilityManager.h"
 #import "Core3DViewController+PrimitiveManager.h"
@@ -6086,6 +6087,40 @@ void Core3DAddDebugOrphanVisualMaterial(
     [GLController.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:0.0].active = YES;
     [GLController.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:0.0].active = YES;
     [GLController didMoveToParentViewController:self];
+}
+
+#ifdef DEBUG
+- (void)debugFailNextNativeViewportDraw {
+    if (!NSThread.isMainThread || !GLController.isViewLoaded) return;
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr) return;
+    const auto armed = std::make_shared<bool>(true);
+    viewer->DebugSetFrameObserver([armed](bool rendered) {
+        if (!rendered && *armed) { *armed = false; return false; }
+        return true;
+    });
+}
+- (void)debugSkipNextNativeViewportPresentation {
+    if (!NSThread.isMainThread || !GLController.isViewLoaded) return;
+    [(GLView *)GLController.view debugSkipNextPresentation];
+}
+#endif
+- (BOOL)observeNativeViewportPresentation:(NSUUID *)identifier
+    changed:(void (^)(Core3DSceneFrameSnapshot *_Nullable, CGSize))changed {
+    if (!NSThread.isMainThread || !_isSetuped || !self.isViewLoaded
+        || ![GLController.view isKindOfClass:GLView.class]) return NO;
+    __weak Core3DViewController *weakSelf = self;
+    return [(GLView *)GLController.view observeNextPresentation:identifier capture:^{
+        return [weakSelf captureSceneFrameSnapshot];
+    } changed:changed];
+}
+- (void)cancelNativeViewportPresentation:(NSUUID *)identifier {
+    if (!NSThread.isMainThread || !GLController.isViewLoaded) return;
+    [(GLView *)GLController.view cancelPresentationObservation:identifier];
+}
+- (BOOL)isNativeViewportPresentationCurrent:(NSUUID *)identifier {
+    return NSThread.isMainThread && GLController.isViewLoaded
+        && [(GLView *)GLController.view isPresentationObservationCurrent:identifier];
 }
 
 - (NSUInteger)viewportRenderedFrameCount {

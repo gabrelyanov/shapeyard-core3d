@@ -95,6 +95,14 @@ private:
     NSUInteger _renderedFrameCount;
     NSUInteger _consecutiveRenderFailures;
     NSUInteger _consecutiveDrawableCreationFailures;
+    NSUUID *_presentationObservation;
+    Core3DSceneFrameSnapshot * _Nullable (^_presentationCapture)(void);
+    void (^_presentationChanged)(Core3DSceneFrameSnapshot * _Nullable, CGSize);
+    BOOL _presentationDelivered;
+#ifdef DEBUG
+    BOOL _debugSkipNextPresentation;
+#endif
+
 }
 
 // =======================================================================
@@ -309,6 +317,7 @@ private:
 
 - (void) destroyBuffers
 {
+    [self invalidatePresentationObservation];
     [self performWithRenderingContext:^{
         glDeleteFramebuffers(1, &self->myFrameBuffer);
         glDeleteRenderbuffers(1, &self->myRenderBuffer);
@@ -326,33 +335,114 @@ private:
 // function : drawView
 // purpose  :
 // =======================================================================
+- (void)invalidatePresentationObservation
+{
+    void (^changed)(Core3DSceneFrameSnapshot *, CGSize) = _presentationChanged;
+    _presentationObservation = nil;
+    _presentationCapture = nil;
+    _presentationChanged = nil;
+    _presentationDelivered = NO;
+    if (changed) { changed(nil, CGSizeZero); }
+}
+
+- (BOOL)observeNextPresentation:(NSUUID *)identifier
+                       capture:(Core3DSceneFrameSnapshot * _Nullable (^)(void))capture
+                       changed:(void (^)(Core3DSceneFrameSnapshot * _Nullable, CGSize))changed
+{
+    if (!NSThread.isMainThread || identifier == nil || capture == nil || changed == nil
+        || _presentationObservation != nil || _isDrawing || ![self canRender]) return NO;
+    _presentationObservation = [identifier copy];
+    _presentationCapture = [capture copy];
+    _presentationChanged = [changed copy];
+    _presentationDelivered = NO;
+    // No model/camera mutation: schedule on the owned display link without
+    // requestRender's scene-invalidation notification cancelling this request.
+    _frameRequested = YES;
+    [self updateDisplayLinkState];
+    __weak GLView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        GLView *view = weakSelf;
+        if (view && [view->_presentationObservation isEqual:identifier] && !view->_presentationDelivered) {
+            [view invalidatePresentationObservation];
+        }
+    });
+    return YES;
+}
+
+- (void)cancelPresentationObservation:(NSUUID *)identifier
+{
+    if (!NSThread.isMainThread || ![_presentationObservation isEqual:identifier]) return;
+    _presentationObservation = nil;
+    _presentationCapture = nil;
+    _presentationChanged = nil;
+    _presentationDelivered = NO;
+}
+
+- (BOOL)isPresentationObservationCurrent:(NSUUID *)identifier
+{
+    return NSThread.isMainThread && _presentationDelivered
+        && [_presentationObservation isEqual:identifier] && [self canRender] && !_isDrawing;
+}
+
 - (BOOL) drawView
 {
     NSAssert(NSThread.isMainThread, @"The viewport renderer is main-thread owned.");
-    if (!_hasDrawable || _isDrawing || myController == nil) {
+    if (_isDrawing) return NO;
+    if (_presentationDelivered) [self invalidatePresentationObservation];
+    if (!_hasDrawable || myController == nil) {
+        [self invalidatePresentationObservation];
         return NO;
     }
+    NSUUID *observation = _presentationObservation;
     _isDrawing = YES;
     if (![EAGLContext setCurrentContext:myGLContext]) {
         _isDrawing = NO;
+        [self invalidatePresentationObservation];
         return NO;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, myFrameBuffer);
     glViewport(0, 0, myBackingWidth, myBackingHeight);
     if (![myController Draw]) {
         _isDrawing = NO;
+        [self invalidatePresentationObservation];
         return NO;
     }
+    Core3DSceneFrameSnapshot *candidate = nil;
+    if (observation && [_presentationObservation isEqual:observation] && _presentationCapture) {
+        candidate = _presentationCapture();
+    }
     glBindRenderbuffer(GL_RENDERBUFFER, myRenderBuffer);
-    const BOOL didPresent = [myGLContext presentRenderbuffer:GL_RENDERBUFFER];
+
+#ifdef DEBUG
+    const BOOL skipPresentation = _debugSkipNextPresentation;
+    _debugSkipNextPresentation = NO;
+#else
+    const BOOL skipPresentation = NO;
+#endif
+    const BOOL didPresent = !skipPresentation && [myGLContext presentRenderbuffer:GL_RENDERBUFFER];
     if (didPresent) {
         ++_renderedFrameCount;
     }
     _isDrawing = NO;
+    if (observation && [_presentationObservation isEqual:observation]) {
+        if (didPresent && candidate) {
+            _presentationDelivered = YES;
+            _presentationCapture = nil;
+            // Keep the executing block alive if its callback cancels itself.
+            void (^changed)(Core3DSceneFrameSnapshot *, CGSize) = _presentationChanged;
+            changed(candidate, self.drawableSize);
+        } else {
+            [self invalidatePresentationObservation];
+        }
+    }
     return didPresent;
 }
 
 #ifdef DEBUG
+- (void)debugSkipNextPresentation {
+    NSAssert(NSThread.isMainThread, @"Native presentation is main-thread owned.");
+    _debugSkipNextPresentation = YES;
+}
 - (NSData *_Nullable)debugDrawAndReadBoundedRGBAWithWidth:(NSUInteger)width
                                                    height:(NSUInteger)height
 {
@@ -366,6 +456,7 @@ private:
         return nil;
     }
 
+    [self invalidatePresentationObservation];
     __block NSData *result = nil;
     const BOOL hadContext = [self performWithRenderingContext:^{
         self->_isDrawing = YES;
@@ -553,6 +644,10 @@ private:
 
 - (void)dealloc
 {
+    // Do not call a client during partial owner destruction.
+    _presentationChanged = nil;
+    _presentationCapture = nil;
+    _presentationObservation = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_displayLink invalidate];
     [self destroyBuffers];
@@ -569,6 +664,7 @@ private:
         [self setNeedsLayout];
         [self requestRender];
     } else {
+        [self invalidatePresentationObservation];
         _interactiveRenderingDepth = 0;
         _consecutiveDrawableCreationFailures = 0;
         _hasDrawable = NO;
@@ -580,6 +676,7 @@ private:
 {
     (void)notification;
     _applicationActive = NO;
+    [self invalidatePresentationObservation];
     _interactiveRenderingDepth = 0;
     _frameRequested = NO;
     _consecutiveDrawableCreationFailures = 0;
@@ -623,6 +720,7 @@ private:
         });
         return;
     }
+    [self invalidatePresentationObservation];
     const BOOL beginsNewRequest = !_frameRequested;
     _frameRequested = YES;
     if (!_hasDrawable) {
@@ -653,6 +751,7 @@ private:
         });
         return;
     }
+    [self invalidatePresentationObservation];
     ++_interactiveRenderingDepth;
     _frameRequested = YES;
     if (!_hasDrawable) {
