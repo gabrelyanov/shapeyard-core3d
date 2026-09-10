@@ -711,6 +711,7 @@ bool ApplyPrivateExportTransforms(
 
 Handle(Poly_Triangulation) BuildBinarySTLMesh(
     const TopoDS_Shape& shape,
+    const double millimetersPerUnit,
     const std::shared_ptr<NativeExportState>& state,
     const Message_ProgressRange& progress) {
     Message_ProgressScope buildScope(progress, "Flatten STL mesh", 2);
@@ -799,6 +800,13 @@ Handle(Poly_Triangulation) BuildBinarySTLMesh(
             }
             gp_Pnt point = triangulation->Node(nodeIndex);
             point.Transform(transform);
+            // STL carries no standard unit metadata. Normalize only this
+            // detached export mesh; keep the editable document in its units.
+            if (millimetersPerUnit != 1.0) {
+                point.SetCoord(point.X() * millimetersPerUnit,
+                               point.Y() * millimetersPerUnit,
+                               point.Z() * millimetersPerUnit);
+            }
             if (!std::isfinite(point.X())
                 || !std::isfinite(point.Y())
                 || !std::isfinite(point.Z())) {
@@ -1740,6 +1748,15 @@ NativeExportResult RunNativeExport(
             MeshPrivateExportSurfaces(compound, state, whole.Next(4));
 
             if (state->exportType == ExportTypeStl) {
+                Standard_Real metersPerUnit = 0.001;
+                if (!XCAFDoc_DocumentTool::GetLengthUnit(ocafDocument, metersPerUnit)) {
+                    metersPerUnit = 0.001;
+                }
+                const double millimetersPerUnit = metersPerUnit * 1000.0;
+                if (!std::isfinite(millimetersPerUnit) || millimetersPerUnit <= 0.0) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidState,
+                        "The STL source unit cannot be represented in millimeters.");
+                }
                 Message_ProgressScope stlScope(
                     whole.Next(5),
                     "Binary STL export",
@@ -1747,6 +1764,7 @@ NativeExportResult RunNativeExport(
                 const Handle(Poly_Triangulation) stlMesh =
                     BuildBinarySTLMesh(
                         compound,
+                        millimetersPerUnit,
                         state,
                         stlScope.Next(1));
                 const OSD_Path outputPath(
