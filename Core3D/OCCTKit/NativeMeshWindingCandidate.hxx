@@ -1,5 +1,5 @@
 #pragma once
-// PRIVATE UNQUALIFIED DRAFT. The document owner must separately validate unit,
+// Private geometry preparer. The document owner separately validates unit,
 // exact identity, atlas provenance, material recipe, generated normal binding,
 // memory budget and ordinary-edit recovery. Authored/supplied frames are excluded.
 #include "NativeMeshWindingPlan.hpp"

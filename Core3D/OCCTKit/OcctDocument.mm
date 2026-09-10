@@ -5283,9 +5283,7 @@ Standard_Boolean OcctDocument::ValidateMeshVertexMove(const TDF_Label& label,
     } catch(...) {return Standard_False;}
 }
 
-// EXTERNAL UNAPPLIED/UNCOMPILED. Intended inside OcctDocument.mm with
-// NativeMeshWindingCandidate.hxx, after existing mesh admission helpers.
-// Header enum: OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared }.
+// Capture exact owner state separately from strict selectable topology.
 namespace {
 bool CaptureWindingRepairSource(const OcctDocument& document, const TDF_Label& label,
     OcctObjectTransformState& source, core3d::meshedit::NativeMeshStorageCapture& captured,
