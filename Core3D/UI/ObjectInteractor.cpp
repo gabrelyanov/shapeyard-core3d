@@ -41,6 +41,7 @@
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Integer.hxx>
 #include <TDataStd_Real.hxx>
+#include <TDataStd_Name.hxx>
 #include <GP_Quaternion.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -1255,12 +1256,15 @@ namespace core3d {
 			for (const DuplicatePendingResult& duplicate :
 				 _pendingDuplicateResults) {
                 profile::Record sourceProfile;
+                OcctObjectNameState sourceName;
                 if (duplicate.sourceLabel.IsNull()
                     || duplicate.sourceLabel.Data() != document->GetData()
                     || duplicate.originalOwnerShape.IsNull()
                     || !duplicate.originalOwnerShape.IsEqual(XCAFDoc_ShapeTool::GetShape(duplicate.sourceLabel))
                     || !profile::Read(document, duplicate.sourceLabel, sourceProfile)
                     || !sourceProfile.IsEqual(duplicate.originalProfile)
+                    || !myDoc->CaptureObjectNameStateForLabel(duplicate.sourceLabel, sourceName)
+                    || !sourceName.IsEqual(duplicate.originalName)
                     || sourceProfile.IsCurrent(document, duplicate.sourceLabel) != duplicate.originalProfileCurrent) {
                     return DuplicateDocumentState::PartialOrMismatched;
                 }
@@ -1287,7 +1291,11 @@ namespace core3d {
 					myDoc->ReadReferenceAxisForLabel(
 						duplicate.resultLabel,
 						storedReferenceAxis);
+                OcctObjectNameState actualName;
 				if (!duplicate.profileCandidateSealed
+                    || !myDoc->CaptureObjectNameStateForLabel(duplicate.resultLabel, actualName)
+                    || actualName.namePresent != duplicate.originalName.namePresent
+                    || (actualName.namePresent && !actualName.name.IsEqual(duplicate.originalName.name))
                     || !actualProfile.IsEqual(duplicate.candidateProfile)
                     || actualProfile.IsCurrent(document, duplicate.resultLabel) != duplicate.originalProfileCurrent
                     || duplicate.expectedShape.IsNull()
@@ -1495,6 +1503,7 @@ namespace core3d {
 			OcctReferenceAxisReadState referenceAxisState;
 			OcctReferenceAxis referenceAxis;
             profile::Record savedProfile;
+            OcctObjectNameState name;
             TopoDS_Shape ownerShape;
             bool profileCurrent = false;
         };
@@ -1544,9 +1553,11 @@ namespace core3d {
             }
 			if (!isDuplicateLabel) {
                 profile::Record savedProfile;
-                if (!profile::Read(doc, label, savedProfile)) { return; }
+                OcctObjectNameState name;
+                if (!profile::Read(doc, label, savedProfile)
+                    || !myDoc->CaptureObjectNameStateForLabel(label, name)) { return; }
 				sources.push_back({shape, label, destinationRepresentation,
-                    referenceAxisState, referenceAxis, savedProfile, storedShape,
+                    referenceAxisState, referenceAxis, savedProfile, name, storedShape,
                     savedProfile.IsCurrent(doc, label)});
             }
         }
@@ -1651,6 +1662,7 @@ namespace core3d {
                 duplicate.expectedReferenceAxisState = source.referenceAxisState;
                 duplicate.expectedReferenceAxis = source.referenceAxis;
                 duplicate.originalProfile = source.savedProfile;
+                duplicate.originalName = source.name;
                 duplicate.originalOwnerShape = source.ownerShape;
                 duplicate.originalProfileCurrent = source.profileCurrent;
                 if (!source.savedProfile.label.IsNull()) {
@@ -1827,6 +1839,13 @@ namespace core3d {
                 }
 #endif
                 duplicate.profileCandidateSealed = true;
+                // Preserve authored names and their absence on each independent
+                // part. Closed-commit recovery compares this exact source state.
+                if (duplicate.originalName.namePresent) {
+                    TDataStd_Name::Set(label, duplicate.originalName.name);
+                } else {
+                    label.ForgetAttribute(TDataStd_Name::GetID());
+                }
 				myDoc->LoadObjectMeterial(label, duplicate.presentation);
 			}
             auto& groupAuthority = *_pendingDuplicateResults.front().groups;

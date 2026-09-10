@@ -506,6 +506,7 @@ namespace core3d {
 			OcctReferenceAxis expectedReferenceAxis;
             std::optional<DuplicateGroupAuthority> groups; // owned by the first result only
             profile::Record originalProfile;
+            OcctObjectNameState originalName;
             TopoDS_Shape originalOwnerShape;
             bool originalProfileCurrent = false;
             TopoDS_Shape preparedProfileBinding;

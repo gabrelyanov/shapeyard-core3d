@@ -249,7 +249,7 @@ inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
             || !XCAFDoc_ShapeTool::IsFree(destinationOwner)
             || !IsIdentifier(newIdentifier) || newIdentifier == original.identifier
             || !Encode(original.parameters, encoded) || encoded != original.values
-            || destinationShape.IsNull() || destinationShape.ShapeType() != TopAbs_SOLID
+            || destinationShape.IsNull() || destinationShape.ShapeType() != originalOwnerShape.ShapeType()
             || destinationShape.IsPartner(originalOwnerShape)
             || preparedBinding.IsNull() || preparedBinding.ShapeType() != TopAbs_SOLID
             || preparedBinding.IsPartner(original.boundShape)) return false;

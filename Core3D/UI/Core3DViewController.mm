@@ -3501,6 +3501,7 @@ void Core3DAddDebugOrphanVisualMaterial(
         const auto shape = BRepPrimAPI_MakeBox(60.0, 40.0, 30.0).Shape();
         const auto label = shapeTool->AddShape(shape, Standard_False, Standard_True);
         if (label.IsNull()) throw Standard_Failure("Unable to create unit-stale profile fixture");
+        Core3DSetDebugGeometryRepresentation(label, 1);
         core3d::profile::Parameters parameters;
         parameters.metersPerUnit = 0.001;
         parameters.definition.points = {gp_Pnt2d(0, 0), gp_Pnt2d(60, 0), gp_Pnt2d(60, 40), gp_Pnt2d(0, 40)};
