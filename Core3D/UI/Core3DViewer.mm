@@ -2101,7 +2101,17 @@ bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
     return _queuedAssetLoadWork != nullptr || hasUnresolvedOrdinaryEditExcludingQueuedLoad();
 }
 bool Core3DViewer::hasUnresolvedEdit() const noexcept {
-    return hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate();
+    if (hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate()) return true;
+    if (!_objectInteractor) return false;
+    // Availability must agree with the authoritative array outcome. A ready
+    // preview remains usable; a committing or uncertain result cannot expose
+    // Undo, Add or Export while its own controller retains recovery ownership.
+    const auto linear = _objectInteractor->linearArrayPreviewState();
+    const auto radial = _objectInteractor->radialArrayPreviewState();
+    return linear == LinearArrayPreviewState::Committing
+        || linear == LinearArrayPreviewState::OutcomeUnknown
+        || radial == RadialArrayPreviewState::Committing
+        || radial == RadialArrayPreviewState::OutcomeUnknown;
 }
 OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
     const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure) noexcept {

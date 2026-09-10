@@ -568,7 +568,12 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         before.state == Core3DModelingPreviewStateReady
         || before.state == Core3DModelingPreviewStateOutcomeUnknown;
     if (!isApplicable || !before.canApply) {
-        return Core3DModelingOperationResultNotReady;
+        // A separate reference-edit ledger may own an uncertain result while
+        // geometry Apply is disabled. Preserve that outcome without invoking
+        // the wrong retry path or implying that no command has committed.
+        return before.state == Core3DModelingPreviewStateOutcomeUnknown
+            ? Core3DModelingOperationResultOutcomeUnknown
+            : Core3DModelingOperationResultNotReady;
     }
 
     const BOOL reportedCompletion = attempt != nil && attempt();
