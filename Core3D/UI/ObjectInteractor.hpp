@@ -391,6 +391,8 @@ namespace core3d {
 #ifdef DEBUG
 		//! Inject Duplicate recovery behavior: 0 normal, 1 false-after-close,
 		//! 2 throw-after-close, 3 fail the first post-commit presentation repair.
+        //! Profile faults: 4 stage authority mismatch, 5 post-stage read failure,
+        //! 6 candidate identity mismatch, 7 source identity mismatch after close.
 		void debugSetDuplicateCommitMode(Standard_Integer mode) noexcept;
 		MirrorPreviewDebugState debugMirrorPreviewState() const noexcept;
 		void debugSetMirrorTransactionFailureCount(
@@ -503,6 +505,13 @@ namespace core3d {
 				OcctReferenceAxisReadState::Invalid;
 			OcctReferenceAxis expectedReferenceAxis;
             std::optional<DuplicateGroupAuthority> groups; // owned by the first result only
+            profile::Record originalProfile;
+            TopoDS_Shape originalOwnerShape;
+            bool originalProfileCurrent = false;
+            TopoDS_Shape preparedProfileBinding;
+            std::string preparedProfileIdentifier;
+            profile::Record candidateProfile;
+            bool profileCandidateSealed = false;
 		};
 		std::vector<DuplicatePendingResult> _pendingDuplicateResults;
 		bool _duplicateOwnsDocumentCommand = false;
@@ -572,6 +581,7 @@ namespace core3d {
 		bool _manipulatorGestureActive = false;
 #ifdef DEBUG
 		Standard_Integer _debugDuplicateCommitMode = 0;
+        Standard_Integer _debugDuplicateProfileFault = 0;
 		Standard_Size _debugDuplicatePresentationRepairFailureCount = 0;
 		Standard_Size _debugMirrorTransactionFailureCount = 0;
 		Standard_Size _debugMirrorAbortFailureCount = 0;

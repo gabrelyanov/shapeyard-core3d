@@ -1184,6 +1184,9 @@ typedef struct {
 //! Standalone BinXCAF fixture whose XCAF document length unit is exactly one
 //! meter per model unit. Used to prove unit metadata persistence end to end.
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
+//! Standalone fixture: saved profile binds its root but retains a different original unit.
+- (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData;
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileDuplicateCapacityProbe:(NSInteger)mode;
 //! Standalone BinXCAF fixture whose sole box has a negative-determinant root
 //! location. Used to prove mesh exporters preserve outward winding.
 - (NSData *_Nullable)debugNegativeLocationBinXCAFFixtureData;

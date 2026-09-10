@@ -220,6 +220,69 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
     } catch (...) { return false; }
 }
 
+inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
+                           const TDF_Label& sourceOwner, const Record& original,
+                           const TopoDS_Shape& originalOwnerShape,
+                           const TDF_Label& destinationOwner,
+                           const TopoDS_Shape& preparedBinding,
+                           const std::string& newIdentifier,
+                           Record& candidate) noexcept {
+    candidate = {};
+    try {
+        Record liveSource, previousDestination;
+        if (document.IsNull() || !document->HasOpenCommand()
+            || sourceOwner.IsNull() || destinationOwner.IsNull()
+            || sourceOwner.Data() != document->GetData()
+            || destinationOwner.Data() != document->GetData()
+            || sourceOwner.IsEqual(destinationOwner)
+            || originalOwnerShape.IsNull()
+            || !originalOwnerShape.IsEqual(XCAFDoc_ShapeTool::GetShape(sourceOwner))
+            || !Read(document, sourceOwner, liveSource) || !liveSource.IsEqual(original)
+            || !Read(document, destinationOwner, previousDestination)
+            || !previousDestination.label.IsNull()) return false;
+        // Legacy shapes without recipes continue to duplicate without one.
+        if (original.label.IsNull())
+            return preparedBinding.IsNull() && newIdentifier.empty();
+        const auto destinationShape = XCAFDoc_ShapeTool::GetShape(destinationOwner);
+        std::vector<double> encoded;
+        if (!XCAFDoc_ShapeTool::IsSimpleShape(destinationOwner)
+            || !XCAFDoc_ShapeTool::IsFree(destinationOwner)
+            || !IsIdentifier(newIdentifier) || newIdentifier == original.identifier
+            || !Encode(original.parameters, encoded) || encoded != original.values
+            || destinationShape.IsNull() || destinationShape.ShapeType() != TopAbs_SOLID
+            || destinationShape.IsPartner(originalOwnerShape)
+            || preparedBinding.IsNull() || preparedBinding.ShapeType() != TopAbs_SOLID
+            || preparedBinding.IsPartner(original.boundShape)) return false;
+        const bool boundToSourceRoot = original.boundShape.IsEqual(originalOwnerShape);
+        // The independently copied current root must be used only when the
+        // original recipe was actually bound to its root, even if units stale.
+        if (preparedBinding.IsEqual(destinationShape) != boundToSourceRoot) return false;
+        const bool expectedCurrent = original.IsCurrent(document, sourceOwner);
+        int maximumTag = 0;
+        for (TDF_ChildIterator it(destinationOwner, Standard_False); it.More(); it.Next())
+            maximumTag = std::max(maximumTag, it.Value().Tag());
+        if (maximumTag == std::numeric_limits<int>::max()) return false;
+        const auto label = destinationOwner.FindChild(maximumTag + 1, Standard_True);
+        TDataStd_Integer::Set(label, SchemaID(), 1);
+        TDataStd_Integer::Set(label, CountID(), int(encoded.size()));
+        TDataStd_AsciiString::Set(label, IdentityID(), TCollection_AsciiString(newIdentifier.c_str()));
+        TNaming_Builder(label).Select(preparedBinding, preparedBinding);
+        for (std::size_t i = 0; i < encoded.size(); ++i)
+            TDataStd_Real::Set(label.FindChild(int(i) + 1, Standard_True), encoded[i]);
+        Record stored;
+        if (!Read(document, destinationOwner, stored)
+            || stored.identifier != newIdentifier || stored.values != original.values
+            || !stored.boundShape.IsEqual(preparedBinding)
+            || stored.IsCurrent(document, destinationOwner) != expectedCurrent)
+            return false;
+        // Prove that adding a new feature did not touch the original labels.
+        if (!Read(document, sourceOwner, liveSource) || !liveSource.IsEqual(original)
+            || !originalOwnerShape.IsEqual(XCAFDoc_ShapeTool::GetShape(sourceOwner))) return false;
+        candidate = std::move(stored);
+        return true;
+    } catch (...) { candidate = {}; return false; }
+}
+
 inline bool ValidateDocument(const Handle(TDocStd_Document)& document, std::vector<Record>& records) noexcept {
     records.clear();
     try {

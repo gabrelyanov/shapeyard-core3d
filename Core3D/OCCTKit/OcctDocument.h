@@ -572,6 +572,8 @@ public:
         const TDF_Label& label, Standard_Boolean visible) noexcept;
     //! Read-only, bounded semantic validation; no lazy metadata allocation.
     Standard_EXPORT static std::string NewSavedGroupIdentifier() noexcept;
+    //! Allocate a new feature identity without opening or mutating a document.
+    Standard_EXPORT static std::string NewProfileIdentifier() noexcept;
     Standard_EXPORT Standard_Boolean CaptureSavedGroups(OcctSavedGroupState& state) const noexcept;
     //! Replace the bounded catalog in an already owned command. Input record
     //! labels are ignored; stable group IDs retain their canonical record slots.

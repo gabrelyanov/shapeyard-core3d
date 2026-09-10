@@ -74,6 +74,8 @@
 #include "NCollection_Buffer.hxx"
 #include "TDataStd_Integer.hxx"
 #include "TDataStd_AsciiString.hxx"
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include "TDataStd_Name.hxx"
 #include "TDataStd_Real.hxx"
 #include "TDF_LabelSequence.hxx"
@@ -3390,6 +3392,137 @@ void Core3DAddDebugOrphanVisualMaterial(
     viewer->FitAll();
     [GLController requestRender];
     return YES;
+}
+
+// DEBUG-only standalone import fixture; never mutates the live document.
+// DEBUG-only real-document admission probe. All setup is in a standalone OCAF
+// document; the production limits and CanDuplicateGeometryDefinitions are used.
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileDuplicateCapacityProbe:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 1) return nil;
+    struct Scope {
+        Handle(OcctDocument) wrapper = new OcctDocument();
+        Handle(TDocStd_Document) document;
+        ~Scope() noexcept { try { if (!document.IsNull()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            const auto app = Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!app.IsNull()) app->Close(document);
+        } } catch (...) {} }
+    } scope;
+    try {
+        scope.wrapper->InitDoc(); scope.document = scope.wrapper->Document();
+        const auto& document = scope.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto original = BRepPrimAPI_MakeBox(60.0, 40.0, 30.0).Shape();
+        document->NewCommand();
+        const auto label = shapes->AddShape(original, Standard_False);
+        core3d::profile::Parameters parameters;
+        parameters.metersPerUnit = 0.001;
+        parameters.definition.points = {gp_Pnt2d(0,0), gp_Pnt2d(60,0), gp_Pnt2d(60,40), gp_Pnt2d(0,40)};
+        parameters.definition.plane = 0; parameters.definition.depth = 30;
+        if (!core3d::profile::Stage(document, label, parameters, NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand()) return nil;
+        core3d::profile::Record record;
+        if (!core3d::profile::Read(document, label, record) || !record.IsCurrent(document, label)) return nil;
+        Standard_Size admittedCopies = 1, shapeCost = 0;
+        auto countLabels = [&]() {
+            Standard_Size count = 0;
+            for (TDF_ChildIterator it(document->GetData()->Root(), Standard_True); it.More(); it.Next()) ++count;
+            return count;
+        };
+        if (mode == 0) {
+            // Exact production 100000-label boundary: a new definition and its
+            // eight transform labels, plus the recipe and its actual scalars.
+            const Standard_Size destinationLabels = 9U + 1U + record.values.size();
+            const Standard_Size target = 100000U - destinationLabels;
+            const auto filler = document->GetData()->Root().FindChild(900000, Standard_True);
+            const Standard_Size before = countLabels();
+            if (before >= target) return nil;
+            for (Standard_Size i = 1; i <= target - before; ++i)
+                filler.FindChild(static_cast<Standard_Integer>(i), Standard_True);
+            if (countLabels() != target) return nil;
+        } else {
+            // Retain the original recipe binding while replacing its root with
+            // a distinct larger box, just as a later solid edit can do.
+            const auto later = BRepPrimAPI_MakeBox(65.0, 40.0, 30.0).Shape();
+            document->NewCommand(); shapes->SetShape(label, later);
+            if (!document->CommitCommand()) return nil;
+            core3d::profile::Record stale;
+            if (!core3d::profile::Read(document, label, stale) || !stale.IsEqual(record)
+                || stale.IsCurrent(document, label)) return nil;
+            TopTools_IndexedMapOfShape currentTopology, retainedTopology;
+            TopExp::MapShapes(later, currentTopology); TopExp::MapShapes(original, retainedTopology);
+            shapeCost = currentTopology.Extent() + retainedTopology.Extent();
+            if (shapeCost == 0 || shapeCost >= 131072U) return nil;
+            admittedCopies = (131072U - shapeCost) / shapeCost;
+            // At this boundary the definition and label limits remain loose.
+            if (admittedCopies < 2 || admittedCopies + 2 >= 4096U
+                || countLabels() + (admittedCopies + 1) * (10U + record.values.size()) >= 100000U) return nil;
+        }
+        const auto labelsBefore = countLabels();
+        const auto timeBefore = document->GetData()->Time();
+        const auto undoBefore = document->GetAvailableUndos();
+        const auto rootBefore = XCAFDoc_ShapeTool::GetShape(label);
+        const bool valid = scope.wrapper->ValidateGeometryRepresentations();
+        const bool atBoundary = scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, admittedCopies}});
+        const bool overflowRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, std::numeric_limits<Standard_Size>::max()}});
+        const bool zeroRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 0U}});
+        const bool duplicateRequestRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U}, {label, 1U}});
+        core3d::profile::Record after;
+        const bool queryUnchanged = labelsBefore == countLabels() && timeBefore == document->GetData()->Time()
+            && undoBefore == document->GetAvailableUndos() && !document->HasOpenCommand()
+            && rootBefore.IsEqual(XCAFDoc_ShapeTool::GetShape(label))
+            && core3d::profile::Read(document, label, after) && after.IsEqual(record);
+        bool beyondRejected = false;
+        if (mode == 0) {
+            const auto filler = document->GetData()->Root().FindChild(900000, Standard_False);
+            filler.FindChild(200000, Standard_True); // Exactly one extra label.
+            if (countLabels() != labelsBefore + 1U) return nil;
+            beyondRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+                std::vector<OcctGeometryDuplicationRequest>{{label, 1U}});
+        } else {
+            beyondRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+                std::vector<OcctGeometryDuplicationRequest>{{label, admittedCopies + 1U}});
+        }
+        return @{@"valid": @(valid), @"atBoundary": @(atBoundary), @"beyondRejected": @(beyondRejected),
+            @"overflowRejected": @(overflowRejected), @"zeroRejected": @(zeroRejected),
+            @"duplicateRequestRejected": @(duplicateRequestRejected), @"queryUnchanged": @(queryUnchanged),
+            @"labelsBefore": @(labelsBefore), @"admittedCopies": @(admittedCopies), @"shapeCost": @(shapeCost)};
+    } catch (...) { return nil; }
+}
+
+- (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData {
+    if (![NSThread isMainThread]) return nil;
+    return Core3DCreateDebugBinXCAFFixture(@"unit-stale-profile", [](const Handle(TDocStd_Document)& document) {
+        const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto shape = BRepPrimAPI_MakeBox(60.0, 40.0, 30.0).Shape();
+        const auto label = shapeTool->AddShape(shape, Standard_False, Standard_True);
+        if (label.IsNull()) throw Standard_Failure("Unable to create unit-stale profile fixture");
+        core3d::profile::Parameters parameters;
+        parameters.metersPerUnit = 0.001;
+        parameters.definition.points = {gp_Pnt2d(0, 0), gp_Pnt2d(60, 0), gp_Pnt2d(60, 40), gp_Pnt2d(0, 40)};
+        parameters.definition.plane = 0;
+        parameters.definition.depth = 30;
+        document->SetUndoLimit(10);
+        document->NewCommand();
+        if (!core3d::profile::Stage(document, label, parameters, NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand() || document->HasOpenCommand())
+            throw Standard_Failure("Unable to stage fixture saved profile");
+        core3d::profile::Record original;
+        if (!core3d::profile::Read(document, label, original) || !original.IsCurrent(document, label))
+            throw Standard_Failure("Fixture profile was not initially current");
+        // Deliberately change only the private fixture's declared document unit.
+        // The record remains bound to the exact same oriented root geometry.
+        XCAFDoc_DocumentTool::SetLengthUnit(document, 1.0);
+        core3d::profile::Record stale;
+        if (!core3d::profile::Read(document, label, stale) || !stale.IsEqual(original)
+            || !stale.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(label))
+            || stale.IsCurrent(document, label))
+            throw Standard_Failure("Fixture did not preserve unit-only staleness");
+    });
 }
 
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {

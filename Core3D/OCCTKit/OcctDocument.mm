@@ -3536,6 +3536,7 @@ struct GeometryDocumentUsage
     Standard_Size labels = 0;
     Standard_Size graphVisits = 0;
     Standard_Size leafOccurrences = 0;
+    Standard_Size profileRecords = 0;
 };
 
 Standard_Boolean ValidateGeometryDocument(
@@ -3883,6 +3884,7 @@ Standard_Boolean ValidateGeometryDocument(
             usage.labels = aLabelCount;
             usage.graphVisits = anAggregateGraphVisitCount;
             usage.leafOccurrences = aLeafOccurrenceCount;
+            usage.profileRecords = static_cast<Standard_Size>(profiles.size());
             *output = usage;
         }
         return Standard_True;
@@ -3966,6 +3968,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
         Standard_Size projectedLabels = current.labels;
         Standard_Size projectedGraphVisits = current.graphVisits;
         Standard_Size projectedLeafOccurrences = current.leafOccurrences;
+        Standard_Size projectedProfiles = current.profileRecords;
         TDF_LabelMap uniqueSources;
         for (const OcctGeometryDuplicationRequest& request : requests) {
             const TDF_Label& source = request.sourceDefinition;
@@ -3999,11 +4002,32 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                         64U * 1024U * 1024U)) return Standard_False;
             }
 
+            core3d::profile::Record sourceProfile;
+            if (!core3d::profile::Read(myOcafDoc, source, sourceProfile)) {
+                return Standard_False;
+            }
+            Standard_Size profileLabels = 0;
+            if (!sourceProfile.label.IsNull()) {
+                if (!AddMultipliedWithinLimit(projectedProfiles, 1U,
+                        destinationCount, core3d::profile::MaximumRecords)) {
+                    return Standard_False;
+                }
+                profileLabels = 1U + static_cast<Standard_Size>(sourceProfile.values.size());
+                // A recipe bound to a prior solid requires an independent copy
+                // of that retained solid as well as the current root. Unit-only
+                // staleness shares its copied root and incurs no second shape.
+                if (!sourceProfile.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(source))
+                    && ClassifyDefinitionGeometry(sourceProfile.boundShape, &sourceGeometry)
+                        != DefinitionGeometryClass::BRep) {
+                    return Standard_False;
+                }
+            }
+
             // AddShape creates one definition label and eight transform
             // children. CopyObjectAppearance creates the legacy material and
             // color children only when a local PBR assignment is not
             // authoritative; visual-material/texture definitions are shared.
-            Standard_Size destinationLabels = 9U;
+            Standard_Size destinationLabels = 9U + profileLabels;
             Handle(TDataStd_Integer) localPBRMarker;
             const Standard_Boolean hasLocalPBR =
                 source.FindAttribute(
@@ -7421,6 +7445,10 @@ Standard_Boolean OcctSavedGroupState::IsEqual(const OcctSavedGroupState& other) 
     } catch (...) { return Standard_False; }
 }
 std::string OcctDocument::NewSavedGroupIdentifier() noexcept {
+    if (![NSThread isMainThread]) { return {}; }
+    try { return NewIdentifier(); } catch (...) { return {}; }
+}
+std::string OcctDocument::NewProfileIdentifier() noexcept {
     if (![NSThread isMainThread]) { return {}; }
     try { return NewIdentifier(); } catch (...) { return {}; }
 }

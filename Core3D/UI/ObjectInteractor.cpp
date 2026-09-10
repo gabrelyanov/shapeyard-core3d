@@ -1254,6 +1254,16 @@ namespace core3d {
 			Standard_Size committedCount = 0;
 			for (const DuplicatePendingResult& duplicate :
 				 _pendingDuplicateResults) {
+                profile::Record sourceProfile;
+                if (duplicate.sourceLabel.IsNull()
+                    || duplicate.sourceLabel.Data() != document->GetData()
+                    || duplicate.originalOwnerShape.IsNull()
+                    || !duplicate.originalOwnerShape.IsEqual(XCAFDoc_ShapeTool::GetShape(duplicate.sourceLabel))
+                    || !profile::Read(document, duplicate.sourceLabel, sourceProfile)
+                    || !sourceProfile.IsEqual(duplicate.originalProfile)
+                    || sourceProfile.IsCurrent(document, duplicate.sourceLabel) != duplicate.originalProfileCurrent) {
+                    return DuplicateDocumentState::PartialOrMismatched;
+                }
 				if (duplicate.resultLabel.IsNull()) {
 					++missingCount;
 					continue;
@@ -1263,7 +1273,12 @@ namespace core3d {
 				}
 				const TopoDS_Shape stored = XCAFDoc_ShapeTool::GetShape(
 					duplicate.resultLabel);
+                profile::Record actualProfile;
+                if (!profile::Read(document, duplicate.resultLabel, actualProfile)) {
+                    return DuplicateDocumentState::PartialOrMismatched;
+                }
 				if (stored.IsNull()) {
+                    if (!actualProfile.label.IsNull()) { return DuplicateDocumentState::PartialOrMismatched; }
 					++missingCount;
 					continue;
 				}
@@ -1272,7 +1287,10 @@ namespace core3d {
 					myDoc->ReadReferenceAxisForLabel(
 						duplicate.resultLabel,
 						storedReferenceAxis);
-				if (duplicate.expectedShape.IsNull()
+				if (!duplicate.profileCandidateSealed
+                    || !actualProfile.IsEqual(duplicate.candidateProfile)
+                    || actualProfile.IsCurrent(document, duplicate.resultLabel) != duplicate.originalProfileCurrent
+                    || duplicate.expectedShape.IsNull()
 					|| !stored.IsEqual(duplicate.expectedShape)
 					|| duplicate.entityIdentifier.empty()
 					|| duplicate.definitionIdentifier.empty()
@@ -1476,6 +1494,9 @@ namespace core3d {
 			OcctGeometryRepresentation representation;
 			OcctReferenceAxisReadState referenceAxisState;
 			OcctReferenceAxis referenceAxis;
+            profile::Record savedProfile;
+            TopoDS_Shape ownerShape;
+            bool profileCurrent = false;
         };
         std::vector<DuplicateSource> sources;
         for (myContext->InitSelected(); myContext->MoreSelected();
@@ -1522,12 +1543,11 @@ namespace core3d {
                 }
             }
 			if (!isDuplicateLabel) {
-				sources.push_back({
-					shape,
-					label,
-					destinationRepresentation,
-					referenceAxisState,
-					referenceAxis});
+                profile::Record savedProfile;
+                if (!profile::Read(doc, label, savedProfile)) { return; }
+				sources.push_back({shape, label, destinationRepresentation,
+                    referenceAxisState, referenceAxis, savedProfile, storedShape,
+                    savedProfile.IsCurrent(doc, label)});
             }
         }
         if (sources.empty()) { return; }
@@ -1622,17 +1642,35 @@ namespace core3d {
 					source.presentation->LocalTransformation().Multiplied(
 						minAxisDisplacement));
 				myDoc->LoadObjectMeterial(source.label, copy);
-				duplicates.push_back({
-					copy,
-					source.label,
-					TDF_Label(),
-					source.representation,
-					{},
-					{},
-					copy->Shape(),
-					copy->LocalTransformation(),
-					source.referenceAxisState,
-					source.referenceAxis});
+                DuplicatePendingResult duplicate;
+                duplicate.presentation = copy;
+                duplicate.sourceLabel = source.label;
+                duplicate.representation = source.representation;
+                duplicate.expectedShape = copy->Shape();
+                duplicate.expectedTransform = copy->LocalTransformation();
+                duplicate.expectedReferenceAxisState = source.referenceAxisState;
+                duplicate.expectedReferenceAxis = source.referenceAxis;
+                duplicate.originalProfile = source.savedProfile;
+                duplicate.originalOwnerShape = source.ownerShape;
+                duplicate.originalProfileCurrent = source.profileCurrent;
+                if (!source.savedProfile.label.IsNull()) {
+                    duplicate.preparedProfileIdentifier = OcctDocument::NewProfileIdentifier();
+                    if (!profile::IsIdentifier(duplicate.preparedProfileIdentifier)
+                        || duplicate.preparedProfileIdentifier == source.savedProfile.identifier) { return; }
+                    if (source.savedProfile.boundShape.IsEqual(source.ownerShape)) {
+                        duplicate.preparedProfileBinding = copy->Shape();
+                    } else {
+                        // Preserve the original stale recipe binding as its own
+                        // independent solid. Never rebind it to the later root.
+                        BRepBuilderAPI_Copy retainedCopy;
+                        retainedCopy.Perform(source.savedProfile.boundShape, Standard_True, Standard_False);
+                        if (!retainedCopy.IsDone() || retainedCopy.Shape().IsNull()
+                            || retainedCopy.Shape().IsPartner(source.savedProfile.boundShape)
+                            || !IsTopologicallyValid(retainedCopy.Shape())) { return; }
+                        duplicate.preparedProfileBinding = retainedCopy.Shape();
+                    }
+                }
+                duplicates.push_back(std::move(duplicate));
 			}
 		} catch (...) {
 			return;
@@ -1715,6 +1753,7 @@ namespace core3d {
 				const TDF_Label label = myDoc->AddShape(
 					duplicate.presentation,
 					duplicate.representation);
+                duplicate.resultLabel = label;
 				if (label.IsNull()) {
 					retainRetryableOrUnknown();
 					return;
@@ -1730,7 +1769,6 @@ namespace core3d {
 					retainRetryableOrUnknown();
 					return;
 				}
-				duplicate.resultLabel = label;
 				duplicate.entityIdentifier =
 					myDoc->EntityIdentifierForLabel(label);
 				duplicate.definitionIdentifier =
@@ -1756,6 +1794,39 @@ namespace core3d {
 					retainRetryableOrUnknown();
 					return;
 				}
+                profile::Record stageAuthority = duplicate.originalProfile;
+#ifdef DEBUG
+                const Standard_Integer profileFault = _debugDuplicateProfileFault;
+                if (!duplicate.originalProfile.label.IsNull()) {
+                    _debugDuplicateProfileFault = 0;
+                    if (profileFault == 4) stageAuthority.values[1] += 1;
+                }
+#endif
+                if (!profile::StageDuplicate(doc, duplicate.sourceLabel,
+                        stageAuthority, duplicate.originalOwnerShape,
+                        label, duplicate.preparedProfileBinding,
+                        duplicate.preparedProfileIdentifier, duplicate.candidateProfile)) {
+                    retainRetryableOrUnknown(); return;
+                }
+#ifdef DEBUG
+                if (profileFault == 5 && !duplicate.candidateProfile.label.IsNull()) {
+                    // A real malformed stored scalar count must abort the owned
+                    // command, including the already allocated duplicate root.
+                    TDataStd_Integer::Set(duplicate.candidateProfile.label, profile::CountID(),
+                        static_cast<int>(duplicate.candidateProfile.values.size()) + 1);
+                    profile::Record readback;
+                    if (!profile::Read(doc, label, readback)) { retainRetryableOrUnknown(); return; }
+                    throw Standard_Failure("Injected invalid profile unexpectedly read back");
+                }
+                if ((profileFault == 6 || profileFault == 7) && !duplicate.candidateProfile.label.IsNull()) {
+                    // Valid but unexpected identity survives ordinary commit;
+                    // exact source/candidate reconciliation must refuse it.
+                    const auto target = profileFault == 6 ? duplicate.candidateProfile.label : duplicate.originalProfile.label;
+                    TDataStd_AsciiString::Set(target, profile::IdentityID(),
+                        TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+                }
+#endif
+                duplicate.profileCandidateSealed = true;
 				myDoc->LoadObjectMeterial(label, duplicate.presentation);
 			}
             auto& groupAuthority = *_pendingDuplicateResults.front().groups;
@@ -5994,6 +6065,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 #ifdef DEBUG
 	void ObjectInteractor::debugSetDuplicateCommitMode(
 		const Standard_Integer mode) noexcept {
+        _debugDuplicateProfileFault = mode >= 4 && mode <= 7 ? mode : 0;
 		if (mode == 3) {
 			_debugDuplicateCommitMode = 0;
 			_debugDuplicatePresentationRepairFailureCount = 1;
