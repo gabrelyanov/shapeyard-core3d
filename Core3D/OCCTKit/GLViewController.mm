@@ -1053,6 +1053,11 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
             selector:@selector(applicationWillResignActive:)
             name:UIApplicationWillResignActiveNotification
             object:nil];
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+            selector:@selector(sceneWillDeactivate:)
+            name:UISceneWillDeactivateNotification
+            object:nil];
     }
 
     return self;
@@ -1135,8 +1140,22 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 
 - (void)applicationWillResignActive:(NSNotification *)notification
 {
-    (void)notification;
+    // Scene-enabled shipping hosts use the exact scene below. Keep deliberate
+    // nil-object notifications used by standalone native hosts and legacy apps.
+    if (notification.object == UIApplication.sharedApplication
+        && self.viewIfLoaded.window.windowScene != nil
+        && [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] != nil) {
+        return;
+    }
     [self endActiveRenderingInteractions];
+}
+
+- (void)sceneWillDeactivate:(NSNotification *)notification
+{
+    UIWindowScene *owner = self.viewIfLoaded.window.windowScene;
+    if (owner != nil && notification.object == owner) {
+        [self endActiveRenderingInteractions];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated
