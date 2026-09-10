@@ -82,6 +82,10 @@ namespace core3d {
             std::uint32_t width, std::uint32_t height, bool revolve = false,
             const std::optional<ProfileCircularSection>& circle = std::nullopt,
             const std::vector<ProfileCircularHole>& holes = {}) noexcept;
+        //! Rebuild the selected current saved profile, retaining its entity and placement.
+        std::shared_ptr<ProfileSolidWork> prepareStoredProfileRebuild(
+            double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
             const std::shared_ptr<ProfileSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;

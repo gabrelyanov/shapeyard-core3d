@@ -1634,6 +1634,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
 struct ProfileSolidWork {
     std::shared_ptr<ProfileSolidGeometry> geometry = std::make_shared<ProfileSolidGeometry>();
     OrdinaryNameLedger authority;
+    std::optional<OrdinaryTransformLedger> rebuildAuthority;
     ObjectFrameIdentity identity;
     Handle(OcctDocument) owner;
     Handle(TDocStd_Document) document;
@@ -1679,6 +1680,41 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     } catch (...) { return {}; }
 }
 
+std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
+    double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || myDoc.IsNull() || identity.entityIdentifier.empty()) return {};
+    try {
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return {};
+        const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || selected.IsNull()) return {};
+        OrdinaryTransformRecord record;
+        const auto label = myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)
+            || record.previous.entityIdentifier != identity.entityIdentifier
+            || record.previous.resolvedRepresentation != OcctGeometryRepresentation::BRep
+            || !record.previous.profile.IsCurrent(myDoc->Document(), label)
+            || !profile::HasOnlyMetadataSubshapes(myDoc->Document(), label)) return {};
+        const auto& d = record.previous.profile.parameters.definition;
+        auto work = prepareProfileSolid(d.points, d.plane, parameter, identity,
+            presentationRevision, width, height, d.revolve, d.circle, d.holes);
+        if (!work) return {};
+        record.requested.label = label; record.requested.presentation = selected;
+        record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
+        record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
+        record.requested.profileRebuild = record.previous.profile.parameters;
+        record.requested.profileRebuild->definition.depth = parameter;
+        work->rebuildAuthority.emplace();
+        work->rebuildAuthority->records.push_back(std::move(record));
+        if (!admitTransform(*work->rebuildAuthority)) return {};
+        work->frameFirst = false;
+        return work;
+    } catch (...) { return {}; }
+}
+
 std::shared_ptr<ProfileSolidGeometry> Core3DViewer::profileSolidGeometry(
     const std::shared_ptr<ProfileSolidWork>& work) noexcept {
     return work ? work->geometry : nullptr;
@@ -1707,6 +1743,21 @@ OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<Profil
             || !_shapeInteractor->selectionModeAuthorityIsExact()
             || _shapeInteractor->getSelectionMode() != work->authority.selectionMode
             || !_objectInteractor->verifyOrdinaryNameAuthority(work->authority)) { return OrdinaryEditResult::Invalid; }
+        if (work->rebuildAuthority) {
+            auto authority = *work->rebuildAuthority;
+            if (authority.records.size() != 1 || !admitTransform(authority)
+                || authority.selectionOwners != work->rebuildAuthority->selectionOwners
+                || authority.manipulatorType != work->rebuildAuthority->manipulatorType
+                || authority.hadManipulator != work->rebuildAuthority->hadManipulator) return OrdinaryEditResult::Invalid;
+            auto& record = authority.records.front();
+            OcctObjectTransformState current;
+            if (!myDoc->CaptureObjectTransformStateForLabel(record.previous.label, current)
+                || !current.IsEqual(record.previous)) return OrdinaryEditResult::Invalid;
+            record.requested.shape = work->geometry->solid;
+            OrdinaryEditResult result = OrdinaryEditResult::Invalid;
+            auto lease = _ordinaryEditController->beginTransform({record.requested}, &result);
+            return lease ? lease.stageAndCommit() : result;
+        }
         Handle(AIS_Shape) presentation = new AIS_Shape(work->geometry->solid);
         myContext->ApplyDefaultMaterial(presentation);
         Quantity_Color color;

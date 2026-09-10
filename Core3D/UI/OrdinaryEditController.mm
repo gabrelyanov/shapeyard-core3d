@@ -186,7 +186,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 && request.operation != OrdinaryTransformOperation::Scale
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
-                && request.operation != OrdinaryTransformOperation::MeshWindingRepair) {
+                && request.operation != OrdinaryTransformOperation::MeshWindingRepair
+                && request.operation != OrdinaryTransformOperation::ProfileRebuild) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
@@ -251,10 +255,24 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
             if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
-                && request.operation != OrdinaryTransformOperation::MeshWindingRepair) {
+                && request.operation != OrdinaryTransformOperation::MeshWindingRepair
+                && request.operation != OrdinaryTransformOperation::ProfileRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             const auto representation = record.previous.resolvedRepresentation;
+            if (request.operation == OrdinaryTransformOperation::ProfileRebuild) {
+                std::vector<double> values;
+                if (changes.size() != 1 || representation != OcctGeometryRepresentation::BRep
+                    || !record.previous.profile.IsCurrent(document, request.label)
+                    || !MatricesEqual(record.previous.transform, request.transform)
+                    || request.rotationAroundPivot || !geometryChanges
+                    || !profile::HasOnlyMetadataSubshapes(document, request.label)
+                    || !profile::Encode(*request.profileRebuild, values)
+                    || request.profileRebuild->metersPerUnit != record.previous.profile.parameters.metersPerUnit) {
+                    return reject(OrdinaryEditResult::Invalid);
+                }
+                if (values == record.previous.profile.values) return reject(OrdinaryEditResult::NoChange);
+            }
             if (request.operation == OrdinaryTransformOperation::MeshUVAtlas
                 && (changes.size() != 1 || !geometryChanges
                     || representation != OcctGeometryRepresentation::TriangleMesh
@@ -1160,14 +1178,29 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || !_document->SaveObjectTransform(record.previous.label, candidate)
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
+                || (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
+                    && !profile::Stage(_document->Document(), record.previous.label,
+                        *record.requested.profileRebuild, record.previous.profile.identifier))
                 || !_document->CaptureObjectTransformStateForLabel(record.previous.label, record.candidate)
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
-                || !record.candidate.profile.IsEqual(record.previous.profile)
+                || (record.requested.operation != OrdinaryTransformOperation::ProfileRebuild
+                    && !record.candidate.profile.IsEqual(record.previous.profile))
                 || record.candidate.scalars != EncodedTransform(record.requested.transform)
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
+            }
+            if (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild) {
+                std::vector<double> values;
+                if (!profile::Encode(*record.requested.profileRebuild, values)
+                    || record.candidate.profile.identifier != record.previous.profile.identifier
+                    || !record.candidate.profile.label.IsEqual(record.previous.profile.label)
+                    || record.candidate.profile.values != values
+                    || !record.candidate.profile.IsCurrent(_document->Document(), record.previous.label)
+                    || !_document->ValidateGeometryRepresentations()) {
+                    throw Standard_Failure("Profile rebuild candidate readback failed");
+                }
             }
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
                 if (record.candidate.authoredFramesPresent) {

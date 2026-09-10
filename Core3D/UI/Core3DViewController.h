@@ -33,6 +33,7 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultRecoveryRequired,
     Core3DProfileConstructionResultFailed,
     Core3DProfileConstructionResultCancelled,
+    Core3DProfileConstructionResultUnchanged,
 };
 
 typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
@@ -786,6 +787,14 @@ typedef struct {
                                  angleDegrees:(double)angleDegrees expected:(Core3DSceneSnapshot *)expected
                                    completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createRevolvedCircularProfile(center:outerRadius:innerRadius:plane:angleDegrees:expected:completion:));
+//! Change the extrusion depth or revolution angle of the selected saved profile.
+//! Lengths use the document's declared units; angles are degrees. Retains the
+//! same entity, outline, holes and placement. Stale geometry bindings reject.
+- (void)rebuildStoredProfileWithEntityIdentifier:(NSString *)entityIdentifier
+                                     parameter:(double)parameter
+                                      expected:(Core3DSceneSnapshot *)expected
+                                    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildStoredProfile(entityIdentifier:parameter:expected:completion:));
 //! Keep the worker slot until completion; cancel at document load/close boundaries.
 - (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

@@ -800,6 +800,8 @@ void Core3DAddDebugOrphanVisualMaterial(
 @end
 
 @interface Core3DViewController (ProfileConstructionPrivate)
+- (void)runProfileSolidWork:(const std::shared_ptr<core3d::ProfileSolidWork>&)work
+                completion:(void(^)(Core3DProfileConstructionResult))completion;
 - (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
                             plane:(Core3DProfilePlane)plane parameter:(double)parameter
                           revolve:(BOOL)revolve
@@ -7061,9 +7063,15 @@ void Core3DAddDebugOrphanVisualMaterial(
             identity, expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve, circle, holes);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runProfileSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (void)runProfileSolidWork:(const std::shared_ptr<core3d::ProfileSolidWork>&)work
+                completion:(void(^)(Core3DProfileConstructionResult))completion {
         _profileSolidWork = work; _profileSolidCancelled = NO;
         const auto geometry = core3d::Core3DViewer::profileSolidGeometry(work);
-        const std::weak_ptr<core3d::Core3DViewer> expectedViewer = viewer;
+        const std::weak_ptr<core3d::Core3DViewer> expectedViewer = GLController.viewer;
         __weak Core3DViewController* weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             const bool built = core3d::Core3DViewer::buildProfileSolidGeometry(geometry);
@@ -7094,7 +7102,7 @@ void Core3DAddDebugOrphanVisualMaterial(
                             | UIStateChangingApplyMaterial | UIStateChangingHistory];
                         break;
                     case core3d::OrdinaryEditResult::Busy: result = Core3DProfileConstructionResultBusy; break;
-                    case core3d::OrdinaryEditResult::NoChange:
+                    case core3d::OrdinaryEditResult::NoChange: result = Core3DProfileConstructionResultUnchanged; break;
                     case core3d::OrdinaryEditResult::Invalid: result = Core3DProfileConstructionResultRejected; break;
                     case core3d::OrdinaryEditResult::OutcomeUnknown: result = Core3DProfileConstructionResultRecoveryRequired; break;
                     case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
@@ -7102,6 +7110,46 @@ void Core3DAddDebugOrphanVisualMaterial(
                 completion(result);
             });
         });
+}
+
+- (void)rebuildStoredProfileWithEntityIdentifier:(NSString *)entityIdentifier
+                                     parameter:(double)parameter
+                                      expected:(Core3DSceneSnapshot *)expected
+                                    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128
+        || !std::isfinite(parameter)) { completion(Core3DProfileConstructionResultRejected); return; }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DProfileConstructionResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) {
+            completion(Core3DProfileConstructionResultRejected); return;
+        }
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto work = viewer->prepareStoredProfileRebuild(parameter, identity, expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runProfileSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
