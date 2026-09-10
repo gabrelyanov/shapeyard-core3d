@@ -1493,16 +1493,19 @@ void MeshPrivateExportSurfaces(
         ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
     if (needsMeshing) {
         const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
-        const int maximumAttempts = qualityPreset ? 3 : 1;
+        const int maximumAttempts = qualityPreset ? 4 : 1;
         Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
         bool validMesh = false;
         for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
             ThrowIfCancelled(state);
-            // Preserve successful existing meshes. A failed quality proof
-            // gets at most two finer private remeshes, never a looser limit.
+            // Keep the original first refinement and final fallback. Before
+            // the final fourfold refinement step, try a half-sized step: a
+            // transformed curved face may only narrowly miss the same proof.
+            // Every accepted mesh still satisfies the requested deflection.
             if (attempt > 0) { BRepTools::Clean(meshingShape); }
+            constexpr double refinementFactors[] = {1.0, 0.25, 0.125, 0.0625};
             const double target = attempt == 0 ? deflection
-                : std::max(Precision::Confusion(), deflection * std::pow(0.25, attempt));
+                : std::max(Precision::Confusion(), deflection * refinementFactors[attempt]);
             BRepMesh_IncrementalMesh mesher;
             mesher.ChangeParameters().Deflection = target;
             mesher.ChangeParameters().Angle = state->deviationAngle;
