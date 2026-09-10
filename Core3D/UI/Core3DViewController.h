@@ -1150,6 +1150,11 @@ typedef struct {
 //! These DEBUG diagnostics cannot authorize edits or persist an AI job.
 //! Diagnostic fixed-memory mutation stamp; NOT a public edit token/readiness lease.
 - (NSDictionary<NSString *, id> *_Nullable)debugNativeMutationStamp;
+//! Read-only saved construction record from the actual OCAF object.
+- (NSDictionary<NSString *, id> *_Nullable)debugStoredProfileDefinitionForEntityIdentifier:(NSString *)identifier
+    NS_SWIFT_NAME(debugStoredProfileDefinition(entityIdentifier:));
+- (BOOL)debugStoredProfileRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier
+    NS_SWIFT_NAME(debugStoredProfileRejectsFault(_:entityIdentifier:));
 //! Private real-document lifecycle plus isolated policy saturation/thread fixtures.
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeMutationLifecycle;
 - (BOOL)debugStartLiveTransactionProbe;

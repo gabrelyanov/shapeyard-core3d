@@ -136,6 +136,8 @@ struct OrdinaryCreationRequest {
     Graphic3d_NameOfMaterial material = Graphic3d_NameOfMaterial_ShinyPlastified;
     Quantity_NameOfColor color = Quantity_NOC_WHITE;
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::BRep;
+    std::optional<profile::Parameters> profile;
+    std::string profileIdentifier;
 };
 struct OrdinaryCreationRecord {
     OrdinaryCreationRequest requested;
@@ -151,6 +153,7 @@ struct OrdinaryCreationRoot {
     std::string entityIdentifier;
     std::string definitionIdentifier;
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
+    profile::Record profile;
 };
 using OrdinaryCreationCatalog = std::map<std::string, OrdinaryCreationRoot>;
 //! Exact retained source and intended derived-copy metadata.

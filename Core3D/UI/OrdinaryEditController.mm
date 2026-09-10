@@ -37,16 +37,18 @@ bool CaptureCreationRoots(const Handle(OcctDocument)& owner, OrdinaryCreationCat
         const auto& label = labels.Value(index);
         const auto shape = XCAFDoc_ShapeTool::GetShape(label);
         if (label.IsNull() || label.Data() != document->GetData() || shape.IsNull()) { return false; }
+        profile::Record storedProfile;
+        if (!profile::Read(document, label, storedProfile)) return false;
         if (!roots.emplace(CreationLabelKey(label), OrdinaryCreationRoot{label, shape,
                 owner->EntityIdentifierForLabel(label), owner->DefinitionIdentifierForLabel(label),
-                owner->GeometryRepresentationForLabel(label)}).second) { return false; }
+                owner->GeometryRepresentationForLabel(label), storedProfile}).second) { return false; }
     }
     return true;
 }
 bool CreationRootsEqual(const OrdinaryCreationRoot& a, const OrdinaryCreationRoot& b) {
     return a.label.IsEqual(b.label) && a.label.Data() == b.label.Data()
         && a.shape.IsEqual(b.shape) && a.entityIdentifier == b.entityIdentifier
-        && a.definitionIdentifier == b.definitionIdentifier && a.representation == b.representation;
+        && a.definitionIdentifier == b.definitionIdentifier && a.representation == b.representation && a.profile.IsEqual(b.profile);
 }
 bool CreationIntegerEquals(const TDF_Label& label, Standard_Integer tag, Standard_Integer expected) {
     const auto child = label.FindChild(tag, Standard_False);
@@ -432,6 +434,11 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
                 || !CandidateIsFinite(request.presentation->LocalTransformation())) {
                 return reject(OrdinaryEditResult::Invalid);
             }
+            std::vector<double> profileValues;
+            if (request.profile ? (request.representation != OcctGeometryRepresentation::BRep
+                    || !profile::IsIdentifier(request.profileIdentifier)
+                    || !profile::Encode(*request.profile, profileValues))
+                : !request.profileIdentifier.empty()) return reject(OrdinaryEditResult::Invalid);
             ledger.records.push_back({request, request.presentation->Shape(),
                                       request.presentation->LocalTransformation(), {}});
         }
@@ -483,6 +490,14 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                 || !definitions.insert(expected.object.definitionIdentifier).second
                 || !_document->CaptureObjectNameStateForLabel(expected.object.label, stored)
                 || !expected.IsEqual(stored)) { return false; }
+            if (record.requested.profile) {
+                std::vector<double> values;
+                if (!profile::Encode(*record.requested.profile, values)
+                    || stored.object.profile.label.IsNull()
+                    || stored.object.profile.identifier != record.requested.profileIdentifier
+                    || stored.object.profile.values != values
+                    || !stored.object.profile.IsCurrent(_document->Document(), expected.object.label)) return false;
+            } else if (!stored.object.profile.label.IsNull()) return false;
             if (ledger.meshCopy) {
                 const auto& source=*ledger.meshCopy;
                 OcctScalarAppearanceState appearance;
@@ -553,6 +568,9 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
                 _document->SaveObjectMaterial(label,record.requested.material);
                 _document->SaveObjectColor(label,record.requested.color);
             }
+            if (record.requested.profile && !profile::Stage(_document->Document(), label,
+                    *record.requested.profile, record.requested.profileIdentifier))
+                throw Standard_Failure("Profile definition staging failed");
             if (!_document->CaptureObjectNameStateForLabel(label, record.candidate)
                 || !record.candidate.object.shape.IsEqual(record.shape)
                 || record.candidate.object.scalars != EncodedTransform(record.transform)
@@ -569,7 +587,9 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             _stageFailureIndex = -1; throw Standard_Failure("Creation staged abort fault");
         }
 #endif
-        if ((ledger.meshCopy && !_document->ValidateGeometryRepresentations())
+        const bool hasProfile = std::any_of(ledger.records.begin(), ledger.records.end(),
+            [](const auto& record) { return record.requested.profile.has_value(); });
+        if (((ledger.meshCopy || hasProfile) && !_document->ValidateGeometryRepresentations())
             || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {

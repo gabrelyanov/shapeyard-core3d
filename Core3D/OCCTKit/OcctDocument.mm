@@ -1609,6 +1609,7 @@ const std::array<const Standard_GUID*, 7>& ReferenceAxisAttributeIDs()
 }
 
 constexpr Standard_Size kMaximumGeometryDocumentLabels = 100'000;
+static_assert(core3d::profile::MaximumLabels == kMaximumGeometryDocumentLabels);
 
 Standard_Boolean ValidateCommandOwnerSentinelsDocument(
     const Handle(TDocStd_Document)& theDocument)
@@ -3551,6 +3552,8 @@ Standard_Boolean ValidateGeometryDocument(
             })(document)) {
             return Standard_False;
         }
+        std::vector<core3d::profile::Record> profiles;
+        if (!core3d::profile::ValidateDocument(document, profiles)) return Standard_False;
         const TDF_Label aRoot = document->GetData()->Root();
         Handle(TDataStd_Integer) aRootMarker;
         Handle(TNaming_NamedShape) aRootShape;
@@ -3627,6 +3630,14 @@ Standard_Boolean ValidateGeometryDocument(
         TDF_LabelMap aVisitedGraphLabels;
         TDF_LabelMap aDefinitionLabels;
         GeometryValidationBudget aBudget;
+        // Current bindings share the already-budgeted root geometry. Stale
+        // definitions can retain older solids and must account for them too.
+        for (const auto& profile : profiles) {
+            if (!profile.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(profile.label.Father()))
+                && ClassifyDefinitionGeometry(profile.boundShape, &aBudget) != DefinitionGeometryClass::BRep)
+                return Standard_False;
+        }
+
         Standard_Size aDefinitionCount = 0;
         Standard_Size anAggregateGraphVisitCount = 0;
         Standard_Size aLeafOccurrenceCount = 0;
@@ -5117,9 +5128,7 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
         if (!CaptureObjectTransformStateForLabel(label, source)
             || source.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh
             || (options.version == 1 && source.meshUVAtlasVersion != 0)) { return Standard_False; }
-        TDF_LabelSequence subshapes;
-        XCAFDoc_ShapeTool::GetSubShapes(label, subshapes);
-        if (subshapes.Length() != 0) { return Standard_False; }
+        if (!core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc, label)) return Standard_False;
         // Replacing UVs under an image would silently change its appearance.
         TDF_Label materialLabel;
         XCAFDoc_VisMaterialTool::GetShapeMaterial(label, materialLabel);
@@ -6490,8 +6499,7 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
             || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
         // Subshape styling needs a deliberate triangle/material mapping. The
         // first copy rejects these labels rather than flattening their styles.
-        TDF_LabelSequence children; XCAFDoc_ShapeTool::GetSubShapes(label,children);
-        if (!children.IsEmpty()) return Standard_False;
+        if (!core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc, label)) return Standard_False;
         for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
             if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
         if (label.IsAttribute(NormalTextureRecipeAttributeID())
@@ -7232,6 +7240,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && meshUVAtlasSettings == other.meshUVAtlasSettings
             && authoredFramesPresent == other.authoredFramesPresent
             && authoredFramesIdentity == other.authoredFramesIdentity
+            && profile.IsEqual(other.profile)
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -7258,6 +7267,7 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         captured.definitionIdentifier = DefinitionIdentifierForLabel(label);
         captured.storedRepresentation = StoredGeometryRepresentationForLabel(label);
         captured.resolvedRepresentation = GeometryRepresentationForLabel(label);
+        if (!core3d::profile::Read(myOcafDoc, label, captured.profile)) return Standard_False;
         OcctAuthoredFrameRecord frames;
         const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
         if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;

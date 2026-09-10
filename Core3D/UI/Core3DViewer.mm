@@ -1640,6 +1640,7 @@ struct ProfileSolidWork {
     std::uint64_t presentationRevision = 0;
     std::uint32_t width = 0, height = 0;
     Standard_Integer documentTime = 0;
+    double metersPerUnit = 0;
     bool frameFirst = false;
     bool consumed = false;
 };
@@ -1668,6 +1669,8 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height;
         work->owner = myDoc; work->document = myDoc->Document();
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(work->document, work->metersPerUnit)
+            || !std::isfinite(work->metersPerUnit) || work->metersPerUnit <= 0) return {};
         work->documentTime = work->document->GetData()->Time();
         Standard_Size count = 0;
         if (!TryCountDisplayedModelShapes(myContext, count)) { return {}; }
@@ -1708,8 +1711,13 @@ OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<Profil
         myContext->ApplyDefaultMaterial(presentation);
         Quantity_Color color;
         presentation->Color(color);
-        const std::vector<OrdinaryCreationRequest> requests = {{presentation,
-            Graphic3d_NameOfMaterial_ShinyPlastified, color.Name(), OcctGeometryRepresentation::BRep}};
+        OrdinaryCreationRequest request{presentation,
+            Graphic3d_NameOfMaterial_ShinyPlastified, color.Name(), OcctGeometryRepresentation::BRep};
+        request.profile = profile::Parameters{static_cast<const ProfileDefinition&>(*work->geometry), work->metersPerUnit};
+        NSString* identifier = NSUUID.UUID.UUIDString;
+        if (identifier == nil) return OrdinaryEditResult::Invalid;
+        request.profileIdentifier = identifier.UTF8String;
+        const std::vector<OrdinaryCreationRequest> requests = {request};
         const auto result = publishCreatedPrimitives(requests);
         if (result != OrdinaryEditResult::Committed) { return result; }
         // Cosmetic continuation follows durable publication. Recovery can safely

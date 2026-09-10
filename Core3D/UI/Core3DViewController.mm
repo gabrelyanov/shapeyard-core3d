@@ -3634,6 +3634,72 @@ void Core3DAddDebugOrphanVisualMaterial(
              @"selection":@(stamp->selection)};
 }
 
+- (NSDictionary<NSString *, id> *)debugStoredProfileDefinitionForEntityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || identifier.length == 0 || identifier.length > 256
+        || GLController == nil || GLController.viewer == nullptr) return nil;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return nil;
+        const auto document = owner->Document();
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        for (int i = 1; i <= labels.Length(); ++i) {
+            const auto label = labels.Value(i);
+            if (owner->EntityIdentifierForLabel(label) != identifier.UTF8String) continue;
+            core3d::profile::Record record;
+            if (!core3d::profile::Read(document, label, record)) return nil;
+            if (record.label.IsNull()) return @{@"present":@NO};
+            NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:record.values.size()];
+            for (double value : record.values) [values addObject:@(value)];
+            return @{@"present":@YES, @"current":@(record.IsCurrent(document, label)),
+                @"identifier":[NSString stringWithUTF8String:record.identifier.c_str()],
+                @"values":values, @"metersPerUnit":@(record.parameters.metersPerUnit)};
+        }
+    } catch (...) {}
+    return nil;
+}
+
+- (BOOL)debugStoredProfileRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || mode < 1 || mode > 8 || identifier.length == 0
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    Handle(TDocStd_Document) document;
+    bool opened = false;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull()) return NO;
+        document = owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return NO;
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        TDF_Label target;
+        for (int i = 1; i <= labels.Length(); ++i)
+            if (owner->EntityIdentifierForLabel(labels.Value(i)) == identifier.UTF8String) target = labels.Value(i);
+        core3d::profile::Record before;
+        if (target.IsNull() || !core3d::profile::Read(document, target, before) || before.label.IsNull()) return NO;
+        const auto undo = document->GetAvailableUndos();
+        document->NewCommand(); opened = true;
+        switch (mode) {
+            case 1: TDataStd_Integer::Set(before.label, core3d::profile::SchemaID(), 2); break;
+            case 2: TDataStd_Integer::Set(before.label, core3d::profile::CountID(), core3d::profile::MaximumScalars + 1); break;
+            case 3: before.label.ForgetAttribute(TNaming_NamedShape::GetID()); break;
+            case 4: TDataStd_Real::Set(before.label.FindChild(2, Standard_False), std::numeric_limits<double>::quiet_NaN()); break;
+            case 5: TDataStd_AsciiString::Set(before.label, core3d::profile::IdentityID(), TCollection_AsciiString("invalid")); break;
+            case 6: TDataStd_Real::Set(before.label, TDataStd_Real::GetID(), 1); break;
+            case 7: TDataStd_Integer::Set(document->Main(), core3d::profile::SchemaID(), 1); break;
+            case 8: TDataStd_Real::Set(before.label.FindChild(2, Standard_False), 0); break;
+        }
+        const bool rejected = !owner->ValidateGeometryRepresentations();
+        document->AbortCommand(); opened = false;
+        core3d::profile::Record after;
+        return rejected && owner->ValidateGeometryRepresentations()
+            && document->GetAvailableUndos() == undo && core3d::profile::Read(document, target, after)
+            && before.IsEqual(after) && after.IsCurrent(document, target);
+    } catch (...) {
+        if (opened && !document.IsNull()) { try { document->AbortCommand(); } catch (...) {} }
+        return NO;
+    }
+}
+
 - (BOOL)debugStartLiveTransactionProbe {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return NO;
     auto document = GLController.viewer->getDocument();

@@ -37,6 +37,7 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <cstdint>
+#include "ProfilePersistence.hxx"
 
 #include <TDF_Data.hxx>
 #include <TCollection_ExtendedString.hxx>
@@ -103,6 +104,7 @@ struct OcctObjectTransformState
     TDF_Label label;
     Handle(TDF_Data) documentData;
     TopoDS_Shape shape;
+    core3d::profile::Record profile;
     gp_Trsf transform;
     std::array<Standard_Real, 8> scalars = {{0, 0, 0, 0, 0, 0, 1, 1}};
     std::array<Standard_Boolean, 8> present = {};
