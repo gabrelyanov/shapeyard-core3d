@@ -617,6 +617,16 @@ private:
         selector:@selector(applicationDidBecomeActive:)
         name:UIApplicationDidBecomeActiveNotification
         object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+        selector:@selector(sceneWillDeactivate:)
+        name:UISceneWillDeactivateNotification
+        object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+        selector:@selector(sceneDidActivate:)
+        name:UISceneDidActivateNotification
+        object:nil];
 }
 
 - (instancetype)init
@@ -674,7 +684,13 @@ private:
 
 - (void)applicationWillResignActive:(NSNotification *)notification
 {
-    (void)notification;
+    // Scene windows follow their own lifecycle. Keep nil-object application
+    // notifications used by the isolated native test host and legacy windows.
+    if (notification.object == UIApplication.sharedApplication
+        && self.window.windowScene != nil
+        && [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] != nil) {
+        return;
+    }
     _applicationActive = NO;
     [self invalidatePresentationObservation];
     _interactiveRenderingDepth = 0;
@@ -689,10 +705,32 @@ private:
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification
 {
-    (void)notification;
+    // Scene windows follow their own lifecycle. Keep nil-object application
+    // notifications used by the isolated native test host and legacy windows.
+    if (notification.object == UIApplication.sharedApplication
+        && self.window.windowScene != nil
+        && [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] != nil) {
+        return;
+    }
     _applicationActive = YES;
     [self setNeedsLayout];
     [self requestRender];
+}
+
+- (void)sceneWillDeactivate:(NSNotification *)notification
+{
+    UIWindowScene *scene = self.window.windowScene;
+    if (scene != nil && notification.object == scene) {
+        [self applicationWillResignActive:notification];
+    }
+}
+
+- (void)sceneDidActivate:(NSNotification *)notification
+{
+    UIWindowScene *scene = self.window.windowScene;
+    if (scene != nil && notification.object == scene) {
+        [self applicationDidBecomeActive:notification];
+    }
 }
 
 - (BOOL)canRender
