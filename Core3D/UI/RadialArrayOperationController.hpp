@@ -145,6 +145,7 @@ public:
     void debugSetApplyCommitMode(Standard_Integer mode) noexcept;
     //! 0 normal, 1 one-shot unavailable, 2 one-shot partial/mismatched.
     void debugSetPostCommitInspectMode(Standard_Integer mode) noexcept;
+    void debugSetProfileCopyFault(Standard_Integer mode) noexcept;
     void debugSetMaximumTopologyNodes(Standard_Size limit) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
     //! 0 normal, 1 false-after-close, 2 throw-after-close.
@@ -173,6 +174,11 @@ private:
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis referenceAxis;
         gp_Ax1 worldAxis;
+        // Exact native recipe/name authority is captured with the preview.
+        // A later document/reference edit cannot silently replace it.
+        OcctObjectNameState profileOwner;
+        Standard_Boolean profileCurrent = Standard_False;
+        Standard_Size retainedProfileTopologyNodes = 0;
         Standard_Integer documentTime = 0;
         Standard_Size topologyNodeCount = 0;
         Standard_Real metersPerUnit = 0.0;
@@ -191,6 +197,8 @@ private:
         OcctReferenceAxisReadState expectedReferenceAxisState =
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
+        profile::Record expectedProfile;
+        Standard_Boolean profileCandidateSealed = Standard_False;
     };
 
     struct PendingReferenceEdit {
@@ -283,6 +291,7 @@ private:
     Standard_Size _debugEraseFailureCount = 0;
     Standard_Integer _debugApplyCommitMode = 0;
     Standard_Integer _debugPostCommitInspectMode = 0;
+    Standard_Integer _debugProfileCopyFault = 0;
     Standard_Size _debugMaximumTopologyNodes =
         kMaximumAggregateTopologyNodes;
     Standard_Integer _debugReferenceEditCommitMode = 0;

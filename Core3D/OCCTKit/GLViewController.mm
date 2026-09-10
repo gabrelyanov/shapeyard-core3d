@@ -4699,6 +4699,13 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
     }
 }
 
+- (void)debugSetLinearArrayProfileCopyFault:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetLinearArrayProfileCopyFault(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit {
     if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
         _viewer->getObjectInteractor()
@@ -4785,6 +4792,13 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         _viewer->getObjectInteractor()
             ->debugSetRadialArrayPostCommitInspectMode(
                 static_cast<Standard_Integer>(mode));
+    }
+}
+
+- (void)debugSetRadialArrayProfileCopyFault:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetRadialArrayProfileCopyFault(
+            static_cast<Standard_Integer>(mode));
     }
 }
 

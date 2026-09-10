@@ -288,6 +288,7 @@ namespace core3d {
         void debugSetLinearArrayCommitMode(Standard_Integer mode) noexcept;
         void debugSetLinearArrayPostCommitInspectFailureCount(
             Standard_Size count) noexcept;
+        void debugSetLinearArrayProfileCopyFault(Standard_Integer mode) noexcept;
         void debugSetMaximumLinearArrayTopologyNodes(
             Standard_Size limit) noexcept;
         Standard_Boolean
@@ -345,6 +346,7 @@ namespace core3d {
             Standard_Integer mode) noexcept;
         void debugSetRadialArrayPostCommitInspectMode(
             Standard_Integer mode) noexcept;
+        void debugSetRadialArrayProfileCopyFault(Standard_Integer mode) noexcept;
         void debugSetMaximumRadialArrayTopologyNodes(
             Standard_Size limit) noexcept;
         Standard_Boolean

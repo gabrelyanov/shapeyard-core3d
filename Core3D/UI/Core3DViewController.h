@@ -1047,6 +1047,7 @@ typedef struct {
 - (void)debugSetLinearArrayEraseFailureCount:(NSUInteger)count;
 - (void)debugSetLinearArrayCommitMode:(NSInteger)mode;
 - (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
 //! Radial Array state values are Unavailable=0, Selecting=1, Ready=2,
@@ -1062,6 +1063,7 @@ typedef struct {
 - (void)debugSetRadialArrayApplyCommitMode:(NSInteger)mode;
 //! Post-commit inspect modes: 0 normal, 1 unavailable, 2 partial/mismatched.
 - (void)debugSetRadialArrayPostCommitInspectMode:(NSInteger)mode;
+- (void)debugSetRadialArrayProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateRadialArraySourcePersistedTransform;
 //! Reference-edit CommitCommand modes: 0 normal, 1 false-after-close,
@@ -1186,6 +1188,7 @@ typedef struct {
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
 //! Standalone fixture: saved profile binds its root but retains a different original unit.
 - (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData;
+- (NSData *_Nullable)debugGeometryStaleProfileBinXCAFFixtureData;
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileDuplicateCapacityProbe:(NSInteger)mode;
 //! Standalone BinXCAF fixture whose sole box has a negative-determinant root
 //! location. Used to prove mesh exporters preserve outward winding.

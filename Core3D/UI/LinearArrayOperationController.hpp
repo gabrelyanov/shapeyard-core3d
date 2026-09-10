@@ -122,6 +122,7 @@ public:
     void debugSetEraseFailureCount(Standard_Size count) noexcept;
     void debugSetCommitMode(Standard_Integer mode) noexcept;
     void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
+    void debugSetProfileCopyFault(Standard_Integer mode) noexcept;
     void debugSetMaximumTopologyNodes(Standard_Size limit) noexcept;
     Standard_Boolean debugMutateFirstSourcePersistedTransform() noexcept;
 #endif
@@ -142,6 +143,11 @@ private:
         OcctReferenceAxisReadState referenceAxisState =
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis referenceAxis;
+        // Exact native recipe/name authority is captured with the preview.
+        // A later document/reference edit cannot silently replace it.
+        OcctObjectNameState profileOwner;
+        Standard_Boolean profileCurrent = Standard_False;
+        Standard_Size retainedProfileTopologyNodes = 0;
         Standard_Integer documentTime = 0;
         Standard_Size topologyNodeCount = 0;
         Standard_Real metersPerUnit = 0.0;
@@ -160,6 +166,8 @@ private:
         OcctReferenceAxisReadState expectedReferenceAxisState =
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
+        profile::Record expectedProfile;
+        Standard_Boolean profileCandidateSealed = Standard_False;
     };
 
     enum class DocumentState : std::uint8_t {
@@ -217,6 +225,7 @@ private:
     Standard_Size _debugEraseFailureCount = 0;
     Standard_Integer _debugCommitMode = 0;
     Standard_Size _debugPostCommitInspectFailureCount = 0;
+    Standard_Integer _debugProfileCopyFault = 0;
     Standard_Size _debugMaximumTopologyNodes =
         kMaximumAggregateTopologyNodes;
 #endif

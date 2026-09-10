@@ -21,6 +21,8 @@
 #include <TColStd_ListOfInteger.hxx>
 #include <TDataStd_Integer.hxx>
 #include <TDataStd_Real.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDataStd_AsciiString.hxx>
 #include <TDF_Attribute.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
@@ -637,7 +639,23 @@ Standard_Boolean RadialArrayOperationController::captureSelectedSource(
             return Standard_False;
         }
 
+        OcctObjectNameState aProfileOwner;
+        Standard_Size aRetainedProfileTopology = 0;
+        if (!_document->CaptureObjectNameStateForLabel(aLabel, aProfileOwner)) {
+            return Standard_False;
+        }
+        const profile::Record& aProfile = aProfileOwner.object.profile;
+        if (!aProfile.label.IsNull() && !aProfile.boundShape.IsEqual(aStored)
+            && (!CountBoundedTopology(aProfile.boundShape,
+                    kMaximumSourceTopologyNodes, aRetainedProfileTopology)
+                || !IsTopologicallyValid(aProfile.boundShape))) {
+            return Standard_False;
+        }
+
         theSource = {};
+        theSource.profileOwner = std::move(aProfileOwner);
+        theSource.profileCurrent = theSource.profileOwner.object.profile.IsCurrent(aDocument, aLabel);
+        theSource.retainedProfileTopologyNodes = aRetainedProfileTopology;
         theSource.document = aDocument;
         theSource.presentation = aPresentation;
         theSource.label = aLabel;
@@ -692,6 +710,13 @@ Standard_Boolean RadialArrayOperationController::sourceIsCurrent(
             || theSource.label.Data() != aDocument->GetData()
             || (theRequireOriginalDocumentTime
                 && aDocument->GetData()->Time() != theSource.documentTime)) {
+            return Standard_False;
+        }
+        OcctObjectNameState aProfileOwner;
+        if (!_document->CaptureObjectNameStateForLabel(theSource.label, aProfileOwner)
+            || !aProfileOwner.IsEqual(theSource.profileOwner)
+            || aProfileOwner.object.profile.IsCurrent(aDocument, theSource.label)
+                != theSource.profileCurrent) {
             return Standard_False;
         }
         const TopoDS_Shape aStored =
@@ -801,8 +826,9 @@ Standard_Boolean RadialArrayOperationController::canAdmitCount(
     const Standard_Size anAggregateLimit =
         kMaximumAggregateTopologyNodes;
 #endif
-    if (theSource.topologyNodeCount
-        > anAggregateLimit / aCount) {
+    if (theSource.topologyNodeCount > anAggregateLimit / aCount
+        || theSource.retainedProfileTopologyNodes
+            > anAggregateLimit / aCount - theSource.topologyNodeCount) {
         return Standard_False;
     }
     try {
@@ -1586,6 +1612,14 @@ RadialArrayOperationController::inspectPendingResults() noexcept
         if (_pendingResults.empty()) {
             return DocumentState::None;
         }
+        OcctObjectNameState aSourceProfileOwner;
+        if (!_source.has_value() || aDocument != _source->document
+            || !_document->CaptureObjectNameStateForLabel(_source->label, aSourceProfileOwner)
+            || !aSourceProfileOwner.IsEqual(_source->profileOwner)
+            || aSourceProfileOwner.object.profile.IsCurrent(aDocument, _source->label)
+                != _source->profileCurrent) {
+            return DocumentState::PartialOrMismatched;
+        }
         Standard_Size aMissingCount = 0;
         Standard_Size aCommittedCount = 0;
         for (const PendingResult& aResult : _pendingResults) {
@@ -1595,7 +1629,14 @@ RadialArrayOperationController::inspectPendingResults() noexcept
             }
             const TopoDS_Shape aStored =
                 XCAFDoc_ShapeTool::GetShape(aResult.label);
+            profile::Record aProfile;
+            if (!profile::Read(aDocument, aResult.label, aProfile)) {
+                return DocumentState::PartialOrMismatched;
+            }
             if (aStored.IsNull()) {
+                if (!aProfile.label.IsNull()) {
+                    return DocumentState::PartialOrMismatched;
+                }
                 ++aMissingCount;
                 continue;
             }
@@ -1603,7 +1644,14 @@ RadialArrayOperationController::inspectPendingResults() noexcept
             const OcctReferenceAxisReadState aReferenceAxisState =
                 _document->ReadReferenceAxisForLabel(
                     aResult.label, aReferenceAxis);
-            if (aResult.expectedShape.IsNull()
+            OcctObjectNameState aName;
+            if (!aResult.profileCandidateSealed
+                || !aProfile.IsEqual(aResult.expectedProfile)
+                || aProfile.IsCurrent(aDocument, aResult.label) != _source->profileCurrent
+                || !_document->CaptureObjectNameStateForLabel(aResult.label, aName)
+                || aName.namePresent != _source->profileOwner.namePresent
+                || (aName.namePresent && !aName.name.IsEqual(_source->profileOwner.name))
+                || aResult.expectedShape.IsNull()
                 || !aStored.IsEqual(aResult.expectedShape)
                 || aResult.entityIdentifier.empty()
                 || aResult.definitionIdentifier.empty()
@@ -1714,7 +1762,10 @@ RadialArrayOperationController::refreshSourceAfterReferenceEdit() noexcept
         || TransformDiffers(aReplacement.transform, aPrevious.transform)
         || aReplacement.topologyNodeCount
             != aPrevious.topologyNodeCount
-        || aReplacement.metersPerUnit != aPrevious.metersPerUnit) {
+        || aReplacement.metersPerUnit != aPrevious.metersPerUnit
+        || !aReplacement.profileOwner.IsEqual(aPrevious.profileOwner)
+        || aReplacement.profileCurrent != aPrevious.profileCurrent
+        || aReplacement.retainedProfileTopologyNodes != aPrevious.retainedProfileTopologyNodes) {
         return Standard_False;
     }
     const Standard_Integer aMaximum = maximumAdmittedCount(aReplacement);
@@ -1917,6 +1968,18 @@ RadialArrayOperationController::editReferenceAxis(
             (void)abortOwnedCommand();
             return reconcileReferenceEdit();
         }
+#ifdef DEBUG
+        if (_debugProfileCopyFault == 7 || _debugProfileCopyFault == 8) {
+            const Standard_Integer aFault = _debugProfileCopyFault;
+            _debugProfileCopyFault = 0;
+            if (aFault == 7 && !_source->profileOwner.object.profile.label.IsNull()) {
+                TDataStd_AsciiString::Set(_source->profileOwner.object.profile.label, profile::IdentityID(),
+                    TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+            } else if (aFault == 8) {
+                TDataStd_Name::Set(_source->label, TCollection_ExtendedString("Injected unexpected reference-edit name"));
+            }
+        }
+#endif
         try {
             Standard_Boolean aCommitReported =
                 aDocument->CommitCommand();
@@ -2025,6 +2088,8 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
     struct PreparedResult {
         Handle(AIS_Shape) presentation;
         gp_Trsf transform;
+        TopoDS_Shape profileBinding;
+        std::string profileIdentifier;
     };
     std::vector<PreparedResult> aPrepared;
     try {
@@ -2040,7 +2105,8 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
         const Standard_Size anAggregateLimit =
             kMaximumAggregateTopologyNodes;
 #endif
-        Standard_Size anAggregateTopology = _source->topologyNodeCount;
+        Standard_Size anAggregateTopology = _source->topologyNodeCount
+            + _source->retainedProfileTopologyNodes;
         for (Standard_Integer anOrdinal = 1;
              anOrdinal < _count; ++anOrdinal) {
             BRepBuilderAPI_Copy aCopy;
@@ -2102,7 +2168,45 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
             }
             _document->LoadObjectMeterial(
                 _source->label, aPresentation);
-            aPrepared.push_back({aPresentation, aTransform});
+            TopoDS_Shape aProfileBinding;
+            std::string aProfileIdentifier;
+            const profile::Record& anOriginalProfile = _source->profileOwner.object.profile;
+            if (!anOriginalProfile.label.IsNull()) {
+                aProfileIdentifier = OcctDocument::NewProfileIdentifier();
+                if (!profile::IsIdentifier(aProfileIdentifier)
+                    || aProfileIdentifier == anOriginalProfile.identifier) {
+                    return RadialArrayApplyResult::NoChange;
+                }
+                if (anOriginalProfile.boundShape.IsEqual(_source->storedShape)) {
+                    // Root binding remains exact even if only units are stale.
+                    aProfileBinding = aPresentation->Shape();
+                } else {
+                    BRepBuilderAPI_Copy aRetainedCopy;
+                    aRetainedCopy.Perform(anOriginalProfile.boundShape, Standard_True, Standard_False);
+                    Standard_Size aRetainedTopology = 0;
+                    if (!aRetainedCopy.IsDone() || aRetainedCopy.Shape().IsNull()
+                        || aRetainedCopy.Shape().IsPartner(anOriginalProfile.boundShape)
+                        || aRetainedCopy.Shape().IsPartner(aPresentation->Shape())
+                        || !IsTopologicallyValid(aRetainedCopy.Shape())
+                        || anAggregateTopology >= anAggregateLimit
+                        || !CountBoundedTopology(aRetainedCopy.Shape(),
+                            anAggregateLimit - anAggregateTopology, aRetainedTopology)
+                        || aRetainedTopology != _source->retainedProfileTopologyNodes
+                        || aRetainedTopology > anAggregateLimit - anAggregateTopology) {
+                        return RadialArrayApplyResult::NoChange;
+                    }
+                    anAggregateTopology += aRetainedTopology;
+                    aProfileBinding = aRetainedCopy.Shape();
+                }
+                for (const PreparedResult& anExisting : aPrepared) {
+                    if (aProfileIdentifier == anExisting.profileIdentifier
+                        || (!anExisting.profileBinding.IsNull()
+                            && aProfileBinding.IsPartner(anExisting.profileBinding))) {
+                        return RadialArrayApplyResult::NoChange;
+                    }
+                }
+            }
+            aPrepared.push_back({aPresentation, aTransform, aProfileBinding, aProfileIdentifier});
         }
     } catch (...) {
         return RadialArrayApplyResult::NoChange;
@@ -2210,6 +2314,39 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                     aPending.expectedReferenceAxis)) {
                 return retainRetryableOrUnknown();
             }
+            profile::Record aStageAuthority = _source->profileOwner.object.profile;
+#ifdef DEBUG
+            Standard_Integer aProfileFault = 0;
+            if (!aStageAuthority.label.IsNull()
+                && _debugProfileCopyFault >= 1 && _debugProfileCopyFault <= 2) {
+                aProfileFault = _debugProfileCopyFault;
+                _debugProfileCopyFault = 0;
+                if (aProfileFault == 1) aStageAuthority.values[1] += 1;
+            }
+#endif
+            if (!profile::StageDuplicate(aDocument, _source->label,
+                    aStageAuthority, _source->storedShape,
+                    aLabel, aResult.profileBinding, aResult.profileIdentifier,
+                    aPending.expectedProfile)) {
+                return retainRetryableOrUnknown();
+            }
+            if (_source->profileOwner.namePresent) {
+                TDataStd_Name::Set(aLabel, _source->profileOwner.name);
+            } else {
+                aLabel.ForgetAttribute(TDataStd_Name::GetID());
+            }
+#ifdef DEBUG
+            if (aProfileFault == 2) {
+                TDataStd_Integer::Set(aPending.expectedProfile.label, profile::CountID(),
+                    static_cast<int>(aPending.expectedProfile.values.size()) + 1);
+                profile::Record aReadback;
+                if (!profile::Read(aDocument, aLabel, aReadback)) {
+                    return retainRetryableOrUnknown();
+                }
+                throw Standard_Failure("Injected invalid array profile unexpectedly read back");
+            }
+#endif
+            aPending.profileCandidateSealed = Standard_True;
             _document->LoadObjectMeterial(
                 aLabel, aResult.presentation);
         }
@@ -2217,6 +2354,26 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
             || !_document->ValidateReferenceAxes()) {
             return retainRetryableOrUnknown();
         }
+#ifdef DEBUG
+        // Inject closed-outcome faults only after every candidate is staged.
+        // Mutating the source earlier would reject a later copy before commit.
+        if (!_source->profileOwner.object.profile.label.IsNull()
+            && !_pendingResults.empty()
+            && _debugProfileCopyFault >= 3 && _debugProfileCopyFault <= 6) {
+            const Standard_Integer aFault = _debugProfileCopyFault;
+            _debugProfileCopyFault = 0;
+            const PendingResult& aFirst = _pendingResults.front();
+            if (aFault == 3 || aFault == 4) {
+                const TDF_Label aTarget = aFault == 3
+                    ? aFirst.expectedProfile.label : _source->profileOwner.object.profile.label;
+                TDataStd_AsciiString::Set(aTarget, profile::IdentityID(),
+                    TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+            } else {
+                const TDF_Label aTarget = aFault == 5 ? aFirst.label : _source->label;
+                TDataStd_Name::Set(aTarget, TCollection_ExtendedString("Injected unexpected array name"));
+            }
+        }
+#endif
         try {
             Standard_Boolean aCommitReported =
                 aDocument->CommitCommand();
@@ -2369,6 +2526,12 @@ void RadialArrayOperationController::debugSetPostCommitInspectMode(
 {
     _debugPostCommitInspectMode = theMode >= 0 && theMode <= 2
         ? theMode : 0;
+}
+
+void RadialArrayOperationController::debugSetProfileCopyFault(
+    const Standard_Integer theMode) noexcept
+{
+    _debugProfileCopyFault = theMode >= 0 && theMode <= 8 ? theMode : 0;
 }
 
 void RadialArrayOperationController::debugSetMaximumTopologyNodes(

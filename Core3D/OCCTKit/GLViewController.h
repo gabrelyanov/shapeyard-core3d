@@ -217,6 +217,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetLinearArrayEraseFailureCount:(NSUInteger)count;
 - (void)debugSetLinearArrayCommitMode:(NSInteger)mode;
 - (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
+- (void)debugSetLinearArrayProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
 - (NSDictionary<NSString *, NSNumber *> *)debugRadialArrayState;
@@ -226,6 +227,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetRadialArrayEraseFailureCount:(NSUInteger)count;
 - (void)debugSetRadialArrayApplyCommitMode:(NSInteger)mode;
 - (void)debugSetRadialArrayPostCommitInspectMode:(NSInteger)mode;
+- (void)debugSetRadialArrayProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumRadialArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateRadialArraySourcePersistedTransform;
 - (void)debugSetRadialArrayReferenceEditCommitMode:(NSInteger)mode;

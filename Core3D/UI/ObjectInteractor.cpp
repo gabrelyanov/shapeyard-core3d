@@ -3843,6 +3843,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		}
 	}
 
+    void ObjectInteractor::debugSetLinearArrayProfileCopyFault(
+        const Standard_Integer mode) noexcept {
+        if (_linearArrayController != nullptr) {
+            _linearArrayController->debugSetProfileCopyFault(mode);
+        }
+    }
+
 	void ObjectInteractor::debugSetMaximumLinearArrayTopologyNodes(
 		const Standard_Size limit) noexcept {
 		if (_linearArrayController != nullptr) {
@@ -4090,6 +4097,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			_radialArrayController->debugSetPostCommitInspectMode(mode);
 		}
 	}
+
+    void ObjectInteractor::debugSetRadialArrayProfileCopyFault(
+        const Standard_Integer mode) noexcept {
+        if (_radialArrayController != nullptr) {
+            _radialArrayController->debugSetProfileCopyFault(mode);
+        }
+    }
 
 	void ObjectInteractor::debugSetMaximumRadialArrayTopologyNodes(
 		const Standard_Size limit) noexcept {
