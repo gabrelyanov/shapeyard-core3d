@@ -1,3 +1,4 @@
+#include "../OCCTKit/ProfileDefinition.hxx"
 //
 //  Core3DViewer.h
 //  Core3D
@@ -43,15 +44,6 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
-    struct ProfileCircularSection {
-        gp_Pnt2d center;
-        double outerRadius = 0;
-        double innerRadius = 0; // Zero is a disk; positive is a concentric hole.
-    };
-    struct ProfileCircularHole {
-        gp_Pnt2d center;
-        double radius = 0;
-    };
     struct ProfileSolidWork;
     struct ProfileSolidGeometry;
     struct MeshVertexEditWork;
