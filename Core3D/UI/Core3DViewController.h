@@ -103,6 +103,15 @@ typedef NS_ENUM(NSInteger, Core3DMeshElementKind) {
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DMeshWindingRepairResult) {
+    Core3DMeshWindingRepairResultUnchanged,
+    Core3DMeshWindingRepairResultCommitted,
+    Core3DMeshWindingRepairResultRejected,
+    Core3DMeshWindingRepairResultBusy,
+    Core3DMeshWindingRepairResultRecoveryRequired,
+    Core3DMeshWindingRepairResultFailed,
+};
+
 typedef NS_ENUM(NSInteger, Core3DMeshUVAtlasResult) {
     Core3DMeshUVAtlasResultUnchanged,
     Core3DMeshUVAtlasResultCommitted,
@@ -689,6 +698,10 @@ typedef struct {
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(createSourceRetainedMeshCopy(entityIdentifier:expected:));
+//! Repair consistent winding of one admitted selected flat mesh; one ordinary Undo.
+//! Exact publication, document, model, presentation and native selection are revalidated.
+- (Core3DMeshWindingRepairResult)repairMeshWindingForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(repairMeshWinding(entityIdentifier:expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
@@ -998,6 +1011,8 @@ typedef struct {
 //! Pairwise shape partnership and TriangleMesh triangulation handle identity
 //! are intentionally unavailable in renderer-neutral scene snapshots.
 - (NSDictionary<NSString *, NSNumber *> *)debugGeometryCopyIndependenceState;
+//! Isolated native winding geometry probes; no live document writes.
+- (NSDictionary<NSString *, NSArray<NSNumber *> *> *_Nullable)debugWindingGeometryProbe;
 //! Test-only exact-label cycle seam; empty begin and real detected-state transitions.
 - (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
     NS_SWIFT_NAME(debugBeginEmptyBoolean(gizmoType:));

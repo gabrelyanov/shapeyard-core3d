@@ -13,7 +13,7 @@
 #include <gp_Vec3f.hxx>
 
 namespace core3d::meshedit {
-struct NativeTopologyCapture {
+struct NativeMeshStorageCapture {
     // Exact ownership references remain internal and on the native owner thread.
     TopoDS_Shape shape;
     TopoDS_Face face;
@@ -25,13 +25,10 @@ struct NativeTopologyCapture {
     double deflection=0;
     // Native one-based node IDs indexed by zero-based triangle/corner ordinals.
     std::vector<std::array<int,3>> triangleNodeIDs;
-    // All coincident stored IDs, including unused coherent-atlas prefix nodes.
-    // UV and normal storage is not merged or rewritten by this map.
-    std::vector<std::vector<int>> vertexNodeIDs;
-    Topology topology;
+    std::vector<Triangle> storedTriangles;
 };
-inline TopologyResult CaptureNativeTopology(const TopoDS_Shape& source,
-    NativeTopologyCapture& output, const std::atomic_bool& cancelled) noexcept {
+inline TopologyResult CaptureNativeMeshStorage(const TopoDS_Shape& source,
+    NativeMeshStorageCapture& output, const std::atomic_bool& cancelled) noexcept {
     output={};
     try {
         if (cancelled.load(std::memory_order_relaxed)) return TopologyResult::Cancelled;
@@ -42,7 +39,7 @@ inline TopologyResult CaptureNativeTopology(const TopoDS_Shape& source,
             if (!it.More() || it.Value().ShapeType()!=TopAbs_FACE) return TopologyResult::Invalid;
             it.Next();if(it.More())return TopologyResult::Invalid;
         }
-        NativeTopologyCapture value;value.shape=source;
+        NativeMeshStorageCapture value;value.shape=source;
         int faces=0;
         for(TopExp_Explorer it(source,TopAbs_FACE);it.More();it.Next()) {
             if(++faces>1)return TopologyResult::Invalid;
@@ -104,9 +101,26 @@ inline TopologyResult CaptureNativeTopology(const TopoDS_Shape& source,
             }
             value.triangleNodeIDs.push_back(ids);triangles.push_back(triangle);
         }
-        // Stored winding is retained; face orientation/placement remains explicit
-        // above. Callers must not double-apply reflection when forming overlays.
-        const auto result=Analyze(triangles,value.topology,cancelled);
+        value.storedTriangles=std::move(triangles);
+        if(cancelled.load(std::memory_order_relaxed))return TopologyResult::Cancelled;
+        output=std::move(value);return TopologyResult::Ready;
+    } catch(...) {output={};return TopologyResult::Invalid;}
+}
+// Existing picker callers still receive strict oriented topology. Raw storage
+// capture grants neither topology validity nor document mutation authority.
+struct NativeTopologyCapture : NativeMeshStorageCapture {
+    std::vector<std::vector<int>> vertexNodeIDs;
+    Topology topology;
+};
+inline TopologyResult CaptureNativeTopology(const TopoDS_Shape& source,
+    NativeTopologyCapture& output,const std::atomic_bool& cancelled) noexcept {
+    output={};
+    try {
+        NativeTopologyCapture value;
+        auto& storage=static_cast<NativeMeshStorageCapture&>(value);
+        const auto captured=CaptureNativeMeshStorage(source,storage,cancelled);
+        if(captured!=TopologyResult::Ready)return captured;
+        const auto result=Analyze(value.storedTriangles,value.topology,cancelled);
         if(result!=TopologyResult::Ready)return result;
         std::map<Point,std::size_t> vertexIDs;
         for(std::size_t v=0;v<value.topology.vertices.size();++v)

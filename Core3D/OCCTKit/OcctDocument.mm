@@ -1,5 +1,6 @@
 #include "NativeObservedApplication.hxx"
 #include "NativeMeshVertexMove.hxx"
+#include "NativeMeshWindingCandidate.hxx"
 #if DEBUG
 #include "NativeLiveTransactionObserverProbe.hxx"
 #endif
@@ -5280,6 +5281,110 @@ Standard_Boolean OcctDocument::ValidateMeshVertexMove(const TDF_Label& label,
             && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals && a.deflection==b.deflection
             && a.triangleNodeIDs==b.triangleNodeIDs;
     } catch(...) {return Standard_False;}
+}
+
+// EXTERNAL UNAPPLIED/UNCOMPILED. Intended inside OcctDocument.mm with
+// NativeMeshWindingCandidate.hxx, after existing mesh admission helpers.
+// Header enum: OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared }.
+namespace {
+bool CaptureWindingRepairSource(const OcctDocument& document, const TDF_Label& label,
+    OcctObjectTransformState& source, core3d::meshedit::NativeMeshStorageCapture& captured,
+    int& prefix, Standard_Size& resident) noexcept {
+    source={}; captured={}; prefix=0; resident=0;
+    if (![NSThread isMainThread]) return false;
+    try {
+        double unit=0;
+        if (!document.CaptureObjectTransformStateForLabel(label,source)
+            || source.resolvedRepresentation!=OcctGeometryRepresentation::TriangleMesh
+            || source.authoredFramesPresent
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document.Document(),unit) || unit!=0.001)
+            return false;
+        const auto recipe=Core3DNormalTextureRecipeForLabel(label);
+        if (recipe<0 || recipe>1) return false;
+        XCAFDoc_VisMaterialPBR material;
+        const bool normal=document.TryPBRMaterialForLabel(label,material) && !material.NormalTexture.IsNull();
+        if (normal!=(recipe==1) || !Core3DValidateOwnedFrameUsage(document.Document(),resident)) return false;
+        std::atomic_bool cancelled{false};
+        using namespace core3d::meshedit;
+        if (CaptureNativeMeshStorage(source.shape,captured,cancelled)!=TopologyResult::Ready) return false;
+        if (source.meshUVAtlasVersion!=0) {
+            if (source.meshUVAtlasVersion!=1 && source.meshUVAtlasVersion!=2) return false;
+            prefix=captured.sourceMesh->NbNodes()-3*captured.sourceMesh->NbTriangles();
+            if (prefix<=0 || (source.meshUVAtlasVersion==2 && prefix!=source.meshUVAtlasSettings[2])) return false;
+        } else if (captured.sourceMesh->HasUVNodes()) return false;
+        // Raw inconsistent storage is never offered as selectable topology.
+        // Validate each existing flat corner normal independently, then the
+        // winding planner validates cross-triangle orientability separately.
+        NativeTopologyCapture flat;
+        static_cast<NativeMeshStorageCapture&>(flat)=captured;
+        for (const auto& triangle:captured.storedTriangles) {
+            Topology isolated;
+            if (Analyze({triangle},isolated,cancelled)!=TopologyResult::Ready) return false;
+            flat.topology.unitNormals.push_back(isolated.unitNormals.front());
+        }
+        return HasFlatCornerLayout(flat,prefix);
+    } catch (...) { source={}; captured={}; return false; }
+}
+}
+
+OcctMeshWindingRepairResult OcctDocument::PrepareMeshWindingRepair(
+    const TDF_Label& label, TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    if (![NSThread isMainThread]) return OcctMeshWindingRepairResult::Invalid;
+    try {
+        using namespace core3d::meshedit;
+        OcctObjectTransformState source; NativeMeshStorageCapture captured;
+        int prefix=0; Standard_Size resident=0;
+        if (!CaptureWindingRepairSource(*this,label,source,captured,prefix,resident))
+            return OcctMeshWindingRepairResult::Invalid;
+        std::atomic_bool cancelled{false}; WindingPlan plan;
+        if (PlanConsistentWinding(captured.storedTriangles,plan,cancelled)!=TopologyResult::Ready)
+            return OcctMeshWindingRepairResult::Invalid;
+        if (plan.reversedTriangles.empty()) return OcctMeshWindingRepairResult::Unchanged;
+        TopoDS_Shape result;
+        if (PrepareFlatWindingRepair(captured,prefix,result,plan,cancelled)!=TopologyResult::Ready)
+            return OcctMeshWindingRepairResult::Invalid;
+        NativeTopologyCapture edited;
+        if (CaptureNativeTopology(result,edited,cancelled)!=TopologyResult::Ready)
+            return OcctMeshWindingRepairResult::Invalid;
+        const gp_Trsf placed=source.transform*edited.meshLocation.Transformation();
+        for (const auto& point:edited.storedNodes) {
+            const auto world=gp_Pnt(point[0],point[1],point[2]).Transformed(placed);
+            for (int axis=1;axis<=3;++axis)
+                if (!std::isfinite(world.Coord(axis)) || std::abs(world.Coord(axis))>1.e6)
+                    return OcctMeshWindingRepairResult::Invalid;
+        }
+        if (Core3DNormalTextureRecipeForLabel(label)==1) {
+            Standard_Size before=0,after=0;
+            if (!Core3DValidateNormalTextureBinding(myOcafDoc,label,&before)
+                || !ValidateNormalTextureShape(result,&after) || before>resident)
+                return OcctMeshWindingRepairResult::Invalid;
+            resident-=before;
+            if (!AddMultipliedWithinLimit(resident,after,1U,64U*1024U*1024U))
+                return OcctMeshWindingRepairResult::Invalid;
+        }
+        candidate=result;
+        return OcctMeshWindingRepairResult::Prepared;
+    } catch (...) { candidate.Nullify(); return OcctMeshWindingRepairResult::Invalid; }
+}
+
+Standard_Boolean OcctDocument::ValidateMeshWindingRepair(const TDF_Label& label,
+    const TopoDS_Shape& candidate) const noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        TopoDS_Shape expected;
+        if (PrepareMeshWindingRepair(label,expected)!=OcctMeshWindingRepairResult::Prepared) return Standard_False;
+        std::atomic_bool cancelled{false};
+        core3d::meshedit::NativeTopologyCapture a,b;
+        if (core3d::meshedit::CaptureNativeTopology(expected,a,cancelled)!=core3d::meshedit::TopologyResult::Ready
+            || core3d::meshedit::CaptureNativeTopology(candidate,b,cancelled)!=core3d::meshedit::TopologyResult::Ready)
+            return Standard_False;
+        return expected.ShapeType()==candidate.ShapeType() && expected.Orientation()==candidate.Orientation()
+            && expected.Location().IsEqual(candidate.Location()) && a.face.Orientation()==b.face.Orientation()
+            && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
+            && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals && a.deflection==b.deflection
+            && a.triangleNodeIDs==b.triangleNodeIDs;
+    } catch (...) { return Standard_False; }
 }
 
 Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(

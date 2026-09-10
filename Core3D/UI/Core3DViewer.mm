@@ -87,6 +87,77 @@
 #import <CoreImage/CIFilter.h>
 
 namespace core3d {
+// This is synchronous and bounded; no UI session or network wait is admitted.
+OrdinaryEditResult Core3DViewer::repairMeshWinding(
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) return OrdinaryEditResult::Busy;
+    if (myDoc.IsNull() || myContext.IsNull() || width == 0 || height == 0
+        || identity.entityIdentifier.empty() || identity.entityIdentifier.size() > 128
+        || identity.entityIdentifier.find('\0') != std::string::npos
+        || identity.publicationSourceIdentifier.empty() || identity.publicationSourceIdentifier.size() > 128
+        || identity.publicationSourceIdentifier.find('\0') != std::string::npos)
+        return OrdinaryEditResult::Invalid;
+    try {
+        const auto owner = myDoc;
+        const auto document = owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return OrdinaryEditResult::Busy;
+        const auto documentTime = document->GetData()->Time();
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision
+            || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->selection.selected.size() != 1
+            || snapshot->selection.selected[0].kind != scene::ElementKind::Object
+            || snapshot->selection.selected[0].entityIdentifier != identity.entityIdentifier)
+            return OrdinaryEditResult::Invalid;
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return OrdinaryEditResult::Invalid;
+        const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || presentation.IsNull()) return OrdinaryEditResult::Invalid;
+        const auto label = owner->ShapeLabel(presentation);
+        OrdinaryTransformRecord record;
+        if (!owner->CaptureObjectTransformStateForLabel(label, record.previous)
+            || record.previous.entityIdentifier != identity.entityIdentifier
+            || record.previous.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh
+            || record.previous.authoredFramesPresent) return OrdinaryEditResult::Invalid;
+        record.requested.label = label; record.requested.presentation = presentation;
+        record.requested.shape = record.previous.shape;
+        record.requested.transform = record.previous.transform;
+        OrdinaryTransformLedger authority; authority.records.push_back(record);
+        if (!admitTransform(authority)) return OrdinaryEditResult::Invalid;
+        TopoDS_Shape candidate;
+        const auto result = owner->PrepareMeshWindingRepair(label, candidate);
+        if (result == OcctMeshWindingRepairResult::Invalid) return OrdinaryEditResult::Invalid;
+        OcctObjectTransformState actual;
+        auto freshAuthority = authority;
+        if (myDoc != owner || owner->Document() != document
+            || document->GetData()->Time() != documentTime
+            || !owner->CaptureObjectTransformStateForLabel(label, actual)
+            || !record.previous.IsEqual(actual)
+            || !admitTransform(freshAuthority)
+            || freshAuthority.selectionOwners != authority.selectionOwners
+            || freshAuthority.manipulatorType != authority.manipulatorType
+            || freshAuthority.hadManipulator != authority.hadManipulator)
+            return OrdinaryEditResult::Invalid;
+        if (result == OcctMeshWindingRepairResult::Unchanged)
+            return candidate.IsNull() ? OrdinaryEditResult::NoChange : OrdinaryEditResult::Invalid;
+        if (result != OcctMeshWindingRepairResult::Prepared || candidate.IsNull())
+            return OrdinaryEditResult::Invalid;
+        auto request = record.requested;
+        request.shape = candidate;
+        request.operation = OrdinaryTransformOperation::MeshWindingRepair;
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = _ordinaryEditController->beginTransform({request}, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
+
 
 namespace {
 

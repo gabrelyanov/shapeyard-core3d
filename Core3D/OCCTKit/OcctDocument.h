@@ -52,6 +52,8 @@ class Message_ProgressRange;
 //! The non-negative values are serialized schema values: never renumber or
 //! reuse them. Invalid is a read-only fail-closed sentinel and must never be
 //! written to a document.
+enum class OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared };
+
 enum class OcctGeometryRepresentation : Standard_Integer
 {
     Invalid = -1,
@@ -658,6 +660,9 @@ public:
     Standard_EXPORT Standard_Boolean CaptureMeshUVAtlasPreview(const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept;
     //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
     Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}, OcctMeshUVAtlasPreview* preview = nullptr) const noexcept;
+    //! Private consistent-winding candidate; source ownership and material contracts remain strict.
+    Standard_EXPORT OcctMeshWindingRepairResult PrepareMeshWindingRepair(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshWindingRepair(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
     //! Bounded flat-corner editing; preserves atlas/maps, rejects supplied frames.
     Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,

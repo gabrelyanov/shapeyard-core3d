@@ -1,4 +1,8 @@
 #if DEBUG
+#include "../OCCTKit/NativeWindingPlanProbe.hxx"
+#include "../OCCTKit/NativeWindingCandidateProbe.hxx"
+#endif
+#if DEBUG
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
 #endif
 #include "../Scene/MikkTangentSpace.hpp"
@@ -6583,6 +6587,48 @@ void Core3DAddDebugOrphanVisualMaterial(
     return Core3DMeshCopyResultRejected;
 }
 
+- (Core3DMeshWindingRepairResult)repairMeshWindingForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DMeshWindingRepairResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DMeshWindingRepairResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DMeshWindingRepairResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->repairMeshWinding(identity, expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DMeshWindingRepairResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+                [self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DMeshWindingRepairResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DMeshWindingRepairResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DMeshWindingRepairResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DMeshWindingRepairResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DMeshWindingRepairResultFailed;
+        }
+    } catch (...) {}
+    return Core3DMeshWindingRepairResultRejected;
+}
+
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
@@ -7931,6 +7977,19 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform {
     return [GLController debugMutateFirstMirrorSourcePersistedTransform];
+}
+
+- (NSDictionary<NSString *, NSArray<NSNumber *> *> *)debugWindingGeometryProbe {
+    if (![NSThread isMainThread]) return nil;
+    try {
+        const auto plan = core3d::debug::RunNativeWindingPlanProbe();
+        const auto candidate = core3d::debug::RunNativeWindingCandidateProbe();
+        NSMutableArray<NSNumber *> *planValues = [NSMutableArray arrayWithCapacity:plan.size()];
+        NSMutableArray<NSNumber *> *candidateValues = [NSMutableArray arrayWithCapacity:candidate.size()];
+        for (const bool value : plan) [planValues addObject:@(value)];
+        for (const bool value : candidate) [candidateValues addObject:@(value)];
+        return @{ @"plan": planValues, @"candidate": candidateValues };
+    } catch (...) { return nil; }
 }
 
 - (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType {

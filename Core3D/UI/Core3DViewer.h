@@ -171,6 +171,8 @@ namespace core3d {
         std::optional<OcctMeshUVAtlasPreview> previewCoherentUVAtlas(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height,
             const std::optional<OcctMeshUVAtlasOptions>& options) noexcept;
+        OrdinaryEditResult repairMeshWinding(const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         OrdinaryEditResult generateTriangleUVAtlas(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options = {}) noexcept;
         OrdinaryEditResult renameObjectFromBrowser(const ObjectFrameIdentity& identity,
