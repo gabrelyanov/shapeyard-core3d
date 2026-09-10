@@ -9,6 +9,7 @@
 #include "../Common/Core3DMobileResourceLimits.h"
 
 #include <AIS_Shape.hxx>
+#include <AIS_ListIteratorOfListOfInteractive.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -2123,8 +2124,18 @@ Standard_Boolean BooleanOperationController::visualApply(
         }
     } aPendingRetirement{aPriorWorker, didScheduleReplacement};
     _previewState = BooleanPreviewState::Selecting;
-    if (_selectionMap.empty()
-        || _selectionMap.size() > kMaxSourceOperands) {
+    if (_selectionMap.empty()) {
+        // An ordinary selection cycle can remove its last operand. Retire the
+        // old generation and presentations while keeping the tool selectable.
+        _actorIOArray.clear();
+        _actedIOArray.clear();
+        if (!pruneOwnedPresentations()) {
+            _previewState = BooleanPreviewState::Failed;
+        }
+        notifyPreviewStateChanged();
+        return Standard_False;
+    }
+    if (_selectionMap.size() > kMaxSourceOperands) {
         _previewState = BooleanPreviewState::Failed;
         notifyPreviewStateChanged();
         return Standard_False;
@@ -2201,13 +2212,21 @@ Standard_Boolean BooleanOperationController::visualApply(
         Standard_Boolean hasCompleteSubjects = Standard_False;
         _actedIOArray = orderedSubjectPresentations(hasCompleteSubjects);
         if (!hasCompleteSubjects
-            || (theAction == BooleanAction::BooleanSubtract
-                && (_actorIOArray.empty() || _actedIOArray.empty()))
             || (IsSingleResultBooleanAction(theAction)
-                && (!_actorIOArray.empty() || _actedIOArray.size() < 2))
+                && !_actorIOArray.empty())
             || _actorIOArray.size() + _actedIOArray.size()
                 > kMaxSourceOperands) {
             _previewState = BooleanPreviewState::Failed;
+            notifyPreviewStateChanged();
+            return Standard_False;
+        }
+        if ((theAction == BooleanAction::BooleanSubtract
+                && (_actorIOArray.empty() || _actedIOArray.empty()))
+            || (IsSingleResultBooleanAction(theAction)
+                && _actedIOArray.size() < 2)) {
+            // Missing roles are normal while choosing operands. No request is
+            // admitted, Apply remains unavailable and the retirement guard
+            // clears any obsolete pending worker before returning.
             notifyPreviewStateChanged();
             return Standard_False;
         }
@@ -3239,3 +3258,50 @@ void BooleanOperationController::clearOperationState() noexcept
 }
 
 } // namespace core3d
+
+#ifdef DEBUG
+namespace core3d {
+// DEBUG only. Resolve the current controller-owned presentation by exact native label.
+// This seam drives production selection cycling; it never supplies a synthetic role.
+Standard_Boolean BooleanOperationController::debugBeginEmptySelection(
+    BooleanAction action) noexcept {
+    cancelActive();
+    if (!begin(action)) return Standard_False;
+    (void)visualApply(action);
+    return Standard_True;
+}
+
+Standard_Boolean BooleanOperationController::debugCycleSelection(
+    const std::string& entity) noexcept {
+    if (!_activeAction || !_stateValid || _selectionFrozen || myDoc.IsNull()
+        || myContext.IsNull() || entity.empty() || entity.size() > 128
+        || entity.find('\0') != std::string::npos) return Standard_False;
+    try {
+        Handle(AIS_InteractiveObject) target;
+        // Selection map keys change when previews make private AIS copies.
+        // Never retain a prior key in the test between cycles.
+        for (const auto& selection : _selectionMap) {
+            if (myDoc->EntityIdentifierForLabel(selection.second.documentLabel) != entity) continue;
+            if (!target.IsNull() || !IsCurrentBRepSelection(myDoc, selection.second)) return Standard_False;
+            target = selection.first;
+        }
+        if (target.IsNull()) {
+            AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                const auto label = myDoc->ShapeLabel(it.Value());
+                if (label.IsNull() || myDoc->EntityIdentifierForLabel(label) != entity) continue;
+                if (!target.IsNull() || !myDoc->IsPresentationEditable(it.Value())) return Standard_False;
+                target = it.Value();
+            }
+        }
+        if (target.IsNull()) return Standard_False;
+        const auto action = *_activeAction;
+        updateDetectedState(target, Handle(SelectMgr_EntityOwner)(), Standard_True, action);
+        (void)visualApply(action);
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+}
+#endif

@@ -7933,6 +7933,41 @@ void Core3DAddDebugOrphanVisualMaterial(
     return [GLController debugMutateFirstMirrorSourcePersistedTransform];
 }
 
+- (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType {
+    core3d::BooleanAction action = core3d::BooleanAction::BooleanSubtract;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || !Core3DTryBooleanActionForGizmo(gizmoType, action)) return NO;
+    [self setGizmoType:gizmoType];
+    if (_currentGizmoType != gizmoType || [GLController getGizmoType] != gizmoType
+        || GLController.viewer == nullptr) return NO;
+    const BOOL result = GLController.viewer->debugCycleBooleanSelection(action, {}, true);
+    self.can_apply = [GLController canApplyBoolean];
+    [GLController debugRequestRender];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
+    return result;
+}
+
+- (BOOL)debugCycleBooleanSelectionForEntityIdentifier:(NSString *)entityIdentifier {
+    core3d::BooleanAction action = core3d::BooleanAction::BooleanSubtract;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr
+        || !Core3DTryBooleanActionForGizmo(_currentGizmoType, action)
+        || [GLController getGizmoType] != _currentGizmoType
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr) return NO;
+    try {
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        const BOOL result = GLController.viewer->debugCycleBooleanSelection(action, entity, false);
+        self.can_apply = [GLController canApplyBoolean];
+        [GLController debugRequestRender];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingApply];
+        return result;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)debugBeginBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
                 actorEntityIdentifiers:(NSArray<NSString *> *)actorEntityIdentifiers
               subjectEntityIdentifiers:(NSArray<NSString *> *)subjectEntityIdentifiers {

@@ -298,6 +298,8 @@ namespace core3d {
 		//! builder exactly as an AIS MoveTo result would be.
 		Standard_Boolean DebugSetDetectedOwner(
 			const Handle(SelectMgr_EntityOwner)& owner) noexcept;
+        Standard_Boolean debugCycleBooleanSelection(BooleanAction action,
+            const std::string& entity, bool beginEmpty) noexcept;
         Standard_Boolean debugBeginBooleanSelection(
             BooleanAction action,
             const std::vector<std::string>& actorEntityIdentifiers,

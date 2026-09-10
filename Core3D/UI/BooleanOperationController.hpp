@@ -139,6 +139,8 @@ public:
     std::uint64_t previewGeneration() const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
 #ifdef DEBUG
+    Standard_Boolean debugBeginEmptySelection(BooleanAction action) noexcept;
+    Standard_Boolean debugCycleSelection(const std::string& entity) noexcept;
     //! Production result validator exposed only for deterministic fixtures.
     static Standard_Boolean debugValidateSolidResult(
         const TopoDS_Shape& shape) noexcept;

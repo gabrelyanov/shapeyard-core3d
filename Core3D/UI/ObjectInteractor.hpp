@@ -224,6 +224,8 @@ namespace core3d {
 		void setBooleanPreviewStateChangedCallback(
 			std::function<void()> callback);
 #ifdef DEBUG
+		Standard_Boolean debugCycleBooleanSelection(BooleanAction action,
+            const std::string& entity, bool beginEmpty) noexcept;
 		Standard_Boolean debugBeginBooleanSelection(
 			const std::vector<Handle(AIS_InteractiveObject)>& actors,
 			const std::vector<Handle(AIS_InteractiveObject)>& subjects,

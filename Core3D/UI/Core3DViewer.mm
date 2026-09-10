@@ -4475,6 +4475,15 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
 }
 
 #ifdef DEBUG
+Standard_Boolean Core3DViewer::debugCycleBooleanSelection(
+    BooleanAction action, const std::string& entity, bool beginEmpty) noexcept {
+    PrimitiveManipulatorType expected = PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+    if (![NSThread isMainThread] || _objectInteractor == nullptr || myDoc.IsNull()
+        || myContext.IsNull() || !TryManipulatorForBooleanAction(action, expected)
+        || _objectInteractor->getManipulatorType() != expected) return Standard_False;
+    return _objectInteractor->debugCycleBooleanSelection(action, entity, beginEmpty);
+}
+
 Standard_Boolean Core3DViewer::debugBeginBooleanSelection(
     const BooleanAction theAction,
     const std::vector<std::string>& theActorEntityIdentifiers,

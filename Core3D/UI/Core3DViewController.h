@@ -998,6 +998,11 @@ typedef struct {
 //! Pairwise shape partnership and TriangleMesh triangulation handle identity
 //! are intentionally unavailable in renderer-neutral scene snapshots.
 - (NSDictionary<NSString *, NSNumber *> *)debugGeometryCopyIndependenceState;
+//! Test-only exact-label cycle seam; empty begin and real detected-state transitions.
+- (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
+    NS_SWIFT_NAME(debugBeginEmptyBoolean(gizmoType:));
+- (BOOL)debugCycleBooleanSelectionForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugCycleBooleanSelection(entityIdentifier:));
 //! Test-only deterministic Boolean seam. Identifiers must name committed
 //! one-occurrence bodies; production selection, ownership, validation, preview,
 //! transaction, and renderer publication paths remain authoritative.

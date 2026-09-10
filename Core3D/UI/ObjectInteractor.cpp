@@ -3453,6 +3453,15 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 	}
 
 #ifdef DEBUG
+    Standard_Boolean ObjectInteractor::debugCycleBooleanSelection(BooleanAction action,
+        const std::string& entity, bool beginEmpty) noexcept {
+        if (_booleanOpController == nullptr) return Standard_False;
+        if (beginEmpty) return entity.empty()
+            ? _booleanOpController->debugBeginEmptySelection(action) : Standard_False;
+        return _booleanOpController->hasActiveOperation(action)
+            ? _booleanOpController->debugCycleSelection(entity) : Standard_False;
+    }
+
 	Standard_Boolean ObjectInteractor::debugBeginBooleanSelection(
 		const std::vector<Handle(AIS_InteractiveObject)>& actors,
 		const std::vector<Handle(AIS_InteractiveObject)>& subjects,
