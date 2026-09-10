@@ -2145,9 +2145,12 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
     } catch (...) { return OrdinaryEditResult::Invalid; }
 }
 
-bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
+bool Core3DViewer::hasUnresolvedOrdinaryEditExcludingQueuedLoad() const noexcept {
     return _documentReplacementWork != nullptr
         || (_ordinaryEditController != nullptr && _ordinaryEditController->blocksNormalWork());
+}
+bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
+    return _queuedAssetLoadWork != nullptr || hasUnresolvedOrdinaryEditExcludingQueuedLoad();
 }
 bool Core3DViewer::hasUnresolvedEdit() const noexcept {
     return hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate();
@@ -2161,6 +2164,7 @@ OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
     return _ordinaryEditController->beginTransform(changes, failure);
 }
 OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
+    if (_queuedAssetLoadWork) return OrdinaryEditResult::Busy;
     if (_documentReplacementWork) {
         return restoreDocumentReplacement() ? OrdinaryEditResult::NoChange : OrdinaryEditResult::OutcomeUnknown;
     }
@@ -3585,9 +3589,67 @@ bool Core3DViewer::restoreDocumentReplacement(bool afterImportFailure) noexcept 
     return true;
 }
 
-AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
+struct QueuedAssetLoadWork {
+    Handle(OcctDocument) owner;
+    Handle(TDocStd_Document) document;
+    std::optional<authority::QueuedLoadReservation> reservation;
+    bool promoted = false;
+};
+
+std::shared_ptr<QueuedAssetLoadWork> Core3DViewer::beginQueuedAssetLoad() noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || _objectInteractor == nullptr || _objectInteractor->isManipulatorGestureActive()) return {};
+    try {
+        auto work = std::make_shared<QueuedAssetLoadWork>();
+        work->owner = myDoc; work->document = myDoc->Document();
+        work->reservation = myDoc->BeginNativeQueuedLoad();
+        if (!work->reservation) return {};
+        _queuedAssetLoadWork = work;
+        return work;
+    } catch (...) { return {}; }
+}
+
+bool Core3DViewer::ownsQueuedAssetLoad(const std::shared_ptr<QueuedAssetLoadWork>& work) const noexcept {
+    return [NSThread isMainThread] && work && _queuedAssetLoadWork == work;
+}
+
+bool Core3DViewer::canAdoptQueuedAssetLoad(const std::shared_ptr<QueuedAssetLoadWork>& work) noexcept {
+    if (!ownsQueuedAssetLoad(work) || work->promoted || !work->reservation
+        || _objectInteractor == nullptr || _shapeInteractor == nullptr || myContext.IsNull()
+        || myDoc.IsNull() || myDoc != work->owner
+        || hasUnresolvedOrdinaryEditExcludingQueuedLoad()
+        || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+        || _objectInteractor->isManipulatorGestureActive()) return false;
+    try {
+        return !myDoc->Document().IsNull() && myDoc->Document() == work->document
+            && !myDoc->Document()->HasOpenCommand()
+            && myDoc->OwnsNativeQueuedLoad(*work->reservation);
+    } catch (...) { return false; }
+}
+
+bool Core3DViewer::finishQueuedAssetLoadPrivateWork(
+    const std::shared_ptr<QueuedAssetLoadWork>& work, bool privateWorkSettled) noexcept {
+    if (!ownsQueuedAssetLoad(work) || !privateWorkSettled || myDoc.IsNull()
+        || myDoc != work->owner || !work->reservation) return false;
+    // Promoted ownership now belongs to _documentReplacementWork, including
+    // unknown restoration. Releasing staged input cannot end that reservation.
+    if (!work->promoted && myDoc->EndNativeQueuedLoadPrivateWork(*work->reservation, true)
+        != authority::QueuedLoadEnd::PrivateWorkSettled) return false;
+    _queuedAssetLoadWork.reset();
+    return true;
+}
+
+AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename) {
+    return ImportCbf(theFilename, {});
+}
+
+AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
+    const std::shared_ptr<QueuedAssetLoadWork>& queuedWork) {
     if (![NSThread isMainThread] || myContext.IsNull() || myDoc.IsNull()) return AssetImportResult::InternalFailure;
-    if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
+    if ((_queuedAssetLoadWork && !queuedWork)
+        || (queuedWork && !canAdoptQueuedAssetLoad(queuedWork))
+        || hasUnresolvedOrdinaryEditExcludingQueuedLoad()
+        || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // Replacement is a hard document boundary. Never cancel or recreate
         // an operation here: its controller may own previews, an open command,
         // or an exactly-once reconciliation token that the enum cannot encode.
@@ -3699,7 +3761,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         work->application = app; work->previous = previous; work->candidate = candidate;
         work->presentations = previousPresentations;
         work->manipulator = previousManipulatorType; work->selection = previousSelectionMode;
-        work->reservation = myDoc->BeginNativeReplacement();
+        // The matching owner transfers atomically after private candidate
+        // validation. No permission can be recaptured between End and Begin.
+        work->reservation = queuedWork
+            ? myDoc->PromoteNativeQueuedLoad(*queuedWork->reservation, canAdoptQueuedAssetLoad(queuedWork))
+            : myDoc->BeginNativeReplacement();
         if (!work->reservation) {
             CloseDocumentNoThrow(app, candidate);
             return AssetImportResult::Busy;
@@ -3707,6 +3773,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string &theFilename) {
         // Install the retained owner before the first context mutation. Assignment
         // of shared_ptr is noexcept; every subsequent failure goes through recovery.
         _documentReplacementWork = std::move(work);
+        if (queuedWork) queuedWork->promoted = true;
     } catch (...) {
         CloseDocumentNoThrow(app, candidate);
         return AssetImportResult::InternalFailure;
@@ -4206,7 +4273,7 @@ void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
     }
 
 void Core3DViewer::StartRotation(int theX, int theY) {
-    if (_documentReplacementWork) return;
+    if (_documentReplacementWork || _queuedAssetLoadWork) return;
     if(_objectInteractor == nullptr) {
         return;
     }
@@ -5067,7 +5134,7 @@ Core3DViewer::DebugMutateFirstBevelSourcePersistedTransform() noexcept
 #endif
 
 void Core3DViewer::Rotation(int theX, int theY) {
-    if (_documentReplacementWork) return;
+    if (_documentReplacementWork || _queuedAssetLoadWork) return;
     if(_objectInteractor == nullptr) {
         return;
     }
@@ -5085,7 +5152,7 @@ void Core3DViewer::Rotation(int theX, int theY) {
 }
 
 void Core3DViewer::FinishInteraction(int theX, int theY) {
-    if (_documentReplacementWork) return;
+    if (_documentReplacementWork || _queuedAssetLoadWork) return;
     if(_objectInteractor != nullptr) {
 		if (_objectInteractor->isPickingMirrorPlane()) {
 			return;
@@ -5095,7 +5162,7 @@ void Core3DViewer::FinishInteraction(int theX, int theY) {
 }
 
 void Core3DViewer::CancelInteraction(int theX, int theY) {
-    if (_documentReplacementWork) return;
+    if (_documentReplacementWork || _queuedAssetLoadWork) return;
     if(_objectInteractor != nullptr) {
 		if (_objectInteractor->isPickingMirrorPlane()) {
 			return;

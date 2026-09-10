@@ -20,6 +20,7 @@
 #include "../OCCTKit/NativeTransactionObserverProbe.hxx"
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
 #include "../OCCTKit/NativeManualIntentPolicyProbe.hxx"
+#include "../OCCTKit/NativeQueuedLoadPolicyProbe.hxx"
 #include "../OCCTKit/NativeReplacementPolicyProbe.hxx"
 #include "../OCCTKit/NativeIntentReplacementPromotionProbe.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
@@ -844,7 +845,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 }
 
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeIntentPolicy:(NSInteger)family {
-    if (![NSThread isMainThread] || family < 0 || family > 2) return @{};
+    if (![NSThread isMainThread] || family < 0 || family > 3) return @{};
     try {
         NSMutableDictionary<NSString *, NSNumber *> *report = [NSMutableDictionary dictionary];
         auto retain = [&](const auto& outcomes) {
@@ -854,7 +855,8 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         };
         if (family == 0) retain(core3d::debug::RunNativeManualIntentPolicyProbe());
         else if (family == 1) retain(core3d::debug::RunNativeReplacementPolicyProbe());
-        else retain(core3d::debug::RunNativeIntentReplacementPromotionProbe());
+        else if (family == 2) retain(core3d::debug::RunNativeIntentReplacementPromotionProbe());
+        else retain(core3d::debug::RunNativeQueuedLoadPolicyProbe());
         return report;
     } catch (...) { return @{}; }
 }

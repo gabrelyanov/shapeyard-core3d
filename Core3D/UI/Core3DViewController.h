@@ -608,6 +608,15 @@ typedef struct {
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
 - (NSData *_Nullable)thumbData;
 
+// Success means accepted; terminal completion follows private cleanup.
+- (Core3DAssetLoadResult)tryLoadFromBundle:(NSURL *)bundleURL
+    NS_SWIFT_NAME(tryLoad(fromBundle:));
+- (Core3DAssetLoadResult)tryLoadFromAssetFile:(NSURL *)URL
+    expectedByteCount:(unsigned long long)count expectedSHA256:(NSString *)sha
+    NS_SWIFT_NAME(tryLoad(fromAssetFile:expectedByteCount:expectedSHA256:));
+- (void)viewDidChangeAssetLoadCleanupPending:(BOOL)pending
+    NS_SWIFT_NAME(viewDidChangeAssetLoadCleanupPending(_:));
+- (void)retryAssetLoadCleanup;
 - (void)loadFromBundle:(NSURL *)bundleUrl;
 //! Opens a manifest-authorized model without materializing it as NSData. Core3D
 //! pins, streams, hashes, and privately stages the file before OCCT sees it.
@@ -1146,6 +1155,11 @@ typedef struct {
 - (BOOL)debugStartLiveTransactionProbe;
 - (void)debugFailNextDocumentAdoption;
 - (void)debugSetDocumentReplacementPreparationFailure:(BOOL)preparation restorationAttempts:(NSInteger)restorationAttempts;
+#ifdef DEBUG
+- (void)debugPauseQueuedAssetAdoption:(BOOL)paused;
+- (void)debugFailQueuedAssetCleanup:(NSUInteger)count;
+- (NSDictionary<NSString *, id> *)debugQueuedAssetLoadState;
+#endif
 - (void)debugStopLiveTransactionProbe;
 - (NSDictionary<NSString *, id> *_Nullable)debugLiveTransactionProbe;
 //! Deterministic projected gestures through the production transform/commit

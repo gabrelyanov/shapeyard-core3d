@@ -3272,6 +3272,51 @@ void OcctDocument::ObserveSuccessfulNativeDocumentAdoption() noexcept {
     } catch (...) { myNativeAuthority->Detach(); }
 }
 
+std::optional<core3d::authority::QueuedLoadReservation>
+OcctDocument::BeginNativeQueuedLoad() noexcept {
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return std::nullopt;
+        // Existing typed preview/recovery ledgers are rejected by the viewer.
+        // Profile/alignment private workers are settled by the controller before adoption.
+        return myNativeAuthority->BeginQueuedLoad(myOcafDoc.get(),
+            core3d::authority::QueuedLoadAdmission::Ready, true, myOcafDoc->HasOpenCommand());
+    } catch (...) { return std::nullopt; }
+}
+
+bool OcctDocument::OwnsNativeQueuedLoad(
+    const core3d::authority::QueuedLoadReservation& reservation) noexcept {
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return false;
+    try {
+        return !myOcafDoc.IsNull() && myOcafDoc->Application().get() == myApp.get()
+            && myNativeAuthority->OwnsQueuedLoad(reservation);
+    } catch (...) { return false; }
+}
+
+core3d::authority::QueuedLoadEnd OcctDocument::EndNativeQueuedLoadPrivateWork(
+    const core3d::authority::QueuedLoadReservation& reservation, bool privateWorkSettled) noexcept {
+    using core3d::authority::QueuedLoadEnd;
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return QueuedLoadEnd::Unavailable;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return QueuedLoadEnd::Unavailable;
+        return myNativeAuthority->EndQueuedLoadPrivateWork(reservation, privateWorkSettled);
+    } catch (...) { return QueuedLoadEnd::Unavailable; }
+}
+
+std::optional<core3d::authority::ReplacementReservation> OcctDocument::PromoteNativeQueuedLoad(
+    const core3d::authority::QueuedLoadReservation& reservation, bool nativeEditReady) noexcept {
+    if (!myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return std::nullopt;
+        return myNativeAuthority->PromoteQueuedLoadToReplacement(reservation, myOcafDoc.get(),
+            nativeEditReady, myOcafDoc->HasOpenCommand());
+    } catch (...) { return std::nullopt; }
+}
+
 std::optional<core3d::authority::ReplacementReservation> OcctDocument::BeginNativeReplacement() noexcept {
     if (!myNativeAuthority || !myAuthorityApplication
         || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;

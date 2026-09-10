@@ -391,6 +391,15 @@ public:
   // Internal committed-adoption boundary; no public AI token is exposed.
   void ObserveSuccessfulNativeDocumentAdoption() noexcept;
   // Private live-import ownership; native readiness is checked by the viewer.
+  // Native queued file preparation. Admission belongs to the viewer, before
+  // cancelling controller workers. These values are never accepted from wire data.
+  std::optional<core3d::authority::QueuedLoadReservation> BeginNativeQueuedLoad() noexcept;
+  bool OwnsNativeQueuedLoad(const core3d::authority::QueuedLoadReservation&) noexcept;
+  core3d::authority::QueuedLoadEnd EndNativeQueuedLoadPrivateWork(
+      const core3d::authority::QueuedLoadReservation&, bool privateWorkSettled) noexcept;
+  std::optional<core3d::authority::ReplacementReservation> PromoteNativeQueuedLoad(
+      const core3d::authority::QueuedLoadReservation&, bool nativeEditReady) noexcept;
+
   std::optional<core3d::authority::ReplacementReservation> BeginNativeReplacement() noexcept;
   core3d::authority::ReplacementEnd EndNativeReplacement(
       const core3d::authority::ReplacementReservation& reservation,

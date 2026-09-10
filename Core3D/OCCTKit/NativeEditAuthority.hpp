@@ -39,6 +39,25 @@ class ReplacementReservation final {
 };
 enum class ReplacementEnd : std::uint8_t { Adopted, Restored, Pending, NotCurrent, Unavailable };
 
+// Internal admission must be derived from the actual native tool owner. A
+// caller cannot classify arbitrary pending work as cancellable. Legacy tools
+// have no ManualIntentReservation yet; migrated tools must supply their exact
+// reservation. Unknown recovery or replacement work must use Reject.
+enum class QueuedLoadAdmission : std::uint8_t {
+    Reject, Ready, KnownCancellableLegacyTool, KnownCancellableManualIntent
+};
+class QueuedLoadReservation final {
+    friend class NativeEditAuthority;
+    QueuedLoadReservation(const std::array<std::uint8_t,16>& nonce,
+                          std::uint64_t opening, std::uint64_t serial) noexcept
+        : nonce_(nonce), opening_(opening), serial_(serial) {}
+    std::array<std::uint8_t,16> nonce_;
+    std::uint64_t opening_, serial_;
+};
+enum class QueuedLoadEnd : std::uint8_t {
+    PrivateWorkSettled, Pending, NotCurrent, Unavailable
+};
+
 class NativeEditAuthority final {
 public:
     explicit NativeEditAuthority(const std::array<std::uint8_t,16>& nativeNonce) noexcept {
@@ -52,13 +71,13 @@ public:
     // Call exclusively after successful adoption, not provisional assignment.
     bool Adopt(const void* nativeDocument) noexcept {
         if(!OnOwner() || !Valid())return false;
-        if(replacementSerial_!=0 || nativeDocument==nullptr || nativeDocument==active_)return Fail();
+        if(loadSerial_!=0 || replacementSerial_!=0 || nativeDocument==nullptr || nativeDocument==active_)return Fail();
         if(!Advance(stamp_.opening) || !Advance(stamp_.edit) || !Advance(stamp_.selection))return false;
         active_=nativeDocument;manualSerial_=0;return true;
     }
     void Detach() noexcept {
         if(!OnOwner())return;
-        active_=nullptr;manualSerial_=0;replacementSerial_=0;
+        active_=nullptr;manualSerial_=0;replacementSerial_=0;loadSerial_=0;
     }
     // Conservatively invalidate on opening/commit/abort attempts. A transaction
     // rolled back to identical data must still invalidate an older AI proposal.
@@ -130,12 +149,76 @@ public:
         const ManualIntentReservation& intent, const void* nativeDocument,
         bool nativeEditReady, bool nativeCommandOpen) noexcept {
         if (!OwnsManualIntent(intent) || nativeDocument != active_
-            || replacementSerial_ != 0 || !nativeEditReady || nativeCommandOpen)
+            || replacementSerial_ != 0 || loadSerial_ != 0 || !nativeEditReady || nativeCommandOpen)
             return std::nullopt;
         if (!Advance(replacementSequence_) || !Advance(stamp_.edit)
             || !Advance(stamp_.selection)) return std::nullopt;
         replacementSerial_ = replacementSequence_;
         manualSerial_ = 0;
+        return ReplacementReservation(stamp_.instanceNonce, stamp_.opening, replacementSerial_);
+    }
+    // Acquire before public-controller cancellation or any queued load work.
+    // This reservation fences captures without claiming the older tool settled.
+    // All methods remain native-owner-thread only. Immutable input and request
+    // identity must be retained by the integration owner, never by wire fields.
+    std::optional<QueuedLoadReservation> BeginQueuedLoad(
+        const void* nativeDocument, QueuedLoadAdmission admission,
+        bool nativeEditReady, bool nativeCommandOpen,
+        const ManualIntentReservation* cancellableIntent = nullptr) noexcept {
+        if (!OnOwner() || !Valid() || active_ == nullptr || nativeDocument != active_
+            || loadSerial_ != 0 || replacementSerial_ != 0) return std::nullopt;
+        switch (admission) {
+            case QueuedLoadAdmission::Ready:
+                if (!nativeEditReady || nativeCommandOpen || manualSerial_ != 0
+                    || cancellableIntent != nullptr) return std::nullopt;
+                break;
+            case QueuedLoadAdmission::KnownCancellableLegacyTool:
+                if (manualSerial_ != 0 || cancellableIntent != nullptr) return std::nullopt;
+                break;
+            case QueuedLoadAdmission::KnownCancellableManualIntent:
+                if (cancellableIntent == nullptr || !OwnsManualIntent(*cancellableIntent))
+                    return std::nullopt;
+                break;
+            default:
+                return std::nullopt;
+        }
+        if (!Advance(loadSequence_) || !Advance(stamp_.selection)) return std::nullopt;
+        loadSerial_ = loadSequence_;
+        return QueuedLoadReservation(stamp_.instanceNonce, stamp_.opening, loadSerial_);
+    }
+    bool OwnsQueuedLoad(const QueuedLoadReservation& reservation) noexcept {
+        if (!OnOwner() || !Valid() || active_ == nullptr || loadSerial_ == 0) return false;
+        return reservation.nonce_ == stamp_.instanceNonce
+            && reservation.opening_ == stamp_.opening && reservation.serial_ == loadSerial_;
+    }
+    // ONLY private validation/rejection/cancellation before promotion. Settled
+    // means this request's worker and owned temporary artifacts are finished.
+    // No assertion is made about a retained Bevel or ordinary recovery ledger;
+    // its owner still controls nativeEditReady. Do not issue a fresh AI context.
+    // After promotion this exact reservation is no longer current, preventing
+    // this path from releasing the retained replacement restoration fence.
+    QueuedLoadEnd EndQueuedLoadPrivateWork(const QueuedLoadReservation& reservation,
+                                         bool privateWorkSettled) noexcept {
+        if (!OnOwner() || !Valid()) return QueuedLoadEnd::Unavailable;
+        if (!OwnsQueuedLoad(reservation)) return QueuedLoadEnd::NotCurrent;
+        if (!privateWorkSettled) return QueuedLoadEnd::Pending;
+        if (!Advance(stamp_.selection)) return QueuedLoadEnd::Unavailable;
+        loadSerial_ = 0;
+        return QueuedLoadEnd::PrivateWorkSettled;
+    }
+    // Called once on the native owner immediately before any live replacement.
+    // Real old-tool/worker/command recovery must be settled; readiness excludes
+    // only this matching load reservation. Do not release then re-acquire.
+    std::optional<ReplacementReservation> PromoteQueuedLoadToReplacement(
+        const QueuedLoadReservation& reservation, const void* nativeDocument,
+        bool nativeEditReady, bool nativeCommandOpen) noexcept {
+        if (!OwnsQueuedLoad(reservation) || nativeDocument != active_
+            || manualSerial_ != 0 || replacementSerial_ != 0
+            || !nativeEditReady || nativeCommandOpen) return std::nullopt;
+        if (!Advance(replacementSequence_) || !Advance(stamp_.edit)
+            || !Advance(stamp_.selection)) return std::nullopt;
+        replacementSerial_ = replacementSequence_;
+        loadSerial_ = 0;
         return ReplacementReservation(stamp_.instanceNonce, stamp_.opening, replacementSerial_);
     }
     bool OwnsReplacement(const ReplacementReservation& reservation) noexcept {
@@ -165,7 +248,7 @@ public:
     std::optional<Stamp> Capture(const void* nativeDocument,bool nativeEditReady,
                                bool nativeCommandOpen) noexcept {
         if(!OnOwner() || !Valid() || active_==nullptr || nativeDocument!=active_
-            || manualSerial_!=0 || replacementSerial_!=0 || !nativeEditReady || nativeCommandOpen)return std::nullopt;
+            || manualSerial_!=0 || replacementSerial_!=0 || loadSerial_!=0 || !nativeEditReady || nativeCommandOpen)return std::nullopt;
         return stamp_;
     }
     bool Matches(const Stamp& expected,const void* nativeDocument,
@@ -180,9 +263,10 @@ public:
 #if DEBUG
     // Monotonic saturation only, for isolated overflow fixtures. No reset/wrap.
     bool DebugExhaustCounter(unsigned counter) noexcept {
-        if (!OnOwner() || !Valid() || active_ == nullptr || counter > 4) return false;
+        if (!OnOwner() || !Valid() || active_ == nullptr || counter > 5) return false;
         auto& value = counter == 0 ? stamp_.opening : counter == 1 ? stamp_.edit
-            : counter == 2 ? stamp_.selection : counter == 3 ? manualSequence_ : replacementSequence_;
+            : counter == 2 ? stamp_.selection : counter == 3 ? manualSequence_
+            : counter == 4 ? replacementSequence_ : loadSequence_;
         value = std::numeric_limits<std::uint64_t>::max();
         return true;
     }
@@ -192,7 +276,7 @@ private:
         if(owner_==std::this_thread::get_id())return true;
         foreignObserved_.store(true,std::memory_order_relaxed);return false;
     }
-    bool Fail() noexcept {valid_=false;active_=nullptr;manualSerial_=0;replacementSerial_=0;return false;}
+    bool Fail() noexcept {valid_=false;active_=nullptr;manualSerial_=0;replacementSerial_=0;loadSerial_=0;return false;}
     bool Advance(std::uint64_t& generation) noexcept {
         if(generation==std::numeric_limits<std::uint64_t>::max())return Fail();
         ++generation;return true;
@@ -203,6 +287,7 @@ private:
     // Sequence never resets across detach/adoption. Zero means no live intent.
     std::uint64_t manualSequence_=0,manualSerial_=0;
     std::uint64_t replacementSequence_=0,replacementSerial_=0;
+    std::uint64_t loadSequence_=0,loadSerial_=0;
     Stamp stamp_;
     bool valid_=false;
 };

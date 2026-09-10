@@ -1,3 +1,5 @@
+#import "../OCCTKit/GLViewController+QueuedAssetLoading.h"
+#import "../OCCTKit/Core3DQueuedAssetRequest.h"
 #if DEBUG
 #include "../OCCTKit/NativeWindingPlanProbe.hxx"
 #include "../OCCTKit/NativeWindingCandidateProbe.hxx"
@@ -766,10 +768,10 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 @interface Core3DViewController () {
     BOOL _isSetuped;
-    NSURL *_shouldLoadBundleUrl;
-    NSURL *_shouldLoadAssetFileURL;
-    unsigned long long _shouldLoadAssetByteCount;
-    NSString *_shouldLoadAssetSHA256;
+    Core3DQueuedAssetRequestSlot *_queuedAssetRequestSlot;
+    Core3DQueuedAssetRequest *_queuedAssetRequest;
+    Core3DQueuedAssetLoadOwner *_queuedNativeLoadOwner;
+    __weak GLViewController *_queuedRequestGL;
     std::atomic_bool _isLoading;
     std::shared_ptr<core3d::ProfileSolidWork> _profileSolidWork;
     BOOL _profileSolidCancelled;
@@ -781,6 +783,9 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)core3d_canBeginCommittedEdit;
+- (BOOL)core3d_hasCompetingLoadOrControllerWork;
+- (Core3DAssetLoadResult)core3d_acceptQueuedInput:(Core3DQueuedAssetInput *)input;
+- (Core3DAssetLoadResult)core3d_startQueuedRequest:(Core3DQueuedAssetRequest *)request;
 - (Core3DMeshUVAtlasPreview *)meshUVPreviewForEntityIdentifier:(NSString *)entityIdentifier
                                                    options:(const std::optional<OcctMeshUVAtlasOptions>&)options
                                                   expected:(Core3DSceneSnapshot *)expected;
@@ -823,6 +828,8 @@ void Core3DAddDebugOrphanVisualMaterial(
     core3d::Core3DViewer::cancelObjectAlignment(_objectAlignmentWork);
     core3d::Core3DViewer::cancelProfileSolid(_profileSolidWork);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if ([_glController isKindOfClass:GLViewController.class] && _queuedNativeLoadOwner != nil)
+        [(GLViewController *)_glController abandonQueuedAssetOwner:_queuedNativeLoadOwner];
     _glController = nil;
     NSLog(@"~Core3DViewController");
 }
@@ -8883,12 +8890,9 @@ void Core3DAddDebugOrphanVisualMaterial(
                     strongSelf.can_apply = NO;
                 });
         }
-        if (_shouldLoadAssetFileURL != nil) {
-            [self loadFromAssetFile:_shouldLoadAssetFileURL
-                 expectedByteCount:_shouldLoadAssetByteCount
-                     expectedSHA256:_shouldLoadAssetSHA256];
-        } else if (_shouldLoadBundleUrl != NULL) {
-            [self loadFromBundle:_shouldLoadBundleUrl];
+        if (_queuedAssetRequest != nil) {
+            const Core3DAssetLoadResult result = [self core3d_startQueuedRequest:_queuedAssetRequest];
+            if (result != Core3DAssetLoadResultSuccess) [self viewDidFailToLoadFromBundle:result];
         }
     }
 }
@@ -9016,109 +9020,165 @@ void Core3DAddDebugOrphanVisualMaterial(
     [self reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:YES];
 }
 
-- (void)loadFromBundle:(NSURL *)bundleUrl {
-    if(bundleUrl == nil) {
-        [self viewDidFailToLoadFromBundle:Core3DAssetLoadResultInternalFailure];
-        return;
-    }
-    
-    [self cancelObjectAlignment];
-    [self cancelProfileConstruction];
-    _isLoading = true;
-    _shouldLoadAssetFileURL = nil;
-    _shouldLoadAssetByteCount = 0;
-    _shouldLoadAssetSHA256 = nil;
-    if (!_isSetuped) {
-        _shouldLoadBundleUrl = bundleUrl;
-        return;
-    }
-    _shouldLoadBundleUrl = nil;
-    NSData *assetData = nil;
-    BOOL foundAssetItem = NO;
-    Core3DAssetLoadResult readFailure = Core3DAssetLoadResultInvalidData;
-    __auto_type bundleReader = [AssetBundle makeReaderWithUrl:bundleUrl];
-    for (AssetBundleItem *item in bundleReader.items) {
-        if (item.type == AssetBundleItemTypeAsset) {
-            foundAssetItem = YES;
-            assetData = item.data;
-            if (!assetData) {
-                NSLog(@"ERROR: load from bundle: NULL DATA");
-                readFailure = Core3DAssetLoadResultTemporaryFileFailure;
-            }
-            break;
-        }
-    }
+// Deferred setup starts the exact retained request directly. Core teardown
+// abandons only its own native load owner before releasing the rendering controller.
 
-    if (assetData) {
-        __weak typeof(self) weakSelf = self;
-        [GLController setAssetData:assetData completion:^(Core3DAssetLoadResult result) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            strongSelf->_isLoading = false;
+- (BOOL)core3d_canReserveQueuedInput:(Core3DQueuedAssetInput *)input
+                  fromGLController:(GLViewController *)controller {
+    if (![NSThread isMainThread] || controller == nil || _glController != controller
+        || _profileSolidWork || _objectAlignmentWork || !_isSetuped) return NO;
+    if (_queuedAssetRequest == nil) return !_isLoading.load();
+    return _queuedRequestGL == controller && _queuedAssetRequest.input == input
+        && [_queuedAssetRequestSlot ownsRequest:_queuedAssetRequest];
+}
+
+- (BOOL)core3d_hasCompetingLoadOrControllerWork {
+    return ![NSThread isMainThread] || _queuedAssetRequest != nil
+        || _isLoading.load() || _profileSolidWork || _objectAlignmentWork;
+}
+
+- (Core3DAssetLoadResult)tryLoadFromBundle:(NSURL *)bundleURL {
+    // Admission rejection cannot cancel a worker, alter UI, or invoke the
+    // accepted request's lifecycle callback. Check before freezing inputs.
+    if ([self core3d_hasCompetingLoadOrControllerWork])
+        return Core3DAssetLoadResultBusy;
+    Core3DQueuedAssetInput *input = [Core3DQueuedAssetInput freezeBundleURL:bundleURL];
+    if (input == nil) return Core3DAssetLoadResultInvalidData;
+    return [self core3d_acceptQueuedInput:input];
+}
+
+- (Core3DAssetLoadResult)tryLoadFromAssetFile:(NSURL *)fileURL
+                          expectedByteCount:(unsigned long long)byteCount
+                              expectedSHA256:(NSString *)sha256 {
+    if ([self core3d_hasCompetingLoadOrControllerWork])
+        return Core3DAssetLoadResultBusy;
+    Core3DQueuedAssetInput *input = [Core3DQueuedAssetInput freezeVerifiedFile:fileURL
+        expectedByteCount:byteCount expectedSHA256:sha256];
+    if (input == nil) return Core3DAssetLoadResultInvalidData;
+    return [self core3d_acceptQueuedInput:input];
+}
+
+- (void)loadFromBundle:(NSURL *)bundleURL {
+    const Core3DAssetLoadResult admission = [self tryLoadFromBundle:bundleURL];
+    if (admission != Core3DAssetLoadResultSuccess && [NSThread isMainThread]
+        && _queuedAssetRequest == nil && !_isLoading.load()) {
+        [self reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:NO];
+        [self viewDidFailToLoadFromBundle:admission];
+    }
+}
+
+- (void)loadFromAssetFile:(NSURL *)fileURL
+        expectedByteCount:(unsigned long long)byteCount
+            expectedSHA256:(NSString *)sha256 {
+    const Core3DAssetLoadResult admission = [self tryLoadFromAssetFile:fileURL
+        expectedByteCount:byteCount expectedSHA256:sha256];
+    if (admission != Core3DAssetLoadResultSuccess && [NSThread isMainThread]
+        && _queuedAssetRequest == nil && !_isLoading.load()) {
+        [self reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:NO];
+        [self viewDidFailToLoadFromBundle:admission];
+    }
+}
+
+- (Core3DAssetLoadResult)core3d_acceptQueuedInput:(Core3DQueuedAssetInput *)input {
+    if ([self core3d_hasCompetingLoadOrControllerWork])
+        return Core3DAssetLoadResultBusy;
+    if (_queuedAssetRequestSlot == nil)
+        _queuedAssetRequestSlot = [[Core3DQueuedAssetRequestSlot alloc] init];
+    Core3DQueuedAssetRequest *request = [_queuedAssetRequestSlot acceptInput:input];
+    if (request == nil) return Core3DAssetLoadResultInternalFailure;
+    _queuedAssetRequest = request;
+    _queuedRequestGL = [_glController isKindOfClass:GLViewController.class] ? GLController : nil;
+    _isLoading = true;
+    // There is no initialized native document before setup. The Core slot owns
+    // this deferred request and suppresses competing controller work. Reserve
+    // the actual document in GL before any private work is submitted.
+    if (!_isSetuped) return Core3DAssetLoadResultSuccess;
+    return [self core3d_startQueuedRequest:request];
+}
+
+- (Core3DAssetLoadResult)core3d_startQueuedRequest:(Core3DQueuedAssetRequest *)request {
+    if (![NSThread isMainThread] || !_isSetuped
+        || _queuedAssetRequest != request
+        || ![_queuedAssetRequestSlot ownsRequest:request]
+        || ![_queuedAssetRequestSlot claimStartForRequest:request])
+        return Core3DAssetLoadResultBusy;
+    // Recheck the real slots on deferred setup. A cancellation flag alone is
+    // not native settlement, and Ready-only admission never cancels them.
+    if (_profileSolidWork || _objectAlignmentWork || _queuedRequestGL == nil
+        || _glController != _queuedRequestGL) {
+        [_queuedAssetRequestSlot finishRequest:request];
+        _queuedAssetRequest = nil;
+        _isLoading = false;
+        return Core3DAssetLoadResultBusy;
+    }
+    __weak typeof(self) weakSelf = self;
+    __weak GLViewController *originGL = _queuedRequestGL;
+    Core3DQueuedAssetLoadOwner *owner = nil;
+    const Core3DAssetLoadResult admission = [GLController
+        acceptQueuedAssetInput:request.input owner:&owner
+        progress:^(BOOL cleanupPending) {
+            __strong typeof(weakSelf) controller = weakSelf;
+            if (controller != nil && controller->_queuedAssetRequest == request
+                && controller.glController == originGL)
+                [controller viewDidChangeAssetLoadCleanupPending:cleanupPending];
+        }
+        completion:^(Core3DAssetLoadResult result) {
+            __strong typeof(weakSelf) controller = weakSelf;
+            if (controller == nil || ![NSThread isMainThread]
+                || controller->_queuedAssetRequest != request
+                || ![controller->_queuedAssetRequestSlot ownsRequest:request]) return;
+            // GL calls this only after the exact private file is removed and
+            // native queued ownership is settled. Retained replacement recovery
+            // remains independent and is reflected by public reconciliation.
+            if (![controller->_queuedAssetRequestSlot finishRequest:request]) return;
+            controller->_queuedNativeLoadOwner = nil;
+            controller->_queuedAssetRequest = nil;
+            controller->_isLoading = false;
+            // A replacement GL is a different editor lifecycle; no notification belongs to it.
+            if (originGL == nil || controller.glController != originGL) return;
+            [controller viewDidChangeAssetLoadCleanupPending:NO];
+            if (controller.glController != originGL) return;
+            // Clear the exact slot before any synchronous observer can re-enter.
             if (result != Core3DAssetLoadResultSuccess) {
-                [strongSelf
-                    reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:
-                        NO];
-                [strongSelf viewDidFailToLoadFromBundle:result];
+                [controller reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:NO];
+                [controller viewDidFailToLoadFromBundle:result];
                 return;
             }
-            [(GLViewController *)strongSelf.glController fitAll];
-            [strongSelf activatePassiveStateAfterDocumentReplacement];
-            [strongSelf viewDidLoadFromBundle];
+            [(GLViewController *)controller.glController fitAll];
+            [controller activatePassiveStateAfterDocumentReplacement];
+            [controller viewDidLoadFromBundle];
         }];
+    if (admission == Core3DAssetLoadResultSuccess) {
+        // GL guarantees asynchronous completion after a successful admission.
+        _queuedNativeLoadOwner = owner;
     } else {
+        [_queuedAssetRequestSlot finishRequest:request];
+        _queuedAssetRequest = nil;
         _isLoading = false;
-        [self viewDidFailToLoadFromBundle:foundAssetItem
-            ? readFailure
-            : Core3DAssetLoadResultInvalidData];
     }
+    return admission;
 }
 
-- (void)loadFromAssetFile:(NSURL *)assetFileURL
-        expectedByteCount:(unsigned long long)expectedByteCount
-            expectedSHA256:(NSString *)expectedSHA256 {
-    if (assetFileURL == nil || expectedByteCount == 0
-        || expectedSHA256 == nil) {
-        [self viewDidFailToLoadFromBundle:
-            Core3DAssetLoadResultInvalidData];
-        return;
-    }
-
-    [self cancelObjectAlignment];
-    [self cancelProfileConstruction];
-    _isLoading = true;
-    if (!_isSetuped) {
-        _shouldLoadBundleUrl = nil;
-        _shouldLoadAssetFileURL = assetFileURL;
-        _shouldLoadAssetByteCount = expectedByteCount;
-        _shouldLoadAssetSHA256 = expectedSHA256;
-        return;
-    }
-    _shouldLoadAssetFileURL = nil;
-    _shouldLoadAssetByteCount = 0;
-    _shouldLoadAssetSHA256 = nil;
-    _shouldLoadBundleUrl = nil;
-
-    __weak typeof(self) weakSelf = self;
-    [GLController setAssetFileURL:assetFileURL
-               expectedByteCount:expectedByteCount
-                   expectedSHA256:expectedSHA256
-                       completion:^(Core3DAssetLoadResult result) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        strongSelf->_isLoading = false;
-        if (result != Core3DAssetLoadResultSuccess) {
-            [strongSelf
-                reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:
-                    NO];
-            [strongSelf viewDidFailToLoadFromBundle:result];
-            return;
-        }
-        [(GLViewController *)strongSelf.glController fitAll];
-        [strongSelf activatePassiveStateAfterDocumentReplacement];
-        [strongSelf viewDidLoadFromBundle];
-    }];
+- (void)viewDidChangeAssetLoadCleanupPending:(BOOL)pending {}
+- (void)retryAssetLoadCleanup {
+    if ([NSThread isMainThread] && _queuedNativeLoadOwner != nil && _queuedRequestGL != nil)
+        [_queuedRequestGL retryQueuedAssetCleanup];
 }
+
+#ifdef DEBUG
+- (void)debugPauseQueuedAssetAdoption:(BOOL)paused {
+    if ([NSThread isMainThread] && [_glController isKindOfClass:GLViewController.class])
+        [GLController debugPauseQueuedAssetAdoption:paused];
+}
+- (void)debugFailQueuedAssetCleanup:(NSUInteger)count {
+    if ([NSThread isMainThread] && [_glController isKindOfClass:GLViewController.class])
+        [GLController debugFailQueuedAssetCleanup:count];
+}
+- (NSDictionary<NSString *, id> *)debugQueuedAssetLoadState {
+    if (![NSThread isMainThread] || ![_glController isKindOfClass:GLViewController.class]) return @{};
+    return [GLController debugQueuedAssetLoadState];
+}
+#endif
 
 - (void)saveSnapshot {
     [GLController saveSnapshot];

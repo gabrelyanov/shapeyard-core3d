@@ -64,6 +64,7 @@ namespace core3d {
         std::vector<std::array<std::uint32_t,3>> triangleVertices;
     };
     struct DocumentReplacementWork;
+    struct QueuedAssetLoadWork;
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
     enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps };
@@ -205,6 +206,14 @@ namespace core3d {
                             int theHeight);
         
         AssetImportResult ImportCbf(const std::string &theFilename);
+        // Internal accepted-request owner, held through staging cleanup on main.
+        std::shared_ptr<QueuedAssetLoadWork> beginQueuedAssetLoad() noexcept;
+        bool ownsQueuedAssetLoad(const std::shared_ptr<QueuedAssetLoadWork>& work) const noexcept;
+        bool canAdoptQueuedAssetLoad(const std::shared_ptr<QueuedAssetLoadWork>& work) noexcept;
+        bool finishQueuedAssetLoadPrivateWork(const std::shared_ptr<QueuedAssetLoadWork>& work,
+                                             bool privateWorkSettled) noexcept;
+        AssetImportResult ImportCbf(const std::string& theFilename,
+                                    const std::shared_ptr<QueuedAssetLoadWork>& work);
         AssetImportResult ValidateCbf(const std::string &theFilename) const;
         //! Rebuild presentations from authoritative OCAF. If traversal or
         //! interactor recreation fails after clearing the context, restore the
@@ -438,6 +447,8 @@ namespace core3d {
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
         std::shared_ptr<MeshVertexEditWork> _meshVertexEditWork;
         std::shared_ptr<DocumentReplacementWork> _documentReplacementWork;
+        std::shared_ptr<QueuedAssetLoadWork> _queuedAssetLoadWork;
+        bool hasUnresolvedOrdinaryEditExcludingQueuedLoad() const noexcept;
         bool restoreDocumentReplacement(bool afterImportFailure = false) noexcept;
 #ifdef DEBUG
         bool _debugFailNextDocumentAdoption = false;

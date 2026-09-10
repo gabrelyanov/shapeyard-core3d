@@ -22,6 +22,8 @@
 #import <Foundation/Foundation.h>
 
 #import "GLViewController.h"
+#import "GLViewController+QueuedAssetLoading.h"
+#include <dirent.h>
 #include <Graphic3d_ShaderProgram.hxx>
 #import "GLView.h"
 
@@ -295,128 +297,6 @@ bool DecodeSHA256(NSString *value,
     return true;
 }
 
-Core3DAssetLoadResult StageVerifiedAssetFile(
-    NSURL *sourceURL,
-    const unsigned long long expectedByteCount,
-    NSString *expectedSHA256,
-    NSURL **stagedURL) {
-    static const unsigned long long kMaximumProjectDocumentBytes =
-        256ull * 1024ull * 1024ull;
-    if (stagedURL == nullptr) {
-        return Core3DAssetLoadResultInternalFailure;
-    }
-    *stagedURL = nil;
-    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> expectedDigest = {};
-    const char *sourcePath = sourceURL.fileSystemRepresentation;
-    if (!sourceURL.isFileURL || sourcePath == nullptr
-        || expectedByteCount == 0
-        || expectedByteCount > kMaximumProjectDocumentBytes
-        || !DecodeSHA256(expectedSHA256, expectedDigest)) {
-        return Core3DAssetLoadResultInvalidData;
-    }
-
-    struct stat pathStatus = {};
-    if (::lstat(sourcePath, &pathStatus) != 0
-        || (pathStatus.st_mode & S_IFMT) != S_IFREG
-        || pathStatus.st_nlink != 1
-        || pathStatus.st_size < 0
-        || static_cast<unsigned long long>(pathStatus.st_size)
-            != expectedByteCount) {
-        return Core3DAssetLoadResultInvalidData;
-    }
-    const int source = ::open(sourcePath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (source < 0) {
-        return errno == ENOENT || errno == ENOTDIR || errno == ELOOP
-            ? Core3DAssetLoadResultInvalidData
-            : Core3DAssetLoadResultTemporaryFileFailure;
-    }
-
-    NSURL *temporaryURL = [NSFileManager.defaultManager.temporaryDirectory
-        URLByAppendingPathComponent:[NSString stringWithFormat:
-            @"%@.verified-project.cbf", NSUUID.UUID.UUIDString]];
-    const char *temporaryPath = temporaryURL.fileSystemRepresentation;
-    const int destination = temporaryPath == nullptr
-        ? -1
-        : ::open(temporaryPath,
-                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                 S_IRUSR | S_IWUSR);
-    if (destination < 0) {
-        ::close(source);
-        return Core3DAssetLoadResultTemporaryFileFailure;
-    }
-
-    Core3DAssetLoadResult result = Core3DAssetLoadResultInvalidData;
-    CC_SHA256_CTX hash = {};
-    CC_SHA256_Init(&hash);
-    std::array<unsigned char, 64 * 1024> buffer = {};
-    unsigned long long copiedBytes = 0;
-    struct stat openedStatus = {};
-    if (::fstat(source, &openedStatus) == 0
-        && FileIdentity(pathStatus) == FileIdentity(openedStatus)) {
-        bool failed = false;
-        while (!failed) {
-            ssize_t count = ::read(source, buffer.data(), buffer.size());
-            if (count < 0 && errno == EINTR) {
-                continue;
-            }
-            if (count < 0) {
-                result = Core3DAssetLoadResultTemporaryFileFailure;
-                failed = true;
-                break;
-            }
-            if (count == 0) {
-                break;
-            }
-            if (static_cast<unsigned long long>(count)
-                    > expectedByteCount - copiedBytes
-                || CC_SHA256_Update(
-                    &hash, buffer.data(), static_cast<CC_LONG>(count)) != 1) {
-                failed = true;
-                break;
-            }
-            copiedBytes += static_cast<unsigned long long>(count);
-            ssize_t written = 0;
-            while (written < count) {
-                const ssize_t writeCount = ::write(
-                    destination,
-                    buffer.data() + written,
-                    static_cast<size_t>(count - written));
-                if (writeCount < 0 && errno == EINTR) {
-                    continue;
-                }
-                if (writeCount <= 0) {
-                    result = Core3DAssetLoadResultTemporaryFileFailure;
-                    failed = true;
-                    break;
-                }
-                written += writeCount;
-            }
-        }
-
-        std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> actualDigest = {};
-        struct stat finalStatus = {};
-        struct stat finalPathStatus = {};
-        if (!failed
-            && copiedBytes == expectedByteCount
-            && CC_SHA256_Final(actualDigest.data(), &hash) == 1
-            && actualDigest == expectedDigest
-            && ::fstat(source, &finalStatus) == 0
-            && FileIdentity(openedStatus) == FileIdentity(finalStatus)
-            && ::lstat(sourcePath, &finalPathStatus) == 0
-            && FileIdentity(openedStatus) == FileIdentity(finalPathStatus)) {
-            result = Core3DAssetLoadResultSuccess;
-        }
-    }
-    ::close(destination);
-    ::close(source);
-    if (result == Core3DAssetLoadResultSuccess) {
-        *stagedURL = temporaryURL;
-    } else {
-        [NSFileManager.defaultManager removeItemAtURL:temporaryURL error:nil];
-    }
-    return result;
-}
-
 Core3DAssetLoadResult AssetLoadResultFromImportResult(AssetImportResult result) {
     switch (result) {
         case AssetImportResult::Success:
@@ -527,6 +407,554 @@ private:
 
 } // namespace
 
+// Allocate this receipt BEFORE exclusive creation. After open succeeds, publish
+// it to the exact request and call markCreatedWithDescriptor immediately. Never
+// delete a temporary path directly once this receipt owns it.
+@interface Core3DQueuedPrivateFile : NSObject
+@property(nonatomic, strong, readonly) NSURL *URL;
+- (instancetype)initWithURL:(NSURL *)URL;
+- (BOOL)markCreatedWithDescriptor:(int)descriptor;
+- (BOOL)sealWithDescriptor:(int)descriptor;
+- (BOOL)hasExactSealedIdentity;
+- (BOOL)removeOwnedFile;
+@end
+
+@implementation Core3DQueuedPrivateFile {
+    BOOL _created;
+    BOOL _identityKnown;
+    BOOL _sealed;
+    dev_t _device;
+    ino_t _inode;
+    struct stat _sealedStatus;
+}
+- (instancetype)initWithURL:(NSURL *)URL {
+    if (!URL.isFileURL || URL.fileSystemRepresentation == nullptr) return nil;
+    self = [super init];
+    if (self) _URL = [URL copy];
+    return self;
+}
+- (BOOL)markCreatedWithDescriptor:(int)descriptor {
+    if (_created) return NO;
+    _created = YES; // Even fstat failure now requires retained cleanup ownership.
+    struct stat status = {};
+    if (descriptor < 0 || ::fstat(descriptor, &status) != 0
+        || !S_ISREG(status.st_mode) || status.st_nlink != 1
+        || status.st_uid != ::geteuid()) return NO;
+    _device = status.st_dev;
+    _inode = status.st_ino;
+    _identityKnown = YES;
+    return YES;
+}
+- (BOOL)sealWithDescriptor:(int)descriptor {
+    if (!_created || !_identityKnown || _sealed) return NO;
+    struct stat status = {};
+    if (descriptor < 0 || ::fstat(descriptor, &status) != 0
+        || !S_ISREG(status.st_mode) || status.st_nlink != 1
+        || status.st_uid != ::geteuid() || status.st_dev != _device
+        || status.st_ino != _inode) return NO;
+    _sealedStatus = status;
+    _sealed = YES;
+    return [self hasExactSealedIdentity];
+}
+- (BOOL)hasExactSealedIdentity {
+    if (!_created || !_identityKnown || !_sealed) return NO;
+    struct stat current = {};
+    return ::lstat(_URL.fileSystemRepresentation, &current) == 0
+        && FileIdentity(current) == FileIdentity(_sealedStatus);
+}
+- (BOOL)removeOwnedFile {
+    if (!_created) return YES; // Failed exclusive open never owns that pathname.
+    const char *path = _URL.fileSystemRepresentation;
+    if (path == nullptr) return NO;
+    struct stat current = {};
+    if (::lstat(path, &current) != 0) return errno == ENOENT;
+    if (!_identityKnown || current.st_dev != _device || current.st_ino != _inode
+        || !S_ISREG(current.st_mode) || current.st_nlink != 1
+        || current.st_uid != ::geteuid()) return NO;
+    if (::unlink(path) != 0 && errno != ENOENT) return NO;
+    struct stat remaining = {};
+    return ::lstat(path, &remaining) != 0 && errno == ENOENT;
+}
+@end
+
+namespace {
+// Private staging grants no native edit authority. The caller retains the exact
+// queued request through adoption and verified cleanup.
+class QueuedStageDescriptor final {
+public:
+    explicit QueuedStageDescriptor(int value) noexcept : value_(value) {}
+    ~QueuedStageDescriptor() { if (value_ >= 0) ::close(value_); }
+    QueuedStageDescriptor(const QueuedStageDescriptor&) = delete;
+    QueuedStageDescriptor& operator=(const QueuedStageDescriptor&) = delete;
+    int get() const noexcept { return value_; }
+    int release() noexcept { int value = value_; value_ = -1; return value; }
+    bool closeChecked() noexcept {
+        const int value = release();
+        return value >= 0 && ::close(value) == 0;
+    }
+private:
+    int value_;
+};
+
+class QueuedStageDirectory final {
+public:
+    explicit QueuedStageDirectory(DIR *value) noexcept : value_(value) {}
+    ~QueuedStageDirectory() { if (value_) ::closedir(value_); }
+    QueuedStageDirectory(const QueuedStageDirectory&) = delete;
+    QueuedStageDirectory& operator=(const QueuedStageDirectory&) = delete;
+    DIR *get() const noexcept { return value_; }
+private:
+    DIR *value_;
+};
+
+// Bounded private staging for the legacy directory bundle. This does not
+// authenticate a manifest or grant access to a public native-file importer.
+// Ambiguous bundles with multiple .asset entries are rejected, instead of
+// selecting whichever entry happens to be returned first by the filesystem.
+// IMPORTANT: stagedURL may be nonnil on FAILURE. Once a file is created, its
+// exact request completion owner owns cleanup on every outcome. Do not reuse
+// the existing StageVerifiedAssetFile early-return pattern that drops the URL.
+// Native queued ownership cannot settle until cleanup has actually succeeded.
+Core3DAssetLoadResult StageLegacyAssetBundle(
+    NSURL *frozenBundleURL, Core3DQueuedPrivateFile **stagedURL) {
+    constexpr unsigned long long maximumBytes = 256ull * 1024ull * 1024ull;
+    constexpr size_t maximumDirectoryEntries = 4096;
+    constexpr char magic[] = "BINFILE";
+    if (stagedURL == nullptr) return Core3DAssetLoadResultInternalFailure;
+    *stagedURL = nil;
+    if (!frozenBundleURL.isFileURL || frozenBundleURL.fileSystemRepresentation == nullptr)
+        return Core3DAssetLoadResultInvalidData;
+
+    const BOOL scoped = [frozenBundleURL startAccessingSecurityScopedResource];
+    @try {
+        try {
+            const char *directoryPath = frozenBundleURL.fileSystemRepresentation;
+            struct stat directoryBefore = {};
+            if (::lstat(directoryPath, &directoryBefore) != 0
+                || !S_ISDIR(directoryBefore.st_mode))
+                return Core3DAssetLoadResultInvalidData;
+            QueuedStageDescriptor directoryFD(::open(directoryPath,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            struct stat directoryOpened = {};
+            if (directoryFD.get() < 0
+                || ::fstat(directoryFD.get(), &directoryOpened) != 0
+                || !(FileIdentity(directoryBefore) == FileIdentity(directoryOpened)))
+                return Core3DAssetLoadResultInvalidData;
+            DIR *rawDirectory = ::fdopendir(directoryFD.get());
+            if (rawDirectory == nullptr)
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            (void)directoryFD.release(); // DIR now owns the descriptor.
+            QueuedStageDirectory directory(rawDirectory);
+            const int parentFD = ::dirfd(directory.get());
+            std::string assetName;
+            size_t entries = 0;
+            for (;;) {
+                errno = 0;
+                const dirent *entry = ::readdir(directory.get());
+                if (entry == nullptr) {
+                    if (errno != 0) return Core3DAssetLoadResultTemporaryFileFailure;
+                    break;
+                }
+                if (++entries > maximumDirectoryEntries)
+                    return Core3DAssetLoadResultInvalidData;
+                const std::string name(entry->d_name);
+                if (name.size() < 6 || name.compare(name.size() - 6, 6, ".asset") != 0)
+                    continue;
+                if (!assetName.empty()) return Core3DAssetLoadResultInvalidData;
+                assetName = name;
+            }
+            if (assetName.empty()) return Core3DAssetLoadResultInvalidData;
+            struct stat before = {};
+            if (::fstatat(parentFD, assetName.c_str(), &before, AT_SYMLINK_NOFOLLOW) != 0
+                || !S_ISREG(before.st_mode) || before.st_nlink != 1
+                || before.st_size < static_cast<off_t>(sizeof(magic) - 1)
+                || static_cast<unsigned long long>(before.st_size) > maximumBytes)
+                return Core3DAssetLoadResultInvalidData;
+            QueuedStageDescriptor source(::openat(parentFD, assetName.c_str(),
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+            // O_NONBLOCK is inert for regular files. If the entry becomes a
+            // FIFO between fstatat and openat, it prevents an unbounded wait;
+            // the descriptor identity/mode check below rejects that change.
+            struct stat opened = {};
+            if (source.get() < 0 || ::fstat(source.get(), &opened) != 0
+                || !(FileIdentity(before) == FileIdentity(opened)))
+                return Core3DAssetLoadResultInvalidData;
+
+            NSURL *temporaryURL = [NSFileManager.defaultManager.temporaryDirectory
+                URLByAppendingPathComponent:[NSString stringWithFormat:
+                    @"%@.queued-legacy.cbf", NSUUID.UUID.UUIDString]];
+            const char *temporaryPath = temporaryURL.fileSystemRepresentation;
+            if (temporaryPath == nullptr)
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            Core3DQueuedPrivateFile *receipt = [[Core3DQueuedPrivateFile alloc] initWithURL:temporaryURL];
+            if (receipt == nil) return Core3DAssetLoadResultTemporaryFileFailure;
+            QueuedStageDescriptor destination(::open(temporaryPath,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                S_IRUSR | S_IWUSR));
+            if (destination.get() < 0)
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            // Publish private-file ownership before any operation can fail.
+            // This function closes descriptors; the completion owner deletes
+            // this file after either adoption or a failed preparation.
+            *stagedURL = receipt;
+            if (![receipt markCreatedWithDescriptor:destination.get()])
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            std::array<unsigned char, 64 * 1024> buffer = {};
+            std::array<unsigned char, sizeof(magic) - 1> prefix = {};
+            size_t prefixCount = 0;
+            unsigned long long copied = 0;
+            const auto expected = static_cast<unsigned long long>(opened.st_size);
+            for (;;) {
+                const ssize_t count = ::read(source.get(), buffer.data(), buffer.size());
+                if (count < 0 && errno == EINTR) continue;
+                if (count < 0) return Core3DAssetLoadResultTemporaryFileFailure;
+                if (count == 0) break;
+                if (static_cast<unsigned long long>(count) > expected - copied)
+                    return Core3DAssetLoadResultInvalidData;
+                const size_t prefixBytes = std::min(prefix.size() - prefixCount,
+                    static_cast<size_t>(count));
+                std::copy_n(buffer.data(), prefixBytes, prefix.data() + prefixCount);
+                prefixCount += prefixBytes;
+                copied += static_cast<unsigned long long>(count);
+                ssize_t written = 0;
+                while (written < count) {
+                    const ssize_t size = ::write(destination.get(), buffer.data() + written,
+                        static_cast<size_t>(count - written));
+                    if (size < 0 && errno == EINTR) continue;
+                    if (size <= 0) return Core3DAssetLoadResultTemporaryFileFailure;
+                    written += size;
+                }
+            }
+            struct stat after = {}, pathAfter = {}, directoryAfter = {}, directoryPathAfter = {};
+            if (copied != expected || prefixCount != prefix.size()
+                || std::memcmp(prefix.data(), magic, prefix.size()) != 0
+                || ::fstat(source.get(), &after) != 0
+                || !(FileIdentity(opened) == FileIdentity(after))
+                || ::fstatat(parentFD, assetName.c_str(), &pathAfter, AT_SYMLINK_NOFOLLOW) != 0
+                || !(FileIdentity(opened) == FileIdentity(pathAfter))
+                || ::fstat(parentFD, &directoryAfter) != 0
+                || !(FileIdentity(directoryOpened) == FileIdentity(directoryAfter))
+                || ::lstat(directoryPath, &directoryPathAfter) != 0
+                || !(FileIdentity(directoryOpened) == FileIdentity(directoryPathAfter)))
+                return Core3DAssetLoadResultInvalidData;
+            if (![receipt sealWithDescriptor:destination.get()])
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            if (!destination.closeChecked())
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            return Core3DAssetLoadResultSuccess;
+        } catch (...) {
+            return Core3DAssetLoadResultInternalFailure;
+        }
+    } @catch (NSException *exception) {
+        return Core3DAssetLoadResultInternalFailure;
+    } @finally {
+        if (scoped) [frozenBundleURL stopAccessingSecurityScopedResource];
+    }
+}
+
+// An existing private file transfers to the completion owner even on failure.
+// That owner must verify cleanup before ending queued ownership.
+Core3DAssetLoadResult StageQueuedVerifiedAssetFile(
+    NSURL *sourceURL, const unsigned long long expectedByteCount,
+    NSString *expectedSHA256, Core3DQueuedPrivateFile **stagedURL) {
+    constexpr unsigned long long maximumBytes = 256ull * 1024ull * 1024ull;
+    if (stagedURL == nullptr) return Core3DAssetLoadResultInternalFailure;
+    *stagedURL = nil;
+    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> expectedDigest = {};
+    if (!sourceURL.isFileURL || sourceURL.fileSystemRepresentation == nullptr
+        || expectedByteCount < sizeof(kCbfMagic) - 1
+        || expectedByteCount > maximumBytes
+        || !DecodeSHA256(expectedSHA256, expectedDigest))
+        return Core3DAssetLoadResultInvalidData;
+
+    const BOOL scoped = [sourceURL startAccessingSecurityScopedResource];
+    @try {
+        try {
+            const char *sourcePath = sourceURL.fileSystemRepresentation;
+            struct stat before = {}, opened = {};
+            if (::lstat(sourcePath, &before) != 0 || !S_ISREG(before.st_mode)
+                || before.st_nlink != 1 || before.st_size < 0
+                || static_cast<unsigned long long>(before.st_size) != expectedByteCount)
+                return Core3DAssetLoadResultInvalidData;
+            QueuedStageDescriptor source(::open(sourcePath,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+            // Reject replacement with a FIFO/device before reading any bytes;
+            // O_NONBLOCK prevents a FIFO open race from hanging the worker.
+            if (source.get() < 0 || ::fstat(source.get(), &opened) != 0
+                || !(FileIdentity(before) == FileIdentity(opened)))
+                return Core3DAssetLoadResultInvalidData;
+
+            NSURL *temporaryURL = [NSFileManager.defaultManager.temporaryDirectory
+                URLByAppendingPathComponent:[NSString stringWithFormat:
+                    @"%@.queued-verified.cbf", NSUUID.UUID.UUIDString]];
+            const char *temporaryPath = temporaryURL.fileSystemRepresentation;
+            if (temporaryPath == nullptr)
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            Core3DQueuedPrivateFile *receipt = [[Core3DQueuedPrivateFile alloc] initWithURL:temporaryURL];
+            if (receipt == nil) return Core3DAssetLoadResultTemporaryFileFailure;
+            QueuedStageDescriptor destination(::open(temporaryPath,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                S_IRUSR | S_IWUSR));
+            if (destination.get() < 0)
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            *stagedURL = receipt;
+            if (![receipt markCreatedWithDescriptor:destination.get()])
+                return Core3DAssetLoadResultTemporaryFileFailure;
+
+            CC_SHA256_CTX hash = {};
+            if (CC_SHA256_Init(&hash) != 1)
+                return Core3DAssetLoadResultInternalFailure;
+            std::array<unsigned char, 64 * 1024> buffer = {};
+            std::array<unsigned char, sizeof(kCbfMagic) - 1> prefix = {};
+            size_t prefixCount = 0;
+            unsigned long long copied = 0;
+            for (;;) {
+                const ssize_t count = ::read(source.get(), buffer.data(), buffer.size());
+                if (count < 0 && errno == EINTR) continue;
+                if (count < 0) return Core3DAssetLoadResultTemporaryFileFailure;
+                if (count == 0) break;
+                if (static_cast<unsigned long long>(count) > expectedByteCount - copied)
+                    return Core3DAssetLoadResultInvalidData;
+                if (CC_SHA256_Update(&hash, buffer.data(), static_cast<CC_LONG>(count)) != 1)
+                    return Core3DAssetLoadResultInternalFailure;
+                const size_t prefixBytes = std::min(prefix.size() - prefixCount,
+                    static_cast<size_t>(count));
+                std::copy_n(buffer.data(), prefixBytes, prefix.data() + prefixCount);
+                prefixCount += prefixBytes;
+                copied += static_cast<unsigned long long>(count);
+                ssize_t written = 0;
+                while (written < count) {
+                    const ssize_t amount = ::write(destination.get(), buffer.data() + written,
+                        static_cast<size_t>(count - written));
+                    if (amount < 0 && errno == EINTR) continue;
+                    if (amount <= 0) return Core3DAssetLoadResultTemporaryFileFailure;
+                    written += amount;
+                }
+            }
+            struct stat after = {}, pathAfter = {};
+            std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> actualDigest = {};
+            if (copied != expectedByteCount || prefixCount != prefix.size()
+                || std::memcmp(prefix.data(), kCbfMagic, prefix.size()) != 0
+                || CC_SHA256_Final(actualDigest.data(), &hash) != 1
+                || actualDigest != expectedDigest
+                || ::fstat(source.get(), &after) != 0
+                || !(FileIdentity(opened) == FileIdentity(after))
+                || ::lstat(sourcePath, &pathAfter) != 0
+                || !(FileIdentity(opened) == FileIdentity(pathAfter)))
+                return Core3DAssetLoadResultInvalidData;
+            if (![receipt sealWithDescriptor:destination.get()])
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            if (!destination.closeChecked())
+                return Core3DAssetLoadResultTemporaryFileFailure;
+            return Core3DAssetLoadResultSuccess;
+        } catch (...) {
+            return Core3DAssetLoadResultInternalFailure;
+        }
+    } @catch (NSException *exception) {
+        return Core3DAssetLoadResultInternalFailure;
+    } @finally {
+        if (scoped) [sourceURL stopAccessingSecurityScopedResource];
+    }
+}
+
+// Physical input freezing precedes reservation.
+// After file creation, every return transfers the path to the completion owner.
+Core3DAssetLoadResult StageQueuedAssetData(NSData *frozenData, Core3DQueuedPrivateFile **stagedURL) {
+    if (stagedURL == nullptr) return Core3DAssetLoadResultInternalFailure;
+    *stagedURL = nil;
+    if (frozenData.length > 256ull * 1024ull * 1024ull || !HasCbfMagic(frozenData))
+        return Core3DAssetLoadResultInvalidData;
+    @try {
+        NSURL *url = [NSFileManager.defaultManager.temporaryDirectory
+            URLByAppendingPathComponent:[NSString stringWithFormat:
+                @"%@.queued-data.cbf", NSUUID.UUID.UUIDString]];
+        const char *path = url.fileSystemRepresentation;
+        if (path == nullptr) return Core3DAssetLoadResultTemporaryFileFailure;
+        Core3DQueuedPrivateFile *receipt = [[Core3DQueuedPrivateFile alloc] initWithURL:url];
+        if (receipt == nil) return Core3DAssetLoadResultTemporaryFileFailure;
+        QueuedStageDescriptor destination(::open(path,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR));
+        if (destination.get() < 0) return Core3DAssetLoadResultTemporaryFileFailure;
+        *stagedURL = receipt;
+        if (![receipt markCreatedWithDescriptor:destination.get()])
+            return Core3DAssetLoadResultTemporaryFileFailure;
+        const unsigned char *bytes = static_cast<const unsigned char *>(frozenData.bytes);
+        NSUInteger written = 0;
+        while (written < frozenData.length) {
+            const size_t count = std::min<NSUInteger>(64 * 1024, frozenData.length - written);
+            const ssize_t amount = ::write(destination.get(), bytes + written, count);
+            if (amount < 0 && errno == EINTR) continue;
+            if (amount <= 0) return Core3DAssetLoadResultTemporaryFileFailure;
+            written += static_cast<NSUInteger>(amount);
+        }
+        if (![receipt sealWithDescriptor:destination.get()])
+            return Core3DAssetLoadResultTemporaryFileFailure;
+        return destination.closeChecked() ? Core3DAssetLoadResultSuccess
+            : Core3DAssetLoadResultTemporaryFileFailure;
+    } @catch (NSException *exception) {
+        return Core3DAssetLoadResultInternalFailure;
+    }
+}
+
+Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3DQueuedPrivateFile **stagedURL) {
+    if (stagedURL == nullptr) return Core3DAssetLoadResultInternalFailure;
+    *stagedURL = nil;
+    if (input == nil) return Core3DAssetLoadResultInvalidData;
+    switch (input.kind) {
+        case Core3DQueuedAssetInputKindData:
+            return StageQueuedAssetData(input.data, stagedURL);
+        case Core3DQueuedAssetInputKindVerifiedFile:
+            return StageQueuedVerifiedAssetFile(input.fileURL, input.expectedByteCount,
+                input.expectedSHA256, stagedURL);
+        case Core3DQueuedAssetInputKindBundle:
+            return StageLegacyAssetBundle(input.fileURL, stagedURL);
+    }
+    return Core3DAssetLoadResultInvalidData;
+}
+
+} // namespace
+
+// This carrier retains native ownership and the rendering lease through cleanup.
+// It alone does not authorize a public AI operation or load dispatch.
+@interface Core3DQueuedAssetLoadOwner : NSObject
+@property(nonatomic, strong, readonly) Core3DQueuedAssetInput *input;
+// Only the actual main-thread GL/controller admission path may call this, after
+// rejecting unsettled controller slots and checking the accepted request.
++ (instancetype)reserveInput:(Core3DQueuedAssetInput *)input
+                glController:(GLViewController *)controller;
+- (GLViewController *)renderingControllerOnMain;
+- (BOOL)ownsGLController:(GLViewController *)controller;
+- (BOOL)claimPrivateStartForGLController:(GLViewController *)controller;
+- (void)abandonForGLController:(GLViewController *)controller;
+- (Core3DAssetLoadResult)adoptPrivateFile:(NSURL *)file
+                         glController:(GLViewController *)controller;
+// Main only. A cleanup failure MUST retain this owner and its private file.
+// After YES, GL removes its exact owner slot, then calls releaseRenderingLease.
+- (BOOL)settleNativeAfterPrivateCleanup:(BOOL)cleanupSucceeded
+                         glController:(GLViewController *)controller;
+- (BOOL)releaseRenderingLeaseForGLController:(GLViewController *)controller;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+@interface Core3DQueuedAssetLoadOwner () {
+    GLViewController *_renderingLease;
+    __weak id<GLViewControllerProtocol> _origin;
+    BOOL _hadOrigin;
+    std::shared_ptr<core3d::Core3DViewer> _nativeViewer;
+    std::shared_ptr<core3d::QueuedAssetLoadWork> _nativeWork;
+    BOOL _privateStarted;
+    BOOL _adoptionAttempted;
+    BOOL _abandoned;
+    BOOL _nativeSettled;
+}
+- (instancetype)initWithInput:(Core3DQueuedAssetInput *)input
+                   controller:(GLViewController *)controller
+                       viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer
+                         work:(const std::shared_ptr<core3d::QueuedAssetLoadWork>&)work;
+@end
+
+@implementation Core3DQueuedAssetLoadOwner
+- (instancetype)initWithInput:(Core3DQueuedAssetInput *)input
+                   controller:(GLViewController *)controller
+                       viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer
+                         work:(const std::shared_ptr<core3d::QueuedAssetLoadWork>&)work {
+    self = [super init];
+    if (self) {
+        _input = input;
+        _renderingLease = controller;
+        _origin = controller.delegate;
+        _hadOrigin = controller.delegate != nil;
+        _nativeViewer = viewer;
+        _nativeWork = work;
+    }
+    return self;
+}
++ (instancetype)reserveInput:(Core3DQueuedAssetInput *)input
+                glController:(GLViewController *)controller {
+    if (![NSThread isMainThread] || input == nil || controller == nil) return nil;
+    const auto viewer = controller.viewer;
+    if (!viewer) return nil;
+    auto work = viewer->beginQueuedAssetLoad();
+    if (!work) return nil;
+    Core3DQueuedAssetLoadOwner *owner = [[self alloc] initWithInput:input
+        controller:controller viewer:viewer work:work];
+    if (owner == nil) {
+        // No private work was submitted and no replacement was promoted.
+        (void)viewer->finishQueuedAssetLoadPrivateWork(work, true);
+    }
+    return owner;
+}
+- (GLViewController *)renderingControllerOnMain {
+    return [NSThread isMainThread] ? _renderingLease : nil;
+}
+- (BOOL)ownsGLController:(GLViewController *)controller {
+    return [NSThread isMainThread] && controller != nil
+        && _renderingLease == controller;
+}
+- (BOOL)claimPrivateStartForGLController:(GLViewController *)controller {
+    if (![self ownsGLController:controller] || _privateStarted || _abandoned
+        || _nativeSettled || !_nativeViewer || !_nativeWork
+        || !_nativeViewer->ownsQueuedAssetLoad(_nativeWork)) return NO;
+    _privateStarted = YES;
+    return YES;
+}
+- (void)abandonForGLController:(GLViewController *)controller {
+    if ([self ownsGLController:controller]) _abandoned = YES;
+    // This only blocks adoption. It never drops private files or native work.
+}
+- (Core3DAssetLoadResult)adoptPrivateFile:(NSURL *)file
+                         glController:(GLViewController *)controller {
+    if (![self ownsGLController:controller] || !_privateStarted || _abandoned
+        || _adoptionAttempted || _nativeSettled || !_nativeViewer || !_nativeWork
+        || !_nativeViewer->canAdoptQueuedAssetLoad(_nativeWork))
+        return Core3DAssetLoadResultBusy;
+    id<GLViewControllerProtocol> origin = _origin;
+    if (_hadOrigin && (origin == nil || controller.delegate != origin))
+        return Core3DAssetLoadResultBusy;
+    if ([origin isKindOfClass:Core3DViewController.class]
+        && ((Core3DViewController *)origin).glController != controller)
+        return Core3DAssetLoadResultBusy;
+    if (!file.isFileURL || file.fileSystemRepresentation == nullptr)
+        return Core3DAssetLoadResultInvalidData;
+    _adoptionAttempted = YES;
+    try {
+        // Exact-owner native overload validates privately and promotes the
+        // queued reservation atomically into retained replacement ownership.
+        return AssetLoadResultFromImportResult(_nativeViewer->ImportCbf(
+            file.fileSystemRepresentation, _nativeWork));
+    } catch (...) {
+        return Core3DAssetLoadResultInternalFailure;
+    }
+}
+- (BOOL)settleNativeAfterPrivateCleanup:(BOOL)cleanupSucceeded
+                         glController:(GLViewController *)controller {
+    if (![self ownsGLController:controller] || _nativeSettled
+        || !cleanupSucceeded || !_nativeViewer || !_nativeWork) return NO;
+    if (!_nativeViewer->finishQueuedAssetLoadPrivateWork(_nativeWork, true))
+        return NO;
+    // These explicit main-thread resets matter even when a worker still owns
+    // the Objective-C carrier. Its later destruction must own no OCCT handles.
+    _nativeWork.reset();
+    _nativeViewer.reset();
+    _nativeSettled = YES;
+    return YES;
+}
+- (BOOL)releaseRenderingLeaseForGLController:(GLViewController *)controller {
+    if (![self ownsGLController:controller] || !_nativeSettled
+        || _nativeWork || _nativeViewer) return NO;
+    // The caller must retain a main-thread local controller while clearing its
+    // exact GL request slot and this lease, breaking the temporary cycle.
+    _renderingLease = nil;
+    return YES;
+}
+- (void)dealloc {
+    NSCAssert(!_nativeWork && !_nativeViewer && _renderingLease == nil,
+        @"Queued native work and rendering lease must settle on main before release");
+}
+@end
+
 @interface GLViewController () <UIGestureRecognizerDelegate>
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
@@ -548,6 +976,23 @@ private:
 
 @implementation GLViewController {
     dispatch_queue_t _assetDataQueue;
+    NSUInteger _pendingAssetDataCount;
+    Core3DQueuedAssetLoadOwner *_queuedAssetOwner;
+    void (^_queuedAssetCompletion)(Core3DAssetLoadResult);
+    void (^_queuedAssetProgress)(BOOL);
+    Core3DQueuedPrivateFile *_queuedPrivateFile;
+    Core3DAssetLoadResult _queuedAssetResult;
+    BOOL _queuedCleanupInFlight;
+    BOOL _queuedCleanupPending;
+    BOOL _queuedPreparationReceived;
+    UIView *_queuedInteractionView;
+    BOOL _queuedViewWasInteractive;
+#ifdef DEBUG
+    BOOL _debugPauseQueuedAdoption;
+    void (^_debugResumeQueuedAdoption)(void);
+    Core3DQueuedPrivateFile *_debugStagedPrivateFile;
+    NSUInteger _debugQueuedCleanupFailures;
+#endif
     BOOL _cancelTouches;
     BOOL _didSetupViewer;
     BOOL _rawTouchRendering;
@@ -1504,6 +1949,7 @@ private:
 }
 
 - (void)selectLastObject {
+    if (_viewer == nullptr || !_viewer->canBeginCommittedEdit()) return;
     _viewer->getObjectInteractor()->selectLastObject();
     [self requestRender];
 }
@@ -5325,6 +5771,12 @@ private:
 }
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion {
+    if (![NSThread isMainThread] || _queuedAssetOwner != nil
+        || _pendingAssetDataCount == NSUIntegerMax) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
+        return;
+    }
+    ++_pendingAssetDataCount;
     __weak typeof(self) weakSelf = self;
     dispatch_async(_assetDataQueue, ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -5413,106 +5865,217 @@ private:
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            // An earlier serialization owns its completion before a replacement
+            // may reserve this controller's queue. Clear before client reentry.
+            if (strongSelf->_pendingAssetDataCount > 0) --strongSelf->_pendingAssetDataCount;
             completion(data);
         });
     });
 }
 
-- (void)setAssetData:(NSData *)data completion:(void(^)(Core3DAssetLoadResult result))completion {
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(_assetDataQueue, ^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
-            CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultInternalFailure);
-            return;
-        }
-        static const NSUInteger kMaximumProjectDocumentBytes =
-            256ull * 1024ull * 1024ull;
-        if (data.length > kMaximumProjectDocumentBytes
-            || !HasCbfMagic(data)) {
-            CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultInvalidData);
-            return;
-        }
+// Ready-only admission retains exact request ownership through preparation,
+// native adoption and verified private-file cleanup. No public AI authority.
 
-        // OCCT reads FILE_FORMAT from the binary header before consulting the
-        // path extension. Both BinOcaf and BinXCAF readers are registered, so
-        // a neutral fixed suffix avoids duplicating its header parser here.
-        NSString *tmpFilename = [NSString stringWithFormat:@"%@.tmp.cbf",
-                                  NSUUID.UUID.UUIDString];
-        NSURL *tmpUrl = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:tmpFilename];
-        NSError *error = nil;
-        [data writeToURL:tmpUrl options:NSDataWritingAtomic error:&error];
-        if (error != nil) {
-            [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
-            CompleteAssetLoadOnMain(completion, Core3DAssetLoadResultTemporaryFileFailure);
-            return;
-        }
-
-        const std::string fn = tmpUrl.path.UTF8String;
-        __block Core3DAssetLoadResult result = Core3DAssetLoadResultInternalFailure;
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            try {
-                if (strongSelf->_viewer != nullptr) {
-                    [strongSelf endActiveRenderingInteractions];
-                    result = AssetLoadResultFromImportResult(strongSelf->_viewer->ImportCbf(fn));
-                    if (result == Core3DAssetLoadResultSuccess) {
-                        [strongSelf requestRender];
-                    }
-                }
-            } catch (...) {
-                result = Core3DAssetLoadResultInternalFailure;
-            }
+- (Core3DAssetLoadResult)acceptQueuedAssetInput:(Core3DQueuedAssetInput *)input
+                                       owner:(Core3DQueuedAssetLoadOwner **)acceptedOwner
+                                    progress:(void (^)(BOOL))progress
+                                  completion:(void (^)(Core3DAssetLoadResult))completion {
+    if (acceptedOwner != nullptr) *acceptedOwner = nil;
+    if (![NSThread isMainThread] || _queuedAssetOwner != nil || _pendingAssetDataCount != 0
+        || _rawTouchRendering || _pinchRendering || _panRendering)
+        return Core3DAssetLoadResultBusy;
+    if (input == nil || completion == nil || acceptedOwner == nullptr)
+        return Core3DAssetLoadResultInvalidData;
+    id origin = self.delegate;
+    if ([origin isKindOfClass:Core3DViewController.class]
+        && ![(Core3DViewController *)origin core3d_canReserveQueuedInput:input fromGLController:self])
+        return Core3DAssetLoadResultBusy;
+    Core3DQueuedAssetLoadOwner *owner = [Core3DQueuedAssetLoadOwner
+        reserveInput:input glController:self];
+    if (owner == nil) return Core3DAssetLoadResultBusy;
+    _queuedAssetOwner = owner;
+    _queuedAssetCompletion = [completion copy];
+    _queuedAssetProgress = [progress copy];
+    _queuedPreparationReceived = NO;
+    _queuedPrivateFile = nil;
+    _queuedCleanupPending = NO;
+    _queuedCleanupInFlight = NO;
+    *acceptedOwner = owner;
+    // Ready-only admission rejected existing raw/pan/pinch gestures. Keep new
+    // touches from starting on this viewport until its exact load has settled.
+    _queuedInteractionView = self.isViewLoaded ? self.view : nil;
+    _queuedViewWasInteractive = _queuedInteractionView.userInteractionEnabled;
+    _queuedInteractionView.userInteractionEnabled = NO;
+    if (![owner claimPrivateStartForGLController:self]) {
+        // Keep the exact owner installed even on an unexpected native-start
+        // rejection. Never drop an unsettled reservation via a local release.
+        _queuedAssetResult = Core3DAssetLoadResultInternalFailure;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            GLViewController *controller = [owner renderingControllerOnMain];
+            [controller core3d_cleanupQueuedOwner:owner];
         });
-        [NSFileManager.defaultManager removeItemAtURL:tmpUrl error:nil];
-        CompleteAssetLoadOnMain(completion, result);
+        return Core3DAssetLoadResultSuccess; // Accepted; terminal result is async.
+    }
+    // Only the carrier crosses the worker boundary. It explicitly clears every
+    // native handle and its GL lease on main before it can be last-released here.
+    dispatch_async(_assetDataQueue, ^{
+        Core3DQueuedPrivateFile *file = nil;
+        const Core3DAssetLoadResult staged = StageQueuedAssetInput(owner.input, &file);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            GLViewController *controller = [owner renderingControllerOnMain];
+#ifdef DEBUG
+            if (controller->_debugPauseQueuedAdoption) {
+                controller->_debugStagedPrivateFile = file;
+                controller->_debugResumeQueuedAdoption = ^{
+                    [controller core3d_receiveStagedQueuedOwner:owner file:file result:staged];
+                };
+                return;
+            }
+#endif
+            [controller core3d_receiveStagedQueuedOwner:owner file:file result:staged];
+        });
+    });
+    return Core3DAssetLoadResultSuccess;
+}
+
+- (void)core3d_receiveStagedQueuedOwner:(Core3DQueuedAssetLoadOwner *)owner
+                                  file:(Core3DQueuedPrivateFile *)file
+                                result:(Core3DAssetLoadResult)result {
+    NSCAssert([NSThread isMainThread], @"Queued native adoption belongs to main");
+    NSCAssert(_queuedAssetOwner == owner && [owner ownsGLController:self],
+        @"Only the exact accepted owner can complete private preparation");
+    if (_queuedAssetOwner != owner || ![owner ownsGLController:self]) return;
+    if (_queuedPreparationReceived) return;
+    _queuedPreparationReceived = YES;
+    _queuedPrivateFile = file; // May be nonnil even when preparation failed.
+    _queuedAssetResult = result;
+    if (result == Core3DAssetLoadResultSuccess) {
+        _queuedAssetResult = file == nil || ![file hasExactSealedIdentity]
+            ? Core3DAssetLoadResultInvalidData
+            : [owner adoptPrivateFile:file.URL glController:self];
+        if (_queuedAssetResult == Core3DAssetLoadResultSuccess) [self requestRender];
+    }
+    [self core3d_cleanupQueuedOwner:owner];
+}
+
+- (void)abandonQueuedAssetOwner:(Core3DQueuedAssetLoadOwner *)owner {
+    if (![NSThread isMainThread] || _queuedAssetOwner != owner) return;
+    [owner abandonForGLController:self];
+    // Abandonment suppresses adoption, not required cleanup or settlement.
+}
+
+- (void)retryQueuedAssetCleanup {
+    if ([NSThread isMainThread] && _queuedAssetOwner != nil && _queuedCleanupPending)
+        [self core3d_cleanupQueuedOwner:_queuedAssetOwner];
+}
+
+- (void)core3d_cleanupQueuedOwner:(Core3DQueuedAssetLoadOwner *)owner {
+    if (![NSThread isMainThread] || _queuedAssetOwner != owner
+        || _queuedCleanupInFlight || ![owner ownsGLController:self]) return;
+    _queuedCleanupInFlight = YES;
+    Core3DQueuedPrivateFile *file = _queuedPrivateFile;
+    BOOL forceFailure = NO;
+#ifdef DEBUG
+    forceFailure = _debugQueuedCleanupFailures > 0;
+    if (forceFailure) --_debugQueuedCleanupFailures;
+#endif
+    dispatch_async(_assetDataQueue, ^{
+        // This path comes only from the accepted stager's exclusive creation,
+        // never from model/user input. No directory scan or recursive removal.
+        const BOOL removed = !forceFailure && (file == nil || [file removeOwnedFile]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            GLViewController *controller = [owner renderingControllerOnMain];
+            [controller core3d_finishCleanupForQueuedOwner:owner removed:removed];
+        });
     });
 }
 
-- (void)setAssetFileURL:(NSURL *)assetFileURL
-      expectedByteCount:(unsigned long long)expectedByteCount
-          expectedSHA256:(NSString *)expectedSHA256
-              completion:(void(^)(Core3DAssetLoadResult result))completion {
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(_assetDataQueue, ^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
-            CompleteAssetLoadOnMain(
-                completion, Core3DAssetLoadResultInternalFailure);
-            return;
-        }
-        NSURL *stagedURL = nil;
-        const Core3DAssetLoadResult stagingResult = StageVerifiedAssetFile(
-            assetFileURL,
-            expectedByteCount,
-            expectedSHA256,
-            &stagedURL);
-        if (stagingResult != Core3DAssetLoadResultSuccess
-            || stagedURL == nil) {
-            CompleteAssetLoadOnMain(completion, stagingResult);
-            return;
-        }
-
-        const std::string filename = stagedURL.path.UTF8String;
-        __block Core3DAssetLoadResult result =
-            Core3DAssetLoadResultInternalFailure;
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            try {
-                if (strongSelf->_viewer != nullptr) {
-                    [strongSelf endActiveRenderingInteractions];
-                    result = AssetLoadResultFromImportResult(
-                        strongSelf->_viewer->ImportCbf(filename));
-                    if (result == Core3DAssetLoadResultSuccess) {
-                        [strongSelf requestRender];
-                    }
-                }
-            } catch (...) {
-                result = Core3DAssetLoadResultInternalFailure;
-            }
-        });
-        [NSFileManager.defaultManager removeItemAtURL:stagedURL error:nil];
-        CompleteAssetLoadOnMain(completion, result);
-    });
+- (void)core3d_finishCleanupForQueuedOwner:(Core3DQueuedAssetLoadOwner *)owner
+                                  removed:(BOOL)removed {
+    if (![NSThread isMainThread] || _queuedAssetOwner != owner
+        || ![owner ownsGLController:self] || !_queuedCleanupInFlight) return;
+    _queuedCleanupInFlight = NO;
+    if (!removed || ![owner settleNativeAfterPrivateCleanup:YES glController:self]) {
+        const BOOL wasPending = _queuedCleanupPending;
+        _queuedCleanupPending = YES;
+        if (!wasPending && _queuedAssetProgress != nil) _queuedAssetProgress(YES);
+        // Retain the exact request/path and native fence. A retry also survives
+        // Core editor teardown because the carrier retains its rendering lease.
+        // Compose a distinct progress callback; do not send terminal failure or
+        // clear Core's accepted request while native ownership is still held.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC),
+            dispatch_get_main_queue(), ^{
+                GLViewController *controller = [owner renderingControllerOnMain];
+                [controller retryQueuedAssetCleanup];
+            });
+        return;
+    }
+    _queuedCleanupPending = NO;
+    _queuedPrivateFile = nil;
+    const Core3DAssetLoadResult result = _queuedAssetResult;
+    void (^completion)(Core3DAssetLoadResult) = _queuedAssetCompletion;
+    _queuedAssetCompletion = nil;
+    _queuedAssetProgress = nil;
+    _queuedAssetOwner = nil;
+    if (self.isViewLoaded && self.view == _queuedInteractionView)
+        _queuedInteractionView.userInteractionEnabled = _queuedViewWasInteractive;
+    _queuedInteractionView = nil;
+    // self is a strong local in the main-queue caller. The carrier explicitly
+    // empties its GL lease before the worker's carrier reference can disappear.
+    const BOOL released = [owner releaseRenderingLeaseForGLController:self];
+    NSCAssert(released, @"A settled queued owner must release its rendering lease");
+    if (released && completion != nil) completion(result);
 }
+
+- (void)setAssetData:(NSData *)data completion:(void (^)(Core3DAssetLoadResult))completion {
+    Core3DAssetLoadResult result = Core3DAssetLoadResultBusy;
+    if ([NSThread isMainThread] && _queuedAssetOwner == nil) {
+        Core3DQueuedAssetInput *input = [Core3DQueuedAssetInput freezeData:data];
+        Core3DQueuedAssetLoadOwner *owner = nil;
+        result = input == nil ? Core3DAssetLoadResultInvalidData
+            : [self acceptQueuedAssetInput:input owner:&owner progress:nil completion:completion];
+    }
+    if (result != Core3DAssetLoadResultSuccess) CompleteAssetLoadOnMain(completion, result);
+}
+- (void)setAssetFileURL:(NSURL *)URL expectedByteCount:(unsigned long long)count
+    expectedSHA256:(NSString *)sha completion:(void (^)(Core3DAssetLoadResult))completion {
+    Core3DAssetLoadResult result = Core3DAssetLoadResultBusy;
+    if ([NSThread isMainThread] && _queuedAssetOwner == nil) {
+        Core3DQueuedAssetInput *input = [Core3DQueuedAssetInput freezeVerifiedFile:URL
+            expectedByteCount:count expectedSHA256:sha];
+        Core3DQueuedAssetLoadOwner *owner = nil;
+        result = input == nil ? Core3DAssetLoadResultInvalidData
+            : [self acceptQueuedAssetInput:input owner:&owner progress:nil completion:completion];
+    }
+    if (result != Core3DAssetLoadResultSuccess) CompleteAssetLoadOnMain(completion, result);
+}
+
+#ifdef DEBUG
+- (void)debugResumeQueuedAssetAdoption { [self debugPauseQueuedAssetAdoption:NO]; }
+- (void)debugPauseQueuedAssetAdoption:(BOOL)paused {
+    if (![NSThread isMainThread]) return;
+    _debugPauseQueuedAdoption = paused;
+    if (!paused && _debugResumeQueuedAdoption != nil) {
+        void (^resume)(void) = _debugResumeQueuedAdoption;
+        _debugResumeQueuedAdoption = nil;
+        _debugStagedPrivateFile = nil;
+        resume();
+    }
+}
+- (void)debugFailQueuedAssetCleanup:(NSUInteger)count {
+    if ([NSThread isMainThread]) _debugQueuedCleanupFailures = MIN(count, 3u);
+}
+- (NSDictionary<NSString *, id> *)debugQueuedAssetLoadState {
+    if (![NSThread isMainThread]) return @{};
+    Core3DQueuedPrivateFile *file = _queuedPrivateFile ?: _debugStagedPrivateFile;
+    return @{ @"active": @(_queuedAssetOwner != nil),
+        @"paused": @(_debugResumeQueuedAdoption != nil),
+        @"cleanupPending": @(_queuedCleanupPending),
+        @"nativeReady": @(_viewer != nullptr && _viewer->canBeginCommittedEdit()),
+        @"privatePath": file.URL.path ?: @"",
+        @"privateFileExists": @(file != nil && [NSFileManager.defaultManager fileExistsAtPath:file.URL.path]) };
+}
+#endif
 
 - (NSData *)thumbData {
     NSString *tmpSnapthotFilename = [NSString stringWithFormat:@"%@.tmp.png", NSUUID.UUID.UUIDString];

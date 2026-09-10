@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */; };
+		C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */; };
 		C03D90910000000000000002 /* mikktspace.c in Sources */ = {isa = PBXBuildFile; fileRef = C03D90920000000000000002 /* mikktspace.c */; };
 		C03D90910000000000000001 /* MikkTangentSpace.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C03D90920000000000000001 /* MikkTangentSpace.cpp */; };
 		1804F28D2C51140A0045084A /* CylinderDriver.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 1804F28C2C51140A0045084A /* CylinderDriver.hpp */; };
@@ -202,6 +204,11 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C03D91020000000000000005 /* GLViewController+QueuedAssetLoading.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GLViewController+QueuedAssetLoading.h"; sourceTree = "<group>"; };
+		C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DQueuedAssetRequest.mm"; sourceTree = "<group>"; };
+		C03D91020000000000000003 /* Core3DQueuedAssetRequest.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DQueuedAssetRequest.h"; sourceTree = "<group>"; };
+		C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DQueuedAssetInput.mm"; sourceTree = "<group>"; };
+		C03D91020000000000000001 /* Core3DQueuedAssetInput.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DQueuedAssetInput.h"; sourceTree = "<group>"; };
 		C03D90920000000000000002 /* mikktspace.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "../ThirdParty/MikkTSpace/mikktspace.c"; sourceTree = "<group>"; };
 		C03D90920000000000000001 /* MikkTangentSpace.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = "MikkTangentSpace.cpp"; sourceTree = "<group>"; };
 		C3D0F1022F30000100000002 /* ThirdPartyNotices */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ThirdPartyNotices; sourceTree = "<group>"; };
@@ -656,6 +663,11 @@
 		322185692BB5CB9A00040E84 /* OCCTKit */ = {
 			isa = PBXGroup;
 			children = (
+				C03D91020000000000000001 /* Core3DQueuedAssetInput.h */,
+				C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */,
+				C03D91020000000000000003 /* Core3DQueuedAssetRequest.h */,
+				C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */,
+				C03D91020000000000000005 /* GLViewController+QueuedAssetLoading.h */,
 				18624FFE2C21DCFB00F86ADD /* Core3DCocoa_Window.hxx */,
 				18624FFF2C21DCFB00F86ADD /* Core3DCocoa_Window.mm */,
 				3221856F2BB5CC1400040E84 /* CafShapePrs.h */,
@@ -998,6 +1010,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */,
+				C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */,
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
 				C3D1A0022F20000100000002 /* Core3DNativeImportOperation.mm in Sources */,
 				59729FAFBF8D4B7F9B0BE095 /* Core3DTransformInspectorSnapshot.mm in Sources */,
