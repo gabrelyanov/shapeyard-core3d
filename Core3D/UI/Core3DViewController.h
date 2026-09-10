@@ -36,6 +36,41 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultUnchanged,
 };
 
+//! Immutable validated construction values. Lengths use the declared document
+//! unit; revolution parameters are degrees. No geometry or document handles.
+@interface Core3DProfileDefinition : NSObject
+@property(nonatomic,copy,readonly) NSArray<NSValue *> *points;
+@property(nonatomic,copy,readonly,nullable) NSValue *circleCenter;
+@property(nonatomic,readonly) double outerRadius;
+@property(nonatomic,readonly) double innerRadius;
+@property(nonatomic,copy,readonly) NSArray<NSValue *> *holeCenters;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *holeRadii;
+@property(nonatomic,readonly) Core3DProfilePlane plane;
+@property(nonatomic,readonly) double parameter;
+@property(nonatomic,readonly) BOOL revolve;
+@property(nonatomic,readonly) double metersPerUnit;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithPoints:(NSArray<NSValue *> *)points
+    circleCenter:(nullable NSValue *)circleCenter outerRadius:(double)outerRadius innerRadius:(double)innerRadius
+    holeCenters:(NSArray<NSValue *> *)holeCenters holeRadii:(NSArray<NSNumber *> *)holeRadii
+    plane:(Core3DProfilePlane)plane parameter:(double)parameter revolve:(BOOL)revolve metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(init(points:circleCenter:outerRadius:innerRadius:holeCenters:holeRadii:plane:parameter:revolve:metersPerUnit:));
+@end
+
+//! A read of one selected native profile. A stale profile remains inspectable
+//! but cannot replace subsequent geometry edits. Apply also checks the original
+//! document/model revision; only the presentation may be refreshed.
+@interface Core3DStoredProfileSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSString *definitionIdentifier;
+@property(nonatomic,copy,readonly) NSString *featureIdentifier;
+@property(nonatomic,strong,readonly) Core3DProfileDefinition *definition;
+@property(nonatomic,readonly) BOOL current;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
     Core3DObjectAlignmentAnchorMinimum = 0,
     Core3DObjectAlignmentAnchorCenter,
@@ -795,6 +830,13 @@ typedef struct {
                                       expected:(Core3DSceneSnapshot *)expected
                                     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildStoredProfile(entityIdentifier:parameter:expected:completion:));
+
+- (nullable Core3DStoredProfileSnapshot *)storedProfileWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedProfile(entityIdentifier:expected:));
+- (void)rebuildStoredProfile:(Core3DStoredProfileSnapshot *)original
+    definition:(Core3DProfileDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildStoredProfile(_:definition:expected:completion:));
 //! Keep the worker slot until completion; cancel at document load/close boundaries.
 - (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

@@ -1680,33 +1680,78 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     } catch (...) { return {}; }
 }
 
-std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
-    double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
-        || myDoc.IsNull() || identity.entityIdentifier.empty()) return {};
+        || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
     try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision) return {};
         myContext->InitSelected();
         if (!myContext->MoreSelected()) return {};
         const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
         myContext->NextSelected();
         if (myContext->MoreSelected() || selected.IsNull()) return {};
+        OcctObjectTransformState state;
+        const auto label = myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, state)
+            || state.entityIdentifier != identity.entityIdentifier
+            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+            || state.profile.label.IsNull()) return {};
+        StoredProfileSnapshot result;
+        result.parameters = state.profile.parameters; result.identity = identity;
+        result.definitionIdentifier = state.definitionIdentifier;
+        result.featureIdentifier = state.profile.identifier;
+        result.current = state.profile.IsCurrent(myDoc->Document(), label)
+            && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        return result;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
+    double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    const auto original = storedProfileDefinition(identity, presentationRevision, width, height);
+    if (!original) return {};
+    auto parameters = original->parameters; parameters.definition.depth = parameter;
+    return prepareStoredProfileRebuild(parameters, *original, identity, presentationRevision, width, height);
+}
+
+std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
+    const profile::Parameters& parameters, const StoredProfileSnapshot& original,
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (!original.current || identity.entityIdentifier != original.identity.entityIdentifier
+        || identity.publicationSourceIdentifier != original.identity.publicationSourceIdentifier
+        || identity.documentGeneration != original.identity.documentGeneration
+        || identity.modelRevision != original.identity.modelRevision
+        || parameters.metersPerUnit != original.parameters.metersPerUnit) return {};
+    try {
+        const auto current = storedProfileDefinition(identity, presentationRevision, width, height);
+        if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
+            || current->definitionIdentifier != original.definitionIdentifier) return {};
+        std::vector<double> originalValues, currentValues, requestedValues;
+        if (!profile::Encode(original.parameters, originalValues)
+            || !profile::Encode(current->parameters, currentValues) || originalValues != currentValues
+            || !profile::Encode(parameters, requestedValues)) return {};
+        myContext->InitSelected();
+        const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
         OrdinaryTransformRecord record;
         const auto label = myDoc->ShapeLabel(selected);
-        if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)
-            || record.previous.entityIdentifier != identity.entityIdentifier
-            || record.previous.resolvedRepresentation != OcctGeometryRepresentation::BRep
-            || !record.previous.profile.IsCurrent(myDoc->Document(), label)
-            || !profile::HasOnlyMetadataSubshapes(myDoc->Document(), label)) return {};
-        const auto& d = record.previous.profile.parameters.definition;
-        auto work = prepareProfileSolid(d.points, d.plane, parameter, identity,
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)) return {};
+        const auto& d = parameters.definition;
+        auto work = prepareProfileSolid(d.points, d.plane, d.depth, identity,
             presentationRevision, width, height, d.revolve, d.circle, d.holes);
         if (!work) return {};
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
-        record.requested.profileRebuild = record.previous.profile.parameters;
-        record.requested.profileRebuild->definition.depth = parameter;
+        record.requested.profileRebuild = parameters;
         work->rebuildAuthority.emplace();
         work->rebuildAuthority->records.push_back(std::move(record));
         if (!admitTransform(*work->rebuildAuthority)) return {};

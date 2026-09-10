@@ -724,6 +724,97 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 } // namespace
 
+@interface Core3DProfileDefinition ()
+- (instancetype)initWithNativeParameters:(const core3d::profile::Parameters&)parameters;
+- (core3d::profile::Parameters)nativeParameters;
+@end
+@implementation Core3DProfileDefinition {
+    core3d::profile::Parameters _parameters;
+}
+- (instancetype)initWithNativeParameters:(const core3d::profile::Parameters&)parameters {
+    self = [super init];
+    if (self) {
+        _parameters = parameters;
+        const auto& d = parameters.definition;
+        NSMutableArray *points = [NSMutableArray arrayWithCapacity:d.points.size()];
+        for (const auto& p : d.points) [points addObject:[NSValue valueWithCGPoint:CGPointMake(p.X(),p.Y())]];
+        _points = [points copy];
+        if (d.circle) _circleCenter = [NSValue valueWithCGPoint:CGPointMake(d.circle->center.X(),d.circle->center.Y())];
+        NSMutableArray *centers = [NSMutableArray arrayWithCapacity:d.holes.size()];
+        NSMutableArray *radii = [NSMutableArray arrayWithCapacity:d.holes.size()];
+        for (const auto& h : d.holes) {
+            [centers addObject:[NSValue valueWithCGPoint:CGPointMake(h.center.X(),h.center.Y())]];
+            [radii addObject:@(h.radius)];
+        }
+        _holeCenters = [centers copy]; _holeRadii = [radii copy];
+    }
+    return self;
+}
+- (instancetype)initWithPoints:(NSArray<NSValue *> *)points
+    circleCenter:(NSValue *)circleCenter outerRadius:(double)outerRadius innerRadius:(double)innerRadius
+    holeCenters:(NSArray<NSValue *> *)holeCenters holeRadii:(NSArray<NSNumber *> *)holeRadii
+    plane:(Core3DProfilePlane)plane parameter:(double)parameter revolve:(BOOL)revolve metersPerUnit:(double)metersPerUnit {
+    if (![points isKindOfClass:[NSArray class]] || points.count > 64
+        || ![holeCenters isKindOfClass:[NSArray class]] || ![holeRadii isKindOfClass:[NSArray class]]
+        || holeCenters.count > 16 || holeCenters.count != holeRadii.count) return nil;
+    try {
+        core3d::profile::Parameters parameters;
+        parameters.metersPerUnit = metersPerUnit;
+        auto& d = parameters.definition;
+        d.plane = static_cast<int>(plane); d.depth = parameter; d.revolve = revolve;
+        auto pointValue = [](id value, gp_Pnt2d& output) {
+            if (![value isKindOfClass:[NSValue class]] || std::strcmp([value objCType], @encode(CGPoint)) != 0) return false;
+            const CGPoint p = [value CGPointValue];
+            if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
+            output = gp_Pnt2d(p.x,p.y); return true;
+        };
+        for (id value in points) {
+            gp_Pnt2d p; if (!pointValue(value,p)) return nil; d.points.push_back(p);
+        }
+        if (circleCenter) {
+            gp_Pnt2d p; if (!pointValue(circleCenter,p)) return nil;
+            d.circle = core3d::ProfileCircularSection{p,outerRadius,innerRadius};
+        } else if (outerRadius != 0 || innerRadius != 0) return nil;
+        for (NSUInteger i=0; i<holeCenters.count; ++i) {
+            gp_Pnt2d p; if (!pointValue(holeCenters[i],p) || ![holeRadii[i] isKindOfClass:[NSNumber class]]) return nil;
+            d.holes.push_back({p,[holeRadii[i] doubleValue]});
+        }
+        std::vector<double> values;
+        if (!core3d::profile::Encode(parameters,values)) return nil;
+        return [self initWithNativeParameters:parameters];
+    } catch (...) { return nil; }
+}
+- (core3d::profile::Parameters)nativeParameters { return _parameters; }
+- (double)outerRadius { return _parameters.definition.circle ? _parameters.definition.circle->outerRadius : 0; }
+- (double)innerRadius { return _parameters.definition.circle ? _parameters.definition.circle->innerRadius : 0; }
+- (Core3DProfilePlane)plane { return static_cast<Core3DProfilePlane>(_parameters.definition.plane); }
+- (double)parameter { return _parameters.definition.depth; }
+- (BOOL)revolve { return _parameters.definition.revolve; }
+- (double)metersPerUnit { return _parameters.metersPerUnit; }
+@end
+
+@interface Core3DStoredProfileSnapshot ()
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredProfileSnapshot&)snapshot;
+- (core3d::StoredProfileSnapshot)nativeSnapshot;
+@end
+@implementation Core3DStoredProfileSnapshot {
+    core3d::StoredProfileSnapshot _native;
+}
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredProfileSnapshot&)snapshot {
+    self = [super init];
+    if (self) {
+        _native = snapshot;
+        _entityIdentifier = [[NSString alloc] initWithUTF8String:snapshot.identity.entityIdentifier.c_str()];
+        _definitionIdentifier = [[NSString alloc] initWithUTF8String:snapshot.definitionIdentifier.c_str()];
+        _featureIdentifier = [[NSString alloc] initWithUTF8String:snapshot.featureIdentifier.c_str()];
+        _definition = [[Core3DProfileDefinition alloc] initWithNativeParameters:snapshot.parameters];
+        _current = snapshot.current;
+    }
+    return self;
+}
+- (core3d::StoredProfileSnapshot)nativeSnapshot { return _native; }
+@end
+
 @interface Core3DMeshVertexEditSnapshot ()
 @property(nonatomic,copy,readonly) NSString *sessionIdentifier;
 - (instancetype)initWithNativeSnapshot:(const core3d::MeshVertexEditSnapshot&)snapshot;
@@ -7148,6 +7239,56 @@ void Core3DAddDebugOrphanVisualMaterial(
         identity.modelRevision = expected.revisions.modelRevision;
         const auto work = viewer->prepareStoredProfileRebuild(parameter, identity, expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runProfileSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (Core3DStoredProfileSnapshot *)storedProfileWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || _profileSolidWork || _isLoading.load() || !_isSetuped
+        || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+    try {
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->storedProfileDefinition(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        return result ? [[Core3DStoredProfileSnapshot alloc] initWithNativeSnapshot:*result] : nil;
+    } catch (...) { return nil; }
+}
+
+- (void)rebuildStoredProfile:(Core3DStoredProfileSnapshot *)original
+    definition:(Core3DProfileDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
+    }
+    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (![original isKindOfClass:[Core3DStoredProfileSnapshot class]]
+        || ![definition isKindOfClass:[Core3DProfileDefinition class]]) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto live = [self storedProfileWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if (!live) { completion(Core3DProfileConstructionResultRejected); return; }
+    try {
+        const CGSize size = GLController.drawableSize;
+        const auto work = GLController.viewer->prepareStoredProfileRebuild([definition nativeParameters],
+            [original nativeSnapshot],[live nativeSnapshot].identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runProfileSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }

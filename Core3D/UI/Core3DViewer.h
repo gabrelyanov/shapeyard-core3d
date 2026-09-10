@@ -46,6 +46,13 @@ namespace core3d {
 
     struct ProfileSolidWork;
     struct ProfileSolidGeometry;
+    struct StoredProfileSnapshot {
+        profile::Parameters parameters;
+        ObjectFrameIdentity identity;
+        std::string definitionIdentifier;
+        std::string featureIdentifier;
+        bool current = false;
+    };
     struct MeshVertexEditWork;
     struct MeshVertexEditSnapshot {
         std::string sessionIdentifier;
@@ -85,6 +92,13 @@ namespace core3d {
         //! Rebuild the selected current saved profile, retaining its entity and placement.
         std::shared_ptr<ProfileSolidWork> prepareStoredProfileRebuild(
             double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        std::optional<StoredProfileSnapshot> storedProfileDefinition(
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        std::shared_ptr<ProfileSolidWork> prepareStoredProfileRebuild(
+            const profile::Parameters& parameters, const StoredProfileSnapshot& original,
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
             const std::shared_ptr<ProfileSolidWork>& work) noexcept;
