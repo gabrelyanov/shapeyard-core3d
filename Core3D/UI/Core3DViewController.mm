@@ -9127,26 +9127,30 @@ void Core3DAddDebugOrphanVisualMaterial(
             if (controller == nil || ![NSThread isMainThread]
                 || controller->_queuedAssetRequest != request
                 || ![controller->_queuedAssetRequestSlot ownsRequest:request]) return;
-            // GL calls this only after the exact private file is removed and
-            // native queued ownership is settled. Retained replacement recovery
-            // remains independent and is reflected by public reconciliation.
+            // Private cleanup and native settlement are complete. Keep Core's
+            // accepted slot through reconciliation and progress feedback so a
+            // reentrant load cannot overtake the prior document lifecycle.
+            if (originGL != nil && controller.glController == originGL) {
+                if (result == Core3DAssetLoadResultSuccess) {
+                    [originGL fitAll];
+                    [controller activatePassiveStateAfterDocumentReplacement];
+                } else {
+                    [controller reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:NO];
+                }
+                if (controller.glController == originGL)
+                    [controller viewDidChangeAssetLoadCleanupPending:NO];
+            }
             if (![controller->_queuedAssetRequestSlot finishRequest:request]) return;
             controller->_queuedNativeLoadOwner = nil;
             controller->_queuedAssetRequest = nil;
             controller->_isLoading = false;
-            // A replacement GL is a different editor lifecycle; no notification belongs to it.
+            // A replacement GL is a different editor lifecycle. Release this
+            // request but never publish the old terminal event into that editor.
             if (originGL == nil || controller.glController != originGL) return;
-            [controller viewDidChangeAssetLoadCleanupPending:NO];
-            if (controller.glController != originGL) return;
-            // Clear the exact slot before any synchronous observer can re-enter.
-            if (result != Core3DAssetLoadResultSuccess) {
-                [controller reconcilePublicStateAfterDocumentLifecycleActivatingPassiveTool:NO];
-                [controller viewDidFailToLoadFromBundle:result];
-                return;
-            }
-            [(GLViewController *)controller.glController fitAll];
-            [controller activatePassiveStateAfterDocumentReplacement];
-            [controller viewDidLoadFromBundle];
+            // Terminal callbacks may immediately begin a subsequent load. No
+            // prior native reconciliation or progress follows that callback.
+            if (result == Core3DAssetLoadResultSuccess) [controller viewDidLoadFromBundle];
+            else [controller viewDidFailToLoadFromBundle:result];
         }];
     if (admission == Core3DAssetLoadResultSuccess) {
         // GL guarantees asynchronous completion after a successful admission.
