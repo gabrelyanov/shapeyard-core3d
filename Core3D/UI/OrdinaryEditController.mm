@@ -1164,6 +1164,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
+                || !record.candidate.profile.IsEqual(record.previous.profile)
                 || record.candidate.scalars != EncodedTransform(record.requested.transform)
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");

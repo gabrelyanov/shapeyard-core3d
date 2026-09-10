@@ -1728,8 +1728,11 @@ OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<Profil
                 Bnd_Box bounds; bounds.Add(gp_Pnt(b[0], b[1], b[2])); bounds.Add(gp_Pnt(b[3], b[4], b[5]));
                 myView->FitAll(bounds, 0.45, Standard_False); myView->ZFitAll();
             }
-            deselectAll();
-            _objectInteractor->SelectAndAttachManipulator(presentation);
+            // Replace the old selection and its gizmo ownership together.
+            // Deselecting alone leaves a previous manipulator attached, and
+            // SelectAndAttachManipulator appends the new object to it.
+            bool selectionWasTouched = false;
+            (void)_objectInteractor->replaceSelectedObjectForBrowser(presentation, selectionWasTouched);
         } catch (...) {}
         return result;
     } catch (...) { return OrdinaryEditResult::Invalid; }
