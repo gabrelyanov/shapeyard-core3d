@@ -10453,6 +10453,13 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             default:
                 break;
         }
+        if (nativeGizmoType == PrimitiveGizmoTypeNone
+            && (_currentGizmoType == PrimitiveGizmoTypeMoveRotate
+                || _currentGizmoType == PrimitiveGizmoTypeScale)) {
+            // Entering an object gizmo can attach a browser-selected target.
+            // Derive action availability after the public tool is final.
+            [GLController refreshSelectionState];
+        }
         // GLController invalidates the native view before the public gizmo and
         // capability state above is final. Publish one final-state observation
         // so alternate renderers cannot remain promoted over an OCCT preview.
