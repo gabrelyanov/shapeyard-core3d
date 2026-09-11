@@ -290,7 +290,9 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                     || request.rotationAroundPivot || !geometryChanges
                     || !enclosure::HasOnlyMetadataSubshapes(document,request.label)
                     || !enclosure::Encode(*request.enclosureRebuild,values)
-                    || request.enclosureRebuild->metersPerUnit != record.previous.enclosure.parameters.metersPerUnit) {
+                    || request.enclosureRebuild->metersPerUnit != record.previous.enclosure.parameters.metersPerUnit
+                    || request.enclosureRebuild->definition.constructionFrame
+                        != record.previous.enclosure.parameters.definition.constructionFrame) {
                     return reject(OrdinaryEditResult::Invalid);
                 }
                 if (values == record.previous.enclosure.values) return reject(OrdinaryEditResult::NoChange);

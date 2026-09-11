@@ -3,6 +3,7 @@
 // Shared immutable dimensional input
 // for a bounded outer-extrude / translated-inner-extrude / cut dependency.
 #include "ProfileDefinition.hxx"
+#include "ProfileConstructionFrame.hxx"
 #include "ProfileCurvePresets.hxx"
 #include <array>
 #include <optional>
@@ -20,6 +21,7 @@ enum class EnclosureDimension { Width, Depth, Height, Wall, Floor, CornerRadius 
 struct EnclosureDefinition {
     EnclosureDimensions dimensions;
     int plane = 0;
+    std::optional<profile::ConstructionFrame> constructionFrame;
 };
 struct EnclosureDerivedDimensions {
     double innerWidth = 0, innerDepth = 0, innerHeight = 0, innerRadius = 0;
@@ -31,7 +33,8 @@ inline bool InspectEnclosureDefinition(const EnclosureDefinition& definition,
     output = {};
     const auto& d = definition.dimensions;
     constexpr double minimum = 1e-3, maximum = 1e6;
-    if (definition.plane < 0 || definition.plane > 2) return false;
+    if (definition.plane < 0 || definition.plane > 2
+        || (definition.constructionFrame && !definition.constructionFrame->IsValid())) return false;
     for (double value : {d.width,d.depth,d.height,d.wall,d.floor,d.cornerRadius})
         if (!std::isfinite(value) || value < minimum || value > maximum) return false;
     // Keep both rounded loops nondegenerate, positive floor/walls, and an open

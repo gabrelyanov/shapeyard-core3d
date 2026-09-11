@@ -1278,7 +1278,9 @@ namespace core3d {
                     || !sourceProfile.IsEqual(duplicate.originalProfile)
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.sourceLabel, sourceName)
                     || !sourceName.IsEqual(duplicate.originalName)
-                    || sourceProfile.IsCurrent(document, duplicate.sourceLabel) != duplicate.originalProfileCurrent) {
+                    || sourceProfile.IsCurrent(document, duplicate.sourceLabel) != duplicate.originalProfileCurrent
+                    || sourceName.object.enclosure.IsCurrent(document, duplicate.sourceLabel)
+                        != duplicate.originalEnclosureCurrent) {
                     return DuplicateDocumentState::PartialOrMismatched;
                 }
 				if (duplicate.resultLabel.IsNull()) {
@@ -1291,11 +1293,13 @@ namespace core3d {
 				const TopoDS_Shape stored = XCAFDoc_ShapeTool::GetShape(
 					duplicate.resultLabel);
                 profile::Record actualProfile;
-                if (!profile::Read(document, duplicate.resultLabel, actualProfile)) {
+                enclosure::Record actualEnclosure;
+                if (!profile::Read(document, duplicate.resultLabel, actualProfile)
+                    || !enclosure::Read(document, duplicate.resultLabel, actualEnclosure)) {
                     return DuplicateDocumentState::PartialOrMismatched;
                 }
 				if (stored.IsNull()) {
-                    if (!actualProfile.label.IsNull()) { return DuplicateDocumentState::PartialOrMismatched; }
+                    if (!actualProfile.label.IsNull() || !actualEnclosure.label.IsNull()) { return DuplicateDocumentState::PartialOrMismatched; }
 					++missingCount;
 					continue;
 				}
@@ -1306,6 +1310,9 @@ namespace core3d {
 						storedReferenceAxis);
                 OcctObjectNameState actualName;
 				if (!duplicate.profileCandidateSealed
+                    || !duplicate.enclosureCandidateSealed
+                    || !actualEnclosure.IsEqual(duplicate.candidateEnclosure)
+                    || actualEnclosure.IsCurrent(document, duplicate.resultLabel) != duplicate.originalEnclosureCurrent
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.resultLabel, actualName)
                     || actualName.namePresent != duplicate.originalName.namePresent
                     || (actualName.namePresent && !actualName.name.IsEqual(duplicate.originalName.name))
@@ -1580,7 +1587,10 @@ namespace core3d {
 		for (const DuplicateSource& source : sources) {
 			sourceLabels.push_back(source.label);
 		}
-		if (!myDoc->CanDuplicateGeometryDefinitions(sourceLabels)) {
+        std::vector<OcctGeometryDuplicationRequest> duplicationRequests;
+        duplicationRequests.reserve(sourceLabels.size());
+        for (const auto& label : sourceLabels) duplicationRequests.push_back({label, 1U, false, true});
+		if (!myDoc->CanDuplicateGeometryDefinitions(duplicationRequests)) {
 			return;
 		}
         OcctSavedGroupState groupBefore;
@@ -1693,6 +1703,23 @@ namespace core3d {
                             || retainedCopy.Shape().IsPartner(source.savedProfile.boundShape)
                             || !IsTopologicallyValid(retainedCopy.Shape())) { return; }
                         duplicate.preparedProfileBinding = retainedCopy.Shape();
+                    }
+                }
+                const auto& savedEnclosure = source.name.object.enclosure;
+                duplicate.originalEnclosureCurrent = savedEnclosure.IsCurrent(doc, source.label);
+                if (!savedEnclosure.label.IsNull()) {
+                    duplicate.preparedEnclosureIdentifier = OcctDocument::NewProfileIdentifier();
+                    if (!profile::IsIdentifier(duplicate.preparedEnclosureIdentifier)
+                        || duplicate.preparedEnclosureIdentifier == savedEnclosure.identifier) return;
+                    if (savedEnclosure.boundShape.IsEqual(source.ownerShape)) {
+                        duplicate.preparedEnclosureBinding = copy->Shape();
+                    } else {
+                        BRepBuilderAPI_Copy retainedCopy;
+                        retainedCopy.Perform(savedEnclosure.boundShape, Standard_True, Standard_False);
+                        if (!retainedCopy.IsDone() || retainedCopy.Shape().IsNull()
+                            || retainedCopy.Shape().IsPartner(savedEnclosure.boundShape)
+                            || !IsTopologicallyValid(retainedCopy.Shape())) return;
+                        duplicate.preparedEnclosureBinding = retainedCopy.Shape();
                     }
                 }
                 duplicates.push_back(std::move(duplicate));
@@ -1852,6 +1879,36 @@ namespace core3d {
                 }
 #endif
                 duplicate.profileCandidateSealed = true;
+                enclosure::Record enclosureAuthority = duplicate.originalName.object.enclosure;
+#ifdef DEBUG
+                const Standard_Integer enclosureFault = _debugDuplicateEnclosureFault;
+                if (!enclosureAuthority.label.IsNull()) {
+                    _debugDuplicateEnclosureFault = 0;
+                    if (enclosureFault == 8) enclosureAuthority.values[2] += 1;
+                }
+#endif
+                if (!enclosure::StageDuplicate(doc, duplicate.sourceLabel,
+                        enclosureAuthority, duplicate.originalOwnerShape,
+                        label, duplicate.preparedEnclosureBinding,
+                        duplicate.preparedEnclosureIdentifier, duplicate.candidateEnclosure)) {
+                    retainRetryableOrUnknown(); return;
+                }
+#ifdef DEBUG
+                if (enclosureFault == 9 && !duplicate.candidateEnclosure.label.IsNull()) {
+                    TDataStd_Integer::Set(duplicate.candidateEnclosure.label, enclosure::CountID(),
+                        static_cast<int>(duplicate.candidateEnclosure.values.size()) + 1);
+                    enclosure::Record readback;
+                    if (!enclosure::Read(doc, label, readback)) { retainRetryableOrUnknown(); return; }
+                    throw Standard_Failure("Injected invalid enclosure unexpectedly read back");
+                }
+                if ((enclosureFault == 10 || enclosureFault == 11) && !duplicate.candidateEnclosure.label.IsNull()) {
+                    const auto target = enclosureFault == 10 ? duplicate.candidateEnclosure.label
+                        : duplicate.originalName.object.enclosure.label;
+                    TDataStd_AsciiString::Set(target, enclosure::IdentityID(),
+                        TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+                }
+#endif
+                duplicate.enclosureCandidateSealed = true;
                 // Preserve authored names and their absence on each independent
                 // part. Closed-commit recovery compares this exact source state.
                 if (duplicate.originalName.namePresent) {
@@ -6357,6 +6414,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 	void ObjectInteractor::debugSetDuplicateCommitMode(
 		const Standard_Integer mode) noexcept {
         _debugDuplicateProfileFault = mode >= 4 && mode <= 7 ? mode : 0;
+        _debugDuplicateEnclosureFault = mode >= 8 && mode <= 11 ? mode : 0;
 		if (mode == 3) {
 			_debugDuplicateCommitMode = 0;
 			_debugDuplicatePresentationRepairFailureCount = 1;

@@ -96,8 +96,45 @@ inline bool BuildEnclosureSolidGeometry(const EnclosureDefinition& definition,
         for (std::size_t axis=0;axis<3;++axis)
             if (!std::isfinite(result.bounds[axis]) || !std::isfinite(result.bounds[axis+3])
                 || std::abs(result.bounds[axis])>1e-7 || std::abs(result.bounds[axis+3]-dimensions[axis])>1e-7) return false;
+        double finalVolume=volume;
+        if (definition.constructionFrame) {
+            gp_Trsf frame;
+            if (cancelled->load() || !definition.constructionFrame->Transform(frame)) return false;
+            BRepBuilderAPI_Transform transformed(solid,frame,Standard_True,Standard_False);
+            if (cancelled->load() || !transformed.IsDone() || transformed.Shape().IsNull()
+                || transformed.Shape().ShapeType()!=TopAbs_SOLID) return false;
+            solid=TopoDS::Solid(transformed.Shape());
+            if (!BRepLib::OrientClosedSolid(solid)
+                || !BRepCheck_Analyzer(solid,Standard_True).IsValid()) return false;
+            GProp_GProps framedProperties;BRepGProp::VolumeProperties(solid,framedProperties);
+            finalVolume=framedProperties.Mass();
+            const double framedExpected=expected*definition.constructionFrame->AbsoluteVolumeScale();
+            if (!std::isfinite(finalVolume) || finalVolume<=0 || !std::isfinite(framedExpected)
+                || framedExpected<=0 || std::abs(finalVolume-framedExpected)>std::max(1e-8,framedExpected*1e-8)) return false;
+            Bnd_Box framedBox;BRepBndLib::AddOptimal(solid,framedBox,Standard_False,Standard_False);
+            if (framedBox.IsVoid() || framedBox.IsOpen()) return false;
+            framedBox.Get(result.bounds[0],result.bounds[1],result.bounds[2],result.bounds[3],result.bounds[4],result.bounds[5]);
+            // The outer rounded footprint is a rectangle plus a radius disk.
+            // Its support function gives tight transformed extrema, including
+            // rotations for which transformed enclosing-box corners are absent.
+            const int u=definition.plane==2 ? 2 : 1;
+            const int v=definition.plane==0 ? 2 : 3;
+            const int w=definition.plane==0 ? 3 : definition.plane==1 ? 2 : 1;
+            const double tolerance=1e-7*std::max(1.0,std::abs(frame.ScaleFactor()));
+            for (int axis=0;axis<3;++axis) {
+                const double a=frame.Value(axis+1,u),b=frame.Value(axis+1,v),c=frame.Value(axis+1,w);
+                const double center=frame.Value(axis+1,4)+a*d.width/2+b*d.depth/2+c*d.height/2;
+                const double extent=std::abs(a)*(d.width/2-d.cornerRadius)
+                    +std::abs(b)*(d.depth/2-d.cornerRadius)+std::hypot(a,b)*d.cornerRadius
+                    +std::abs(c)*d.height/2;
+                if (!std::isfinite(center) || !std::isfinite(extent)
+                    || !std::isfinite(result.bounds[axis]) || !std::isfinite(result.bounds[axis+3])
+                    || std::abs(result.bounds[axis]-(center-extent))>tolerance
+                    || std::abs(result.bounds[axis+3]-(center+extent))>tolerance) return false;
+            }
+        }
         if (cancelled->load()) return false;
-        result.solid=solid;result.volume=volume;output=std::move(result);return true;
+        result.solid=solid;result.volume=finalVolume;output=std::move(result);return true;
     } catch (...) {output={};return false;}
 }
 } // namespace core3d

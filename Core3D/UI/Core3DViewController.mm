@@ -1036,6 +1036,17 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         return [[Core3DEnclosureDefinition alloc] initWithNativeParameters:parameters];
     } catch (...) { return nil; }
 }
+- (Core3DEnclosureDefinition *)definitionByUpdatingWidth:(double)width depth:(double)depth
+    height:(double)height wall:(double)wall floor:(double)floor cornerRadius:(double)cornerRadius
+    plane:(Core3DProfilePlane)plane {
+    if (plane < Core3DProfilePlaneXY || plane > Core3DProfilePlaneYZ) return nil;
+    try {
+        auto parameters = _parameters;
+        parameters.definition.dimensions = {width,depth,height,wall,floor,cornerRadius};
+        parameters.definition.plane = static_cast<int>(plane);
+        return [[Core3DEnclosureDefinition alloc] initWithNativeParameters:parameters];
+    } catch (...) { return nil; }
+}
 - (double)width { return _parameters.definition.dimensions.width; }
 - (double)depth { return _parameters.definition.dimensions.depth; }
 - (double)height { return _parameters.definition.dimensions.height; }
@@ -3671,6 +3682,163 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 // DEBUG-only standalone import fixture; never mutates the live document.
 // DEBUG-only real-document admission probe. All setup is in a standalone OCAF
 // document; the production limits and CanDuplicateGeometryDefinitions are used.
+- (NSDictionary<NSString *, NSNumber *> *)debugEnclosureCopyOwnershipState {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr) return nil;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || !owner->ValidateGeometryRepresentations()) return nil;
+        const auto document = owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return nil;
+        const auto tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (tool.IsNull()) return nil;
+        TDF_LabelSequence roots; tool->GetFreeShapes(roots);
+        if (roots.Length() > 4096) return nil;
+        std::unordered_set<const TopoDS_TShape *> previousTopologies;
+        std::set<std::string> identities;
+        Standard_Size enclosures = 0, current = 0, retainedBindings = 0, allNodes = 0;
+        bool independent = true, uniqueIdentifiers = true;
+        for (int index = 1; index <= roots.Length(); ++index) {
+            const auto label = roots.Value(index);
+            core3d::enclosure::Record record;
+            if (!core3d::enclosure::Read(document, label, record)) return nil;
+            if (record.label.IsNull()) continue;
+            ++enclosures;
+            uniqueIdentifiers = identities.insert(record.identifier).second && uniqueIdentifiers;
+            current += record.IsCurrent(document, label) ? 1 : 0;
+            const auto root = XCAFDoc_ShapeTool::GetShape(label);
+            if (root.IsNull() || record.boundShape.IsNull()) return nil;
+            const bool sameRoot = record.boundShape.IsEqual(root);
+            retainedBindings += sameRoot ? 0 : 1;
+            std::unordered_set<const TopoDS_TShape *> ownTopologies;
+            const auto include = [&](const TopoDS_Shape& shape) {
+                TopTools_IndexedMapOfShape nodes; TopExp::MapShapes(shape, nodes);
+                for (int node = 1; node <= nodes.Extent(); ++node)
+                    ownTopologies.insert(nodes(node).TShape().get());
+            };
+            include(root); if (!sameRoot) include(record.boundShape);
+            if (ownTopologies.size() > 131072U - allNodes) return nil;
+            allNodes += ownTopologies.size();
+            for (const auto topology : ownTopologies)
+                if (!previousTopologies.insert(topology).second) independent = false;
+        }
+        return @{@"enclosureCount":@(enclosures), @"currentCount":@(current),
+            @"retainedBindingCount":@(retainedBindings), @"topologyNodes":@(allNodes),
+            @"pairwiseIndependentRootsAndBindings":@(independent),
+            @"uniqueFeatureIdentifiers":@(uniqueIdentifiers)};
+    } catch (...) { return nil; }
+}
+
+// Modes0/1: exact label boundary for legacy9/framed17 scalar recipes.
+// Mode2: current root + separate stale bound topology multiplicity.
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureDuplicateCapacityProbe:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 2) return nil;
+    struct Scope {
+        Handle(OcctDocument) wrapper = new OcctDocument();
+        Handle(TDocStd_Document) document;
+        ~Scope() noexcept { try { if (!document.IsNull()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            const auto app = Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!app.IsNull()) app->Close(document);
+        } } catch (...) {} }
+    } scope;
+    try {
+        scope.wrapper->InitDoc(); scope.document = scope.wrapper->Document();
+        const auto& document = scope.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        core3d::enclosure::Parameters parameters;
+        parameters.metersPerUnit = 0.001;
+        parameters.definition.dimensions = {100,60,30,2,2,4};
+        parameters.definition.plane = 0;
+        if (mode != 0) {
+            parameters.definition.constructionFrame.emplace();
+            parameters.definition.constructionFrame->values = {13,-7,2,0,0,0.25881904510252074,0.9659258262890683,-1.25};
+        }
+        core3d::EnclosureSolidResult geometry;
+        if (!core3d::BuildEnclosureSolidGeometry(parameters.definition,
+                std::make_shared<std::atomic_bool>(false), geometry)) return nil;
+        const auto original = geometry.solid;
+        document->NewCommand();
+        const auto label = shapes->AddShape(original, Standard_False);
+        if (!core3d::enclosure::Stage(document, label, parameters, NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand()) return nil;
+        core3d::enclosure::Record record;
+        if (!core3d::enclosure::Read(document, label, record) || !record.IsCurrent(document, label)) return nil;
+        Standard_Size admittedCopies = 1, shapeCost = 0;
+        auto countLabels = [&]() {
+            Standard_Size count = 0;
+            for (TDF_ChildIterator it(document->GetData()->Root(), Standard_True); it.More(); it.Next()) ++count;
+            return count;
+        };
+        if (mode <= 1) {
+            // Exact production 100000-label boundary: a new definition and its
+            // eight transform labels, plus the recipe and its actual scalars.
+            const Standard_Size destinationLabels = 9U + 1U + record.values.size();
+            const Standard_Size target = 100000U - destinationLabels;
+            const auto filler = document->GetData()->Root().FindChild(900000, Standard_True);
+            const Standard_Size before = countLabels();
+            if (before >= target) return nil;
+            for (Standard_Size i = 1; i <= target - before; ++i)
+                filler.FindChild(static_cast<Standard_Integer>(i), Standard_True);
+            if (countLabels() != target) return nil;
+        } else {
+            // Retain the original recipe binding while replacing its root with
+            // a distinct larger box, just as a later solid edit can do.
+            const auto later = BRepPrimAPI_MakeBox(65.0, 40.0, 30.0).Shape();
+            document->NewCommand(); shapes->SetShape(label, later);
+            if (!document->CommitCommand()) return nil;
+            core3d::enclosure::Record stale;
+            if (!core3d::enclosure::Read(document, label, stale) || !stale.IsEqual(record)
+                || stale.IsCurrent(document, label)) return nil;
+            TopTools_IndexedMapOfShape currentTopology, retainedTopology;
+            TopExp::MapShapes(later, currentTopology); TopExp::MapShapes(original, retainedTopology);
+            shapeCost = currentTopology.Extent() + retainedTopology.Extent();
+            if (shapeCost == 0 || shapeCost >= 131072U) return nil;
+            admittedCopies = (131072U - shapeCost) / shapeCost;
+            // At this boundary the definition and label limits remain loose.
+            if (admittedCopies < 2 || admittedCopies + 2 >= 4096U
+                || countLabels() + (admittedCopies + 1) * (10U + record.values.size()) >= 100000U) return nil;
+        }
+        const auto labelsBefore = countLabels();
+        const auto timeBefore = document->GetData()->Time();
+        const auto undoBefore = document->GetAvailableUndos();
+        const auto rootBefore = XCAFDoc_ShapeTool::GetShape(label);
+        const bool valid = scope.wrapper->ValidateGeometryRepresentations();
+        const bool defaultRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U}});
+        const bool bakingRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, true, true}});
+        const bool atBoundary = scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, admittedCopies, false, true}});
+        const bool overflowRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, std::numeric_limits<Standard_Size>::max(), false, true}});
+        const bool zeroRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 0U, false, true}});
+        const bool duplicateRequestRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, false, true}, {label, 1U, false, true}});
+        core3d::enclosure::Record after;
+        const bool queryUnchanged = labelsBefore == countLabels() && timeBefore == document->GetData()->Time()
+            && undoBefore == document->GetAvailableUndos() && !document->HasOpenCommand()
+            && rootBefore.IsEqual(XCAFDoc_ShapeTool::GetShape(label))
+            && core3d::enclosure::Read(document, label, after) && after.IsEqual(record);
+        bool beyondRejected = false;
+        if (mode <= 1) {
+            const auto filler = document->GetData()->Root().FindChild(900000, Standard_False);
+            filler.FindChild(200000, Standard_True); // Exactly one extra label.
+            if (countLabels() != labelsBefore + 1U) return nil;
+            beyondRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+                std::vector<OcctGeometryDuplicationRequest>{{label, 1U, false, true}});
+        } else {
+            beyondRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+                std::vector<OcctGeometryDuplicationRequest>{{label, admittedCopies + 1U, false, true}});
+        }
+        return @{@"defaultRejected":@(defaultRejected), @"bakingRejected":@(bakingRejected), @"valid": @(valid), @"atBoundary": @(atBoundary), @"beyondRejected": @(beyondRejected),
+            @"overflowRejected": @(overflowRejected), @"zeroRejected": @(zeroRejected),
+            @"duplicateRequestRejected": @(duplicateRequestRejected), @"queryUnchanged": @(queryUnchanged),
+            @"labelsBefore": @(labelsBefore), @"admittedCopies": @(admittedCopies), @"shapeCost": @(shapeCost)};
+    } catch (...) { return nil; }
+}
+
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileDuplicateCapacityProbe:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 1) return nil;
     struct Scope {
@@ -4257,7 +4425,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         }
         return @{@"accepted":@YES,@"built":@YES,@"recoded":@(recoded),@"values":[roundtrip copy],
             @"bounds":[bounds copy],@"volume":@(geometry.volume),@"classifications":[states copy],
-            @"schema":@(core3d::enclosure::SchemaVersion)};
+            @"schema":@(int(encoded.front()))};
     } catch (...) {return @{@"accepted":@NO,@"exception":@YES};}
 }
 
@@ -4461,6 +4629,71 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         if (!core3d::enclosure::Read(document,label,record) || !record.IsCurrent(document,label))
             throw Standard_Failure("Enclosure fixture binding mismatch");
         if (fault == 1) TDataStd_Integer::Set(record.label,core3d::enclosure::SchemaID(),99);
+    });
+}
+
++ (Core3DEnclosureDefinition *)debugEnclosureDefinitionValues:(NSArray<NSNumber *> *)input {
+    if (![input isKindOfClass:[NSArray class]] || (input.count != 9 && input.count != 17)) return nil;
+    try {
+        std::vector<double> values; values.reserve(input.count);
+        for (id value in input) {
+            if (![value isKindOfClass:[NSNumber class]]) return nil;
+            values.push_back([value doubleValue]);
+        }
+        if (values.front() != 1 && values.front() != 2) return nil;
+        core3d::enclosure::Parameters parameters;
+        if (!core3d::enclosure::Decode(int(values.front()),values,parameters)) return nil;
+        return [[Core3DEnclosureDefinition alloc] initWithNativeParameters:parameters];
+    } catch (...) { return nil; }
+}
+
++ (NSArray<NSNumber *> *)debugEncodedEnclosureDefinition:(Core3DEnclosureDefinition *)definition {
+    if (![definition isKindOfClass:[Core3DEnclosureDefinition class]]) return nil;
+    try {
+        std::vector<double> values;
+        if (!core3d::enclosure::Encode([definition nativeParameters],values)) return nil;
+        NSMutableArray<NSNumber *> *result = [NSMutableArray arrayWithCapacity:values.size()];
+        for (double value : values) [result addObject:@(value)];
+        return [result copy];
+    } catch (...) { return nil; }
+}
+
++ (NSData *)debugEnclosureFrameFixtureValues:(NSArray<NSNumber *> *)input state:(NSInteger)state {
+    if (![NSThread isMainThread] || state < 0 || state > 2) return nil;
+    Core3DEnclosureDefinition *definition = [self debugEnclosureDefinitionValues:input];
+    if (definition == nil) return nil;
+    const auto parameters = [definition nativeParameters];
+    if (!parameters.definition.constructionFrame) return nil;
+    return Core3DCreateDebugBinXCAFFixture(@"enclosure-frame", [parameters,state](const Handle(TDocStd_Document)& document) {
+        XCAFDoc_DocumentTool::SetLengthUnit(document,parameters.metersPerUnit);
+        core3d::EnclosureSolidResult geometry;
+        if (!core3d::BuildEnclosureSolidGeometry(parameters.definition,
+                std::make_shared<std::atomic_bool>(false),geometry))
+            throw Standard_Failure("Unable to build framed enclosure fixture");
+        const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto label = shapeTool->AddShape(geometry.solid,Standard_False,Standard_True);
+        if (label.IsNull()) throw Standard_Failure("Unable to add framed enclosure fixture");
+        Core3DSetDebugGeometryRepresentation(label,1);
+        TDataStd_Name::Set(label,TCollection_ExtendedString("Framed enclosure"));
+        document->SetUndoLimit(10);document->NewCommand();
+        if (!core3d::enclosure::Stage(document,label,parameters,NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand()) throw Standard_Failure("Unable to stage framed enclosure fixture");
+        core3d::enclosure::Record record;
+        if (!core3d::enclosure::Read(document,label,record) || !record.IsCurrent(document,label))
+            throw Standard_Failure("Framed enclosure fixture binding mismatch");
+        if (state == 1) {
+            XCAFDoc_DocumentTool::SetLengthUnit(document,parameters.metersPerUnit == 0.001 ? 1.0 : 0.001);
+        } else if (state == 2) {
+            gp_Trsf moved; moved.SetTranslation(gp_Vec(7,0,0));
+            BRepBuilderAPI_Transform transformed(geometry.solid,moved,Standard_True,Standard_False);
+            if (!transformed.IsDone() || transformed.Shape().IsNull())
+                throw Standard_Failure("Unable to make stale framed enclosure root");
+            shapeTool->SetShape(label,transformed.Shape());
+        }
+        core3d::enclosure::Record stored;
+        if (!core3d::enclosure::Read(document,label,stored)
+            || stored.IsCurrent(document,label) != (state == 0))
+            throw Standard_Failure("Framed enclosure fixture current/stale state mismatch");
     });
 }
 

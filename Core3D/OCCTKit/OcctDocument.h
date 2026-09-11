@@ -356,6 +356,9 @@ struct OcctGeometryDuplicationRequest
     // A geometry-baking copy adds a construction frame to an existing profile.
     // Existing framed recipes already include these eight scalar labels.
     bool requiresProfileConstructionFrame = false;
+    // Explicitly owned ordinary Duplicate only. Other copy paths keep rejecting
+    // enclosures until their staging and recovery ledgers preserve the recipe.
+    bool preservesEnclosureRecipe = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,

@@ -162,6 +162,10 @@ __attribute__((objc_subclassing_restricted))
 //! Returns validated values only; does not change a document or add history.
 - (nullable Core3DEnclosureDefinition *)definitionByUpdatingDimension:(Core3DEnclosureDimension)dimension
     value:(double)value NS_SWIFT_NAME(updating(_:value:));
+//! Validates all dimensional changes atomically, retaining exact units/frame.
+- (nullable Core3DEnclosureDefinition *)definitionByUpdatingWidth:(double)width depth:(double)depth
+    height:(double)height wall:(double)wall floor:(double)floor cornerRadius:(double)cornerRadius
+    plane:(Core3DProfilePlane)plane NS_SWIFT_NAME(updating(width:depth:height:wall:floor:cornerRadius:plane:));
 @end
 
 //! Exact opening authority for one selected enclosure; a changed document/model
@@ -1387,6 +1391,14 @@ typedef struct {
 - (NSDictionary<NSString *, id> *_Nullable)debugNativeMutationStamp;
 - (NSData *_Nullable)debugEnclosureBinXCAFFixturePlane:(NSInteger)plane width:(double)width fault:(NSInteger)fault
     NS_SWIFT_NAME(debugEnclosureFixture(plane:width:fault:));
++ (Core3DEnclosureDefinition *_Nullable)debugEnclosureDefinitionValues:(NSArray<NSNumber *> *)values
+    NS_SWIFT_NAME(debugEnclosureDefinition(values:));
++ (NSArray<NSNumber *> *_Nullable)debugEncodedEnclosureDefinition:(Core3DEnclosureDefinition *)definition
+    NS_SWIFT_NAME(debugEncodedEnclosure(_:));
++ (NSData *_Nullable)debugEnclosureFrameFixtureValues:(NSArray<NSNumber *> *)values state:(NSInteger)state
+    NS_SWIFT_NAME(debugEnclosureFrameFixture(values:state:));
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureCopyOwnershipState;
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureDuplicateCapacityProbe:(NSInteger)mode;
 - (NSDictionary<NSString *, id> *_Nullable)debugStoredEnclosureForEntityIdentifier:(NSString *)identifier
     NS_SWIFT_NAME(debugStoredEnclosure(entityIdentifier:));
 - (BOOL)debugStoredEnclosureRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier

@@ -1894,7 +1894,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         || identity.publicationSourceIdentifier != original.identity.publicationSourceIdentifier
         || identity.documentGeneration != original.identity.documentGeneration
         || identity.modelRevision != original.identity.modelRevision
-        || parameters.metersPerUnit != original.parameters.metersPerUnit) return {};
+        || parameters.metersPerUnit != original.parameters.metersPerUnit
+        || parameters.definition.constructionFrame != original.parameters.definition.constructionFrame) return {};
     try {
         const auto current = storedEnclosureDefinition(identity, presentationRevision, width, height);
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier

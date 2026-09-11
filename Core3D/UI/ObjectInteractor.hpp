@@ -519,6 +519,11 @@ namespace core3d {
             std::string preparedProfileIdentifier;
             profile::Record candidateProfile;
             bool profileCandidateSealed = false;
+            bool originalEnclosureCurrent = false;
+            TopoDS_Shape preparedEnclosureBinding;
+            std::string preparedEnclosureIdentifier;
+            enclosure::Record candidateEnclosure;
+            bool enclosureCandidateSealed = false;
 		};
 		std::vector<DuplicatePendingResult> _pendingDuplicateResults;
 		bool _duplicateOwnsDocumentCommand = false;
@@ -599,6 +604,7 @@ namespace core3d {
 #ifdef DEBUG
 		Standard_Integer _debugDuplicateCommitMode = 0;
         Standard_Integer _debugDuplicateProfileFault = 0;
+        Standard_Integer _debugDuplicateEnclosureFault = 0;
 		Standard_Size _debugDuplicatePresentationRepairFailureCount = 0;
 		Standard_Size _debugMirrorTransactionFailureCount = 0;
 		Standard_Size _debugMirrorAbortFailureCount = 0;

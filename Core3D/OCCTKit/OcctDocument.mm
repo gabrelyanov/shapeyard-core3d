@@ -4009,16 +4009,26 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                         64U * 1024U * 1024U)) return Standard_False;
             }
 
-            // Enclosure construction frames/copies require their own codec.
-            // Until that operation is implemented, refuse before allocation;
-            // a profile-only copier must never silently discard the dependency.
             core3d::enclosure::Record sourceEnclosure;
             if (!core3d::enclosure::Read(myOcafDoc, source, sourceEnclosure)
-                || !sourceEnclosure.label.IsNull()) return Standard_False;
+                || (!sourceEnclosure.label.IsNull()
+                    && (!request.preservesEnclosureRecipe || request.requiresProfileConstructionFrame)))
+                return Standard_False;
             core3d::profile::Record sourceProfile;
             if (!core3d::profile::Read(myOcafDoc, source, sourceProfile)
                 || (request.requiresProfileConstructionFrame && sourceProfile.label.IsNull())) {
                 return Standard_False;
+            }
+            // Simultaneous profile/enclosure owners have no admitted copy policy.
+            if (!sourceProfile.label.IsNull() && !sourceEnclosure.label.IsNull()) return Standard_False;
+            Standard_Size enclosureLabels = 0;
+            if (!sourceEnclosure.label.IsNull()) {
+                if (!AddMultipliedWithinLimit(projectedFeatures, 1U,
+                        destinationCount, core3d::enclosure::MaximumRecords)) return Standard_False;
+                enclosureLabels = 1U + static_cast<Standard_Size>(sourceEnclosure.values.size());
+                if (!sourceEnclosure.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(source))
+                    && ClassifyDefinitionGeometry(sourceEnclosure.boundShape, &sourceGeometry)
+                        != DefinitionGeometryClass::BRep) return Standard_False;
             }
             Standard_Size profileLabels = 0;
             if (!sourceProfile.label.IsNull()) {
@@ -4043,7 +4053,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             // children. CopyObjectAppearance creates the legacy material and
             // color children only when a local PBR assignment is not
             // authoritative; visual-material/texture definitions are shared.
-            Standard_Size destinationLabels = 9U + profileLabels;
+            Standard_Size destinationLabels = 9U + profileLabels + enclosureLabels;
             Handle(TDataStd_Integer) localPBRMarker;
             const Standard_Boolean hasLocalPBR =
                 source.FindAttribute(
