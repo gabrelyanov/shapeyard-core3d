@@ -268,7 +268,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                     || request.rotationAroundPivot || !geometryChanges
                     || !profile::HasOnlyMetadataSubshapes(document, request.label)
                     || !profile::Encode(*request.profileRebuild, values)
-                    || request.profileRebuild->metersPerUnit != record.previous.profile.parameters.metersPerUnit) {
+                    || request.profileRebuild->metersPerUnit != record.previous.profile.parameters.metersPerUnit
+                    || request.profileRebuild->constructionFrame != record.previous.profile.parameters.constructionFrame) {
                     return reject(OrdinaryEditResult::Invalid);
                 }
                 if (values == record.previous.profile.values) return reject(OrdinaryEditResult::NoChange);

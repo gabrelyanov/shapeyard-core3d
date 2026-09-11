@@ -793,6 +793,12 @@ void Core3DAddDebugOrphanVisualMaterial(
 - (double)parameter { return _parameters.definition.depth; }
 - (BOOL)revolve { return _parameters.definition.revolve; }
 - (double)metersPerUnit { return _parameters.metersPerUnit; }
+- (NSArray<NSNumber *> *)constructionFrameValues {
+    if (!_parameters.constructionFrame) return @[];
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:8];
+    for (double value : _parameters.constructionFrame->values) [values addObject:@(value)];
+    return [values copy];
+}
 @end
 
 @interface Core3DStoredProfileSnapshot ()
@@ -3494,6 +3500,79 @@ void Core3DAddDebugOrphanVisualMaterial(
     } catch (...) { return nil; }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileMirrorCapacityProbe:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 1) return nil;
+    struct Scope {
+        Handle(OcctDocument) wrapper = new OcctDocument();
+        Handle(TDocStd_Document) document;
+        ~Scope() noexcept { try { if (!document.IsNull()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            const auto app = Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!app.IsNull()) app->Close(document);
+        } } catch (...) {} }
+    } scope;
+    try {
+        scope.wrapper->InitDoc(); scope.document = scope.wrapper->Document();
+        const auto& document = scope.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto original = BRepPrimAPI_MakeBox(60.0, 40.0, 30.0).Shape();
+        document->NewCommand();
+        const auto label = shapes->AddShape(original, Standard_False);
+        core3d::profile::Parameters parameters;
+        parameters.metersPerUnit = 0.001;
+        parameters.definition.points = {gp_Pnt2d(0,0), gp_Pnt2d(60,0), gp_Pnt2d(60,40), gp_Pnt2d(0,40)};
+        parameters.definition.plane = 0; parameters.definition.depth = 30;
+        if (mode == 1) parameters.constructionFrame.emplace();
+        if (!core3d::profile::Stage(document, label, parameters, NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand()) return nil;
+        core3d::profile::Record record;
+        if (!core3d::profile::Read(document, label, record) || !record.IsCurrent(document, label)) return nil;
+        Standard_Size admittedCopies = 1, shapeCost = 0;
+        auto countLabels = [&]() {
+            Standard_Size count = 0;
+            for (TDF_ChildIterator it(document->GetData()->Root(), Standard_True); it.More(); it.Next()) ++count;
+            return count;
+        };
+        const Standard_Size extraFrameScalars = mode == 0 ? 8U : 0U;
+        const Standard_Size destinationLabels = 10U + record.values.size() + extraFrameScalars;
+        if (destinationLabels != 33U || record.values.size() != (mode == 0 ? 15U : 23U)) return nil;
+        const Standard_Size target = 100000U - destinationLabels;
+        const auto filler = document->GetData()->Root().FindChild(900000, Standard_True);
+        const Standard_Size before = countLabels();
+        if (before >= target) return nil;
+        for (Standard_Size i = 1; i <= target - before; ++i)
+            filler.FindChild(static_cast<Standard_Integer>(i), Standard_True);
+        if (countLabels() != target) return nil;
+        const auto labelsBefore = countLabels();
+        const auto timeBefore = document->GetData()->Time();
+        const auto undoBefore = document->GetAvailableUndos();
+        const auto rootBefore = XCAFDoc_ShapeTool::GetShape(label);
+        const bool valid = scope.wrapper->ValidateGeometryRepresentations();
+        const bool atBoundary = scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, admittedCopies, true}});
+        const bool overflowRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, std::numeric_limits<Standard_Size>::max(), true}});
+        const bool zeroRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 0U, true}});
+        const bool duplicateRequestRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, true}, {label, 1U, true}});
+        core3d::profile::Record after;
+        const bool queryUnchanged = labelsBefore == countLabels() && timeBefore == document->GetData()->Time()
+            && undoBefore == document->GetAvailableUndos() && !document->HasOpenCommand()
+            && rootBefore.IsEqual(XCAFDoc_ShapeTool::GetShape(label))
+            && core3d::profile::Read(document, label, after) && after.IsEqual(record);
+        filler.FindChild(200000, Standard_True);
+        if (countLabels() != labelsBefore + 1U) return nil;
+        const bool beyondRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, true}});
+        return @{@"valid": @(valid), @"atBoundary": @(atBoundary), @"beyondRejected": @(beyondRejected),
+            @"overflowRejected": @(overflowRejected), @"zeroRejected": @(zeroRejected),
+            @"duplicateRequestRejected": @(duplicateRequestRejected), @"queryUnchanged": @(queryUnchanged),
+            @"sourceScalars": @(record.values.size()), @"extraFrameScalars": @(extraFrameScalars),
+            @"destinationLabels": @(destinationLabels), @"labelsBefore": @(labelsBefore), @"admittedCopies": @(admittedCopies), @"shapeCost": @(shapeCost)};
+    } catch (...) { return nil; }
+}
+
 - (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData {
     if (![NSThread isMainThread]) return nil;
     return Core3DCreateDebugBinXCAFFixture(@"unit-stale-profile", [](const Handle(TDocStd_Document)& document) {
@@ -3585,6 +3664,60 @@ void Core3DAddDebugOrphanVisualMaterial(
             || stale.IsCurrent(document, label))
             throw Standard_Failure("Fixture did not preserve geometry-only staleness");
     });
+}
+
+- (NSData *_Nullable)debugLegacyNoLengthUnitMirrorBinXCAFFixtureData {
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL* baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.legacy-no-unit-mirror-fixture", NSUUID.UUID.UUIDString]];
+    NSString* xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData* result = nil;
+    try {
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), document);
+        if (document.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create legacy no-unit mirror fixture document");
+        }
+        Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapeTool.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create legacy no-unit mirror fixture shape tool");
+        }
+        double unit = 0.001;
+        if (XCAFDoc_DocumentTool::GetLengthUnit(document, unit))
+            throw Standard_Failure("Legacy fixture must omit explicit unit metadata");
+        const TDF_Label shapeLabel = shapeTool->AddShape(
+            BRepPrimAPI_MakeBox(60.0, 40.0, 30.0).Shape(),
+            Standard_False,
+            Standard_True);
+        if (shapeLabel.IsNull()) {
+            throw Standard_Failure(
+                "Unable to create legacy no-unit mirror fixture shape");
+        }
+        if (application->SaveAs(
+                document, baseURL.path.UTF8String) != PCDM_SS_OK) {
+            throw Standard_Failure(
+                "Unable to save legacy no-unit mirror fixture");
+        }
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) {
+        result = nil;
+    }
+    try {
+        if (!application.IsNull() && !document.IsNull()) {
+            application->Close(document);
+        }
+    } catch (...) {
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
 }
 
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {
@@ -3948,7 +4081,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)debugStoredProfileRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier {
-    if (![NSThread isMainThread] || mode < 1 || mode > 8 || identifier.length == 0
+    if (![NSThread isMainThread] || mode < 1 || mode > 18 || identifier.length == 0
         || GLController == nil || GLController.viewer == nullptr) return NO;
     Handle(TDocStd_Document) document;
     bool opened = false;
@@ -3964,10 +4097,12 @@ void Core3DAddDebugOrphanVisualMaterial(
             if (owner->EntityIdentifierForLabel(labels.Value(i)) == identifier.UTF8String) target = labels.Value(i);
         core3d::profile::Record before;
         if (target.IsNull() || !core3d::profile::Read(document, target, before) || before.label.IsNull()) return NO;
+        if (mode >= 9 && !before.parameters.constructionFrame) return NO;
+        const int frameStart = static_cast<int>(before.values.size()) - 8 + 1;
         const auto undo = document->GetAvailableUndos();
         document->NewCommand(); opened = true;
         switch (mode) {
-            case 1: TDataStd_Integer::Set(before.label, core3d::profile::SchemaID(), 2); break;
+            case 1: TDataStd_Integer::Set(before.label, core3d::profile::SchemaID(), 99); break;
             case 2: TDataStd_Integer::Set(before.label, core3d::profile::CountID(), core3d::profile::MaximumScalars + 1); break;
             case 3: before.label.ForgetAttribute(TNaming_NamedShape::GetID()); break;
             case 4: TDataStd_Real::Set(before.label.FindChild(2, Standard_False), std::numeric_limits<double>::quiet_NaN()); break;
@@ -3975,6 +4110,18 @@ void Core3DAddDebugOrphanVisualMaterial(
             case 6: TDataStd_Real::Set(before.label, TDataStd_Real::GetID(), 1); break;
             case 7: TDataStd_Integer::Set(document->Main(), core3d::profile::SchemaID(), 1); break;
             case 8: TDataStd_Real::Set(before.label.FindChild(2, Standard_False), 0); break;
+            case 9: TDataStd_Integer::Set(before.label, core3d::profile::SchemaID(), 1); break;
+            case 10: TDataStd_Integer::Set(before.label, core3d::profile::CountID(), static_cast<int>(before.values.size()) - 1); break;
+            case 11: TDataStd_Real::Set(before.label.FindChild(frameStart + 3, Standard_False), 2); break;
+            case 12:
+                for (int i = 3; i <= 6; ++i) TDataStd_Real::Set(before.label.FindChild(frameStart + i, Standard_False), 0);
+                break;
+            case 13: TDataStd_Real::Set(before.label.FindChild(frameStart + 7, Standard_False), 0); break;
+            case 14: TDataStd_Real::Set(before.label.FindChild(frameStart + 7, Standard_False), 1e6 + 1); break;
+            case 15: TDataStd_Real::Set(before.label.FindChild(frameStart, Standard_False), 1e6 + 1); break;
+            case 16: TDataStd_Real::Set(before.label.FindChild(frameStart, Standard_False), std::numeric_limits<double>::quiet_NaN()); break;
+            case 17: TDataStd_Integer::Set(before.label.FindChild(frameStart, Standard_False), 1); break;
+            case 18: TDataStd_Real::Set(before.label.FindChild(frameStart, Standard_False).FindChild(1, Standard_True), 1); break;
         }
         const bool rejected = !owner->ValidateGeometryRepresentations();
         document->AbortCommand(); opened = false;
@@ -6555,6 +6702,34 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 #endif
 
+- (BOOL)previewMirrorAxis:(Core3DMirrorAxis)axis backward:(BOOL)backward {
+    if (![NSThread isMainThread]
+        || !_isSetuped
+        || _currentGizmoType != PrimitiveGizmoTypeMirror
+        || axis < Core3DMirrorAxisX || axis > Core3DMirrorAxisZ) {
+        return NO;
+    }
+
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        if (viewer == nullptr
+            || viewer->getObjectInteractor() == nullptr) {
+            return NO;
+        }
+        const BOOL didCreate = viewer->getObjectInteractor()->tryMirror(
+            static_cast<Standard_Integer>(axis),
+            backward);
+        [GLController requestRender];
+        // Axis-menu and viewport-handle previews share the authoritative
+        // native operation and finalized UI/publication lifecycle.
+        [self viewDidEndPrimaryInteractionCancelled:NO];
+        return didCreate;
+    } catch (...) {
+        return NO;
+    }
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [GLController requestRender];
@@ -7481,8 +7656,14 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (!live) { completion(Core3DProfileConstructionResultRejected); return; }
     try {
         const CGSize size = GLController.drawableSize;
-        const auto work = GLController.viewer->prepareStoredProfileRebuild([definition nativeParameters],
-            [original nativeSnapshot],[live nativeSnapshot].identity,expected.revisions.presentationRevision,
+        const auto originalNative = [original nativeSnapshot];
+        auto requested = [definition nativeParameters];
+        // The outline editor owns profile dimensions, not the construction
+        // frame. Retain that frame from the exact opening authority; native
+        // admission rejects stale originals or attempts to change it.
+        requested.constructionFrame = originalNative.parameters.constructionFrame;
+        const auto work = GLController.viewer->prepareStoredProfileRebuild(requested,
+            originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runProfileSolidWork:work completion:completion];
@@ -8146,31 +8327,9 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)debugTryMirrorAxis:(NSInteger)axis backward:(BOOL)backward {
-    if (![NSThread isMainThread]
-        || !_isSetuped
-        || _currentGizmoType != PrimitiveGizmoTypeMirror
-        || axis < 0 || axis > 2) {
-        return NO;
-    }
-
-    try {
-        const std::shared_ptr<core3d::Core3DViewer> viewer =
-            GLController.viewer;
-        if (viewer == nullptr
-            || viewer->getObjectInteractor() == nullptr) {
-            return NO;
-        }
-        const BOOL didCreate = viewer->getObjectInteractor()->tryMirror(
-            static_cast<Standard_Integer>(axis),
-            backward);
-        [GLController requestRender];
-        // Reuse the same finalized lifecycle path as an authoritative touch
-        // release so Apply state and alternate-renderer capture stay aligned.
-        [self viewDidEndPrimaryInteractionCancelled:NO];
-        return didCreate;
-    } catch (...) {
-        return NO;
-    }
+    if (axis < 0 || axis > 2) return NO;
+    return [self previewMirrorAxis:static_cast<Core3DMirrorAxis>(axis)
+                        backward:backward];
 }
 
 - (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
@@ -8218,6 +8377,10 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 - (void)debugSetLinearArrayProfileCopyFault:(NSInteger)mode {
     [GLController debugSetLinearArrayProfileCopyFault:mode];
+}
+
+- (void)debugSetMirrorProfileCopyFault:(NSInteger)mode {
+    [GLController debugSetMirrorProfileCopyFault:mode];
 }
 
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit {

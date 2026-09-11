@@ -404,6 +404,7 @@ namespace core3d {
 		void debugSetMirrorReferenceEraseFailureCount(
 			Standard_Size count) noexcept;
 		void debugSetMirrorCommitMode(Standard_Integer mode) noexcept;
+        void debugSetMirrorProfileCopyFault(Standard_Integer mode) noexcept;
 		void debugSetMirrorPostCommitInspectFailureCount(
 			Standard_Size count) noexcept;
 		void debugSetMaximumMirrorTopologyNodes(
@@ -535,6 +536,13 @@ namespace core3d {
 			OcctReferenceAxisReadState referenceAxisState =
 				OcctReferenceAxisReadState::Invalid;
 			OcctReferenceAxis referenceAxis;
+            OcctObjectNameState profileOwner;
+            Standard_Boolean profileCurrent = Standard_False;
+            Standard_Size retainedProfileTopologyNodes = 0;
+            double documentMetersPerUnit = 0;
+            bool documentLengthUnitPresent = false;
+            TopoDS_Shape preparedProfileBinding;
+            std::string profileIdentifier;
 		};
 		struct MirrorPendingResult {
 			TDF_Label label;
@@ -545,6 +553,9 @@ namespace core3d {
 			OcctReferenceAxisReadState expectedReferenceAxisState =
 				OcctReferenceAxisReadState::Invalid;
 			OcctReferenceAxis expectedReferenceAxis;
+            OcctObjectNameState expectedProfileOwner;
+            Standard_Boolean expectedProfileCurrent = Standard_False;
+            Standard_Boolean profileCandidateSealed = Standard_False;
 		};
 		struct MirrorPlaneReferenceSnapshot {
 			Handle(TDocStd_Document) document;
@@ -591,6 +602,7 @@ namespace core3d {
 		Standard_Size _debugMirrorEraseFailureCount = 0;
 		Standard_Size _debugMirrorReferenceEraseFailureCount = 0;
 		Standard_Integer _debugMirrorCommitMode = 0;
+        Standard_Integer _debugMirrorProfileCopyFault = 0;
 		Standard_Size _debugMirrorPostCommitInspectFailureCount = 0;
 		Standard_Size _debugMaximumMirrorTopologyNodes = 8'192;
 		Standard_Size _debugMaximumMirrorReferenceTopologyNodes = 8'192;

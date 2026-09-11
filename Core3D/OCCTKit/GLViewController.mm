@@ -4706,6 +4706,13 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
     }
 }
 
+- (void)debugSetMirrorProfileCopyFault:(NSInteger)mode {
+    if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
+        _viewer->getObjectInteractor()->debugSetMirrorProfileCopyFault(
+            static_cast<Standard_Integer>(mode));
+    }
+}
+
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit {
     if (_viewer != nullptr && _viewer->getObjectInteractor() != nullptr) {
         _viewer->getObjectInteractor()

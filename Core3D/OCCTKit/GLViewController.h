@@ -218,6 +218,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)debugSetLinearArrayCommitMode:(NSInteger)mode;
 - (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
 - (void)debugSetLinearArrayProfileCopyFault:(NSInteger)mode;
+- (void)debugSetMirrorProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
 - (NSDictionary<NSString *, NSNumber *> *)debugRadialArrayState;

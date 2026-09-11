@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ProfileDefinition.hxx"
+#include "ProfileConstructionFrame.hxx"
 #include <TDocStd_Document.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TopoDS_Shape.hxx>
@@ -32,13 +33,15 @@ inline const Standard_GUID& IdentityID() {
 inline const Standard_GUID& CountID() {
     static const Standard_GUID id("6085D37B-E101-4F09-95B3-8AFA6E1D08A3"); return id;
 }
-inline constexpr int MaximumScalars = 7 + 64 * 2 + 16 * 3;
+inline constexpr int MaximumLegacyScalars = 7 + 64 * 2 + 16 * 3;
+inline constexpr int MaximumScalars = MaximumLegacyScalars + 8;
 inline constexpr int MaximumLabels = 100000;
 inline constexpr int MaximumRecords = 4096;
 
 struct Parameters {
     ProfileDefinition definition;
     double metersPerUnit = 0;
+    std::optional<ConstructionFrame> constructionFrame;
 };
 
 inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
@@ -48,6 +51,7 @@ inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
     if (!std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit <= 0
         || !ProfileDefinitionExpectedVolume(d.points, d.circle, d.holes,
             d.plane, d.depth, d.revolve, area, volume)) return false;
+    if (parameters.constructionFrame && !parameters.constructionFrame->IsValid()) return false;
     values = {double(d.plane), d.depth, d.revolve ? 1.0 : 0.0,
         d.circle ? 1.0 : 0.0, double(d.points.size()), double(d.holes.size()),
         parameters.metersPerUnit};
@@ -61,6 +65,9 @@ inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
     }
     for (const auto& hole : d.holes)
         values.insert(values.end(), {hole.center.X(), hole.center.Y(), hole.radius});
+    if (parameters.constructionFrame)
+        values.insert(values.end(), parameters.constructionFrame->values.begin(),
+                      parameters.constructionFrame->values.end());
     return values.size() <= MaximumScalars;
 }
 
@@ -75,8 +82,9 @@ inline bool Decode(const std::vector<double>& values, Parameters& result) {
         || !integer(values[4], 64) || !integer(values[5], 16)) return false;
     const int points = int(values[4]), holes = int(values[5]);
     const bool circular = values[3] == 1;
-    if (values.size() != 7 + (circular ? 4 : points * 2) + holes * 3
-        || (circular && points != 0)) return false;
+    const std::size_t legacyCount = 7 + (circular ? 4 : points * 2) + holes * 3;
+    const bool framed = values.size() == legacyCount + 8;
+    if ((!framed && values.size() != legacyCount) || (circular && points != 0)) return false;
     Parameters p;
     p.metersPerUnit = values[6];
     auto& d = p.definition;
@@ -91,6 +99,12 @@ inline bool Decode(const std::vector<double>& values, Parameters& result) {
     }
     for (int i = 0; i < holes; ++i, offset += 3)
         d.holes.push_back({gp_Pnt2d(values[offset], values[offset + 1]), values[offset + 2]});
+    if (framed) {
+        ConstructionFrame frame;
+        std::copy_n(values.begin() + legacyCount, 8, frame.values.begin());
+        if (!frame.IsValid()) return false;
+        p.constructionFrame = frame;
+    }
     std::vector<double> encoded;
     if (!Encode(p, encoded) || encoded != values) return false;
     result = std::move(p); return true;
@@ -151,10 +165,12 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
         Handle(TDataStd_Integer) schema, count;
         Handle(TDataStd_AsciiString) identity;
         Handle(TNaming_NamedShape) binding;
-        if (!label.FindAttribute(SchemaID(), schema) || schema->Get() != 1
+        if (!label.FindAttribute(SchemaID(), schema) || (schema->Get() != 1 && schema->Get() != 2)
             || !label.FindAttribute(CountID(), count) || count->Get() < 7 || count->Get() > MaximumScalars
             || !label.FindAttribute(IdentityID(), identity)
             || !label.FindAttribute(TNaming_NamedShape::GetID(), binding)) return false;
+        const int scalarLimit = schema->Get() == 1 ? MaximumLegacyScalars : MaximumScalars;
+        if (count->Get() > scalarLimit) return false;
         record.identifier = identity->Get().ToCString();
         if (!IsIdentifier(record.identifier)) return false;
         record.boundShape = binding->Get();
@@ -168,8 +184,8 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
         int present = 0, childrenInspected = 0;
         for (TDF_ChildIterator it(label, Standard_False); it.More(); it.Next()) {
             const auto child = it.Value();
-            if (++childrenInspected > MaximumScalars || child.Tag() < 1
-                || child.Tag() > MaximumScalars || child.HasChild()) return false;
+            if (++childrenInspected > scalarLimit || child.Tag() < 1
+                || child.Tag() > scalarLimit || child.HasChild()) return false;
             if (!child.HasAttribute()) continue; // Empty labels from a shorter later recipe.
             if (child.Tag() < 1 || child.Tag() > count->Get()) return false;
             Handle(TDataStd_Real) scalar;
@@ -178,7 +194,8 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
                 if (attr.Value()->ID() != TDataStd_Real::GetID()) return false;
             record.values[child.Tag() - 1] = scalar->Get(); ++present;
         }
-        if (present != count->Get() || !Decode(record.values, record.parameters)) return false;
+        if (present != count->Get() || !Decode(record.values, record.parameters)
+            || schema->Get() != (record.parameters.constructionFrame ? 2 : 1)) return false;
         output = std::move(record); return true;
     } catch (...) { output = {}; return false; }
 }
@@ -206,7 +223,7 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
             if (maximumTag == std::numeric_limits<int>::max()) return false;
             label = owner.FindChild(maximumTag + 1, Standard_True);
         }
-        TDataStd_Integer::Set(label, SchemaID(), 1);
+        TDataStd_Integer::Set(label, SchemaID(), parameters.constructionFrame ? 2 : 1);
         TDataStd_Integer::Set(label, CountID(), int(values.size()));
         TDataStd_AsciiString::Set(label, IdentityID(), TCollection_AsciiString(identifier.c_str()));
         TNaming_Builder(label).Select(shape, shape);
@@ -220,13 +237,14 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
     } catch (...) { return false; }
 }
 
-inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
+inline bool StageIndependentCopy(const Handle(TDocStd_Document)& document,
                            const TDF_Label& sourceOwner, const Record& original,
                            const TopoDS_Shape& originalOwnerShape,
                            const TDF_Label& destinationOwner,
                            const TopoDS_Shape& preparedBinding,
                            const std::string& newIdentifier,
-                           Record& candidate) noexcept {
+                           Record& candidate,
+                           const std::optional<gp_Trsf>& bakedTransform) noexcept {
     candidate = {};
     try {
         Record liveSource, previousDestination;
@@ -244,11 +262,21 @@ inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
         if (original.label.IsNull())
             return preparedBinding.IsNull() && newIdentifier.empty();
         const auto destinationShape = XCAFDoc_ShapeTool::GetShape(destinationOwner);
-        std::vector<double> encoded;
+        Parameters destinationParameters = original.parameters;
+        if (bakedTransform) {
+            gp_Trsf originalFrame;
+            if (original.parameters.constructionFrame
+                && !original.parameters.constructionFrame->Transform(originalFrame)) return false;
+            ConstructionFrame composed;
+            if (!ConstructionFrame::Capture(*bakedTransform * originalFrame, composed)) return false;
+            destinationParameters.constructionFrame = composed;
+        }
+        std::vector<double> encoded, originalEncoded;
         if (!XCAFDoc_ShapeTool::IsSimpleShape(destinationOwner)
             || !XCAFDoc_ShapeTool::IsFree(destinationOwner)
             || !IsIdentifier(newIdentifier) || newIdentifier == original.identifier
-            || !Encode(original.parameters, encoded) || encoded != original.values
+            || !Encode(original.parameters, originalEncoded) || originalEncoded != original.values
+            || !Encode(destinationParameters, encoded)
             || destinationShape.IsNull() || destinationShape.ShapeType() != originalOwnerShape.ShapeType()
             || destinationShape.IsPartner(originalOwnerShape)
             || preparedBinding.IsNull() || preparedBinding.ShapeType() != TopAbs_SOLID
@@ -263,7 +291,7 @@ inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
             maximumTag = std::max(maximumTag, it.Value().Tag());
         if (maximumTag == std::numeric_limits<int>::max()) return false;
         const auto label = destinationOwner.FindChild(maximumTag + 1, Standard_True);
-        TDataStd_Integer::Set(label, SchemaID(), 1);
+        TDataStd_Integer::Set(label, SchemaID(), destinationParameters.constructionFrame ? 2 : 1);
         TDataStd_Integer::Set(label, CountID(), int(encoded.size()));
         TDataStd_AsciiString::Set(label, IdentityID(), TCollection_AsciiString(newIdentifier.c_str()));
         TNaming_Builder(label).Select(preparedBinding, preparedBinding);
@@ -271,7 +299,7 @@ inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
             TDataStd_Real::Set(label.FindChild(int(i) + 1, Standard_True), encoded[i]);
         Record stored;
         if (!Read(document, destinationOwner, stored)
-            || stored.identifier != newIdentifier || stored.values != original.values
+            || stored.identifier != newIdentifier || stored.values != encoded
             || !stored.boundShape.IsEqual(preparedBinding)
             || stored.IsCurrent(document, destinationOwner) != expectedCurrent)
             return false;
@@ -281,6 +309,31 @@ inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
         candidate = std::move(stored);
         return true;
     } catch (...) { candidate = {}; return false; }
+}
+
+inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
+                           const TDF_Label& sourceOwner, const Record& original,
+                           const TopoDS_Shape& originalOwnerShape,
+                           const TDF_Label& destinationOwner,
+                           const TopoDS_Shape& preparedBinding,
+                           const std::string& newIdentifier,
+                           Record& candidate) noexcept {
+    return StageIndependentCopy(document, sourceOwner, original, originalOwnerShape,
+                                destinationOwner, preparedBinding, newIdentifier,
+                                candidate, std::nullopt);
+}
+
+inline bool StageTransformedCopy(const Handle(TDocStd_Document)& document,
+                                const TDF_Label& sourceOwner, const Record& original,
+                                const TopoDS_Shape& originalOwnerShape,
+                                const TDF_Label& destinationOwner,
+                                const TopoDS_Shape& preparedBinding,
+                                const std::string& newIdentifier,
+                                const gp_Trsf& bakedTransform,
+                                Record& candidate) noexcept {
+    return StageIndependentCopy(document, sourceOwner, original, originalOwnerShape,
+                                destinationOwner, preparedBinding, newIdentifier,
+                                candidate, bakedTransform);
 }
 
 inline bool ValidateDocument(const Handle(TDocStd_Document)& document, std::vector<Record>& records) noexcept {

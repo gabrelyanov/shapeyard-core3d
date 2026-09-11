@@ -4003,7 +4003,8 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             }
 
             core3d::profile::Record sourceProfile;
-            if (!core3d::profile::Read(myOcafDoc, source, sourceProfile)) {
+            if (!core3d::profile::Read(myOcafDoc, source, sourceProfile)
+                || (request.requiresProfileConstructionFrame && sourceProfile.label.IsNull())) {
                 return Standard_False;
             }
             Standard_Size profileLabels = 0;
@@ -4013,6 +4014,8 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                     return Standard_False;
                 }
                 profileLabels = 1U + static_cast<Standard_Size>(sourceProfile.values.size());
+                if (request.requiresProfileConstructionFrame
+                    && !sourceProfile.parameters.constructionFrame) profileLabels += 8U;
                 // A recipe bound to a prior solid requires an independent copy
                 // of that retained solid as well as the current root. Unit-only
                 // staleness shares its copied root and incurs no second shape.

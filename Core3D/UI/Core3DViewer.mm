@@ -1525,6 +1525,7 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
 
 struct ProfileSolidGeometry : ProfileDefinition {
     std::atomic_bool cancelled{false};
+    std::optional<profile::ConstructionFrame> constructionFrame;
     TopoDS_Shape solid;
     std::array<double, 6> bounds{};
     bool built = false;
@@ -1612,6 +1613,18 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             result = prism.Shape();
         }
         if (geometry->cancelled.load() || result.IsNull() || result.ShapeType() != TopAbs_SOLID) { return false; }
+        if (geometry->constructionFrame) {
+            gp_Trsf frame;
+            if (!geometry->constructionFrame->Transform(frame)) return false;
+            expected *= geometry->constructionFrame->AbsoluteVolumeScale();
+            if (!std::isfinite(expected) || expected <= 0 || geometry->cancelled.load()) return false;
+            // Only detached worker-owned geometry is transformed. Repeated
+            // reflection must never enter OCCT's negative mesh-copy path.
+            BRepBuilderAPI_Transform transformed(result, frame, Standard_True, Standard_False);
+            if (!transformed.IsDone()) return false;
+            result = transformed.Shape();
+            if (geometry->cancelled.load() || result.IsNull() || result.ShapeType() != TopAbs_SOLID) return false;
+        }
         auto solid = TopoDS::Solid(result);
         if (!BRepLib::OrientClosedSolid(solid) || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) { return false; }
         GProp_GProps properties;
@@ -1730,7 +1743,8 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         || identity.publicationSourceIdentifier != original.identity.publicationSourceIdentifier
         || identity.documentGeneration != original.identity.documentGeneration
         || identity.modelRevision != original.identity.modelRevision
-        || parameters.metersPerUnit != original.parameters.metersPerUnit) return {};
+        || parameters.metersPerUnit != original.parameters.metersPerUnit
+        || parameters.constructionFrame != original.parameters.constructionFrame) return {};
     try {
         const auto current = storedProfileDefinition(identity, presentationRevision, width, height);
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
@@ -1748,6 +1762,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         auto work = prepareProfileSolid(d.points, d.plane, d.depth, identity,
             presentationRevision, width, height, d.revolve, d.circle, d.holes);
         if (!work) return {};
+        work->geometry->constructionFrame = parameters.constructionFrame;
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
@@ -2103,15 +2118,18 @@ bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
 bool Core3DViewer::hasUnresolvedEdit() const noexcept {
     if (hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate()) return true;
     if (!_objectInteractor) return false;
-    // Availability must agree with the authoritative array outcome. A ready
+    // Availability must agree with the authoritative preview outcome. A ready
     // preview remains usable; a committing or uncertain result cannot expose
     // Undo, Add or Export while its own controller retains recovery ownership.
     const auto linear = _objectInteractor->linearArrayPreviewState();
     const auto radial = _objectInteractor->radialArrayPreviewState();
+    const auto mirror = _objectInteractor->mirrorPreviewState();
     return linear == LinearArrayPreviewState::Committing
         || linear == LinearArrayPreviewState::OutcomeUnknown
         || radial == RadialArrayPreviewState::Committing
-        || radial == RadialArrayPreviewState::OutcomeUnknown;
+        || radial == RadialArrayPreviewState::OutcomeUnknown
+        || mirror == MirrorPreviewState::Committing
+        || mirror == MirrorPreviewState::OutcomeUnknown;
 }
 OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
     const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure) noexcept {

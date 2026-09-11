@@ -351,6 +351,9 @@ struct OcctGeometryDuplicationRequest
 {
     TDF_Label sourceDefinition;
     Standard_Size destinationCount = 0;
+    // A geometry-baking copy adds a construction frame to an existing profile.
+    // Existing framed recipes already include these eight scalar labels.
+    bool requiresProfileConstructionFrame = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,

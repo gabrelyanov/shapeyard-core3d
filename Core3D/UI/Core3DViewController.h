@@ -49,6 +49,9 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
 @property(nonatomic,readonly) double parameter;
 @property(nonatomic,readonly) BOOL revolve;
 @property(nonatomic,readonly) double metersPerUnit;
+//! Empty for legacy identity. Otherwise translation XYZ in document units,
+//! proper unit quaternion XYZW, signed uniform scale. Read-only local frame.
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithPoints:(NSArray<NSValue *> *)points
@@ -267,6 +270,13 @@ typedef struct {
     double max;
 } Boundaries;
 
+//! World-axis normal for a selection-bounds Mirror plane.
+typedef NS_ENUM(NSInteger, Core3DMirrorAxis) {
+    Core3DMirrorAxisX = 0,
+    Core3DMirrorAxisY,
+    Core3DMirrorAxisZ,
+};
+
 //! Stable world-axis contract for a destructive Linear Array operation.
 typedef NS_ENUM(NSInteger, Core3DLinearArrayAxis) {
     Core3DLinearArrayAxisX = 0,
@@ -438,6 +448,11 @@ typedef struct {
     NS_SWIFT_NAME(tryCancelMirror());
 - (void)applyMirror;
 - (void)cancelMirror;
+//! Preview one of the six world-axis planes at the current selection bounds.
+//! This synchronous UI operation changes only the transient preview; Apply
+//! owns the native document command. It is not a stable-target AI adapter.
+- (BOOL)previewMirrorAxis:(Core3DMirrorAxis)axis backward:(BOOL)backward
+    NS_SWIFT_NAME(previewMirror(axis:backward:));
 - (BOOL)beginMirrorPlanePicking;
 - (BOOL)cancelMirrorPlanePicking;
 - (BOOL)isPickingMirrorPlane;
@@ -606,6 +621,12 @@ typedef struct {
     BOOL _isPreviewMode;
     NSString *_coreInfoText;
 }
+
+//! Preview one of the six world-axis planes at the current selection bounds.
+//! This synchronous UI operation changes only the transient preview; Apply
+//! owns the native document command. It is not a stable-target AI adapter.
+- (BOOL)previewMirrorAxis:(Core3DMirrorAxis)axis backward:(BOOL)backward
+    NS_SWIFT_NAME(previewMirror(axis:backward:));
 
 @property (nonatomic, strong, readonly) Core3DMaterialController* materialController;
 
@@ -1048,6 +1069,7 @@ typedef struct {
 - (void)debugSetLinearArrayCommitMode:(NSInteger)mode;
 - (void)debugSetLinearArrayPostCommitInspectFailureCount:(NSUInteger)count;
 - (void)debugSetLinearArrayProfileCopyFault:(NSInteger)mode;
+- (void)debugSetMirrorProfileCopyFault:(NSInteger)mode;
 - (void)debugSetMaximumLinearArrayTopologyNodes:(NSUInteger)limit;
 - (BOOL)debugMutateFirstLinearArraySourcePersistedTransform;
 //! Radial Array state values are Unavailable=0, Selecting=1, Ready=2,
@@ -1185,11 +1207,13 @@ typedef struct {
 - (NSData *_Nullable)debugLegacyBinOcafFixtureData;
 //! Standalone BinXCAF fixture whose XCAF document length unit is exactly one
 //! meter per model unit. Used to prove unit metadata persistence end to end.
+- (NSData *_Nullable)debugLegacyNoLengthUnitMirrorBinXCAFFixtureData;
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
 //! Standalone fixture: saved profile binds its root but retains a different original unit.
 - (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData;
 - (NSData *_Nullable)debugGeometryStaleProfileBinXCAFFixtureData;
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileDuplicateCapacityProbe:(NSInteger)mode;
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileMirrorCapacityProbe:(NSInteger)mode;
 //! Standalone BinXCAF fixture whose sole box has a negative-determinant root
 //! location. Used to prove mesh exporters preserve outward winding.
 - (NSData *_Nullable)debugNegativeLocationBinXCAFFixtureData;
