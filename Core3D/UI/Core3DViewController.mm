@@ -1,3 +1,8 @@
+#if DEBUG
+#include "../OCCTKit/EnclosureParameters.hxx"
+#include "../OCCTKit/EnclosureGeometry.hxx"
+#include <BRepClass3d_SolidClassifier.hxx>
+#endif
 #include "../OCCTKit/ProfileCurvePresets.hxx"
 #import "../OCCTKit/GLViewController+QueuedAssetLoading.h"
 #import "../OCCTKit/Core3DQueuedAssetRequest.h"
@@ -4129,6 +4134,86 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     GLController.viewer->DebugFailNextDocumentAdoption();
 }
 // No live viewer, document access, mutation or persistent test settings.
++ (NSDictionary<NSString *, id> *)debugEnclosureValues:(NSArray<NSNumber *> *)input
+    schema:(NSInteger)schema points:(NSArray<NSArray<NSNumber *> *> *)points cancelled:(BOOL)cancelled {
+    if (![input isKindOfClass:[NSArray class]] || input.count > 32
+        || ![points isKindOfClass:[NSArray class]] || points.count > 4096)
+        return @{@"accepted": @NO, @"bridgeRejected": @YES};
+    try {
+        std::vector<double> values;values.reserve(input.count);
+        for (id value in input) {
+            if (![value isKindOfClass:[NSNumber class]]) return @{@"accepted":@NO,@"bridgeRejected":@YES};
+            values.push_back([value doubleValue]);
+        }
+        if (schema < std::numeric_limits<int>::min() || schema > std::numeric_limits<int>::max())
+            return @{@"accepted":@NO,@"bridgeRejected":@YES};
+        core3d::enclosure::Parameters parameters;
+        const bool decoded=core3d::enclosure::Decode(int(schema),values,parameters);
+        if (!decoded) return @{@"accepted":@NO,@"bridgeRejected":@NO};
+        std::vector<gp_Pnt> samples;samples.reserve(points.count);
+        for (id row in points) {
+            if (![row isKindOfClass:[NSArray class]] || [row count]!=3)
+                return @{@"accepted":@NO,@"bridgeRejected":@YES};
+            double coordinates[3];
+            for (NSUInteger i=0;i<3;++i) {
+                id number=row[i];
+                if (![number isKindOfClass:[NSNumber class]]) return @{@"accepted":@NO,@"bridgeRejected":@YES};
+                coordinates[i]=[number doubleValue];
+                if (!std::isfinite(coordinates[i]) || std::abs(coordinates[i])>1e6)
+                    return @{@"accepted":@NO,@"bridgeRejected":@YES};
+            }
+            samples.emplace_back(coordinates[0],coordinates[1],coordinates[2]);
+        }
+        auto token=std::make_shared<std::atomic_bool>(bool(cancelled));
+        core3d::EnclosureSolidResult geometry;
+        const bool built=core3d::BuildEnclosureSolidGeometry(parameters.definition,token,geometry);
+        if (!built) return @{@"accepted":@YES,@"built":@NO,@"emptyResult":@(geometry.solid.IsNull()),@"volume":@(geometry.volume)};
+        std::vector<double> encoded;const bool recoded=core3d::enclosure::Encode(parameters,encoded);
+        NSMutableArray *roundtrip=[NSMutableArray arrayWithCapacity:encoded.size()];
+        for (double value:encoded) [roundtrip addObject:@(value)];
+        NSMutableArray *bounds=[NSMutableArray arrayWithCapacity:6];
+        for (double value:geometry.bounds) [bounds addObject:@(value)];
+        NSMutableArray *states=[NSMutableArray arrayWithCapacity:samples.size()];
+        for (const auto& point:samples) {
+            BRepClass3d_SolidClassifier classifier(geometry.solid,point,1e-7);
+            switch(classifier.State()) {
+                case TopAbs_IN:[states addObject:@"inside"];break;
+                case TopAbs_OUT:[states addObject:@"outside"];break;
+                case TopAbs_ON:[states addObject:@"boundary"];break;
+                default:[states addObject:@"unknown"];break;
+            }
+        }
+        return @{@"accepted":@YES,@"built":@YES,@"recoded":@(recoded),@"values":[roundtrip copy],
+            @"bounds":[bounds copy],@"volume":@(geometry.volume),@"classifications":[states copy],
+            @"schema":@(core3d::enclosure::SchemaVersion)};
+    } catch (...) {return @{@"accepted":@NO,@"exception":@YES};}
+}
+
++ (NSDictionary<NSString *, id> *)debugEnclosureUpdateValues:(NSArray<NSNumber *> *)input
+    dimension:(NSInteger)dimension value:(double)value {
+    if (![input isKindOfClass:[NSArray class]] || input.count!=9 || dimension<0 || dimension>5)
+        return @{@"accepted":@NO};
+    try {
+        std::vector<double> values;values.reserve(input.count);
+        for (id number in input) {
+            if (![number isKindOfClass:[NSNumber class]]) return @{@"accepted":@NO};
+            values.push_back([number doubleValue]);
+        }
+        core3d::enclosure::Parameters parameters;
+        if (!core3d::enclosure::Decode(1,values,parameters)) return @{@"accepted":@NO};
+        const auto candidate=core3d::UpdatedEnclosureDimension(parameters.definition,
+            static_cast<core3d::EnclosureDimension>(dimension),value);
+        if (!candidate) return @{@"accepted":@NO};
+        const bool unchanged=candidate->plane==parameters.definition.plane
+            && candidate->dimensions.IsEqual(parameters.definition.dimensions);
+        parameters.definition=*candidate;std::vector<double> encoded;
+        if (!core3d::enclosure::Encode(parameters,encoded)) return @{@"accepted":@NO};
+        NSMutableArray *output=[NSMutableArray arrayWithCapacity:encoded.size()];
+        for (double scalar:encoded) [output addObject:@(scalar)];
+        return @{@"accepted":@YES,@"unchanged":@(unchanged),@"values":[output copy]};
+    } catch (...) {return @{@"accepted":@NO,@"exception":@YES};}
+}
+
 + (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)input {
     if (![input isKindOfClass:[NSArray class]] || input.count > 6211)
         return @{@"accepted": @NO, @"bridgeRejected": @YES};
