@@ -8,6 +8,7 @@
 
 #include "Core3DViewer.h"
 #include "../OCCTKit/ProfileCurveFace.hxx"
+#include "../OCCTKit/EnclosureGeometry.hxx"
 
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1648,8 +1649,29 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     } catch (...) { return false; }
 }
 
-struct ProfileSolidWork {
-    std::shared_ptr<ProfileSolidGeometry> geometry = std::make_shared<ProfileSolidGeometry>();
+struct EnclosureSolidGeometry {
+    enclosure::Parameters parameters;
+    std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
+    EnclosureSolidResult result;
+    bool built = false;
+};
+struct CompletedNativeSolid {
+    TopoDS_Shape solid;
+    std::array<double,6> bounds;
+};
+std::optional<CompletedNativeSolid> CompletedNativeSolidFor(const NativeSolidGeometryPayload& payload) noexcept {
+    if (const auto p = std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&payload)) {
+        if (*p && (*p)->built && !(*p)->cancelled.load() && !(*p)->solid.IsNull())
+            return CompletedNativeSolid{(*p)->solid,(*p)->bounds};
+    } else if (const auto p = std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&payload)) {
+        if (*p && (*p)->built && (*p)->cancelled && !(*p)->cancelled->load() && !(*p)->result.solid.IsNull())
+            return CompletedNativeSolid{(*p)->result.solid,(*p)->result.bounds};
+    }
+    return {};
+}
+
+struct NativeSolidWork {
+    NativeSolidGeometryPayload geometry;
     OrdinaryNameLedger authority;
     std::optional<OrdinaryTransformLedger> rebuildAuthority;
     ObjectFrameIdentity identity;
@@ -1663,7 +1685,7 @@ struct ProfileSolidWork {
     bool consumed = false;
 };
 
-std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareProfileSolid(
     const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
     if (![NSThread isMainThread] || parameters.constructionFrame
@@ -1678,7 +1700,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     } catch (...) { return {}; }
 }
 
-std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareProfileSolid(
     const std::vector<gp_Pnt2d>& points, int plane, double depth,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height, bool revolve,
@@ -1692,23 +1714,20 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     } catch (...) { return {}; }
 }
 
-std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
-    const ProfileDefinition& definition, const ObjectFrameIdentity& identity,
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareNativeSolidWork(
+    const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || myDoc->Document().IsNull() || width == 0 || height == 0) { return {}; }
     try {
-        double area = 0, volume = 0;
-        if (!ProfileDefinitionExpectedVolume(definition, area, volume)) { return {}; }
         const auto snapshot = captureSceneSnapshot(width, height);
         if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
             || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
             || snapshot->revisions.documentGeneration != identity.documentGeneration
             || snapshot->revisions.model != identity.modelRevision
             || snapshot->revisions.presentation != presentationRevision) { return {}; }
-        auto work = std::make_shared<ProfileSolidWork>();
+        auto work = std::make_shared<NativeSolidWork>();
         if (!admitNames(work->authority)) { return {}; }
-        static_cast<ProfileDefinition&>(*work->geometry)=definition;
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height;
         work->owner = myDoc; work->document = myDoc->Document();
@@ -1718,6 +1737,37 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
         Standard_Size count = 0;
         if (!TryCountDisplayedModelShapes(myContext, count)) { return {}; }
         work->frameFirst = count == 0;
+        return work;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareProfileSolid(
+    const ProfileDefinition& definition, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return {};
+    try {
+        double area=0,volume=0;
+        if (!ProfileDefinitionExpectedVolume(definition,area,volume)) return {};
+        auto work=prepareNativeSolidWork(identity,presentationRevision,width,height);
+        if (!work) return {};
+        auto geometry=std::make_shared<ProfileSolidGeometry>();
+        static_cast<ProfileDefinition&>(*geometry)=definition;
+        work->geometry=std::move(geometry);
+        return work;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareEnclosureSolid(
+    const enclosure::Parameters& parameters, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return {};
+    try {
+        std::vector<double> values;
+        if (!enclosure::Encode(parameters,values)) return {};
+        auto work=prepareNativeSolidWork(identity,presentationRevision,width,height);
+        if (!work || work->metersPerUnit != parameters.metersPerUnit) return {};
+        auto geometry=std::make_shared<EnclosureSolidGeometry>(); geometry->parameters=parameters;
+        work->geometry=std::move(geometry);
         return work;
     } catch (...) { return {}; }
 }
@@ -1755,7 +1805,40 @@ std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
     } catch (...) { return {}; }
 }
 
-std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
+std::optional<StoredEnclosureSnapshot> Core3DViewer::storedEnclosureDefinition(
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
+    try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision) return {};
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return {};
+        const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || selected.IsNull()) return {};
+        OcctObjectTransformState state;
+        const auto label = myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, state)
+            || state.entityIdentifier != identity.entityIdentifier
+            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+            || state.enclosure.label.IsNull()) return {};
+        StoredEnclosureSnapshot result;
+        result.parameters = state.enclosure.parameters; result.identity = identity;
+        result.definitionIdentifier = state.definitionIdentifier;
+        result.featureIdentifier = state.enclosure.identifier;
+        result.current = state.enclosure.IsCurrent(myDoc->Document(), label)
+            && enclosure::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        return result;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
     double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
     const auto original = storedProfileDefinition(identity, presentationRevision, width, height);
@@ -1764,7 +1847,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
     return prepareStoredProfileRebuild(parameters, *original, identity, presentationRevision, width, height);
 }
 
-std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
     const profile::Parameters& parameters, const StoredProfileSnapshot& original,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
@@ -1790,7 +1873,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         const auto& d = parameters.definition;
         auto work = prepareProfileSolid(d, identity, presentationRevision, width, height);
         if (!work) return {};
-        work->geometry->constructionFrame = parameters.constructionFrame;
+        profileSolidGeometry(work)->constructionFrame = parameters.constructionFrame;
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
@@ -1803,20 +1886,77 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
     } catch (...) { return {}; }
 }
 
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
+    const enclosure::Parameters& parameters, const StoredEnclosureSnapshot& original,
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (!original.current || identity.entityIdentifier != original.identity.entityIdentifier
+        || identity.publicationSourceIdentifier != original.identity.publicationSourceIdentifier
+        || identity.documentGeneration != original.identity.documentGeneration
+        || identity.modelRevision != original.identity.modelRevision
+        || parameters.metersPerUnit != original.parameters.metersPerUnit) return {};
+    try {
+        const auto current = storedEnclosureDefinition(identity, presentationRevision, width, height);
+        if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
+            || current->definitionIdentifier != original.definitionIdentifier) return {};
+        std::vector<double> originalValues, currentValues, requestedValues;
+        if (!enclosure::Encode(original.parameters, originalValues)
+            || !enclosure::Encode(current->parameters, currentValues) || originalValues != currentValues
+            || !enclosure::Encode(parameters, requestedValues)) return {};
+        myContext->InitSelected();
+        const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        OrdinaryTransformRecord record;
+        const auto label = myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)) return {};
+        auto work = prepareEnclosureSolid(parameters, identity, presentationRevision, width, height);
+        if (!work) return {};
+        record.requested.label = label; record.requested.presentation = selected;
+        record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
+        record.requested.operation = OrdinaryTransformOperation::EnclosureRebuild;
+        record.requested.enclosureRebuild = parameters;
+        work->rebuildAuthority.emplace();
+        work->rebuildAuthority->records.push_back(std::move(record));
+        if (!admitTransform(*work->rebuildAuthority)) return {};
+        work->frameFirst = false;
+        return work;
+    } catch (...) { return {}; }
+}
+
 std::shared_ptr<ProfileSolidGeometry> Core3DViewer::profileSolidGeometry(
-    const std::shared_ptr<ProfileSolidWork>& work) noexcept {
-    return work ? work->geometry : nullptr;
+    const std::shared_ptr<NativeSolidWork>& work) noexcept {
+    if (!work) return {};
+    const auto payload=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&work->geometry);
+    return payload ? *payload : nullptr;
 }
 bool Core3DViewer::buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept {
     return BuildProfileSolidGeometry(geometry);
 }
-void Core3DViewer::cancelProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept {
-    if (work) { work->geometry->cancelled.store(true); }
+NativeSolidGeometryPayload Core3DViewer::nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept {
+    return work ? work->geometry : NativeSolidGeometryPayload{};
+}
+bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept {
+    if (const auto p=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&payload))
+        return BuildProfileSolidGeometry(*p);
+    if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&payload)) {
+        if (!*p || (*p)->built || !(*p)->cancelled || (*p)->cancelled->load()) return false;
+        (*p)->built=BuildEnclosureSolidGeometry((*p)->parameters.definition,(*p)->cancelled,(*p)->result);
+        return (*p)->built;
+    }
+    return false;
+}
+void Core3DViewer::cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
+    if (!work) return;
+    if (const auto p=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&work->geometry)) {
+        if (*p) (*p)->cancelled.store(true);
+    } else if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry)) {
+        if (*p && (*p)->cancelled) (*p)->cancelled->store(true);
+    }
 }
 
-OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept {
-    if (![NSThread isMainThread] || !work || work->consumed || !work->geometry->built
-        || work->geometry->cancelled.load() || work->geometry->solid.IsNull()) { return OrdinaryEditResult::Invalid; }
+OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
+    if (![NSThread isMainThread] || !work || work->consumed) return OrdinaryEditResult::Invalid;
+    const auto completed=CompletedNativeSolidFor(work->geometry);
+    if (!completed) return OrdinaryEditResult::Invalid;
     work->consumed = true;
     if (!canBeginCommittedEdit()) { return OrdinaryEditResult::Busy; }
     try {
@@ -1841,21 +1981,28 @@ OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<Profil
             OcctObjectTransformState current;
             if (!myDoc->CaptureObjectTransformStateForLabel(record.previous.label, current)
                 || !current.IsEqual(record.previous)) return OrdinaryEditResult::Invalid;
-            record.requested.shape = work->geometry->solid;
+            record.requested.shape = completed->solid;
             OrdinaryEditResult result = OrdinaryEditResult::Invalid;
             auto lease = _ordinaryEditController->beginTransform({record.requested}, &result);
             return lease ? lease.stageAndCommit() : result;
         }
-        Handle(AIS_Shape) presentation = new AIS_Shape(work->geometry->solid);
+        Handle(AIS_Shape) presentation = new AIS_Shape(completed->solid);
         myContext->ApplyDefaultMaterial(presentation);
         Quantity_Color color;
         presentation->Color(color);
         OrdinaryCreationRequest request{presentation,
             Graphic3d_NameOfMaterial_ShinyPlastified, color.Name(), OcctGeometryRepresentation::BRep};
-        request.profile = profile::Parameters{static_cast<const ProfileDefinition&>(*work->geometry), work->metersPerUnit};
         NSString* identifier = NSUUID.UUID.UUIDString;
         if (identifier == nil) return OrdinaryEditResult::Invalid;
-        request.profileIdentifier = identifier.UTF8String;
+        if (const auto geometry=profileSolidGeometry(work)) {
+            request.profile=profile::Parameters{static_cast<const ProfileDefinition&>(*geometry),work->metersPerUnit};
+            request.profileIdentifier=identifier.UTF8String;
+        } else {
+            const auto enclosureGeometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry);
+            if (!enclosureGeometry || !*enclosureGeometry) return OrdinaryEditResult::Invalid;
+            request.enclosure=(*enclosureGeometry)->parameters;
+            request.enclosureIdentifier=identifier.UTF8String;
+        }
         const std::vector<OrdinaryCreationRequest> requests = {request};
         const auto result = publishCreatedPrimitives(requests);
         if (result != OrdinaryEditResult::Committed) { return result; }
@@ -1863,7 +2010,7 @@ OrdinaryEditResult Core3DViewer::commitProfileSolid(const std::shared_ptr<Profil
         // leave the new solid visible but unselected if this continuation fails.
         try {
             if (work->frameFirst && !myView.IsNull()) {
-                const auto& b = work->geometry->bounds;
+                const auto& b = completed->bounds;
                 Bnd_Box bounds; bounds.Add(gp_Pnt(b[0], b[1], b[2])); bounds.Add(gp_Pnt(b[3], b[4], b[5]));
                 myView->FitAll(bounds, 0.45, Standard_False); myView->ZFitAll();
             }

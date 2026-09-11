@@ -20,6 +20,7 @@
 #include "OrdinaryEditController.hpp"
 #include <gp_Pnt2d.hxx>
 #include <optional>
+#include <variant>
 #include "../OCCTKit/NativeMeshElementSelection.hpp"
 
 #include "OrthoProjectionType.h"
@@ -44,10 +45,21 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
-    struct ProfileSolidWork;
+    struct NativeSolidWork;
     struct ProfileSolidGeometry;
+    struct EnclosureSolidGeometry;
+    // Detached typed payload only; monostate is an invalid/unprepared request.
+    using NativeSolidGeometryPayload = std::variant<std::monostate,
+        std::shared_ptr<ProfileSolidGeometry>, std::shared_ptr<EnclosureSolidGeometry>>;
     struct StoredProfileSnapshot {
         profile::Parameters parameters;
+        ObjectFrameIdentity identity;
+        std::string definitionIdentifier;
+        std::string featureIdentifier;
+        bool current = false;
+    };
+    struct StoredEnclosureSnapshot {
+        enclosure::Parameters parameters;
         ObjectFrameIdentity identity;
         std::string definitionIdentifier;
         std::string featureIdentifier;
@@ -84,35 +96,50 @@ namespace core3d {
         void addPrimitivesFromJSON(NSString* json);
         //! Typed creation requires exact document units and no caller-supplied
         //! construction frame. Stored rebuild has separate frame authority.
-        std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
+        std::shared_ptr<NativeSolidWork> prepareProfileSolid(
             const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         //! Polygon or exact circular-section construction: owned private worker geometry.
-        std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
+        std::shared_ptr<NativeSolidWork> prepareProfileSolid(
             const ProfileDefinition& definition, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
-        std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
+        std::shared_ptr<NativeSolidWork> prepareProfileSolid(
             const std::vector<gp_Pnt2d>& points, int plane, double depth,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height, bool revolve = false,
             const std::optional<ProfileCircularSection>& circle = std::nullopt,
             const std::vector<ProfileCircularHole>& holes = {}) noexcept;
         //! Rebuild the selected current saved profile, retaining its entity and placement.
-        std::shared_ptr<ProfileSolidWork> prepareStoredProfileRebuild(
+        std::shared_ptr<NativeSolidWork> prepareStoredProfileRebuild(
             double parameter, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
         std::optional<StoredProfileSnapshot> storedProfileDefinition(
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
-        std::shared_ptr<ProfileSolidWork> prepareStoredProfileRebuild(
+        std::shared_ptr<NativeSolidWork> prepareStoredProfileRebuild(
             const profile::Parameters& parameters, const StoredProfileSnapshot& original,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareNativeSolidWork(
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareEnclosureSolid(
+            const enclosure::Parameters& parameters, const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
+        std::optional<StoredEnclosureSnapshot> storedEnclosureDefinition(
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareStoredEnclosureRebuild(
+            const enclosure::Parameters& parameters, const StoredEnclosureSnapshot& original,
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        static NativeSolidGeometryPayload nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept;
+        static bool buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
-            const std::shared_ptr<ProfileSolidWork>& work) noexcept;
+            const std::shared_ptr<NativeSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;
-        static void cancelProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept;
-        OrdinaryEditResult commitProfileSolid(const std::shared_ptr<ProfileSolidWork>& work) noexcept;
+        static void cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept;
+        OrdinaryEditResult commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept;
         
         void showGrid(bool show);
         

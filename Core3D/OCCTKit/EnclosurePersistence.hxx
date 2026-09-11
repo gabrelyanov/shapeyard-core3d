@@ -167,6 +167,18 @@ inline bool ValidateDocument(const Handle(TDocStd_Document)& document, std::vect
     } catch (...) { records.clear(); return false; }
 }
 
+// Rebuild admission recognizes only this feature's own metadata child;
+// arbitrary face/subshape styling needs an explicit preservation policy.
+inline bool HasOnlyMetadataSubshapes(const Handle(TDocStd_Document)& document, const TDF_Label& owner) {
+    Record record;
+    if (!Read(document,owner,record)) return false;
+    TDF_LabelSequence children;
+    XCAFDoc_ShapeTool::GetSubShapes(owner,children);
+    for (int i=1;i<=children.Length();++i)
+        if (record.label.IsNull() || !children.Value(i).IsEqual(record.label)) return false;
+    return true;
+}
+
 // Combined gate must replace the profile-only call at the document boundary.
 // MaximumRecords is shared, not doubled. Feature identifiers are globally unique.
 inline bool ValidateFeatureRecords(const Handle(TDocStd_Document)& document,

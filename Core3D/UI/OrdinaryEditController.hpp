@@ -19,7 +19,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild };
 
 //! Rotation of a selection around an explicit world-space point, in model
 //! units. delta must be a unit-scale rigid transform that fixes the pivot.
@@ -44,6 +44,7 @@ struct OrdinaryTransformChange {
     OcctMeshUVAtlasOptions meshUVAtlasOptions;
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
     std::optional<profile::Parameters> profileRebuild;
+    std::optional<enclosure::Parameters> enclosureRebuild;
 };
 
 struct OrdinaryTransformRecord {
@@ -139,6 +140,8 @@ struct OrdinaryCreationRequest {
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::BRep;
     std::optional<profile::Parameters> profile;
     std::string profileIdentifier;
+    std::optional<enclosure::Parameters> enclosure;
+    std::string enclosureIdentifier;
 };
 struct OrdinaryCreationRecord {
     OrdinaryCreationRequest requested;

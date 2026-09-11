@@ -190,10 +190,14 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
-                && request.operation != OrdinaryTransformOperation::ProfileRebuild) {
+                && request.operation != OrdinaryTransformOperation::ProfileRebuild
+                && request.operation != OrdinaryTransformOperation::EnclosureRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
@@ -259,7 +263,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
-                && request.operation != OrdinaryTransformOperation::ProfileRebuild) {
+                && request.operation != OrdinaryTransformOperation::ProfileRebuild
+                && request.operation != OrdinaryTransformOperation::EnclosureRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             const auto representation = record.previous.resolvedRepresentation;
@@ -276,6 +281,19 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                     return reject(OrdinaryEditResult::Invalid);
                 }
                 if (values == record.previous.profile.values) return reject(OrdinaryEditResult::NoChange);
+            }
+            if (request.operation == OrdinaryTransformOperation::EnclosureRebuild) {
+                std::vector<double> values;
+                if (changes.size() != 1 || representation != OcctGeometryRepresentation::BRep
+                    || !record.previous.enclosure.IsCurrent(document,request.label)
+                    || !MatricesEqual(record.previous.transform,request.transform)
+                    || request.rotationAroundPivot || !geometryChanges
+                    || !enclosure::HasOnlyMetadataSubshapes(document,request.label)
+                    || !enclosure::Encode(*request.enclosureRebuild,values)
+                    || request.enclosureRebuild->metersPerUnit != record.previous.enclosure.parameters.metersPerUnit) {
+                    return reject(OrdinaryEditResult::Invalid);
+                }
+                if (values == record.previous.enclosure.values) return reject(OrdinaryEditResult::NoChange);
             }
             if (request.operation == OrdinaryTransformOperation::MeshUVAtlas
                 && (changes.size() != 1 || !geometryChanges
@@ -456,6 +474,12 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
                 || !CandidateIsFinite(request.presentation->LocalTransformation())) {
                 return reject(OrdinaryEditResult::Invalid);
             }
+            if (request.profile && request.enclosure) return reject(OrdinaryEditResult::Invalid);
+            std::vector<double> enclosureValues;
+            if (request.enclosure ? (request.representation != OcctGeometryRepresentation::BRep
+                    || !profile::IsIdentifier(request.enclosureIdentifier)
+                    || !enclosure::Encode(*request.enclosure,enclosureValues))
+                    : !request.enclosureIdentifier.empty()) return reject(OrdinaryEditResult::Invalid);
             std::vector<double> profileValues;
             if (request.profile ? (request.representation != OcctGeometryRepresentation::BRep
                     || !profile::IsIdentifier(request.profileIdentifier)
@@ -520,7 +544,14 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                     || stored.object.profile.values != values
                     || !stored.object.profile.IsCurrent(_document->Document(), expected.object.label)) return false;
             } else if (!stored.object.profile.label.IsNull()) return false;
-            if (!stored.object.enclosure.label.IsNull()) return false;
+            if (record.requested.enclosure) {
+                std::vector<double> values;
+                if (!enclosure::Encode(*record.requested.enclosure,values)
+                    || stored.object.enclosure.label.IsNull()
+                    || stored.object.enclosure.identifier != record.requested.enclosureIdentifier
+                    || stored.object.enclosure.values != values
+                    || !stored.object.enclosure.IsCurrent(_document->Document(),expected.object.label)) return false;
+            } else if (!stored.object.enclosure.label.IsNull()) return false;
             if (ledger.meshCopy) {
                 const auto& source=*ledger.meshCopy;
                 OcctScalarAppearanceState appearance;
@@ -594,6 +625,9 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             if (record.requested.profile && !profile::Stage(_document->Document(), label,
                     *record.requested.profile, record.requested.profileIdentifier))
                 throw Standard_Failure("Profile definition staging failed");
+            if (record.requested.enclosure && !enclosure::Stage(_document->Document(),label,
+                    *record.requested.enclosure,record.requested.enclosureIdentifier))
+                throw Standard_Failure("Enclosure definition staging failed");
             if (!_document->CaptureObjectNameStateForLabel(label, record.candidate)
                 || !record.candidate.object.shape.IsEqual(record.shape)
                 || record.candidate.object.scalars != EncodedTransform(record.transform)
@@ -610,9 +644,9 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             _stageFailureIndex = -1; throw Standard_Failure("Creation staged abort fault");
         }
 #endif
-        const bool hasProfile = std::any_of(ledger.records.begin(), ledger.records.end(),
-            [](const auto& record) { return record.requested.profile.has_value(); });
-        if (((ledger.meshCopy || hasProfile) && !_document->ValidateGeometryRepresentations())
+        const bool hasFeature = std::any_of(ledger.records.begin(), ledger.records.end(),
+            [](const auto& record) { return record.requested.profile.has_value() || record.requested.enclosure.has_value(); });
+        if (((ledger.meshCopy || hasFeature) && !_document->ValidateGeometryRepresentations())
             || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
@@ -1186,13 +1220,17 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
                     && !profile::Stage(_document->Document(), record.previous.label,
                         *record.requested.profileRebuild, record.previous.profile.identifier))
+                || (record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild
+                    && !enclosure::Stage(_document->Document(),record.previous.label,
+                        *record.requested.enclosureRebuild,record.previous.enclosure.identifier))
                 || !_document->CaptureObjectTransformStateForLabel(record.previous.label, record.candidate)
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
                 || (record.requested.operation != OrdinaryTransformOperation::ProfileRebuild
                     && !record.candidate.profile.IsEqual(record.previous.profile))
-                || !record.candidate.enclosure.IsEqual(record.previous.enclosure)
+                || (record.requested.operation != OrdinaryTransformOperation::EnclosureRebuild
+                    && !record.candidate.enclosure.IsEqual(record.previous.enclosure))
                 || record.candidate.scalars != EncodedTransform(record.requested.transform)
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
@@ -1207,6 +1245,16 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || !_document->ValidateGeometryRepresentations()) {
                     throw Standard_Failure("Profile rebuild candidate readback failed");
                 }
+            }
+            if (record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild) {
+                std::vector<double> values;
+                if (!enclosure::Encode(*record.requested.enclosureRebuild,values)
+                    || record.candidate.enclosure.identifier != record.previous.enclosure.identifier
+                    || !record.candidate.enclosure.label.IsEqual(record.previous.enclosure.label)
+                    || record.candidate.enclosure.values != values
+                    || !record.candidate.enclosure.IsCurrent(_document->Document(),record.previous.label)
+                    || !_document->ValidateGeometryRepresentations())
+                    throw Standard_Failure("Enclosure rebuild candidate readback failed");
             }
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
                 if (record.candidate.authoredFramesPresent) {

@@ -997,6 +997,76 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 @end
 
+@interface Core3DEnclosureDefinition ()
+- (instancetype)initWithNativeParameters:(const core3d::enclosure::Parameters&)parameters;
+- (core3d::enclosure::Parameters)nativeParameters;
+@end
+@implementation Core3DEnclosureDefinition {
+    core3d::enclosure::Parameters _parameters;
+}
+- (instancetype)initWithNativeParameters:(const core3d::enclosure::Parameters&)parameters {
+    try {
+        std::vector<double> values;
+        if (!core3d::enclosure::Encode(parameters,values)) return nil;
+        self = [super init];
+        if (self) _parameters = parameters;
+        return self;
+    } catch (...) { return nil; }
+}
+- (instancetype)initWithWidth:(double)width depth:(double)depth height:(double)height
+    wall:(double)wall floor:(double)floor cornerRadius:(double)cornerRadius
+    plane:(Core3DProfilePlane)plane metersPerUnit:(double)metersPerUnit {
+    // Check NSInteger before narrowing to the native int/enum representation.
+    if (plane < Core3DProfilePlaneXY || plane > Core3DProfilePlaneYZ) return nil;
+    core3d::enclosure::Parameters parameters;
+    parameters.definition.dimensions = {width,depth,height,wall,floor,cornerRadius};
+    parameters.definition.plane = static_cast<int>(plane);
+    parameters.metersPerUnit = metersPerUnit;
+    return [self initWithNativeParameters:parameters];
+}
+- (Core3DEnclosureDefinition *)definitionByUpdatingDimension:(Core3DEnclosureDimension)dimension value:(double)value {
+    if (dimension < Core3DEnclosureDimensionWidth || dimension > Core3DEnclosureDimensionCornerRadius) return nil;
+    try {
+        const auto updated = core3d::UpdatedEnclosureDimension(_parameters.definition,
+            static_cast<core3d::EnclosureDimension>(dimension),value);
+        if (!updated) return nil;
+        auto parameters = _parameters; parameters.definition = *updated;
+        return [[Core3DEnclosureDefinition alloc] initWithNativeParameters:parameters];
+    } catch (...) { return nil; }
+}
+- (double)width { return _parameters.definition.dimensions.width; }
+- (double)depth { return _parameters.definition.dimensions.depth; }
+- (double)height { return _parameters.definition.dimensions.height; }
+- (double)wall { return _parameters.definition.dimensions.wall; }
+- (double)floor { return _parameters.definition.dimensions.floor; }
+- (double)cornerRadius { return _parameters.definition.dimensions.cornerRadius; }
+- (Core3DProfilePlane)plane { return static_cast<Core3DProfilePlane>(_parameters.definition.plane); }
+- (double)metersPerUnit { return _parameters.metersPerUnit; }
+- (core3d::enclosure::Parameters)nativeParameters { return _parameters; }
+@end
+
+@interface Core3DStoredEnclosureSnapshot ()
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredEnclosureSnapshot&)snapshot;
+- (core3d::StoredEnclosureSnapshot)nativeSnapshot;
+@end
+@implementation Core3DStoredEnclosureSnapshot {
+    core3d::StoredEnclosureSnapshot _native;
+}
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredEnclosureSnapshot&)snapshot {
+    self = [super init];
+    if (self) {
+        _native = snapshot;
+        _entityIdentifier = [[NSString alloc] initWithUTF8String:snapshot.identity.entityIdentifier.c_str()];
+        _definitionIdentifier = [[NSString alloc] initWithUTF8String:snapshot.definitionIdentifier.c_str()];
+        _featureIdentifier = [[NSString alloc] initWithUTF8String:snapshot.featureIdentifier.c_str()];
+        _definition = [[Core3DEnclosureDefinition alloc] initWithNativeParameters:snapshot.parameters];
+        _current = snapshot.current;
+    }
+    return self;
+}
+- (core3d::StoredEnclosureSnapshot)nativeSnapshot { return _native; }
+@end
+
 @interface Core3DStoredProfileSnapshot ()
 - (instancetype)initWithNativeSnapshot:(const core3d::StoredProfileSnapshot&)snapshot;
 - (core3d::StoredProfileSnapshot)nativeSnapshot;
@@ -1068,8 +1138,8 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     Core3DQueuedAssetLoadOwner *_queuedNativeLoadOwner;
     __weak GLViewController *_queuedRequestGL;
     std::atomic_bool _isLoading;
-    std::shared_ptr<core3d::ProfileSolidWork> _profileSolidWork;
-    BOOL _profileSolidCancelled;
+    std::shared_ptr<core3d::NativeSolidWork> _nativeSolidWork;
+    BOOL _nativeSolidCancelled;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
 #ifdef DEBUG
@@ -1095,7 +1165,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 @end
 
 @interface Core3DViewController (ProfileConstructionPrivate)
-- (void)runProfileSolidWork:(const std::shared_ptr<core3d::ProfileSolidWork>&)work
+- (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion;
 - (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
                             plane:(Core3DProfilePlane)plane parameter:(double)parameter
@@ -1123,7 +1193,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 
 - (void)dealloc {
     core3d::Core3DViewer::cancelObjectAlignment(_objectAlignmentWork);
-    core3d::Core3DViewer::cancelProfileSolid(_profileSolidWork);
+    core3d::Core3DViewer::cancelNativeSolid(_nativeSolidWork);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     if ([_glController isKindOfClass:GLViewController.class] && _queuedNativeLoadOwner != nil)
         [(GLViewController *)_glController abandonQueuedAssetOwner:_queuedNativeLoadOwner];
@@ -7819,8 +7889,8 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 
 - (void)cancelProfileConstruction {
     if (![NSThread isMainThread]) { return; }
-    _profileSolidCancelled = YES;
-    core3d::Core3DViewer::cancelProfileSolid(_profileSolidWork);
+    _nativeSolidCancelled = YES;
+    core3d::Core3DViewer::cancelNativeSolid(_nativeSolidWork);
 }
 
 - (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
@@ -7881,7 +7951,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
         return;
     }
-    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
         || ![points isKindOfClass:[NSArray class]]
         || (circle ? points.count != 0 : (points.count < 3 || points.count > 64))
@@ -7943,9 +8013,104 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             identity, expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve, circle, holes);
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
-        [self runProfileSolidWork:work completion:completion];
+        [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
+
+- (void)createEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![definition isKindOfClass:[Core3DEnclosureDefinition class]]
+        || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
+        || definition.metersPerUnit != expected.metersPerUnit
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DProfileConstructionResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        const char *publication = expected.publicationSourceIdentifier.UTF8String;
+        if (!publication) { completion(Core3DProfileConstructionResultRejected); return; }
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto parameters = [definition nativeParameters];
+        const auto work = viewer->prepareEnclosureSolid(parameters,identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (Core3DStoredEnclosureSnapshot *)storedEnclosureWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || _nativeSolidWork || _isLoading.load() || !_isSetuped
+        || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+    try {
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->storedEnclosureDefinition(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        return result ? [[Core3DStoredEnclosureSnapshot alloc] initWithNativeSnapshot:*result] : nil;
+    } catch (...) { return nil; }
+}
+
+- (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
+    definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (![original isKindOfClass:[Core3DStoredEnclosureSnapshot class]]
+        || ![definition isKindOfClass:[Core3DEnclosureDefinition class]]) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto live = [self storedEnclosureWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if (!live) { completion(Core3DProfileConstructionResultRejected); return; }
+    try {
+        const CGSize size = GLController.drawableSize;
+        const auto originalNative = [original nativeSnapshot];
+        auto requested = [definition nativeParameters];
+        const auto work = GLController.viewer->prepareStoredEnclosureRebuild(requested,
+            originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (void)cancelNativeConstruction { [self cancelProfileConstruction]; }
 
 - (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected
@@ -7955,7 +8120,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
         return;
     }
-    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
         || ![definition isKindOfClass:[Core3DProfileDefinition class]]
         || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
@@ -7984,25 +8149,25 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         const auto work = viewer->prepareProfileSolid(parameters,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
-        [self runProfileSolidWork:work completion:completion];
+        [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
-- (void)runProfileSolidWork:(const std::shared_ptr<core3d::ProfileSolidWork>&)work
+- (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion {
-        _profileSolidWork = work; _profileSolidCancelled = NO;
-        const auto geometry = core3d::Core3DViewer::profileSolidGeometry(work);
+        _nativeSolidWork = work; _nativeSolidCancelled = NO;
+        const auto geometry = core3d::Core3DViewer::nativeSolidGeometry(work);
         const std::weak_ptr<core3d::Core3DViewer> expectedViewer = GLController.viewer;
         __weak Core3DViewController* weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            const bool built = core3d::Core3DViewer::buildProfileSolidGeometry(geometry);
+            const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry);
             dispatch_async(dispatch_get_main_queue(), ^{
                 Core3DViewController* controller = weakSelf;
                 if (!controller) { return; }
-                const BOOL cancelled = controller->_profileSolidCancelled;
+                const BOOL cancelled = controller->_nativeSolidCancelled;
                 // Main-thread work owns live scene authority. The worker's only
                 // strong payload contains new private geometry and scalar values.
-                const auto pendingWork = std::move(controller->_profileSolidWork);
+                const auto pendingWork = std::move(controller->_nativeSolidWork);
                 const auto currentViewer = expectedViewer.lock();
                 if (cancelled) { completion(Core3DProfileConstructionResultCancelled); return; }
                 if (!pendingWork || !currentViewer || controller->_isLoading.load() || !controller->_isSetuped
@@ -8011,7 +8176,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
                     completion(Core3DProfileConstructionResultRejected); return;
                 }
                 if (!built) { completion(Core3DProfileConstructionResultFailed); return; }
-                const auto native = currentViewer->commitProfileSolid(pendingWork);
+                const auto native = currentViewer->commitNativeSolid(pendingWork);
                 Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
                 switch (native) {
                     case core3d::OrdinaryEditResult::Committed:
@@ -8042,7 +8207,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
         return;
     }
-    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
     if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
         || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
         || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
@@ -8070,13 +8235,13 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         const auto work = viewer->prepareStoredProfileRebuild(parameter, identity, expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
-        [self runProfileSolidWork:work completion:completion];
+        [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
 - (Core3DStoredProfileSnapshot *)storedProfileWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected {
-    if (![NSThread isMainThread] || _profileSolidWork || _isLoading.load() || !_isSetuped
+    if (![NSThread isMainThread] || _nativeSolidWork || _isLoading.load() || !_isSetuped
         || GLController == nil || GLController.viewer == nullptr
         || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
         || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
@@ -8107,7 +8272,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
     }
-    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
     if (![original isKindOfClass:[Core3DStoredProfileSnapshot class]]
         || ![definition isKindOfClass:[Core3DProfileDefinition class]]) {
         completion(Core3DProfileConstructionResultRejected); return;
@@ -8126,7 +8291,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
-        [self runProfileSolidWork:work completion:completion];
+        [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
@@ -10107,7 +10272,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 - (BOOL)core3d_canReserveQueuedInput:(Core3DQueuedAssetInput *)input
                   fromGLController:(GLViewController *)controller {
     if (![NSThread isMainThread] || controller == nil || _glController != controller
-        || _profileSolidWork || _objectAlignmentWork || !_isSetuped) return NO;
+        || _nativeSolidWork || _objectAlignmentWork || !_isSetuped) return NO;
     if (_queuedAssetRequest == nil) return !_isLoading.load();
     return _queuedRequestGL == controller && _queuedAssetRequest.input == input
         && [_queuedAssetRequestSlot ownsRequest:_queuedAssetRequest];
@@ -10115,7 +10280,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 
 - (BOOL)core3d_hasCompetingLoadOrControllerWork {
     return ![NSThread isMainThread] || _queuedAssetRequest != nil
-        || _isLoading.load() || _profileSolidWork || _objectAlignmentWork;
+        || _isLoading.load() || _nativeSolidWork || _objectAlignmentWork;
 }
 
 - (Core3DAssetLoadResult)tryLoadFromBundle:(NSURL *)bundleURL {
@@ -10185,7 +10350,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         return Core3DAssetLoadResultBusy;
     // Recheck the real slots on deferred setup. A cancellation flag alone is
     // not native settlement, and Ready-only admission never cancels them.
-    if (_profileSolidWork || _objectAlignmentWork || _queuedRequestGL == nil
+    if (_nativeSolidWork || _objectAlignmentWork || _queuedRequestGL == nil
         || _glController != _queuedRequestGL) {
         [_queuedAssetRequestSlot finishRequest:request];
         _queuedAssetRequest = nil;

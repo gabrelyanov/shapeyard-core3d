@@ -132,6 +132,51 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(init(curveOuter:inner:plane:parameter:revolve:metersPerUnit:));
 @end
 
+typedef NS_ENUM(NSInteger, Core3DEnclosureDimension) {
+    Core3DEnclosureDimensionWidth = 0,
+    Core3DEnclosureDimensionDepth,
+    Core3DEnclosureDimensionHeight,
+    Core3DEnclosureDimensionWall,
+    Core3DEnclosureDimensionFloor,
+    Core3DEnclosureDimensionCornerRadius,
+};
+
+//! Immutable native construction values. Lengths use the declared document
+//! unit. These values carry no geometry, document handles or edit authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DEnclosureDefinition : NSObject
+@property(nonatomic,readonly) double width;
+@property(nonatomic,readonly) double depth;
+@property(nonatomic,readonly) double height;
+@property(nonatomic,readonly) double wall;
+@property(nonatomic,readonly) double floor;
+@property(nonatomic,readonly) double cornerRadius;
+@property(nonatomic,readonly) Core3DProfilePlane plane;
+@property(nonatomic,readonly) double metersPerUnit;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithWidth:(double)width depth:(double)depth height:(double)height
+    wall:(double)wall floor:(double)floor cornerRadius:(double)cornerRadius
+    plane:(Core3DProfilePlane)plane metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(init(width:depth:height:wall:floor:cornerRadius:plane:metersPerUnit:));
+//! Returns validated values only; does not change a document or add history.
+- (nullable Core3DEnclosureDefinition *)definitionByUpdatingDimension:(Core3DEnclosureDimension)dimension
+    value:(double)value NS_SWIFT_NAME(updating(_:value:));
+@end
+
+//! Exact opening authority for one selected enclosure; a changed document/model
+//! requires another read before applying dimensions. Values are not authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DStoredEnclosureSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSString *definitionIdentifier;
+@property(nonatomic,copy,readonly) NSString *featureIdentifier;
+@property(nonatomic,strong,readonly) Core3DEnclosureDefinition *definition;
+@property(nonatomic,readonly) BOOL current;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! A read of one selected native profile. A stale profile remains inspectable
 //! but cannot replace subsequent geometry edits. Apply also checks the original
 //! document/model revision; only the presentation may be refreshed.
@@ -880,6 +925,21 @@ typedef struct {
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createProfile(definition:expected:completion:));
+//! Create or edit the native enclosure dependency using the same worker slot,
+//! cancellation and ordinary history as profile construction. Units must match
+//! the document; rebuilding preserves placement and native entity identity.
+- (void)createEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createEnclosure(definition:expected:completion:));
+- (nullable Core3DStoredEnclosureSnapshot *)storedEnclosureWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedEnclosure(entityIdentifier:expected:));
+- (void)rebuildStoredEnclosure:(Core3DStoredEnclosureSnapshot *)original
+    definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildStoredEnclosure(_:definition:expected:completion:));
+//! Cancels either construction kind; admission stays Busy until completion.
+- (void)cancelNativeConstruction;
 //! Construct one solid from 3–64 non-intersecting outline points in mm, either
 //! winding, with positive depth 0.001–1,000,000 mm. One undoable creation.
 - (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
