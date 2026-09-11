@@ -52,20 +52,12 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <limits>
 #include <unordered_set>
 #include <utility>
 
 namespace core3d {
 	namespace {
-        // Temporary DEBUG diagnosis for the retained273 preview rejections.
-        Standard_Boolean MirrorPreviewRejected(const char* function, int line) noexcept {
-#ifdef DEBUG
-            std::fprintf(stderr, "SHAPEYARD_MIRROR_PREVIEW_REJECT %s:%d\n", function, line);
-#endif
-            return Standard_False;
-        }
         // Preserve absent legacy units as distinct authority. The established
         // legacy interpretation is millimetres; reading must not add metadata.
         bool ReadMirrorDocumentUnits(const Handle(TDocStd_Document)& document,
@@ -2177,6 +2169,45 @@ namespace core3d {
 						source.first.get(), source.second);
 				}
             }
+        } else if (mirror && aPreviousType != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+                   && _manipulatorSourceLabels.empty()
+                   && _trialMirrorObjects.empty() && _trialMirrorSources.empty()
+                   && _pendingMirrorResults.empty() && !_mirrorOwnsDocumentCommand) {
+            // Browser selection and construction can preserve an exact selected
+            // part while None owns no gizmo. Entering Mirror must attach that
+            // existing selection; never replace a stale nonempty cached gizmo.
+            std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> sources;
+            std::unordered_set<const AIS_InteractiveObject*> unique;
+            bool exact = !myContext.IsNull() && !myDoc.IsNull();
+            if (exact) {
+                for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                    const auto object = myContext->SelectedInteractive();
+                    const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object);
+                    const TDF_Label label = myDoc->ShapeLabel(object);
+                    gp_Trsf transform;
+                    if (sources.size() >= kMaxMirrorPreviewBodies || shape.IsNull()
+                        || !myContext->IsDisplayed(object) || !myDoc->IsPresentationEditable(object)
+                        || label.IsNull() || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                        || !IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(label))
+                        || myContext->SelectedOwner().IsNull()
+                        || myContext->SelectedOwner() != object->GlobalSelOwner()
+                        || shape->Shape().IsNull()
+                        || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(shape->Shape())
+                        || !myDoc->TryObjectTransformForLabel(label, transform)
+                        || TransformDiffers(transform, object->LocalTransformation())
+                        || !unique.insert(object.get()).second) {
+                        exact = false; break;
+                    }
+                    sources.emplace_back(object, label);
+                }
+            }
+            if (exact && !sources.empty()) {
+                Handle(Core3DManipulatorObjectSequence) selected = new Core3DManipulatorObjectSequence();
+                for (const auto& source : sources) selected->Append(source.first);
+                _manipulator->Attach(selected);
+                for (const auto& source : sources)
+                    _manipulatorSourceLabels.emplace(source.first.get(), source.second);
+            }
         }
 
 		_manipulator->Redisplay();
@@ -4156,20 +4187,20 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
 			|| _mirrorPreviewState == MirrorPreviewState::Committing
 			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 		if (_mirrorPlanePicking && !cancelMirrorPlanePicking()) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 		++_mirrorPreviewGeneration;
 		try {
 			if (!tryMirrorImpl(axisIndex, backward)) {
 				_mirrorPreviewState = MirrorPreviewState::Failed;
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 			if (!clearCustomMirrorPlaneState()) {
 				_mirrorPreviewState = MirrorPreviewState::Failed;
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 			_trialMirrorUsesCustomPlane = false;
 			_mirrorPreviewState = MirrorPreviewState::Ready;
@@ -4177,7 +4208,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		} catch (...) {
 			(void)clearTrialMirrorObjects();
 			_mirrorPreviewState = MirrorPreviewState::Failed;
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 	}
 
@@ -4188,14 +4219,14 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			|| !_manipulator->IsAttached()
 			|| axisIndex < 0
 			|| axisIndex > 2) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 		const Handle(Core3DManipulatorObjectSequence) anObjects =
 			_manipulator->Objects();
 		if (anObjects.IsNull() || anObjects->Size() == 0
 			|| static_cast<std::size_t>(anObjects->Size())
 				> kMaxMirrorPreviewBodies) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 
 		Bnd_Box aBox, aBoxSum;
@@ -4204,7 +4235,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			aBoxSum.Add(aBox);
 		}
 		if (aBoxSum.IsVoid() || aBoxSum.IsOpen()) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 		const gp_Pnt aMaximum = aBoxSum.CornerMax();
 		const gp_Pnt aMinimum = aBoxSum.CornerMin();
@@ -4236,7 +4267,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 					abs(aMaximum.Z() - aMinimum.Z()) * 0.5f * aSign));
 				break;
 			default:
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 		}
 		return tryMirrorWorldPlaneImpl(
 			gp_Ax2(anOrigin, aNormal, anXDirection));
@@ -4247,14 +4278,14 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		if (!_trialMirrorObjects.empty() && !_trialMirrorObjectsValid) {
 			(void)clearTrialMirrorObjects();
 			if (!_trialMirrorObjects.empty()) {
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 		}
 		if (_manipulator.IsNull() || !_manipulator->IsAttached()
 			|| !IsFiniteBoundedPoint(theWorldPlane.Location())
 			|| !IsFiniteDirection(theWorldPlane.Direction())
 			|| !IsFiniteDirection(theWorldPlane.XDirection())) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 		const Handle(TDocStd_Document) aSourceDocument =
 			myDoc.IsNull()
@@ -4262,14 +4293,14 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			: myDoc->ChangeDocument();
 		if (aSourceDocument.IsNull()
 			|| aSourceDocument->HasOpenCommand()) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 
 		Handle(Core3DManipulatorObjectSequence) anObjects = _manipulator->Objects();
 		if (anObjects.IsNull() || anObjects->Size() == 0
 			|| static_cast<std::size_t>(anObjects->Size())
 				> kMaxMirrorPreviewBodies) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 		Core3DManipulatorObjectSequence::Iterator anObjIter (*anObjects);
 		std::vector<Handle(AIS_Shape)> replacementObjects;
@@ -4284,7 +4315,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				myDoc,
 				PrimitiveManipulatorType::PrimitiveGizmoTypeMirror,
 				_manipulatorSourceLabels)) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 
 #ifdef DEBUG
@@ -4304,29 +4335,29 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
         Standard_Size projectedTopology = 0;
         for (Core3DManipulatorObjectSequence::Iterator it(*anObjects); it.More(); it.Next()) {
             const auto source = _manipulatorSourceLabels.find(it.Value().get());
-            if (source == _manipulatorSourceLabels.end()) return MirrorPreviewRejected(__func__, __LINE__);
+            if (source == _manipulatorSourceLabels.end()) return Standard_False;
             OcctObjectNameState owner;
-            if (!myDoc->CaptureObjectNameStateForLabel(source->second, owner)) return MirrorPreviewRejected(__func__, __LINE__);
+            if (!myDoc->CaptureObjectNameStateForLabel(source->second, owner)) return Standard_False;
             const auto& profile = owner.object.profile;
             Standard_Size currentNodes = 0, retainedNodes = 0;
-            if (!CountBoundedMirrorTopology(owner.object.shape, aPerSourceLimit, currentNodes)) return MirrorPreviewRejected(__func__, __LINE__);
+            if (!CountBoundedMirrorTopology(owner.object.shape, aPerSourceLimit, currentNodes)) return Standard_False;
             if (!profile.label.IsNull() && !profile.boundShape.IsEqual(owner.object.shape)
                 && (!CountBoundedMirrorTopology(profile.boundShape, aPerSourceLimit, retainedNodes)
-                    || !IsTopologicallyValid(profile.boundShape))) return MirrorPreviewRejected(__func__, __LINE__);
+                    || !IsTopologicallyValid(profile.boundShape))) return Standard_False;
             for (const Standard_Size cost : {currentNodes, retainedNodes, currentNodes, retainedNodes}) {
-                if (cost > anAggregateLimit - projectedTopology) return MirrorPreviewRejected(__func__, __LINE__);
+                if (cost > anAggregateLimit - projectedTopology) return Standard_False;
                 projectedTopology += cost;
             }
             profileRequests.push_back({source->second, 1, !profile.label.IsNull()});
         }
-        if (!myDoc->CanDuplicateGeometryDefinitions(profileRequests)) return MirrorPreviewRejected(__func__, __LINE__);
+        if (!myDoc->CanDuplicateGeometryDefinitions(profileRequests)) return Standard_False;
 
 		for (; anObjIter.More(); anObjIter.Next()) {
 			Handle(AIS_InteractiveObject) selected = anObjIter.Value();
 
 			Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(selected);
 			if (shape.IsNull() || shape->Shape().IsNull()) {
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 			const auto source = _manipulatorSourceLabels.find(
 				selected.get());
@@ -4343,7 +4374,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 						!= OcctGeometryRepresentation::BRep)) {
 				// The current negative-transform path deliberately drops mesh
 				// data, so triangle-only definitions cannot enter a preview.
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 			const TopoDS_Shape sourceStoredShape =
 				XCAFDoc_ShapeTool::GetShape(sourceLabel);
@@ -4377,21 +4408,21 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				|| sourceNodeCount
 					> anAggregateLimit - anAggregateTopologyNodes
 				|| !IsTopologicallyValid(sourceStoredShape)) {
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 			anAggregateTopologyNodes += sourceNodeCount;
             OcctObjectNameState profileOwner;
-            if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)) return MirrorPreviewRejected(__func__, __LINE__);
+            if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)) return Standard_False;
             const auto& originalProfile = profileOwner.object.profile;
             double documentMetersPerUnit = 0;
             bool documentLengthUnitPresent = false;
             if (!ReadMirrorDocumentUnits(aSourceDocument, documentMetersPerUnit,
-                                         documentLengthUnitPresent)) return MirrorPreviewRejected(__func__, __LINE__);
+                                         documentLengthUnitPresent)) return Standard_False;
             Standard_Size retainedProfileNodes = 0;
             if (!originalProfile.label.IsNull() && !originalProfile.boundShape.IsEqual(sourceStoredShape)) {
                 if (!CountBoundedMirrorTopology(originalProfile.boundShape, aPerSourceLimit, retainedProfileNodes)
                     || retainedProfileNodes > anAggregateLimit - anAggregateTopologyNodes
-                    || !IsTopologicallyValid(originalProfile.boundShape)) return MirrorPreviewRejected(__func__, __LINE__);
+                    || !IsTopologicallyValid(originalProfile.boundShape)) return Standard_False;
                 anAggregateTopologyNodes += retainedProfileNodes;
             }
 
@@ -4410,9 +4441,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             if (!originalProfile.label.IsNull()) {
                 gp_Trsf originalFrame;
                 if (originalProfile.parameters.constructionFrame
-                    && !originalProfile.parameters.constructionFrame->Transform(originalFrame)) return MirrorPreviewRejected(__func__, __LINE__);
+                    && !originalProfile.parameters.constructionFrame->Transform(originalFrame)) return Standard_False;
                 profile::ConstructionFrame composed;
-                if (!profile::ConstructionFrame::Capture(aBakedTransform * originalFrame, composed)) return MirrorPreviewRejected(__func__, __LINE__);
+                if (!profile::ConstructionFrame::Capture(aBakedTransform * originalFrame, composed)) return Standard_False;
             }
 			
 			// OCCT's negative-transform mesh-copy path corrupts allocator state
@@ -4434,7 +4465,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 					resultNodeCount)
 				|| resultNodeCount == 0
 				|| !IsTopologicallyValid(aShapePrs->Shape())) {
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 			anAggregateTopologyNodes += resultNodeCount;
             TopoDS_Shape preparedProfileBinding;
@@ -4442,7 +4473,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             if (!originalProfile.label.IsNull()) {
                 profileIdentifier = OcctDocument::NewProfileIdentifier();
                 if (!profile::IsIdentifier(profileIdentifier) || profileIdentifier == originalProfile.identifier
-                    || aShapePrs->Shape().IsPartner(sourceStoredShape)) return MirrorPreviewRejected(__func__, __LINE__);
+                    || aShapePrs->Shape().IsPartner(sourceStoredShape)) return Standard_False;
                 if (originalProfile.boundShape.IsEqual(sourceStoredShape)) {
                     preparedProfileBinding = aShapePrs->Shape();
                 } else {
@@ -4455,7 +4486,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         || !IsShapeWithinModelCoordinates(retained.Shape())
                         || !IsTopologicallyValid(retained.Shape())
                         || !CountBoundedMirrorTopology(retained.Shape(), anAggregateLimit - anAggregateTopologyNodes, nodes)
-                        || nodes != retainedProfileNodes) return MirrorPreviewRejected(__func__, __LINE__);
+                        || nodes != retainedProfileNodes) return Standard_False;
                     anAggregateTopologyNodes += nodes;
                     preparedProfileBinding = retained.Shape();
                 }
@@ -4487,7 +4518,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull()});
 		}
 		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
-			return MirrorPreviewRejected(__func__, __LINE__);
+			return Standard_False;
 		}
 
 		// A plane is a choice for the current mirror operation, not an
@@ -4517,7 +4548,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			// contract while the operation is pending.
 			myContext->Deactivate(aShapePrs);
 			if (!myContext->IsDisplayed(aShapePrs)) {
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 		}
 		for (const Handle(AIS_Shape)& aShapePrs
@@ -4535,7 +4566,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			if (myContext->IsDisplayed(aShapePrs)) {
 				// _trialMirrorObjects still owns the combined old/new set.
 				// A non-throwing no-op erase must not orphan the old preview.
-				return MirrorPreviewRejected(__func__, __LINE__);
+				return Standard_False;
 			}
 		}
 		_trialMirrorObjects = std::move(replacementObjects);

@@ -6707,9 +6707,6 @@ void Core3DAddDebugOrphanVisualMaterial(
         || !_isSetuped
         || _currentGizmoType != PrimitiveGizmoTypeMirror
         || axis < Core3DMirrorAxisX || axis > Core3DMirrorAxisZ) {
-#ifdef DEBUG
-        NSLog(@"SHAPEYARD_MIRROR_CONTROLLER_REJECT line %d main %d setup %d gizmo %ld axis %ld", __LINE__, [NSThread isMainThread], _isSetuped, (long)_currentGizmoType, (long)axis);
-#endif
         return NO;
     }
 
@@ -6718,10 +6715,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             GLController.viewer;
         if (viewer == nullptr
             || viewer->getObjectInteractor() == nullptr) {
-    #ifdef DEBUG
-        NSLog(@"SHAPEYARD_MIRROR_CONTROLLER_REJECT line %d main %d setup %d gizmo %ld axis %ld", __LINE__, [NSThread isMainThread], _isSetuped, (long)_currentGizmoType, (long)axis);
-#endif
-        return NO;
+            return NO;
         }
         const BOOL didCreate = viewer->getObjectInteractor()->tryMirror(
             static_cast<Standard_Integer>(axis),
@@ -6732,9 +6726,6 @@ void Core3DAddDebugOrphanVisualMaterial(
         [self viewDidEndPrimaryInteractionCancelled:NO];
         return didCreate;
     } catch (...) {
-#ifdef DEBUG
-        NSLog(@"SHAPEYARD_MIRROR_CONTROLLER_REJECT line %d main %d setup %d gizmo %ld axis %ld", __LINE__, [NSThread isMainThread], _isSetuped, (long)_currentGizmoType, (long)axis);
-#endif
         return NO;
     }
 }
