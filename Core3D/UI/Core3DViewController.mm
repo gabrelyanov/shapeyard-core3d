@@ -726,6 +726,109 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 } // namespace
 
+@implementation Core3DProfileCurveVertex
+- (instancetype)initWithIdentifier:(uint32_t)identifier point:(CGPoint)point {
+    if (identifier == 0 || !std::isfinite(point.x) || !std::isfinite(point.y)
+        || std::abs(point.x) > 1e6 || std::abs(point.y) > 1e6) return nil;
+    self = [super init];
+    if (self) { _identifier = identifier; _point = point; }
+    return self;
+}
+@end
+
+@implementation Core3DProfileCurveSegment
+- (instancetype)initWithIdentifier:(uint32_t)identifier
+    startVertex:(uint32_t)startVertex endVertex:(uint32_t)endVertex
+    kind:(Core3DProfileCurveKind)kind center:(CGPoint)center radius:(double)radius
+    startDegrees:(double)startDegrees sweepDegrees:(double)sweepDegrees {
+    if (identifier == 0 || startVertex == 0 || endVertex == 0 || startVertex == endVertex
+        || !std::isfinite(center.x) || !std::isfinite(center.y)
+        || !std::isfinite(radius) || !std::isfinite(startDegrees)
+        || !std::isfinite(sweepDegrees)) return nil;
+    if (kind == Core3DProfileCurveKindLine) {
+        if (center.x != 0 || center.y != 0 || radius != 0
+            || startDegrees != 0 || sweepDegrees != 0) return nil;
+    } else if (kind == Core3DProfileCurveKindCircularArc) {
+        if (std::abs(center.x) > 1e6 || std::abs(center.y) > 1e6
+            || radius < 1e-3 || radius > 1e6 || std::abs(startDegrees) > 360
+            || std::abs(sweepDegrees) < 1e-6 || std::abs(sweepDegrees) >= 360) return nil;
+    } else return nil;
+    self = [super init];
+    if (self) {
+        _identifier = identifier; _startVertex = startVertex; _endVertex = endVertex;
+        _kind = kind; _center = center; _radius = radius;
+        _startDegrees = startDegrees; _sweepDegrees = sweepDegrees;
+    }
+    return self;
+}
+@end
+
+@interface Core3DProfileCurveLoop ()
+- (core3d::ProfileCurveLoop)nativeLoop;
+@end
+@implementation Core3DProfileCurveLoop {
+    core3d::ProfileCurveLoop _native;
+}
+- (instancetype)initWithIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DProfileCurveSegment *> *)segments {
+    if (identifier == 0 || ![vertices isKindOfClass:[NSArray class]]
+        || ![segments isKindOfClass:[NSArray class]] || vertices.count < 2
+        || vertices.count > 512 || vertices.count != segments.count) return nil;
+    NSArray *ownedVertices = [vertices copy], *ownedSegments = [segments copy];
+    try {
+        core3d::ProfileCurveLoop loop; loop.identifier = identifier;
+        loop.vertices.reserve(ownedVertices.count); loop.segments.reserve(ownedSegments.count);
+        for (id value in ownedVertices) {
+            if (![value isMemberOfClass:[Core3DProfileCurveVertex class]]) return nil;
+            Core3DProfileCurveVertex *v = value;
+            loop.vertices.push_back({v.identifier, gp_Pnt2d(v.point.x,v.point.y)});
+        }
+        for (id value in ownedSegments) {
+            if (![value isMemberOfClass:[Core3DProfileCurveSegment class]]) return nil;
+            Core3DProfileCurveSegment *v = value;
+            loop.segments.push_back({v.identifier,v.startVertex,v.endVertex,
+                static_cast<core3d::ProfileCurveKind>(v.kind),gp_Pnt2d(v.center.x,v.center.y),
+                v.radius,v.startDegrees,v.sweepDegrees});
+        }
+        std::set<core3d::ProfileCurveID> identifiers;
+        std::size_t vertexCount = 0, segmentCount = 0;
+        core3d::ProfileCurveLoopInspection inspection;
+        if (!core3d::InspectProfileCurveLoopStructure(loop,loop.vertices.front().point,
+            identifiers,vertexCount,segmentCount,inspection)) return nil;
+        self = [super init];
+        if (self) {
+            _native = std::move(loop); _identifier = identifier;
+            _vertices = ownedVertices; _segments = ownedSegments;
+        }
+        return self;
+    } catch (...) { return nil; }
+}
+- (core3d::ProfileCurveLoop)nativeLoop { return _native; }
+@end
+
+static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveLoop& loop) {
+    NSMutableArray<Core3DProfileCurveVertex *> *vertices = [NSMutableArray arrayWithCapacity:loop.vertices.size()];
+    NSMutableArray<Core3DProfileCurveSegment *> *segments = [NSMutableArray arrayWithCapacity:loop.segments.size()];
+    for (const auto& v : loop.vertices) {
+        auto value = [[Core3DProfileCurveVertex alloc] initWithIdentifier:v.identifier
+            point:CGPointMake(v.point.X(),v.point.Y())];
+        if (!value) return nil;
+        [vertices addObject:value];
+    }
+    for (const auto& v : loop.segments) {
+        auto value = [[Core3DProfileCurveSegment alloc] initWithIdentifier:v.identifier
+            startVertex:v.startVertex endVertex:v.endVertex
+            kind:static_cast<Core3DProfileCurveKind>(v.kind)
+            center:CGPointMake(v.center.X(),v.center.Y()) radius:v.radius
+            startDegrees:v.startDegrees sweepDegrees:v.sweepDegrees];
+        if (!value) return nil;
+        [segments addObject:value];
+    }
+    return [[Core3DProfileCurveLoop alloc] initWithIdentifier:loop.identifier vertices:vertices segments:segments];
+}
+
+
 @interface Core3DProfileDefinition ()
 - (instancetype)initWithNativeParameters:(const core3d::profile::Parameters&)parameters;
 - (core3d::profile::Parameters)nativeParameters;
@@ -738,6 +841,18 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (self) {
         _parameters = parameters;
         const auto& d = parameters.definition;
+        _curveInner = @[];
+        if (d.curves) {
+            _curveOuter = Core3DPublicCurveLoop(d.curves->outer);
+            if (!_curveOuter) return nil;
+            NSMutableArray<Core3DProfileCurveLoop *> *inner = [NSMutableArray arrayWithCapacity:d.curves->inner.size()];
+            for (const auto& loop : d.curves->inner) {
+                auto value = Core3DPublicCurveLoop(loop);
+                if (!value) return nil;
+                [inner addObject:value];
+            }
+            _curveInner = [inner copy];
+        }
         NSMutableArray *points = [NSMutableArray arrayWithCapacity:d.points.size()];
         for (const auto& p : d.points) [points addObject:[NSValue valueWithCGPoint:CGPointMake(p.X(),p.Y())]];
         _points = [points copy];
@@ -781,6 +896,33 @@ void Core3DAddDebugOrphanVisualMaterial(
             gp_Pnt2d p; if (!pointValue(holeCenters[i],p) || ![holeRadii[i] isKindOfClass:[NSNumber class]]) return nil;
             d.holes.push_back({p,[holeRadii[i] doubleValue]});
         }
+        std::vector<double> values;
+        if (!core3d::profile::Encode(parameters,values)) return nil;
+        return [self initWithNativeParameters:parameters];
+    } catch (...) { return nil; }
+}
+- (instancetype)initWithCurveOuter:(Core3DProfileCurveLoop *)outer
+    inner:(NSArray<Core3DProfileCurveLoop *> *)inner plane:(Core3DProfilePlane)plane
+    parameter:(double)parameter revolve:(BOOL)revolve metersPerUnit:(double)metersPerUnit {
+    if (![outer isMemberOfClass:[Core3DProfileCurveLoop class]]
+        || ![inner isKindOfClass:[NSArray class]] || inner.count > 16) return nil;
+    NSArray *ownedInner = [inner copy];
+    try {
+        std::size_t count = outer.vertices.count;
+        for (id value in ownedInner) {
+            if (![value isMemberOfClass:[Core3DProfileCurveLoop class]]) return nil;
+            Core3DProfileCurveLoop *loop = value;
+            if (loop.vertices.count > 512 - count) return nil;
+            count += loop.vertices.count;
+        }
+        core3d::profile::Parameters parameters;
+        parameters.metersPerUnit = metersPerUnit;
+        auto& definition = parameters.definition;
+        definition.plane = static_cast<int>(plane); definition.depth = parameter; definition.revolve = revolve;
+        definition.curves.emplace(); definition.curves->outer = [outer nativeLoop];
+        definition.curves->inner.reserve(ownedInner.count);
+        for (Core3DProfileCurveLoop *loop in ownedInner)
+            definition.curves->inner.push_back([loop nativeLoop]);
         std::vector<double> values;
         if (!core3d::profile::Encode(parameters,values)) return nil;
         return [self initWithNativeParameters:parameters];
@@ -3937,6 +4079,40 @@ void Core3DAddDebugOrphanVisualMaterial(
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return;
     GLController.viewer->DebugFailNextDocumentAdoption();
 }
+// No live viewer, document access, mutation or persistent test settings.
++ (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)input {
+    if (![input isKindOfClass:[NSArray class]] || input.count > 6211)
+        return @{@"accepted": @NO, @"bridgeRejected": @YES};
+    try {
+        std::vector<double> values; values.reserve(input.count);
+        for (id value in input) {
+            if (![value isKindOfClass:[NSNumber class]])
+                return @{@"accepted": @NO, @"bridgeRejected": @YES};
+            // Preserve NaN/Inf so the native decoder, not this diagnostic,
+            // demonstrates rejection of non-finite serialized scalars.
+            values.push_back([value doubleValue]);
+        }
+        core3d::profile::Parameters parameters;
+        const bool decoded = core3d::profile::Decode(values,parameters);
+        if (!decoded) return @{@"accepted": @NO, @"bridgeRejected": @NO};
+        std::vector<double> encoded;
+        if (!core3d::profile::Encode(parameters,encoded))
+            return @{@"accepted": @YES, @"encodeFailed": @YES};
+        NSMutableArray<NSNumber *> *output = [NSMutableArray arrayWithCapacity:encoded.size()];
+        for (double value : encoded) [output addObject:@(value)];
+        double area = 0, volume = 0;
+        const bool measured = core3d::ProfileDefinitionExpectedVolume(parameters.definition,area,volume);
+        return @{@"accepted": @YES, @"bridgeRejected": @NO,
+            @"schema": @(core3d::profile::SchemaFor(parameters)), @"values": [output copy],
+            @"hasCurves": @(parameters.definition.curves.has_value()),
+            @"hasFrame": @(parameters.constructionFrame.has_value()),
+            @"measured": @(measured), @"area": @(area), @"volume": @(volume)};
+    } catch (...) {
+        return @{@"accepted": @NO, @"exception": @YES};
+    }
+}
+
+
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeMutationLifecycle {
     if (![NSThread isMainThread]) return @{@"mainThread":@NO};
     NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
@@ -7524,6 +7700,47 @@ void Core3DAddDebugOrphanVisualMaterial(
         const auto work = viewer->prepareProfileSolid(outline, static_cast<int>(plane), depth,
             identity, expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)), static_cast<std::uint32_t>(std::llround(size.height)), revolve, circle, holes);
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runProfileSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (_profileSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![definition isKindOfClass:[Core3DProfileDefinition class]]
+        || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
+        || definition.metersPerUnit != expected.metersPerUnit
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DProfileConstructionResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        const char *publication = expected.publicationSourceIdentifier.UTF8String;
+        if (!publication) { completion(Core3DProfileConstructionResultRejected); return; }
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto parameters = [definition nativeParameters];
+        const auto work = viewer->prepareProfileSolid(parameters,identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runProfileSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }

@@ -82,7 +82,15 @@ namespace core3d {
         Standard_EXPORT NSString* addTestPrimitives();
         void addPrimitive(PrimitiveType primitiveType);
         void addPrimitivesFromJSON(NSString* json);
+        //! Typed creation requires exact document units and no caller-supplied
+        //! construction frame. Stored rebuild has separate frame authority.
+        std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
+            const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         //! Polygon or exact circular-section construction: owned private worker geometry.
+        std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
+            const ProfileDefinition& definition, const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         std::shared_ptr<ProfileSolidWork> prepareProfileSolid(
             const std::vector<gp_Pnt2d>& points, int plane, double depth,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,

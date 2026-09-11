@@ -36,9 +36,65 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultUnchanged,
 };
 
+//! Explicit curve values carry feature-local stable IDs. Coordinates and radii
+//! use the enclosing profile's declared document unit; angles are degrees.
+//! These immutable values contain no OCCT handles or live selection authority.
+typedef NS_ENUM(NSInteger, Core3DProfileCurveKind) {
+    Core3DProfileCurveKindLine = 0, Core3DProfileCurveKindCircularArc = 1,
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DProfileCurveVertex : NSObject
+@property(nonatomic,readonly) uint32_t identifier;
+@property(nonatomic,readonly) CGPoint point;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithIdentifier:(uint32_t)identifier point:(CGPoint)point
+    NS_SWIFT_NAME(init(identifier:point:));
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DProfileCurveSegment : NSObject
+@property(nonatomic,readonly) uint32_t identifier;
+@property(nonatomic,readonly) uint32_t startVertex;
+@property(nonatomic,readonly) uint32_t endVertex;
+@property(nonatomic,readonly) Core3DProfileCurveKind kind;
+//! Unused line parameters are exactly zero. Arc endpoints must agree with the
+//! referenced vertices; this is validated when constructing the full profile.
+@property(nonatomic,readonly) CGPoint center;
+@property(nonatomic,readonly) double radius;
+@property(nonatomic,readonly) double startDegrees;
+@property(nonatomic,readonly) double sweepDegrees;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithIdentifier:(uint32_t)identifier
+    startVertex:(uint32_t)startVertex endVertex:(uint32_t)endVertex
+    kind:(Core3DProfileCurveKind)kind center:(CGPoint)center radius:(double)radius
+    startDegrees:(double)startDegrees sweepDegrees:(double)sweepDegrees
+    NS_SWIFT_NAME(init(identifier:startVertex:endVertex:kind:center:radius:startDegrees:sweepDegrees:));
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DProfileCurveLoop : NSObject
+@property(nonatomic,readonly) uint32_t identifier;
+@property(nonatomic,copy,readonly) NSArray<Core3DProfileCurveVertex *> *vertices;
+@property(nonatomic,copy,readonly) NSArray<Core3DProfileCurveSegment *> *segments;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+//! Ordered shared endpoints, 2-512 vertices and equally many segments. Full
+//! profile admission checks closed topology, intersections and hole clearance.
+- (nullable instancetype)initWithIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DProfileCurveSegment *> *)segments
+    NS_SWIFT_NAME(init(identifier:vertices:segments:));
+@end
+
 //! Immutable validated construction values. Lengths use the declared document
 //! unit; revolution parameters are degrees. No geometry or document handles.
 @interface Core3DProfileDefinition : NSObject
+//! Non-nil only for explicit line/arc profiles. Legacy outline/circle/hole
+//! properties are empty in that case; callers must present the curve editor.
+@property(nonatomic,strong,readonly,nullable) Core3DProfileCurveLoop *curveOuter;
+@property(nonatomic,copy,readonly) NSArray<Core3DProfileCurveLoop *> *curveInner;
 @property(nonatomic,copy,readonly) NSArray<NSValue *> *points;
 @property(nonatomic,copy,readonly,nullable) NSValue *circleCenter;
 @property(nonatomic,readonly) double outerRadius;
@@ -59,6 +115,11 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     holeCenters:(NSArray<NSValue *> *)holeCenters holeRadii:(NSArray<NSNumber *> *)holeRadii
     plane:(Core3DProfilePlane)plane parameter:(double)parameter revolve:(BOOL)revolve metersPerUnit:(double)metersPerUnit
     NS_SWIFT_NAME(init(points:circleCenter:outerRadius:innerRadius:holeCenters:holeRadii:plane:parameter:revolve:metersPerUnit:));
+//! At most17 loops and512 total vertices/segments with unique positive IDs.
+- (nullable instancetype)initWithCurveOuter:(Core3DProfileCurveLoop *)outer
+    inner:(NSArray<Core3DProfileCurveLoop *> *)inner plane:(Core3DProfilePlane)plane
+    parameter:(double)parameter revolve:(BOOL)revolve metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(init(curveOuter:inner:plane:parameter:revolve:metersPerUnit:));
 @end
 
 //! A read of one selected native profile. A stale profile remains inspectable
@@ -802,6 +863,13 @@ typedef struct {
 //! Suppress pending mutation; its completion returns Cancelled after the worker
 //! drains. A second measurement is Busy until then, even after cancellation.
 - (void)cancelObjectAlignment;
+//! Create from immutable validated values with explicit units. The declared
+//! unit must match the captured native document exactly; no implicit scaling.
+//! Uses the same cancellable worker and ordinary history as touch construction.
+- (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createProfile(definition:expected:completion:));
 //! Construct one solid from 3–64 non-intersecting outline points in mm, either
 //! winding, with positive depth 0.001–1,000,000 mm. One undoable creation.
 - (void)createExtrudedProfileWithPoints:(NSArray<NSValue *> *)points
@@ -1231,6 +1299,9 @@ typedef struct {
 //! These DEBUG diagnostics cannot authorize edits or persist an AI job.
 //! Diagnostic fixed-memory mutation stamp; NOT a public edit token/readiness lease.
 - (NSDictionary<NSString *, id> *_Nullable)debugNativeMutationStamp;
+//! Pure native codec diagnostic; no live document or mutation authority.
++ (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)values
+    NS_SWIFT_NAME(debugCurveProfileCodec(values:));
 //! Read-only saved construction record from the actual OCAF object.
 - (NSDictionary<NSString *, id> *_Nullable)debugStoredProfileDefinitionForEntityIdentifier:(NSString *)identifier
     NS_SWIFT_NAME(debugStoredProfileDefinition(entityIdentifier:));

@@ -7,6 +7,7 @@
 //
 
 #include "Core3DViewer.h"
+#include "../OCCTKit/ProfileCurveFace.hxx"
 
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1537,10 +1538,13 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     try {
         OCC_CATCH_SIGNALS
         double signedArea = 0, expected = 0;
-        if (!ProfileDefinitionExpectedVolume(geometry->points, geometry->circle, geometry->holes, geometry->plane,
-                geometry->depth, geometry->revolve, signedArea, expected)) { return false; }
+        if (!ProfileDefinitionExpectedVolume(*geometry, signedArea, expected)) { return false; }
         TopoDS_Face profileFace;
-        if (geometry->circle) {
+        if (geometry->curves) {
+            ProfileCurveFaceResult built;
+            if (!BuildProfileCurveFace(*geometry->curves,geometry->plane,geometry->cancelled,built)) return false;
+            profileFace=built.face;
+        } else if (geometry->circle) {
             const auto& circle = *geometry->circle;
             const gp_Pnt center = ProfilePointInPlane(circle.center, geometry->plane);
             // Orient each analytic circle in the same U/V basis as polygons.
@@ -1660,16 +1664,42 @@ struct ProfileSolidWork {
 };
 
 std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
+    const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || parameters.constructionFrame
+        || !std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit <= 0) return {};
+    try {
+        // No unit conversion or new history occurs during preparation. The
+        // captured document time also fences unit changes before commit.
+        auto work = prepareProfileSolid(parameters.definition, identity,
+            presentationRevision, width, height);
+        if (!work || work->metersPerUnit != parameters.metersPerUnit) return {};
+        return work;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
     const std::vector<gp_Pnt2d>& points, int plane, double depth,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height, bool revolve,
     const std::optional<ProfileCircularSection>& circle,
     const std::vector<ProfileCircularHole>& holes) noexcept {
+    try {
+        ProfileDefinition definition;
+        definition.points=points;definition.circle=circle;definition.holes=holes;
+        definition.plane=plane;definition.depth=depth;definition.revolve=revolve;
+        return prepareProfileSolid(definition,identity,presentationRevision,width,height);
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
+    const ProfileDefinition& definition, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || myDoc->Document().IsNull() || width == 0 || height == 0) { return {}; }
     try {
         double area = 0, volume = 0;
-        if (!ProfileDefinitionExpectedVolume(points, circle, holes, plane, depth, revolve, area, volume)) { return {}; }
+        if (!ProfileDefinitionExpectedVolume(definition, area, volume)) { return {}; }
         const auto snapshot = captureSceneSnapshot(width, height);
         if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
             || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
@@ -1678,8 +1708,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareProfileSolid(
             || snapshot->revisions.presentation != presentationRevision) { return {}; }
         auto work = std::make_shared<ProfileSolidWork>();
         if (!admitNames(work->authority)) { return {}; }
-        work->geometry->points = points; work->geometry->plane = plane; work->geometry->depth = depth;
-        work->geometry->revolve = revolve; work->geometry->circle = circle; work->geometry->holes = holes;
+        static_cast<ProfileDefinition&>(*work->geometry)=definition;
         work->identity = identity; work->presentationRevision = presentationRevision;
         work->width = width; work->height = height;
         work->owner = myDoc; work->document = myDoc->Document();
@@ -1759,8 +1788,7 @@ std::shared_ptr<ProfileSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         const auto label = myDoc->ShapeLabel(selected);
         if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)) return {};
         const auto& d = parameters.definition;
-        auto work = prepareProfileSolid(d.points, d.plane, d.depth, identity,
-            presentationRevision, width, height, d.revolve, d.circle, d.holes);
+        auto work = prepareProfileSolid(d, identity, presentationRevision, width, height);
         if (!work) return {};
         work->geometry->constructionFrame = parameters.constructionFrame;
         record.requested.label = label; record.requested.presentation = selected;

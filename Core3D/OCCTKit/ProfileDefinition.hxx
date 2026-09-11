@@ -3,6 +3,7 @@
 // Shared construction inputs and validation for touch-authored profiles,
 // persistent native features and future typed modeling commands. Validation
 // has no viewport, document mutation or UI ownership dependency.
+#include "ProfileCurveAdmission.hxx"
 #include <gp_Pnt2d.hxx>
 #include <gp_Pnt.hxx>
 #include <algorithm>
@@ -22,6 +23,7 @@ struct ProfileCircularHole {
 };
 
 struct ProfileDefinition {
+    std::optional<ProfileCurveSection> curves; // Explicit authored line/arc loops.
     std::vector<gp_Pnt2d> points;
     std::optional<ProfileCircularSection> circle;
     std::vector<ProfileCircularHole> holes;
@@ -172,6 +174,30 @@ inline bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
         volume = signedArea * parameter;
     }
     return std::isfinite(volume) && volume > 0;
+}
+
+// One typed entry point preserves all existing polygon/circular behavior.
+// Curves cannot carry a simultaneous legacy outline or hole payload.
+inline bool ProfileDefinitionExpectedVolume(const ProfileDefinition& definition,
+    double& signedArea, double& volume) {
+    signedArea=0;volume=0;
+    if (!definition.curves)
+        return ProfileDefinitionExpectedVolume(definition.points,definition.circle,definition.holes,
+            definition.plane,definition.depth,definition.revolve,signedArea,volume);
+    if (!definition.points.empty() || definition.circle || !definition.holes.empty()
+        || definition.plane<0 || definition.plane>2 || !std::isfinite(definition.depth)
+        || definition.depth<1e-3 || definition.depth>(definition.revolve?360.0:1e6)) return false;
+    ProfileCurveSectionInspection inspection;
+    if (!InspectProfileCurveSection(*definition.curves,inspection)) return false;
+    double expected=inspection.area*definition.depth;
+    if (definition.revolve) {
+        // Authored U is radial in each existing work-plane mapping. A section
+        // crossing the axis would sweep overlapping material and is refused.
+        if (inspection.outerBounds[0]<0) return false;
+        expected=inspection.firstMomentX*(definition.depth*std::acos(-1.0)/180.0);
+    }
+    if (!std::isfinite(expected) || expected<=1e-8) return false;
+    signedArea=inspection.area;volume=expected;return true;
 }
 
 inline gp_Pnt ProfilePointInPlane(const gp_Pnt2d& p, int plane) {

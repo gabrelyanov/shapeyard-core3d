@@ -34,7 +34,18 @@ inline const Standard_GUID& CountID() {
     static const Standard_GUID id("6085D37B-E101-4F09-95B3-8AFA6E1D08A3"); return id;
 }
 inline constexpr int MaximumLegacyScalars = 7 + 64 * 2 + 16 * 3;
-inline constexpr int MaximumScalars = MaximumLegacyScalars + 8;
+inline constexpr int MaximumFramedLegacyScalars = MaximumLegacyScalars + 8;
+inline constexpr int MaximumCurveScalars = 7 + 3 * 17 + 3 * 512 + 9 * 512;
+inline constexpr int MaximumScalars = MaximumCurveScalars + 8;
+inline int ScalarLimitForSchema(int schema) {
+    switch (schema) {
+        case 1: return MaximumLegacyScalars;
+        case 2: return MaximumFramedLegacyScalars;
+        case 3: return MaximumCurveScalars;
+        case 4: return MaximumScalars;
+        default: return 0;
+    }
+}
 inline constexpr int MaximumLabels = 100000;
 inline constexpr int MaximumRecords = 4096;
 
@@ -44,14 +55,38 @@ struct Parameters {
     std::optional<ConstructionFrame> constructionFrame;
 };
 
+inline int SchemaFor(const Parameters& parameters) {
+    return (parameters.definition.curves ? 3 : 1) + (parameters.constructionFrame ? 1 : 0);
+}
+
 inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
     values.clear();
     const auto& d = parameters.definition;
     double area = 0, volume = 0;
     if (!std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit <= 0
-        || !ProfileDefinitionExpectedVolume(d.points, d.circle, d.holes,
-            d.plane, d.depth, d.revolve, area, volume)) return false;
+        || !ProfileDefinitionExpectedVolume(d, area, volume)) return false;
     if (parameters.constructionFrame && !parameters.constructionFrame->IsValid()) return false;
+    if (d.curves) {
+        values = {double(d.plane),d.depth,d.revolve?1.0:0.0,2.0,
+            double(1+d.curves->inner.size()),parameters.constructionFrame?1.0:0.0,
+            parameters.metersPerUnit};
+        const auto appendLoop = [&](const ProfileCurveLoop& loop) {
+            values.insert(values.end(),{double(loop.identifier),double(loop.vertices.size()),
+                double(loop.segments.size())});
+            for (const auto& vertex:loop.vertices)
+                values.insert(values.end(),{double(vertex.identifier),vertex.point.X(),vertex.point.Y()});
+            for (const auto& edge:loop.segments)
+                values.insert(values.end(),{double(edge.identifier),double(static_cast<int>(edge.kind)),
+                    double(edge.startVertex),double(edge.endVertex),edge.center.X(),edge.center.Y(),
+                    edge.radius,edge.startDegrees,edge.sweepDegrees});
+        };
+        appendLoop(d.curves->outer);
+        for (const auto& loop:d.curves->inner) appendLoop(loop);
+        if (parameters.constructionFrame)
+            values.insert(values.end(),parameters.constructionFrame->values.begin(),
+                parameters.constructionFrame->values.end());
+        return values.size()<=std::size_t(ScalarLimitForSchema(SchemaFor(parameters)));
+    }
     values = {double(d.plane), d.depth, d.revolve ? 1.0 : 0.0,
         d.circle ? 1.0 : 0.0, double(d.points.size()), double(d.holes.size()),
         parameters.metersPerUnit};
@@ -68,13 +103,72 @@ inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
     if (parameters.constructionFrame)
         values.insert(values.end(), parameters.constructionFrame->values.begin(),
                       parameters.constructionFrame->values.end());
-    return values.size() <= MaximumScalars;
+    return values.size() <= std::size_t(ScalarLimitForSchema(SchemaFor(parameters)));
+}
+
+inline bool DecodeCurves(const std::vector<double>& values, Parameters& result) {
+    result={};
+    if (values.size()<7 || values.size()>MaximumScalars) return false;
+    for (double value:values) if (!std::isfinite(value)) return false;
+    const auto integer=[](double v,double low,double high) {
+        return v>=low && v<=high && v==std::floor(v);
+    };
+    if (!integer(values[0],0,2) || !integer(values[2],0,1) || values[3]!=2
+        || !integer(values[4],1,17) || !integer(values[5],0,1)) return false;
+    const bool framed=values[5]==1;
+    if (values.size()>std::size_t(framed?MaximumScalars:MaximumCurveScalars)) return false;
+    const auto identity=[&](double value) {
+        return integer(value,1,double(std::numeric_limits<ProfileCurveID>::max()));
+    };
+    Parameters p;
+    p.metersPerUnit=values[6];p.definition.plane=int(values[0]);
+    p.definition.depth=values[1];p.definition.revolve=values[2]==1;
+    ProfileCurveSection section;
+    std::size_t offset=7,totalVertices=0,totalSegments=0;
+    for (int i=0;i<int(values[4]);++i) {
+        if (values.size()-offset<3) return false;
+        if (!identity(values[offset]) || !integer(values[offset+1],2,512)
+            || !integer(values[offset+2],2,512) || values[offset+1]!=values[offset+2]) return false;
+        ProfileCurveLoop loop;loop.identifier=ProfileCurveID(values[offset]);
+        const std::size_t vertices=std::size_t(values[offset+1]),segments=std::size_t(values[offset+2]);
+        offset+=3;
+        if (vertices>512-totalVertices || segments>512-totalSegments
+            || 3*vertices+9*segments>values.size()-offset) return false;
+        totalVertices+=vertices;totalSegments+=segments;
+        loop.vertices.reserve(vertices);loop.segments.reserve(segments);
+        for (std::size_t j=0;j<vertices;++j,offset+=3) {
+            if (!identity(values[offset])) return false;
+            loop.vertices.push_back({ProfileCurveID(values[offset]),gp_Pnt2d(values[offset+1],values[offset+2])});
+        }
+        for (std::size_t j=0;j<segments;++j,offset+=9) {
+            if (!identity(values[offset]) || !integer(values[offset+1],0,1)
+                || !identity(values[offset+2]) || !identity(values[offset+3])) return false;
+            ProfileCurveSegment edge;
+            edge.identifier=ProfileCurveID(values[offset]);edge.kind=ProfileCurveKind(int(values[offset+1]));
+            edge.startVertex=ProfileCurveID(values[offset+2]);edge.endVertex=ProfileCurveID(values[offset+3]);
+            edge.center=gp_Pnt2d(values[offset+4],values[offset+5]);edge.radius=values[offset+6];
+            edge.startDegrees=values[offset+7];edge.sweepDegrees=values[offset+8];
+            loop.segments.push_back(edge);
+        }
+        if (i==0) section.outer=std::move(loop);else section.inner.push_back(std::move(loop));
+    }
+    if (values.size()-offset!=(framed?8u:0u)) return false;
+    if (framed) {
+        ConstructionFrame frame;std::copy_n(values.begin()+offset,8,frame.values.begin());
+        if (!frame.IsValid()) return false;p.constructionFrame=frame;
+    }
+    p.definition.curves=std::move(section);
+    std::vector<double> encoded;
+    if (!Encode(p,encoded) || encoded!=values) return false;
+    result=std::move(p);return true;
 }
 
 inline bool Decode(const std::vector<double>& values, Parameters& result) {
     result = {};
     if (values.size() < 7 || values.size() > MaximumScalars) return false;
     for (double value : values) if (!std::isfinite(value)) return false;
+    if (values[3]==2) return DecodeCurves(values,result);
+    if (values.size()>MaximumFramedLegacyScalars) return false;
     const auto integer = [](double value, int maximum) {
         return value >= 0 && value <= maximum && value == std::floor(value);
     };
@@ -165,11 +259,11 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
         Handle(TDataStd_Integer) schema, count;
         Handle(TDataStd_AsciiString) identity;
         Handle(TNaming_NamedShape) binding;
-        if (!label.FindAttribute(SchemaID(), schema) || (schema->Get() != 1 && schema->Get() != 2)
+        if (!label.FindAttribute(SchemaID(), schema) || ScalarLimitForSchema(schema->Get()) == 0
             || !label.FindAttribute(CountID(), count) || count->Get() < 7 || count->Get() > MaximumScalars
             || !label.FindAttribute(IdentityID(), identity)
             || !label.FindAttribute(TNaming_NamedShape::GetID(), binding)) return false;
-        const int scalarLimit = schema->Get() == 1 ? MaximumLegacyScalars : MaximumScalars;
+        const int scalarLimit = ScalarLimitForSchema(schema->Get());
         if (count->Get() > scalarLimit) return false;
         record.identifier = identity->Get().ToCString();
         if (!IsIdentifier(record.identifier)) return false;
@@ -181,17 +275,16 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
                 && id != TNaming_NamedShape::GetID()) return false;
         }
         record.values.resize(count->Get());
-        int present = 0, childrenInspected = 0, descendantsInspected = 0;
+        int present = 0, childrenInspected = 0;
         for (TDF_ChildIterator it(label, Standard_False); it.More(); it.Next()) {
             const auto child = it.Value();
-            if (++childrenInspected > scalarLimit || child.Tag() < 1
-                || child.Tag() > scalarLimit) return false;
+            if (++childrenInspected > MaximumLabels || child.Tag() < 1) return false;
             // OCAF aborts attributes, but allocated labels survive the transaction.
             // Empty descendants carry no recipe data; any live attribute is invalid.
             for (TDF_ChildIterator nested(child, Standard_True); nested.More(); nested.Next())
-                if (++descendantsInspected > MaximumLabels || nested.Value().HasAttribute()) return false;
+                if (++childrenInspected > MaximumLabels || nested.Value().HasAttribute()) return false;
             if (!child.HasAttribute()) continue; // Empty labels from a shorter later recipe.
-            if (child.Tag() < 1 || child.Tag() > count->Get()) return false;
+            if (child.Tag() > scalarLimit || child.Tag() > count->Get()) return false;
             Handle(TDataStd_Real) scalar;
             if (!child.FindAttribute(TDataStd_Real::GetID(), scalar) || !std::isfinite(scalar->Get())) return false;
             for (TDF_AttributeIterator attr(child); attr.More(); attr.Next())
@@ -199,7 +292,7 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
             record.values[child.Tag() - 1] = scalar->Get(); ++present;
         }
         if (present != count->Get() || !Decode(record.values, record.parameters)
-            || schema->Get() != (record.parameters.constructionFrame ? 2 : 1)) return false;
+            || schema->Get() != SchemaFor(record.parameters)) return false;
         output = std::move(record); return true;
     } catch (...) { output = {}; return false; }
 }
@@ -227,7 +320,7 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
             if (maximumTag == std::numeric_limits<int>::max()) return false;
             label = owner.FindChild(maximumTag + 1, Standard_True);
         }
-        TDataStd_Integer::Set(label, SchemaID(), parameters.constructionFrame ? 2 : 1);
+        TDataStd_Integer::Set(label, SchemaID(), SchemaFor(parameters));
         TDataStd_Integer::Set(label, CountID(), int(values.size()));
         TDataStd_AsciiString::Set(label, IdentityID(), TCollection_AsciiString(identifier.c_str()));
         TNaming_Builder(label).Select(shape, shape);
@@ -295,7 +388,7 @@ inline bool StageIndependentCopy(const Handle(TDocStd_Document)& document,
             maximumTag = std::max(maximumTag, it.Value().Tag());
         if (maximumTag == std::numeric_limits<int>::max()) return false;
         const auto label = destinationOwner.FindChild(maximumTag + 1, Standard_True);
-        TDataStd_Integer::Set(label, SchemaID(), destinationParameters.constructionFrame ? 2 : 1);
+        TDataStd_Integer::Set(label, SchemaID(), SchemaFor(destinationParameters));
         TDataStd_Integer::Set(label, CountID(), int(encoded.size()));
         TDataStd_AsciiString::Set(label, IdentityID(), TCollection_AsciiString(newIdentifier.c_str()));
         TNaming_Builder(label).Select(preparedBinding, preparedBinding);
