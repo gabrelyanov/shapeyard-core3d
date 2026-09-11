@@ -86,6 +86,16 @@ __attribute__((objc_subclassing_restricted))
     vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
     segments:(NSArray<Core3DProfileCurveSegment *> *)segments
     NS_SWIFT_NAME(init(identifier:vertices:segments:));
+//! Presets return explicit editable curves. The caller supplies stable IDs;
+//! assembling a profile still validates cross-loop identity and clearance.
++ (nullable Core3DProfileCurveLoop *)roundedRectangleWithMinimum:(CGPoint)minimum
+    maximum:(CGPoint)maximum radius:(double)radius identifier:(uint32_t)identifier
+    vertexIdentifiers:(NSArray<NSNumber *> *)vertices segmentIdentifiers:(NSArray<NSNumber *> *)segments
+    NS_SWIFT_NAME(roundedRectangle(minimum:maximum:radius:identifier:vertexIdentifiers:segmentIdentifiers:));
++ (nullable Core3DProfileCurveLoop *)capsuleWithCenter:(CGPoint)center length:(double)length
+    diameter:(double)diameter rotationDegrees:(double)rotationDegrees identifier:(uint32_t)identifier
+    vertexIdentifiers:(NSArray<NSNumber *> *)vertices segmentIdentifiers:(NSArray<NSNumber *> *)segments
+    NS_SWIFT_NAME(capsule(center:length:diameter:rotationDegrees:identifier:vertexIdentifiers:segmentIdentifiers:));
 @end
 
 //! Immutable validated construction values. Lengths use the declared document

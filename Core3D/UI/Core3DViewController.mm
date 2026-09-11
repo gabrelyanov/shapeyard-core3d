@@ -1,3 +1,4 @@
+#include "../OCCTKit/ProfileCurvePresets.hxx"
 #import "../OCCTKit/GLViewController+QueuedAssetLoading.h"
 #import "../OCCTKit/Core3DQueuedAssetRequest.h"
 #if DEBUG
@@ -763,6 +764,28 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 @end
 
+static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveLoop& loop);
+template<std::size_t N>
+static bool Core3DProfilePresetIdentifiers(uint32_t loopID,
+    NSArray<NSNumber *> *vertices, NSArray<NSNumber *> *segments,
+    core3d::ProfileCurvePresetIDs<N>& output) {
+    if (loopID == 0 || ![vertices isKindOfClass:[NSArray class]]
+        || ![segments isKindOfClass:[NSArray class]]
+        || vertices.count != N || segments.count != N) return false;
+    const auto read = [](id value, core3d::ProfileCurveID& identifier) {
+        if (![value isKindOfClass:[NSNumber class]]) return false;
+        const double scalar = [value doubleValue];
+        if (!std::isfinite(scalar) || scalar < 1 || std::floor(scalar) != scalar
+            || scalar > std::numeric_limits<std::uint32_t>::max()) return false;
+        identifier = static_cast<std::uint32_t>(scalar); return true;
+    };
+    core3d::ProfileCurvePresetIDs<N> result; result.loop = loopID;
+    for (std::size_t i = 0; i < N; ++i)
+        if (!read(vertices[i],result.vertices[i]) || !read(segments[i],result.segments[i])) return false;
+    output = result; return true;
+}
+
+
 @interface Core3DProfileCurveLoop ()
 - (core3d::ProfileCurveLoop)nativeLoop;
 @end
@@ -805,6 +828,32 @@ void Core3DAddDebugOrphanVisualMaterial(
     } catch (...) { return nil; }
 }
 - (core3d::ProfileCurveLoop)nativeLoop { return _native; }
++ (Core3DProfileCurveLoop *)roundedRectangleWithMinimum:(CGPoint)minimum
+    maximum:(CGPoint)maximum radius:(double)radius identifier:(uint32_t)identifier
+    vertexIdentifiers:(NSArray<NSNumber *> *)vertices segmentIdentifiers:(NSArray<NSNumber *> *)segments {
+    try {
+        core3d::ProfileCurvePresetIDs<8> ids;
+        core3d::ProfileCurveLoop loop;
+        if (!Core3DProfilePresetIdentifiers(identifier,vertices,segments,ids)
+            || !core3d::BuildRoundedRectangleProfileLoop(gp_Pnt2d(minimum.x,minimum.y),
+                gp_Pnt2d(maximum.x,maximum.y),radius,ids,loop)) return nil;
+        return Core3DPublicCurveLoop(loop);
+    } catch (...) { return nil; }
+}
+
++ (Core3DProfileCurveLoop *)capsuleWithCenter:(CGPoint)center length:(double)length
+    diameter:(double)diameter rotationDegrees:(double)rotationDegrees identifier:(uint32_t)identifier
+    vertexIdentifiers:(NSArray<NSNumber *> *)vertices segmentIdentifiers:(NSArray<NSNumber *> *)segments {
+    try {
+        core3d::ProfileCurvePresetIDs<4> ids;
+        core3d::ProfileCurveLoop loop;
+        if (!Core3DProfilePresetIdentifiers(identifier,vertices,segments,ids)
+            || !core3d::BuildCapsuleProfileLoop(gp_Pnt2d(center.x,center.y),length,
+                diameter,rotationDegrees,ids,loop)) return nil;
+        return Core3DPublicCurveLoop(loop);
+    } catch (...) { return nil; }
+}
+
 @end
 
 static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveLoop& loop) {
