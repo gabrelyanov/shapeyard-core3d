@@ -181,11 +181,15 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
                 && id != TNaming_NamedShape::GetID()) return false;
         }
         record.values.resize(count->Get());
-        int present = 0, childrenInspected = 0;
+        int present = 0, childrenInspected = 0, descendantsInspected = 0;
         for (TDF_ChildIterator it(label, Standard_False); it.More(); it.Next()) {
             const auto child = it.Value();
             if (++childrenInspected > scalarLimit || child.Tag() < 1
-                || child.Tag() > scalarLimit || child.HasChild()) return false;
+                || child.Tag() > scalarLimit) return false;
+            // OCAF aborts attributes, but allocated labels survive the transaction.
+            // Empty descendants carry no recipe data; any live attribute is invalid.
+            for (TDF_ChildIterator nested(child, Standard_True); nested.More(); nested.Next())
+                if (++descendantsInspected > MaximumLabels || nested.Value().HasAttribute()) return false;
             if (!child.HasAttribute()) continue; // Empty labels from a shorter later recipe.
             if (child.Tag() < 1 || child.Tag() > count->Get()) return false;
             Handle(TDataStd_Real) scalar;

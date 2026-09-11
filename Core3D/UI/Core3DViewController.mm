@@ -4081,7 +4081,7 @@ void Core3DAddDebugOrphanVisualMaterial(
 }
 
 - (BOOL)debugStoredProfileRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier {
-    if (![NSThread isMainThread] || mode < 1 || mode > 18 || identifier.length == 0
+    if (![NSThread isMainThread] || mode < 1 || mode > 19 || identifier.length == 0
         || GLController == nil || GLController.viewer == nullptr) return NO;
     Handle(TDocStd_Document) document;
     bool opened = false;
@@ -4122,6 +4122,7 @@ void Core3DAddDebugOrphanVisualMaterial(
             case 16: TDataStd_Real::Set(before.label.FindChild(frameStart, Standard_False), std::numeric_limits<double>::quiet_NaN()); break;
             case 17: TDataStd_Integer::Set(before.label.FindChild(frameStart, Standard_False), 1); break;
             case 18: TDataStd_Real::Set(before.label.FindChild(frameStart, Standard_False).FindChild(1, Standard_True), 1); break;
+            case 19: TDataStd_Real::Set(before.label.FindChild(frameStart, Standard_False).FindChild(1, Standard_True).FindChild(1, Standard_True), 1); break;
         }
         const bool rejected = !owner->ValidateGeometryRepresentations();
         document->AbortCommand(); opened = false;
