@@ -45,6 +45,14 @@ namespace core3d {
         std::uint64_t modelRevision = 0;
     };
 
+    //! Identity of a presentation-only Ready mirror framing request.
+    //! Snapshot serials advance on capture; compare stable revision domains.
+    struct MirrorPreviewFrameIdentity {
+        std::string publicationSourceIdentifier;
+        scene::RevisionVector revisions;
+        std::uint64_t previewGeneration = 0;
+    };
+
     struct NativeSolidWork;
     struct ProfileSolidGeometry;
     struct EnclosureSolidGeometry;
@@ -312,6 +320,12 @@ namespace core3d {
                         double targetX = 0.0, double targetY = 0.0,
                         double targetWidth = 1.0, double targetHeight = 1.0,
                         const ObjectFrameIdentity* objectIdentity = nullptr) noexcept;
+        //! Fit selected committed sources plus an exact Ready axis preview.
+        //! Never changes the document, selection, operation or model history.
+        bool frameMirrorPreview(const MirrorPreviewFrameIdentity& expected,
+                        std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+                        double targetX, double targetY,
+                        double targetWidth, double targetHeight) noexcept;
 
         //! Select one exact, visible, editable object from a current browser
         //! lease. Keeps camera and model history; updates the selection gizmo.

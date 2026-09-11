@@ -4189,13 +4189,10 @@ bool Core3DViewer::selectObjectFromBrowser(
     }
 }
 
-bool Core3DViewer::frameModel(
-    const bool selectedObjectsOnly,
-    const std::uint32_t viewportWidth,
-    const std::uint32_t viewportHeight,
-    const double targetX, const double targetY,
-    const double targetWidth, const double targetHeight,
-    const ObjectFrameIdentity* objectIdentity) noexcept {
+// Shared camera math only. Admission and authoritative bounds remain with
+// each caller; a failed fit restores the exact previous camera.
+static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bounds,
+    double targetX, double targetY, double targetWidth, double targetHeight) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -4204,62 +4201,16 @@ bool Core3DViewer::frameModel(
         || targetX + targetWidth > 1.0 || targetY + targetHeight > 1.0) {
         return false;
     }
-    if (![NSThread isMainThread] || !canBeginCommittedEdit()
-        || myView.IsNull() || myContext.IsNull()
-        || viewportWidth == 0 || viewportHeight == 0) {
-        return false;
-    }
+    if (view.IsNull() || view->Camera().IsNull()
+        || bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
     Handle(Graphic3d_Camera) previousCamera;
     bool cameraWasMutated = false;
     try {
         OCC_CATCH_SIGNALS
-        // Reuse the bounded, document-authoritative extraction contract. This
-        // reads existing triangulations only and excludes gizmos/preview actors.
-        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
-        if (snapshot == nullptr
-            || (selectedObjectsOnly
-                && snapshot->selectionMode != scene::ElementKind::Object)) {
-            return false;
-        }
-        if (objectIdentity != nullptr
-            && (selectedObjectsOnly || objectIdentity->entityIdentifier.empty()
-                || objectIdentity->publicationSourceIdentifier
-                    != snapshot->publicationSourceIdentifier
-                || objectIdentity->documentGeneration
-                    != snapshot->revisions.documentGeneration
-                || objectIdentity->modelRevision != snapshot->revisions.model)) {
-            return false;
-        }
-        Bnd_Box bounds;
-        for (const auto& instance : snapshot->instances) {
-            if (!instance.visible || instance.role != scene::RenderRole::Model
-                || (selectedObjectsOnly && !instance.selected)
-                || (objectIdentity != nullptr && instance.entityIdentifier
-                    != objectIdentity->entityIdentifier)) {
-                continue;
-            }
-            if (instance.meshIndex >= snapshot->meshes.size()) { return false; }
-            const auto& local = snapshot->meshes[instance.meshIndex].localBounds;
-            if (!local.valid) { return false; }
-            const auto& m = instance.worldFromObject.values;
-            for (const double x : {local.minimum.x, local.maximum.x}) {
-                for (const double y : {local.minimum.y, local.maximum.y}) {
-                    for (const double z : {local.minimum.z, local.maximum.z}) {
-                        const double wx = m[0]*x + m[4]*y + m[8]*z + m[12];
-                        const double wy = m[1]*x + m[5]*y + m[9]*z + m[13];
-                        const double wz = m[2]*x + m[6]*y + m[10]*z + m[14];
-                        if (!std::isfinite(wx) || !std::isfinite(wy)
-                            || !std::isfinite(wz)) { return false; }
-                        bounds.Add(gp_Pnt(wx, wy, wz));
-                    }
-                }
-            }
-        }
-        if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
-        previousCamera = new Graphic3d_Camera(myView->Camera());
+        previousCamera = new Graphic3d_Camera(view->Camera());
         cameraWasMutated = true;
-        myView->FitAll(bounds, 0.15, Standard_False);
-        const auto& camera = myView->Camera();
+        view->FitAll(bounds, 0.15, Standard_False);
+        const auto& camera = view->Camera();
         {
             // Verify full-viewport fits too: FitAll alone can clip tall
             // perspective models. Keep projection, aspect and orientation
@@ -4308,7 +4259,7 @@ bool Core3DViewer::frameModel(
                 return false;
             }
         }
-        myView->ZFitAll();
+        view->ZFitAll();
         const gp_Pnt eye = camera->Eye();
         const gp_Pnt center = camera->Center();
         const gp_Dir up = camera->Up();
@@ -4318,22 +4269,187 @@ bool Core3DViewer::frameModel(
                                    camera->Distance(), camera->ZNear(),
                                    camera->ZFar()}) {
             if (!std::isfinite(value)) {
-                myView->Camera()->Copy(previousCamera);
+                view->Camera()->Copy(previousCamera);
                 return false;
             }
         }
         if (camera->Scale() <= 0.0 || camera->Distance() <= 0.0
             || camera->ZFar() <= camera->ZNear()) {
-            myView->Camera()->Copy(previousCamera);
+            view->Camera()->Copy(previousCamera);
             return false;
         }
         return true;
     } catch (...) {
         if (cameraWasMutated && !previousCamera.IsNull()) {
-            try { myView->Camera()->Copy(previousCamera); } catch (...) {}
+            try { view->Camera()->Copy(previousCamera); } catch (...) {}
         }
         return false;
     }
+}
+
+bool Core3DViewer::frameModel(
+    const bool selectedObjectsOnly,
+    const std::uint32_t viewportWidth,
+    const std::uint32_t viewportHeight,
+    const double targetX, const double targetY,
+    const double targetWidth, const double targetHeight,
+    const ObjectFrameIdentity* objectIdentity) noexcept {
+    // Target coordinates are normalized to the full viewport, origin top-left.
+    if (!std::isfinite(targetX) || !std::isfinite(targetY)
+        || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
+        || targetX < 0.0 || targetY < 0.0
+        || targetWidth <= 0.0 || targetHeight <= 0.0
+        || targetX + targetWidth > 1.0 || targetY + targetHeight > 1.0) {
+        return false;
+    }
+    if (![NSThread isMainThread] || !canBeginCommittedEdit()
+        || myView.IsNull() || myContext.IsNull()
+        || viewportWidth == 0 || viewportHeight == 0) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        // Reuse the bounded, document-authoritative extraction contract. This
+        // reads existing triangulations only and excludes gizmos/preview actors.
+        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
+        if (snapshot == nullptr
+            || (selectedObjectsOnly
+                && snapshot->selectionMode != scene::ElementKind::Object)) {
+            return false;
+        }
+        if (objectIdentity != nullptr
+            && (selectedObjectsOnly || objectIdentity->entityIdentifier.empty()
+                || objectIdentity->publicationSourceIdentifier
+                    != snapshot->publicationSourceIdentifier
+                || objectIdentity->documentGeneration
+                    != snapshot->revisions.documentGeneration
+                || objectIdentity->modelRevision != snapshot->revisions.model)) {
+            return false;
+        }
+        Bnd_Box bounds;
+        for (const auto& instance : snapshot->instances) {
+            if (!instance.visible || instance.role != scene::RenderRole::Model
+                || (selectedObjectsOnly && !instance.selected)
+                || (objectIdentity != nullptr && instance.entityIdentifier
+                    != objectIdentity->entityIdentifier)) {
+                continue;
+            }
+            if (instance.meshIndex >= snapshot->meshes.size()) { return false; }
+            const auto& local = snapshot->meshes[instance.meshIndex].localBounds;
+            if (!local.valid) { return false; }
+            const auto& m = instance.worldFromObject.values;
+            for (const double x : {local.minimum.x, local.maximum.x}) {
+                for (const double y : {local.minimum.y, local.maximum.y}) {
+                    for (const double z : {local.minimum.z, local.maximum.z}) {
+                        const double wx = m[0]*x + m[4]*y + m[8]*z + m[12];
+                        const double wy = m[1]*x + m[5]*y + m[9]*z + m[13];
+                        const double wz = m[2]*x + m[6]*y + m[10]*z + m[14];
+                        if (!std::isfinite(wx) || !std::isfinite(wy)
+                            || !std::isfinite(wz)) { return false; }
+                        bounds.Add(gp_Pnt(wx, wy, wz));
+                    }
+                }
+            }
+        }
+        if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
+        return FitCameraToBounds(myView, bounds,
+            targetX, targetY, targetWidth, targetHeight);
+    } catch (...) { return false; }
+}
+
+bool Core3DViewer::frameMirrorPreview(
+    const MirrorPreviewFrameIdentity& expected,
+    const std::uint32_t viewportWidth, const std::uint32_t viewportHeight,
+    const double targetX, const double targetY,
+    const double targetWidth, const double targetHeight) noexcept {
+    // Target coordinates are normalized to the full viewport, origin top-left.
+    if (!std::isfinite(targetX) || !std::isfinite(targetY)
+        || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
+        || targetX < 0.0 || targetY < 0.0
+        || targetWidth <= 0.0 || targetHeight <= 0.0
+        || targetX + targetWidth > 1.0 || targetY + targetHeight > 1.0) {
+        return false;
+    }
+    if (![NSThread isMainThread] || viewportWidth == 0 || viewportHeight == 0
+        || myView.IsNull() || myContext.IsNull() || myDoc.IsNull()
+        || !_objectInteractor || !_shapeInteractor || hasUnresolvedEdit()
+        || expected.publicationSourceIdentifier.empty()
+        || expected.publicationSourceIdentifier.size() > 128
+        || expected.publicationSourceIdentifier.find('\0') != std::string::npos) {
+        return false;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        // An active Ready mirror is intentionally admitted here, never through
+        // canBeginCommittedEdit or the committed Frame All operation.
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()
+            || !_objectInteractor->canFrameMirrorPreview(expected.previewGeneration)
+            || _objectInteractor->hasActiveBoolean()
+            || _objectInteractor->hasUnresolvedBoolean()
+            || _objectInteractor->hasActiveLinearArray()
+            || _objectInteractor->hasUnresolvedLinearArray()
+            || _objectInteractor->hasActiveRadialArray()
+            || _objectInteractor->hasUnresolvedRadialArray()
+            || _shapeInteractor->hasActiveBevel()
+            || _shapeInteractor->hasActiveExtrusion()
+            || _shapeInteractor->hasActiveShell()
+            || _shapeInteractor->hasUnresolvedShell()) { return false; }
+        const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
+        if (!snapshot || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->publicationSourceIdentifier != expected.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != expected.revisions.documentGeneration
+            || snapshot->revisions.model != expected.revisions.model
+            || snapshot->revisions.presentation != expected.revisions.presentation
+            || snapshot->revisions.camera != expected.revisions.camera) { return false; }
+        const auto overlay = captureScenePresentationOverlay();
+        if (!overlay || overlay->kind != scene::PresentationOverlayKind::MirrorPreview
+            || overlay->publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+            || overlay->baseSnapshotRevision != snapshot->revisions.snapshot
+            || overlay->baseDocumentGeneration != snapshot->revisions.documentGeneration
+            || overlay->baseModelRevision != snapshot->revisions.model
+            || overlay->basePresentationRevision != snapshot->revisions.presentation
+            || !overlay->suppressedEntityIdentifiers.empty()) { return false; }
+        Bnd_Box bounds;
+        const auto addBounds = [&bounds](const scene::InstanceSnapshot& item,
+            const std::vector<scene::MeshSnapshot>& meshes) {
+            if (item.coordinateSpace != scene::CoordinateSpace::World
+                || item.meshIndex >= meshes.size()) { return false; }
+            const auto& local = meshes[item.meshIndex].localBounds;
+            if (!local.valid) { return false; }
+            const auto& m = item.worldFromObject.values;
+            for (const double x : {local.minimum.x, local.maximum.x}) {
+                for (const double y : {local.minimum.y, local.maximum.y}) {
+                    for (const double z : {local.minimum.z, local.maximum.z}) {
+                        const double wx = m[0]*x + m[4]*y + m[8]*z + m[12];
+                        const double wy = m[1]*x + m[5]*y + m[9]*z + m[13];
+                        const double wz = m[2]*x + m[6]*y + m[10]*z + m[14];
+                        if (!std::isfinite(wx) || !std::isfinite(wy)
+                            || !std::isfinite(wz)) { return false; }
+                        bounds.Add(gp_Pnt(wx, wy, wz));
+                    }
+                }
+            }
+            return true;
+        };
+        std::size_t sourceCount = 0, previewCount = 0;
+        for (const auto& item : snapshot->instances) {
+            if (!item.visible || !item.selected || item.role != scene::RenderRole::Model) { continue; }
+            if (!addBounds(item, snapshot->meshes)) { return false; }
+            ++sourceCount;
+        }
+        for (const auto& item : overlay->instances) {
+            // The validated six leading plane handles have Gizmo role and
+            // pixel-space bounds; include only world-space result geometry.
+            if (!item.visible || item.role != scene::RenderRole::MirrorPreview) { continue; }
+            if (!addBounds(item, overlay->meshes)) { return false; }
+            ++previewCount;
+        }
+        if (sourceCount == 0 || previewCount == 0
+            || !_objectInteractor->canFrameMirrorPreview(expected.previewGeneration)) { return false; }
+        return FitCameraToBounds(myView, bounds,
+            targetX, targetY, targetWidth, targetHeight);
+    } catch (...) { return false; }
 }
 
 bool Core3DViewer::setCameraOrthographic(const bool orthographic) noexcept {

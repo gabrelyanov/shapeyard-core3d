@@ -390,6 +390,9 @@ namespace core3d {
 		const bool canApplyMirror() const noexcept;
 		MirrorPreviewState mirrorPreviewState() const noexcept;
 		std::uint64_t mirrorPreviewGeneration() const noexcept;
+        //! Read-only axis-preview authority check; unlike canApplyMirror,
+        //! outcome-unknown reconciliation is never admitted for camera work.
+        bool canFrameMirrorPreview(std::uint64_t expectedGeneration) const noexcept;
 #ifdef DEBUG
 		//! Inject Duplicate recovery behavior: 0 normal, 1 false-after-close,
 		//! 2 throw-after-close, 3 fail the first post-commit presentation repair.

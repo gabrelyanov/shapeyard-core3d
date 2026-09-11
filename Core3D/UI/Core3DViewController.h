@@ -847,6 +847,14 @@ typedef struct {
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)normalizedViewportRect
     NS_SWIFT_NAME(frameObject(entityIdentifier:expected:normalizedViewportRect:));
+//! Fit selected source objects and an exact Ready axis-mirror preview without
+//! changing geometry, selection, preview generation or Undo history. Rejects
+//! stale scene/camera/drawable identity and retains the old camera on failure.
+//! Custom reference-plane preview framing is not admitted by this contract.
+- (BOOL)frameMirrorPreviewWithExpected:(Core3DSceneSnapshot *)expected
+                           generation:(uint64_t)generation
+               normalizedViewportRect:(CGRect)normalizedViewportRect
+    NS_SWIFT_NAME(frameMirrorPreview(expected:generation:normalizedViewportRect:));
 //! Replace whole-object selection with one visible editable browser entry.
 //! Requires Object mode and the same publication/document/model identity.
 //! Does not move the camera or create a model-history entry.
@@ -1199,6 +1207,9 @@ typedef struct {
 //! Commit a persisted transform change behind the active Mirror snapshot while
 //! leaving its presentation untouched, proving Apply rejects stale sources.
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform;
+//! Deliberately clear selection behind a Ready axis-preview ledger, proving
+//! camera admission rejects source/selection drift without changing recovery.
+- (BOOL)debugClearReadyMirrorSourceSelection;
 - (BOOL)debugTryMirrorPlaneWithEntityIdentifier:(NSString *)entityIdentifier
                               faceTopologyIndex:(NSInteger)faceTopologyIndex
                                          offset:(CGFloat)offset

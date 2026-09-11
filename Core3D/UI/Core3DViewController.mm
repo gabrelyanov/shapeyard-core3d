@@ -7437,6 +7437,42 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     } catch (...) { return NO; }
 }
 
+- (BOOL)frameMirrorPreviewWithExpected:(Core3DSceneSnapshot *)expected
+                           generation:(uint64_t)generation
+               normalizedViewportRect:(CGRect)rect {
+    if (![NSThread isMainThread] || !_isSetuped || _nativeSolidWork
+        || _isLoading.load() || GLController == nil || expected == nil
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return NO; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1.0 || size.height < 1.0
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return NO; }
+    const auto width = static_cast<std::uint32_t>(std::llround(size.width));
+    const auto height = static_cast<std::uint32_t>(std::llround(size.height));
+    const auto pixels = expected.camera.viewportSizePixels;
+    if (pixels.x != width || pixels.y != height) { return NO; }
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (publication == nullptr) { return NO; }
+    try {
+        core3d::MirrorPreviewFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.revisions.documentGeneration = expected.revisions.documentGeneration;
+        identity.revisions.model = expected.revisions.modelRevision;
+        identity.revisions.presentation = expected.revisions.presentationRevision;
+        identity.revisions.camera = expected.revisions.cameraRevision;
+        identity.previewGeneration = generation;
+        const auto viewer = GLController.viewer;
+        if (viewer == nullptr || !viewer->frameMirrorPreview(identity, width, height,
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)) { return NO; }
+        [GLController requestRender];
+        [self viewDidInvalidateSceneSnapshot];
+        return YES;
+    } catch (...) { return NO; }
+}
+
 - (Core3DSavedGroupEditResult)editSavedGroupOperation:(NSInteger)operation identifier:(NSString *)entityIdentifier
     entities:(NSArray<NSString *> *)entities name:(NSString *)name expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
@@ -9300,6 +9336,18 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 
 - (void)debugSetMaximumMirrorReferenceFaces:(NSUInteger)limit {
 	[GLController debugSetMaximumMirrorReferenceFaces:limit];
+}
+
+- (BOOL)debugClearReadyMirrorSourceSelection {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) { return NO; }
+    const auto viewer = GLController.viewer;
+    if (!viewer || viewer->AisContext().IsNull() || !viewer->getObjectInteractor()) { return NO; }
+    const auto interactor = viewer->getObjectInteractor();
+    if (!interactor->canFrameMirrorPreview(interactor->mirrorPreviewGeneration())) { return NO; }
+    try {
+        viewer->AisContext()->ClearSelected(Standard_False);
+        return viewer->AisContext()->NbSelected() == 0;
+    } catch (...) { return NO; }
 }
 
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform {

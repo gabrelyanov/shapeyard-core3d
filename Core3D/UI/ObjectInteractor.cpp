@@ -5719,6 +5719,32 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		return _mirrorPreviewGeneration;
 	}
 
+    bool ObjectInteractor::canFrameMirrorPreview(
+        const std::uint64_t expectedGeneration) const noexcept {
+        try {
+            if (_mirrorPreviewState != MirrorPreviewState::Ready
+                || _manipulatorGestureActive
+                || _mirrorPreviewGeneration != expectedGeneration
+                || _mirrorPlanePicking || _trialMirrorUsesCustomPlane
+                || _customMirrorPlane.has_value()
+                || !_mirrorReferencePresentations.empty()
+                || _mirrorOwnsDocumentCommand || !_pendingMirrorResults.empty()
+                || myContext.IsNull() || _trialMirrorSources.empty()
+                || _trialMirrorSources.size() > kMaxMirrorPreviewBodies
+                || !canApplyMirror() || !mirrorSourcesAreCurrent()) { return false; }
+            // The native fit uses selected Model bounds. Prove those objects
+            // are exactly the sources captured by this preview, not a later
+            // selection that merely shares the same document/model revision.
+            if (myContext->NbSelected()
+                != static_cast<Standard_Integer>(_trialMirrorSources.size())) { return false; }
+            for (const auto& source : _trialMirrorSources) {
+                if (source.presentation.IsNull()
+                    || !myContext->IsSelected(source.presentation)) { return false; }
+            }
+            return true;
+        } catch (...) { return false; }
+    }
+
 	Standard_Boolean ObjectInteractor::mirrorSourcesAreCurrent() const noexcept {
 		if (!_trialMirrorObjectsValid || _trialMirrorObjects.empty()
 			|| _trialMirrorObjects.size() != _trialMirrorSources.size()
