@@ -25,6 +25,7 @@
 #include "Core3DNativeTangentBuffers.hxx"
 
 #include <OpenGl_GraphicDriver.hxx>
+#include <Graphic3d_CLight.hxx>
 #include <Standard_Failure.hxx>
 
 #include <AIS_ConnectedInteractive.hxx>
@@ -257,6 +258,16 @@ bool OcctViewer::InitViewer (UIView* theWin)
     myViewer = new V3d_Viewer (aGraphicDriver);
     myViewer->SetDefaultLights();
     myViewer->SetLightOn();
+    // A camera-aligned headlight flattens the equally angled faces of an
+    // isometric model. Offset it so cavity floors, walls and rims remain
+    // distinguishable, without changing the model's authored material.
+    for (auto light = myViewer->ActiveLightIterator(); light.More(); light.Next()) {
+        if (!light.Value().IsNull()
+            && light.Value()->Type() == Graphic3d_TOLS_DIRECTIONAL
+            && light.Value()->IsHeadlight()) {
+            light.Value()->SetDirection(gp_Dir(0.35, -0.45, -1.0));
+        }
+    }
     
     // Create AIS context
     myContext = new Core3DContext (myViewer);
