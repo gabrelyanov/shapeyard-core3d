@@ -38,17 +38,20 @@ bool CaptureCreationRoots(const Handle(OcctDocument)& owner, OrdinaryCreationCat
         const auto shape = XCAFDoc_ShapeTool::GetShape(label);
         if (label.IsNull() || label.Data() != document->GetData() || shape.IsNull()) { return false; }
         profile::Record storedProfile;
-        if (!profile::Read(document, label, storedProfile)) return false;
+        enclosure::Record storedEnclosure;
+        if (!profile::Read(document, label, storedProfile)
+            || !enclosure::Read(document, label, storedEnclosure)) return false;
         if (!roots.emplace(CreationLabelKey(label), OrdinaryCreationRoot{label, shape,
                 owner->EntityIdentifierForLabel(label), owner->DefinitionIdentifierForLabel(label),
-                owner->GeometryRepresentationForLabel(label), storedProfile}).second) { return false; }
+                owner->GeometryRepresentationForLabel(label), storedProfile, storedEnclosure}).second) { return false; }
     }
     return true;
 }
 bool CreationRootsEqual(const OrdinaryCreationRoot& a, const OrdinaryCreationRoot& b) {
     return a.label.IsEqual(b.label) && a.label.Data() == b.label.Data()
         && a.shape.IsEqual(b.shape) && a.entityIdentifier == b.entityIdentifier
-        && a.definitionIdentifier == b.definitionIdentifier && a.representation == b.representation && a.profile.IsEqual(b.profile);
+        && a.definitionIdentifier == b.definitionIdentifier && a.representation == b.representation && a.profile.IsEqual(b.profile)
+        && a.enclosure.IsEqual(b.enclosure);
 }
 bool CreationIntegerEquals(const TDF_Label& label, Standard_Integer tag, Standard_Integer expected) {
     const auto child = label.FindChild(tag, Standard_False);
@@ -517,6 +520,7 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                     || stored.object.profile.values != values
                     || !stored.object.profile.IsCurrent(_document->Document(), expected.object.label)) return false;
             } else if (!stored.object.profile.label.IsNull()) return false;
+            if (!stored.object.enclosure.label.IsNull()) return false;
             if (ledger.meshCopy) {
                 const auto& source=*ledger.meshCopy;
                 OcctScalarAppearanceState appearance;
@@ -1188,6 +1192,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
                 || (record.requested.operation != OrdinaryTransformOperation::ProfileRebuild
                     && !record.candidate.profile.IsEqual(record.previous.profile))
+                || !record.candidate.enclosure.IsEqual(record.previous.enclosure)
                 || record.candidate.scalars != EncodedTransform(record.requested.transform)
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");

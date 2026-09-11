@@ -4365,6 +4365,114 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
              @"selection":@(stamp->selection)};
 }
 
+// Standalone persistence fixture, not an ordinary creation API.
+- (NSData *_Nullable)debugEnclosureBinXCAFFixturePlane:(NSInteger)plane width:(double)width fault:(NSInteger)fault {
+    if (![NSThread isMainThread] || plane < 0 || plane > 2
+        || (width != 100 && width != 120) || fault < 0 || fault > 1) return nil;
+    return Core3DCreateDebugBinXCAFFixture(@"enclosure-dependency", [plane,width,fault](const Handle(TDocStd_Document)& document) {
+        core3d::enclosure::Parameters parameters;
+        parameters.definition.plane = int(plane);
+        parameters.definition.dimensions = {width,60,30,2,2,4};
+        parameters.metersPerUnit = 0.001;
+        core3d::EnclosureSolidResult geometry;
+        if (!core3d::BuildEnclosureSolidGeometry(parameters.definition,
+                std::make_shared<std::atomic_bool>(false), geometry))
+            throw Standard_Failure("Unable to build enclosure fixture");
+        const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto label = shapeTool->AddShape(geometry.solid, Standard_False, Standard_True);
+        if (label.IsNull()) throw Standard_Failure("Unable to add enclosure fixture");
+        Core3DSetDebugGeometryRepresentation(label, 1);
+        document->SetUndoLimit(10); document->NewCommand();
+        if (!core3d::enclosure::Stage(document,label,parameters,NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand()) throw Standard_Failure("Unable to stage enclosure fixture");
+        core3d::enclosure::Record record;
+        if (!core3d::enclosure::Read(document,label,record) || !record.IsCurrent(document,label))
+            throw Standard_Failure("Enclosure fixture binding mismatch");
+        if (fault == 1) TDataStd_Integer::Set(record.label,core3d::enclosure::SchemaID(),99);
+    });
+}
+
+- (NSDictionary<NSString *, id> *)debugStoredEnclosureForEntityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || identifier.length == 0 || identifier.length > 256
+        || GLController == nil || GLController.viewer == nullptr) return nil;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return nil;
+        const auto document = owner->Document();
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        for (int i = 1; i <= labels.Length(); ++i) {
+            const auto label = labels.Value(i);
+            if (owner->EntityIdentifierForLabel(label) != identifier.UTF8String) continue;
+            core3d::enclosure::Record record;
+            if (!core3d::enclosure::Read(document,label,record)) return nil;
+            if (record.label.IsNull()) return @{@"present":@NO};
+            NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:record.values.size()];
+            for (double value : record.values) [values addObject:@(value)];
+            GProp_GProps properties; BRepGProp::VolumeProperties(record.boundShape,properties);
+            OcctObjectTransformState state;
+            const bool captured = owner->CaptureObjectTransformStateForLabel(label,state);
+            return @{@"present":@YES,@"current":@(record.IsCurrent(document,label)),
+                @"identifier":[NSString stringWithUTF8String:record.identifier.c_str()],@"values":values,
+                @"nativeVolume":@(properties.Mass()),@"authorityCaptured":@(captured),
+                @"copyAdmitted":@(owner->CanDuplicateGeometryDefinitions({{label,1U}}))};
+        }
+    } catch (...) {}
+    return nil;
+}
+
+// Faults are confined to one owned synchronous DEBUG command, always aborted.
+// Mode12 changes valid metadata to prove exact operation authority notices it.
+- (BOOL)debugStoredEnclosureRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || mode < 1 || mode > 12 || identifier.length == 0
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    Handle(TDocStd_Document) document; bool opened = false;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull()) return NO;
+        document = owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return NO;
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        TDF_Label target;
+        for (int i = 1; i <= labels.Length(); ++i)
+            if (owner->EntityIdentifierForLabel(labels.Value(i)) == identifier.UTF8String) target = labels.Value(i);
+        core3d::enclosure::Record before;
+        OcctObjectTransformState original;
+        if (target.IsNull() || !core3d::enclosure::Read(document,target,before) || before.label.IsNull()
+            || !owner->CaptureObjectTransformStateForLabel(target,original)) return NO;
+        const auto undo = document->GetAvailableUndos(), redo = document->GetAvailableRedos();
+        document->NewCommand(); opened = true;
+        switch (mode) {
+            case 1: TDataStd_Integer::Set(before.label,core3d::enclosure::SchemaID(),99); break;
+            case 2: TDataStd_Integer::Set(before.label,core3d::enclosure::CountID(),10); break;
+            case 3: before.label.ForgetAttribute(TNaming_NamedShape::GetID()); break;
+            case 4: TDataStd_Real::Set(before.label.FindChild(3,Standard_False),std::numeric_limits<double>::quiet_NaN()); break;
+            case 5: TDataStd_AsciiString::Set(before.label,core3d::enclosure::IdentityID(),TCollection_AsciiString("invalid")); break;
+            case 6: TDataStd_Real::Set(before.label,1); break;
+            case 7: TDataStd_Integer::Set(document->Main(),core3d::enclosure::SchemaID(),1); break;
+            case 8: TDataStd_Real::Set(before.label.FindChild(3,Standard_False),0); break;
+            case 9: TDataStd_Real::Set(before.label.FindChild(3,Standard_False).FindChild(1,Standard_True),1); break;
+            case 10: TDataStd_Integer::Set(before.label.FindChild(3,Standard_False),1); break;
+            case 11: TDataStd_Integer::Set(target.FindChild(900,Standard_True),core3d::profile::SchemaID(),1); break;
+            case 12: TDataStd_Real::Set(before.label.FindChild(3,Standard_False),before.parameters.definition.dimensions.width+20); break;
+        }
+        OcctObjectTransformState changed;
+        const bool checked = mode == 12
+            ? owner->CaptureObjectTransformStateForLabel(target,changed) && !original.IsEqual(changed)
+                && owner->ValidateGeometryRepresentations()
+            : !owner->ValidateGeometryRepresentations();
+        document->AbortCommand(); opened = false;
+        OcctObjectTransformState restored;
+        return checked && owner->ValidateGeometryRepresentations()
+            && document->GetAvailableUndos() == undo && document->GetAvailableRedos() == redo
+            && owner->CaptureObjectTransformStateForLabel(target,restored) && original.IsEqual(restored);
+    } catch (...) {
+        if (opened && !document.IsNull()) { try { document->AbortCommand(); } catch (...) {} }
+        return NO;
+    }
+}
+
 - (NSDictionary<NSString *, id> *)debugStoredProfileDefinitionForEntityIdentifier:(NSString *)identifier {
     if (![NSThread isMainThread] || identifier.length == 0 || identifier.length > 256
         || GLController == nil || GLController.viewer == nullptr) return nil;

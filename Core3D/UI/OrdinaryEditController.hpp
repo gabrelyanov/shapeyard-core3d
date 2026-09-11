@@ -155,6 +155,7 @@ struct OrdinaryCreationRoot {
     std::string definitionIdentifier;
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
     profile::Record profile;
+    enclosure::Record enclosure;
 };
 using OrdinaryCreationCatalog = std::map<std::string, OrdinaryCreationRoot>;
 //! Exact retained source and intended derived-copy metadata.

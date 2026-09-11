@@ -1309,6 +1309,12 @@ typedef struct {
 //! These DEBUG diagnostics cannot authorize edits or persist an AI job.
 //! Diagnostic fixed-memory mutation stamp; NOT a public edit token/readiness lease.
 - (NSDictionary<NSString *, id> *_Nullable)debugNativeMutationStamp;
+- (NSData *_Nullable)debugEnclosureBinXCAFFixturePlane:(NSInteger)plane width:(double)width fault:(NSInteger)fault
+    NS_SWIFT_NAME(debugEnclosureFixture(plane:width:fault:));
+- (NSDictionary<NSString *, id> *_Nullable)debugStoredEnclosureForEntityIdentifier:(NSString *)identifier
+    NS_SWIFT_NAME(debugStoredEnclosure(entityIdentifier:));
+- (BOOL)debugStoredEnclosureRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier
+    NS_SWIFT_NAME(debugStoredEnclosureRejectsFault(_:entityIdentifier:));
 + (NSDictionary<NSString *, id> *)debugEnclosureValues:(NSArray<NSNumber *> *)input
     schema:(NSInteger)schema points:(NSArray<NSArray<NSNumber *> *> *)points cancelled:(BOOL)cancelled
     NS_SWIFT_NAME(debugEnclosure(values:schema:points:cancelled:));

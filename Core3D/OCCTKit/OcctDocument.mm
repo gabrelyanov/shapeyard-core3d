@@ -3536,7 +3536,7 @@ struct GeometryDocumentUsage
     Standard_Size labels = 0;
     Standard_Size graphVisits = 0;
     Standard_Size leafOccurrences = 0;
-    Standard_Size profileRecords = 0;
+    Standard_Size featureRecords = 0;
 };
 
 Standard_Boolean ValidateGeometryDocument(
@@ -3554,7 +3554,8 @@ Standard_Boolean ValidateGeometryDocument(
             return Standard_False;
         }
         std::vector<core3d::profile::Record> profiles;
-        if (!core3d::profile::ValidateDocument(document, profiles)) return Standard_False;
+        std::vector<core3d::enclosure::Record> enclosures;
+        if (!core3d::enclosure::ValidateFeatureRecords(document, profiles, enclosures)) return Standard_False;
         const TDF_Label aRoot = document->GetData()->Root();
         Handle(TDataStd_Integer) aRootMarker;
         Handle(TNaming_NamedShape) aRootShape;
@@ -3636,6 +3637,12 @@ Standard_Boolean ValidateGeometryDocument(
         for (const auto& profile : profiles) {
             if (!profile.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(profile.label.Father()))
                 && ClassifyDefinitionGeometry(profile.boundShape, &aBudget) != DefinitionGeometryClass::BRep)
+                return Standard_False;
+        }
+
+        for (const auto& enclosure : enclosures) {
+            if (!enclosure.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(enclosure.label.Father()))
+                && ClassifyDefinitionGeometry(enclosure.boundShape, &aBudget) != DefinitionGeometryClass::BRep)
                 return Standard_False;
         }
 
@@ -3884,7 +3891,7 @@ Standard_Boolean ValidateGeometryDocument(
             usage.labels = aLabelCount;
             usage.graphVisits = anAggregateGraphVisitCount;
             usage.leafOccurrences = aLeafOccurrenceCount;
-            usage.profileRecords = static_cast<Standard_Size>(profiles.size());
+            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size());
             *output = usage;
         }
         return Standard_True;
@@ -3968,7 +3975,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
         Standard_Size projectedLabels = current.labels;
         Standard_Size projectedGraphVisits = current.graphVisits;
         Standard_Size projectedLeafOccurrences = current.leafOccurrences;
-        Standard_Size projectedProfiles = current.profileRecords;
+        Standard_Size projectedFeatures = current.featureRecords;
         TDF_LabelMap uniqueSources;
         for (const OcctGeometryDuplicationRequest& request : requests) {
             const TDF_Label& source = request.sourceDefinition;
@@ -4002,6 +4009,12 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                         64U * 1024U * 1024U)) return Standard_False;
             }
 
+            // Enclosure construction frames/copies require their own codec.
+            // Until that operation is implemented, refuse before allocation;
+            // a profile-only copier must never silently discard the dependency.
+            core3d::enclosure::Record sourceEnclosure;
+            if (!core3d::enclosure::Read(myOcafDoc, source, sourceEnclosure)
+                || !sourceEnclosure.label.IsNull()) return Standard_False;
             core3d::profile::Record sourceProfile;
             if (!core3d::profile::Read(myOcafDoc, source, sourceProfile)
                 || (request.requiresProfileConstructionFrame && sourceProfile.label.IsNull())) {
@@ -4009,7 +4022,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             }
             Standard_Size profileLabels = 0;
             if (!sourceProfile.label.IsNull()) {
-                if (!AddMultipliedWithinLimit(projectedProfiles, 1U,
+                if (!AddMultipliedWithinLimit(projectedFeatures, 1U,
                         destinationCount, core3d::profile::MaximumRecords)) {
                     return Standard_False;
                 }
@@ -7268,6 +7281,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && authoredFramesPresent == other.authoredFramesPresent
             && authoredFramesIdentity == other.authoredFramesIdentity
             && profile.IsEqual(other.profile)
+            && enclosure.IsEqual(other.enclosure)
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -7294,7 +7308,8 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         captured.definitionIdentifier = DefinitionIdentifierForLabel(label);
         captured.storedRepresentation = StoredGeometryRepresentationForLabel(label);
         captured.resolvedRepresentation = GeometryRepresentationForLabel(label);
-        if (!core3d::profile::Read(myOcafDoc, label, captured.profile)) return Standard_False;
+        if (!core3d::profile::Read(myOcafDoc, label, captured.profile)
+            || !core3d::enclosure::Read(myOcafDoc, label, captured.enclosure)) return Standard_False;
         OcctAuthoredFrameRecord frames;
         const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
         if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;
