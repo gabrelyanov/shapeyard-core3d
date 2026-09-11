@@ -551,6 +551,10 @@ namespace core3d {
             bool documentLengthUnitPresent = false;
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
+            Standard_Boolean enclosureCurrent = Standard_False;
+            Standard_Size retainedEnclosureTopologyNodes = 0;
+            TopoDS_Shape preparedEnclosureBinding;
+            std::string enclosureIdentifier;
 		};
 		struct MirrorPendingResult {
 			TDF_Label label;
@@ -564,6 +568,7 @@ namespace core3d {
             OcctObjectNameState expectedProfileOwner;
             Standard_Boolean expectedProfileCurrent = Standard_False;
             Standard_Boolean profileCandidateSealed = Standard_False;
+            Standard_Boolean expectedEnclosureCurrent = Standard_False;
 		};
 		struct MirrorPlaneReferenceSnapshot {
 			Handle(TDocStd_Document) document;

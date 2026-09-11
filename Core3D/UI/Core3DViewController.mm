@@ -3936,6 +3936,96 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     } catch (...) { return nil; }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureMirrorCapacityProbe:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 1) return nil;
+    struct Scope {
+        Handle(OcctDocument) wrapper = new OcctDocument();
+        Handle(TDocStd_Document) document;
+        ~Scope() noexcept { try { if (!document.IsNull()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            const auto app = Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!app.IsNull()) app->Close(document);
+        } } catch (...) {} }
+    } scope;
+    try {
+        scope.wrapper->InitDoc(); scope.document = scope.wrapper->Document();
+        const auto& document = scope.document;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        core3d::enclosure::Parameters parameters;
+        parameters.metersPerUnit = 0.001;
+        parameters.definition.dimensions = {100,60,30,2,2,4};
+        parameters.definition.plane = 0;
+        if (mode == 1) {
+            parameters.definition.constructionFrame.emplace();
+            parameters.definition.constructionFrame->values = {13,-7,2,0,0,0.25881904510252074,0.9659258262890683,-1.25};
+        }
+        core3d::EnclosureSolidResult geometry;
+        if (!core3d::BuildEnclosureSolidGeometry(parameters.definition,
+                std::make_shared<std::atomic_bool>(false), geometry)) return nil;
+        const auto original = geometry.solid;
+        document->NewCommand();
+        const auto label = shapes->AddShape(original, Standard_False);
+        const auto bareLabel = shapes->AddShape(BRepPrimAPI_MakeBox(10.0,12.0,14.0).Shape(), Standard_False);
+        if (bareLabel.IsNull()) return nil;
+        if (!core3d::enclosure::Stage(document, label, parameters, NSUUID.UUID.UUIDString.UTF8String)
+            || !document->CommitCommand()) return nil;
+        core3d::enclosure::Record record;
+        if (!core3d::enclosure::Read(document, label, record) || !record.IsCurrent(document, label)) return nil;
+        Standard_Size admittedCopies = 1, shapeCost = 0;
+        auto countLabels = [&]() {
+            Standard_Size count = 0;
+            for (TDF_ChildIterator it(document->GetData()->Root(), Standard_True); it.More(); it.Next()) ++count;
+            return count;
+        };
+        const Standard_Size extraFrameScalars = mode == 0 ? 8U : 0U;
+        const Standard_Size destinationLabels = 10U + record.values.size() + extraFrameScalars;
+        if (destinationLabels != 27U || record.values.size() != (mode == 0 ? 9U : 17U)) return nil;
+        const Standard_Size target = 100000U - destinationLabels;
+        const auto filler = document->GetData()->Root().FindChild(900000, Standard_True);
+        const Standard_Size before = countLabels();
+        if (before >= target) return nil;
+        for (Standard_Size i = 1; i <= target - before; ++i)
+            filler.FindChild(static_cast<Standard_Integer>(i), Standard_True);
+        if (countLabels() != target) return nil;
+        const auto labelsBefore = countLabels();
+        const auto timeBefore = document->GetData()->Time();
+        const auto undoBefore = document->GetAvailableUndos();
+        const auto rootBefore = XCAFDoc_ShapeTool::GetShape(label);
+        const bool valid = scope.wrapper->ValidateGeometryRepresentations();
+        const bool atBoundary = scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, admittedCopies, false, true, true}});
+        const bool overflowRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, std::numeric_limits<Standard_Size>::max(), false, true, true}});
+        const bool zeroRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 0U, false, true, true}});
+        const bool duplicateRequestRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, false, true, true}, {label, 1U, false, true, true}});
+        const bool missingPreservationRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, false, false, true}});
+        const bool conflictingFramePoliciesRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, true, true, true}});
+        const bool absentEnclosureFrameRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{bareLabel, 1U, false, true, true}});
+        core3d::enclosure::Record after;
+        const bool queryUnchanged = labelsBefore == countLabels() && timeBefore == document->GetData()->Time()
+            && undoBefore == document->GetAvailableUndos() && !document->HasOpenCommand()
+            && rootBefore.IsEqual(XCAFDoc_ShapeTool::GetShape(label))
+            && core3d::enclosure::Read(document, label, after) && after.IsEqual(record);
+        filler.FindChild(200000, Standard_True);
+        if (countLabels() != labelsBefore + 1U) return nil;
+        const bool beyondRejected = !scope.wrapper->CanDuplicateGeometryDefinitions(
+            std::vector<OcctGeometryDuplicationRequest>{{label, 1U, false, true, true}});
+        return @{@"valid": @(valid), @"atBoundary": @(atBoundary), @"beyondRejected": @(beyondRejected),
+            @"overflowRejected": @(overflowRejected), @"zeroRejected": @(zeroRejected),
+            @"absentEnclosureFrameRejected": @(absentEnclosureFrameRejected),
+            @"missingPreservationRejected": @(missingPreservationRejected),
+            @"conflictingFramePoliciesRejected": @(conflictingFramePoliciesRejected),
+            @"duplicateRequestRejected": @(duplicateRequestRejected), @"queryUnchanged": @(queryUnchanged),
+            @"sourceScalars": @(record.values.size()), @"extraFrameScalars": @(extraFrameScalars),
+            @"destinationLabels": @(destinationLabels), @"labelsBefore": @(labelsBefore), @"admittedCopies": @(admittedCopies), @"shapeCost": @(shapeCost)};
+    } catch (...) { return nil; }
+}
+
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugProfileMirrorCapacityProbe:(NSInteger)mode {
     if (![NSThread isMainThread] || mode < 0 || mode > 1) return nil;
     struct Scope {
@@ -9824,6 +9914,10 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     [GLController didReceiveMemoryWarning];
 }
 
+- (void)debugSimulateMirrorMemoryWarning {
+    [GLController didReceiveMemoryWarning];
+}
+
 - (void)debugSimulateLinearArrayMemoryWarning {
     [GLController didReceiveMemoryWarning];
 }
@@ -10152,13 +10246,16 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         const Core3DModelingPreviewStatus aStatus =
             [self modelingPreviewStatusForGizmoType:
                 PrimitiveGizmoTypeMirror];
-        self.can_apply = aStatus.canApply;
-        // Lifecycle cancellation can clear an idle trial without an active
-        // raw touch. Publish the finalized mirror presentation state here so
-        // alternate renderers recapture the overlay instead of reusing the
-        // last camera/frame publication with stale preview geometry.
-        [self viewDidChangeViewportPresentationState];
-        [self sendNotifyUIState:UIStateChangingApply];
+        if (!aStatus.active) {
+            // Memory pressure retires an ordinary preview through cancelMirror.
+            // Keep the public tool synchronized with its native inactive owner.
+            [self completeOperationInteraction];
+        } else {
+            // Failed cleanup and unknown commits retain their recovery controls.
+            self.can_apply = aStatus.canApply;
+            [self viewDidChangeViewportPresentationState];
+            [self sendNotifyUIState:UIStateChangingApply];
+        }
     }
     if (_currentGizmoType == PrimitiveGizmoTypeLinearArray) {
         const Core3DModelingPreviewStatus status =

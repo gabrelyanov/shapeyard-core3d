@@ -1292,6 +1292,8 @@ typedef struct {
 - (void)debugSetBooleanPostCommitInspectFailureCount:(NSUInteger)count;
 //! Deliver the viewport's production memory-warning cancellation path.
 - (void)debugSimulateBooleanMemoryWarning;
+//! Deliver the viewport memory-warning path for an active Mirror regression.
+- (void)debugSimulateMirrorMemoryWarning;
 //! Deliver the same production path for an active Linear Array regression.
 - (void)debugSimulateLinearArrayMemoryWarning;
 //! Deliver the same production path for an active Shell regression.
@@ -1399,6 +1401,7 @@ typedef struct {
     NS_SWIFT_NAME(debugEnclosureFrameFixture(values:state:));
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureCopyOwnershipState;
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureDuplicateCapacityProbe:(NSInteger)mode;
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureMirrorCapacityProbe:(NSInteger)mode;
 - (NSDictionary<NSString *, id> *_Nullable)debugStoredEnclosureForEntityIdentifier:(NSString *)identifier
     NS_SWIFT_NAME(debugStoredEnclosure(entityIdentifier:));
 - (BOOL)debugStoredEnclosureRejectsFault:(NSInteger)mode entityIdentifier:(NSString *)identifier

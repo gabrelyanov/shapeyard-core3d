@@ -359,6 +359,9 @@ struct OcctGeometryDuplicationRequest
     // Explicitly owned copies only. Default callers keep rejecting enclosures;
     // admitted owners must preserve their recipe in staging and recovery.
     bool preservesEnclosureRecipe = false;
+    // Baked enclosure copies compose an eight-scalar construction frame.
+    // Charge the additional labels only when the source has no frame yet.
+    bool requiresEnclosureConstructionFrame = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,

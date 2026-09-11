@@ -1419,6 +1419,21 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
     [super didReceiveMemoryWarning];
     if (_viewer != nullptr
         && _viewer->getObjectInteractor() != nullptr
+        && _viewer->getObjectInteractor()->hasActiveMirror()) {
+        // Cancel only through the native owner. An unknown commit or a failed
+        // graphics erase must retain every owned handle and recovery control.
+        (void)_viewer->getObjectInteractor()->cancelMirror();
+        [self checkSelections];
+        [self requestRender];
+        if (_delegate
+            && [_delegate respondsToSelector:
+                @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+            [_delegate viewer:self
+                didEndPrimaryInteractionCancelled:YES];
+        }
+    }
+    if (_viewer != nullptr
+        && _viewer->getObjectInteractor() != nullptr
         && (_viewer->getObjectInteractor()->hasActiveBoolean()
             || _viewer->getObjectInteractor()->hasUnresolvedBoolean())) {
         const PrimitiveGizmoType currentType = [self getGizmoType];

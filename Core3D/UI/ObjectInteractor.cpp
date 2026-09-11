@@ -4401,16 +4401,22 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             OcctObjectNameState owner;
             if (!myDoc->CaptureObjectNameStateForLabel(source->second, owner)) return Standard_False;
             const auto& profile = owner.object.profile;
-            Standard_Size currentNodes = 0, retainedNodes = 0;
+            const auto& enclosure = owner.object.enclosure;
+            Standard_Size currentNodes = 0, retainedNodes = 0, retainedEnclosureNodes = 0;
             if (!CountBoundedMirrorTopology(owner.object.shape, aPerSourceLimit, currentNodes)) return Standard_False;
             if (!profile.label.IsNull() && !profile.boundShape.IsEqual(owner.object.shape)
                 && (!CountBoundedMirrorTopology(profile.boundShape, aPerSourceLimit, retainedNodes)
                     || !IsTopologicallyValid(profile.boundShape))) return Standard_False;
-            for (const Standard_Size cost : {currentNodes, retainedNodes, currentNodes, retainedNodes}) {
+            if (!enclosure.label.IsNull() && !enclosure.boundShape.IsEqual(owner.object.shape)
+                && (!CountBoundedMirrorTopology(enclosure.boundShape, aPerSourceLimit, retainedEnclosureNodes)
+                    || !IsTopologicallyValid(enclosure.boundShape))) return Standard_False;
+            for (const Standard_Size cost : {currentNodes, retainedNodes, retainedEnclosureNodes,
+                                            currentNodes, retainedNodes, retainedEnclosureNodes}) {
                 if (cost > anAggregateLimit - projectedTopology) return Standard_False;
                 projectedTopology += cost;
             }
-            profileRequests.push_back({source->second, 1, !profile.label.IsNull()});
+            profileRequests.push_back({source->second, 1, !profile.label.IsNull(),
+                                       !enclosure.label.IsNull(), !enclosure.label.IsNull()});
         }
         if (!myDoc->CanDuplicateGeometryDefinitions(profileRequests)) return Standard_False;
 
@@ -4476,6 +4482,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             OcctObjectNameState profileOwner;
             if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)) return Standard_False;
             const auto& originalProfile = profileOwner.object.profile;
+            const auto& originalEnclosure = profileOwner.object.enclosure;
             double documentMetersPerUnit = 0;
             bool documentLengthUnitPresent = false;
             if (!ReadMirrorDocumentUnits(aSourceDocument, documentMetersPerUnit,
@@ -4486,6 +4493,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || retainedProfileNodes > anAggregateLimit - anAggregateTopologyNodes
                     || !IsTopologicallyValid(originalProfile.boundShape)) return Standard_False;
                 anAggregateTopologyNodes += retainedProfileNodes;
+            }
+            Standard_Size retainedEnclosureNodes = 0;
+            if (!originalEnclosure.label.IsNull() && !originalEnclosure.boundShape.IsEqual(sourceStoredShape)) {
+                if (!CountBoundedMirrorTopology(originalEnclosure.boundShape, aPerSourceLimit, retainedEnclosureNodes)
+                    || retainedEnclosureNodes > anAggregateLimit - anAggregateTopologyNodes
+                    || !IsTopologicallyValid(originalEnclosure.boundShape)) return Standard_False;
+                anAggregateTopologyNodes += retainedEnclosureNodes;
             }
 
 			gp_Pnt offset = theWorldPlane.Location();
@@ -4508,6 +4522,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 if (!profile::ConstructionFrame::Capture(aBakedTransform * originalFrame, composed)) return Standard_False;
             }
 			
+            if (!originalEnclosure.label.IsNull()) {
+                gp_Trsf originalFrame;
+                if (originalEnclosure.parameters.definition.constructionFrame
+                    && !originalEnclosure.parameters.definition.constructionFrame->Transform(originalFrame)) return Standard_False;
+                profile::ConstructionFrame composed;
+                if (!profile::ConstructionFrame::Capture(aBakedTransform * originalFrame, composed)) return Standard_False;
+            }
 			// OCCT's negative-transform mesh-copy path corrupts allocator state
 			// when mirror previews are replaced repeatedly. Keep mesh copying
 			// disabled; AIS Display below triangulates the owned trial before
@@ -4515,7 +4536,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			BRepBuilderAPI_Transform aBRepTrsf(
 				shape->Shape(),
 				aBakedTransform,
-                originalProfile.label.IsNull() ? Standard_False : Standard_True,
+                originalProfile.label.IsNull() && originalEnclosure.label.IsNull() ? Standard_False : Standard_True,
 				Standard_False);
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
 			Standard_Size resultNodeCount = 0;
@@ -4553,6 +4574,34 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     preparedProfileBinding = retained.Shape();
                 }
             }
+            TopoDS_Shape preparedEnclosureBinding;
+            std::string enclosureIdentifier;
+            if (!originalEnclosure.label.IsNull()) {
+                enclosureIdentifier = OcctDocument::NewProfileIdentifier();
+                if (!profile::IsIdentifier(enclosureIdentifier) || enclosureIdentifier == originalEnclosure.identifier
+                    || aShapePrs->Shape().IsPartner(sourceStoredShape)) return Standard_False;
+                if (originalEnclosure.boundShape.IsEqual(sourceStoredShape)) {
+                    preparedEnclosureBinding = aShapePrs->Shape();
+                } else {
+                    BRepBuilderAPI_Transform retained(originalEnclosure.boundShape, aBakedTransform,
+                                                       Standard_True, Standard_False);
+                    Standard_Size nodes = 0;
+                    if (!retained.IsDone() || retained.Shape().IsNull()
+                        || retained.Shape().IsPartner(originalEnclosure.boundShape)
+                        || retained.Shape().IsPartner(aShapePrs->Shape())
+                        || !IsShapeWithinModelCoordinates(retained.Shape())
+                        || !IsTopologicallyValid(retained.Shape())
+                        || !CountBoundedMirrorTopology(retained.Shape(), anAggregateLimit - anAggregateTopologyNodes, nodes)
+                        || nodes != retainedEnclosureNodes) return Standard_False;
+                    anAggregateTopologyNodes += nodes;
+                    preparedEnclosureBinding = retained.Shape();
+                }
+                for (const auto& previous : replacementSources) {
+                    if (enclosureIdentifier == previous.enclosureIdentifier
+                        || (!previous.preparedEnclosureBinding.IsNull()
+                            && preparedEnclosureBinding.IsPartner(previous.preparedEnclosureBinding))) return Standard_False;
+                }
+            }
 			myDoc->LoadObjectMeterial(sourceLabel, aShapePrs);
 			replacementObjects.push_back(aShapePrs);
 			replacementSources.push_back({
@@ -4572,12 +4621,18 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 documentLengthUnitPresent,
                 preparedProfileBinding,
                 profileIdentifier,
+                originalEnclosure.IsCurrent(aSourceDocument, sourceLabel),
+                retainedEnclosureNodes,
+                preparedEnclosureBinding,
+                enclosureIdentifier,
 			});
 		}
 		std::vector<OcctGeometryDuplicationRequest> aSourceLabels;
 		aSourceLabels.reserve(replacementSources.size());
 		for (const MirrorSourceSnapshot& aSource : replacementSources) {
-			aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull()});
+			aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
+                                        !aSource.profileOwner.object.enclosure.label.IsNull(),
+                                        !aSource.profileOwner.object.enclosure.label.IsNull()});
 		}
 		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
 			return Standard_False;
@@ -5872,7 +5927,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || documentMetersPerUnit != aSource.documentMetersPerUnit
                     || !myDoc->CaptureObjectNameStateForLabel(aSource.label, profileOwner)
                     || !profileOwner.IsEqual(aSource.profileOwner)
-                    || profileOwner.object.profile.IsCurrent(aDocument, aSource.label) != aSource.profileCurrent)
+                    || profileOwner.object.profile.IsCurrent(aDocument, aSource.label) != aSource.profileCurrent
+                    || profileOwner.object.enclosure.IsCurrent(aDocument, aSource.label) != aSource.enclosureCurrent)
                     return Standard_False;
 				if (aSource.presentation.IsNull()
 					|| aSource.label.IsNull()
@@ -5948,6 +6004,25 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         anAggregateNodes += candidateNodes;
                     }
                 } else if (!aSource.preparedProfileBinding.IsNull() || !aSource.profileIdentifier.empty()) return Standard_False;
+                const auto& originalEnclosure = profileOwner.object.enclosure;
+                if (!originalEnclosure.label.IsNull()) {
+                    if (aSource.preparedEnclosureBinding.IsNull()
+                        || aSource.preparedEnclosureBinding.IsPartner(originalEnclosure.boundShape)
+                        || (aSource.preparedEnclosureBinding.IsEqual(aResult->Shape())
+                            != originalEnclosure.boundShape.IsEqual(aStored))) return Standard_False;
+                    if (!originalEnclosure.boundShape.IsEqual(aStored)) {
+                        Standard_Size originalNodes = 0, candidateNodes = 0;
+                        if (!CountBoundedMirrorTopology(originalEnclosure.boundShape, aPerSourceLimit, originalNodes)
+                            || originalNodes != aSource.retainedEnclosureTopologyNodes
+                            || originalNodes > anAggregateLimit - anAggregateNodes) return Standard_False;
+                        anAggregateNodes += originalNodes;
+                        if (!CountBoundedMirrorTopology(aSource.preparedEnclosureBinding,
+                                anAggregateLimit - anAggregateNodes, candidateNodes)
+                            || candidateNodes != originalNodes
+                            || !IsTopologicallyValid(aSource.preparedEnclosureBinding)) return Standard_False;
+                        anAggregateNodes += candidateNodes;
+                    }
+                } else if (!aSource.preparedEnclosureBinding.IsNull() || !aSource.enclosureIdentifier.empty()) return Standard_False;
 			}
 			return Standard_True;
 		} catch (...) {
@@ -5984,7 +6059,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || documentMetersPerUnit != source.documentMetersPerUnit
                     || !myDoc->CaptureObjectNameStateForLabel(source.label, current)
                     || !current.IsEqual(source.profileOwner)
-                    || current.object.profile.IsCurrent(aDocument, source.label) != source.profileCurrent)
+                    || current.object.profile.IsCurrent(aDocument, source.label) != source.profileCurrent
+                    || current.object.enclosure.IsCurrent(aDocument, source.label) != source.enclosureCurrent)
                     return MirrorDocumentState::PartialOrMismatched;
             }
 			Standard_Size aMissingCount = 0;
@@ -5998,9 +6074,11 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				const TopoDS_Shape aStored =
 					XCAFDoc_ShapeTool::GetShape(aResult.label);
                 profile::Record storedProfile;
-                if (!profile::Read(aDocument, aResult.label, storedProfile)) return MirrorDocumentState::PartialOrMismatched;
+                enclosure::Record storedEnclosure;
+                if (!profile::Read(aDocument, aResult.label, storedProfile)
+                    || !enclosure::Read(aDocument, aResult.label, storedEnclosure)) return MirrorDocumentState::PartialOrMismatched;
 				if (aStored.IsNull()) {
-                    if (!storedProfile.label.IsNull()) return MirrorDocumentState::PartialOrMismatched;
+                    if (!storedProfile.label.IsNull() || !storedEnclosure.label.IsNull()) return MirrorDocumentState::PartialOrMismatched;
 					++aMissingCount;
 					continue;
 				}
@@ -6013,6 +6091,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || !myDoc->CaptureObjectNameStateForLabel(aResult.label, candidateOwner)
                     || !candidateOwner.IsEqual(aResult.expectedProfileOwner)
                     || storedProfile.IsCurrent(aDocument, aResult.label) != aResult.expectedProfileCurrent
+                    || storedEnclosure.IsCurrent(aDocument, aResult.label) != aResult.expectedEnclosureCurrent
                     || aResult.expectedShape.IsNull()
 					|| !aStored.IsEqual(aResult.expectedShape)
 					|| aResult.entityIdentifier.empty()
@@ -6172,7 +6251,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		try {
 			aSourceLabels.reserve(_trialMirrorSources.size());
 			for (const MirrorSourceSnapshot& aSource : _trialMirrorSources) {
-				aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull()});
+				aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
+                                        !aSource.profileOwner.object.enclosure.label.IsNull(),
+                                        !aSource.profileOwner.object.enclosure.label.IsNull()});
 			}
 		} catch (...) {
 			return MirrorApplyResult::NoChange;
@@ -6303,15 +6384,41 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     throw Standard_Failure("Injected invalid mirror profile unexpectedly read back");
                 }
 #endif
+                enclosure::Record candidateEnclosure;
+                auto enclosureAuthority = aSource.profileOwner.object.enclosure;
+#ifdef DEBUG
+                Standard_Integer enclosureFault = 0;
+                if (!enclosureAuthority.label.IsNull()
+                    && _debugMirrorProfileCopyFault >= 12 && _debugMirrorProfileCopyFault <= 13) {
+                    enclosureFault = _debugMirrorProfileCopyFault; _debugMirrorProfileCopyFault = 0;
+                    if (enclosureFault == 12) enclosureAuthority.values[2] += 1;
+                }
+#endif
+                if (!enclosure::StageTransformedCopy(aDocument, aSource.label,
+                        enclosureAuthority, aSource.storedShape, aLabel,
+                        aSource.preparedEnclosureBinding, aSource.enclosureIdentifier,
+                        aSource.bakedTransform, candidateEnclosure)) return retainRetryableOrUnknown();
+#ifdef DEBUG
+                if (enclosureFault == 13) {
+                    TDataStd_Integer::Set(candidateEnclosure.label, enclosure::CountID(),
+                                         static_cast<int>(candidateEnclosure.values.size()) + 1);
+                    enclosure::Record readback;
+                    if (!enclosure::Read(aDocument, aLabel, readback)) return retainRetryableOrUnknown();
+                    throw Standard_Failure("Injected invalid mirror enclosure unexpectedly read back");
+                }
+#endif
                 if (aSource.profileOwner.namePresent) TDataStd_Name::Set(aLabel, aSource.profileOwner.name);
                 else aLabel.ForgetAttribute(TDataStd_Name::GetID());
                 if (!myDoc->CaptureObjectNameStateForLabel(aLabel, aPending.expectedProfileOwner)
                     || !aPending.expectedProfileOwner.object.profile.IsEqual(candidateProfile)
+                    || !aPending.expectedProfileOwner.object.enclosure.IsEqual(candidateEnclosure)
                     || aPending.expectedProfileOwner.namePresent != aSource.profileOwner.namePresent
                     || (aSource.profileOwner.namePresent
                         && !aPending.expectedProfileOwner.name.IsEqual(aSource.profileOwner.name))) return retainRetryableOrUnknown();
                 aPending.expectedProfileCurrent = candidateProfile.IsCurrent(aDocument, aLabel);
                 if (aPending.expectedProfileCurrent != aSource.profileCurrent) return retainRetryableOrUnknown();
+                aPending.expectedEnclosureCurrent = candidateEnclosure.IsCurrent(aDocument, aLabel);
+                if (aPending.expectedEnclosureCurrent != aSource.enclosureCurrent) return retainRetryableOrUnknown();
                 aPending.profileCandidateSealed = Standard_True;
 				myDoc->LoadObjectMeterial(aLabel, aShape);
 			}
@@ -6322,6 +6429,24 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             // Inject authority drift after sealing ordinary (including legacy
             // recipe-less) candidates, inside the owned mirror transaction.
             // Mode 8 changes presence alone for an absent-unit legacy file.
+            if (!_trialMirrorSources.empty() && !_pendingMirrorResults.empty()
+                && !_trialMirrorSources.front().profileOwner.object.enclosure.label.IsNull()
+                && _debugMirrorProfileCopyFault >= 14 && _debugMirrorProfileCopyFault <= 18) {
+                const auto fault = _debugMirrorProfileCopyFault; _debugMirrorProfileCopyFault = 0;
+                const auto& original = _trialMirrorSources.front().profileOwner.object.enclosure;
+                const auto& candidate = _pendingMirrorResults.front().expectedProfileOwner.object.enclosure;
+                if (fault == 14 || fault == 15) {
+                    TDataStd_AsciiString::Set(fault == 14 ? candidate.label : original.label,
+                        enclosure::IdentityID(), TCollection_AsciiString(OcctDocument::NewProfileIdentifier().c_str()));
+                } else if (fault == 16 || fault == 17) {
+                    TDataStd_Name::Set(fault == 16 ? _pendingMirrorResults.front().label : _trialMirrorSources.front().label,
+                                      TCollection_ExtendedString("Unexpected mirrored enclosure name"));
+                } else {
+                    const int firstFrameScalar = static_cast<int>(candidate.values.size()) - 8 + 1;
+                    TDataStd_Real::Set(candidate.label.FindChild(firstFrameScalar, Standard_False),
+                                      candidate.parameters.definition.constructionFrame->values[0] + 1);
+                }
+            }
             if (_debugMirrorProfileCopyFault == 8 || _debugMirrorProfileCopyFault == 9) {
                 const auto fault = _debugMirrorProfileCopyFault; _debugMirrorProfileCopyFault = 0;
                 XCAFDoc_DocumentTool::SetLengthUnit(aDocument, fault == 8 ? 0.001 : 1.0);
@@ -6483,7 +6608,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 	}
 
     void ObjectInteractor::debugSetMirrorProfileCopyFault(const Standard_Integer mode) noexcept {
-        _debugMirrorProfileCopyFault = mode >= 0 && mode <= 9 ? mode : 0;
+        _debugMirrorProfileCopyFault = ((mode >= 0 && mode <= 9) || (mode >= 12 && mode <= 18)) ? mode : 0;
         // Modes 10/11 simulate a separate committed unit edit between preview
         // capture and Apply. They own only the new command opened here.
         if (mode != 10 && mode != 11) return;

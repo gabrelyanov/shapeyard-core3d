@@ -4014,6 +4014,9 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                 || (!sourceEnclosure.label.IsNull()
                     && (!request.preservesEnclosureRecipe || request.requiresProfileConstructionFrame)))
                 return Standard_False;
+            if (request.requiresEnclosureConstructionFrame
+                && (!request.preservesEnclosureRecipe || sourceEnclosure.label.IsNull()))
+                return Standard_False;
             core3d::profile::Record sourceProfile;
             if (!core3d::profile::Read(myOcafDoc, source, sourceProfile)
                 || (request.requiresProfileConstructionFrame && sourceProfile.label.IsNull())) {
@@ -4026,6 +4029,8 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                 if (!AddMultipliedWithinLimit(projectedFeatures, 1U,
                         destinationCount, core3d::enclosure::MaximumRecords)) return Standard_False;
                 enclosureLabels = 1U + static_cast<Standard_Size>(sourceEnclosure.values.size());
+                if (request.requiresEnclosureConstructionFrame
+                    && !sourceEnclosure.parameters.definition.constructionFrame) enclosureLabels += 8U;
                 if (!sourceEnclosure.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(source))
                     && ClassifyDefinitionGeometry(sourceEnclosure.boundShape, &sourceGeometry)
                         != DefinitionGeometryClass::BRep) return Standard_False;
