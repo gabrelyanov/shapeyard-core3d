@@ -2226,13 +2226,15 @@ namespace core3d {
 						source.first.get(), source.second);
 				}
             }
-        } else if (mirror && aPreviousType != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+        } else if (((mirror && aPreviousType != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror)
+                    || ((movRot || scale)
+                        && aPreviousType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone))
                    && _manipulatorSourceLabels.empty()
                    && _trialMirrorObjects.empty() && _trialMirrorSources.empty()
                    && _pendingMirrorResults.empty() && !_mirrorOwnsDocumentCommand) {
             // Browser selection and construction can preserve an exact selected
-            // part while None owns no gizmo. Entering Mirror must attach that
-            // existing selection; never replace a stale nonempty cached gizmo.
+            // part while None owns no gizmo. Entering an object gizmo must
+            // attach that selection; never replace a stale nonempty cache.
             std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> sources;
             std::unordered_set<const AIS_InteractiveObject*> unique;
             bool exact = !myContext.IsNull() && !myDoc.IsNull();
@@ -2242,10 +2244,13 @@ namespace core3d {
                     const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object);
                     const TDF_Label label = myDoc->ShapeLabel(object);
                     gp_Trsf transform;
-                    if (sources.size() >= kMaxMirrorPreviewBodies || shape.IsNull()
+                    const auto representation = myDoc->GeometryRepresentationForLabel(label);
+                    const std::size_t maximumSources = mirror ? kMaxMirrorPreviewBodies : 1024U;
+                    if (sources.size() >= maximumSources || shape.IsNull()
                         || !myContext->IsDisplayed(object) || !myDoc->IsPresentationEditable(object)
                         || label.IsNull() || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
-                        || !IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(label))
+                        || !IsObjectModelingRepresentation(representation)
+                        || ((mirror || scale) && !IsBRepModelingRepresentation(representation))
                         || myContext->SelectedOwner().IsNull()
                         || myContext->SelectedOwner() != object->GlobalSelOwner()
                         || shape->Shape().IsNull()
