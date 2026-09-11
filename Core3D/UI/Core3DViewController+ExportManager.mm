@@ -230,8 +230,11 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             // belong to the export operation, never the live AIS drawer.
             deviationCoefficient = meshQuality == Core3DExportMeshQualityCoarse
                 ? 0.01 : (meshQuality == Core3DExportMeshQualityFine ? 0.00025 : 0.001);
+            // Fine also resolves angular curvature on swept surfaces. A chord
+            // coefficient alone can admit visibly coarser large-radius turns.
+            // This remains a bounded preset, not a physical-error guarantee.
             deviationAngle = (meshQuality == Core3DExportMeshQualityCoarse
-                ? 30.0 : (meshQuality == Core3DExportMeshQualityFine ? 10.0 : 20.0))
+                ? 30.0 : (meshQuality == Core3DExportMeshQualityFine ? 7.5 : 20.0))
                 * M_PI / 180.0;
         }
 
