@@ -178,6 +178,8 @@ private:
         // A later document/reference edit cannot silently replace it.
         OcctObjectNameState profileOwner;
         Standard_Boolean profileCurrent = Standard_False;
+        Standard_Boolean enclosureCurrent = Standard_False;
+        Standard_Size retainedEnclosureTopologyNodes = 0;
         Standard_Size retainedProfileTopologyNodes = 0;
         Standard_Integer documentTime = 0;
         Standard_Size topologyNodeCount = 0;
@@ -198,6 +200,7 @@ private:
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
         profile::Record expectedProfile;
+        enclosure::Record expectedEnclosure;
         Standard_Boolean profileCandidateSealed = Standard_False;
     };
 
