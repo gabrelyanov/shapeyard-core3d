@@ -734,7 +734,7 @@ protected: //! @name Auxiliary classes to fill presentation with proper primitiv
       {
         myLength = theValue * 0.9f;
         myBoxSize = theValue * 0.25f;
-		myMirroringPlaneSize = theValue * 1.0f;
+		myMirroringPlaneSize = theValue * 0.55f;
         myDiskThickness = theValue * 0.15f;
         myIndent = theValue * 0.05f;
       }
@@ -743,7 +743,9 @@ protected: //! @name Auxiliary classes to fill presentation with proper primitiv
         Standard_ShortReal aLength = theValue - 2 * myIndent;
         myLength = aLength * 1.0f;
         myBoxSize = aLength * 0.25f;
-		myMirroringPlaneSize = aLength * 1.3f;
+		// Compact plane handles leave the mirrored bodies inspectable.
+		// Native picking and immutable overlays use this same geometry.
+		myMirroringPlaneSize = aLength * 0.55f;
         myDiskThickness = aLength * 0.15f;
       }
       myInnerRadius = myLength - 2 * myIndent;
