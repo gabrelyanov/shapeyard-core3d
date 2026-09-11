@@ -719,7 +719,12 @@ namespace core3d {
 				}
 				const gp_Pln aPlane = aSurface.Plane();
 				theWorldOrigin = aPlane.Location();
-				theWorldNormal = aPlane.Axis().Direction();
+				// A baked reflection can leave the plane's Ax3 indirect. Its
+				// stored Z axis then opposes the surface U x V normal. Apply
+				// face orientation to the parametric normal before transforming
+				// it by the authored presentation placement.
+				theWorldNormal = aPlane.XAxis().Direction().Crossed(
+					aPlane.YAxis().Direction());
 				if (theFace.Orientation() == TopAbs_REVERSED) {
 					theWorldNormal.Reverse();
 				}
