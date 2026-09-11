@@ -2,6 +2,8 @@
 #include "../OCCTKit/EnclosureParameters.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <Graphic3d_CLight.hxx>
+#include <Prs3d_ShadingAspect.hxx>
 #endif
 #include "../OCCTKit/ProfileCurvePresets.hxx"
 #import "../OCCTKit/GLViewController+QueuedAssetLoading.h"
@@ -7249,6 +7251,78 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 
 #ifdef DEBUG
+- (NSDictionary<NSString *, id> *)debugNativeLightingState {
+    if (!NSThread.isMainThread || !_isSetuped || !GLController.isViewLoaded) return nil;
+    const auto viewer = GLController.viewer;
+    if (!viewer || viewer->ActiveView().IsNull()) return nil;
+    try {
+        const auto& view = viewer->ActiveView();
+        NSMutableArray* lights = [NSMutableArray array];
+        for (auto it = view->ActiveLightIterator(); it.More(); it.Next()) {
+            if (lights.count >= 8 || it.Value().IsNull()) return nil;
+            const auto& light = it.Value();
+            NSMutableDictionary* row = [@{@"type": @(light->Type()),
+                @"directional": @(light->Type() == Graphic3d_TOLS_DIRECTIONAL),
+                @"headlight": @(light->IsHeadlight()), @"intensity": @(light->Intensity())} mutableCopy];
+            if (light->Type() == Graphic3d_TOLS_DIRECTIONAL) {
+                const auto direction = light->Direction();
+                row[@"direction"] = @[@(direction.X()), @(direction.Y()), @(direction.Z())];
+            }
+            [lights addObject:row];
+        }
+        NSMutableArray* shapes = [NSMutableArray array];
+        if (!viewer->AisContext().IsNull()) {
+            AIS_ListOfInteractive displayed;
+            viewer->AisContext()->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                if (shapes.count >= 16) return nil;
+                const auto shape = Handle(AIS_Shape)::DownCast(it.Value());
+                if (shape.IsNull() || shape->Attributes().IsNull()
+                    || shape->Attributes()->ShadingAspect().IsNull()) continue;
+                const auto aspect = shape->Attributes()->ShadingAspect()->Aspect();
+                if (aspect.IsNull()) continue;
+                const auto rgb = [](const Quantity_Color& c) {
+                    return @[@(c.Red()), @(c.Green()), @(c.Blue())];
+                };
+                const auto& front = aspect->FrontMaterial();
+                const auto& back = aspect->BackMaterial();
+                [shapes addObject:@{@"shadingModel": @(aspect->ShadingModel()),
+                    @"customShader": @(!aspect->ShaderProgram().IsNull()),
+                    @"distinguishMaterials": @(aspect->Distinguish()),
+                    @"frontAmbient": rgb(front.AmbientColor()), @"frontDiffuse": rgb(front.DiffuseColor()),
+                    @"frontSpecular": rgb(front.SpecularColor()), @"frontShininess": @(front.Shininess()),
+                    @"backAmbient": rgb(back.AmbientColor()), @"backDiffuse": rgb(back.DiffuseColor()),
+                    @"interiorColor": rgb(aspect->InteriorColor())}];
+            }
+        }
+        return @{@"lights": lights, @"shadingModel": @(view->RenderingParams().ShadingModel),
+            @"displayedShapeAspects": shapes};
+    } catch (...) { return nil; }
+}
+- (BOOL)debugSetNativeHeadlightDirectionX:(double)x y:(double)y z:(double)z {
+    if (!NSThread.isMainThread || !_isSetuped || !GLController.isViewLoaded
+        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)
+        || std::abs(x) > 16 || std::abs(y) > 16 || std::abs(z) > 16
+        || x*x+y*y+z*z < 1e-12) return NO;
+    const auto viewer = GLController.viewer;
+    if (!viewer || !viewer->canBeginCommittedEdit() || viewer->ActiveView().IsNull()) return NO;
+    try {
+        Handle(V3d_Light) selected;
+        for (auto it = viewer->ActiveView()->ActiveLightIterator(); it.More(); it.Next()) {
+            const auto& light = it.Value();
+            if (!light.IsNull() && light->Type() == Graphic3d_TOLS_DIRECTIONAL && light->IsHeadlight()) {
+                if (!selected.IsNull()) return NO;
+                selected = light;
+            }
+        }
+        if (selected.IsNull()) return NO;
+        selected->SetDirection(gp_Dir(x,y,z));
+        viewer->ActiveView()->Invalidate();
+        [GLController requestRender];
+        return YES;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)debugReplayCameraTouch:(NSInteger)mode {
     if (!NSThread.isMainThread || !_isSetuped || !GLController.isViewLoaded
         || mode < 0 || mode > 3 || _currentGizmoType != PrimitiveGizmoTypeNone)

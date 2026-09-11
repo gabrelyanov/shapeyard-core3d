@@ -815,6 +815,11 @@ typedef struct {
 - (void)cancelNativeViewportPresentation:(NSUUID *)identifier;
 - (BOOL)isNativeViewportPresentationCurrent:(NSUUID *)identifier;
 #ifdef DEBUG
+// DEBUG-only lighting diagnosis; no native geometry or persisted material mutation.
+- (NSDictionary<NSString *, id> *_Nullable)debugNativeLightingState;
+- (BOOL)debugSetNativeHeadlightDirectionX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugSetNativeHeadlightDirection(x:y:z:));
+
 // Replay native orbit touch-down/zero sample/drag/return-to-origin (modes0..3).
 - (BOOL)debugReplayCameraTouch:(NSInteger)mode;
 - (void)debugFailNextNativeViewportDraw;
