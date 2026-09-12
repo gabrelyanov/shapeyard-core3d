@@ -4834,6 +4834,22 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 
 // Read-only DEBUG visibility into unverified component evidence. Public verified
 // reconciliation remains unavailable, including for current matching effects.
+- (NSDictionary *)debugReceiptGeometryStream:(NSData *)data chunkSize:(NSUInteger)chunkSize {
+    if(!NSThread.isMainThread||![data isKindOfClass:NSData.class]||data.length==0
+        ||data.length>8*1024*1024||chunkSize==0||chunkSize>4096)return @{@"valid":@NO};
+    try {
+        core3d::receipt::GeometryStream buffer;std::vector<std::uint8_t> bytes;
+        buffer.debugBytes=&bytes;std::ostream stream(&buffer);
+        const char *input=static_cast<const char *>(data.bytes);
+        for(NSUInteger offset=0;offset<data.length;offset+=chunkSize)
+            stream.write(input+offset,std::streamsize(MIN(chunkSize,data.length-offset)));
+        core3d::receipt::Digest digest;
+        if(!stream.good()||!buffer.finish(digest))return @{@"valid":@NO};
+        return @{@"valid":@YES,@"bytes":[NSData dataWithBytes:bytes.data() length:bytes.size()],
+            @"sha256":[NSData dataWithBytes:digest.data() length:digest.size()]};
+    }catch(...){return @{@"valid":@NO};}
+}
+
 - (NSDictionary *)debugInspectNativeReceipt:(NSString *)requestID conflict:(BOOL)conflict {
     namespace r = core3d::receipt;
     if (![NSThread isMainThread] || !GLController || !GLController.viewer)

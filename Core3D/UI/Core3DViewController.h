@@ -1508,6 +1508,9 @@ typedef struct {
 - (NSData *_Nullable)debugLegacyNoLengthUnitMirrorBinXCAFFixtureData;
 - (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind
     NS_SWIFT_NAME(debugNativeReceiptFixture(_:));
+/// DEBUG stream oracle only; no native geometry authority is issued from bytes.
+- (NSDictionary *)debugReceiptGeometryStream:(NSData *)data chunkSize:(NSUInteger)chunkSize
+    NS_SWIFT_NAME(debugReceiptGeometryStream(_:chunkSize:));
 - (NSDictionary *)debugInspectNativeReceipt:(NSString *)requestID conflict:(BOOL)conflict
     NS_SWIFT_NAME(debugInspectNativeReceipt(_:conflict:));
 - (void)debugNativeTombstoneProbe:(NSInteger)scenario completion:(void (^)(NSDictionary *result))completion
