@@ -71,6 +71,7 @@ namespace core3d {
         ObjectFrameIdentity identity;
         std::string definitionIdentifier;
         std::string featureIdentifier;
+        double dimensionMetersPerUnit = 0;
         bool current = false;
     };
     struct StoredEnclosureSnapshot {

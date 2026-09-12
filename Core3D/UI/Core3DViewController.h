@@ -22,6 +22,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DSceneSnapshot;
+@class Core3DStoredProfileSnapshot;
 @class Core3DSceneFrameSnapshot;
 @class Core3DScenePresentationOverlaySnapshot;
 
@@ -223,6 +224,9 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,strong,readonly) Core3DSceneSnapshot *scene;
 @property(nonatomic,copy,readonly) NSString *documentIdentifier;
 @property(nonatomic,strong,readonly,nullable) Core3DStoredEnclosureSnapshot *selectedEnclosure;
+//! Only current canonical rectangle or solid-circle extrusions are described
+//! for AI edits. Other saved profiles remain available through manual editing.
+@property(nonatomic,strong,readonly,nullable) Core3DStoredProfileSnapshot *selectedProfile;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -235,6 +239,11 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,copy,readonly) NSString *featureIdentifier;
 @property(nonatomic,strong,readonly) Core3DProfileDefinition *definition;
+//! Physical metres per definition length along its own axes, including both
+//! stored construction and authored object scale. Meaningful for editing only
+//! while current is YES and this value is positive. Zero means unavailable
+//! for physical editing; manual profile inspection remains supported.
+@property(nonatomic,readonly) double dimensionMetersPerUnit;
 @property(nonatomic,readonly) BOOL current;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -1056,6 +1065,13 @@ typedef struct {
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildEnclosure(definition:context:completion:));
+//! Rebuild the exact selected canonical box/cylinder profile from its original
+//! planning lease. Primitive kind and plane remain unchanged; native opening
+//! construction frame and authored placement are retained by ordinary history.
+- (void)rebuildProfileWithDefinition:(Core3DProfileDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildProfile(definition:context:completion:));
 //! One flat instruction, 1–16 separate named profile solids and one Undo.
 //! Existing typed profile tolerances apply in document units. No fusion or
 //! nested hierarchy is inferred. Stop retires the exact planning context.

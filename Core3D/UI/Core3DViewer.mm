@@ -1853,6 +1853,13 @@ std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
         result.parameters = state.profile.parameters; result.identity = identity;
         result.definitionIdentifier = state.definitionIdentifier;
         result.featureIdentifier = state.profile.identifier;
+        const double constructionScale = result.parameters.constructionFrame
+            ? result.parameters.constructionFrame->values[7] : 1.0;
+        result.dimensionMetersPerUnit = result.parameters.metersPerUnit
+            * std::abs(constructionScale) * std::abs(state.scalars[7]);
+        if (!std::isfinite(result.dimensionMetersPerUnit) || result.dimensionMetersPerUnit <= 0
+            || !std::isfinite(result.dimensionMetersPerUnit * 1000.0))
+            result.dimensionMetersPerUnit = 0; // Unsupported physical scale does not hide a manual recipe.
         result.current = state.profile.IsCurrent(myDoc->Document(), label)
             && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
         return result;

@@ -1098,6 +1098,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         _definitionIdentifier = [[NSString alloc] initWithUTF8String:snapshot.definitionIdentifier.c_str()];
         _featureIdentifier = [[NSString alloc] initWithUTF8String:snapshot.featureIdentifier.c_str()];
         _definition = [[Core3DProfileDefinition alloc] initWithNativeParameters:snapshot.parameters];
+        _dimensionMetersPerUnit = snapshot.dimensionMetersPerUnit;
         _current = snapshot.current;
     }
     return self;
@@ -1233,6 +1234,26 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
 }
 @end
 
+// Descriptive AI subset only. Arbitrary profiles keep the full manual path.
+// Exact canonical coordinates avoid reinterpreting an offset/concave outline.
+// Kind is private metadata, never authority or a renderer-derived classification.
+static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parameters& parameters) noexcept {
+    const auto& d = parameters.definition;
+    if (d.revolve || d.curves || !d.holes.empty() || d.plane < 0 || d.plane > 2
+        || !std::isfinite(d.depth) || d.depth <= 0) return 0;
+    if (d.circle) {
+        const auto& c = *d.circle;
+        return d.points.empty() && c.center.X() == 0 && c.center.Y() == 0
+            && c.innerRadius == 0 && std::isfinite(c.outerRadius) && c.outerRadius > 0 ? 2 : 0;
+    }
+    if (d.points.size() != 4) return 0;
+    const auto& p = d.points;
+    const double width=p[1].X(), depth=p[2].Y();
+    return std::isfinite(width) && width > 0 && std::isfinite(depth) && depth > 0
+        && p[0].X() == 0 && p[0].Y() == 0 && p[1].Y() == 0
+        && p[2].X() == width && p[3].X() == 0 && p[3].Y() == depth ? 1 : 0;
+}
+
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -1244,15 +1265,17 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
 }
 - (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
     documentIdentifier:(NSString *)documentIdentifier
-    enclosure:(Core3DStoredEnclosureSnapshot *)enclosure;
+    enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
+    profile:(Core3DStoredProfileSnapshot *)profile;
 @end
 @implementation Core3DModelingPlanningContext
 - (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
     documentIdentifier:(NSString *)documentIdentifier
-    enclosure:(Core3DStoredEnclosureSnapshot *)enclosure {
+    enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
+    profile:(Core3DStoredProfileSnapshot *)profile {
     if ((self = [super init])) {
         _scene = scene; _documentIdentifier = [documentIdentifier copy];
-        _selectedEnclosure = enclosure;
+        _selectedEnclosure = enclosure; _selectedProfile = profile;
     }
     return self;
 }
@@ -8990,17 +9013,24 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
         NSString *documentID = [[NSString alloc] initWithUTF8String:document->DocumentIdentifier().c_str()];
         if (documentID.length == 0 || documentID.length > 128) return nil;
         Core3DStoredEnclosureSnapshot *enclosure = nil;
+        Core3DStoredProfileSnapshot *profile = nil;
         if (scene.selection.selectedElements.count == 1) {
             Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
             if (selected.kind == Core3DSceneElementKindObject)
                 enclosure = [self storedEnclosureWithEntityIdentifier:selected.entityIdentifier expected:scene];
             if (enclosure && !enclosure.current) enclosure = nil;
+            if (!enclosure && selected.kind == Core3DSceneElementKindObject) {
+                profile = [self storedProfileWithEntityIdentifier:selected.entityIdentifier expected:scene];
+                if (profile && (!profile.current || profile.dimensionMetersPerUnit <= 0
+                    || Core3DCanonicalModelingProfileKind([profile nativeSnapshot].parameters) == 0))
+                    profile = nil;
+            }
         }
         // Native reads must not acquire or refresh authority during capture.
         const auto after = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
         if (!after || !(*after == *stamp)) return nil;
         Core3DModelingPlanningContext *context = [[Core3DModelingPlanningContext alloc]
-            initWithScene:scene documentIdentifier:documentID enclosure:enclosure];
+            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile];
         context->_planningOwner = self; context->_planningViewer = viewer;
         context->_planningStamp = *stamp; context->_planningOverlayRevision = overlay.overlayRevision;
         Core3DModelingPlanningContext *previous = _issuedModelingPlanningContext;
@@ -9102,6 +9132,43 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion {
     [self core3d_executeEnclosure:definition context:context rebuild:YES completion:completion];
+}
+
+- (void)rebuildProfileWithDefinition:(Core3DProfileDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
+    }
+    if (![self isModelingPlanningContextCurrent:context] || !context.selectedProfile
+        || ![definition isKindOfClass:Core3DProfileDefinition.class]) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        const auto original=[context.selectedProfile nativeSnapshot];
+        const auto requested=[definition nativeParameters];
+        const auto kind=Core3DCanonicalModelingProfileKind(original.parameters);
+        if (!original.current || original.dimensionMetersPerUnit <= 0 || kind == 0
+            || Core3DCanonicalModelingProfileKind(requested) != kind
+            || requested.definition.plane != original.parameters.definition.plane
+            || requested.metersPerUnit != original.parameters.metersPerUnit) {
+            completion(Core3DProfileConstructionResultRejected); return;
+        }
+        context->_planningConsumed=YES; _modelingConstructionContext=context;
+        __weak Core3DViewController *weakSelf=self;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        // Ordinary rebuild copies the exact opening construction frame; its
+        // native transform ledger retains authored placement and stable IDs.
+        [self rebuildStoredProfile:context.selectedProfile definition:definition expected:context.scene
+            completion:^(Core3DProfileConstructionResult result) {
+                Core3DViewController *owner=weakSelf;
+                Core3DModelingPlanningContext *finished=weakContext;
+                if (finished) finished->_planningRetired=YES;
+                if (owner && owner->_modelingConstructionContext==finished) owner->_modelingConstructionContext=nil;
+                completion(result);
+            }];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
 - (void)createAssemblyWithParts:(NSArray<Core3DAssemblyPartDefinition *> *)parts
