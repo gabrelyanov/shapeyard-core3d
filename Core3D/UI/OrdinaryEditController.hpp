@@ -3,7 +3,7 @@
 #include <gp_Ax2.hxx>
 
 #include "OrdinaryEditCommand.hpp"
-#include "NativeModelingReceipt.hxx"
+#include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "NativeModelingRequest.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
