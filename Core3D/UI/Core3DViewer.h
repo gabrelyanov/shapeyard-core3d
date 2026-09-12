@@ -179,6 +179,9 @@ namespace core3d {
         //! True only while no typed operation owns a command, preview, or
         //! exactly-once recovery ledger and the OCAF document is writable.
         bool canBeginCommittedEdit() const noexcept;
+        //! Conservative semantic transition fence, including failed/no-op
+        //! selection and tool attempts. Camera-only publication does not call it.
+        void observeNativePlanningInteraction() noexcept;
         //! Duplicate presentation repair is intentionally exposed separately:
         //! committed snapshots and project serialization must fail closed while
         //! its result ledger remains the sole recovery authority.

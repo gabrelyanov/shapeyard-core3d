@@ -79,6 +79,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)hasUnresolvedOrdinaryEdit;
 - (BOOL)prepareOrdinaryEditForDocumentClose;
 - (void)deselectAll;
+//! Internal native planning readiness; preview/gallery and constructor views
+//! never issue production model-edit permission.
+- (BOOL)canIssueModelingPlanningContext;
 - (void)refreshSelectionState;
 - (BOOL)isSelected;
 

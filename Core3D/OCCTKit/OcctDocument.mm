@@ -3341,6 +3341,26 @@ core3d::authority::ReplacementEnd OcctDocument::EndNativeReplacement(
     } catch (...) { return ReplacementEnd::Unavailable; }
 }
 
+std::optional<core3d::authority::Stamp>
+OcctDocument::CaptureNativePlanningStamp(bool nativeEditReady) noexcept {
+    if (![NSThread isMainThread] || !nativeEditReady || !myNativeAuthority
+        || !myAuthorityApplication || !myAuthorityApplication->AuthorityThreadContractValid())
+        return std::nullopt;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
+            || DocumentIdentifier().empty()) return std::nullopt;
+        return myNativeAuthority->Capture(myOcafDoc.get(), nativeEditReady, myOcafDoc->HasOpenCommand());
+    } catch (...) { return std::nullopt; }
+}
+
+void OcctDocument::ObserveNativePlanningInteraction() noexcept {
+    if (![NSThread isMainThread] || !myNativeAuthority || !myAuthorityApplication
+        || !myAuthorityApplication->AuthorityThreadContractValid()) return;
+    try {
+        if (!myOcafDoc.IsNull()) myNativeAuthority->SelectionBoundary(myOcafDoc.get());
+    } catch (...) {}
+}
+
 #if DEBUG
 std::optional<core3d::authority::Stamp> OcctDocument::DebugNativeMutationStamp() noexcept {
     // Diagnostic read only: selection and owner/preview fences are not wired.

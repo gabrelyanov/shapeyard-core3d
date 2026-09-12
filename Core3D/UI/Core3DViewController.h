@@ -186,6 +186,19 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! One-use planning lease issued by one live native owner. Its immutable
+//! descriptions may inform a provider; none of their serialized fields can
+//! recreate permission. Keep this object on the main thread. Capture requires
+//! passive object selection and no preview, load, construction or recovery.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingPlanningContext : NSObject
+@property(nonatomic,strong,readonly) Core3DSceneSnapshot *scene;
+@property(nonatomic,copy,readonly) NSString *documentIdentifier;
+@property(nonatomic,strong,readonly,nullable) Core3DStoredEnclosureSnapshot *selectedEnclosure;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! A read of one selected native profile. A stale profile remains inspectable
 //! but cannot replace subsequent geometry edits. Apply also checks the original
 //! document/model revision; only the presentation may be refreshed.
@@ -988,6 +1001,33 @@ typedef struct {
     definition:(Core3DEnclosureDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildStoredEnclosure(_:definition:expected:completion:));
+//! Prepare passive Object/MoveRotate/Scale state for a separate planning
+//! capture. Preserves model and selected targets; rejects active work, gestures,
+//! modeling previews, readonly views and recovery without cancelling them.
+- (BOOL)prepareForModelingPlanning NS_SWIFT_NAME(prepareForModelingPlanning());
+//! Capture supersedes the previous unused lease. Camera changes alone remain
+//! valid; any observed semantic selection/tool or native edit/history boundary
+//! invalidates it, even if geometry or selection later returns to the same value.
+- (nullable Core3DModelingPlanningContext *)captureModelingPlanningContext;
+- (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context
+    NS_SWIFT_NAME(isModelingPlanningContextCurrent(_:));
+//! Idempotently retires this exact lease. Stops only construction owned by it;
+//! unrelated later touch work is never cancelled. Worker completion still drains.
+- (void)retireModelingPlanningContext:(Core3DModelingPlanningContext *)context
+    NS_SWIFT_NAME(retireModelingPlanningContext(_:));
+//! One logical native command/Undo. Rejected includes foreign, stale, consumed,
+//! malformed and unavailable authority. No automatic retry after consumption:
+//! durable request receipts/crash reconciliation are not provided by this API.
+- (void)createEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createEnclosure(definition:context:completion:));
+//! Target is exclusively the selected enclosure captured by this exact lease.
+//! Definition must preserve its construction frame and declared native unit.
+- (void)rebuildEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildEnclosure(definition:context:completion:));
 //! Cancels either construction kind; admission stays Busy until completion.
 - (void)cancelNativeConstruction;
 //! Construct one solid from 3–64 non-intersecting outline points in mm, either

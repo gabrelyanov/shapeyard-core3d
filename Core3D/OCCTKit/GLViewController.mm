@@ -1889,6 +1889,9 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 -(void) checkSelections {
+    // Observe synchronously, before the debounced UI delegate. This also
+    // catches a select/deselect round trip between two immutable scene reads.
+    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
 	bool isSelected = _viewer->getObjectInteractor()->isSelected();
 	bool isManipulatorAttached = _viewer->getObjectInteractor()->isManipulatorAttached();
 	unsigned char selections = Core3DViewer::kSelectionTypeNone;
@@ -2108,6 +2111,11 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
     [self requestRender];
 }
 
+- (BOOL)canIssueModelingPlanningContext {
+    return [NSThread isMainThread] && _didSetupViewer && !_isPreviewMode
+        && !_isConstructorMode && _viewer != nullptr && _viewer->canBeginCommittedEdit();
+}
+
 - (void)refreshSelectionState {
     [self checkSelections];
 }
@@ -2299,6 +2307,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (Core3DSelectionTypeChangeResult)
     trySetSelectionType:(PrimitiveSelectionType)type
 {
+    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
     if (![NSThread isMainThread]) {
         return Core3DSelectionTypeChangeResultWrongThread;
     }
@@ -2482,6 +2491,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
+    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
 	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}

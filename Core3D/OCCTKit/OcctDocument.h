@@ -418,6 +418,11 @@ public:
       const core3d::authority::ReplacementReservation& reservation,
       bool accepted, bool restored) noexcept;
 
+  // Production planning observation. Readiness is supplied only by the native
+  // viewer/controller after checking their actual worker/preview/recovery fences.
+  // This is not a serialized token; the public bridge retains it opaquely.
+  std::optional<core3d::authority::Stamp> CaptureNativePlanningStamp(bool nativeEditReady) noexcept;
+  void ObserveNativePlanningInteraction() noexcept;
 #if DEBUG
   std::optional<core3d::authority::Stamp> DebugNativeMutationStamp() noexcept;
 #endif

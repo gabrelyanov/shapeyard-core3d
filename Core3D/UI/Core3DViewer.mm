@@ -1508,6 +1508,10 @@ Handle(OcctDocument) Core3DViewer::getDocument() {
     return myDoc;
 }
 
+void Core3DViewer::observeNativePlanningInteraction() noexcept {
+    if (!myDoc.IsNull()) myDoc->ObserveNativePlanningInteraction();
+}
+
 bool Core3DViewer::canBeginCommittedEdit() const noexcept {
     try {
         if (_objectInteractor == nullptr || _shapeInteractor == nullptr
@@ -2527,6 +2531,7 @@ OrdinaryEditResult Core3DViewer::editSavedGroup(int operation, const std::string
 bool Core3DViewer::selectSavedGroup(const ObjectFrameIdentity& expected,
     std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height,
     bool& selectionWasTouched) noexcept {
+    observeNativePlanningInteraction();
     selectionWasTouched = false;
 
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || width == 0 || height == 0
@@ -4145,6 +4150,7 @@ bool Core3DViewer::selectObjectFromBrowser(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight,
     bool& selectionWasTouched) noexcept {
+    observeNativePlanningInteraction();
     selectionWasTouched = false;
     if (![NSThread isMainThread] || !canBeginCommittedEdit()
         || myContext.IsNull() || myView.IsNull()
@@ -5488,6 +5494,7 @@ const int Core3DViewer::selectedCount() const {
 }
 
 void Core3DViewer::Select(int theX, int theY) {
+    observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
         return;
     }
@@ -5573,6 +5580,7 @@ void Core3DViewer::Select(int theX, int theY) {
 }
 
 	void Core3DViewer::deselectAll() {
+        observeNativePlanningInteraction();
 		if (myContext.IsNull()) { return; }
 		if (_objectInteractor != nullptr
 			&& hasUnresolvedEdit()) {

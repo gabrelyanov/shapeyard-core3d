@@ -2155,6 +2155,7 @@ namespace core3d {
     ShapeSelectionModeChangeResult ShapeInteractor::setSelectionMode(
         const ShapeSelectionMode mode) noexcept
     {
+        if (!myDoc.IsNull()) myDoc->ObserveNativePlanningInteraction();
         if (myContext.IsNull() || myDoc.IsNull()
             || myDoc->Document().IsNull()) {
             return ShapeSelectionModeChangeResult::NotReady;

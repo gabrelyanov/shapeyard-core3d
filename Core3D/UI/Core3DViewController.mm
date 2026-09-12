@@ -1147,6 +1147,61 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 @end
 
+// Main-thread-owned callback storage. Client callbacks can retain native
+// context snapshots, so they must never be part of the geometry worker's
+// capture graph. Only an immutable completion UUID crosses that boundary.
+static NSMutableDictionary<NSUUID *, id> *Core3DNativeSolidCompletionRegistry() {
+    static NSMutableDictionary<NSUUID *, id> *callbacks;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ callbacks = [NSMutableDictionary dictionary]; });
+    return callbacks;
+}
+
+static NSUUID *Core3DRegisterNativeSolidCompletion(void (^completion)(Core3DProfileConstructionResult)) {
+    if (![NSThread isMainThread] || !completion) return nil;
+    NSMutableDictionary<NSUUID *, id> *callbacks = Core3DNativeSolidCompletionRegistry();
+    if (callbacks.count >= 32) return nil;
+    NSUUID *token = [NSUUID UUID];
+    callbacks[token] = [completion copy];
+    return token;
+}
+
+static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConstructionResult result) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ Core3DDeliverNativeSolidCompletion(token, result); });
+        return;
+    }
+    NSMutableDictionary<NSUUID *, id> *callbacks = Core3DNativeSolidCompletionRegistry();
+    void (^completion)(Core3DProfileConstructionResult) = callbacks[token];
+    [callbacks removeObjectForKey:token]; // Remove before invoking reentrant user code.
+    if (completion) completion(result);
+}
+
+@interface Core3DModelingPlanningContext () {
+@public
+    __weak Core3DViewController *_planningOwner;
+    std::weak_ptr<core3d::Core3DViewer> _planningViewer;
+    core3d::authority::Stamp _planningStamp;
+    uint64_t _planningOverlayRevision;
+    BOOL _planningConsumed;
+    BOOL _planningRetired;
+}
+- (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
+    documentIdentifier:(NSString *)documentIdentifier
+    enclosure:(Core3DStoredEnclosureSnapshot *)enclosure;
+@end
+@implementation Core3DModelingPlanningContext
+- (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
+    documentIdentifier:(NSString *)documentIdentifier
+    enclosure:(Core3DStoredEnclosureSnapshot *)enclosure {
+    if ((self = [super init])) {
+        _scene = scene; _documentIdentifier = [documentIdentifier copy];
+        _selectedEnclosure = enclosure;
+    }
+    return self;
+}
+@end
+
 @interface Core3DViewController () {
     BOOL _isSetuped;
     Core3DQueuedAssetRequestSlot *_queuedAssetRequestSlot;
@@ -1156,6 +1211,8 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     std::atomic_bool _isLoading;
     std::shared_ptr<core3d::NativeSolidWork> _nativeSolidWork;
     BOOL _nativeSolidCancelled;
+    __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
+    Core3DModelingPlanningContext *_modelingConstructionContext;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
     Core3DMeshContactOperation *_meshContactOperation;
@@ -1171,6 +1228,12 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 
 - (BOOL)core3d_canBeginCommittedEdit;
+- (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
+    matchesAllowingConsumed:(BOOL)allowConsumed;
+- (BOOL)core3d_canCaptureModelingContext;
+- (void)core3d_executeEnclosure:(Core3DEnclosureDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context rebuild:(BOOL)rebuild
+    completion:(void(^)(Core3DProfileConstructionResult))completion;
 - (core3d::meshcheck::ContactSourceStatus)core3d_captureMeshContactSource:
     (const core3d::meshcheck::ContactSourceIdentity&)identity
     cancelled:(const std::atomic_bool&)cancelled
@@ -8790,6 +8853,201 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
+
+- (BOOL)core3d_canCaptureModelingContext {
+    return [NSThread isMainThread] && _isSetuped && !_isPreviewMode
+        && [GLController canIssueModelingPlanningContext]
+        && ![self core3d_hasCompetingLoadOrControllerWork]
+        && [self core3d_canBeginCommittedEdit]
+        && [GLController getSelectionType] == PrimitiveSelectionTypeShape
+        && [GLController getGizmoType] == PrimitiveGizmoTypeNone
+        && !GLController.viewer->getObjectInteractor()->isManipulatorGestureActive();
+}
+
+- (BOOL)prepareForModelingPlanning {
+    if (![NSThread isMainThread] || !_isSetuped || _isPreviewMode
+        || ![GLController canIssueModelingPlanningContext]
+        || [self core3d_hasCompetingLoadOrControllerWork]
+        || ![self core3d_canBeginCommittedEdit]
+        || _currentSelectionType != PrimitiveSelectionTypeShape
+        || [GLController getSelectionType] != PrimitiveSelectionTypeShape) return NO;
+    const PrimitiveGizmoType gizmo = [GLController getGizmoType];
+    if (_currentGizmoType != gizmo || (gizmo != PrimitiveGizmoTypeNone
+        && gizmo != PrimitiveGizmoTypeMoveRotate && gizmo != PrimitiveGizmoTypeScale)) return NO;
+    const auto viewer = GLController.viewer;
+    const auto interactor = viewer->getObjectInteractor();
+    if (!interactor || interactor->isManipulatorGestureActive()) return NO;
+    try {
+        Core3DSceneSnapshot *before = [self captureSceneSnapshot];
+        Core3DScenePresentationOverlaySnapshot *overlay = [self captureScenePresentationOverlay];
+        if (!before || !overlay || before.selectionMode != Core3DSceneElementKindObject
+            || overlay.suppressedEntityIdentifiers.count != 0) return NO;
+        // Ordinary passive gizmo geometry is the only removable overlay.
+        // Never interpret an active modeling preview as a harmless tool icon.
+        const BOOL passiveOverlay = overlay.kind == Core3DScenePresentationOverlayKindNone
+            || (gizmo == PrimitiveGizmoTypeMoveRotate && overlay.kind == Core3DScenePresentationOverlayKindMoveRotateGizmo)
+            || (gizmo == PrimitiveGizmoTypeScale && overlay.kind == Core3DScenePresentationOverlayKindScaleGizmo);
+        if (!passiveOverlay) return NO;
+        for (Core3DSceneRenderItemSnapshot *item in overlay.renderItems)
+            if (item.renderRole != Core3DSceneRenderRoleGizmo) return NO;
+        const auto document = viewer->getDocument();
+        if (document.IsNull()) return NO;
+        const auto stamp = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if (!stamp) return NO;
+        // All admission checks precede the existing native transition. In
+        // particular, a pending gesture/worker/recovery is never cancelled here.
+        if (gizmo != PrimitiveGizmoTypeNone) [self setGizmoType:PrimitiveGizmoTypeNone];
+        if (![self core3d_canCaptureModelingContext]) return NO;
+        Core3DSceneSnapshot *after = [self captureSceneSnapshot];
+        Core3DScenePresentationOverlaySnapshot *empty = [self captureScenePresentationOverlay];
+        const auto finalStamp = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if (!after || !empty || empty.kind != Core3DScenePresentationOverlayKindNone || !finalStamp
+            || finalStamp->instanceNonce != stamp->instanceNonce || finalStamp->opening != stamp->opening
+            || finalStamp->edit != stamp->edit
+            || ![after.publicationSourceIdentifier isEqualToString:before.publicationSourceIdentifier]
+            || after.revisions.documentGeneration != before.revisions.documentGeneration
+            || after.revisions.modelRevision != before.revisions.modelRevision
+            || after.selectionMode != before.selectionMode || after.metersPerUnit != before.metersPerUnit
+            || after.selection.selectedElements.count != before.selection.selectedElements.count) return NO;
+        for (NSUInteger i = 0; i < before.selection.selectedElements.count; ++i) {
+            Core3DSceneElementIdentifier *a = before.selection.selectedElements[i];
+            Core3DSceneElementIdentifier *b = after.selection.selectedElements[i];
+            if (![a.entityIdentifier isEqualToString:b.entityIdentifier] || a.kind != b.kind
+                || a.topologyIndex != b.topologyIndex || a.geometryRevision != b.geometryRevision) return NO;
+        }
+        return YES;
+    } catch (...) { return NO; }
+}
+
+- (Core3DModelingPlanningContext *)captureModelingPlanningContext {
+    if (![self core3d_canCaptureModelingContext]) return nil;
+    try {
+        const auto viewer = GLController.viewer;
+        const auto document = viewer->getDocument();
+        if (document.IsNull()) return nil;
+        const auto stamp = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        Core3DSceneSnapshot *scene = [self captureSceneSnapshot];
+        Core3DScenePresentationOverlaySnapshot *overlay = [self captureScenePresentationOverlay];
+        if (!stamp || !scene || !overlay || scene.selectionMode != Core3DSceneElementKindObject
+            || overlay.kind != Core3DScenePresentationOverlayKindNone
+            || !std::isfinite(scene.metersPerUnit) || scene.metersPerUnit <= 0) return nil;
+        NSString *documentID = [[NSString alloc] initWithUTF8String:document->DocumentIdentifier().c_str()];
+        if (documentID.length == 0 || documentID.length > 128) return nil;
+        Core3DStoredEnclosureSnapshot *enclosure = nil;
+        if (scene.selection.selectedElements.count == 1) {
+            Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
+            if (selected.kind == Core3DSceneElementKindObject)
+                enclosure = [self storedEnclosureWithEntityIdentifier:selected.entityIdentifier expected:scene];
+            if (enclosure && !enclosure.current) enclosure = nil;
+        }
+        // Native reads must not acquire or refresh authority during capture.
+        const auto after = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if (!after || !(*after == *stamp)) return nil;
+        Core3DModelingPlanningContext *context = [[Core3DModelingPlanningContext alloc]
+            initWithScene:scene documentIdentifier:documentID enclosure:enclosure];
+        context->_planningOwner = self; context->_planningViewer = viewer;
+        context->_planningStamp = *stamp; context->_planningOverlayRevision = overlay.overlayRevision;
+        Core3DModelingPlanningContext *previous = _issuedModelingPlanningContext;
+        if (previous) previous->_planningRetired = YES;
+        _issuedModelingPlanningContext = context;
+        return context;
+    } catch (...) { return nil; }
+}
+
+- (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
+    matchesAllowingConsumed:(BOOL)allowConsumed {
+    if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
+        || context != _issuedModelingPlanningContext || context->_planningOwner != self
+        || context->_planningRetired || (!allowConsumed && context->_planningConsumed)
+        || ![self core3d_canCaptureModelingContext]) return NO;
+    try {
+        const auto viewer = context->_planningViewer.lock();
+        if (!viewer || viewer != GLController.viewer) return NO;
+        const auto document = viewer->getDocument();
+        if (document.IsNull()) return NO;
+        const auto stamp = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if (!stamp || !(*stamp == context->_planningStamp)) return NO;
+        NSString *documentID = [[NSString alloc] initWithUTF8String:document->DocumentIdentifier().c_str()];
+        if (![documentID isEqualToString:context.documentIdentifier]) return NO;
+        Core3DSceneSnapshot *live = [self captureSceneSnapshot];
+        Core3DScenePresentationOverlaySnapshot *overlay = [self captureScenePresentationOverlay];
+        Core3DSceneSnapshot *expected = context.scene;
+        if (!live || !overlay || overlay.kind != Core3DScenePresentationOverlayKindNone
+            || overlay.overlayRevision != context->_planningOverlayRevision
+            || live.selectionMode != expected.selectionMode
+            || ![live.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+            || live.revisions.documentGeneration != expected.revisions.documentGeneration
+            || live.revisions.modelRevision != expected.revisions.modelRevision
+            || live.revisions.presentationRevision != expected.revisions.presentationRevision
+            || live.metersPerUnit != expected.metersPerUnit
+            || live.selection.selectedElements.count != expected.selection.selectedElements.count) return NO;
+        for (NSUInteger i = 0; i < live.selection.selectedElements.count; ++i) {
+            Core3DSceneElementIdentifier *a = live.selection.selectedElements[i];
+            Core3DSceneElementIdentifier *b = expected.selection.selectedElements[i];
+            if (![a.entityIdentifier isEqualToString:b.entityIdentifier] || a.kind != b.kind
+                || a.topologyIndex != b.topologyIndex || a.geometryRevision != b.geometryRevision) return NO;
+        }
+        const auto after = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        return after && *after == context->_planningStamp;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context {
+    return [self core3d_modelingContext:context matchesAllowingConsumed:NO];
+}
+
+- (void)retireModelingPlanningContext:(Core3DModelingPlanningContext *)context {
+    if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
+        || context->_planningOwner != self) return;
+    context->_planningRetired = YES;
+    if (_modelingConstructionContext == context && _nativeSolidWork)
+        [self cancelNativeConstruction];
+}
+
+- (void)core3d_executeEnclosure:(Core3DEnclosureDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context rebuild:(BOOL)rebuild
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (![self isModelingPlanningContextCurrent:context]
+        || ![definition isKindOfClass:Core3DEnclosureDefinition.class]
+        || (rebuild && !context.selectedEnclosure)) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    // Consume before invoking native admission. A failed attempt cannot be
+    // silently replayed with refreshed permission; request a new plan/context.
+    context->_planningConsumed = YES;
+    _modelingConstructionContext = context;
+    __weak Core3DViewController *weakSelf = self;
+    __weak Core3DModelingPlanningContext *weakContext = context;
+    void (^finish)(Core3DProfileConstructionResult) = ^(Core3DProfileConstructionResult result) {
+        Core3DViewController *owner = weakSelf;
+        Core3DModelingPlanningContext *finishedContext = weakContext;
+        if (finishedContext) finishedContext->_planningRetired = YES;
+        if (owner && owner->_modelingConstructionContext == finishedContext)
+            owner->_modelingConstructionContext = nil;
+        completion(result);
+    };
+    if (rebuild) [self rebuildStoredEnclosure:context.selectedEnclosure definition:definition
+        expected:context.scene completion:finish];
+    else [self createEnclosureWithDefinition:definition expected:context.scene completion:finish];
+}
+
+- (void)createEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self core3d_executeEnclosure:definition context:context rebuild:NO completion:completion];
+}
+
+- (void)rebuildEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self core3d_executeEnclosure:definition context:context rebuild:YES completion:completion];
+}
+
 - (void)cancelNativeConstruction { [self cancelProfileConstruction]; }
 
 - (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
@@ -8835,7 +9093,10 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion {
+        NSUUID *completionToken = Core3DRegisterNativeSolidCompletion(completion);
+        if (!completionToken) { completion(Core3DProfileConstructionResultBusy); return; }
         _nativeSolidWork = work; _nativeSolidCancelled = NO;
+        __weak Core3DModelingPlanningContext *weakPlanningContext = _modelingConstructionContext;
         const auto geometry = core3d::Core3DViewer::nativeSolidGeometry(work);
         const std::weak_ptr<core3d::Core3DViewer> expectedViewer = GLController.viewer;
         __weak Core3DViewController* weakSelf = self;
@@ -8843,19 +9104,28 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry);
             dispatch_async(dispatch_get_main_queue(), ^{
                 Core3DViewController* controller = weakSelf;
-                if (!controller) { return; }
+                if (!controller) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return; }
+                Core3DModelingPlanningContext *planningContext = weakPlanningContext;
                 const BOOL cancelled = controller->_nativeSolidCancelled;
                 // Main-thread work owns live scene authority. The worker's only
                 // strong payload contains new private geometry and scalar values.
                 const auto pendingWork = std::move(controller->_nativeSolidWork);
                 const auto currentViewer = expectedViewer.lock();
-                if (cancelled) { completion(Core3DProfileConstructionResultCancelled); return; }
+                if (cancelled) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultCancelled); return; }
                 if (!pendingWork || !currentViewer || controller->_isLoading.load() || !controller->_isSetuped
                     || ((GLViewController *)controller.glController) == nil
                     || ((GLViewController *)controller.glController).viewer != currentViewer) {
-                    completion(Core3DProfileConstructionResultRejected); return;
+                    Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
                 }
-                if (!built) { completion(Core3DProfileConstructionResultFailed); return; }
+                // Recheck the originally issued lease after private geometry
+                // work, before opening the single ordinary OCAF transaction.
+                // The work slot was moved out above, so its own job is not
+                // mistaken for competing native work by readiness admission.
+                if (planningContext && ![controller core3d_modelingContext:planningContext
+                        matchesAllowingConsumed:YES]) {
+                    Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
+                }
+                if (!built) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultFailed); return; }
                 const auto native = currentViewer->commitNativeSolid(pendingWork);
                 Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
                 switch (native) {
@@ -8873,7 +9143,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
                     case core3d::OrdinaryEditResult::OutcomeUnknown: result = Core3DProfileConstructionResultRecoveryRequired; break;
                     case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
                 }
-                completion(result);
+                Core3DDeliverNativeSolidCompletion(completionToken, result);
             });
         });
 }
