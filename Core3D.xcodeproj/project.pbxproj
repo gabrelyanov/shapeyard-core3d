@@ -154,7 +154,9 @@
 		C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D0E0112F10000100000011 /* Core3DNativeExportOperation.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */; };
 		C3D1A0012F20000100000001 /* Core3DNativeImportOperation.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D1A0112F20000100000011 /* Core3DNativeImportOperation.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		3DF82DCF1EF97E1E6DD140F6 /* Core3DMeshContactOperation.h in Headers */ = {isa = PBXBuildFile; fileRef = 9A29829928AB277602A87580 /* Core3DMeshContactOperation.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D1A0022F20000100000002 /* Core3DNativeImportOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D1A0132F20000100000013 /* Core3DNativeImportOperation.mm */; };
+		278C032B51CDE27DB28FD217 /* Core3DMeshContactOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = 23B3ADFE6189A256630AC856 /* Core3DMeshContactOperation.mm */; };
 		C3D1B0012F21000100000001 /* Core3DGLBPreflight.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D1B0122F21000100000012 /* Core3DGLBPreflight.mm */; };
 		C3D1B0022F21000100000002 /* Core3DGLBReader.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D1B0142F21000100000014 /* Core3DGLBReader.mm */; };
 		323E89E22BD13F3F0035FF45 /* GLViewControllerProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 323E89E12BD13F3F0035FF45 /* GLViewControllerProtocol.h */; };
@@ -356,8 +358,11 @@
 		C3D0E0122F10000100000012 /* Core3DNativeExportOperation+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DNativeExportOperation+Private.h"; sourceTree = "<group>"; };
 		C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeExportOperation.mm; sourceTree = "<group>"; };
 		C3D1A0112F20000100000011 /* Core3DNativeImportOperation.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DNativeImportOperation.h; sourceTree = "<group>"; };
+		9A29829928AB277602A87580 /* Core3DMeshContactOperation.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DMeshContactOperation.h; sourceTree = "<group>"; };
 		C3D1A0122F20000100000012 /* Core3DNativeImportOperation+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DNativeImportOperation+Private.h"; sourceTree = "<group>"; };
+		E631827AF0E60E69718149CF /* Core3DMeshContactOperation+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DMeshContactOperation+Private.h"; sourceTree = "<group>"; };
 		C3D1A0132F20000100000013 /* Core3DNativeImportOperation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeImportOperation.mm; sourceTree = "<group>"; };
+		23B3ADFE6189A256630AC856 /* Core3DMeshContactOperation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DMeshContactOperation.mm; sourceTree = "<group>"; };
 		C3D1B0112F21000100000011 /* Core3DGLBPreflight.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DGLBPreflight.hpp; sourceTree = "<group>"; };
 		C3D1B0122F21000100000012 /* Core3DGLBPreflight.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DGLBPreflight.mm; sourceTree = "<group>"; };
 		C3D1B0132F21000100000013 /* Core3DGLBReader.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Core3DGLBReader.hpp; sourceTree = "<group>"; };
@@ -585,6 +590,7 @@
 				C03D50060000000000000001 /* Viewport */,
 				3240475C2C00D1FC009E4B86 /* Export */,
 				C3D1A0202F20000100000020 /* Import */,
+				BD90817BF6F627904ACCA10B /* MeshCheck */,
 				3201971A2BD7AED400F30E62 /* Bundle */,
 				325C83582BCE77AD000292E4 /* Common */,
 				326B3F942BBC23AC00030C30 /* Primitives */,
@@ -766,6 +772,16 @@
 			path = Export;
 			sourceTree = "<group>";
 		};
+		BD90817BF6F627904ACCA10B /* MeshCheck */ = {
+			isa = PBXGroup;
+			children = (
+				9A29829928AB277602A87580 /* Core3DMeshContactOperation.h */,
+				E631827AF0E60E69718149CF /* Core3DMeshContactOperation+Private.h */,
+				23B3ADFE6189A256630AC856 /* Core3DMeshContactOperation.mm */,
+			);
+			path = MeshCheck;
+			sourceTree = "<group>";
+		};
 		C3D1A0202F20000100000020 /* Import */ = {
 			isa = PBXGroup;
 			children = (
@@ -832,6 +848,7 @@
 			files = (
 				C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */,
 				C3D1A0012F20000100000001 /* Core3DNativeImportOperation.h in Headers */,
+				3DF82DCF1EF97E1E6DD140F6 /* Core3DMeshContactOperation.h in Headers */,
 				1EA2D4A59925473C9BA22AAD /* Core3DModelCapability.h in Headers */,
 				D427676541F245DBAE023481 /* Core3DTransformInspectorSnapshot.h in Headers */,
 				C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */,
@@ -1014,6 +1031,7 @@
 				C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */,
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
 				C3D1A0022F20000100000002 /* Core3DNativeImportOperation.mm in Sources */,
+				278C032B51CDE27DB28FD217 /* Core3DMeshContactOperation.mm in Sources */,
 				59729FAFBF8D4B7F9B0BE095 /* Core3DTransformInspectorSnapshot.mm in Sources */,
 				EE5FD2E86F2F453EBB5101C3 /* TransformInspectorMeasurementController.cpp in Sources */,
 				C3D1B0012F21000100000001 /* Core3DGLBPreflight.mm in Sources */,

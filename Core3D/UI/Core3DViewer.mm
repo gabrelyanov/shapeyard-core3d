@@ -4674,6 +4674,36 @@ Core3DViewer::DebugSelectRetainedOperationPresentation() noexcept
 }
 #endif
 
+meshcheck::ContactSourceStatus Core3DViewer::captureNativeMeshContacts(
+    const meshcheck::ContactSourceIdentity& expected,
+    const std::uint32_t width, const std::uint32_t height,
+    const std::atomic_bool& cancelled,
+    meshcheck::ContactSourceCapture& output) noexcept
+{
+    using Status = meshcheck::ContactSourceStatus;
+    output = {};
+    if (cancelled.load(std::memory_order_relaxed)) return Status::Cancelled;
+    if (![NSThread isMainThread]) return Status::InternalFailure;
+    const auto snapshot = captureSceneSnapshot(width, height);
+    if (!snapshot) return Status::StaleSource;
+    return _sceneSnapshotBuilder.CaptureNativeMeshContacts(
+        myDoc, expected, cancelled, output);
+}
+
+meshcheck::ContactSourceStatus Core3DViewer::validateNativeMeshContacts(
+    const meshcheck::ContactSourceCapture& original,
+    const std::uint32_t width, const std::uint32_t height,
+    const std::atomic_bool& cancelled) noexcept
+{
+    meshcheck::ContactSourceCapture current;
+    const auto status = captureNativeMeshContacts(
+        original.identity, width, height, cancelled, current);
+    if (status != meshcheck::ContactSourceStatus::Ready) return status;
+    return meshcheck::SameContactSource(original, current)
+        ? meshcheck::ContactSourceStatus::Ready
+        : meshcheck::ContactSourceStatus::StaleSource;
+}
+
 scene::OcctSceneSnapshotBuilder::SnapshotPointer
 Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,

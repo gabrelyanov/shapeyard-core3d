@@ -12,6 +12,7 @@
 #import <Core3D/UIStateChanging.h>
 #import <Core3D/ExportType.h>
 #import <Core3D/Core3DNativeExportOperation.h>
+#import <Core3D/Core3DMeshContactOperation.h>
 #import <Core3D/OrthoProjectionType.h>
 #import <Core3D/Core3DMaterialController.h>
 #import <Core3D/Core3DModelCapability.h>
@@ -897,6 +898,15 @@ typedef struct {
     elementIndices:(NSArray<NSNumber *> *)elementIndices deltaX:(double)deltaX deltaY:(double)deltaY deltaZ:(double)deltaZ
     NS_SWIFT_NAME(commitMeshElementEdit(_:elementIndices:deltaX:deltaY:deltaZ:));
 - (void)cancelMeshVertexEdit:(Core3DMeshVertexEditSnapshot *)expected;
+
+//! Read-only exact self-contact diagnostic for an explicit native mesh occurrence.
+//! Never changes selection or history. Completion is asynchronous on main.
+- (Core3DMeshContactOperation *)checkMeshContactsForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected completion:(Core3DMeshContactCompletion)completion
+    NS_SWIFT_NAME(checkMeshContacts(entityIdentifier:expected:completion:));
+//! Only the latest report issued by this owner can be current. Native source
+//! coordinates, topology, placement and document lifetime are revalidated.
+- (BOOL)isMeshContactReportCurrent:(Core3DMeshContactReport *)report;
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected

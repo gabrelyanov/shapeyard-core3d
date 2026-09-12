@@ -342,6 +342,18 @@ namespace core3d {
 
         //! Capture committed OCAF geometry and semantic camera state into
         //! immutable renderer-neutral values. Main-thread only.
+        //! Read-only native mesh capture for one explicit occurrence. The
+        //! committed-scene barriers apply; selection is never retargeted.
+        meshcheck::ContactSourceStatus captureNativeMeshContacts(
+            const meshcheck::ContactSourceIdentity& expected,
+            std::uint32_t width, std::uint32_t height,
+            const std::atomic_bool& cancelled,
+            meshcheck::ContactSourceCapture& output) noexcept;
+        meshcheck::ContactSourceStatus validateNativeMeshContacts(
+            const meshcheck::ContactSourceCapture& original,
+            std::uint32_t width, std::uint32_t height,
+            const std::atomic_bool& cancelled) noexcept;
+
         scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;

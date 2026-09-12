@@ -21,6 +21,7 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/ExportType.h>
 #import <Core3D/Core3DNativeExportOperation.h>
 #import <Core3D/Core3DNativeImportOperation.h>
+#import <Core3D/Core3DMeshContactOperation.h>
 #import <Core3D/UIStateChanging.h>
 #import <Core3D/Core3DModelCapability.h>
 #import <Core3D/Core3DTransformInspectorSnapshot.h>

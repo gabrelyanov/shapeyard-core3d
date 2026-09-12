@@ -10,6 +10,7 @@
 #define Core3D_OcctSceneSnapshotBuilder_hpp
 
 #include "SceneSnapshot.hpp"
+#include "../OCCTKit/NativeContactSource.hpp"
 
 #include <Standard_Handle.hxx>
 #include <TDF_Label.hxx>
@@ -53,6 +54,16 @@ public:
         const Handle(V3d_View)& theView,
         const UInt2& theViewportPixels,
         ElementKind theAcceptedSelectionKind) noexcept;
+
+    //! Owner-thread read of a named occurrence from the last committed full
+    //! publication. Does not require or modify selection. Caller must first
+    //! obtain a fresh committed snapshot through the viewer's edit barriers.
+    //! Only copied numeric values leave this adapter, never labels or shapes.
+    meshcheck::ContactSourceStatus CaptureNativeMeshContacts(
+        const Handle(OcctDocument)& document,
+        const meshcheck::ContactSourceIdentity& expected,
+        const std::atomic_bool& cancelled,
+        meshcheck::ContactSourceCapture& output) noexcept;
 
     //! Export-only derivative over an exclusively owned deserialized document.
     //! Never call with the live document. The callback meshes only the supplied

@@ -9,6 +9,7 @@
 
 #include "OcctSceneSnapshotBuilder.hpp"
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
+#include "../OCCTKit/NativeContactMeshCapture.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -2994,6 +2995,14 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 struct OcctSceneSnapshotBuilder::State {
     using LabelInstanceMap =
         std::unordered_map<std::string, std::vector<std::size_t>>;
+    struct NativeContactSource {
+        TDF_Label definitionLabel;
+        std::string definitionIdentifier;
+        std::uint64_t geometryRevision=0;
+        OcctGeometryRepresentation representation=OcctGeometryRepresentation::Invalid;
+        std::array<double,16> worldFromObject{};
+    };
+    using NativeContactSourceMap=std::unordered_map<std::string,NativeContactSource>;
     struct DefinitionRevision {
         std::uint64_t fingerprint = 0;
         std::uint64_t revision = 0;
@@ -3037,6 +3046,9 @@ struct OcctSceneSnapshotBuilder::State {
     //! copied, never the potentially large committed-scene maps.
     std::shared_ptr<const LabelInstanceMap> lastFullLabelToInstances;
     std::shared_ptr<const std::vector<std::string>> lastFullEntityIdentifiers;
+    // Labels remain private on the document owner. Immutable map sharing keeps
+    // presentation-only State copies independent of scene size.
+    std::shared_ptr<const NativeContactSourceMap> lastFullNativeContactSources;
     OverlayState overlay;
 #ifdef DEBUG
     DebugTriangulationFailure debugTriangulationFailure =
@@ -3056,6 +3068,87 @@ OcctSceneSnapshotBuilder::OcctSceneSnapshotBuilder()
 }
 
 OcctSceneSnapshotBuilder::~OcctSceneSnapshotBuilder() = default;
+
+meshcheck::ContactSourceStatus
+OcctSceneSnapshotBuilder::CaptureNativeMeshContacts(
+    const Handle(OcctDocument)& document,
+    const meshcheck::ContactSourceIdentity& expected,
+    const std::atomic_bool& cancelled,
+    meshcheck::ContactSourceCapture& output) noexcept
+{
+    using Status=meshcheck::ContactSourceStatus;
+    output={};
+    if (cancelled.load(std::memory_order_relaxed)) return Status::Cancelled;
+    if (![NSThread isMainThread]) return Status::InternalFailure;
+    if (document.IsNull() || myState==nullptr
+        || myState->documentObject.IsNull()
+        || !myState->lastFullNativeContactSources
+        || expected.entityIdentifier.empty() || expected.entityIdentifier.size()>128
+        || expected.definitionIdentifier.empty() || expected.definitionIdentifier.size()>128
+        || expected.publicationSourceIdentifier.empty()
+        || expected.publicationSourceIdentifier!=myState->publicationSourceIdentifier
+        || expected.documentGeneration==0
+        || expected.documentGeneration!=myState->documentGeneration
+        || expected.modelRevision==0 || expected.modelRevision!=myState->modelRevision
+        || expected.geometryRevision==0) return Status::StaleSource;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto& native=document->Document();
+        if (native.IsNull() || native->HasOpenCommand()
+            || native.get()!=myState->documentObject.get()
+            || document->DocumentIdentifier()!=myState->documentIdentifier)
+            return Status::StaleSource;
+        const auto& data=native->GetData();
+        if (data.IsNull() || data->Time()!=myState->lastFullDocumentTime)
+            return Status::StaleSource;
+        const auto found=myState->lastFullNativeContactSources->find(expected.entityIdentifier);
+        if (found==myState->lastFullNativeContactSources->end()) return Status::StaleSource;
+        const auto& source=found->second;
+        if (source.definitionIdentifier!=expected.definitionIdentifier
+            || source.geometryRevision!=expected.geometryRevision
+            || source.definitionLabel.IsNull()
+            || document->DefinitionIdentifierForLabel(source.definitionLabel)
+                !=expected.definitionIdentifier) return Status::StaleSource;
+        if (source.representation!=OcctGeometryRepresentation::TriangleMesh)
+            return Status::Unsupported;
+        // Only a finite nonsingular occurrence placement preserves incidence
+        // for later world inspection. Very small determinant underflow rejects
+        // conservatively; it must never turn a collapsed transform into clean.
+        const auto& m=source.worldFromObject;
+        for (const auto value:m) if (!std::isfinite(value)) return Status::InvalidGeometry;
+        const auto determinant=m[0]*(m[5]*m[10]-m[9]*m[6])
+            -m[4]*(m[1]*m[10]-m[9]*m[2])+m[8]*(m[1]*m[6]-m[5]*m[2]);
+        if (!std::isfinite(determinant) || determinant==0) return Status::InvalidGeometry;
+        meshcheck::ContactMeshCoordinates coordinates;
+        const auto status=meshcheck::CaptureContactMeshCoordinates(
+            XCAFDoc_ShapeTool::GetShape(source.definitionLabel),coordinates,cancelled);
+        using Capture=meshcheck::ContactCaptureStatus;
+        switch(status) {
+            case Capture::Ready: break;
+            case Capture::Unsupported: return Status::Unsupported;
+            case Capture::Invalid: return Status::InvalidGeometry;
+            case Capture::TooLarge: return Status::ResourceLimit;
+            case Capture::Cancelled: return Status::Cancelled;
+            case Capture::TimedOut: return Status::TimedOut;
+        }
+        meshcheck::ContactSourceCapture captured;
+        captured.identity=expected;
+        captured.documentTime=data->Time();
+        captured.storedNodeCount=coordinates.storedNodeCount;
+        captured.facePlacement=coordinates.facePlacement;
+        captured.faceOrientation=coordinates.faceOrientation;
+        captured.worldFromObject=source.worldFromObject;
+        captured.triangles=std::move(coordinates.triangles);
+        captured.storedNodes=std::move(coordinates.storedNodes);
+        captured.triangleNodeIDs=std::move(coordinates.triangleNodeIDs);
+        if (cancelled.load(std::memory_order_relaxed)) return Status::Cancelled;
+        output=std::move(captured);
+        return Status::Ready;
+    } catch (const std::bad_alloc&) { return Status::ResourceLimit; }
+      catch (const std::length_error&) { return Status::ResourceLimit; }
+      catch (...) { return Status::InternalFailure; }
+}
+
 
 #ifdef DEBUG
 void OcctSceneSnapshotBuilder::DebugSetTriangulationFailure(
@@ -4848,6 +4941,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aNextState.overlay.definitions.clear();
             aNextState.lastFullLabelToInstances.reset();
             aNextState.lastFullEntityIdentifiers.reset();
+            aNextState.lastFullNativeContactSources.reset();
             aNextState.lastFullSnapshotRevision = 0;
             aNextState.lastFullDocumentTime = 0;
         }
@@ -5715,6 +5809,20 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         aNextState.lastFullLabelToInstances =
             std::make_shared<State::LabelInstanceMap>(
                 std::move(aLabelToInstances));
+
+        auto contactSources=std::make_shared<State::NativeContactSourceMap>();
+        contactSources->reserve(aScene.instances.size());
+        for (const auto& instance:aScene.instances) {
+            if (instance.meshIndex>=aDefinitions.size()
+                || instance.meshIndex>=aScene.meshes.size()) return {};
+            const auto& definition=aDefinitions[instance.meshIndex];
+            const auto& mesh=aScene.meshes[instance.meshIndex];
+            if (!contactSources->emplace(instance.entityIdentifier,
+                State::NativeContactSource{definition.label,
+                    mesh.definitionIdentifier,mesh.geometryRevision,
+                    definition.representation,instance.worldFromObject.values}).second) return {};
+        }
+        aNextState.lastFullNativeContactSources=std::move(contactSources);
 
         // Finish every potentially allocating operation before publishing
         // state. A failed allocation must not consume any revision.

@@ -40,6 +40,7 @@
 #import <Core3D/AssetBundle.h>
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 #import "Core3DTransformInspectorSnapshotFactory.hpp"
+#import "../MeshCheck/Core3DMeshContactOperation+Private.h"
 
 #include "GLViewController+Trick.h"
 #include "BooleanOperationController.hpp"
@@ -1157,12 +1158,20 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     BOOL _nativeSolidCancelled;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
+    Core3DMeshContactOperation *_meshContactOperation;
+    NSObject *_meshContactToken;
+    __weak Core3DMeshContactReport *_issuedMeshContactReport;
+    std::shared_ptr<const core3d::meshcheck::ContactSourceCapture> _meshContactSource;
 #ifdef DEBUG
     NSUInteger _debugMaximumTextureAuthoringObjects;
 #endif
 }
 
 - (BOOL)core3d_canBeginCommittedEdit;
+- (core3d::meshcheck::ContactSourceStatus)core3d_captureMeshContactSource:
+    (const core3d::meshcheck::ContactSourceIdentity&)identity
+    cancelled:(const std::atomic_bool&)cancelled
+    output:(core3d::meshcheck::ContactSourceCapture&)output;
 - (BOOL)core3d_hasCompetingLoadOrControllerWork;
 - (Core3DAssetLoadResult)core3d_acceptQueuedInput:(Core3DQueuedAssetInput *)input;
 - (Core3DAssetLoadResult)core3d_startQueuedRequest:(Core3DQueuedAssetRequest *)request;
@@ -8093,6 +8102,132 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         }
     } catch (...) {}
     return Core3DMeshCopyResultRejected;
+}
+
+- (core3d::meshcheck::ContactSourceStatus)core3d_captureMeshContactSource:
+    (const core3d::meshcheck::ContactSourceIdentity&)identity
+    cancelled:(const std::atomic_bool&)cancelled
+    output:(core3d::meshcheck::ContactSourceCapture&)output {
+    using Status=core3d::meshcheck::ContactSourceStatus;
+    output={};
+    if(cancelled.load(std::memory_order_acquire)) return Status::Cancelled;
+    if(!NSThread.isMainThread) return Status::InternalFailure;
+    if(!_isSetuped || _isLoading.load() || _nativeSolidWork || _objectAlignmentWork
+        || GLController==nil || !GLController.viewer) return Status::StaleSource;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width<1 || size.height<1
+        || size.width>std::numeric_limits<std::uint32_t>::max()
+        || size.height>std::numeric_limits<std::uint32_t>::max()) return Status::StaleSource;
+    return GLController.viewer->captureNativeMeshContacts(identity,
+        static_cast<std::uint32_t>(std::llround(size.width)),
+        static_cast<std::uint32_t>(std::llround(size.height)),cancelled,output);
+}
+
+- (Core3DMeshContactOperation *)checkMeshContactsForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected completion:(Core3DMeshContactCompletion)completion {
+    using namespace core3d::meshcheck;
+    ContactSourceIdentity identity;
+    const bool ownerThread=NSThread.isMainThread;
+    // The DTO supplies bounded references, never geometry authority. The native
+    // owner resolves the actual occurrence and validates these revision domains.
+    if(ownerThread && expected!=nil && expected.renderItems.count<=50000
+        && expected.meshes.count<=50000) {
+        auto copyIdentifier=[](NSString *value,std::string& result) {
+            const NSUInteger length=[value lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+            const char *bytes=value.UTF8String;
+            if(length==0 || length>128 || bytes==nullptr) return false;
+            result.assign(bytes,length);
+            return result.find('\0')==std::string::npos;
+        };
+        try {
+            Core3DSceneRenderItemSnapshot *target=nil;
+            NSUInteger matches=0;
+            for(Core3DSceneRenderItemSnapshot *item in expected.renderItems) {
+                if(item.renderRole==Core3DSceneRenderRoleModel
+                    && [item.entityIdentifier isEqualToString:entityIdentifier]) {
+                    target=item;++matches;
+                }
+            }
+            if(matches==1 && target.meshIndex<expected.meshes.count) {
+                Core3DSceneMeshSnapshot *mesh=expected.meshes[target.meshIndex];
+                if(copyIdentifier(entityIdentifier,identity.entityIdentifier)
+                    && copyIdentifier(mesh.definitionIdentifier,identity.definitionIdentifier)
+                    && copyIdentifier(expected.publicationSourceIdentifier,identity.publicationSourceIdentifier)) {
+                    identity.documentGeneration=expected.revisions.documentGeneration;
+                    identity.modelRevision=expected.revisions.modelRevision;
+                    identity.geometryRevision=mesh.geometryRevision;
+                } else identity={};
+            }
+        } catch(...) { identity={}; }
+    }
+    NSObject *token=[[NSObject alloc] init];
+    if(ownerThread) {
+        [_meshContactOperation cancel];
+        _meshContactOperation=nil;_meshContactSource.reset();
+        _issuedMeshContactReport=nil;_meshContactToken=token;
+    }
+    __weak Core3DViewController *weakOwner=self;
+    Core3DMeshContactOperation *operation=[[Core3DMeshContactOperation alloc]
+        initWithIdentity:identity ownerToken:token
+        prepare:^ContactSourceStatus(const std::atomic_bool& cancelled,
+            std::shared_ptr<const ContactSourceCapture>& output) {
+            if(!ownerThread) return ContactSourceStatus::InternalFailure;
+            Core3DViewController *owner=weakOwner;
+            if(owner==nil || owner->_meshContactToken!=token) return ContactSourceStatus::StaleSource;
+            ContactSourceCapture captured;
+            const auto status=[owner core3d_captureMeshContactSource:identity
+                cancelled:cancelled output:captured];
+            if(status==ContactSourceStatus::Ready) {
+                output=std::make_shared<const ContactSourceCapture>(std::move(captured));
+                owner->_meshContactSource=output;
+            }
+            return status;
+        }
+        validate:^ContactSourceStatus(const ContactSourceCapture& original,
+            const std::atomic_bool& cancelled) {
+            Core3DViewController *owner=weakOwner;
+            if(owner==nil || owner->_meshContactToken!=token
+                || owner->_meshContactSource.get()!=&original) return ContactSourceStatus::StaleSource;
+            ContactSourceCapture current;
+            const auto status=[owner core3d_captureMeshContactSource:original.identity
+                cancelled:cancelled output:current];
+            if(status!=ContactSourceStatus::Ready) return status;
+            return SameContactSource(original,current)
+                ? ContactSourceStatus::Ready : ContactSourceStatus::StaleSource;
+        }
+        completion:^(Core3DMeshContactReport *report) {
+            Core3DViewController *owner=weakOwner;
+            if(owner!=nil && owner->_meshContactToken==token) {
+                owner->_meshContactOperation=nil;
+                if(report.state==Core3DMeshContactStateComplete) owner->_issuedMeshContactReport=report;
+                else { owner->_issuedMeshContactReport=nil;owner->_meshContactSource.reset(); }
+            }
+            // Publish owner state before invoking user code; the callback may
+            // start a replacement job without the old delivery clearing it.
+            if(completion) completion(report);
+        }];
+    if(ownerThread) _meshContactOperation=operation;
+    return operation;
+}
+
+- (BOOL)isMeshContactReportCurrent:(Core3DMeshContactReport *)report {
+    using namespace core3d::meshcheck;
+    if(!NSThread.isMainThread || report==nil || report.class!=Core3DMeshContactReport.class
+        || report!=_issuedMeshContactReport || report.ownerToken!=_meshContactToken
+        || report.state!=Core3DMeshContactStateComplete || !_meshContactSource) return NO;
+    const auto& original=*_meshContactSource;
+    const auto& identity=original.identity;
+    // Public report metadata cannot replace the retained owner-issued capture.
+    if(![report.entityIdentifier isEqualToString:@(identity.entityIdentifier.c_str())]
+        || ![report.definitionIdentifier isEqualToString:@(identity.definitionIdentifier.c_str())]
+        || ![report.publicationSourceIdentifier isEqualToString:@(identity.publicationSourceIdentifier.c_str())]
+        || report.documentGeneration!=identity.documentGeneration
+        || report.modelRevision!=identity.modelRevision
+        || report.geometryRevision!=identity.geometryRevision) return NO;
+    std::atomic_bool cancelled{false};ContactSourceCapture current;
+    return [self core3d_captureMeshContactSource:identity cancelled:cancelled output:current]
+        ==ContactSourceStatus::Ready && SameContactSource(original,current);
 }
 
 - (Core3DMeshWindingRepairResult)repairMeshWindingForEntityIdentifier:(NSString *)entityIdentifier
