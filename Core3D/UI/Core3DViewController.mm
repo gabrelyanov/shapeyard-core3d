@@ -68,6 +68,7 @@
 #include "../OCCTKit/NativeModelingReceiptLegacyDebug.hxx"
 #endif
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
+#include <XCAFDoc_ShapeMapTool.hxx>
 #include "../OCCTKit/NativeModelingTombstone.hxx"
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TDF_Tool.hxx>
@@ -6885,23 +6886,36 @@ struct NativeModelingPermitIssuer final {
         if(document.IsNull()||document->HasOpenCommand()||!owner->CaptureObjectTransformStateForLabel(label,before)
             ||before.sweep.label.IsNull())return @{};
         document->NewCommand();
-        struct Abort {Handle(TDocStd_Document) doc;~Abort(){try{if(!doc.IsNull()&&doc->HasOpenCommand())doc->AbortCommand();}catch(...){}}} abort{document};
+        // SetShape changes the transient subshape map, whose OCCT Restore is
+        // deliberately empty. This fixture's direct rollback must refresh that
+        // cache from the restored label before asking AddSubShape about a face.
+        // It must not retain the injected box's cache or rewrite the saved BRep.
+        struct Abort {
+            Handle(TDocStd_Document) doc; TDF_Label label;
+            void restore() {
+                if (!doc.IsNull() && doc->HasOpenCommand()) doc->AbortCommand();
+                Handle(XCAFDoc_ShapeMapTool) map;
+                if (!label.IsNull() && label.FindAttribute(XCAFDoc_ShapeMapTool::GetID(),map))
+                    map->SetShape(XCAFDoc_ShapeTool::GetShape(label));
+            }
+            ~Abort(){try{restore();}catch(...){}}
+        } abort{document,label};
         const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
         shapes->SetShape(label,BRepPrimAPI_MakeBox(10,11,12).Solid());
         core3d::sweep_persistence::Record stale;
         const bool readRefused=!core3d::sweep_persistence::Read(document,label,stale);
         const bool stageRefused=!core3d::sweep_persistence::Stage(document,label,before.sweep.definition,before.sweep.identifier);
-        document->AbortCommand();OcctObjectTransformState after;
+        abort.restore();OcctObjectTransformState after;
         const bool restored=owner->CaptureObjectTransformStateForLabel(label,after)&&after.IsEqual(before)
             &&core3d::sweep_rebuild::SameRawScalars(after.scalars,before.scalars);
         document->NewCommand();
-        TopExp_Explorer face(before.shape,TopAbs_FACE);if(!face.More())return @{};
+        TopExp_Explorer face(after.shape,TopAbs_FACE);if(!face.More() || !shapes->IsSubShape(label,face.Current()))return @{};
         const auto faceLabel=shapes->AddSubShape(label,face.Current());if(faceLabel.IsNull())return @{};
         TDataStd_Name::Set(faceLabel,TCollection_ExtendedString("Preserved face style guard"));
         core3d::sweep_persistence::Record stillCurrent;
         const bool faceRefused=core3d::sweep_persistence::Read(document,label,stillCurrent)
             &&!core3d::sweep_rebuild::HasOnlyMetadataSubshapes(document,label);
-        document->AbortCommand();OcctObjectTransformState finalState;
+        abort.restore();OcctObjectTransformState finalState;
         const bool finalRestored=owner->CaptureObjectTransformStateForLabel(label,finalState)&&finalState.IsEqual(before)
             &&core3d::sweep_rebuild::SameRawScalars(finalState.scalars,before.scalars);
         return @{@"readRefused":@(readRefused),@"stageRefused":@(stageRefused),
