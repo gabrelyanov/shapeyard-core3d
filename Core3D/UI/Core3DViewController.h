@@ -1646,6 +1646,10 @@ typedef struct {
     NS_SWIFT_NAME(debugExecuteReservedRebuild(_:receiptFailure:completion:));
 - (NSDictionary *)debugCreationReceiptState:(Core3DModelingPreparedRequest *)request
     NS_SWIFT_NAME(debugCreationReceiptState(_:));
+//! DEBUG only: exact hashed effect bytes for a present request with one or two effects.
+//! Read-only document evidence; no Store lookup, receipt mutation or verified query.
+- (NSDictionary *)debugCreationReceiptEffectDiagnostics:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugCreationReceiptEffectDiagnostics(_:));
 
 /// Native-owned test configuration only; -1 uses the actual fixed-path Store.
 /// Other bounded scenarios use an internally owned disposable POSIX Store.

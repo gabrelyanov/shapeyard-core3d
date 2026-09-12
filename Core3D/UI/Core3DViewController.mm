@@ -5669,6 +5669,37 @@ struct NativeModelingPermitIssuer final {
 }
 
 
+- (NSDictionary *)debugCreationReceiptEffectDiagnostics:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||![request isKindOfClass:Core3DModelingPreparedRequest.class]
+        ||!GLController||!GLController.viewer)return @{@"version":@1,@"available":@NO};
+    try {
+        namespace r=core3d::receipt;
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())
+            return @{@"version":@1,@"available":@NO};
+        r::Key key;key.accountScope=request->_requestKey.accountScope;key.document=request->_requestKey.document;
+        key.request=request->_requestKey.request;key.command=request->_requestKey.command;key.execution=request->_requestKey.execution;
+        r::Catalog catalog;const auto read=r::Read(owner->Document(),catalog);
+        const auto inspection=r::InspectDocument(owner,key);
+        // These two failing fixtures contain at most two effects. Bound this
+        // optional DEBUG capture independently of the public 16-effect catalog.
+        // Each existing geometry sink remains limited to 8MiB of exact bytes.
+        if(read!=r::ReadStatus::Valid||inspection.presence!=r::DocumentPresence::Present
+            ||inspection.effects.empty()||inspection.effects.size()>2)
+            return @{@"version":@1,@"available":@NO,@"read":@(int(read)),@"presence":@(int(inspection.presence))};
+        NSMutableArray *effects=[NSMutableArray arrayWithCapacity:inspection.effects.size()];
+        for(const auto& effect:inspection.effects)
+            [effects addObject:Core3DReceiptEffectDiagnostic(owner,effect)];
+        auto hex=[](const auto& bytes){return [NSString stringWithUTF8String:r::Hex(bytes).c_str()];};
+        NSString *catalogBase64=[[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()]
+            base64EncodedStringWithOptions:0];
+        return @{@"version":@1,@"available":@YES,@"read":@(int(read)),@"presence":@(int(inspection.presence)),
+            @"effectsCurrent":@(inspection.effectsCurrent),@"requestHex":hex(key.request),@"documentHex":hex(key.document),
+            @"commandHex":hex(key.command),@"executionHex":hex(key.execution),@"catalogBase64":catalogBase64,@"effects":effects};
+    } catch (...) {return @{@"version":@1,@"available":@NO};}
+}
+
+
 - (BOOL)debugConfigureAsyncModelingRequest:(Core3DModelingPreparedRequest *)request
     storageScenario:(NSInteger)scenario deliveryGate:(void (^)(void (^)(void)))gate
     receiptFailure:(BOOL)receiptFailure afterStart:(void (^)(void))afterStart {
