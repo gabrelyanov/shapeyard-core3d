@@ -83,6 +83,8 @@ NS_SWIFT_SENDABLE
 - (void)cancel;
 
 #ifdef DEBUG
++ (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit
+    NS_SWIFT_NAME(debugParametricSTLRefinement(metersPerUnit:));
 //! Deterministic XCTest seam for proving that start/cancel never blocks the
 //! main run loop. Production builds do not expose or execute this barrier.
 + (void)debugSetWorkerPaused:(BOOL)paused

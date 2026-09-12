@@ -9,6 +9,19 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepMesh_Context.hxx>
+#include <BRepMesh_FaceDiscret.hxx>
+#include <BRepMesh_MeshAlgoFactory.hxx>
+#include <BRepMesh_DelaunayBaseMeshAlgo.hxx>
+#include <BRepMesh_DelaunayDeflectionControlMeshAlgo.hxx>
+#include <BRepMesh_NURBSRangeSplitter.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <algorithm>
+#ifdef DEBUG
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#endif
 #include <BRepTools.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <TDF_ChildIterator.hxx>
@@ -1481,6 +1494,117 @@ void WriteSTEP(
     ThrowIfCancelled(state);
 }
 
+// BRepLib::UpdateDeflection measures corresponding UV/3D midpoint distance.
+// The standard Delaunay optimizer instead measures distance to a triangle plane
+// or link. A bilinear planar trapezoid can therefore remain at two triangles,
+// with a large *tangential* midpoint discrepancy, through every normal retry.
+// This final STL-only retry inserts interior nodes on the ORIGINAL surface. It
+// does not alter surfaces, pcurves, boundary polygons, deflection metadata or BRep.
+using ExportParametricBase = BRepMesh_DelaunayDeflectionControlMeshAlgo<
+    BRepMesh_NURBSRangeSplitter, BRepMesh_DelaunayBaseMeshAlgo>;
+
+bool ExportBilinearSurface(const Handle(Geom_BSplineSurface)& spline) {
+    return !spline.IsNull() && spline->UDegree()==1 && spline->VDegree()==1
+        && spline->NbUPoles()==2 && spline->NbVPoles()==2
+        && spline->NbUKnots()==2 && spline->NbVKnots()==2
+        && !spline->IsURational() && !spline->IsVRational()
+        && !spline->IsUPeriodic() && !spline->IsVPeriodic();
+}
+
+struct ExportParametricBudget {
+    explicit ExportParametricBudget(unsigned limit=65536): maximumProposals(limit) {}
+    const unsigned maximumProposals;
+    std::atomic<unsigned> proposedNodes{0};
+};
+
+class ExportParametricMesh final : public ExportParametricBase {
+public:
+    ExportParametricMesh(double requested, std::shared_ptr<ExportParametricBudget> budget)
+        : requested_(requested), budget_(std::move(budget)) {}
+protected:
+    void postProcessMesh(BRepMesh_Delaun& mesher, const Message_ProgressRange& range) override {
+        Message_ProgressScope scope(range, "Refine corresponding surface points", 2);
+        ExportParametricBase::postProcessMesh(mesher, scope.Next());
+        if (!scope.More()) return;
+        const auto surface = getDFace()->GetSurface();
+        const auto spline = Handle(Geom_BSplineSurface)::DownCast(surface->Surface().Surface());
+        // Bounded, non-rational single bilinear span only. No arbitrary spline,
+        // rational surface, mesh-only face or UV-authoring route is admitted.
+        if (!ExportBilinearSurface(spline) || !std::isfinite(requested_) || requested_<=0) return;
+        const double threshold = requested_*0.5;
+        const double minimum = getParameters().MinSize;
+        if (!std::isfinite(threshold) || threshold<=0 || !std::isfinite(minimum) || minimum<=0) return;
+        Message_ProgressScope passes(scope.Next(), "Corresponding point refinement", 10);
+        for (int pass=0; pass<10 && passes.More(); ++pass) {
+            const auto structure = getStructure();
+            if (structure->ElementsOfDomain().Extent()>32768) return;
+            Handle(IMeshData::ListOfPnt2d) nodes = new IMeshData::ListOfPnt2d(getAllocator());
+            std::set<std::pair<int,int>> seenLinks;
+            bool limited = false;
+            const auto consider = [&](const gp_XY& uv, const gp_XYZ& linear,
+                                      const std::array<gp_XYZ,3>& corners) {
+                gp_Pnt exact; surface->D0(uv.X(),uv.Y(),exact);
+                if (!std::isfinite(exact.X()) || !std::isfinite(exact.Y()) || !std::isfinite(exact.Z())) {
+                    limited=true; return;
+                }
+                const double distance = (exact.XYZ()-linear).Modulus();
+                if (!std::isfinite(distance)) { limited=true; return; }
+                if (distance<=threshold) return;
+                // Respect the existing mesher's minimum edge-length guard.
+                for (const auto& corner : corners) if ((exact.XYZ()-corner).Modulus()<minimum) return;
+                if (nodes->Size()>=8192 || budget_->proposedNodes.fetch_add(1)>=budget_->maximumProposals) {
+                    limited=true; return;
+                }
+                nodes->Append(gp_Pnt2d(uv));
+            };
+            IMeshData::IteratorOfMapOfInteger triangles(structure->ElementsOfDomain());
+            for (; triangles.More(); triangles.Next()) {
+                if (!passes.More() || limited) return;
+                const auto& triangle=structure->GetElement(triangles.Key());
+                if (triangle.Movability()==BRepMesh_Deleted) continue;
+                int indices[3]; structure->ElementNodes(triangle,indices);
+                std::array<gp_XY,3> uv; std::array<gp_XYZ,3> xyz;
+                for (int i=0;i<3;++i) {
+                    const auto& vertex=structure->GetNode(indices[i]);
+                    uv[i]=getRangeSplitter().Scale(vertex.Coord(),Standard_False).XY();
+                    xyz[i]=getNodesMap()->Value(vertex.Location3d()).XYZ();
+                }
+                consider((uv[0]+uv[1]+uv[2])/3.0,(xyz[0]+xyz[1]+xyz[2])/3.0,xyz);
+                for (int i=0;i<3 && !limited;++i) {
+                    if (structure->GetLink(triangle.myEdges[i]).Movability()==BRepMesh_Frontier) continue;
+                    const int j=(i+1)%3;
+                    const auto key=std::minmax(indices[i],indices[j]);
+                    if (!seenLinks.emplace(key.first,key.second).second) continue;
+                    consider((uv[i]+uv[j])/2.0,(xyz[i]+xyz[j])/2.0,xyz);
+                }
+            }
+            if (limited || nodes->IsEmpty()) return;
+            // OCCT classifies candidates as TopAbs_IN and evaluates their actual
+            // surface point before adding them with BRepMesh_Free authority.
+            if (!insertNodes(nodes,mesher,passes.Next())) return;
+        }
+        // No success is inferred here. Standard OCCT postprocessing measures
+        // the resulting mesh and the ORIGINAL requested-deflection gate decides.
+    }
+private:
+    double requested_;
+    std::shared_ptr<ExportParametricBudget> budget_;
+};
+
+class ExportParametricFactory final : public BRepMesh_MeshAlgoFactory {
+public:
+    explicit ExportParametricFactory(double requested, unsigned maximumProposals=65536)
+        : requested_(requested), budget_(std::make_shared<ExportParametricBudget>(maximumProposals)) {}
+    Handle(IMeshTools_MeshAlgo) GetAlgo(GeomAbs_SurfaceType type,
+        const IMeshTools_Parameters& parameters) const override {
+        if (type==GeomAbs_BSplineSurface) return new ExportParametricMesh(requested_,budget_);
+        return BRepMesh_MeshAlgoFactory::GetAlgo(type,parameters);
+    }
+private:
+    double requested_;
+    std::shared_ptr<ExportParametricBudget> budget_;
+};
+
 void MeshPrivateExportSurfaces(
     const TopoDS_Shape& compound,
     const std::shared_ptr<NativeExportState>& state,
@@ -1531,7 +1655,10 @@ void MeshPrivateExportSurfaces(
         ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
     if (needsMeshing) {
         const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
-        const int maximumAttempts = qualityPreset ? 4 : 1;
+        // Four existing attempts stay byte-for-byte in order. Only STL may
+        // make a fifth, bounded original-surface parameter refinement attempt.
+        const bool parametricRetry = qualityPreset && state->exportType == ExportTypeStl;
+        const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 1;
         Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
         bool validMesh = false;
         for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
@@ -1540,8 +1667,20 @@ void MeshPrivateExportSurfaces(
             // the final fourfold refinement step, try a half-sized step: a
             // transformed curved face may only narrowly miss the same proof.
             // Every accepted mesh still satisfies the requested deflection.
+            if (attempt == 4) {
+                bool hasEligibleFailure = false;
+                for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                    ThrowIfCancelled(state);
+                    const auto face = TopoDS::Face(faces.Current());
+                    const auto spline = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(face));
+                    if (!BRepTools::Triangulation(face, deflection) && ExportBilinearSurface(spline)) {
+                        hasEligibleFailure = true; break;
+                    }
+                }
+                if (!hasEligibleFailure) break;
+            }
             if (attempt > 0) { BRepTools::Clean(meshingShape); }
-            constexpr double refinementFactors[] = {1.0, 0.25, 0.125, 0.0625};
+            constexpr double refinementFactors[] = {1.0, 0.25, 0.125, 0.0625, 0.0625};
             const double target = attempt == 0 ? deflection
                 : std::max(Precision::Confusion(), deflection * refinementFactors[attempt]);
             BRepMesh_IncrementalMesh mesher;
@@ -1554,7 +1693,13 @@ void MeshPrivateExportSurfaces(
                 mesher.ChangeParameters().EnableControlSurfaceDeflectionAllSurfaces = Standard_True;
             }
             mesher.SetShape(meshingShape);
-            mesher.Perform(meshScope.Next(1));
+            if (attempt == 4) {
+                Handle(IMeshTools_Context) context = new BRepMesh_Context();
+                context->SetFaceDiscret(new BRepMesh_FaceDiscret(new ExportParametricFactory(deflection)));
+                mesher.Perform(context, meshScope.Next(1));
+            } else {
+                mesher.Perform(meshScope.Next(1));
+            }
             ThrowIfCancelled(state);
             if (qualityPreset) {
                 std::int64_t nodes = 0, triangles = 0;
@@ -1579,10 +1724,11 @@ void MeshPrivateExportSurfaces(
                     TopLoc_Location location;
                     const auto face = TopoDS::Face(faces.Current());
                     const auto mesh = BRep_Tool::Triangulation(face, location);
-                    NSLog(@"[NativeExportMeshDiagnostic] face=%d mesh=%d deflection=%.17g nodes=%d triangles=%d valid=%d",
+                    const auto diagnosticSpline=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(face));
+                    NSLog(@"[NativeExportMeshDiagnostic] face=%d mesh=%d deflection=%.17g nodes=%d triangles=%d valid=%d bilinear=%d",
                         ++diagnosticFace, !mesh.IsNull(), mesh.IsNull() ? -1.0 : mesh->Deflection(),
                         mesh.IsNull() ? 0 : mesh->NbNodes(), mesh.IsNull() ? 0 : mesh->NbTriangles(),
-                        BRepTools::Triangulation(face, deflection));
+                        BRepTools::Triangulation(face, deflection),ExportBilinearSurface(diagnosticSpline));
                 }
             }
 #endif
@@ -2216,6 +2362,61 @@ NSString *ErrorDescription(const NativeExportResult& result) {
 }
 
 #ifdef DEBUG
++ (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit {
+    if (![NSThread isMainThread] || (metersPerUnit!=0.001 && metersPerUnit!=1.0)) return @{};
+    try {
+        const double scale=0.001/metersPerUnit, requested=0.12*scale;
+        TColgp_Array2OfPnt poles(1,2,1,2);
+        poles(1,1)=gp_Pnt(-10*scale,-6*scale,0); poles(2,1)=gp_Pnt(-10*scale,6*scale,0);
+        poles(1,2)=gp_Pnt(-9*scale,-10*scale,60*scale); poles(2,2)=gp_Pnt(-9*scale,10*scale,60*scale);
+        TColStd_Array1OfReal knots(1,2); knots(1)=0; knots(2)=1;
+        TColStd_Array1OfInteger multiplicities(1,2); multiplicities(1)=2; multiplicities(2)=2;
+        Handle(Geom_BSplineSurface) surface=new Geom_BSplineSurface(poles,knots,knots,multiplicities,multiplicities,1,1);
+        BRepBuilderAPI_MakeFace maker(surface,Precision::Confusion());
+        if (!maker.IsDone()) return @{};
+        const TopoDS_Face face=maker.Face();
+        BRepMesh_IncrementalMesh baseline(face,requested,Standard_False,0.1,Standard_False);
+        TopLoc_Location location;
+        const auto baselineMesh=BRep_Tool::Triangulation(face,location);
+        if (baselineMesh.IsNull()) return @{};
+        const double baselineDeflection=baselineMesh->Deflection();
+        const bool baselineRejected=!BRepTools::Triangulation(face,requested);
+        const auto geometryBytes=[&]() {
+            std::ostringstream stream;stream.imbue(std::locale::classic());
+            BRepTools::Write(face,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
+            return stream.str();
+        };
+        const auto before=geometryBytes();
+        BRepTools::Clean(face);
+        BRepMesh_IncrementalMesh limited;
+        limited.SetShape(face);limited.ChangeParameters().Deflection=requested;
+        limited.ChangeParameters().Angle=0.1;
+        Handle(IMeshTools_Context) limitedContext=new BRepMesh_Context();
+        limitedContext->SetFaceDiscret(new BRepMesh_FaceDiscret(new ExportParametricFactory(requested,0)));
+        limited.Perform(limitedContext);
+        const bool budgetRefused=!BRepTools::Triangulation(face,requested);
+        auto state=std::make_shared<NativeExportState>();
+        state->meshQuality=Core3DExportMeshQualityFine; state->exportType=ExportTypeStl;
+        state->deflectionType=Aspect_TOD_ABSOLUTE;state->maximalChordialDeviation=requested;
+        state->deviationAngle=0.1;
+        MeshPrivateExportSurfaces(face,state,Message_ProgressRange());
+        const auto refined=BRep_Tool::Triangulation(face,location);
+        if(refined.IsNull())return @{};
+        const bool unchanged=before==geometryBytes();
+        bool cancelled=false;state->cancelled.store(true);
+        try {MeshPrivateExportSurfaces(face,state,Message_ProgressRange());}
+        catch(const NativeExportFailure& failure){cancelled=failure.Code()==Core3DNativeExportErrorCancelled;}
+        auto rational=Handle(Geom_BSplineSurface)::DownCast(surface->Copy());rational->SetWeight(1,1,2.0);
+        auto higher=Handle(Geom_BSplineSurface)::DownCast(surface->Copy());higher->IncreaseDegree(2,2);
+        return @{@"baselineDone":@(baseline.IsDone() && baseline.GetStatusFlags()==0),
+            @"baselineQualityRejected":@(baselineRejected),@"baselineDeflection":@(baselineDeflection),
+            @"requested":@(requested),@"refinedAccepted":@(BRepTools::Triangulation(face,requested)),
+            @"refinedDeflection":@(refined->Deflection()),@"sourceBRepUnchanged":@(unchanged),
+            @"budgetRefused":@(budgetRefused),@"cancelled":@(cancelled),
+            @"rationalRefused":@(!ExportBilinearSurface(rational)),@"higherDegreeRefused":@(!ExportBilinearSurface(higher))};
+    } catch (...) {return @{};}
+}
+
 + (void)debugSetWorkerPaused:(BOOL)paused {
     {
         std::lock_guard<std::mutex> lock(gDebugWorkerPauseMutex);
