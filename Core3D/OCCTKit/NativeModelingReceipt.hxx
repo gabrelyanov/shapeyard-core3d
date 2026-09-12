@@ -204,18 +204,17 @@ struct DebugEffectCapture {
     const char *stage = "entry";
 };
 #endif
-// OCCT 7.8 GeomTools_SurfaceSet compact grammar: a plane is type1 +12
-// scalars; a cylinder is type2 +origin3 +axis3 +Xdirection3 +Ydirection3
-// +radius1. Only exact negative-zero tokens in cylinder direction fields are
-// equivalent evidence. Recipe/frame bytes, origins, radii, nonzero values,
-// curves and topology references are deliberately outside this filter.
-class CylinderDirectionZeroFilter final {
+// OCCT7.8 compact geometry grammar, limited to the measured analytic records.
+// Only literal -0 numeric tokens are canonicalized:2D line coordinates and
+// directions;3D circle and plane/cylinder directions. All other spellings,
+// nonzero values,3D origins/radii,trim parameters and topology bytes survive.
+// Unknown records abandon parsing for the remainder; never seek a later header
+// inside an unrecognized multiline record. No native shape/state is modified.
+class AnalyticGeometryZeroFilter final {
 public:
     template<class Sink> bool write(const char *bytes,std::size_t count,Sink&&sink) {
         for(std::size_t i=0;i<count;++i) {
             if(phase==Phase::Passthrough)return sink(bytes+i,count-i);
-            // Bound lookahead independently of the existing 8 MiB stream limit.
-            // An unsupported long record is preserved, never partly tokenized.
             if(line.size()==4096){phase=Phase::Passthrough;if(!sink(line.data(),line.size()))return false;
                 line.clear();return sink(bytes+i,count-i);}
             line.push_back(bytes[i]);
@@ -223,12 +222,13 @@ public:
         }return true;
     }
     template<class Sink> bool finish(Sink&&sink) {
-        // A partial final record is not a proven typed surface record.
+        // Incomplete final lines have no proven record boundary.
         const bool okay=line.empty()||sink(line.data(),line.size());line.clear();return okay;
     }
 private:
-    enum class Phase {Version,Prelude,Surfaces,Passthrough};
-    Phase phase=Phase::Version;std::string line;std::size_t remaining=0;
+    enum class Phase {Version,Prelude,Between,Curve2ds,Curves,Surfaces,Passthrough};
+    Phase phase=Phase::Version;std::string line;std::size_t remaining=0,trimDepth=0;
+    unsigned lastSection=0;bool sawLocations=false;
     struct Token {std::size_t begin=0,size=0;};
     static bool whitespace(char c){return c==' '||c=='\t'||c=='\r'||c=='\n';}
     static bool finiteNumber(const std::string& token) {
@@ -236,7 +236,14 @@ private:
         std::istringstream input(token);input.imbue(std::locale::classic());double value=0;
         return bool(input>>value)&&input.eof()&&std::isfinite(value);
     }
+    static bool boundedCount(const std::string& token,std::size_t& value) {
+        value=0;if(token.empty()||token.size()>4)return false;
+        for(char c:token){if(c<'0'||c>'9')return false;const std::size_t digit=std::size_t(c-'0');
+            if(value>(8192-digit)/10)return false;value=value*10+digit;}
+        return true;
+    }
     template<class Sink> bool emitLine(Sink&&sink) {
+        auto passthrough=[&](){phase=Phase::Passthrough;return sink(line.data(),line.size());};
         if(phase==Phase::Version) {
             if(line=="\n")return sink(line.data(),line.size());
             phase=line=="CASCADE Topology V3, (c) Open Cascade\n"?Phase::Prelude:Phase::Passthrough;
@@ -247,33 +254,57 @@ private:
             while(cursor<line.size()&&whitespace(line[cursor]))++cursor;
             if(cursor==line.size())break;
             const auto first=cursor;while(cursor<line.size()&&!whitespace(line[cursor]))++cursor;
-            if(count==tokens.size()) {if(phase==Phase::Surfaces)phase=Phase::Passthrough;return sink(line.data(),line.size());}
+            if(count==tokens.size())return passthrough();
             tokens[count++]={first,cursor-first};
         }
         auto text=[&](std::size_t i){return line.substr(tokens[i].begin,tokens[i].size);};
-        if(phase==Phase::Prelude) {
-            if(count&&text(0)=="Surfaces") {
-                bool valid=count==2;remaining=0;
-                if(valid)for(char c:text(1)){if(c<'0'||c>'9'||remaining>8192){valid=false;break;}remaining=remaining*10+std::size_t(c-'0');}
-                phase=valid&&remaining>0&&remaining<=8192?Phase::Surfaces:Phase::Passthrough;
+        if(phase==Phase::Prelude||phase==Phase::Between) {
+            if(count!=2)return passthrough();
+            const auto name=text(0);std::size_t records=0;
+            if(!boundedCount(text(1),records))return passthrough();
+            if(name=="Locations") {
+                // Nonempty location tables have a different grammar. Preserve
+                // them and everything after them rather than infer boundaries.
+                if(phase!=Phase::Prelude||sawLocations||lastSection||records)return passthrough();
+                sawLocations=true;return sink(line.data(),line.size());
             }
+            const unsigned section=name=="Curve2ds"?1:name=="Curves"?2:name=="Polygon3D"?3:
+                name=="PolygonOnTriangulations"?4:name=="Surfaces"?5:0;
+            if(!section||section<=lastSection)return passthrough();
+            lastSection=section;remaining=records;trimDepth=0;
+            if(section==3||section==4) {
+                if(records)return passthrough();phase=Phase::Between;
+            }else if(!records)phase=section==5?Phase::Passthrough:Phase::Between;
+            else phase=section==1?Phase::Curve2ds:section==2?Phase::Curves:Phase::Surfaces;
             return sink(line.data(),line.size());
         }
-        // Only these single-line record boundaries are recognized. Another
-        // surface type may contain nested/multiline data, so preserve it and
-        // the entire remainder verbatim instead of guessing later boundaries.
-        const bool cylinder=count==14&&text(0)=="2";
-        const bool plane=count==13&&text(0)=="1";
-        if(!cylinder&&!plane){phase=Phase::Passthrough;return sink(line.data(),line.size());}
-        for(std::size_t i=1;i<count;++i)if(!finiteNumber(text(i))){phase=Phase::Passthrough;return sink(line.data(),line.size());}
+        if(!count)return passthrough();
+        const auto type=text(0);std::size_t firstZero=0,lastZero=0;bool trimmed=false;
+        if(phase==Phase::Curve2ds) {
+            if(type=="1"&&count==5){firstZero=1;lastZero=4;}
+            else if(type=="2"&&count==8){} // Circle basis: preserve every scalar.
+            else if(type=="8"&&count==3&&trimDepth<64)trimmed=true;
+            else return passthrough();
+        }else if(phase==Phase::Curves) {
+            if(type=="1"&&count==7){} //3D line fields are outside measured policy.
+            else if(type=="2"&&count==14){firstZero=4;lastZero=12;}
+            else return passthrough();
+        }else if(phase==Phase::Surfaces) {
+            if((type=="1"&&count==13)||(type=="2"&&count==14)){firstZero=4;lastZero=12;}
+            else return passthrough();
+        }else return passthrough();
+        for(std::size_t i=1;i<count;++i)if(!finiteNumber(text(i)))return passthrough();
+        // A trimmed2D record owns exactly one recursively written basis.
+        // Only a terminal line/circle consumes a counted top-level record.
+        if(trimmed){++trimDepth;return sink(line.data(),line.size());}
+        if(!remaining)return passthrough();
         std::size_t emitted=0;
-        if(cylinder)for(std::size_t i=4;i<=12;++i)if(text(i)=="-0") {
-            // Delete exactly this token's minus byte; all whitespace and every
-            // other byte are emitted unchanged, regardless of write chunking.
+        if(firstZero)for(std::size_t i=firstZero;i<=lastZero;++i)if(text(i)=="-0") {
             if(!sink(line.data()+emitted,tokens[i].begin-emitted))return false;
             emitted=tokens[i].begin+1;
         }
-        if(--remaining==0)phase=Phase::Passthrough;
+        trimDepth=0;
+        if(--remaining==0)phase=phase==Phase::Surfaces?Phase::Passthrough:Phase::Between;
         return sink(line.data()+emitted,line.size()-emitted);
     }
 };
@@ -304,7 +335,7 @@ private:
 #endif
         return true;
     }
-    CylinderDirectionZeroFilter filter;
+    AnalyticGeometryZeroFilter filter;
     CC_SHA256_CTX context{};std::size_t written=0;bool valid=false;
 };
 inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
@@ -333,7 +364,7 @@ inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
 #endif
         std::ostream stream(&buffer);stream.imbue(std::locale::classic());
         // Fixed OCCT format, no cached tessellation/normals. This is exact
-        // representation identity except proven signed-zero cylinder directions.
+        // representation identity except the proven typed analytic zero fields.
         // The typed stream filter never changes the detached/native shape.
         BRepTools::Write(detached,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
         return stream.good()&&buffer.finish(out);
