@@ -1164,6 +1164,8 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     std::shared_ptr<const core3d::meshcheck::ContactSourceCapture> _meshContactSource;
 #ifdef DEBUG
     NSUInteger _debugMaximumTextureAuthoringObjects;
+    void (^_debugMeshContactAfterCapture)(void);
+    void (^_debugMeshContactBeforeDelivery)(void);
 #endif
 }
 
@@ -8124,6 +8126,15 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         static_cast<std::uint32_t>(std::llround(size.height)),cancelled,output);
 }
 
+#if DEBUG
+- (void)debugSetNextMeshContactAfterCaptureHook:(void (^)(void))afterCapture
+                           beforeDeliveryHook:(void (^)(void))beforeDelivery {
+    if(!NSThread.isMainThread) return;
+    _debugMeshContactAfterCapture=[afterCapture copy];
+    _debugMeshContactBeforeDelivery=[beforeDelivery copy];
+}
+#endif
+
 - (Core3DMeshContactOperation *)checkMeshContactsForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected completion:(Core3DMeshContactCompletion)completion {
     using namespace core3d::meshcheck;
@@ -8171,6 +8182,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     Core3DMeshContactOperation *operation=[[Core3DMeshContactOperation alloc]
         initWithIdentity:identity ownerToken:token
         prepare:^ContactSourceStatus(const std::atomic_bool& cancelled,
+            const std::shared_ptr<void>& reservation,
             std::shared_ptr<const ContactSourceCapture>& output) {
             if(!ownerThread) return ContactSourceStatus::InternalFailure;
             Core3DViewController *owner=weakOwner;
@@ -8179,7 +8191,16 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             const auto status=[owner core3d_captureMeshContactSource:identity
                 cancelled:cancelled output:captured];
             if(status==ContactSourceStatus::Ready) {
-                output=std::make_shared<const ContactSourceCapture>(std::move(captured));
+                // The alias shares an owner containing both the exact numeric
+                // source and its budget reservation. No job/source cycle and
+                // no OCCT handle can enter this ownership graph.
+                struct ReservedSource {
+                    std::shared_ptr<void> reservation;
+                    ContactSourceCapture capture;
+                };
+                auto reserved=std::make_shared<ReservedSource>(
+                    ReservedSource{reservation,std::move(captured)});
+                output=std::shared_ptr<const ContactSourceCapture>(reserved,&reserved->capture);
                 owner->_meshContactSource=output;
             }
             return status;
@@ -8200,15 +8221,40 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             Core3DViewController *owner=weakOwner;
             if(owner!=nil && owner->_meshContactToken==token) {
                 owner->_meshContactOperation=nil;
-                if(report.state==Core3DMeshContactStateComplete) owner->_issuedMeshContactReport=report;
+                if(report.state==Core3DMeshContactStateComplete) {
+                    owner->_issuedMeshContactReport=report;
+                    [report core3d_setReleaseHandler:^{
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            Core3DViewController *currentOwner=weakOwner;
+                            if(currentOwner!=nil && currentOwner->_meshContactToken==token
+                                && currentOwner->_issuedMeshContactReport==nil) {
+                                currentOwner->_meshContactSource.reset();
+                                currentOwner->_meshContactToken=nil;
+                            }
+                        });
+                    }];
+                }
                 else { owner->_issuedMeshContactReport=nil;owner->_meshContactSource.reset(); }
             }
             // Publish owner state before invoking user code; the callback may
             // start a replacement job without the old delivery clearing it.
             if(completion) completion(report);
         }];
-    if(ownerThread) _meshContactOperation=operation;
+    if(ownerThread) {
+#if DEBUG
+        [operation core3d_setAfterCaptureHook:_debugMeshContactAfterCapture
+            beforeDeliveryHook:_debugMeshContactBeforeDelivery];
+        _debugMeshContactAfterCapture=nil;_debugMeshContactBeforeDelivery=nil;
+#endif
+        _meshContactOperation=operation;
+    }
     return operation;
+}
+
+- (void)discardMeshContactReport:(Core3DMeshContactReport *)report {
+    if(!NSThread.isMainThread || report==nil || report!=_issuedMeshContactReport
+        || report.ownerToken!=_meshContactToken) return;
+    _issuedMeshContactReport=nil;_meshContactSource.reset();_meshContactToken=nil;
 }
 
 - (BOOL)isMeshContactReportCurrent:(Core3DMeshContactReport *)report {

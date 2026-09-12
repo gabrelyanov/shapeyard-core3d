@@ -907,6 +907,15 @@ typedef struct {
 //! Only the latest report issued by this owner can be current. Native source
 //! coordinates, topology, placement and document lifetime are revalidated.
 - (BOOL)isMeshContactReportCurrent:(Core3DMeshContactReport *)report;
+//! Release the latest issued report's retained source without changing the
+//! document. Foreign or superseded reports cannot release another request.
+- (void)discardMeshContactReport:(Core3DMeshContactReport *)report;
+#if DEBUG
+//! One-shot observations on main around the next real native contact request.
+- (void)debugSetNextMeshContactAfterCaptureHook:(void (^_Nullable)(void))afterCapture
+                           beforeDeliveryHook:(void (^_Nullable)(void))beforeDelivery
+    NS_SWIFT_NAME(debugSetNextMeshContactHooks(afterCapture:beforeDelivery:));
+#endif
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected

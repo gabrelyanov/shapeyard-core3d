@@ -3,8 +3,15 @@
 
 using namespace core3d::meshcheck;
 namespace {
-// Bound captured payloads as well as worker concurrency across all editors.
-std::atomic_size_t activeMeshContactJobs{0};
+// A reservation follows the captured payload, including a completed report's
+// owner record. Finishing a worker alone must not release the memory budget.
+std::atomic_size_t reservedMeshContactCaptures{0};
+struct MeshContactReservation {
+    bool acquired=false;
+    ~MeshContactReservation() {
+        if(acquired) reservedMeshContactCaptures.fetch_sub(1,std::memory_order_acq_rel);
+    }
+};
 struct MeshContactJob {
     ContactSourceIdentity identity;
     std::shared_ptr<const ContactSourceCapture> source;
@@ -13,11 +20,8 @@ struct MeshContactJob {
     std::atomic_bool cancelled{false};
     std::mutex completionMutex;
     bool finished=false;
-    bool ownsSlot=false;
+    std::shared_ptr<void> reservation;
     std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
-    ~MeshContactJob() {
-        if(ownsSlot) activeMeshContactJobs.fetch_sub(1,std::memory_order_acq_rel);
-    }
 };
 Core3DMeshContactState PublicState(ContactSourceStatus status) {
     switch(status) {
@@ -76,9 +80,16 @@ NSOperationQueue *MeshContactQueue() {
 @end
 @implementation Core3DMeshContactReport {
     NSObject *_ownerToken;
+    void (^_releaseHandler)(void);
 }
 + (BOOL)accessInstanceVariablesDirectly { return NO; }
 - (NSObject *)ownerToken { return _ownerToken; }
+- (void)core3d_setReleaseHandler:(void (^)(void))handler {
+    _releaseHandler=[handler copy];
+}
+- (void)dealloc {
+    if(_releaseHandler) _releaseHandler();
+}
 - (instancetype)initWithJob:(const MeshContactJob&)job ownerToken:(NSObject *)token {
     self=[super init];
     if(self) {
@@ -117,7 +128,18 @@ NSOperationQueue *MeshContactQueue() {
     Core3DMeshContactPrepare _prepare;
     Core3DMeshContactValidate _validate;
     Core3DMeshContactCompletion _completion;
+#if DEBUG
+    void (^_afterCaptureHook)(void);
+    void (^_beforeDeliveryHook)(void);
+#endif
 }
+#if DEBUG
+- (void)core3d_setAfterCaptureHook:(void (^)(void))afterCapture
+              beforeDeliveryHook:(void (^)(void))beforeDelivery {
+    NSAssert(NSThread.isMainThread,@"Contact test hooks require the owner thread");
+    _afterCaptureHook=[afterCapture copy];_beforeDeliveryHook=[beforeDelivery copy];
+}
+#endif
 - (instancetype)initWithIdentity:(const ContactSourceIdentity&)identity
                       ownerToken:(NSObject *)ownerToken
                          prepare:(Core3DMeshContactPrepare)prepare
@@ -146,16 +168,18 @@ NSOperationQueue *MeshContactQueue() {
         [self deliverOnMain];return;
     }
     try {
-        auto active=activeMeshContactJobs.load(std::memory_order_acquire);
-        while(active<4 && !_job->ownsSlot) {
-            _job->ownsSlot=activeMeshContactJobs.compare_exchange_weak(
+        auto reservation=std::make_shared<MeshContactReservation>();
+        auto active=reservedMeshContactCaptures.load(std::memory_order_acquire);
+        while(active<4 && !reservation->acquired) {
+            reservation->acquired=reservedMeshContactCaptures.compare_exchange_weak(
                 active,active+1,std::memory_order_acq_rel);
         }
-        if(!_job->ownsSlot) {
+        if(!reservation->acquired) {
             _job->state=Core3DMeshContactStateResourceLimit;
             [self deliverOnMain];return;
         }
-        const auto status=_prepare ? _prepare(_job->cancelled,_job->source)
+        _job->reservation=std::move(reservation);
+        const auto status=_prepare ? _prepare(_job->cancelled,_job->reservation,_job->source)
                                    : ContactSourceStatus::InternalFailure;
         _job->state=PublicState(status);
         if(status==ContactSourceStatus::Ready && !_job->source)
@@ -166,6 +190,10 @@ NSOperationQueue *MeshContactQueue() {
     if(_job->state!=Core3DMeshContactStateComplete) {
         [self deliverOnMain];return;
     }
+#if DEBUG
+    void (^afterCapture)(void)=_afterCaptureHook;_afterCaptureHook=nil;
+    if(afterCapture) afterCapture();
+#endif
     [MeshContactQueue() addOperationWithBlock:^{
         // The captured source contains only numeric values and strings. This
         // worker never reads mutable OCAF/AIS or consults the selected object.
@@ -176,6 +204,11 @@ NSOperationQueue *MeshContactQueue() {
 }
 - (void)deliverOnMain {
     NSAssert(NSThread.isMainThread,@"Native contact completion requires main");
+#if DEBUG
+    void (^beforeDelivery)(void)=_beforeDeliveryHook;
+    _beforeDeliveryHook=nil;_afterCaptureHook=nil;
+    if(beforeDelivery) beforeDelivery();
+#endif
     // Revalidate even a failed scan if a source was admitted: no outcome should
     // silently attach to a different or closed document during detached work.
     if(_job->source && !_job->cancelled.load(std::memory_order_acquire)) {
@@ -202,10 +235,7 @@ NSOperationQueue *MeshContactQueue() {
     // The controller may retain the original numeric capture in its bounded
     // registry for report actions. The completed operation releases its copy.
     _job->source.reset();_job->result={};
-    if(_job->ownsSlot) {
-        _job->ownsSlot=false;
-        activeMeshContactJobs.fetch_sub(1,std::memory_order_acq_rel);
-    }
+    _job->reservation.reset();
     if(completion) completion(report);
 }
 @end
