@@ -2,6 +2,7 @@
 
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/EnclosurePersistence.hxx"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 
@@ -13,6 +14,7 @@
 #include <TDF_ChildIterator.hxx>
 #include <TDataStd_Real.hxx>
 #include <TNaming_NamedShape.hxx>
+#include <TNaming_Builder.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Image_Texture.hxx>
 #include <Interface_CheckIterator.hxx>
@@ -658,18 +660,26 @@ bool ApplyPrivateExportTransforms(
                 || XCAFDoc_ShapeTool::IsReference(root)) { return false; }
             const TopoDS_Shape original = shapeTool->GetShape(root);
             if (original.IsNull()) { return false; }
-            for (TopExp_Explorer faces(original, TopAbs_FACE); faces.More(); faces.Next()) {
-                ThrowIfCancelled(state);
-                TopLoc_Location location;
-                const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
-                if (!mesh.IsNull()) {
-                    copiedNodes += mesh->NbNodes(); copiedTriangles += mesh->NbTriangles();
-                    if (copiedNodes > kMaximumSTLNodes || copiedTriangles > kMaximumSTLTriangles) {
-                        throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
-                            "Scaled geometry exceeds the supported mobile export size.");
+            const auto budgetCopiedMesh = [&](const TopoDS_Shape& shape) {
+                for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+                    ThrowIfCancelled(state);
+                    TopLoc_Location location;
+                    const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                    if (!mesh.IsNull()) {
+                        copiedNodes += mesh->NbNodes(); copiedTriangles += mesh->NbTriangles();
+                        if (copiedNodes > kMaximumSTLNodes || copiedTriangles > kMaximumSTLTriangles) {
+                            throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
+                                "Scaled geometry exceeds the supported mobile export size.");
+                        }
                     }
                 }
-            }
+            };
+            budgetCopiedMesh(original);
+            core3d::profile::Record profile;
+            core3d::enclosure::Record enclosure;
+            if (!core3d::profile::Read(ocaf, root, profile)
+                || !core3d::enclosure::Read(ocaf, root, enclosure)) { return false; }
+            const TDF_Label featureLabel = !profile.label.IsNull() ? profile.label : enclosure.label;
             gp_Trsf scale;
             scale.SetScale(gp_Pnt(0, 0, 0), factor);
             // CopyMesh preserves authored UVs and handles negative scale's
@@ -681,9 +691,22 @@ bool ApplyPrivateExportTransforms(
             const auto captureReplacement = [&](const TDF_Label& label) {
                 Handle(TNaming_NamedShape) named;
                 if (!label.FindAttribute(TNaming_NamedShape::GetID(), named)) { return true; }
-                const TopoDS_Shape previous = shapeTool->GetShape(label);
+                const bool isFeatureBinding = !featureLabel.IsNull() && label.IsEqual(featureLabel);
+                const TopoDS_Shape previous = isFeatureBinding ? named->Get() : shapeTool->GetShape(label);
                 if (previous.IsNull()) { return false; }
-                const TopoDS_Shape replacement = transformed.ModifiedShape(previous);
+                TopoDS_Shape replacement;
+                if (isFeatureBinding && !previous.IsEqual(original)) {
+                    // A stale recipe can retain a different solid. Preserve its
+                    // independent binding in this private export copy instead of
+                    // asking the current root's modifier to resolve an old shape.
+                    budgetCopiedMesh(previous);
+                    BRepBuilderAPI_Transform retained(previous, scale, Standard_True, Standard_True);
+                    ThrowIfCancelled(state);
+                    if (!retained.IsDone()) { return false; }
+                    replacement = retained.Shape();
+                } else {
+                    replacement = transformed.ModifiedShape(previous);
+                }
                 if (replacement.IsNull()) { return false; }
                 replacements.emplace_back(label, replacement);
                 return true;
@@ -698,7 +721,14 @@ bool ApplyPrivateExportTransforms(
             // also replace another occurrence sharing the original shape.
             for (const auto& replacement : replacements) {
                 ThrowIfCancelled(state);
-                shapeTool->SetShape(replacement.first, replacement.second);
+                if (!featureLabel.IsNull() && replacement.first.IsEqual(featureLabel)) {
+                    // Recipe bindings admit their exact codec attributes only.
+                    // ShapeTool::SetShape would add XCAFDoc_ShapeMapTool here,
+                    // making subsequent private-document validation reject.
+                    TNaming_Builder(replacement.first).Generated(replacement.second);
+                } else {
+                    shapeTool->SetShape(replacement.first, replacement.second);
+                }
             }
             // Tag 8 is the persisted object-scale field read by
             // ObjectTransformForLabel. The source snapshot is never modified.
