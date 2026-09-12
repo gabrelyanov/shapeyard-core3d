@@ -22,6 +22,11 @@
 
 namespace core3d::profile {
 
+// Keep new records clear of OcctDocument transform children 1..8 and
+// appearance children 11/12, even when those attributes are still implicit.
+// Read preserves compatibility with already persisted record locations.
+inline constexpr int MinimumRecordTag = 13;
+
 // Existing bounded scalar/string drivers only. Numeric arrays and function
 // drivers are intentionally not part of the project-file reader contract.
 inline const Standard_GUID& SchemaID() {
@@ -314,7 +319,7 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
         if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID) return false;
         auto label = previous.label;
         if (label.IsNull()) {
-            int maximumTag = 0;
+            int maximumTag = MinimumRecordTag - 1;
             for (TDF_ChildIterator it(owner, Standard_False); it.More(); it.Next())
                 maximumTag = std::max(maximumTag, it.Value().Tag());
             if (maximumTag == std::numeric_limits<int>::max()) return false;
@@ -383,7 +388,7 @@ inline bool StageIndependentCopy(const Handle(TDocStd_Document)& document,
         // original recipe was actually bound to its root, even if units stale.
         if (preparedBinding.IsEqual(destinationShape) != boundToSourceRoot) return false;
         const bool expectedCurrent = original.IsCurrent(document, sourceOwner);
-        int maximumTag = 0;
+        int maximumTag = MinimumRecordTag - 1;
         for (TDF_ChildIterator it(destinationOwner, Standard_False); it.More(); it.Next())
             maximumTag = std::max(maximumTag, it.Value().Tag());
         if (maximumTag == std::numeric_limits<int>::max()) return false;

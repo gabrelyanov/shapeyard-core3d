@@ -4151,8 +4151,9 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
             || !document->CommitCommand() || document->HasOpenCommand())
             throw Standard_Failure("Unable to stage fixture saved profile");
         core3d::profile::Record original;
-        if (!core3d::profile::Read(document, label, original) || !original.IsCurrent(document, label))
-            throw Standard_Failure("Fixture profile was not initially current");
+        if (!core3d::profile::Read(document, label, original) || !original.IsCurrent(document, label)
+            || original.label.Tag() < core3d::profile::MinimumRecordTag)
+            throw Standard_Failure("Fixture profile was not current or overlapped reserved object fields");
         // Each box has 34 unique shapes but 86 recursive occurrences:
         // 1 solid + 1 shell + 6 faces + 6 wires + 24 edges + 48 vertices.
         // Arrays bound occurrence traversal, including shared edges/vertices.
