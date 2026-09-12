@@ -476,6 +476,8 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
                 || !CandidateIsFinite(request.presentation->LocalTransformation())) {
                 return reject(OrdinaryEditResult::Invalid);
             }
+            if (request.name && (!OcctObjectNameIsValid(*request.name) || ledger.meshCopy))
+                return reject(OrdinaryEditResult::Invalid);
             if (request.profile && request.enclosure) return reject(OrdinaryEditResult::Invalid);
             std::vector<double> enclosureValues;
             if (request.enclosure ? (request.representation != OcctGeometryRepresentation::BRep
@@ -538,6 +540,7 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                 || !definitions.insert(expected.object.definitionIdentifier).second
                 || !_document->CaptureObjectNameStateForLabel(expected.object.label, stored)
                 || !expected.IsEqual(stored)) { return false; }
+            if (record.requested.name && (!stored.namePresent || !stored.name.IsEqual(*record.requested.name))) return false;
             if (record.requested.profile) {
                 std::vector<double> values;
                 if (!profile::Encode(*record.requested.profile, values)
@@ -624,6 +627,8 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
                 _document->SaveObjectMaterial(label,record.requested.material);
                 _document->SaveObjectColor(label,record.requested.color);
             }
+            if (record.requested.name && !_document->SetObjectNameForLabel(label, *record.requested.name))
+                throw Standard_Failure("Creation part name staging failed");
             if (record.requested.profile && !profile::Stage(_document->Document(), label,
                     *record.requested.profile, record.requested.profileIdentifier))
                 throw Standard_Failure("Profile definition staging failed");

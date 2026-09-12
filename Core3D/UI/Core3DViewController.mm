@@ -1177,6 +1177,62 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
     if (completion) completion(result);
 }
 
+@interface Core3DAssemblyPartDefinition ()
+- (instancetype)initWithKind:(Core3DAssemblyPartKind)kind name:(NSString *)name
+    width:(double)width depth:(double)depth height:(double)height radius:(double)radius
+    position:(simd_double3)position rotation:(simd_double4)rotation;
+- (std::optional<core3d::AssemblyPartDefinition>)nativePartForMetersPerUnit:(double)unit;
+@end
+@implementation Core3DAssemblyPartDefinition
+- (instancetype)initWithKind:(Core3DAssemblyPartKind)kind name:(NSString *)name
+    width:(double)width depth:(double)depth height:(double)height radius:(double)radius
+    position:(simd_double3)position rotation:(simd_double4)rotation {
+    if (![name isKindOfClass:NSString.class] || name.length==0 || name.length>64) return nil;
+    TCollection_ExtendedString nativeName;
+    for (NSUInteger i=0;i<name.length;++i) nativeName+=static_cast<Standard_ExtCharacter>([name characterAtIndex:i]);
+    if (!OcctObjectNameIsValid(nativeName)) return nil;
+    const auto length=[](double x){return std::isfinite(x)&&x>=1e-3&&x<=1e6;};
+    if (!length(height) || (kind==Core3DAssemblyPartKindBox ? (!length(width)||!length(depth)) : !length(radius))) return nil;
+    core3d::profile::ConstructionFrame frame;
+    frame.values={position.x,position.y,position.z,rotation.x,rotation.y,rotation.z,rotation.w,1};
+    if (!frame.IsValid()) return nil;
+    if ((self=[super init])) {
+        _kind=kind;_name=[name copy];_partIdentifier=NSUUID.UUID.UUIDString;
+        _widthMM=width;_depthMM=depth;_heightMM=height;_radiusMM=radius;
+        _positionMM=position;_rotationXYZW=rotation;
+        if (!_partIdentifier) return nil;
+    }
+    return self;
+}
++ (instancetype)boxWithName:(NSString *)name widthMM:(double)width depthMM:(double)depth heightMM:(double)height
+    positionMM:(simd_double3)position rotationXYZW:(simd_double4)rotation {
+    return [[self alloc] initWithKind:Core3DAssemblyPartKindBox name:name width:width depth:depth height:height radius:0 position:position rotation:rotation];
+}
++ (instancetype)cylinderWithName:(NSString *)name radiusMM:(double)radius heightMM:(double)height
+    positionMM:(simd_double3)position rotationXYZW:(simd_double4)rotation {
+    return [[self alloc] initWithKind:Core3DAssemblyPartKindCylinder name:name width:0 depth:0 height:height radius:radius position:position rotation:rotation];
+}
+- (std::optional<core3d::AssemblyPartDefinition>)nativePartForMetersPerUnit:(double)unit {
+    if (!std::isfinite(unit)||unit<=0) return {};
+    try {
+        const double scale=.001/unit;
+        core3d::AssemblyPartDefinition part;
+        part.identifier=_partIdentifier.UTF8String;
+        for (NSUInteger i=0;i<_name.length;++i) part.name+=static_cast<Standard_ExtCharacter>([_name characterAtIndex:i]);
+        auto& p=part.parameters;p.metersPerUnit=unit;p.definition.plane=0;p.definition.depth=_heightMM*scale;
+        if (_kind==Core3DAssemblyPartKindBox) p.definition.points={{0,0},{_widthMM*scale,0},{_widthMM*scale,_depthMM*scale},{0,_depthMM*scale}};
+        else p.definition.circle=core3d::ProfileCircularSection{gp_Pnt2d(0,0),_radiusMM*scale,0};
+        core3d::profile::ConstructionFrame frame;
+        frame.values={_positionMM.x*scale,_positionMM.y*scale,_positionMM.z*scale,
+            _rotationXYZW.x,_rotationXYZW.y,_rotationXYZW.z,_rotationXYZW.w,1};
+        p.constructionFrame=frame;
+        std::vector<double> encoded;
+        if (!core3d::profile::Encode(p,encoded)) return {};
+        return part;
+    } catch (...) {return {};}
+}
+@end
+
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -9046,6 +9102,49 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion {
     [self core3d_executeEnclosure:definition context:context rebuild:YES completion:completion];
+}
+
+- (void)createAssemblyWithParts:(NSArray<Core3DAssemblyPartDefinition *> *)parts
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{completion(Core3DProfileConstructionResultRejected);});return;
+    }
+    if (![self isModelingPlanningContextCurrent:context] || ![parts isKindOfClass:NSArray.class]
+        || parts.count==0 || parts.count>16) {completion(Core3DProfileConstructionResultRejected);return;}
+    try {
+        NSArray<Core3DAssemblyPartDefinition *> *frozen=[parts copy];
+        NSMutableSet<NSString *> *names=[NSMutableSet set],*identifiers=[NSMutableSet set];
+        std::vector<core3d::AssemblyPartDefinition> nativeParts;
+        for (Core3DAssemblyPartDefinition *part in frozen) {
+            if (![part isKindOfClass:Core3DAssemblyPartDefinition.class] || [names containsObject:part.name]
+                || [identifiers containsObject:part.partIdentifier]) {completion(Core3DProfileConstructionResultRejected);return;}
+            const auto native=[part nativePartForMetersPerUnit:context.scene.metersPerUnit];
+            if (!native) {completion(Core3DProfileConstructionResultRejected);return;}
+            [names addObject:part.name];[identifiers addObject:part.partIdentifier];nativeParts.push_back(*native);
+        }
+        const CGSize size=GLController.drawableSize;
+        if (!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+            ||size.width>UINT32_MAX||size.height>UINT32_MAX) {completion(Core3DProfileConstructionResultRejected);return;}
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier=context.scene.publicationSourceIdentifier.UTF8String;
+        identity.documentGeneration=context.scene.revisions.documentGeneration;
+        identity.modelRevision=context.scene.revisions.modelRevision;
+        const auto work=GLController.viewer->prepareAssemblySolid(nativeParts,identity,context.scene.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) {completion(Core3DProfileConstructionResultRejected);return;}
+        context->_planningConsumed=YES;_modelingConstructionContext=context;
+        __weak Core3DViewController *weakSelf=self;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result) {
+            Core3DViewController *owner=weakSelf;
+            Core3DModelingPlanningContext *finished=weakContext;
+            if (finished) finished->_planningRetired=YES;
+            if (owner && owner->_modelingConstructionContext==finished) owner->_modelingConstructionContext=nil;
+            completion(result);
+        }];
+    } catch (...) {completion(Core3DProfileConstructionResultRejected);}
 }
 
 - (void)cancelNativeConstruction { [self cancelProfileConstruction]; }

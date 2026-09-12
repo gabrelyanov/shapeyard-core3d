@@ -56,9 +56,16 @@ namespace core3d {
     struct NativeSolidWork;
     struct ProfileSolidGeometry;
     struct EnclosureSolidGeometry;
+    struct AssemblySolidGeometry;
+    struct AssemblyPartDefinition {
+        profile::Parameters parameters;
+        TCollection_ExtendedString name;
+        std::string identifier;
+    };
     // Detached typed payload only; monostate is an invalid/unprepared request.
     using NativeSolidGeometryPayload = std::variant<std::monostate,
-        std::shared_ptr<ProfileSolidGeometry>, std::shared_ptr<EnclosureSolidGeometry>>;
+        std::shared_ptr<ProfileSolidGeometry>, std::shared_ptr<EnclosureSolidGeometry>,
+        std::shared_ptr<AssemblySolidGeometry>>;
     struct StoredProfileSnapshot {
         profile::Parameters parameters;
         ObjectFrameIdentity identity;
@@ -147,6 +154,9 @@ namespace core3d {
             const enclosure::Parameters& parameters, const StoredEnclosureSnapshot& original,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareAssemblySolid(
+            const std::vector<AssemblyPartDefinition>& parts, const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         static NativeSolidGeometryPayload nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept;
         static bool buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(

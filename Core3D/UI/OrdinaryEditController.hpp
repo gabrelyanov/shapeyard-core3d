@@ -142,6 +142,7 @@ struct OrdinaryCreationRequest {
     std::string profileIdentifier;
     std::optional<enclosure::Parameters> enclosure;
     std::string enclosureIdentifier;
+    std::optional<TCollection_ExtendedString> name; // Staged in this same creation command.
 };
 struct OrdinaryCreationRecord {
     OrdinaryCreationRequest requested;

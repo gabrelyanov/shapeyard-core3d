@@ -1659,6 +1659,31 @@ struct EnclosureSolidGeometry {
     EnclosureSolidResult result;
     bool built = false;
 };
+struct AssemblySolidGeometry {
+    std::vector<std::shared_ptr<ProfileSolidGeometry>> parts;
+    std::atomic_bool cancelled{false};
+    std::array<double,6> bounds{};
+    bool built = false;
+};
+
+static bool BuildAssemblySolidGeometry(const std::shared_ptr<AssemblySolidGeometry>& geometry) noexcept {
+    if (!geometry || geometry->built || geometry->cancelled.load()
+        || geometry->parts.empty() || geometry->parts.size() > 16) return false;
+    try {
+        bool first = true;
+        for (const auto& part : geometry->parts) {
+            if (geometry->cancelled.load() || !BuildProfileSolidGeometry(part)) return false;
+            if (first) { geometry->bounds = part->bounds; first = false; }
+            else for (int axis=0; axis<3; ++axis) {
+                geometry->bounds[axis] = std::min(geometry->bounds[axis], part->bounds[axis]);
+                geometry->bounds[axis+3] = std::max(geometry->bounds[axis+3], part->bounds[axis+3]);
+            }
+        }
+        if (geometry->cancelled.load()) return false;
+        geometry->built = true; return true;
+    } catch (...) { return false; }
+}
+
 struct CompletedNativeSolid {
     TopoDS_Shape solid;
     std::array<double,6> bounds;
@@ -1677,6 +1702,7 @@ std::optional<CompletedNativeSolid> CompletedNativeSolidFor(const NativeSolidGeo
 struct NativeSolidWork {
     NativeSolidGeometryPayload geometry;
     OrdinaryNameLedger authority;
+    std::vector<AssemblyPartDefinition> assemblyParts; // Main-owned metadata, never worker payload.
     std::optional<OrdinaryTransformLedger> rebuildAuthority;
     ObjectFrameIdentity identity;
     Handle(OcctDocument) owner;
@@ -1757,6 +1783,30 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareProfileSolid(
         auto geometry=std::make_shared<ProfileSolidGeometry>();
         static_cast<ProfileDefinition&>(*geometry)=definition;
         work->geometry=std::move(geometry);
+        return work;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareAssemblySolid(
+    const std::vector<AssemblyPartDefinition>& parts, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || parts.empty() || parts.size()>16) return {};
+    try {
+        auto work = prepareNativeSolidWork(identity,presentationRevision,width,height);
+        if (!work) return {};
+        std::unordered_set<std::string> identifiers;
+        auto geometry = std::make_shared<AssemblySolidGeometry>();
+        for (const auto& part : parts) {
+            std::vector<double> encoded;
+            if (part.parameters.metersPerUnit != work->metersPerUnit || !part.parameters.constructionFrame
+                || !profile::Encode(part.parameters, encoded) || !profile::IsIdentifier(part.identifier)
+                || !identifiers.insert(part.identifier).second || !OcctObjectNameIsValid(part.name)) return {};
+            auto solid = std::make_shared<ProfileSolidGeometry>();
+            static_cast<ProfileDefinition&>(*solid) = part.parameters.definition;
+            solid->constructionFrame = part.parameters.constructionFrame;
+            geometry->parts.push_back(std::move(solid));
+        }
+        work->assemblyParts = parts; work->geometry = std::move(geometry);
         return work;
     } catch (...) { return {}; }
 }
@@ -1950,6 +2000,8 @@ NativeSolidGeometryPayload Core3DViewer::nativeSolidGeometry(const std::shared_p
     return work ? work->geometry : NativeSolidGeometryPayload{};
 }
 bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept {
+    if (const auto assembly=std::get_if<std::shared_ptr<AssemblySolidGeometry>>(&payload))
+        return BuildAssemblySolidGeometry(*assembly);
     if (const auto p=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&payload))
         return BuildProfileSolidGeometry(*p);
     if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&payload)) {
@@ -1961,6 +2013,13 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
 }
 void Core3DViewer::cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (!work) return;
+    if (const auto assembly=std::get_if<std::shared_ptr<AssemblySolidGeometry>>(&work->geometry)) {
+        if (*assembly) {
+            (*assembly)->cancelled.store(true);
+            for (const auto& part : (*assembly)->parts) if (part) part->cancelled.store(true);
+        }
+        return;
+    }
     if (const auto p=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&work->geometry)) {
         if (*p) (*p)->cancelled.store(true);
     } else if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry)) {
@@ -1971,7 +2030,14 @@ void Core3DViewer::cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& wor
 OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (![NSThread isMainThread] || !work || work->consumed) return OrdinaryEditResult::Invalid;
     const auto completed=CompletedNativeSolidFor(work->geometry);
-    if (!completed) return OrdinaryEditResult::Invalid;
+    std::shared_ptr<AssemblySolidGeometry> assembly;
+    if (const auto payload=std::get_if<std::shared_ptr<AssemblySolidGeometry>>(&work->geometry)) assembly=*payload;
+    if (assembly) {
+        if (!assembly->built || assembly->cancelled.load() || assembly->parts.empty() || assembly->parts.size()>16
+            || work->rebuildAuthority || work->assemblyParts.size()!=assembly->parts.size()) return OrdinaryEditResult::Invalid;
+        for (const auto& part : assembly->parts)
+            if (!part || !part->built || part->cancelled.load() || part->solid.IsNull()) return OrdinaryEditResult::Invalid;
+    } else if (!completed) return OrdinaryEditResult::Invalid;
     work->consumed = true;
     if (!canBeginCommittedEdit()) { return OrdinaryEditResult::Busy; }
     try {
@@ -1986,6 +2052,34 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             || !_shapeInteractor->selectionModeAuthorityIsExact()
             || _shapeInteractor->getSelectionMode() != work->authority.selectionMode
             || !_objectInteractor->verifyOrdinaryNameAuthority(work->authority)) { return OrdinaryEditResult::Invalid; }
+        if (assembly) {
+            std::vector<OrdinaryCreationRequest> requests;
+            std::vector<Handle(AIS_InteractiveObject)> presentations;
+            for (std::size_t i=0; i<assembly->parts.size(); ++i) {
+                Handle(AIS_Shape) presentation = new AIS_Shape(assembly->parts[i]->solid);
+                myContext->ApplyDefaultMaterial(presentation);
+                Quantity_Color color; presentation->Color(color);
+                OrdinaryCreationRequest request{presentation, Graphic3d_NameOfMaterial_ShinyPlastified,
+                    color.Name(), OcctGeometryRepresentation::BRep};
+                request.profile=work->assemblyParts[i].parameters;
+                request.profileIdentifier=work->assemblyParts[i].identifier;
+                request.name=work->assemblyParts[i].name;
+                requests.push_back(std::move(request)); presentations.push_back(presentation);
+            }
+            // Exactly one existing ordinary creation transaction stages every
+            // part, profile identity and display name, or reconciles/aborts all.
+            const auto result=publishCreatedPrimitives(requests);
+            if (result!=OrdinaryEditResult::Committed) return result;
+            try {
+                if (work->frameFirst && !myView.IsNull()) {
+                    const auto& b=assembly->bounds;
+                    Bnd_Box bounds; bounds.Add(gp_Pnt(b[0],b[1],b[2])); bounds.Add(gp_Pnt(b[3],b[4],b[5]));
+                    myView->FitAll(bounds,0.45,Standard_False);myView->ZFitAll();
+                }
+                bool touched=false; (void)_objectInteractor->replaceSelectedObjectsForBrowser(presentations,touched);
+            } catch (...) {}
+            return result;
+        }
         if (work->rebuildAuthority) {
             auto authority = *work->rebuildAuthority;
             if (authority.records.size() != 1 || !admitTransform(authority)

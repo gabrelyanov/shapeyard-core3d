@@ -6,6 +6,7 @@
 //
 
 #import <UIKit/UIKit.h>
+#import <simd/simd.h>
 #import <Core3D/PrimitiveType.h>
 #import <Core3D/PrimitiveSelectionType.h>
 #import <Core3D/PrimitiveGizmoType.h>
@@ -184,6 +185,33 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) BOOL current;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
+@end
+
+typedef NS_ENUM(NSInteger, Core3DAssemblyPartKind) {
+    Core3DAssemblyPartKindBox = 0, Core3DAssemblyPartKindCylinder,
+};
+//! Physical millimetres. Box origin=min corner; cylinder origin=base centre;
+//! height follows local +Z before the explicit proper quaternion/translation.
+//! Part UUID is persisted as profile feature identity, never edit permission.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAssemblyPartDefinition : NSObject
+@property(nonatomic,readonly) Core3DAssemblyPartKind kind;
+@property(nonatomic,copy,readonly) NSString *name;
+@property(nonatomic,copy,readonly) NSString *partIdentifier;
+@property(nonatomic,readonly) double widthMM;
+@property(nonatomic,readonly) double depthMM;
+@property(nonatomic,readonly) double heightMM;
+@property(nonatomic,readonly) double radiusMM;
+@property(nonatomic,readonly) simd_double3 positionMM;
+@property(nonatomic,readonly) simd_double4 rotationXYZW;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
++ (nullable instancetype)boxWithName:(NSString *)name widthMM:(double)width depthMM:(double)depth
+    heightMM:(double)height positionMM:(simd_double3)position rotationXYZW:(simd_double4)rotation
+    NS_SWIFT_NAME(box(name:widthMM:depthMM:heightMM:positionMM:rotationXYZW:));
++ (nullable instancetype)cylinderWithName:(NSString *)name radiusMM:(double)radius heightMM:(double)height
+    positionMM:(simd_double3)position rotationXYZW:(simd_double4)rotation
+    NS_SWIFT_NAME(cylinder(name:radiusMM:heightMM:positionMM:rotationXYZW:));
 @end
 
 //! One-use planning lease issued by one live native owner. Its immutable
@@ -1028,7 +1056,14 @@ typedef struct {
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildEnclosure(definition:context:completion:));
-//! Cancels either construction kind; admission stays Busy until completion.
+//! One flat instruction, 1–16 separate named profile solids and one Undo.
+//! Existing typed profile tolerances apply in document units. No fusion or
+//! nested hierarchy is inferred. Stop retires the exact planning context.
+- (void)createAssemblyWithParts:(NSArray<Core3DAssemblyPartDefinition *> *)parts
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createAssembly(parts:context:completion:));
+//! Cancels any native construction kind; admission stays Busy until completion.
 - (void)cancelNativeConstruction;
 //! Construct one solid from 3–64 non-intersecting outline points in mm, either
 //! winding, with positive depth 0.001–1,000,000 mm. One undoable creation.
