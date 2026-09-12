@@ -3,6 +3,8 @@
 #include <gp_Ax2.hxx>
 
 #include "OrdinaryEditCommand.hpp"
+#include "NativeModelingReceipt.hxx"
+#include "NativeModelingRequest.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
 #include <map>
@@ -20,6 +22,56 @@ enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance,
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild };
+
+// Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
+// Only the ordinary controller can seal this result; an unresolved ledger retains it.
+class NativeModelingReceiptResolution final {
+public:
+    enum class State { Pending, Committed, Aborted, Unchanged };
+    State state() const noexcept { return state_; }
+    const receipt::Record& record() const noexcept { return record_; }
+private:
+    friend class OrdinaryEditController;
+    State state_=State::Pending;
+    receipt::Record record_;
+};
+struct NativeModelingEpoch final { bool retired=false; }; // read/write main only
+struct NativeModelingPermitIssuer; // Defined solely at the owner reservation boundary.
+class NativeModelingCommitPermit final {
+public:
+    NativeModelingCommitPermit(const NativeModelingCommitPermit&)=delete;
+    NativeModelingCommitPermit& operator=(const NativeModelingCommitPermit&)=delete;
+    bool current() const noexcept {
+        return session_&&request_&&!session_->retired&&!request_->retired;
+    }
+    const std::shared_ptr<NativeModelingReceiptResolution>& resolution() const noexcept { return resolution_; }
+private:
+    friend struct NativeModelingPermitIssuer;
+    friend class Core3DViewer;
+    friend class OrdinaryEditController;
+    NativeModelingCommitPermit()=default;
+    receipt::Key key_;
+    receipt::Operation operation_=receipt::Operation::CreateEnclosure;
+    request::Descriptor descriptor_;
+    std::vector<receipt::UUID> featureIDs_;
+    Handle(TDocStd_Document) document_;
+    receipt::Catalog previous_;
+    std::optional<receipt::Effect> expectedSource_; // Rebuild-only, main-owned native proof.
+    std::shared_ptr<NativeModelingEpoch> session_,request_;
+    std::shared_ptr<NativeModelingReceiptResolution> resolution_;
+    std::optional<request::Admission> admission_;
+    bool attached_=false,admitted_=false;
+#if DEBUG
+    bool debugStageFailure_=false;
+    bool debugBeforeReleaseFailure_=false;
+#endif
+};
+struct OrdinaryModelingReceiptLedger {
+    std::shared_ptr<NativeModelingCommitPermit> permit;
+    receipt::Catalog candidate;
+    receipt::Record record;
+    bool staged=false;
+};
 
 //! Rotation of a selection around an explicit world-space point, in model
 //! units. delta must be a unit-scale rigid transform that fixes the pivot.
@@ -54,6 +106,7 @@ struct OrdinaryTransformRecord {
 };
 
 struct OrdinaryTransformLedger {
+    std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::vector<OrdinaryTransformRecord> records;
     bool candidateSealed = false;
     std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
@@ -174,6 +227,7 @@ struct OrdinaryMeshCopySource {
 };
 
 struct OrdinaryCreationLedger {
+    std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::optional<OrdinaryMeshCopySource> meshCopy;
     OrdinaryCreationCatalog previousRoots;
     OcctSavedGroupState groups;
@@ -250,6 +304,10 @@ public:
         const TCollection_ExtendedString& name, OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginCreation(const std::vector<OrdinaryCreationRequest>& requests,
                                    OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginModelingCreation(const std::vector<OrdinaryCreationRequest>& requests,
+        std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept;
+    OrdinaryEditLease beginModelingRebuild(const OrdinaryTransformChange& change,
+        std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept;
     OrdinaryEditLease beginGrouping(const std::vector<OcctSavedGroup>& groups,
                                    OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
@@ -272,9 +330,18 @@ private:
     OrdinaryEditResult reconcileImpl() noexcept;
     OrdinaryEditResult stageCreationAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileCreationImpl() noexcept;
+    OrdinaryEditLease beginTransformImpl(const std::vector<OrdinaryTransformChange>& changes,
+        OrdinaryEditResult* failure, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
+    bool bindRebuildReceipt(OrdinaryTransformLedger& ledger, const OrdinaryTransformChange& change,
+        const OcctObjectTransformState& previous, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
+    bool rebuildReceiptMatches(const OrdinaryTransformLedger& ledger, bool candidate) const noexcept;
+    bool stageRebuildReceipt(OrdinaryTransformLedger& ledger) noexcept;
+    bool stageCreationReceipt(OrdinaryCreationLedger& ledger) noexcept;
+    bool creationReceiptMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept;
     bool creationMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept;
     OrdinaryEditLease beginCreationImpl(const std::vector<OrdinaryCreationRequest>& requests,
-        std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure) noexcept;
+        std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure,
+        std::shared_ptr<NativeModelingCommitPermit> permit = {}) noexcept;
     bool meshCopySourceMatches(const OrdinaryMeshCopySource& source, bool candidate) const noexcept;
     OrdinaryEditResult stageGroupingAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileGroupingImpl() noexcept;

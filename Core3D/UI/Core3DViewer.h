@@ -54,6 +54,7 @@ namespace core3d {
     };
 
     struct NativeSolidWork;
+    class NativeModelingCommitPermit;
     struct ProfileSolidGeometry;
     struct EnclosureSolidGeometry;
     struct AssemblySolidGeometry;
@@ -164,6 +165,10 @@ namespace core3d {
             const std::shared_ptr<NativeSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;
         static void cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept;
+        static bool attachModelingRebuildPermit(const std::shared_ptr<NativeSolidWork>& work,
+            std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
+        static bool attachModelingCreationPermit(const std::shared_ptr<NativeSolidWork>& work,
+            std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
         OrdinaryEditResult commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept;
         
         void showGrid(bool show);
@@ -555,7 +560,8 @@ namespace core3d {
         bool admitTransform(OrdinaryTransformLedger& ledger) noexcept override;
         bool admitVisibility(OrdinaryVisibilityLedger& ledger) noexcept override;
         bool repairVisibility(const OrdinaryVisibilityLedger& ledger, bool committed) noexcept override;
-        OrdinaryEditResult publishCreatedPrimitives(const std::vector<OrdinaryCreationRequest>& requests) noexcept;
+        OrdinaryEditResult publishCreatedPrimitives(const std::vector<OrdinaryCreationRequest>& requests,
+            std::shared_ptr<NativeModelingCommitPermit> permit = {}) noexcept;
         bool admitCreation(OrdinaryCreationLedger& ledger) noexcept override;
         bool admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept override;
         bool repairMeshCopy(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;

@@ -1700,6 +1700,7 @@ std::optional<CompletedNativeSolid> CompletedNativeSolidFor(const NativeSolidGeo
 }
 
 struct NativeSolidWork {
+    std::shared_ptr<NativeModelingCommitPermit> modelingPermit; // Main only; excluded from numeric geometry payload.
     NativeSolidGeometryPayload geometry;
     OrdinaryNameLedger authority;
     std::vector<AssemblyPartDefinition> assemblyParts; // Main-owned metadata, never worker payload.
@@ -2034,6 +2035,82 @@ void Core3DViewer::cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& wor
     }
 }
 
+bool Core3DViewer::attachModelingCreationPermit(const std::shared_ptr<NativeSolidWork>& work,
+    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
+    if(!NSThread.isMainThread||!work||!permit||work->consumed||work->modelingPermit
+        ||work->rebuildAuthority||permit->attached_||!permit->current()
+        ||!permit->admission_||permit->admission_->phase()!=request::Phase::Building
+        ||work->document!=permit->document_||work->document->HasOpenCommand())return false;
+    try {
+        request::Descriptor actual;actual.operation=static_cast<request::Operation>(permit->operation_);
+        if(actual.operation==request::Operation::CreateEnclosure){
+            const auto g=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry);
+            if(!g||!*g||permit->featureIDs_.size()!=1||!work->assemblyParts.empty())return false;
+            request::Part p;p.recipe=request::Recipe::Enclosure;
+            p.schema=(*g)->parameters.definition.constructionFrame?enclosure::FramedSchemaVersion:enclosure::SchemaVersion;
+            if(!enclosure::Encode((*g)->parameters,p.values))return false;
+            actual.parts.push_back(std::move(p));
+        }else if(actual.operation==request::Operation::CreateAssembly){
+            if(!std::holds_alternative<std::shared_ptr<AssemblySolidGeometry>>(work->geometry)
+                ||work->assemblyParts.size()!=permit->featureIDs_.size()
+                ||work->assemblyParts.size()!=permit->descriptor_.parts.size())return false;
+            for(std::size_t i=0;i<work->assemblyParts.size();++i){
+                const auto& part=work->assemblyParts[i];request::Part p;receipt::UUID feature;
+                p.recipe=request::Recipe::Profile;p.schema=profile::SchemaFor(part.parameters);
+                p.name=permit->descriptor_.parts[i].name;
+                if(!part.name.IsEqual(TCollection_ExtendedString(p.name.c_str(),Standard_True))
+                    ||!receipt::ParseUUID(part.identifier,feature)||feature!=permit->featureIDs_[i]
+                    ||!receipt::SupportedProfile(part.parameters)||!profile::Encode(part.parameters,p.values))return false;
+                actual.parts.push_back(std::move(p));
+            }
+        }else return false;
+        std::vector<std::uint8_t> a,b;request::Digest digest;
+        if(!request::Encode(actual,a)||!request::Encode(permit->descriptor_,b)||a!=b
+            ||!request::CommandHash(actual,digest)||digest!=permit->key_.command)return false;
+        permit->attached_=true;work->modelingPermit=std::move(permit);return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::attachModelingRebuildPermit(const std::shared_ptr<NativeSolidWork>& work,
+    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
+    if(!NSThread.isMainThread||!work||!permit||work->consumed||work->modelingPermit
+        ||!work->rebuildAuthority||work->rebuildAuthority->records.size()!=1||!work->assemblyParts.empty()
+        ||permit->attached_||!permit->current()||!permit->expectedSource_||permit->featureIDs_.size()!=1
+        ||!permit->admission_||permit->admission_->phase()!=request::Phase::Building
+        ||work->document!=permit->document_||work->document->HasOpenCommand())return false;
+    try {
+        const auto& record=work->rebuildAuthority->records.front();
+        request::Descriptor actual;actual.operation=static_cast<request::Operation>(permit->operation_);
+        request::Part part;receipt::UUID feature;
+        if(actual.operation==request::Operation::RebuildEnclosure){
+            const auto geometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry);
+            if(!geometry||!*geometry||!record.requested.enclosureRebuild||record.requested.profileRebuild
+                ||!receipt::ParseUUID(record.previous.enclosure.identifier,feature))return false;
+            part.recipe=request::Recipe::Enclosure;
+            part.schema=(*geometry)->parameters.definition.constructionFrame?enclosure::FramedSchemaVersion:enclosure::SchemaVersion;
+            if(!enclosure::Encode((*geometry)->parameters,part.values))return false;
+            std::vector<double> requested;if(!enclosure::Encode(*record.requested.enclosureRebuild,requested)||requested!=part.values)return false;
+        }else if(actual.operation==request::Operation::RebuildProfile){
+            const auto geometry=profileSolidGeometry(work);
+            if(!geometry||!record.requested.profileRebuild||record.requested.enclosureRebuild
+                ||!receipt::SupportedProfile(record.previous.profile.parameters)
+                ||!receipt::SupportedProfile(*record.requested.profileRebuild)
+                ||!receipt::ParseUUID(record.previous.profile.identifier,feature))return false;
+            profile::Parameters parameters{static_cast<const ProfileDefinition&>(*geometry),record.requested.profileRebuild->metersPerUnit};
+            parameters.constructionFrame=geometry->constructionFrame;
+            part.recipe=request::Recipe::Profile;part.schema=profile::SchemaFor(parameters);
+            if(!profile::Encode(parameters,part.values))return false;
+            std::vector<double> requested;if(!profile::Encode(*record.requested.profileRebuild,requested)||requested!=part.values)return false;
+        }else return false;
+        actual.parts.push_back(std::move(part));std::vector<std::uint8_t> a,b;request::Digest digest;receipt::Effect source;
+        if(feature!=permit->featureIDs_.front()||feature!=permit->expectedSource_->featureID
+            ||!request::Encode(actual,a)||!request::Encode(permit->descriptor_,b)||a!=b
+            ||!request::CommandHash(actual,digest)||digest!=permit->key_.command
+            ||!receipt::CaptureEffect(work->owner,record.previous.label,source)||!(source==*permit->expectedSource_))return false;
+        permit->attached_=true;work->modelingPermit=std::move(permit);return true;
+    }catch(...){return false;}
+}
+
 OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (![NSThread isMainThread] || !work || work->consumed) return OrdinaryEditResult::Invalid;
     const auto completed=CompletedNativeSolidFor(work->geometry);
@@ -2059,6 +2136,13 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             || !_shapeInteractor->selectionModeAuthorityIsExact()
             || _shapeInteractor->getSelectionMode() != work->authority.selectionMode
             || !_objectInteractor->verifyOrdinaryNameAuthority(work->authority)) { return OrdinaryEditResult::Invalid; }
+        if(work->modelingPermit){
+            auto& p=*work->modelingPermit;
+            const bool rebuild=p.operation_==receipt::Operation::RebuildEnclosure||p.operation_==receipt::Operation::RebuildProfile;
+            if(bool(work->rebuildAuthority)!=rebuild)return OrdinaryEditResult::Invalid;
+            if(!p.current()||!p.admission_
+                ||!p.admission_->geometryReady(true,true)||!p.admission_->takeForOrdinary(true))return OrdinaryEditResult::Invalid;
+        }
         if (assembly) {
             std::vector<OrdinaryCreationRequest> requests;
             std::vector<Handle(AIS_InteractiveObject)> presentations;
@@ -2075,7 +2159,7 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             }
             // Exactly one existing ordinary creation transaction stages every
             // part, profile identity and display name, or reconciles/aborts all.
-            const auto result=publishCreatedPrimitives(requests);
+            const auto result=publishCreatedPrimitives(requests,work->modelingPermit);
             if (result!=OrdinaryEditResult::Committed) return result;
             try {
                 if (work->frameFirst && !myView.IsNull()) {
@@ -2099,7 +2183,9 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 || !current.IsEqual(record.previous)) return OrdinaryEditResult::Invalid;
             record.requested.shape = completed->solid;
             OrdinaryEditResult result = OrdinaryEditResult::Invalid;
-            auto lease = _ordinaryEditController->beginTransform({record.requested}, &result);
+            auto lease = work->modelingPermit
+                ? _ordinaryEditController->beginModelingRebuild(record.requested,work->modelingPermit,&result)
+                : _ordinaryEditController->beginTransform({record.requested}, &result);
             return lease ? lease.stageAndCommit() : result;
         }
         Handle(AIS_Shape) presentation = new AIS_Shape(completed->solid);
@@ -2108,7 +2194,9 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
         presentation->Color(color);
         OrdinaryCreationRequest request{presentation,
             Graphic3d_NameOfMaterial_ShinyPlastified, color.Name(), OcctGeometryRepresentation::BRep};
-        NSString* identifier = NSUUID.UUID.UUIDString;
+        NSString* identifier = work->modelingPermit
+            ? [[NSUUID alloc] initWithUUIDBytes:work->modelingPermit->featureIDs_.front().data()].UUIDString
+            : NSUUID.UUID.UUIDString;
         if (identifier == nil) return OrdinaryEditResult::Invalid;
         if (const auto geometry=profileSolidGeometry(work)) {
             request.profile=profile::Parameters{static_cast<const ProfileDefinition&>(*geometry),work->metersPerUnit};
@@ -2120,7 +2208,7 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             request.enclosureIdentifier=identifier.UTF8String;
         }
         const std::vector<OrdinaryCreationRequest> requests = {request};
-        const auto result = publishCreatedPrimitives(requests);
+        const auto result = publishCreatedPrimitives(requests,work->modelingPermit);
         if (result != OrdinaryEditResult::Committed) { return result; }
         // Cosmetic continuation follows durable publication. Recovery can safely
         // leave the new solid visible but unselected if this continuation fails.
@@ -2672,12 +2760,13 @@ bool Core3DViewer::selectSavedGroup(const ObjectFrameIdentity& expected,
 
 
 OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
-    const std::vector<OrdinaryCreationRequest>& requests) noexcept {
+    const std::vector<OrdinaryCreationRequest>& requests, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || !_ordinaryEditController) {
         return OrdinaryEditResult::Busy;
     }
     OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
-    auto lease = _ordinaryEditController->beginCreation(requests, &failure);
+    auto lease = permit ? _ordinaryEditController->beginModelingCreation(requests,std::move(permit),&failure)
+        : _ordinaryEditController->beginCreation(requests, &failure);
     return lease ? lease.stageAndCommit() : failure;
 }
 

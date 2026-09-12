@@ -133,6 +133,11 @@ __attribute__((objc_subclassing_restricted))
     inner:(NSArray<Core3DProfileCurveLoop *> *)inner plane:(Core3DProfilePlane)plane
     parameter:(double)parameter revolve:(BOOL)revolve metersPerUnit:(double)metersPerUnit
     NS_SWIFT_NAME(init(curveOuter:inner:plane:parameter:revolve:metersPerUnit:));
+//! Validated native clone changing only depth or angle. Retains all other scalar
+//! bits, contours, stable curve IDs, units and construction frame unchanged.
+//! No edit authority or document/history mutation is created by this value.
+- (nullable Core3DProfileDefinition *)definitionByChangingParameter:(double)parameter
+    NS_SWIFT_NAME(changingParameter(_:));
 @end
 
 typedef NS_ENUM(NSInteger, Core3DEnclosureDimension) {
@@ -224,9 +229,74 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,strong,readonly) Core3DSceneSnapshot *scene;
 @property(nonatomic,copy,readonly) NSString *documentIdentifier;
 @property(nonatomic,strong,readonly,nullable) Core3DStoredEnclosureSnapshot *selectedEnclosure;
-//! Only current canonical rectangle or solid-circle extrusions are described
-//! for AI edits. Other saved profiles remain available through manual editing.
+//! Current canonical rectangle or solid-circle extrusion dimensions. Bounded
+//! arbitrary recipes are exposed separately below; manual editing is unchanged.
 @property(nonatomic,strong,readonly,nullable) Core3DStoredProfileSnapshot *selectedProfile;
+//! Exclusive alternative to selectedProfile for bounded polygon extrusions
+//! and ordered line/arc extrude/revolve recipes. Only the existing operation's
+//! depth/angle may be changed through rebuildProfileRecipe; no contour edits.
+@property(nonatomic,strong,readonly,nullable) Core3DStoredProfileSnapshot *selectedProfileRecipe;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+// Insert after Core3DModelingPlanningContext's @end, before stored profile.
+//! Main-thread host session binding. Core does not authenticate these values.
+//! The trusted host session coordinator supplies a nonsecret namespace and
+//! generation. Never pass credentials, provider fields or reconstructed tokens.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingHostSession : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
++ (nullable instancetype)installHostAccountSession:(NSString *)scope generation:(NSString *)generation
+    NS_SWIFT_NAME(installHostAccountSession(scope:generation:));
++ (void)retireHostAccountSession:(Core3DModelingHostSession *)session
+    NS_SWIFT_NAME(retireHostAccountSession(_:));
+@end
+
+typedef NS_ENUM(NSInteger, Core3DModelingEvidenceCoverage) {
+    Core3DModelingEvidenceCoverageCanonicalEffect = 0,
+    Core3DModelingEvidenceCoverageUnverifiedProfile,
+};
+typedef NS_ENUM(NSInteger, Core3DModelingRequestExecutionResult) {
+    Core3DModelingRequestExecutionResultUnavailable = 0,
+};
+//! Immutable main-owned preparation only. Hashes describe the native typed
+//! command; none recreates authority. Stage A cannot execute or reserve it.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingPreparedRequest : NSObject
+@property(nonatomic,copy,readonly) NSUUID *requestIdentifier;
+@property(nonatomic,copy,readonly) NSString *documentIdentifier;
+@property(nonatomic,copy,readonly) NSData *commandSHA256;
+@property(nonatomic,copy,readonly) NSData *executionSHA256;
+@property(nonatomic,readonly) Core3DModelingEvidenceCoverage evidenceCoverage;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+
+typedef NS_ENUM(NSInteger, Core3DModelingAsyncDisposition) {
+    Core3DModelingAsyncDispositionCommitted, Core3DModelingAsyncDispositionCancelled,
+    Core3DModelingAsyncDispositionRejected, Core3DModelingAsyncDispositionFailed,
+    Core3DModelingAsyncDispositionPreviouslySeen, Core3DModelingAsyncDispositionConflict,
+    Core3DModelingAsyncDispositionCapacity, Core3DModelingAsyncDispositionBusy,
+    Core3DModelingAsyncDispositionUncertain, Core3DModelingAsyncDispositionUnsupported
+};
+typedef NS_ENUM(NSInteger, Core3DModelingStorageObservation) {
+    Core3DModelingStorageObservationNotAttempted, Core3DModelingStorageObservationReserved,
+    Core3DModelingStorageObservationPreviouslySeen, Core3DModelingStorageObservationConflict,
+    Core3DModelingStorageObservationCapacity, Core3DModelingStorageObservationBusy,
+    Core3DModelingStorageObservationUnknown
+};
+//! Result of one invocation, not saved-document durability or query authority.
+//! No disposition authorizes automatic replay. Invalid/foreign calls omit IDs.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingAsyncOutcome : NSObject
+@property(nonatomic,readonly) Core3DModelingAsyncDisposition disposition;
+@property(nonatomic,readonly) Core3DModelingStorageObservation storageObservation;
+@property(nonatomic,copy,readonly,nullable) NSUUID *requestIdentifier;
+@property(nonatomic,copy,readonly,nullable) NSString *documentIdentifier;
+@property(nonatomic,copy,readonly) NSArray<NSString *> *entityIdentifiers;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -1046,6 +1116,35 @@ typedef struct {
 //! valid; any observed semantic selection/tool or native edit/history boundary
 //! invalidates it, even if geometry or selection later returns to the same value.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContext;
+//! Stage A read-only preparation; existing native lease/unit/recipe validators
+//! stay authoritative. The host session must be currently installed on main.
+- (nullable Core3DModelingPreparedRequest *)prepareEnclosureRequest:(Core3DEnclosureDefinition *)definition
+    rebuild:(BOOL)rebuild context:(Core3DModelingPlanningContext *)context
+    session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID
+    NS_SWIFT_NAME(prepareEnclosureRequest(definition:rebuild:context:session:requestID:));
+- (nullable Core3DModelingPreparedRequest *)prepareProfileRequest:(Core3DProfileDefinition *)definition
+    rebuild:(BOOL)rebuild context:(Core3DModelingPlanningContext *)context
+    session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID
+    NS_SWIFT_NAME(prepareProfileRequest(definition:rebuild:context:session:requestID:));
+- (nullable Core3DModelingPreparedRequest *)prepareAssemblyRequest:(NSArray<Core3DAssemblyPartDefinition *> *)parts
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
+    requestID:(NSUUID *)requestID NS_SWIFT_NAME(prepareAssemblyRequest(parts:context:session:requestID:));
+- (BOOL)isModelingPreparedRequestCurrent:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(isModelingPreparedRequestCurrent(_:));
+- (void)stopModelingPreparedRequest:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(stopModelingPreparedRequest(_:));
+//! Intentionally unavailable until durable reservation/ordinary coupling is
+//! qualified. Does not consume context, reserve storage or change history.
+- (Core3DModelingRequestExecutionResult)executeModelingPreparedRequest:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(executeModelingPreparedRequest(_:));
+//! Main-owned async creation only (enclosure/assembly). Exactly one main result
+//! for a nonnull completion; all other prepared operations remain unsupported.
+//! First actual permanent reservation is required. No fallback or replay.
+- (void)executeModelingPreparedRequest:(nullable Core3DModelingPreparedRequest *)request
+    completion:(void (^)(Core3DModelingAsyncOutcome *))completion
+    NS_SWIFT_NAME(executeModelingPreparedRequest(_:completion:));
+
+
 - (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context
     NS_SWIFT_NAME(isModelingPlanningContextCurrent(_:));
 //! Idempotently retires this exact lease. Stops only construction owned by it;
@@ -1080,6 +1179,12 @@ typedef struct {
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildProfile(definition:context:completion:));
+//! One original planning lease; only depth/angle may differ from its exact
+//! saved recipe. Delegates to the ordinary profile worker/history path.
+- (void)rebuildProfileRecipeWithDefinition:(Core3DProfileDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildProfileRecipe(definition:context:completion:));
 //! One flat instruction, 1–16 separate named profile solids and one Undo.
 //! Existing typed profile tolerances apply in document units. No fusion or
 //! nested hierarchy is inferred. Stop retires the exact planning context.
@@ -1516,6 +1621,60 @@ typedef struct {
 - (void)debugNativeTombstoneProbe:(NSInteger)scenario completion:(void (^)(NSDictionary *result))completion
     NS_SWIFT_NAME(debugNativeTombstoneProbe(_:completion:));
 - (BOOL)debugNativeTombstoneRejectsMainThread;
+- (NSDictionary *)debugInspectModelingDescriptorData:(NSData *)data
+    NS_SWIFT_NAME(debugInspectModelingDescriptorData(_:));
+- (NSDictionary *)debugModelingAdmissionStateProbe NS_SWIFT_NAME(debugModelingAdmissionStateProbe());
+- (nullable NSData *)debugModelingPreparedDescriptor:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugModelingPreparedDescriptor(_:));
+
+/// Creation coupling qualification only; requires an actual first-reserved private test capability.
+- (BOOL)debugExecuteReservedCreation:(Core3DModelingPreparedRequest *)request receiptFailure:(BOOL)receiptFailure
+    completion:(void (^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(debugExecuteReservedCreation(_:receiptFailure:completion:));
+/// Exact issued-operation fault immediately before releasing the ordinary command stamp.
+- (BOOL)debugFailCreationReceiptResolutionBeforeRelease:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugFailCreationReceiptResolutionBeforeRelease(_:));
+/// Read-only DEBUG owner state after a request has been released; no query or execution authority.
+- (NSDictionary *)debugCreationReceiptOwnerState NS_SWIFT_NAME(debugCreationReceiptOwnerState());
+/// Read-only document evidence, deliberately not a verified receipt query.
+//! Corrupt a not-yet-admitted numeric proof to exercise fail-closed reservation.
+- (BOOL)debugCorruptPreparedRebuildSourceEffect:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugCorruptPreparedRebuildSourceEffect(_:));
+//! DEBUG only: actual reserved rebuild; no production Store caller or verified query.
+- (BOOL)debugExecuteReservedRebuild:(Core3DModelingPreparedRequest *)request receiptFailure:(BOOL)receiptFailure
+    completion:(void (^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(debugExecuteReservedRebuild(_:receiptFailure:completion:));
+- (NSDictionary *)debugCreationReceiptState:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugCreationReceiptState(_:));
+
+/// Native-owned test configuration only; -1 uses the actual fixed-path Store.
+/// Other bounded scenarios use an internally owned disposable POSIX Store.
+/// No caller-selected path or fabricated reservation can enter this API.
+- (BOOL)debugConfigureAsyncModelingRequest:(Core3DModelingPreparedRequest *)request
+    storageScenario:(NSInteger)scenario
+    deliveryGate:(void (^_Nullable)(void (^_Nonnull)(void)))gate
+    receiptFailure:(BOOL)receiptFailure afterStart:(void (^_Nullable)(void))afterStart
+    NS_SWIFT_NAME(debugConfigureAsyncModelingRequest(_:storageScenario:deliveryGate:receiptFailure:afterStart:));
+/// Actual numeric dispatcher observation; no path or execution authority.
+- (NSDictionary *)debugAsyncModelingStorageState:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugAsyncModelingStorageState(_:));
+/// A new default Store lookup for joint lifetime tests, not verified query authority.
+- (void)debugLookupPermanentModelingRequest:(Core3DModelingPreparedRequest *)request
+    completion:(void (^)(NSDictionary *))completion
+    NS_SWIFT_NAME(debugLookupPermanentModelingRequest(_:completion:));
+/// DEBUG-only actual private POSIX reservation; never runs production Apply.
+- (BOOL)debugReserveModelingPreparedRequest:(Core3DModelingPreparedRequest *)request scenario:(NSInteger)scenario
+    deliveryGate:(void (^_Nullable)(void (^_Nonnull)(void)))gate
+    completion:(void (^_Nonnull)(NSDictionary *_Nonnull))completion
+    NS_SWIFT_NAME(debugReserveModelingPreparedRequest(_:scenario:deliveryGate:completion:));
+- (BOOL)debugConsumeReservedCapabilityWithoutGeometry:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugConsumeReservedCapabilityWithoutGeometry(_:));
+- (BOOL)debugExpireModelingReservation:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugExpireModelingReservation(_:));
+- (BOOL)debugInjectMismatchedModelingReservation:(Core3DModelingPreparedRequest *)request field:(NSInteger)field
+    NS_SWIFT_NAME(debugInjectMismatchedModelingReservation(_:field:));
+- (NSDictionary *)debugModelingReservationState:(Core3DModelingPreparedRequest *)request
+    NS_SWIFT_NAME(debugModelingReservationState(_:));
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
 //! Standalone fixture: saved profile binds its root but retains a different original unit.
 - (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData;

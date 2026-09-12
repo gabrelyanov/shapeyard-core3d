@@ -11,6 +11,8 @@
 #include <limits>
 #include <unordered_set>
 #include <utility>
+#include <type_traits>
+#include <new>
 #include <TDF_Tool.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Integer.hxx>
@@ -158,7 +160,18 @@ bool OrdinaryEditController::blocksNormalWork() const noexcept {
 }
 
 OrdinaryEditLease OrdinaryEditController::beginTransform(
-    const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure) noexcept
+    const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure) noexcept {
+    return beginTransformImpl(changes, failure, {});
+}
+OrdinaryEditLease OrdinaryEditController::beginModelingRebuild(const OrdinaryTransformChange& change,
+    std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept {
+    if (!permit) { if (failure) *failure=OrdinaryEditResult::Invalid; return {}; }
+    try { return beginTransformImpl({change}, failure, std::move(permit)); }
+    catch (...) { if (failure) *failure=OrdinaryEditResult::Invalid; return {}; }
+}
+OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
+    const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure,
+    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept
 {
     const auto reject = [&](OrdinaryEditResult reason) {
         if (failure) { *failure = reason; }
@@ -179,6 +192,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
         if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
         OrdinaryTransformLedger ledger;
         ledger.records.reserve(changes.size());
+        if (permit && changes.size()!=1) return reject(OrdinaryEditResult::Invalid);
         std::unordered_set<std::string> entities;
         std::unordered_set<const AIS_Shape*> presentations;
         bool changed = false;
@@ -210,6 +224,21 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                 || !presentations.insert(request.presentation.get()).second) {
                 return reject(OrdinaryEditResult::Invalid);
             }
+            if (permit && !bindRebuildReceipt(ledger, request, record.previous, permit))
+                return reject(OrdinaryEditResult::Invalid);
+            const auto unchanged = [&]() {
+                if (permit) {
+                    record.requested=request;
+                    ledger.records.push_back(record);
+                    if (!permit->current() || document->HasOpenCommand()
+                        || !captureMatches(record.previous) || !rebuildReceiptMatches(ledger,false))
+                        return reject(OrdinaryEditResult::Invalid);
+                    // No command was opened: no receipt-only Undo or durable
+                    // commit claim. The permanent reservation still forbids replay.
+                    permit->resolution_->state_=NativeModelingReceiptResolution::State::Unchanged;
+                }
+                return reject(OrdinaryEditResult::NoChange);
+            };
             if (request.rotationAroundPivot.has_value() != changes.front().rotationAroundPivot.has_value()) {
                 return reject(OrdinaryEditResult::Invalid);
             }
@@ -280,7 +309,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                     || request.profileRebuild->constructionFrame != record.previous.profile.parameters.constructionFrame) {
                     return reject(OrdinaryEditResult::Invalid);
                 }
-                if (values == record.previous.profile.values) return reject(OrdinaryEditResult::NoChange);
+                if (values == record.previous.profile.values) return unchanged();
             }
             if (request.operation == OrdinaryTransformOperation::EnclosureRebuild) {
                 std::vector<double> values;
@@ -295,7 +324,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
                         != record.previous.enclosure.parameters.definition.constructionFrame) {
                     return reject(OrdinaryEditResult::Invalid);
                 }
-                if (values == record.previous.enclosure.values) return reject(OrdinaryEditResult::NoChange);
+                if (values == record.previous.enclosure.values) return unchanged();
             }
             if (request.operation == OrdinaryTransformOperation::MeshUVAtlas
                 && (changes.size() != 1 || !geometryChanges
@@ -349,6 +378,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
         for (const auto& record : ledger.records) {
             if (!captureMatches(record.previous)) { return reject(OrdinaryEditResult::Invalid); }
         }
+        if (permit && (!permit->current() || !rebuildReceiptMatches(ledger,false)))
+            return reject(OrdinaryEditResult::Invalid);
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
         _activeToken = ++_nextToken;
@@ -442,9 +473,17 @@ OrdinaryEditLease OrdinaryEditController::beginCreation(
     return beginCreationImpl(requests,std::nullopt,failure);
 }
 
+OrdinaryEditLease OrdinaryEditController::beginModelingCreation(
+    const std::vector<OrdinaryCreationRequest>& requests,
+    std::shared_ptr<NativeModelingCommitPermit> permit,OrdinaryEditResult* failure) noexcept {
+    if(!permit){if(failure)*failure=OrdinaryEditResult::Invalid;return {};}
+    return beginCreationImpl(requests,std::nullopt,failure,std::move(permit));
+}
+
 OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
     const std::vector<OrdinaryCreationRequest>& requests,
-    std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure) noexcept {
+    std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure,
+    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
     const auto reject = [&](OrdinaryEditResult result) {
         if (failure) { *failure = result; }
         return OrdinaryEditLease();
@@ -462,6 +501,48 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
         if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
         OrdinaryCreationLedger ledger;
         ledger.meshCopy=std::move(meshCopy);
+        if(permit){
+            // Consumed even on rejected admission; a failed attempt is never replayable.
+            if(permit->admitted_||!permit->attached_||!permit->current()||!permit->admission_
+                ||permit->admission_->terminal()!=request::Terminal::HandedToOrdinary||ledger.meshCopy
+                ||permit->document_!=document||!permit->resolution_
+                ||permit->resolution_->state()!=NativeModelingReceiptResolution::State::Pending
+                ||requests.size()!=permit->featureIDs_.size())return reject(OrdinaryEditResult::Invalid);
+            permit->admitted_=true;
+            request::Descriptor actual;actual.operation=static_cast<request::Operation>(permit->operation_);
+            if(actual.operation!=request::Operation::CreateEnclosure&&actual.operation!=request::Operation::CreateAssembly)
+                return reject(OrdinaryEditResult::Invalid);
+            for(std::size_t i=0;i<requests.size();++i){
+                const auto& item=requests[i];request::Part part;receipt::UUID feature;
+                if(actual.operation==request::Operation::CreateEnclosure){
+                    if(requests.size()!=1||!item.enclosure||item.profile||item.name
+                        ||!receipt::ParseUUID(item.enclosureIdentifier,feature))return reject(OrdinaryEditResult::Invalid);
+                    part.recipe=request::Recipe::Enclosure;
+                    part.schema=item.enclosure->definition.constructionFrame?enclosure::FramedSchemaVersion:enclosure::SchemaVersion;
+                    if(!enclosure::Encode(*item.enclosure,part.values))return reject(OrdinaryEditResult::Invalid);
+                }else{
+                    if(!item.profile||item.enclosure||!item.name||item.name->Length()>256
+                        ||!receipt::SupportedProfile(*item.profile)||!receipt::ParseUUID(item.profileIdentifier,feature))
+                        return reject(OrdinaryEditResult::Invalid);
+                    part.recipe=request::Recipe::Profile;part.schema=profile::SchemaFor(*item.profile);
+                    if(!profile::Encode(*item.profile,part.values))return reject(OrdinaryEditResult::Invalid);
+                    NSString *name=[[NSString alloc] initWithCharacters:reinterpret_cast<const unichar*>(item.name->ToExtString())
+                        length:item.name->Length()];
+                    NSData *utf8=[name dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+                    if(!utf8||utf8.length==0||utf8.length>256)return reject(OrdinaryEditResult::Invalid);
+                    part.name.assign(static_cast<const char*>(utf8.bytes),utf8.length);
+                }
+                if(feature!=permit->featureIDs_[i])return reject(OrdinaryEditResult::Invalid);
+                actual.parts.push_back(std::move(part));
+            }
+            request::Digest digest;
+            std::vector<std::uint8_t> expectedBytes,actualBytes;
+            if(!request::Encode(actual,actualBytes)||!request::Encode(permit->descriptor_,expectedBytes)
+                ||actualBytes!=expectedBytes||!request::CommandHash(actual,digest)||digest!=permit->key_.command)
+                return reject(OrdinaryEditResult::Invalid);
+            ledger.modelingReceipt.emplace();ledger.modelingReceipt->permit=std::move(permit);
+            if(!creationReceiptMatches(ledger,false))return reject(OrdinaryEditResult::Invalid);
+        }
         if (ledger.meshCopy && (requests.size()!=1 || !meshCopySourceMatches(*ledger.meshCopy,false)))
             return reject(OrdinaryEditResult::Invalid);
         if (!CaptureCreationRoots(_document, ledger.previousRoots)
@@ -516,8 +597,53 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
     }
 }
 
+// These helpers are called only by the main-thread ordinary controller. Old
+// receipt effects may be stale; preserve their exact catalog bytes and validate
+// only the new command's effects. No transaction or filesystem is opened here.
+bool OrdinaryEditController::creationReceiptMatches(const OrdinaryCreationLedger& ledger,bool candidate) const noexcept {
+    if(!ledger.modelingReceipt)return true;
+    try {
+        const auto& r=*ledger.modelingReceipt;const auto& p=*r.permit;
+        if(_document.IsNull()||_document->Document()!=p.document_)return false;
+        receipt::Catalog actual;const auto status=receipt::Read(p.document_,actual);
+        const auto& expected=candidate?r.candidate:p.previous_;
+        if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
+            ||actual.label!=expected.label||actual.bytes!=expected.bytes)return false;
+        if(!candidate)return true;
+        if(!r.staged||r.record.effects.size()!=ledger.records.size())return false;
+        for(std::size_t i=0;i<ledger.records.size();++i){
+            receipt::Effect actualEffect;
+            if(!receipt::CaptureEffect(_document,ledger.records[i].candidate.object.label,actualEffect)
+                ||!(actualEffect==r.record.effects[i]))return false;
+        }
+        return true;
+    }catch(...){return false;}
+}
+bool OrdinaryEditController::stageCreationReceipt(OrdinaryCreationLedger& ledger) noexcept {
+    if(!ledger.modelingReceipt)return true;
+    try {
+        auto& r=*ledger.modelingReceipt;auto& p=*r.permit;
+        if(!p.current()||r.staged||ledger.records.size()!=p.featureIDs_.size())return false;
+        r.record.key=p.key_;r.record.operation=p.operation_;
+        for(std::size_t i=0;i<ledger.records.size();++i){
+            receipt::Effect effect;
+            if(!receipt::CaptureEffect(_document,ledger.records[i].candidate.object.label,effect)
+                ||effect.featureID!=p.featureIDs_[i])return false;
+            r.record.effects.push_back(effect);
+        }
+        if(!receipt::Valid(r.record)||!receipt::Stage(_document,r.record,p.previous_)
+            ||receipt::Read(p.document_,r.candidate)!=receipt::ReadStatus::Valid)return false;
+        r.staged=true;
+#ifdef DEBUG
+        if(p.debugStageFailure_){p.debugStageFailure_=false;return false;} // after receipt write, before commit
+#endif
+        return p.current()&&creationReceiptMatches(ledger,true);
+    }catch(...){return false;}
+}
+
 bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept {
     try {
+        if (!creationReceiptMatches(ledger,candidate && ledger.modelingReceipt && ledger.modelingReceipt->staged)) return false;
         if (ledger.meshCopy && !meshCopySourceMatches(*ledger.meshCopy,candidate)) return false;
         OrdinaryCreationCatalog actual;
         OcctSavedGroupState groups;
@@ -655,6 +781,8 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             [](const auto& record) { return record.requested.profile.has_value() || record.requested.enclosure.has_value(); });
         if (((ledger.meshCopy || hasFeature) && !_document->ValidateGeometryRepresentations())
             || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
+        if(!stageCreationReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
+            throw Standard_Failure("Modeling receipt staging or epoch fence failed");
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
             _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return OrdinaryEditResult::OutcomeUnknown;
@@ -675,15 +803,35 @@ OrdinaryEditResult OrdinaryEditController::reconcileCreationImpl() noexcept {
         if (observation == OrdinaryCommandObservation::OpenOwned) { observation = _command.abortAndObserve(); }
         const bool candidate = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
         const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
-        if ((!candidate && !previous) || (candidate && !ledger.candidateSealed) || !creationMatches(ledger, candidate)) {
+        if ((!candidate && !previous) || (candidate && (!ledger.candidateSealed
+            || (ledger.modelingReceipt && !ledger.modelingReceipt->staged))) || !creationMatches(ledger, candidate)) {
             _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
         }
         _committed = candidate; _state = OrdinaryEditState::RepairPending;
         const bool repaired=ledger.meshCopy ? _host.repairMeshCopy(ledger,candidate) : _host.repairCreation(ledger,candidate);
         if (!repaired) { return OrdinaryEditResult::OutcomeUnknown; }
         if (!creationMatches(ledger, candidate)) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+#if DEBUG
+        if(candidate&&ledger.modelingReceipt&&ledger.modelingReceipt->permit->debugBeforeReleaseFailure_){
+            ledger.modelingReceipt->permit->debugBeforeReleaseFailure_=false;
+            // Simulate a failing allocation at the LAST recoverable boundary.
+            // Keep stamp, candidate record and Pending resolution for reconciliation.
+            throw std::bad_alloc();
+        }
+#endif
         _state = OrdinaryEditState::Publishing;
         if (!_command.releaseClosed()) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
+        if(ledger.modelingReceipt){
+            auto& resolution=*ledger.modelingReceipt->permit->resolution_;
+            // Closed geometry + receipt truth is sealed before callbacks/NotifyChanges.
+            static_assert(std::is_nothrow_move_assignable_v<receipt::Record>,
+                "Receipt resolution transfer after command release must never allocate or throw");
+            // Preserve the candidate record through the final creationMatches.
+            // After release only a proven noexcept move and scalar seal remain.
+            // An Aborted Pending resolution already has its original empty record.
+            if(candidate)resolution.record_=std::move(ledger.modelingReceipt->record);
+            resolution.state_=candidate?NativeModelingReceiptResolution::State::Committed:NativeModelingReceiptResolution::State::Aborted;
+        }
         if (candidate && !_didPublish) { _didPublish = true; try { _document->NotifyChanges(); } catch (...) {} }
         clearResolved();
         return candidate ? OrdinaryEditResult::Committed : OrdinaryEditResult::RetryableFailure;
@@ -1171,6 +1319,83 @@ bool OrdinaryEditController::captureMatches(const OcctObjectTransformState& expe
         && expected.IsEqual(actual);
 }
 
+// Receipt coupling is opt-in for one exact stored rebuild. Ordinary touch,
+// arbitrary profiles and every other transform retain their existing path.
+bool OrdinaryEditController::bindRebuildReceipt(OrdinaryTransformLedger& ledger,
+    const OrdinaryTransformChange& change, const OcctObjectTransformState& previous,
+    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
+    try {
+        if (!permit || ledger.modelingReceipt || permit->admitted_ || !permit->attached_
+            || !permit->current() || !permit->expectedSource_ || !permit->admission_
+            || permit->admission_->terminal()!=request::Terminal::HandedToOrdinary
+            || permit->document_!=_document->Document() || !permit->resolution_
+            || permit->resolution_->state()!=NativeModelingReceiptResolution::State::Pending
+            || permit->featureIDs_.size()!=1) return false;
+        permit->admitted_=true; // Even failed admission cannot replay this capability.
+        request::Descriptor actual; actual.operation=static_cast<request::Operation>(permit->operation_);
+        request::Part part; receipt::UUID feature;
+        if (actual.operation==request::Operation::RebuildEnclosure) {
+            if (change.operation!=OrdinaryTransformOperation::EnclosureRebuild || !change.enclosureRebuild
+                || change.profileRebuild || !receipt::ParseUUID(previous.enclosure.identifier,feature)) return false;
+            part.recipe=request::Recipe::Enclosure;
+            part.schema=change.enclosureRebuild->definition.constructionFrame?enclosure::FramedSchemaVersion:enclosure::SchemaVersion;
+            if (!enclosure::Encode(*change.enclosureRebuild,part.values)) return false;
+        } else if (actual.operation==request::Operation::RebuildProfile) {
+            if (change.operation!=OrdinaryTransformOperation::ProfileRebuild || !change.profileRebuild
+                || change.enclosureRebuild || !receipt::SupportedProfile(previous.profile.parameters)
+                || !receipt::SupportedProfile(*change.profileRebuild)
+                || !receipt::ParseUUID(previous.profile.identifier,feature)) return false;
+            part.recipe=request::Recipe::Profile; part.schema=profile::SchemaFor(*change.profileRebuild);
+            if (!profile::Encode(*change.profileRebuild,part.values)) return false;
+        } else return false;
+        actual.parts.push_back(std::move(part)); request::Digest digest;
+        std::vector<std::uint8_t> expectedBytes,actualBytes;
+        receipt::Effect source; receipt::Catalog catalog;
+        const auto status=receipt::Read(permit->document_,catalog);
+        if (feature!=permit->featureIDs_.front() || feature!=permit->expectedSource_->featureID
+            || !request::Encode(actual,actualBytes) || !request::Encode(permit->descriptor_,expectedBytes)
+            || actualBytes!=expectedBytes || !request::CommandHash(actual,digest) || digest!=permit->key_.command
+            || !receipt::CaptureEffect(_document,previous.label,source) || !(source==*permit->expectedSource_)
+            || (status!=receipt::ReadStatus::Absent && status!=receipt::ReadStatus::Valid)
+            || catalog.label!=permit->previous_.label || catalog.bytes!=permit->previous_.bytes) return false;
+        ledger.modelingReceipt.emplace(); ledger.modelingReceipt->permit=std::move(permit); return true;
+    } catch (...) { return false; }
+}
+bool OrdinaryEditController::rebuildReceiptMatches(const OrdinaryTransformLedger& ledger,bool candidate) const noexcept {
+    if (!ledger.modelingReceipt) return true;
+    try {
+        const auto& r=*ledger.modelingReceipt; const auto& p=*r.permit;
+        if (ledger.records.size()!=1 || !p.expectedSource_ || _document->Document()!=p.document_) return false;
+        receipt::Catalog catalog; const auto status=receipt::Read(p.document_,catalog);
+        const auto& expected=candidate?r.candidate:p.previous_;
+        if ((status!=receipt::ReadStatus::Absent && status!=receipt::ReadStatus::Valid)
+            || catalog.label!=expected.label || catalog.bytes!=expected.bytes) return false;
+        receipt::Effect live;
+        if (!receipt::CaptureEffect(_document,ledger.records.front().previous.label,live)) return false;
+        return candidate ? r.staged && r.record.effects.size()==1 && live==r.record.effects.front()
+            : live==*p.expectedSource_;
+    } catch (...) { return false; }
+}
+bool OrdinaryEditController::stageRebuildReceipt(OrdinaryTransformLedger& ledger) noexcept {
+    if (!ledger.modelingReceipt) return true;
+    try {
+        auto& r=*ledger.modelingReceipt; auto& p=*r.permit;
+        if (ledger.records.size()!=1 || !p.current() || !p.expectedSource_ || r.staged) return false;
+        receipt::Effect effect;
+        if (!receipt::CaptureEffect(_document,ledger.records.front().candidate.label,effect)
+            || effect.entity!=p.expectedSource_->entity || effect.definition!=p.expectedSource_->definition
+            || effect.feature!=p.expectedSource_->feature || effect.featureID!=p.expectedSource_->featureID) return false;
+        r.record.key=p.key_; r.record.operation=p.operation_; r.record.effects={effect};
+        if (!receipt::Valid(r.record) || !receipt::Stage(_document,r.record,p.previous_)
+            || receipt::Read(p.document_,r.candidate)!=receipt::ReadStatus::Valid) return false;
+        r.staged=true;
+#if DEBUG
+        if (p.debugStageFailure_) { p.debugStageFailure_=false; return false; }
+#endif
+        return p.current() && rebuildReceiptMatches(ledger,true);
+    } catch (...) { return false; }
+}
+
 OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) noexcept {
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
@@ -1181,6 +1406,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
     if (std::holds_alternative<OrdinaryNameLedger>(*_pending)) { return stageNamesAndCommit(token); }
     try {
         auto& ledger = std::get<OrdinaryTransformLedger>(*_pending);
+        if (ledger.modelingReceipt && (!ledger.modelingReceipt->permit->current()
+            || !rebuildReceiptMatches(ledger,false))) return cancel(token);
         // Reject stale baseline before the first write; ownership alone is
         // insufficient admission for a batch mutation.
         for (const auto& record : ledger.records) {
@@ -1292,6 +1519,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if (!present) { throw Standard_Failure("Incomplete ordinary transform candidate"); }
             }
         }
+        if (!stageRebuildReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
+            throw Standard_Failure("Ordinary rebuild receipt staging failed");
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
             _state = OrdinaryEditState::OutcomeUnknown;
@@ -1389,6 +1618,7 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
                 return OrdinaryEditResult::OutcomeUnknown;
             }
         }
+        if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
         if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
@@ -1408,12 +1638,26 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
                 ledger.records[index].requested.presentation = replacements[index];
             }
         }
+        if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
+#if DEBUG
+        if (candidate && ledger.modelingReceipt && ledger.modelingReceipt->permit->debugBeforeReleaseFailure_) {
+            ledger.modelingReceipt->permit->debugBeforeReleaseFailure_=false;
+            throw std::bad_alloc(); // Retained marker still proves the actual closed outcome.
+        }
+#endif
         // Retain Publishing through synchronous observers. Host/observer
         // reentrancy remains Busy until this entire method has returned.
         _state = OrdinaryEditState::Publishing;
         if (!_command.releaseClosed()) {
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;
+        }
+        if (ledger.modelingReceipt) {
+            auto& resolution=*ledger.modelingReceipt->permit->resolution_;
+            static_assert(std::is_nothrow_move_assignable_v<receipt::Record>);
+            if (candidate) resolution.record_=std::move(ledger.modelingReceipt->record);
+            resolution.state_=candidate?NativeModelingReceiptResolution::State::Committed
+                :NativeModelingReceiptResolution::State::Aborted;
         }
         if (candidate && !_didPublish) {
             _didPublish = true;

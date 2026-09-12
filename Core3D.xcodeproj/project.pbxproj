@@ -206,6 +206,7 @@
 		0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		3A3275384C537C4F2CC799D2 /* NativeModelingTombstone.mm in Sources */ = {isa = PBXBuildFile; fileRef = 4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */; };
+		8CAADF16F7C49892EFD16D0D /* NativeModelingRequest.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 666A9DCAF738B47E8737A25D /* NativeModelingRequest.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -426,6 +427,7 @@
 		D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingReceipt.hxx; sourceTree = "<group>"; };
 		C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingTombstone.hxx; sourceTree = "<group>"; };
 		4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = NativeModelingTombstone.mm; sourceTree = "<group>"; };
+		666A9DCAF738B47E8737A25D /* NativeModelingRequest.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingRequest.hxx; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -691,6 +693,7 @@
 				D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */,
 				C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */,
 				4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */,
+				666A9DCAF738B47E8737A25D /* NativeModelingRequest.hxx */,
 				322185702BB5CC1400040E84 /* OcctDocument.h */,
 				3221856A2BB5CC1300040E84 /* OcctDocument.mm */,
 				3221856D2BB5CC1400040E84 /* OcctViewer.h */,
@@ -912,6 +915,7 @@
 				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
 				0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */,
 				A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */,
+				8CAADF16F7C49892EFD16D0D /* NativeModelingRequest.hxx in Headers */,
 				3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */,
 				18A006332BD2B306004931B1 /* ShapeInteractor.hpp in Headers */,
 				329B2ECF2C1AF53900F3A763 /* kdtree.h in Headers */,

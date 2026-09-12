@@ -48,6 +48,7 @@
 #include "OrdinaryEditController.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/NativeModelingRequest.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/NativeModelingTombstone.hxx"
@@ -996,6 +997,15 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         return [self initWithNativeParameters:parameters];
     } catch (...) { return nil; }
 }
+- (Core3DProfileDefinition *)definitionByChangingParameter:(double)parameter {
+    try {
+        auto requested = _parameters;
+        requested.definition.depth = parameter;
+        std::vector<double> encoded;
+        if (!core3d::profile::Encode(requested,encoded)) return nil;
+        return [[Core3DProfileDefinition alloc] initWithNativeParameters:requested];
+    } catch (...) { return nil; }
+}
 - (core3d::profile::Parameters)nativeParameters { return _parameters; }
 - (double)outerRadius { return _parameters.definition.circle ? _parameters.definition.circle->outerRadius : 0; }
 - (double)innerRadius { return _parameters.definition.circle ? _parameters.definition.circle->innerRadius : 0; }
@@ -1264,6 +1274,59 @@ static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parame
         && p[2].X() == width && p[3].X() == 0 && p[3].Y() == depth ? 1 : 0;
 }
 
+// This is a provider-description bound, not a new geometry validator. Current
+// saved features already passed native profile admission; actual rebuild still
+// uses that admission. Do not reorder connectivity to make a recipe fit JSON.
+static bool Core3DModelingProfileRecipeSupported(const core3d::profile::Parameters& parameters,
+    double dimensionMetersPerUnit) noexcept {
+    try {
+        const auto& d=parameters.definition;
+        if (!std::isfinite(dimensionMetersPerUnit) || dimensionMetersPerUnit<=0
+            || !std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit<=0
+            || d.plane<0 || d.plane>2 || d.circle) return false;
+        const double millimetersPerUnit=dimensionMetersPerUnit/0.001;
+        const auto mm=[&](double value) {return value*millimetersPerUnit;};
+        const auto coordinate=[&](double value) {const double physical=mm(value);
+            return std::isfinite(physical) && std::abs(physical)<=1e6;};
+        const auto length=[&](double value) {const double physical=mm(value);
+            return std::isfinite(physical) && physical>=0.001 && physical<=1e6;};
+        const auto point=[&](const gp_Pnt2d& value) {return coordinate(value.X()) && coordinate(value.Y());};
+        if (d.revolve) {
+            if (!std::isfinite(d.depth) || d.depth<0.001 || d.depth>360) return false;
+        } else if (!length(d.depth)) return false;
+        if (!d.curves) {
+            if (d.revolve || d.points.size()<3 || d.points.size()>64 || d.holes.size()>16) return false;
+            for (const auto& value:d.points) if (!point(value)) return false;
+            for (const auto& hole:d.holes) if (!point(hole.center) || !length(hole.radius)) return false;
+            return true;
+        }
+        if (!d.points.empty() || !d.holes.empty() || d.curves->inner.size()>4) return false;
+        std::size_t total=0;
+        const auto loop=[&](const core3d::ProfileCurveLoop& value) {
+            const std::size_t count=value.vertices.size();
+            if (count<2 || count>64-total || value.segments.size()!=count) return false;
+            total+=count;
+            for (std::size_t i=0;i<count;++i) {
+                const auto& vertex=value.vertices[i];const auto& edge=value.segments[i];
+                if (!point(vertex.point) || edge.startVertex!=vertex.identifier
+                    || edge.endVertex!=value.vertices[(i+1)%count].identifier) return false;
+                if (edge.kind==core3d::ProfileCurveKind::Line) {
+                    if (edge.center.X()!=0 || edge.center.Y()!=0 || edge.radius!=0
+                        || edge.startDegrees!=0 || edge.sweepDegrees!=0) return false;
+                } else if (edge.kind==core3d::ProfileCurveKind::CircularArc) {
+                    if (!point(edge.center) || !length(edge.radius) || !std::isfinite(edge.startDegrees)
+                        || std::abs(edge.startDegrees)>360 || !std::isfinite(edge.sweepDegrees)
+                        || std::abs(edge.sweepDegrees)<0.001 || std::abs(edge.sweepDegrees)>=360) return false;
+                } else return false;
+            }
+            return true;
+        };
+        if (!loop(d.curves->outer)) return false;
+        for (const auto& inner:d.curves->inner) if (!loop(inner)) return false;
+        return true;
+    } catch (...) {return false;}
+}
+
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -1276,16 +1339,18 @@ static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parame
 - (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
     documentIdentifier:(NSString *)documentIdentifier
     enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
-    profile:(Core3DStoredProfileSnapshot *)profile;
+    profile:(Core3DStoredProfileSnapshot *)profile
+    recipe:(Core3DStoredProfileSnapshot *)recipe;
 @end
 @implementation Core3DModelingPlanningContext
 - (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
     documentIdentifier:(NSString *)documentIdentifier
     enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
-    profile:(Core3DStoredProfileSnapshot *)profile {
+    profile:(Core3DStoredProfileSnapshot *)profile
+    recipe:(Core3DStoredProfileSnapshot *)recipe {
     if ((self = [super init])) {
         _scene = scene; _documentIdentifier = [documentIdentifier copy];
-        _selectedEnclosure = enclosure; _selectedProfile = profile;
+        _selectedEnclosure = enclosure; _selectedProfile = profile; _selectedProfileRecipe = recipe;
     }
     return self;
 }
@@ -1531,7 +1596,577 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 }
 #endif
 
+// Insert after Core3DModelingPlanningContext @implementation/@end.
+@interface Core3DModelingHostSession () {
+@public
+    core3d::request::Digest _hostScopeDigest;
+    core3d::request::Digest _hostGenerationDigest;
+    core3d::request::UUID _hostIdentity;
+    BOOL _hostRetired;
+    std::shared_ptr<core3d::NativeModelingEpoch> _hostEpoch;
+}
+- (instancetype)initPrivate;
+@end
+static Core3DModelingHostSession *Core3DInstalledHostSession; // main only
+static bool Core3DRequestString(NSString *value,std::size_t limit,std::string&out) {
+    out.clear();if (![value isKindOfClass:NSString.class]||value.length==0||value.length>limit) return false;
+    // UTF-8 requires at least as many bytes as UTF-16 code units. Refuse
+    // oversized input before allocating its encoded representation.
+    NSData *bytes=[value dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!bytes || bytes.length==0 || bytes.length>limit) return false;
+    out.assign(static_cast<const char *>(bytes.bytes),bytes.length);
+    return core3d::request::UTF8(out,limit);
+}
+static bool Core3DRequestUUID(NSUUID *value,core3d::request::UUID&out) {
+    out.fill(0);if (![value isKindOfClass:NSUUID.class]) return false;
+    [value getUUIDBytes:out.data()];return core3d::request::Nonzero(out);
+}
+static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
+    return [NSThread isMainThread] && [session isKindOfClass:Core3DModelingHostSession.class]
+        && session==Core3DInstalledHostSession && !session->_hostRetired;
+}
+@implementation Core3DModelingHostSession
+- (instancetype)initPrivate {return [super init];}
++ (instancetype)installHostAccountSession:(NSString *)scope generation:(NSString *)generation {
+    if (![NSThread isMainThread]) return nil;
+    // Even an invalid replacement retires old host authority; login failure
+    // must not accidentally leave the previous account active.
+    if (Core3DInstalledHostSession) { Core3DInstalledHostSession->_hostRetired=YES;
+        if(Core3DInstalledHostSession->_hostEpoch)Core3DInstalledHostSession->_hostEpoch->retired=true; }
+    Core3DInstalledHostSession=nil;
+    try {
+        std::string nativeScope,nativeGeneration;
+        if (!Core3DRequestString(scope,512,nativeScope)||!Core3DRequestString(generation,128,nativeGeneration)) return nil;
+        Core3DModelingHostSession *session=[[self alloc] initPrivate];
+        if (!core3d::request::ScopeHash(nativeScope,session->_hostScopeDigest)
+            || !core3d::request::Hash("Shapeyard/host-generation/v1",
+                std::vector<std::uint8_t>(nativeGeneration.begin(),nativeGeneration.end()),session->_hostGenerationDigest)
+            || !Core3DRequestUUID(NSUUID.UUID,session->_hostIdentity)) return nil;
+        session->_hostEpoch=std::make_shared<core3d::NativeModelingEpoch>();
+        Core3DInstalledHostSession=session;return session;
+    } catch (...) {return nil;}
+}
++ (void)retireHostAccountSession:(Core3DModelingHostSession *)session {
+    if (![NSThread isMainThread]||![session isKindOfClass:Core3DModelingHostSession.class]) return;
+    session->_hostRetired=YES;
+    if(session->_hostEpoch)session->_hostEpoch->retired=true;
+    if (Core3DInstalledHostSession==session) Core3DInstalledHostSession=nil;
+}
+@end
+
+@interface Core3DModelingPreparedRequest () {
+@public
+    __weak Core3DViewController *_requestOwner;
+    Core3DModelingPlanningContext *_requestContext;
+    Core3DModelingHostSession *_requestSession;
+    core3d::request::Descriptor _requestDescriptor;
+    core3d::request::Key _requestKey;
+    std::vector<core3d::request::UUID> _requestFeatureIDs;
+    std::optional<core3d::profile::Parameters> _requestProfile;
+    std::optional<core3d::enclosure::Parameters> _requestEnclosure;
+    std::vector<core3d::AssemblyPartDefinition> _requestAssembly;
+    BOOL _requestRetired;
+    std::shared_ptr<core3d::NativeModelingEpoch> _requestEpoch;
+    std::shared_ptr<core3d::NativeModelingCommitPermit> _requestCommitPermit;
+    std::optional<core3d::receipt::Catalog> _requestCreationCatalog;
+    std::optional<core3d::receipt::Effect> _requestSourceEffect; // Rebuild-only numeric proof.
+    BOOL _requestAdmitted;
+    core3d::request::UUID _requestReservationDeliveryID;
+#if DEBUG
+    NSDictionary *_requestAsyncStorageSnapshot;
+    BOOL _requestAsyncConfigured;
+    NSInteger _requestAsyncScenario;
+    BOOL _requestAsyncReceiptFailure;
+    void (^_requestAsyncGate)(void (^resume)(void));
+    void (^_requestAsyncAfterStart)(void);
+#endif
+}
+- (instancetype)initPrivateWithRequest:(NSUUID *)request document:(NSString *)document
+    key:(const core3d::request::Key&)key coverage:(Core3DModelingEvidenceCoverage)coverage;
+@end
+@implementation Core3DModelingPreparedRequest
+- (instancetype)initPrivateWithRequest:(NSUUID *)request document:(NSString *)document
+    key:(const core3d::request::Key&)key coverage:(Core3DModelingEvidenceCoverage)coverage {
+    if ((self=[super init])) {
+        _requestIdentifier=[request copy];_documentIdentifier=[document copy];_requestKey=key;
+        _commandSHA256=[NSData dataWithBytes:key.command.data() length:key.command.size()];
+        _executionSHA256=[NSData dataWithBytes:key.execution.data() length:key.execution.size()];
+        _evidenceCoverage=coverage;
+    }return self;
+}
+@end
+
+// Insert after Stage A private request types. Main-owned objects never enter
+// utility blocks. This seam has no production caller before Stage C coupling.
+namespace core3d::request {
+struct ReservationDispatch { UUID deliveryID{}; Key key{}; };
+struct ReservationDelivery {
+    UUID deliveryID{}; Key key{};
+    tombstone::Reservation disposition=tombstone::Reservation::Unavailable;
+#if DEBUG
+    tombstone::Presence observed=tombstone::Presence::Unavailable;
+    bool privateStore=false,cleanup=false,workerMain=false;
+#endif
+};
+inline tombstone::Key TombstoneKey(const Key& key) {
+    tombstone::Key value;value.accountScope=key.accountScope;value.document=key.document;
+    value.request=key.request;value.command=key.command;value.execution=key.execution;return value;
+}
+inline ReserveReply Reply(tombstone::Reservation reply) {
+    switch(reply){case tombstone::Reservation::Reserved:return ReserveReply::FirstReserved;
+        case tombstone::Reservation::AlreadyReserved:return ReserveReply::PreviouslySeen;
+        case tombstone::Reservation::Conflict:return ReserveReply::Conflict;
+        case tombstone::Reservation::Capacity:return ReserveReply::Capacity;
+        case tombstone::Reservation::Busy:return ReserveReply::Busy;
+        case tombstone::Reservation::Unavailable:return ReserveReply::Uncertain;}
+    return ReserveReply::Uncertain;
+}
+}
+typedef NS_ENUM(NSInteger, Core3DReservationOutcome) {
+    Core3DReservationOutcomeReservedForCoupling,
+    Core3DReservationOutcomeCancelled, Core3DReservationOutcomeRejected,
+    Core3DReservationOutcomePreviouslySeen, Core3DReservationOutcomeConflict,
+    Core3DReservationOutcomeCapacity, Core3DReservationOutcomeBusy,
+    Core3DReservationOutcomeUncertain
+};
+typedef void (^Core3DReservationCompletion)(Core3DReservationOutcome,
+    const core3d::request::ReservationDelivery&, BOOL);
+@interface Core3DModelingReservationEntry : NSObject {
+@public
+    __weak Core3DViewController *_owner;
+    Core3DModelingPreparedRequest *_prepared;
+    Core3DReservationCompletion _completion;
+    core3d::request::ReservationDispatch _dispatch;
+    std::optional<core3d::request::Admission> _admission;
+    BOOL _stopped;
+#if DEBUG
+    void (^_gate)(void (^resume)(void));
+    BOOL _manualTestDeadline;
+#endif
+}
+@end
+@implementation Core3DModelingReservationEntry
+@end
+@interface Core3DModelingReservedCapability : NSObject {
+@public
+    Core3DModelingReservationEntry *_entry;
+    core3d::request::ReservationDelivery _delivery;
+    BOOL _taken;
+}
+@end
+@implementation Core3DModelingReservedCapability
+@end
+@interface Core3DViewController (NativeReservationPrivate)
+- (BOOL)core3d_reservationMatches:(Core3DModelingPreparedRequest *)request;
+- (void)core3d_releaseReservation:(Core3DModelingPreparedRequest *)request;
+- (BOOL)core3d_acceptReservedCapability:(Core3DModelingReservedCapability *)capability;
+@end
+static NSMutableDictionary<NSUUID *,Core3DModelingReservationEntry *> *Core3DReservationEntries;
+static NSUUID *Core3DReservationIdentifier(const core3d::request::UUID& value) {
+    return [[NSUUID alloc] initWithUUIDBytes:value.data()];
+}
+static Core3DReservationOutcome Core3DReservationClosedOutcome(core3d::request::Terminal terminal) {
+    using T=core3d::request::Terminal;
+    switch(terminal){case T::Cancelled:return Core3DReservationOutcomeCancelled;
+        case T::PreviouslySeen:return Core3DReservationOutcomePreviouslySeen;
+        case T::Conflict:return Core3DReservationOutcomeConflict;
+        case T::Capacity:return Core3DReservationOutcomeCapacity;
+        case T::Busy:return Core3DReservationOutcomeBusy;
+        case T::Uncertain:return Core3DReservationOutcomeUncertain;
+        default:return Core3DReservationOutcomeRejected;}
+}
+static void Core3DFinishReservation(Core3DModelingReservationEntry *entry,
+    const core3d::request::ReservationDelivery& delivery,Core3DReservationOutcome outcome,BOOL storageKnown) {
+    NSCAssert(NSThread.isMainThread,@"Native reservation completion must remain main-owned");
+    if(outcome==Core3DReservationOutcomeRejected&&entry->_admission->phase()==core3d::request::Phase::Reserved)
+        entry->_admission->beginGeometry(false); // closes policy; never starts geometry
+    // Remove authority/slot before invoking potentially reentrant client code.
+    [entry->_owner core3d_releaseReservation:entry->_prepared];
+    entry->_prepared->_requestRetired=YES;
+    entry->_prepared->_requestContext->_planningRetired=YES;
+    Core3DReservationCompletion completion=entry->_completion;entry->_completion=nil;
+#if DEBUG
+    entry->_gate=nil;
+#endif
+    if(completion)completion(outcome,delivery,storageKnown);
+}
+static void Core3DDeliverReservation(const core3d::request::ReservationDelivery& delivery) {
+    NSCAssert(NSThread.isMainThread,@"Native reservation delivery must remain on main");
+    NSUUID *identifier=Core3DReservationIdentifier(delivery.deliveryID);
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[identifier];
+    // A mismatched or duplicate worker message has no authority over any slot.
+    if(!entry||!(entry->_dispatch.key==delivery.key))return;
+    [Core3DReservationEntries removeObjectForKey:identifier];
+    if(entry->_stopped) {
+        Core3DFinishReservation(entry,delivery,Core3DReservationOutcomeCancelled,delivery.disposition!=core3d::tombstone::Reservation::Unavailable);return;
+    }
+    entry->_admission->reservation(delivery.key,core3d::request::Reply(delivery.disposition));
+    if(entry->_admission->phase()!=core3d::request::Phase::Reserved) {
+        Core3DFinishReservation(entry,delivery,Core3DReservationClosedOutcome(entry->_admission->terminal()),delivery.disposition!=core3d::tombstone::Reservation::Unavailable);return;
+    }
+    Core3DViewController *owner=entry->_owner;
+    if(!owner||![owner core3d_reservationMatches:entry->_prepared]) {
+        Core3DFinishReservation(entry,delivery,Core3DReservationOutcomeRejected,YES);return;
+    }
+    // Only this actual first-reserved path can manufacture the private object.
+    // Neither a decoded key nor an enum/status can reconstruct this capability.
+    Core3DModelingReservedCapability *capability=[Core3DModelingReservedCapability new];
+    capability->_entry=entry;capability->_delivery=delivery;
+    if(![owner core3d_acceptReservedCapability:capability]) {
+        Core3DFinishReservation(entry,delivery,Core3DReservationOutcomeRejected,YES);return;
+    }
+    Core3DReservationCompletion completion=entry->_completion;entry->_completion=nil;
+#if DEBUG
+    entry->_gate=nil;
+#endif
+    // This is reservation completion, never a model committed/retry-safe result.
+    if(completion)completion(Core3DReservationOutcomeReservedForCoupling,delivery,YES);
+}
+static void Core3DExpireReservation(const core3d::request::UUID& deliveryID) {
+    NSCAssert(NSThread.isMainThread,@"Native reservation deadline must run on main");
+    NSUUID *identifier=Core3DReservationIdentifier(deliveryID);
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[identifier];if(!entry)return;
+    [Core3DReservationEntries removeObjectForKey:identifier];
+    core3d::request::ReservationDelivery unknown;unknown.deliveryID=deliveryID;unknown.key=entry->_dispatch.key;
+    // Even if Stop honestly cancelled geometry, storage may still finish later.
+    // No completion or expiry makes this consumed request replayable.
+    if(!entry->_stopped)entry->_admission->reservation(unknown.key,core3d::request::ReserveReply::Uncertain);
+    Core3DFinishReservation(entry,unknown,entry->_stopped?Core3DReservationOutcomeCancelled:
+        Core3DReservationOutcomeUncertain,NO);
+}
+static void Core3DDeadlineReservation(const core3d::request::UUID& deliveryID) {
+#if DEBUG
+    // Explicit deterministic capacity qualification only. The production
+    // deadline stays30s; debugExpire still exercises the exact expiry path.
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[Core3DReservationIdentifier(deliveryID)];
+    if(entry&&entry->_manualTestDeadline)return;
+#endif
+    Core3DExpireReservation(deliveryID);
+}
+static void Core3DRouteReservationDelivery(const core3d::request::ReservationDelivery& delivery) {
+    NSCAssert(NSThread.isMainThread,@"Native reservation routing must remain on main");
+#if DEBUG
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[Core3DReservationIdentifier(delivery.deliveryID)];
+    if(entry&&entry->_gate&&entry->_dispatch.key==delivery.key) {
+        void (^gate)(void (^)(void))=entry->_gate;entry->_gate=nil;
+        const auto once=std::make_shared<std::atomic_bool>(false);
+        const auto copiedDelivery=delivery;
+        // Gate and arbitrary test callback are read/invoked/destroyed on main.
+        // The resume block captures only numeric delivery + an atomic latch.
+        gate(^{if(!once->exchange(true))dispatch_async(dispatch_get_main_queue(),^{Core3DDeliverReservation(copiedDelivery);});});
+        return;
+    }
+#endif
+    Core3DDeliverReservation(delivery);
+}
+static void Core3DRunReservation(const core3d::request::ReservationDispatch& work) {
+    // Called only by the async entry after main-owned exact admission.
+    // A first actual Reserved reply alone can continue into ordinary creation.
+    const auto copiedWork=work;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        core3d::request::ReservationDelivery delivery;delivery.deliveryID=copiedWork.deliveryID;delivery.key=copiedWork.key;
+#if DEBUG
+        delivery.workerMain=::pthread_main_np();
+#endif
+        delivery.disposition=core3d::tombstone::Store().reserve(core3d::request::TombstoneKey(copiedWork.key));
+        dispatch_async(dispatch_get_main_queue(),^{Core3DRouteReservationDelivery(delivery);});
+    });
+}
+
+#if DEBUG
+#include <cstdlib>
+#include <stdexcept>
+// Native-issued test configuration is copied path bytes + a bounded scenario.
+// The worker never captures Foundation objects, callbacks or native handles.
+struct Core3DReservationTestConfig {std::array<char,1024> parentPattern{};unsigned scenario=0;};
+static core3d::request::ReservationDelivery Core3DRunPrivateReservation(
+    core3d::request::ReservationDispatch work,Core3DReservationTestConfig config) {
+    namespace t=core3d::tombstone;
+    core3d::request::ReservationDelivery reply;reply.deliveryID=work.deliveryID;reply.key=work.key;
+    reply.workerMain=::pthread_main_np();reply.privateStore=true;
+    if(reply.workerMain||config.scenario>11||!::mkdtemp(config.parentPattern.data()))return reply;
+    const std::string parent=config.parentPattern.data(),root=parent+"/NativeModelingRequests";
+    try {
+        auto store=t::Store::ForTesting(parent);const auto key=core3d::request::TombstoneKey(work.key);
+        // Initialization is itself durable. Faults below target request admission,
+        // not a mocked status or a fabricated proof capability.
+        if(store.lookup(key)==t::Presence::Absent) {
+            if(config.scenario==1)(void)store.reserve(key);
+            if(config.scenario==2){auto other=key;other.command[0]^=1;(void)store.reserve(other);}
+            if(config.scenario==3){
+                t::detail::FD damaged(::open((root+"/records").c_str(),O_WRONLY|O_TRUNC|O_NOFOLLOW|O_CLOEXEC));
+                const std::uint8_t bytes[]={1,2,3};
+                if(damaged.value>=0){(void)t::detail::WriteAll(damaged.value,bytes,3);(void)t::detail::FileSync(damaged.value);}
+            }
+            if(config.scenario==4)(void)::unlink((root+"/records").c_str());
+            if(config.scenario==5)store.setNextFault(t::Store::Fault::AfterRename);
+            if(config.scenario==9)store.setNextFault(t::Store::Fault::AfterPartialPendingWrite);
+            if(config.scenario==10)store.setNextFault(t::Store::Fault::AfterPendingSync);
+            if(config.scenario==11)store.setNextFault(t::Store::Fault::AfterDirectorySync);
+            if(config.scenario==7) {
+                // Seed a closed128-record private fixture through the real codec;
+                // the existing component tests separately exercise128 fsynced
+                // reservations. This probe qualifies actual admission routing.
+                std::vector<t::Key> full;
+                for(unsigned i=1;i<=t::MaximumRecords;++i){auto occupied=key;occupied.request.fill(0);
+                    occupied.request[0]=0x80;occupied.request[1]=key.request[1]^0xff;
+                    occupied.request[15]=std::uint8_t(i);full.push_back(occupied);}
+                std::vector<std::uint8_t> bytes;
+                t::detail::FD seeded(::open((root+"/records").c_str(),O_WRONLY|O_TRUNC|O_NOFOLLOW|O_CLOEXEC));
+                if(!t::Encode(full,bytes)||!t::detail::Owned(seeded.value,false,0600)
+                    ||!t::detail::WriteAll(seeded.value,bytes.data(),bytes.size())||!t::detail::FileSync(seeded.value))
+                    throw std::runtime_error("Private reservation capacity fixture");
+            }
+            t::detail::FD heldLock(config.scenario==8?
+                ::open((root+"/lock").c_str(),O_RDWR|O_CLOEXEC|O_NOFOLLOW):-1);
+            if(config.scenario==8&&(heldLock.value<0||::flock(heldLock.value,LOCK_EX|LOCK_NB)!=0))
+                throw std::runtime_error("Private reservation busy fixture");
+            reply.disposition=store.reserve(key);
+            reply.observed=store.lookup(key);
+        }
+    }catch(...){reply.disposition=t::Reservation::Unavailable;}
+    // This is a disposable DEBUG qualification root, never the permanent native
+    // production store. Its actual readback precedes bounded known-file cleanup.
+    bool clean=true;
+    for(const char *name:{"pending","records","lock"})
+        if(::unlink((root+"/"+name).c_str())!=0&&errno!=ENOENT)clean=false;
+    if(::rmdir(root.c_str())!=0&&errno!=ENOENT)clean=false;
+    if(::rmdir(parent.c_str())!=0)clean=false;
+    reply.cleanup=clean;return reply;
+}
+static NSString *Core3DReservationOutcomeName(Core3DReservationOutcome value) {
+    switch(value){case Core3DReservationOutcomeReservedForCoupling:return @"reservedForCoupling";
+        case Core3DReservationOutcomeCancelled:return @"cancelled";case Core3DReservationOutcomeRejected:return @"rejected";
+        case Core3DReservationOutcomePreviouslySeen:return @"previouslySeen";case Core3DReservationOutcomeConflict:return @"conflict";
+        case Core3DReservationOutcomeCapacity:return @"capacity";case Core3DReservationOutcomeBusy:return @"busy";
+        case Core3DReservationOutcomeUncertain:return @"uncertain";}
+    return @"invalid";
+}
+static NSDictionary *Core3DReservationDebugResult(Core3DReservationOutcome outcome,
+    const core3d::request::ReservationDelivery& delivery,BOOL known) {
+    using R=core3d::tombstone::Reservation;NSString *storage=@"unavailable";
+    switch(delivery.disposition){case R::Reserved:storage=@"reserved";break;case R::AlreadyReserved:storage=@"alreadyReserved";break;
+        case R::Conflict:storage=@"conflict";break;case R::Capacity:storage=@"capacity";break;case R::Busy:storage=@"busy";break;case R::Unavailable:break;}
+    using P=core3d::tombstone::Presence;NSString *observed=@"unavailable";
+    switch(delivery.observed){case P::Absent:observed=@"absent";break;case P::Match:observed=@"match";break;
+        case P::Conflict:observed=@"conflict";break;case P::Busy:observed=@"busy";break;case P::Unavailable:break;}
+    return @{@"outcome":Core3DReservationOutcomeName(outcome),@"storage":storage,@"storageKnown":@(known),
+        @"observed":observed,@"privateStore":@(delivery.privateStore),@"cleanup":@(delivery.cleanup),
+        @"workerMain":@(delivery.workerMain),@"completionMain":@(NSThread.isMainThread)};
+}
+#endif
+
+
+@interface Core3DModelingAsyncOutcome ()
+- (instancetype)initWithDisposition:(Core3DModelingAsyncDisposition)disposition
+    storage:(Core3DModelingStorageObservation)storage request:(NSUUID *)request
+    document:(NSString *)document entities:(NSArray<NSString *> *)entities;
+@end
+@implementation Core3DModelingAsyncOutcome
+- (instancetype)initWithDisposition:(Core3DModelingAsyncDisposition)disposition
+    storage:(Core3DModelingStorageObservation)storage request:(NSUUID *)request
+    document:(NSString *)document entities:(NSArray<NSString *> *)entities {
+    if((self=[super init])){_disposition=disposition;_storageObservation=storage;
+        _requestIdentifier=[request copy];_documentIdentifier=[document copy];_entityIdentifiers=[entities copy];}
+    return self;
+}
+@end
+// Callback and immutable resolution live exclusively on main. In particular,
+// this box does not retain the native controller or prepared request.
+@interface Core3DModelingAsyncCompletion : NSObject {
+@public
+    __weak Core3DViewController *_owner;
+    __weak Core3DModelingPreparedRequest *_prepared;
+    NSUUID *_requestID;
+    NSString *_documentID;
+    core3d::request::Key _key;
+    std::shared_ptr<core3d::NativeModelingReceiptResolution> _resolution;
+    Core3DModelingStorageObservation _storage;
+    void (^_completion)(Core3DModelingAsyncOutcome *);
+    BOOL _finished;
+}
+@end
+@implementation Core3DModelingAsyncCompletion
+@end
+static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
+    Core3DModelingAsyncDisposition disposition) {
+    NSCAssert(NSThread.isMainThread,@"Async native result must remain main-owned");
+    if(!box||box->_finished)return;
+    NSMutableArray<NSString *> *entities=[NSMutableArray array];
+    const auto resolution=box->_resolution;
+    if(resolution&&resolution->state()==core3d::NativeModelingReceiptResolution::State::Committed){
+        const auto& record=resolution->record();
+        const bool same=record.key.accountScope==box->_key.accountScope&&record.key.document==box->_key.document
+            &&record.key.request==box->_key.request&&record.key.command==box->_key.command
+            &&record.key.execution==box->_key.execution&&!record.effects.empty()&&record.effects.size()<=16;
+        if(same){
+            disposition=Core3DModelingAsyncDispositionCommitted;
+            for(const auto&effect:record.effects)
+                [entities addObject:[[NSUUID alloc] initWithUUIDBytes:effect.entity.data()].UUIDString];
+        }else disposition=Core3DModelingAsyncDispositionUncertain;
+    }else if(disposition==Core3DModelingAsyncDispositionCommitted){
+        // A generic geometry result cannot manufacture a committed receipt.
+        disposition=Core3DModelingAsyncDispositionUncertain;
+    }
+    box->_finished=YES;
+    auto completion=box->_completion;box->_completion=nil;
+#if DEBUG
+    Core3DModelingPreparedRequest *prepared=box->_prepared;
+    if(prepared){prepared->_requestAsyncGate=nil;prepared->_requestAsyncAfterStart=nil;}
+#endif
+    box->_prepared=nil;box->_owner=nil;box->_resolution.reset();
+    Core3DModelingAsyncOutcome *outcome=[[Core3DModelingAsyncOutcome alloc]
+        initWithDisposition:disposition storage:box->_storage request:box->_requestID
+        document:box->_documentID entities:entities];
+    if(completion)completion(outcome);
+}
+static Core3DModelingStorageObservation Core3DAsyncStorage(
+    const core3d::request::ReservationDelivery& delivery,BOOL known) {
+    if(!known)return Core3DModelingStorageObservationUnknown;
+    using R=core3d::tombstone::Reservation;
+    switch(delivery.disposition){
+        case R::Reserved:return Core3DModelingStorageObservationReserved;
+        case R::AlreadyReserved:return Core3DModelingStorageObservationPreviouslySeen;
+        case R::Conflict:return Core3DModelingStorageObservationConflict;
+        case R::Capacity:return Core3DModelingStorageObservationCapacity;
+        case R::Busy:return Core3DModelingStorageObservationBusy;
+        case R::Unavailable:return Core3DModelingStorageObservationUnknown;
+    }
+    return Core3DModelingStorageObservationUnknown;
+}
+static Core3DModelingAsyncDisposition Core3DAsyncReservationDisposition(Core3DReservationOutcome value){
+    switch(value){
+        case Core3DReservationOutcomeCancelled:return Core3DModelingAsyncDispositionCancelled;
+        case Core3DReservationOutcomeRejected:return Core3DModelingAsyncDispositionRejected;
+        case Core3DReservationOutcomePreviouslySeen:return Core3DModelingAsyncDispositionPreviouslySeen;
+        case Core3DReservationOutcomeConflict:return Core3DModelingAsyncDispositionConflict;
+        case Core3DReservationOutcomeCapacity:return Core3DModelingAsyncDispositionCapacity;
+        case Core3DReservationOutcomeBusy:return Core3DModelingAsyncDispositionBusy;
+        default:return Core3DModelingAsyncDispositionUncertain;
+    }
+}
+static Core3DModelingAsyncDisposition Core3DAsyncConstructionDisposition(Core3DProfileConstructionResult value){
+    switch(value){
+        case Core3DProfileConstructionResultCommitted:return Core3DModelingAsyncDispositionCommitted;
+        case Core3DProfileConstructionResultCancelled:return Core3DModelingAsyncDispositionCancelled;
+        case Core3DProfileConstructionResultRejected:return Core3DModelingAsyncDispositionRejected;
+        case Core3DProfileConstructionResultFailed:return Core3DModelingAsyncDispositionFailed;
+        case Core3DProfileConstructionResultBusy:return Core3DModelingAsyncDispositionBusy;
+        default:return Core3DModelingAsyncDispositionUncertain;
+    }
+}
+
+#if DEBUG
+static NSMutableDictionary<NSUUID *, id> *Core3DAsyncStoreProbeCallbacks;
+#endif
+
+static bool Core3DRebuildSourceMatches(Core3DModelingPreparedRequest *request,
+    const Handle(OcctDocument)& owner) noexcept {
+    try {
+        if (!NSThread.isMainThread || !request || !request->_requestSourceEffect || owner.IsNull()
+            || owner->Document().IsNull() || !XCAFDoc_DocumentTool::CheckShapeTool(owner->Document()->Main())) return false;
+        TDF_LabelSequence roots; XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
+        if (roots.Length()>50000) return false;
+        bool found=false;
+        for (int i=1;i<=roots.Length();++i) {
+            core3d::receipt::UUID entity;
+            if (!core3d::receipt::ParseUUID(owner->EntityIdentifierForLabel(roots.Value(i)),entity)) return false;
+            if (entity!=request->_requestSourceEffect->entity) continue;
+            core3d::receipt::Effect live;
+            if (found || !core3d::receipt::CaptureEffect(owner,roots.Value(i),live)
+                || !(live==*request->_requestSourceEffect)) return false;
+            found=true;
+        }
+        return found;
+    } catch (...) { return false; }
+}
+
+namespace core3d {
+// Defined only at the main-owned actual-reservation boundary. No public
+// constructor, serialized ticket, callback outcome or numeric enum issues one.
+struct NativeModelingPermitIssuer final {
+#if DEBUG
+    static bool failBeforeRelease(Core3DModelingPreparedRequest *request) {
+        if(!NSThread.isMainThread||!request||!request->_requestCommitPermit
+            ||!request->_requestCommitPermit->current()
+            ||request->_requestCommitPermit->resolution()->state()!=NativeModelingReceiptResolution::State::Pending)return false;
+        request->_requestCommitPermit->debugBeforeReleaseFailure_=true;return true;
+    }
+    static void failReceiptStage(Core3DModelingPreparedRequest *request) {
+        if(NSThread.isMainThread&&request&&request->_requestCommitPermit)request->_requestCommitPermit->debugStageFailure_=true;
+    }
+#endif
+    static std::shared_ptr<NativeModelingCommitPermit> take(Core3DModelingReservedCapability *capability,
+        const Handle(OcctDocument)& owner) {
+        if(!NSThread.isMainThread||!capability||capability->_taken||!capability->_entry
+            ||owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return {};
+        auto *entry=capability->_entry;auto *prepared=entry->_prepared;
+        if(!prepared||!entry->_owner||![entry->_owner core3d_reservationMatches:prepared]
+            ||capability->_delivery.disposition!=tombstone::Reservation::Reserved
+            ||!(entry->_dispatch.key==capability->_delivery.key)||!entry->_admission
+            ||entry->_admission->phase()!=request::Phase::Reserved
+            ||!prepared->_requestEpoch||prepared->_requestEpoch->retired
+            ||!prepared->_requestSession->_hostEpoch||prepared->_requestSession->_hostEpoch->retired)return {};
+        const auto operation=prepared->_requestDescriptor.operation;
+        if(operation!=request::Operation::CreateEnclosure&&operation!=request::Operation::CreateAssembly)return {};
+        receipt::Catalog catalog;const auto status=receipt::Read(owner->Document(),catalog);
+        receipt::UUID document;
+        if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
+            ||!prepared->_requestCreationCatalog
+            ||catalog.label!=prepared->_requestCreationCatalog->label||catalog.bytes!=prepared->_requestCreationCatalog->bytes
+            ||catalog.records.size()>=receipt::MaximumRecords
+            ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
+        for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
+        auto p=std::shared_ptr<NativeModelingCommitPermit>(new NativeModelingCommitPermit);
+        p->key_.accountScope=prepared->_requestKey.accountScope;p->key_.document=prepared->_requestKey.document;
+        p->key_.request=prepared->_requestKey.request;p->key_.command=prepared->_requestKey.command;p->key_.execution=prepared->_requestKey.execution;
+        p->operation_=static_cast<receipt::Operation>(operation);p->descriptor_=prepared->_requestDescriptor;
+        p->featureIDs_=prepared->_requestFeatureIDs;p->document_=owner->Document();p->previous_=std::move(catalog);
+        p->session_=prepared->_requestSession->_hostEpoch;p->request_=prepared->_requestEpoch;
+        p->resolution_=std::make_shared<NativeModelingReceiptResolution>();p->admission_=entry->_admission;
+        if(!p->admission_->beginGeometry(true))return {};
+        capability->_taken=YES;return p;
+    }
+    static std::shared_ptr<NativeModelingCommitPermit> takeRebuild(Core3DModelingReservedCapability *capability,
+        const Handle(OcctDocument)& owner) {
+        if(!NSThread.isMainThread||!capability||capability->_taken||!capability->_entry
+            ||owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return {};
+        auto *entry=capability->_entry;auto *prepared=entry->_prepared;
+        if(!prepared||!entry->_owner||![entry->_owner core3d_reservationMatches:prepared]
+            ||capability->_delivery.disposition!=tombstone::Reservation::Reserved
+            ||!(entry->_dispatch.key==capability->_delivery.key)||!entry->_admission
+            ||entry->_admission->phase()!=request::Phase::Reserved
+            ||!prepared->_requestEpoch||prepared->_requestEpoch->retired
+            ||!prepared->_requestSession->_hostEpoch||prepared->_requestSession->_hostEpoch->retired)return {};
+        const auto operation=prepared->_requestDescriptor.operation;
+        if(operation!=request::Operation::RebuildEnclosure&&operation!=request::Operation::RebuildProfile)return {};
+        if(!Core3DRebuildSourceMatches(prepared,owner))return {};
+        receipt::Catalog catalog;const auto status=receipt::Read(owner->Document(),catalog);
+        receipt::UUID document;
+        if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
+            ||!prepared->_requestCreationCatalog
+            ||catalog.label!=prepared->_requestCreationCatalog->label||catalog.bytes!=prepared->_requestCreationCatalog->bytes
+            ||catalog.records.size()>=receipt::MaximumRecords
+            ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
+        for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
+        auto p=std::shared_ptr<NativeModelingCommitPermit>(new NativeModelingCommitPermit);
+        p->key_.accountScope=prepared->_requestKey.accountScope;p->key_.document=prepared->_requestKey.document;
+        p->key_.request=prepared->_requestKey.request;p->key_.command=prepared->_requestKey.command;p->key_.execution=prepared->_requestKey.execution;
+        p->operation_=static_cast<receipt::Operation>(operation);p->descriptor_=prepared->_requestDescriptor;
+        p->featureIDs_=prepared->_requestFeatureIDs;p->document_=owner->Document();p->previous_=std::move(catalog);
+        p->expectedSource_=prepared->_requestSourceEffect;
+        p->session_=prepared->_requestSession->_hostEpoch;p->request_=prepared->_requestEpoch;
+        p->resolution_=std::make_shared<NativeModelingReceiptResolution>();p->admission_=entry->_admission;
+        if(!p->admission_->beginGeometry(true))return {};
+        capability->_taken=YES;return p;
+    }
+};
+}
+
 @interface Core3DViewController () {
+    NSHashTable<Core3DModelingPreparedRequest *> *_issuedModelingPreparedRequests;
+    Core3DModelingPreparedRequest *_pendingModelingReservation;
+    Core3DModelingReservedCapability *_reservedModelingCapability;
     BOOL _isSetuped;
     Core3DQueuedAssetRequestSlot *_queuedAssetRequestSlot;
     Core3DQueuedAssetRequest *_queuedAssetRequest;
@@ -1556,10 +2191,20 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 #endif
 }
 
+- (BOOL)core3d_startReservedRebuild:(Core3DModelingPreparedRequest *)request completion:(void (^)(Core3DProfileConstructionResult))completion;
+- (BOOL)core3d_startReservedCreation:(Core3DModelingPreparedRequest *)request completion:(void (^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_canBeginCommittedEdit;
+- (Core3DModelingPreparedRequest *)core3d_prepareRequest:(const core3d::request::Descriptor&)descriptor
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
+    requestID:(NSUUID *)requestID featureIDs:(const std::vector<core3d::request::UUID>&)featureIDs
+    coverage:(Core3DModelingEvidenceCoverage)coverage;
 - (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
     matchesAllowingConsumed:(BOOL)allowConsumed;
 - (BOOL)core3d_canCaptureModelingContext;
+- (BOOL)core3d_canCaptureModelingContextForReservation:(Core3DModelingPlanningContext *)context;
+- (void)core3d_retireReservationContext:(Core3DModelingPlanningContext *)context;
+- (std::optional<core3d::request::ReservationDispatch>)core3d_registerReservation:
+    (Core3DModelingPreparedRequest *)request completion:(Core3DReservationCompletion)completion;
 - (void)core3d_executeEnclosure:(Core3DEnclosureDefinition *)definition
     context:(Core3DModelingPlanningContext *)context rebuild:(BOOL)rebuild
     completion:(void(^)(Core3DProfileConstructionResult))completion;
@@ -4899,6 +5544,238 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
     return [NSThread isMainThread]
         && core3d::tombstone::Store::ForTesting("/unused-by-main-thread-refusal").reserve(key)
             == core3d::tombstone::Reservation::Unavailable;
+}
+
+- (NSDictionary *)debugInspectModelingDescriptorData:(NSData *)data {
+    namespace r=core3d::request;
+    if (![NSThread isMainThread]||![data isKindOfClass:NSData.class]||data.length==0||data.length>r::MaximumBytes) return @{@"valid":@NO};
+    try {
+        const auto bytes=static_cast<const std::uint8_t*>(data.bytes);
+        r::Descriptor descriptor;std::vector<std::uint8_t> canonical;r::Digest hash;
+        if (!r::Decode(std::vector<std::uint8_t>(bytes,bytes+data.length),descriptor)
+            ||!r::Encode(descriptor,canonical)||!r::CommandHash(descriptor,hash)) return @{@"valid":@NO};
+        NSMutableArray *values=[NSMutableArray array];
+        for(const auto&part:descriptor.parts) {
+            NSMutableArray *bits=[NSMutableArray array];for(double x:part.values){std::uint64_t b;std::memcpy(&b,&x,8);[bits addObject:@(b)];}
+            [values addObject:bits];
+        }
+        return @{@"valid":@YES,@"bytes":[NSData dataWithBytes:canonical.data() length:canonical.size()],
+            @"commandSHA256":[NSData dataWithBytes:hash.data() length:hash.size()],@"valueBits":values};
+    } catch (...) {return @{@"valid":@NO};}
+}
+- (NSData *)debugModelingPreparedDescriptor:(Core3DModelingPreparedRequest *)request {
+    if (![self isModelingPreparedRequestCurrent:request]) return nil;
+    std::vector<std::uint8_t> bytes;
+    return core3d::request::Encode(request->_requestDescriptor,bytes)?[NSData dataWithBytes:bytes.data() length:bytes.size()]:nil;
+}
+- (NSDictionary *)debugModelingAdmissionStateProbe {
+    namespace r=core3d::request;
+    r::Key key;key.accountScope.fill(1);key.document.fill(2);key.request.fill(3);key.command.fill(4);key.execution.fill(5);
+    int bindings=0,closedReplies=0,stopPhases=0;
+    for(int field=0;field<5;++field){auto foreign=key;
+        if(field==0)foreign.accountScope[0]^=1;else if(field==1)foreign.document[0]^=1;
+        else if(field==2)foreign.request[0]^=1;else if(field==3)foreign.command[0]^=1;else foreign.execution[0]^=1;
+        r::Admission a(key);if(a.begin()&&!a.reservation(foreign,r::ReserveReply::FirstReserved)&&a.phase()==r::Phase::Reserving
+            &&a.reservation(key,r::ReserveReply::FirstReserved)&&!a.reservation(key,r::ReserveReply::FirstReserved))++bindings;
+    }
+    const std::array<r::ReserveReply,5> replies={r::ReserveReply::PreviouslySeen,r::ReserveReply::Conflict,r::ReserveReply::Capacity,r::ReserveReply::Busy,r::ReserveReply::Uncertain};
+    const std::array<r::Terminal,5> terminals={r::Terminal::PreviouslySeen,r::Terminal::Conflict,r::Terminal::Capacity,r::Terminal::Busy,r::Terminal::Uncertain};
+    for(std::size_t i=0;i<replies.size();++i){r::Admission a(key);
+        if(a.begin()&&!a.reservation(key,replies[i])&&a.phase()==r::Phase::Terminal&&a.terminal()==terminals[i]
+            &&!a.begin()&&!a.beginGeometry(true)&&!a.reservation(key,r::ReserveReply::FirstReserved))++closedReplies;
+    }
+    for(int phase=0;phase<5;++phase){r::Admission a(key);
+        if(phase>=1)a.begin();if(phase>=2)a.reservation(key,r::ReserveReply::FirstReserved);
+        if(phase>=3)a.beginGeometry(true);if(phase>=4)a.geometryReady(true,true);
+        if(a.stop()&&a.terminal()==r::Terminal::Cancelled&&!a.stop()&&!a.begin()
+            &&!a.reservation(key,r::ReserveReply::FirstReserved)&&!a.takeForOrdinary(true))++stopPhases;
+    }
+    r::Admission delivered(key);const bool once=delivered.begin()&&delivered.reservation(key,r::ReserveReply::FirstReserved)
+        &&delivered.beginGeometry(true)&&delivered.geometryReady(true,true)&&delivered.takeForOrdinary(true)
+        &&!delivered.takeForOrdinary(true)&&!delivered.stop()&&delivered.terminal()==r::Terminal::HandedToOrdinary;
+    int fences=0;
+    for(int phase=0;phase<3;++phase){r::Admission a(key);a.begin();a.reservation(key,r::ReserveReply::FirstReserved);
+        bool refused=false;if(phase==0)refused=!a.beginGeometry(false);
+        else {a.beginGeometry(true);if(phase==1)refused=!a.geometryReady(true,false);
+            else {a.geometryReady(true,true);refused=!a.takeForOrdinary(false);}}
+        if(refused&&a.terminal()==r::Terminal::Rejected&&!a.takeForOrdinary(true))++fences;
+    }
+    r::Admission failed(key);failed.begin();failed.reservation(key,r::ReserveReply::FirstReserved);failed.beginGeometry(true);
+    const bool buildRefused=!failed.geometryReady(false,true)&&failed.terminal()==r::Terminal::Rejected;
+    r::Admission invalid(r::Key{});
+    return @{@"bindingRejections":@(bindings),@"closedReplies":@(closedReplies),@"stopPhases":@(stopPhases),
+        @"fenceRejections":@(fences),@"once":@(once),@"buildRefused":@(buildRefused),@"invalidKeyRefused":@(!invalid.begin())};
+}
+
+- (NSDictionary *)debugCreationReceiptOwnerState {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{};
+    const auto owner=GLController.viewer->getDocument();
+    if(owner.IsNull()||owner->Document().IsNull())return @{};
+    core3d::receipt::Catalog catalog;const auto status=core3d::receipt::Read(owner->Document(),catalog);
+    return @{@"read":@(int(status)),@"recordCount":@(catalog.records.size()),
+        @"hasConstructionContext":@(_modelingConstructionContext!=nil),
+        @"hasPendingReservation":@(_pendingModelingReservation!=nil),
+        @"openCommand":@(owner->Document()->HasOpenCommand())};
+}
+- (BOOL)debugFailCreationReceiptResolutionBeforeRelease:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||!request||request->_requestOwner!=self)return NO;
+    return core3d::NativeModelingPermitIssuer::failBeforeRelease(request);
+}
+- (BOOL)debugExecuteReservedCreation:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure completion:(void (^)(Core3DProfileConstructionResult))completion {
+    if(!NSThread.isMainThread||!completion||!GLController||!GLController.viewer)return NO;
+    const BOOL accepted=[self core3d_startReservedCreation:request completion:completion];
+    if(accepted&&receiptFailure)core3d::NativeModelingPermitIssuer::failReceiptStage(request);
+    return accepted;
+}
+- (BOOL)debugCorruptPreparedRebuildSourceEffect:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||!request||request->_requestOwner!=self||request->_requestAdmitted
+        ||!request->_requestSourceEffect)return NO;
+    request->_requestSourceEffect->geometry[0]^=1;return YES;
+}
+- (BOOL)debugExecuteReservedRebuild:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure completion:(void (^)(Core3DProfileConstructionResult))completion {
+    if(!NSThread.isMainThread||!completion||!GLController||!GLController.viewer)return NO;
+    const BOOL accepted=[self core3d_startReservedRebuild:request completion:completion];
+    if(accepted&&receiptFailure)core3d::NativeModelingPermitIssuer::failReceiptStage(request);
+    return accepted;
+}
+- (NSDictionary *)debugCreationReceiptState:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||![request isKindOfClass:Core3DModelingPreparedRequest.class]
+        ||!GLController||!GLController.viewer)return @{};
+    const auto owner=GLController.viewer->getDocument();if(owner.IsNull())return @{};
+    core3d::receipt::Key key;key.accountScope=request->_requestKey.accountScope;key.document=request->_requestKey.document;
+    key.request=request->_requestKey.request;key.command=request->_requestKey.command;key.execution=request->_requestKey.execution;
+    core3d::receipt::Catalog catalog;const auto read=core3d::receipt::Read(owner->Document(),catalog);
+    const auto inspection=core3d::receipt::InspectDocument(owner,key);
+    NSMutableArray *features=[NSMutableArray array],*entities=[NSMutableArray array],*definitions=[NSMutableArray array];
+    for(const auto&effect:inspection.effects){
+        [features addObject:[[NSUUID alloc] initWithUUIDBytes:effect.featureID.data()].UUIDString];
+        [entities addObject:[[NSUUID alloc] initWithUUIDBytes:effect.entity.data()].UUIDString];
+        [definitions addObject:[[NSUUID alloc] initWithUUIDBytes:effect.definition.data()].UUIDString];
+    }
+    NSMutableArray *frozen=[NSMutableArray array];
+    for(const auto&identifier:request->_requestFeatureIDs)[frozen addObject:[[NSUUID alloc] initWithUUIDBytes:identifier.data()].UUIDString];
+    const auto resolution=request->_requestCommitPermit?request->_requestCommitPermit->resolution():nullptr;
+    const auto ordinary=GLController.viewer->debugOrdinaryEditController();
+    const bool stampRetained=ordinary&&ordinary->debugCommandStamp().isRetained();
+    // This is explicitly document-only DEBUG evidence. It neither performs a
+    // Store lookup nor upgrades QueryVerifiedReceipt from Unavailable.
+    return @{@"commandStampRetained":@(stampRetained),@"read":@(int(read)),@"presence":@(int(inspection.presence)),@"effectsCurrent":@(inspection.effectsCurrent),
+        @"catalogBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],@"recordCount":@(catalog.records.size()),
+        @"featureIDs":features,@"entityIDs":entities,@"definitionIDs":definitions,@"frozenFeatureIDs":frozen,
+        @"resolution":@(resolution?int(resolution->state()):-1),@"openCommand":@(owner->Document()->HasOpenCommand()),
+        @"verifiedQueryAvailable":@(core3d::receipt::QueryVerifiedReceipt()!=core3d::receipt::VerifiedQueryStatus::Unavailable)};
+}
+
+
+- (BOOL)debugConfigureAsyncModelingRequest:(Core3DModelingPreparedRequest *)request
+    storageScenario:(NSInteger)scenario deliveryGate:(void (^)(void (^)(void)))gate
+    receiptFailure:(BOOL)receiptFailure afterStart:(void (^)(void))afterStart {
+    if(!NSThread.isMainThread||scenario< -1||scenario>11||scenario==6
+        ||![self isModelingPreparedRequestCurrent:request]||request->_requestAsyncConfigured)return NO;
+    request->_requestAsyncConfigured=YES;request->_requestAsyncScenario=scenario;
+    request->_requestAsyncGate=[gate copy];request->_requestAsyncReceiptFailure=receiptFailure;
+    request->_requestAsyncAfterStart=[afterStart copy];return YES;
+}
+- (void)debugLookupPermanentModelingRequest:(Core3DModelingPreparedRequest *)request
+    completion:(void (^)(NSDictionary *))completion {
+    if(!NSThread.isMainThread||!completion)return;
+    if(![request isKindOfClass:Core3DModelingPreparedRequest.class]||!core3d::request::ValidKey(request->_requestKey)){
+        completion(@{@"valid":@NO});return;
+    }
+    // Read-only DEBUG proof, never a public verified query or capability. The
+    // main registry owns its callback; utility work receives numeric values only.
+    core3d::request::UUID identifier;
+    if(!Core3DRequestUUID(NSUUID.UUID,identifier)){completion(@{@"valid":@NO});return;}
+    if(!Core3DAsyncStoreProbeCallbacks)Core3DAsyncStoreProbeCallbacks=[NSMutableDictionary dictionary];
+    if(Core3DAsyncStoreProbeCallbacks.count>=32){completion(@{@"valid":@NO});return;}
+    NSUUID *token=Core3DReservationIdentifier(identifier);
+    Core3DAsyncStoreProbeCallbacks[token]=[completion copy];
+    const auto key=request->_requestKey;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        NSUUID *expired=Core3DReservationIdentifier(identifier);
+        void (^callback)(NSDictionary *)=Core3DAsyncStoreProbeCallbacks[expired];
+        [Core3DAsyncStoreProbeCallbacks removeObjectForKey:expired];
+        if(callback)callback(@{@"valid":@NO,@"deadline":@YES,@"verifiedQueryAvailable":@NO});
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        const auto presence=core3d::tombstone::Store().lookup(core3d::request::TombstoneKey(key));
+        const bool workerMain=::pthread_main_np();
+        dispatch_async(dispatch_get_main_queue(),^{
+            NSUUID *finished=Core3DReservationIdentifier(identifier);
+            void (^callback)(NSDictionary *)=Core3DAsyncStoreProbeCallbacks[finished];
+            [Core3DAsyncStoreProbeCallbacks removeObjectForKey:finished];
+            if(callback)callback(@{@"valid":@YES,@"presence":@(int(presence)),@"workerMain":@(workerMain),
+                @"completionMain":@(NSThread.isMainThread),@"verifiedQueryAvailable":@NO});
+        });
+    });
+}
+
+- (NSDictionary *)debugAsyncModelingStorageState:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||![request isKindOfClass:Core3DModelingPreparedRequest.class]
+        ||request->_requestOwner!=self)return @{};
+    return request->_requestAsyncStorageSnapshot?:@{};
+}
+
+- (BOOL)debugReserveModelingPreparedRequest:(Core3DModelingPreparedRequest *)request scenario:(NSInteger)scenario
+    deliveryGate:(void (^)(void (^)(void)))gate completion:(void (^)(NSDictionary *))completion {
+    if(!NSThread.isMainThread||!completion||scenario<0||scenario>8)return NO;
+    Core3DReservationTestConfig configuration;configuration.scenario=scenario==6?0:unsigned(scenario);
+    NSString *pattern=[NSTemporaryDirectory() stringByAppendingPathComponent:@"native-reservation-XXXXXX"];
+    std::string path;if(!Core3DRequestString(pattern,configuration.parentPattern.size()-1,path))return NO;
+    std::copy(path.begin(),path.end(),configuration.parentPattern.begin());
+    auto work=[self core3d_registerReservation:request completion:
+        ^(Core3DReservationOutcome outcome,const core3d::request::ReservationDelivery& value,BOOL known) {
+            completion(Core3DReservationDebugResult(outcome,value,known));
+        }];
+    if(!work)return NO;
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[Core3DReservationIdentifier(work->deliveryID)];
+    entry->_gate=[gate copy];entry->_manualTestDeadline=scenario==6;
+    const auto dispatch=*work;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        const auto reply=Core3DRunPrivateReservation(dispatch,configuration);
+        dispatch_async(dispatch_get_main_queue(),^{Core3DRouteReservationDelivery(reply);});
+    });
+    return YES;
+}
+- (BOOL)debugConsumeReservedCapabilityWithoutGeometry:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||!_reservedModelingCapability
+        ||_reservedModelingCapability->_entry->_prepared!=request||_reservedModelingCapability->_taken
+        ||![self core3d_reservationMatches:request])return NO;
+    _reservedModelingCapability->_taken=YES;
+    // Only observe/retire the actual private capability. Stage B deliberately
+    // has no GeometryReady/ordinary handoff shortcut or model execution.
+    [self stopModelingPreparedRequest:request];return YES;
+}
+- (BOOL)debugExpireModelingReservation:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||!request||request->_requestOwner!=self)return NO;
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[Core3DReservationIdentifier(request->_requestReservationDeliveryID)];
+    if(!entry||entry->_prepared!=request)return NO;
+    Core3DExpireReservation(entry->_dispatch.deliveryID);return YES;
+}
+- (BOOL)debugInjectMismatchedModelingReservation:(Core3DModelingPreparedRequest *)request field:(NSInteger)field {
+    if(!NSThread.isMainThread||!request||request->_requestOwner!=self||field<0||field>5)return NO;
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[Core3DReservationIdentifier(request->_requestReservationDeliveryID)];
+    if(!entry||entry->_prepared!=request)return NO;
+    core3d::request::ReservationDelivery invalid;invalid.deliveryID=entry->_dispatch.deliveryID;
+    invalid.key=entry->_dispatch.key;invalid.disposition=core3d::tombstone::Reservation::Reserved;
+    switch(field){case 0:invalid.key.accountScope[0]^=1;break;case 1:invalid.key.document[0]^=1;break;
+        case 2:invalid.key.request[0]^=1;break;case 3:invalid.key.command[0]^=1;break;
+        case 4:invalid.key.execution[0]^=1;break;case 5:invalid.deliveryID[0]^=1;break;}
+    Core3DDeliverReservation(invalid);
+    return Core3DReservationEntries[Core3DReservationIdentifier(entry->_dispatch.deliveryID)]==entry;
+}
+- (NSDictionary *)debugModelingReservationState:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{};
+    const auto owner=GLController.viewer->getDocument();
+    if(owner.IsNull()||owner->Document().IsNull())return @{};
+    const BOOL ours=request&&request->_requestOwner==self;
+    return @{@"openCommand":@(owner->Document()->HasOpenCommand()),
+        @"pending":@(ours&&_pendingModelingReservation==request),
+        @"admitted":@(ours&&request->_requestAdmitted),
+        @"reserved":@(ours&&_reservedModelingCapability&&_reservedModelingCapability->_entry->_prepared==request),
+        @"registryCount":@(Core3DReservationEntries.count)};
 }
 
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {
@@ -9432,6 +10309,11 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 
 
 - (BOOL)core3d_canCaptureModelingContext {
+    return [self core3d_canCaptureModelingContextForReservation:nil];
+}
+- (BOOL)core3d_canCaptureModelingContextForReservation:(Core3DModelingPlanningContext *)context {
+    if(!NSThread.isMainThread)return NO;
+    if(_pendingModelingReservation&&(!context||_pendingModelingReservation->_requestContext!=context))return NO;
     return [NSThread isMainThread] && _isSetuped && !_isPreviewMode
         && [GLController canIssueModelingPlanningContext]
         && ![self core3d_hasCompetingLoadOrControllerWork]
@@ -9442,6 +10324,7 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 }
 
 - (BOOL)prepareForModelingPlanning {
+    if (!NSThread.isMainThread || _pendingModelingReservation) return NO;
     if (![NSThread isMainThread] || !_isSetuped || _isPreviewMode
         || ![GLController canIssueModelingPlanningContext]
         || [self core3d_hasCompetingLoadOrControllerWork]
@@ -9496,6 +10379,485 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
     } catch (...) { return NO; }
 }
 
+// Internal reservation slot excludes competing AI admission only. It is not an
+// OCAF/viewer lock: manual touch may proceed and invalidate the original lease.
+- (std::optional<core3d::request::ReservationDispatch>)core3d_registerReservation:
+    (Core3DModelingPreparedRequest *)request completion:(Core3DReservationCompletion)completion {
+    if(!NSThread.isMainThread||!completion||_pendingModelingReservation||_reservedModelingCapability
+        ||![self isModelingPreparedRequestCurrent:request]
+        ||request->_requestAdmitted||Core3DReservationEntries.count>=32)return std::nullopt;
+    try {
+        const auto operation=request->_requestDescriptor.operation;
+        if(operation==core3d::request::Operation::CreateEnclosure||operation==core3d::request::Operation::CreateAssembly
+            ||operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile){
+            // Fail known catalog conflicts before any permanent reservation.
+            if(!GLController||!GLController.viewer)return std::nullopt;
+            const auto owner=GLController.viewer->getDocument();
+            if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return std::nullopt;
+            if ((operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile)
+                && !Core3DRebuildSourceMatches(request,owner)) return std::nullopt;
+            core3d::receipt::Catalog prior;const auto status=core3d::receipt::Read(owner->Document(),prior);
+            if((status!=core3d::receipt::ReadStatus::Absent&&status!=core3d::receipt::ReadStatus::Valid)
+                ||prior.records.size()>=core3d::receipt::MaximumRecords)return std::nullopt;
+            for(const auto&record:prior.records)if(record.key.request==request->_requestKey.request)return std::nullopt;
+            request->_requestCreationCatalog=std::move(prior);
+        }
+        Core3DModelingReservationEntry *entry=[Core3DModelingReservationEntry new];
+        entry->_owner=self;entry->_prepared=request;entry->_completion=[completion copy];
+        entry->_dispatch.key=request->_requestKey;
+        if(!Core3DRequestUUID(NSUUID.UUID,entry->_dispatch.deliveryID))return std::nullopt;
+        entry->_admission.emplace(entry->_dispatch.key);
+        if(!entry->_admission->begin())return std::nullopt;
+        if(!Core3DReservationEntries)Core3DReservationEntries=[NSMutableDictionary dictionary];
+        NSUUID *identifier=Core3DReservationIdentifier(entry->_dispatch.deliveryID);
+        if(Core3DReservationEntries[identifier])return std::nullopt;
+        Core3DReservationEntries[identifier]=entry;
+        // All checks and callback allocation precede single main-thread consume.
+        // There is no transaction or document command open across the wait.
+        request->_requestAdmitted=YES;request->_requestContext->_planningConsumed=YES;
+        request->_requestReservationDeliveryID=entry->_dispatch.deliveryID;
+        _pendingModelingReservation=request;
+        const auto deliveryID=entry->_dispatch.deliveryID;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+            Core3DDeadlineReservation(deliveryID);
+        });
+        return entry->_dispatch;
+    }catch(...){return std::nullopt;}
+}
+- (BOOL)core3d_reservationMatches:(Core3DModelingPreparedRequest *)request {
+    return NSThread.isMainThread&&request&&_pendingModelingReservation==request
+        &&request->_requestOwner==self&&request->_requestAdmitted&&!request->_requestRetired
+        &&[_issuedModelingPreparedRequests containsObject:request]
+        &&Core3DHostSessionCurrent(request->_requestSession)
+        &&[self core3d_modelingContext:request->_requestContext matchesAllowingConsumed:YES];
+}
+- (void)core3d_releaseReservation:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread)return;
+    if(_pendingModelingReservation==request)_pendingModelingReservation=nil;
+    if(_reservedModelingCapability&&_reservedModelingCapability->_entry->_prepared==request)
+        _reservedModelingCapability=nil;
+}
+- (BOOL)core3d_acceptReservedCapability:(Core3DModelingReservedCapability *)capability {
+    if(!NSThread.isMainThread||!capability||_reservedModelingCapability||capability->_taken
+        ||capability->_delivery.disposition!=core3d::tombstone::Reservation::Reserved
+        ||capability->_entry->_owner!=self
+        ||!(capability->_entry->_dispatch.key==capability->_delivery.key)
+        ||capability->_entry->_admission->phase()!=core3d::request::Phase::Reserved
+        ||![self core3d_reservationMatches:capability->_entry->_prepared])return NO;
+    _reservedModelingCapability=capability;return YES;
+}
+- (void)core3d_retireReservationContext:(Core3DModelingPlanningContext *)context {
+    if(!NSThread.isMainThread||!_pendingModelingReservation
+        ||_pendingModelingReservation->_requestContext!=context)return;
+    Core3DModelingPreparedRequest *request=_pendingModelingReservation;
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[
+        Core3DReservationIdentifier(request->_requestReservationDeliveryID)];
+    if(entry&&entry->_owner==self&&entry->_prepared==request) {
+        entry->_stopped=YES;entry->_admission->stop();
+    }
+    if(_reservedModelingCapability&&_reservedModelingCapability->_entry->_prepared==request)
+        _reservedModelingCapability->_entry->_admission->stop();
+    request->_requestRetired=YES;context->_planningRetired=YES;
+    if(request->_requestEpoch)request->_requestEpoch->retired=true;
+    [self core3d_releaseReservation:request];
+}
+
+- (Core3DModelingPreparedRequest *)core3d_prepareRequest:(const core3d::request::Descriptor&)descriptor
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
+    requestID:(NSUUID *)requestID featureIDs:(const std::vector<core3d::request::UUID>&)featureIDs
+    coverage:(Core3DModelingEvidenceCoverage)coverage {
+    namespace r=core3d::request;
+    if (![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)) return nil;
+    if (!_issuedModelingPreparedRequests) _issuedModelingPreparedRequests=[NSHashTable weakObjectsHashTable];
+    if (_issuedModelingPreparedRequests.allObjects.count>=32) return nil;
+    try {
+        r::Key key;key.accountScope=session->_hostScopeDigest;
+        if (!Core3DRequestUUID(requestID,key.request)
+            || !Core3DRequestUUID([[NSUUID alloc] initWithUUIDString:context.documentIdentifier],key.document)
+            || !r::CommandHash(descriptor,key.command)||featureIDs.size()!=descriptor.parts.size()) return nil;
+        r::Writer authority;
+        authority.raw(session->_hostIdentity.data(),session->_hostIdentity.size());
+        authority.raw(session->_hostGenerationDigest.data(),session->_hostGenerationDigest.size());
+        authority.raw(context->_planningStamp.instanceNonce.data(),context->_planningStamp.instanceNonce.size());
+        authority.integer(context->_planningStamp.opening);authority.integer(context->_planningStamp.edit);
+        authority.integer(context->_planningStamp.selection);authority.integer(context->_planningOverlayRevision);
+        std::string publication;if (!Core3DRequestString(context.scene.publicationSourceIdentifier,128,publication)) return nil;
+        authority.text(publication);authority.integer(context.scene.revisions.documentGeneration);
+        authority.integer(context.scene.revisions.modelRevision);authority.integer(context.scene.revisions.presentationRevision);
+        authority.scalar(context.scene.metersPerUnit);authority.integer(context.scene.selection.selectedElements.count,4);
+        for (Core3DSceneElementIdentifier *element in context.scene.selection.selectedElements) {
+            std::string entity;if (!Core3DRequestString(element.entityIdentifier,128,entity)) return nil;
+            authority.text(entity);authority.integer(element.kind);authority.integer(element.topologyIndex);authority.integer(element.geometryRevision);
+        }
+        // Target state comes from native persisted object authority. Renderer
+        // Float buffers never supply recipe units, transforms or stable IDs.
+        NSString *target=nil;std::vector<double> originalValues;
+        std::optional<core3d::receipt::Effect> expectedSource;
+        if (descriptor.operation==r::Operation::RebuildProfile) {
+            if (!context.selectedProfile) return nil;
+            const auto original=[context.selectedProfile nativeSnapshot];
+            if (!core3d::profile::Encode(original.parameters,originalValues)) return nil;
+            target=context.selectedProfile.entityIdentifier;authority.scalar(original.dimensionMetersPerUnit);
+            authority.text(original.featureIdentifier);
+        } else if (descriptor.operation==r::Operation::RebuildEnclosure) {
+            if (!context.selectedEnclosure) return nil;
+            const auto original=[context.selectedEnclosure nativeSnapshot];
+            if (!core3d::enclosure::Encode(original.parameters,originalValues)) return nil;
+            target=context.selectedEnclosure.entityIdentifier;authority.scalar(original.dimensionMetersPerUnit);
+            authority.text(original.featureIdentifier);
+        }
+        authority.integer(originalValues.size(),4);for(double value:originalValues) authority.scalar(value);
+        if (target) {
+            const auto viewer=context->_planningViewer.lock();if (!viewer) return nil;
+            const auto document=viewer->getDocument();if (document.IsNull()||document->Document().IsNull()
+                ||!XCAFDoc_DocumentTool::CheckShapeTool(document->Document()->Main())) return nil;
+            TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main())->GetFreeShapes(roots);
+            if (roots.Length()>50000) return nil;
+            OcctObjectTransformState state;bool found=false;
+            for (int i=1;i<=roots.Length();++i) {
+                if (document->EntityIdentifierForLabel(roots.Value(i))!=target.UTF8String) continue;
+                if (found||!document->CaptureObjectTransformStateForLabel(roots.Value(i),state)) return nil;found=true;
+                core3d::receipt::Effect effect;
+                if (!core3d::receipt::CaptureEffect(document,roots.Value(i),effect)) return nil;
+                expectedSource=effect;
+            }
+            if (!found) return nil;
+            authority.text(state.entityIdentifier);authority.text(state.definitionIdentifier);
+            for (std::size_t i=0;i<state.scalars.size();++i) {authority.integer(state.present[i]?1:0,1);authority.scalar(state.scalars[i]);}
+        }
+        if (target) {
+            if (!expectedSource) return nil;
+            // Append a tagged rebuild-only authority extension. Creation bytes
+            // and native command descriptors retain their existing encodings.
+            authority.text("rebuild-source-effect/v1");
+            authority.integer(std::uint8_t(expectedSource->feature),1);
+            authority.raw(expectedSource->entity.data(),expectedSource->entity.size());
+            authority.raw(expectedSource->definition.data(),expectedSource->definition.size());
+            authority.raw(expectedSource->featureID.data(),expectedSource->featureID.size());
+            authority.raw(expectedSource->geometry.data(),expectedSource->geometry.size());
+            authority.raw(expectedSource->state.data(),expectedSource->state.size());
+        }
+        authority.integer(featureIDs.size(),4);
+        for (const auto&identifier:featureIDs) {if (!r::Nonzero(identifier)) return nil;authority.raw(identifier.data(),identifier.size());}
+        if (!authority.valid||!r::ExecutionHash(key.command,key.accountScope,key.document,key.request,authority.bytes,key.execution)
+            || ![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)) return nil;
+        Core3DModelingPreparedRequest *request=[[Core3DModelingPreparedRequest alloc]
+            initPrivateWithRequest:requestID document:context.documentIdentifier key:key coverage:coverage];
+        request->_requestOwner=self;request->_requestContext=context;request->_requestSession=session;
+        request->_requestEpoch=std::make_shared<core3d::NativeModelingEpoch>();
+        request->_requestDescriptor=descriptor;request->_requestFeatureIDs=featureIDs;
+        request->_requestSourceEffect=expectedSource;
+        [_issuedModelingPreparedRequests addObject:request];return request;
+    } catch (...) {return nil;}
+}
+
+- (Core3DModelingPreparedRequest *)prepareEnclosureRequest:(Core3DEnclosureDefinition *)definition
+    rebuild:(BOOL)rebuild context:(Core3DModelingPlanningContext *)context
+    session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID {
+    if (![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)
+        || ![definition isKindOfClass:Core3DEnclosureDefinition.class]) return nil;
+    try {
+        auto parameters=[definition nativeParameters];core3d::request::UUID feature;
+        if (rebuild) {
+            if (!context.selectedEnclosure) return nil;const auto original=[context.selectedEnclosure nativeSnapshot];
+            if (!original.current||parameters.metersPerUnit!=original.parameters.metersPerUnit
+                || parameters.definition.constructionFrame!=original.parameters.definition.constructionFrame
+                || !Core3DRequestUUID([[NSUUID alloc] initWithUUIDString:context.selectedEnclosure.featureIdentifier],feature)) return nil;
+        } else if (parameters.metersPerUnit!=context.scene.metersPerUnit||!Core3DRequestUUID(NSUUID.UUID,feature)) return nil;
+        core3d::request::Part part;part.recipe=core3d::request::Recipe::Enclosure;
+        part.schema=parameters.definition.constructionFrame?core3d::enclosure::FramedSchemaVersion:core3d::enclosure::SchemaVersion;
+        if (!core3d::enclosure::Encode(parameters,part.values)) return nil;
+        core3d::request::Descriptor descriptor;descriptor.operation=rebuild?core3d::request::Operation::RebuildEnclosure:core3d::request::Operation::CreateEnclosure;descriptor.parts={part};
+        Core3DModelingPreparedRequest *request=[self core3d_prepareRequest:descriptor context:context session:session requestID:requestID featureIDs:(std::vector<core3d::request::UUID>{feature}) coverage:Core3DModelingEvidenceCoverageCanonicalEffect];
+        if (request) request->_requestEnclosure=parameters;return request;
+    } catch (...) {return nil;}
+}
+
+- (Core3DModelingPreparedRequest *)prepareProfileRequest:(Core3DProfileDefinition *)definition
+    rebuild:(BOOL)rebuild context:(Core3DModelingPlanningContext *)context
+    session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID {
+    if (![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)
+        || ![definition isKindOfClass:Core3DProfileDefinition.class]) return nil;
+    try {
+        auto parameters=[definition nativeParameters];core3d::request::UUID feature;
+        if (rebuild) {
+            if (!context.selectedProfile) return nil;const auto original=[context.selectedProfile nativeSnapshot];
+            const auto kind=Core3DCanonicalModelingProfileKind(original.parameters);
+            if (!original.current||kind==0||Core3DCanonicalModelingProfileKind(parameters)!=kind
+                || parameters.definition.plane!=original.parameters.definition.plane
+                || parameters.metersPerUnit!=original.parameters.metersPerUnit
+                || !Core3DRequestUUID([[NSUUID alloc] initWithUUIDString:context.selectedProfile.featureIdentifier],feature)) return nil;
+            // Match the existing rebuild adapter: null/unchanged fields already
+            // preserve exact raw values, and the native frame remains opening.
+            parameters.constructionFrame=original.parameters.constructionFrame;
+        } else if (parameters.metersPerUnit!=context.scene.metersPerUnit||!Core3DRequestUUID(NSUUID.UUID,feature)) return nil;
+        core3d::request::Part part;part.recipe=core3d::request::Recipe::Profile;
+        part.schema=core3d::profile::SchemaFor(parameters);
+        if (!core3d::profile::Encode(parameters,part.values)) return nil;
+        core3d::request::Descriptor descriptor;descriptor.operation=rebuild?core3d::request::Operation::RebuildProfile:core3d::request::Operation::CreateProfile;descriptor.parts={part};
+        // Receipt schema has no CreateProfile operation yet. Never classify an
+        // arbitrary/new profile as covered just because its outline is simple.
+        const auto coverage=rebuild?Core3DModelingEvidenceCoverageCanonicalEffect:Core3DModelingEvidenceCoverageUnverifiedProfile;
+        Core3DModelingPreparedRequest *request=[self core3d_prepareRequest:descriptor context:context session:session requestID:requestID featureIDs:(std::vector<core3d::request::UUID>{feature}) coverage:coverage];
+        if (request) request->_requestProfile=parameters;return request;
+    } catch (...) {return nil;}
+}
+
+- (Core3DModelingPreparedRequest *)prepareAssemblyRequest:(NSArray<Core3DAssemblyPartDefinition *> *)parts
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID {
+    if (![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)
+        || ![parts isKindOfClass:NSArray.class]||parts.count<1||parts.count>16) return nil;
+    try {
+        core3d::request::Descriptor descriptor;descriptor.operation=core3d::request::Operation::CreateAssembly;
+        std::vector<core3d::AssemblyPartDefinition> nativeParts;std::vector<core3d::request::UUID> featureIDs;
+        NSMutableSet *names=[NSMutableSet set],*identifiers=[NSMutableSet set];
+        for (Core3DAssemblyPartDefinition *part in [parts copy]) {
+            if (![part isKindOfClass:Core3DAssemblyPartDefinition.class]||[names containsObject:part.name]
+                ||[identifiers containsObject:part.partIdentifier]) return nil;
+            const auto native=[part nativePartForMetersPerUnit:context.scene.metersPerUnit];core3d::request::UUID feature;
+            core3d::request::Part encoded;encoded.recipe=core3d::request::Recipe::Profile;
+            if (!native||!Core3DRequestUUID([[NSUUID alloc] initWithUUIDString:part.partIdentifier],feature)
+                ||!Core3DRequestString(part.name,256,encoded.name)) return nil;
+            encoded.schema=core3d::profile::SchemaFor(native->parameters);
+            if (!core3d::profile::Encode(native->parameters,encoded.values)) return nil;
+            descriptor.parts.push_back(std::move(encoded));nativeParts.push_back(*native);featureIDs.push_back(feature);
+            [names addObject:part.name];[identifiers addObject:part.partIdentifier];
+        }
+        Core3DModelingPreparedRequest *request=[self core3d_prepareRequest:descriptor context:context session:session requestID:requestID featureIDs:featureIDs coverage:Core3DModelingEvidenceCoverageCanonicalEffect];
+        if (request) request->_requestAssembly=std::move(nativeParts);return request;
+    } catch (...) {return nil;}
+}
+
+- (BOOL)isModelingPreparedRequestCurrent:(Core3DModelingPreparedRequest *)request {
+    return [NSThread isMainThread]&&[request isKindOfClass:Core3DModelingPreparedRequest.class]
+        && request->_requestOwner==self && !request->_requestRetired && !request->_requestAdmitted
+        && [_issuedModelingPreparedRequests containsObject:request]
+        && Core3DHostSessionCurrent(request->_requestSession)
+        && [self isModelingPlanningContextCurrent:request->_requestContext];
+}
+- (void)stopModelingPreparedRequest:(Core3DModelingPreparedRequest *)request {
+    if (![NSThread isMainThread]||![request isKindOfClass:Core3DModelingPreparedRequest.class]
+        ||request->_requestOwner!=self||![_issuedModelingPreparedRequests containsObject:request]) return;
+    request->_requestRetired=YES;
+#if DEBUG
+    request->_requestAsyncGate=nil;request->_requestAsyncAfterStart=nil;
+#endif
+    if(request->_requestEpoch)request->_requestEpoch->retired=true;
+    [self retireModelingPlanningContext:request->_requestContext];
+}
+- (Core3DModelingRequestExecutionResult)executeModelingPreparedRequest:(Core3DModelingPreparedRequest *)request {
+    // Public execution remains disabled until Stage C. This entry performs
+    // no Store operation, geometry, callback, consume or receipt query.
+    return Core3DModelingRequestExecutionResultUnavailable;
+}
+
+
+- (void)executeModelingPreparedRequest:(Core3DModelingPreparedRequest *)request
+    completion:(void (^)(Core3DModelingAsyncOutcome *))completion {
+    if(!completion)return;
+    if(!NSThread.isMainThread){
+        // Off-main invocation is rejected without touching native ownership or
+        // reading supplied request fields. No controller enters this block.
+        dispatch_async(dispatch_get_main_queue(),^{
+            completion([[Core3DModelingAsyncOutcome alloc] initWithDisposition:Core3DModelingAsyncDispositionRejected
+                storage:Core3DModelingStorageObservationNotAttempted request:nil document:nil entities:@[]]);
+        });return;
+    }
+    Core3DModelingAsyncCompletion *box=[Core3DModelingAsyncCompletion new];
+    box->_completion=[completion copy];box->_storage=Core3DModelingStorageObservationNotAttempted;
+    if(![request isKindOfClass:Core3DModelingPreparedRequest.class]
+        ||![self isModelingPreparedRequestCurrent:request]){
+        Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionRejected);return;
+    }
+    box->_owner=self;box->_prepared=request;box->_requestID=request.requestIdentifier;
+    box->_documentID=request.documentIdentifier;box->_key=request->_requestKey;
+    const auto operation=request->_requestDescriptor.operation;
+    if(request.evidenceCoverage!=Core3DModelingEvidenceCoverageCanonicalEffect
+        ||(operation!=core3d::request::Operation::CreateEnclosure&&operation!=core3d::request::Operation::CreateAssembly)){
+        Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionUnsupported);return;
+    }
+#if DEBUG
+    Core3DReservationTestConfig configuration;
+    const BOOL privateStore=request->_requestAsyncConfigured&&request->_requestAsyncScenario>=0;
+    if(privateStore){
+        configuration.scenario=unsigned(request->_requestAsyncScenario);
+        NSString *pattern=[NSTemporaryDirectory() stringByAppendingPathComponent:@"native-async-reservation-XXXXXX"];
+        std::string path;if(!Core3DRequestString(pattern,configuration.parentPattern.size()-1,path)){
+            Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionRejected);return;
+        }
+        std::copy(path.begin(),path.end(),configuration.parentPattern.begin());
+    }
+#endif
+    const auto work=[self core3d_registerReservation:request completion:
+        ^(Core3DReservationOutcome outcome,const core3d::request::ReservationDelivery& delivery,BOOL known){
+            box->_storage=Core3DAsyncStorage(delivery,known);
+#if DEBUG
+            Core3DModelingPreparedRequest *observed=box->_prepared;
+            if(observed)observed->_requestAsyncStorageSnapshot=Core3DReservationDebugResult(outcome,delivery,known);
+#endif
+            if(outcome!=Core3DReservationOutcomeReservedForCoupling){
+                Core3DFinishAsyncModeling(box,Core3DAsyncReservationDisposition(outcome));return;
+            }
+            Core3DViewController *owner=box->_owner;Core3DModelingPreparedRequest *prepared=box->_prepared;
+            if(!owner||!prepared){Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionRejected);return;}
+#if DEBUG
+            const BOOL failReceipt=prepared->_requestAsyncReceiptFailure;
+            void (^afterStart)(void)=prepared->_requestAsyncAfterStart;prepared->_requestAsyncAfterStart=nil;
+#endif
+            const BOOL started=[owner core3d_startReservedCreation:prepared completion:^(Core3DProfileConstructionResult result){
+                Core3DFinishAsyncModeling(box,Core3DAsyncConstructionDisposition(result));
+            }];
+            if(!box->_finished&&prepared->_requestCommitPermit)
+                box->_resolution=prepared->_requestCommitPermit->resolution();
+            if(!started){
+                [owner stopModelingPreparedRequest:prepared];
+                Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionRejected);return;
+            }
+#if DEBUG
+            if(!box->_finished&&failReceipt)core3d::NativeModelingPermitIssuer::failReceiptStage(prepared);
+            if(!box->_finished&&afterStart)afterStart();
+#endif
+        }];
+    if(!work){Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionBusy);return;}
+#if DEBUG
+    Core3DModelingReservationEntry *entry=Core3DReservationEntries[Core3DReservationIdentifier(work->deliveryID)];
+    entry->_gate=request->_requestAsyncGate;request->_requestAsyncGate=nil;
+    if(privateStore){
+        const auto copied=*work;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+            const auto delivery=Core3DRunPrivateReservation(copied,configuration);
+            dispatch_async(dispatch_get_main_queue(),^{Core3DRouteReservationDelivery(delivery);});
+        });return;
+    }
+#endif
+    Core3DRunReservation(*work);
+}
+
+- (BOOL)core3d_startReservedCreation:(Core3DModelingPreparedRequest *)request
+    completion:(void (^)(Core3DProfileConstructionResult))completion {
+    if(!NSThread.isMainThread||!completion||!request
+        ||!_reservedModelingCapability||_reservedModelingCapability->_taken
+        ||_reservedModelingCapability->_entry->_prepared!=request
+        ||request->_requestCommitPermit||_nativeSolidWork)return NO;
+    if(![self core3d_reservationMatches:request]||!GLController||!GLController.viewer){
+        [self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;
+    }
+    try {
+        const auto viewer=GLController.viewer;const auto document=viewer->getDocument();
+        auto permit=core3d::NativeModelingPermitIssuer::take(_reservedModelingCapability,document);
+        if(!permit){[self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;}
+        request->_requestCommitPermit=permit;
+        _reservedModelingCapability=nil; // Moved authority cannot be reconstructed from the key.
+        const auto context=request->_requestContext;
+        const auto size=GLController.view.bounds.size;
+        std::shared_ptr<core3d::NativeSolidWork> work;
+        if(std::isfinite(size.width)&&std::isfinite(size.height)&&size.width>=1&&size.height>=1&&size.width<=16384&&size.height<=16384){
+            core3d::ObjectFrameIdentity identity;
+            identity.publicationSourceIdentifier=context.scene.publicationSourceIdentifier.UTF8String;
+            identity.documentGeneration=context.scene.revisions.documentGeneration;
+            identity.modelRevision=context.scene.revisions.modelRevision;
+            if(request->_requestDescriptor.operation==core3d::request::Operation::CreateEnclosure&&request->_requestEnclosure)
+                work=viewer->prepareEnclosureSolid(*request->_requestEnclosure,identity,context.scene.revisions.presentationRevision,
+                    std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+            else if(request->_requestDescriptor.operation==core3d::request::Operation::CreateAssembly)
+                work=viewer->prepareAssemblySolid(request->_requestAssembly,identity,context.scene.revisions.presentationRevision,
+                    std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+        }
+        // Preparation may touch native selection bookkeeping. Never replace the
+        // original lease with a freshly captured scene after it does so.
+        if(!work||![self core3d_reservationMatches:request]
+            ||!core3d::Core3DViewer::attachModelingCreationPermit(work,permit)){
+            [self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;
+        }
+        _modelingConstructionContext=context;
+        __weak Core3DViewController *weakOwner=self;
+        __weak Core3DModelingPreparedRequest *weakRequest=request;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        // runNativeSolidWork stores this callback in its main-only registry.
+        // Its utility block still captures geometry and weak native owners only.
+        [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){
+            Core3DViewController *owner=weakOwner;Core3DModelingPreparedRequest *issued=weakRequest;
+            // Stop may release the last request before this late completion.
+            // The owner's occupied context slot independently keeps this weak
+            // identity alive; clear only that exact slot, never a newer context.
+            Core3DModelingPlanningContext *finishedContext=weakContext;
+            if(owner&&owner->_modelingConstructionContext==finishedContext)
+                owner->_modelingConstructionContext=nil;
+            if(owner&&issued){
+                [owner core3d_releaseReservation:issued];issued->_requestRetired=YES;
+                issued->_requestContext->_planningRetired=YES;
+            }
+            completion(result);
+        }];
+        return YES;
+    }catch(...){[self stopModelingPreparedRequest:request];return NO;}
+}
+
+- (BOOL)core3d_startReservedRebuild:(Core3DModelingPreparedRequest *)request
+    completion:(void (^)(Core3DProfileConstructionResult))completion {
+    if(!NSThread.isMainThread||!completion||!request
+        ||!_reservedModelingCapability||_reservedModelingCapability->_taken
+        ||_reservedModelingCapability->_entry->_prepared!=request
+        ||request->_requestCommitPermit||_nativeSolidWork)return NO;
+    if(![self core3d_reservationMatches:request]||!GLController||!GLController.viewer){
+        [self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;
+    }
+    try {
+        const auto viewer=GLController.viewer;const auto document=viewer->getDocument();
+        auto permit=core3d::NativeModelingPermitIssuer::takeRebuild(_reservedModelingCapability,document);
+        if(!permit){[self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;}
+        request->_requestCommitPermit=permit;
+        _reservedModelingCapability=nil; // Moved authority cannot be reconstructed from the key.
+        const auto context=request->_requestContext;
+        const auto size=GLController.view.bounds.size;
+        std::shared_ptr<core3d::NativeSolidWork> work;
+        if(std::isfinite(size.width)&&std::isfinite(size.height)&&size.width>=1&&size.height>=1&&size.width<=16384&&size.height<=16384){
+            core3d::ObjectFrameIdentity identity;
+            identity.publicationSourceIdentifier=context.scene.publicationSourceIdentifier.UTF8String;
+            identity.documentGeneration=context.scene.revisions.documentGeneration;
+            identity.modelRevision=context.scene.revisions.modelRevision;
+            if(request->_requestDescriptor.operation==core3d::request::Operation::RebuildEnclosure
+                &&request->_requestEnclosure&&context.selectedEnclosure){
+                const auto original=[context.selectedEnclosure nativeSnapshot]; identity.entityIdentifier=original.identity.entityIdentifier;
+                work=viewer->prepareStoredEnclosureRebuild(*request->_requestEnclosure,original,identity,
+                    context.scene.revisions.presentationRevision,std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+            }else if(request->_requestDescriptor.operation==core3d::request::Operation::RebuildProfile
+                &&request->_requestProfile&&context.selectedProfile){
+                const auto original=[context.selectedProfile nativeSnapshot]; identity.entityIdentifier=original.identity.entityIdentifier;
+                work=viewer->prepareStoredProfileRebuild(*request->_requestProfile,original,identity,
+                    context.scene.revisions.presentationRevision,std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+            }
+        }
+        // Preparation may touch native selection bookkeeping. Never replace the
+        // original lease with a freshly captured scene after it does so.
+        if(!work||![self core3d_reservationMatches:request]
+            ||!core3d::Core3DViewer::attachModelingRebuildPermit(work,permit)){
+            [self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;
+        }
+        _modelingConstructionContext=context;
+        __weak Core3DViewController *weakOwner=self;
+        __weak Core3DModelingPreparedRequest *weakRequest=request;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        // runNativeSolidWork stores this callback in its main-only registry.
+        // Its utility block still captures geometry and weak native owners only.
+        [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){
+            Core3DViewController *owner=weakOwner;Core3DModelingPreparedRequest *issued=weakRequest;
+            // Stop may release the last request before this late completion.
+            // The owner's occupied context slot independently keeps this weak
+            // identity alive; clear only that exact slot, never a newer context.
+            Core3DModelingPlanningContext *finishedContext=weakContext;
+            if(owner&&owner->_modelingConstructionContext==finishedContext)
+                owner->_modelingConstructionContext=nil;
+            if(owner&&issued){
+                [owner core3d_releaseReservation:issued];issued->_requestRetired=YES;
+                issued->_requestContext->_planningRetired=YES;
+            }
+            completion(result);
+        }];
+        return YES;
+    }catch(...){[self stopModelingPreparedRequest:request];return NO;}
+}
+
 - (Core3DModelingPlanningContext *)captureModelingPlanningContext {
     if (![self core3d_canCaptureModelingContext]) return nil;
     try {
@@ -9512,6 +10874,7 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
         if (documentID.length == 0 || documentID.length > 128) return nil;
         Core3DStoredEnclosureSnapshot *enclosure = nil;
         Core3DStoredProfileSnapshot *profile = nil;
+        Core3DStoredProfileSnapshot *recipe = nil;
         if (scene.selection.selectedElements.count == 1) {
             Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
             if (selected.kind == Core3DSceneElementKindObject)
@@ -9519,16 +10882,20 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
             if (enclosure && !enclosure.current) enclosure = nil;
             if (!enclosure && selected.kind == Core3DSceneElementKindObject) {
                 profile = [self storedProfileWithEntityIdentifier:selected.entityIdentifier expected:scene];
-                if (profile && (!profile.current || profile.dimensionMetersPerUnit <= 0
-                    || Core3DCanonicalModelingProfileKind([profile nativeSnapshot].parameters) == 0))
+                if (profile && (!profile.current || !std::isfinite(profile.dimensionMetersPerUnit)
+                    || profile.dimensionMetersPerUnit <= 0)) profile = nil;
+                if (profile && Core3DCanonicalModelingProfileKind([profile nativeSnapshot].parameters) == 0) {
+                    if (Core3DModelingProfileRecipeSupported([profile nativeSnapshot].parameters,
+                        profile.dimensionMetersPerUnit)) recipe = profile;
                     profile = nil;
+                }
             }
         }
         // Native reads must not acquire or refresh authority during capture.
         const auto after = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
         if (!after || !(*after == *stamp)) return nil;
         Core3DModelingPlanningContext *context = [[Core3DModelingPlanningContext alloc]
-            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile];
+            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile recipe:recipe];
         context->_planningOwner = self; context->_planningViewer = viewer;
         context->_planningStamp = *stamp; context->_planningOverlayRevision = overlay.overlayRevision;
         Core3DModelingPlanningContext *previous = _issuedModelingPlanningContext;
@@ -9543,7 +10910,7 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
     if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
         || context != _issuedModelingPlanningContext || context->_planningOwner != self
         || context->_planningRetired || (!allowConsumed && context->_planningConsumed)
-        || ![self core3d_canCaptureModelingContext]) return NO;
+        || ![self core3d_canCaptureModelingContextForReservation:allowConsumed?context:nil]) return NO;
     try {
         const auto viewer = context->_planningViewer.lock();
         if (!viewer || viewer != GLController.viewer) return NO;
@@ -9583,6 +10950,7 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 - (void)retireModelingPlanningContext:(Core3DModelingPlanningContext *)context {
     if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
         || context->_planningOwner != self) return;
+    [self core3d_retireReservationContext:context];
     context->_planningRetired = YES;
     if (_modelingConstructionContext == context && _nativeSolidWork)
         [self cancelNativeConstruction];
@@ -9698,6 +11066,50 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
                 completion(result);
             }];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (void)rebuildProfileRecipeWithDefinition:(Core3DProfileDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{completion(Core3DProfileConstructionResultRejected);});return;
+    }
+    if (![self isModelingPlanningContextCurrent:context] || !context.selectedProfileRecipe
+        || context.selectedProfile || context.selectedEnclosure
+        || ![definition isMemberOfClass:Core3DProfileDefinition.class]) {
+        completion(Core3DProfileConstructionResultRejected);return;
+    }
+    try {
+        const auto original=[context.selectedProfileRecipe nativeSnapshot];
+        const auto requested=[definition nativeParameters];
+        if (!original.current || !Core3DModelingProfileRecipeSupported(original.parameters,original.dimensionMetersPerUnit)
+            || !Core3DModelingProfileRecipeSupported(requested,original.dimensionMetersPerUnit)) {
+            completion(Core3DProfileConstructionResultRejected);return;
+        }
+        // Encode the original with just the requested parameter, then compare
+        // every scalar bit. This also binds optional frame, unit, all IDs and
+        // ordered contour/hole values; +/-zero cannot hide any other change.
+        auto expected=original.parameters;expected.definition.depth=requested.definition.depth;
+        std::vector<double> expectedValues,requestedValues;
+        if (!core3d::profile::Encode(expected,expectedValues)
+            || !core3d::profile::Encode(requested,requestedValues)
+            || expectedValues.size()!=requestedValues.size()
+            || std::memcmp(expectedValues.data(),requestedValues.data(),expectedValues.size()*sizeof(double))!=0) {
+            completion(Core3DProfileConstructionResultRejected);return;
+        }
+        context->_planningConsumed=YES;_modelingConstructionContext=context;
+        __weak Core3DViewController *weakSelf=self;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        [self rebuildStoredProfile:context.selectedProfileRecipe definition:definition expected:context.scene
+            completion:^(Core3DProfileConstructionResult result) {
+                Core3DViewController *owner=weakSelf;
+                Core3DModelingPlanningContext *finished=weakContext;
+                if (finished) finished->_planningRetired=YES;
+                if (owner && owner->_modelingConstructionContext==finished) owner->_modelingConstructionContext=nil;
+                completion(result);
+            }];
+    } catch (...) {completion(Core3DProfileConstructionResultRejected);}
 }
 
 - (void)createAssemblyWithParts:(NSArray<Core3DAssemblyPartDefinition *> *)parts
@@ -9819,6 +11231,11 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
                 if (planningContext && ![controller core3d_modelingContext:planningContext
                         matchesAllowingConsumed:YES]) {
                     Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
+                }
+                Core3DModelingPreparedRequest *reserved=controller->_pendingModelingReservation;
+                if(reserved&&reserved->_requestContext==planningContext&&reserved->_requestCommitPermit
+                    &&(![controller core3d_reservationMatches:reserved]||!reserved->_requestCommitPermit->current())){
+                    Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;
                 }
                 if (!built) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultFailed); return; }
                 const auto native = currentViewer->commitNativeSolid(pendingWork);
