@@ -203,6 +203,9 @@
 		C03D50020000000000000001 /* Core3DSceneSnapshot.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50040000000000000001 /* Core3DSceneSnapshot.mm */; };
 		C03D50110000000000000001 /* OcctSceneSnapshotBuilder.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */; };
 		C3D0F1032F30000100000003 /* ThirdPartyNotices in Resources */ = {isa = PBXBuildFile; fileRef = C3D0F1022F30000100000002 /* ThirdPartyNotices */; };
+		0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		3A3275384C537C4F2CC799D2 /* NativeModelingTombstone.mm in Sources */ = {isa = PBXBuildFile; fileRef = 4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -420,6 +423,9 @@
 		C03D50120000000000000001 /* SceneSnapshot.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SceneSnapshot.hpp; sourceTree = "<group>"; };
 		C03D50130000000000000001 /* OcctSceneSnapshotBuilder.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = OcctSceneSnapshotBuilder.hpp; sourceTree = "<group>"; };
 		C03D50140000000000000001 /* OcctSceneSnapshotBuilder.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = OcctSceneSnapshotBuilder.mm; sourceTree = "<group>"; };
+		D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingReceipt.hxx; sourceTree = "<group>"; };
+		C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingTombstone.hxx; sourceTree = "<group>"; };
+		4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = NativeModelingTombstone.mm; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -682,6 +688,9 @@
 				322185732BB5CC1500040E84 /* GLView.mm */,
 				322185722BB5CC1500040E84 /* GLViewController.h */,
 				322185712BB5CC1500040E84 /* GLViewController.mm */,
+				D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */,
+				C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */,
+				4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */,
 				322185702BB5CC1400040E84 /* OcctDocument.h */,
 				3221856A2BB5CC1300040E84 /* OcctDocument.mm */,
 				3221856D2BB5CC1400040E84 /* OcctViewer.h */,
@@ -901,6 +910,8 @@
 				322185792BB5CC1500040E84 /* CafShapePrs.h in Headers */,
 				322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */,
 				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
+				0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */,
+				A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */,
 				3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */,
 				18A006332BD2B306004931B1 /* ShapeInteractor.hpp in Headers */,
 				329B2ECF2C1AF53900F3A763 /* kdtree.h in Headers */,
@@ -1077,6 +1088,7 @@
 				329B2ED02C1AF53900F3A763 /* importstl.cpp in Sources */,
 				18A0062E2BD2A2E5004931B1 /* Interactor.cpp in Sources */,
 				18665F002CA2BDC600141E05 /* NSBundle+Path.m in Sources */,
+				3A3275384C537C4F2CC799D2 /* NativeModelingTombstone.mm in Sources */,
 				322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */,
 				3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */,
 			);

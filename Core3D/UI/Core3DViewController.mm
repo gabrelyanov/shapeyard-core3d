@@ -48,6 +48,16 @@
 #include "OrdinaryEditController.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
+#if DEBUG
+#include "../OCCTKit/NativeModelingReceipt.hxx"
+#include "../OCCTKit/NativeModelingTombstone.hxx"
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <TDF_Tool.hxx>
+#include <thread>
+#include <atomic>
+#include <stdexcept>
+#endif
+
 #include "../Common/dispatch_cancelable_block.h"
 #include "XCAFDoc_DocumentTool.hxx"
 #include "XCAFDoc_ColorTool.hxx"
@@ -1280,6 +1290,214 @@ static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parame
     return self;
 }
 @end
+
+#if DEBUG
+// DEBUG-only preservation oracle. Reads existing native labels and values;
+// no tool is lazily created. Allocation counter values are intentionally not
+// compared: adding a shape may advance them; their GUID/type must survive.
+static NSDictionary *Core3DReceiptPreservation(const Handle(OcctDocument)& owner) {
+    if (owner.IsNull() || owner->Document().IsNull()) return nil;
+    const auto doc = owner->Document();
+    if (!XCAFDoc_DocumentTool::CheckShapeTool(doc->Main())
+        || !XCAFDoc_DocumentTool::CheckColorTool(doc->Main())
+        || !XCAFDoc_DocumentTool::CheckVisMaterialTool(doc->Main())) return nil;
+    auto entry = [](const TDF_Label& label) -> NSString * {
+        TCollection_AsciiString text; TDF_Tool::Entry(label,text);
+        return [NSString stringWithUTF8String:text.ToCString()];
+    };
+    auto utf16 = [](const TCollection_ExtendedString& value) -> NSArray * {
+        NSMutableArray *units = [NSMutableArray array];
+        for (int i=1;i<=value.Length();++i) [units addObject:@(std::uint16_t(value.Value(i)))];
+        return units;
+    };
+    NSMutableArray *infrastructure = [NSMutableArray array];
+    const std::array<TDF_Label,4> labels = {doc->Main(),
+        XCAFDoc_DocumentTool::ShapeTool(doc->Main())->Label(),
+        XCAFDoc_DocumentTool::ColorTool(doc->Main())->Label(),
+        XCAFDoc_DocumentTool::VisMaterialTool(doc->Main())->Label()};
+    for (const auto& label:labels) {
+        NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+        for (TDF_AttributeIterator it(label);it.More();it.Next()) {
+            const auto a = it.Value(); char guid[37]; a->ID().ToCString(guid);
+            NSMutableDictionary *value = [@{@"type":[NSString stringWithUTF8String:a->DynamicType()->Name()]} mutableCopy];
+            if (const auto integer = Handle(TDataStd_Integer)::DownCast(a); !integer.IsNull()) value[@"integer"] = @(integer->Get());
+            if (const auto real = Handle(TDataStd_Real)::DownCast(a); !real.IsNull()) {
+                std::uint64_t bits; const double scalar=real->Get(); std::memcpy(&bits,&scalar,8);
+                value[@"realBits"] = @(bits);
+            }
+            if (const auto ascii = Handle(TDataStd_AsciiString)::DownCast(a); !ascii.IsNull())
+                value[@"ascii"] = [NSString stringWithUTF8String:ascii->Get().ToCString()];
+            if (const auto name = Handle(TDataStd_Name)::DownCast(a); !name.IsNull()) value[@"utf16"] = utf16(name->Get());
+            attributes[[NSString stringWithUTF8String:guid]] = value;
+        }
+        [infrastructure addObject:@{@"entry":entry(label),@"attributes":attributes}];
+    }
+    OcctSavedGroupState groups;
+    if (!owner->CaptureSavedGroups(groups) || groups.groups.size()!=1 || groups.groups[0].members.size()!=1) return nil;
+    const auto& group=groups.groups[0]; OcctObjectNameState guard;
+    if (!owner->CaptureObjectNameStateForLabel(group.members[0],guard)
+        || !guard.namePresent || guard.name!=TCollection_ExtendedString("Receipt guard")
+        || group.name!=TCollection_ExtendedString("Receipt guard group")) return nil;
+    core3d::receipt::Digest geometry;
+    if (!core3d::receipt::GeometryDigest(guard.object.shape,geometry)) return nil;
+    NSMutableArray *scalars = [NSMutableArray array], *present = [NSMutableArray array];
+    for (std::size_t i=0;i<guard.object.scalars.size();++i) {
+        std::uint64_t bits; std::memcpy(&bits,&guard.object.scalars[i],8);
+        [scalars addObject:@(bits)]; [present addObject:@(guard.object.present[i])];
+    }
+    return @{@"infrastructure":infrastructure,@"guardEntityID":[NSString stringWithUTF8String:guard.object.entityIdentifier.c_str()],
+        @"guardDefinitionID":[NSString stringWithUTF8String:guard.object.definitionIdentifier.c_str()],
+        @"guardEntry":entry(group.members[0]),@"guardName":utf16(guard.name),
+        @"guardGeometrySHA":[NSString stringWithUTF8String:core3d::receipt::Hex(geometry).c_str()],
+        @"guardScalarBits":scalars,@"guardScalarPresence":present,
+        @"groupID":[NSString stringWithUTF8String:group.identifier.c_str()],@"groupName":utf16(group.name),
+        @"groupContainer":entry(groups.container),@"groupEntry":entry(group.recordLabel),@"groupMember":entry(group.members[0])};
+}
+
+static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
+    namespace t = core3d::tombstone;
+    NSMutableDictionary *checks = [NSMutableDictionary dictionary];
+    NSURL *temporary = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    if (![NSFileManager.defaultManager createDirectoryAtURL:temporary withIntermediateDirectories:NO
+        attributes:@{NSFilePosixPermissions:@0700} error:nil]) return @{@"fixtureCreated":@NO};
+    auto expect = [&](NSString *name,bool passed){checks[name]=@(passed);};
+    auto key = [](unsigned id) {
+        t::Key k;k.accountScope.fill(1);k.command.fill(2);k.execution.fill(3);k.document.fill(4);
+        k.request[0]=std::uint8_t(id>>8);k.request[1]=std::uint8_t(id);return k;
+    };
+    auto parent = [&](NSString *name) {
+        NSURL *url = [temporary URLByAppendingPathComponent:name isDirectory:YES];
+        if (![NSFileManager.defaultManager createDirectoryAtURL:url withIntermediateDirectories:NO
+            attributes:@{NSFilePosixPermissions:@0700} error:nil]) throw std::runtime_error("Native fixture parent");
+        return std::string(url.path.fileSystemRepresentation);
+    };
+    auto read = [&](const std::string& path) {
+        t::detail::FD file(::open(path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));
+        std::vector<std::uint8_t> bytes;
+        if(!t::detail::ReadAll(file.value,t::MaximumBytes,bytes))throw std::runtime_error("Native fixture read");
+        return bytes;
+    };
+    auto overwrite = [&](const std::string& path,const std::vector<std::uint8_t>& bytes) {
+        t::detail::FD file(::open(path.c_str(),O_WRONLY|O_TRUNC|O_CLOEXEC|O_NOFOLLOW));
+        if(file.value<0||!t::detail::WriteAll(file.value,bytes.data(),bytes.size())||!t::detail::FileSync(file.value))
+            throw std::runtime_error("Native fixture write");
+    };
+    try {
+        if (scenario==0) {
+            const auto path=parent(@"basic");auto store=t::Store::ForTesting(path);const auto original=key(1);
+            expect(@"firstReserved",store.reserve(original)==t::Reservation::Reserved);
+            auto reopened=t::Store::ForTesting(path);
+            expect(@"freshInstanceNeverReadmits",reopened.reserve(original)==t::Reservation::AlreadyReserved);
+            expect(@"lookupMatches",reopened.lookup(original)==t::Presence::Match);
+            auto foreign=original;foreign.accountScope[0]^=1;
+            expect(@"scopeConflict",reopened.reserve(foreign)==t::Reservation::Conflict);
+            foreign=original;foreign.document[0]^=1;
+            expect(@"documentConflict",reopened.reserve(foreign)==t::Reservation::Conflict);
+            foreign=original;foreign.command[0]^=1;
+            expect(@"commandConflict",reopened.reserve(foreign)==t::Reservation::Conflict);
+            foreign=original;foreign.execution[0]^=1;
+            expect(@"executionConflict",reopened.reserve(foreign)==t::Reservation::Conflict);
+            expect(@"unknownAbsent",reopened.lookup(key(2))==t::Presence::Absent);
+            const auto bytes=read(path+"/NativeModelingRequests/records");std::vector<t::Key> decoded;
+            expect(@"exactStoredBinding",t::Decode(bytes,decoded)&&decoded.size()==1&&decoded[0]==original);
+            auto damaged=bytes;damaged.back()^=1;
+            expect(@"checksumClosed",!t::Decode(damaged,decoded)&&decoded.empty());
+            damaged=bytes;damaged.pop_back();expect(@"truncatedClosed",!t::Decode(damaged,decoded)&&decoded.empty());
+            damaged=bytes;damaged[4]=2;expect(@"futureClosed",!t::Decode(damaged,decoded)&&decoded.empty());
+            std::vector<std::uint8_t> encoded;expect(@"duplicateCodecClosed",!t::Encode({original,original},encoded)&&encoded.empty());
+            expect(@"boundedBytes",bytes.size()==40+t::RecordBytes);
+        } else if (scenario==1) {
+            const auto path=parent(@"concurrent");constexpr unsigned count=8;
+            std::array<t::Reservation,count> results;std::array<std::thread,count> workers;
+            std::atomic<unsigned> ready{0};std::atomic<bool> start{false};
+            try {
+                for(unsigned i=0;i<count;++i)workers[i]=std::thread([&,i]{auto s=t::Store::ForTesting(path);ready.fetch_add(1);
+                    while(!start.load())std::this_thread::yield();results[i]=s.reserve(key(1));});
+            } catch (...) {
+                start.store(true);for(auto& worker:workers)if(worker.joinable())worker.join();throw;
+            }
+            while(ready.load()!=count)std::this_thread::yield();start.store(true);
+            for(auto& worker:workers)worker.join();
+            const auto won=std::count(results.begin(),results.end(),t::Reservation::Reserved);
+            expect(@"oneConcurrentReservation",won==1);
+            expect(@"othersRefusedOrBusy",std::all_of(results.begin(),results.end(),[](auto value){return value==t::Reservation::Reserved
+                ||value==t::Reservation::AlreadyReserved||value==t::Reservation::Busy;}));
+            auto final=t::Store::ForTesting(path);expect(@"freshReadStillReserved",final.reserve(key(1))==t::Reservation::AlreadyReserved);
+            t::detail::FD lock(::open((path+"/NativeModelingRequests/lock").c_str(),O_RDWR|O_CLOEXEC|O_NOFOLLOW));
+            if(lock.value<0||::flock(lock.value,LOCK_EX|LOCK_NB)!=0)throw std::runtime_error("Probe lock");
+            expect(@"externalFileLockBusy",final.reserve(key(2))==t::Reservation::Busy);
+            expect(@"externalReadLockBusy",final.lookup(key(1))==t::Presence::Busy);
+            ::flock(lock.value,LOCK_UN);
+            expect(@"unlockAdmitsNewRequest",final.reserve(key(2))==t::Reservation::Reserved);
+        } else if (scenario==2) {
+            const auto path=parent(@"capacity");auto store=t::Store::ForTesting(path);bool all=true;
+            for(unsigned i=1;i<=t::MaximumRecords;++i)all=store.reserve(key(i))==t::Reservation::Reserved&&all;
+            expect(@"all128Retained",all);
+            const auto before=read(path+"/NativeModelingRequests/records");
+            expect(@"capacityRefuses129",store.reserve(key(129))==t::Reservation::Capacity);
+            expect(@"capacityDoesNotEvict",before==read(path+"/NativeModelingRequests/records"));
+            auto reopened=t::Store::ForTesting(path);
+            expect(@"oldestNeverReadmitted",reopened.reserve(key(1))==t::Reservation::AlreadyReserved);
+            expect(@"newestNeverReadmitted",reopened.reserve(key(128))==t::Reservation::AlreadyReserved);
+            expect(@"bounded128Bytes",before.size()==t::MaximumBytes);
+        } else if (scenario==3) {
+            const std::array<t::Store::Fault,4> faults{t::Store::Fault::AfterPartialPendingWrite,t::Store::Fault::AfterPendingSync,
+                t::Store::Fault::AfterRename,t::Store::Fault::AfterDirectorySync};
+            for(unsigned i=0;i<faults.size();++i){
+                const auto path=parent([NSString stringWithFormat:@"fault%u",i]);auto store=t::Store::ForTesting(path);
+                if(store.reserve(key(1))!=t::Reservation::Reserved)throw std::runtime_error("Fault fixture initialization");
+                store.setNextFault(faults[i]);
+                expect([NSString stringWithFormat:@"uncertain%u",i],store.reserve(key(2))==t::Reservation::Unavailable);
+                auto fresh=t::Store::ForTesting(path);
+                expect([NSString stringWithFormat:@"neverReadmits%u",i],fresh.reserve(key(2))==
+                    (i<2?t::Reservation::Unavailable:t::Reservation::AlreadyReserved));
+                expect([NSString stringWithFormat:@"priorReservation%u",i],fresh.lookup(key(1))==
+                    (i<2?t::Presence::Unavailable:t::Presence::Match));
+            }
+            const auto initial=parent(@"uncertainInitialization");auto fresh=t::Store::ForTesting(initial);
+            fresh.setNextFault(t::Store::Fault::AfterPendingSync);
+            expect(@"initialFailureClosed",fresh.reserve(key(1))==t::Reservation::Unavailable);
+            auto later=t::Store::ForTesting(initial);
+            expect(@"initialFailureNotFreshStore",later.reserve(key(1))==t::Reservation::Unavailable);
+        } else if (scenario==4) {
+            for(unsigned issue=0;issue<6;++issue){
+                const auto path=parent([NSString stringWithFormat:@"invalid%u",issue]);auto store=t::Store::ForTesting(path);
+                if(store.reserve(key(1))!=t::Reservation::Reserved)throw std::runtime_error("Invalid fixture initialization");
+                const auto records=path+"/NativeModelingRequests/records";
+                if(issue==0){auto bytes=read(records);bytes.back()^=1;overwrite(records,bytes);}
+                if(issue==1&&::unlink(records.c_str())!=0)throw std::runtime_error("Remove owned test catalog");
+                if(issue==2){if(::rename(records.c_str(),(records+".retained").c_str())!=0
+                    ||::symlink("records.retained",records.c_str())!=0)throw std::runtime_error("Symlink test catalog");}
+                if(issue==3&&::chmod(records.c_str(),0644)!=0)throw std::runtime_error("Permission test catalog");
+                if(issue==4){std::vector<std::uint8_t> huge(t::MaximumBytes+1,0);overwrite(records,huge);}
+                if(issue==5&&::unlink((path+"/NativeModelingRequests/lock").c_str())!=0)throw std::runtime_error("Remove owned test marker");
+                auto fresh=t::Store::ForTesting(path);
+                expect([NSString stringWithFormat:@"malformedAdmission%u",issue],fresh.reserve(key(2))==t::Reservation::Unavailable);
+                expect([NSString stringWithFormat:@"malformedLookup%u",issue],fresh.lookup(key(1))==t::Presence::Unavailable);
+            }
+        } else if (scenario==5) {
+            const auto path=parent(@"privacy");auto store=t::Store::ForTesting(path);
+            expect(@"reserved",store.reserve(key(1))==t::Reservation::Reserved);
+            const auto root=path+"/NativeModelingRequests";
+            t::detail::FD directory(::open(root.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
+            t::detail::FD lock(::openat(directory.value,"lock",O_RDONLY|O_CLOEXEC|O_NOFOLLOW));
+            t::detail::FD records(::openat(directory.value,"records",O_RDONLY|O_CLOEXEC|O_NOFOLLOW));
+            expect(@"directory0700",t::detail::Owned(directory.value,true,0700));
+            expect(@"lock0600",t::detail::Owned(lock.value,false,0600));
+            expect(@"records0600",t::detail::Owned(records.value,false,0600));
+            expect(@"noPendingAfterAcknowledgement",t::detail::Absent(directory.value,"pending"));
+            expect(@"hardLinkRefused",::link((root+"/records").c_str(),(root+"/extra").c_str())==0
+                &&store.lookup(key(1))==t::Presence::Unavailable);
+            const auto symlinkParent=parent(@"symlinkRoot");
+            expect(@"rootSymlinkRefused",::symlink(root.c_str(),(symlinkParent+"/NativeModelingRequests").c_str())==0
+                &&t::Store::ForTesting(symlinkParent).reserve(key(2))==t::Reservation::Unavailable);
+        } else expect(@"knownScenario",false);
+    } catch (...) { checks[@"fixtureCompletedWithoutException"]=@NO; }
+    [NSFileManager.defaultManager removeItemAtURL:temporary error:nil];
+    return checks;
+}
+#endif
 
 @interface Core3DViewController () {
     BOOL _isSetuped;
@@ -4401,6 +4619,218 @@ static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parame
     [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
     [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
     return result;
+}
+
+// Fixture-only creation: one real OCAF command contains geometry, recipe and
+// record. This does NOT exercise or enable production AI receipt integration.
+- (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind {
+    if (![NSThread isMainThread] || kind < 0 || kind > 2) return nil;
+    namespace r = core3d::receipt;
+    Handle(OcctDocument) owner;
+    NSURL *base = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSString *saved = nil;
+    NSDictionary *result = nil;
+    try {
+        owner = new OcctDocument(); owner->InitDoc();
+        const auto document = owner->Document();
+        if (document.IsNull()) throw Standard_Failure("Receipt fixture document");
+        // Existing ordinary shape and saved group predate this instruction.
+        // Clearing only fixture setup history leaves one real receipt Undo.
+        document->NewCommand();
+        Handle(AIS_Shape) guardAIS = new AIS_Shape(BRepPrimAPI_MakeBox(gp_Pnt(200,0,0),1,2,3).Shape());
+        const auto guardLabel = owner->AddShape(guardAIS,OcctGeometryRepresentation::BRep);
+        OcctSavedGroup guardGroup; guardGroup.identifier=OcctDocument::NewSavedGroupIdentifier();
+        guardGroup.name=TCollection_ExtendedString("Receipt guard group"); guardGroup.members={guardLabel};
+        if (guardLabel.IsNull() || !owner->SetObjectNameForLabel(guardLabel,TCollection_ExtendedString("Receipt guard"))
+            || !owner->StageSavedGroups({guardGroup}) || !document->CommitCommand())
+            throw Standard_Failure("Receipt guard fixture");
+        document->ClearUndos();
+        OcctObjectNameState guardBefore; OcctSavedGroupState groupsBefore;
+        NSDictionary *preservation=Core3DReceiptPreservation(owner);
+        if (!preservation || !owner->CaptureObjectNameStateForLabel(guardLabel,guardBefore)
+            || !owner->CaptureSavedGroups(groupsBefore)) throw Standard_Failure("Receipt guard capture");
+        auto preserved = [&]() {
+            OcctObjectNameState guardAfter; OcctSavedGroupState groupsAfter;
+            return owner->CaptureObjectNameStateForLabel(guardLabel,guardAfter)
+                && guardBefore.IsEqual(guardAfter) && owner->CaptureSavedGroups(groupsAfter)
+                && groupsBefore.IsEqual(groupsAfter)
+                && [preservation isEqual:Core3DReceiptPreservation(owner)];
+        };
+        TopoDS_Shape shape;
+        core3d::profile::Parameters profile; profile.metersPerUnit = 0.001;
+        profile.definition.depth = 30;
+        core3d::enclosure::Parameters enclosure; enclosure.metersPerUnit = 0.001;
+        if (kind == 0) {
+            profile.definition.points = {{0,0},{100,0},{100,60},{0,60}};
+            shape = BRepPrimAPI_MakeBox(100,60,30).Shape();
+        } else if (kind == 1) {
+            profile.definition.circle = core3d::ProfileCircularSection{gp_Pnt2d(0,0),20,0};
+            shape = BRepPrimAPI_MakeCylinder(20,30).Shape();
+        } else {
+            core3d::EnclosureSolidResult built;
+            if (!core3d::BuildEnclosureSolidGeometry(enclosure.definition,
+                std::make_shared<std::atomic_bool>(false), built))
+                throw Standard_Failure("Receipt enclosure fixture");
+            shape = built.solid;
+        }
+        const std::string feature = NSUUID.UUID.UUIDString.UTF8String;
+        r::Record record;
+        record.operation = kind == 2 ? r::Operation::CreateEnclosure : r::Operation::CreateAssembly;
+        record.key.accountScope.fill(1); record.key.command.fill(2); record.key.execution.fill(3);
+        NSString *request = NSUUID.UUID.UUIDString;
+        if (!r::ParseUUID(owner->DocumentIdentifier(), record.key.document)
+            || !r::ParseUUID(request.UTF8String, record.key.request))
+            throw Standard_Failure("Receipt fixture key");
+        r::Catalog before;
+        if (r::Read(document,before) != r::ReadStatus::Absent)
+            throw Standard_Failure("Receipt fixture nonempty catalog");
+        document->NewCommand();
+        Handle(AIS_Shape) ais = new AIS_Shape(shape);
+        const auto label = owner->AddShape(ais,OcctGeometryRepresentation::BRep);
+        if (label.IsNull() || !(kind == 2
+            ? core3d::enclosure::Stage(document,label,enclosure,feature)
+            : core3d::profile::Stage(document,label,profile,feature)))
+            throw Standard_Failure("Receipt fixture recipe");
+        r::Effect effect;
+        if (!r::CaptureEffect(owner,label,effect)) throw Standard_Failure("Receipt fixture effect");
+        record.effects = {effect};
+        if (!r::Stage(owner,record,before) || !document->CommitCommand())
+            throw Standard_Failure("Receipt fixture commit");
+        const bool stagePreserved = preserved();
+        const bool oneUndo = document->GetAvailableUndos() == 1;
+        const auto first = r::InspectDocument(owner,record.key);
+        const bool initiallyCurrent = first.presence == r::DocumentPresence::Present && first.effectsCurrent;
+        const bool undone = document->Undo();
+        r::Catalog absent; const bool undoAbsent = r::Read(document,absent) == r::ReadStatus::Absent;
+        TDF_LabelSequence roots; XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(roots);
+        const bool undoGuardOnly = roots.Length()==1 && roots.Value(1)==guardLabel;
+        const bool undoPreserved = preserved();
+        const bool redone = document->Redo();
+        const auto restored = r::InspectDocument(owner,record.key);
+        const bool redoCurrent = restored.presence == r::DocumentPresence::Present && restored.effectsCurrent;
+        const bool redoPreserved = preserved();
+        r::Catalog catalog;
+        if (r::Read(document,catalog) != r::ReadStatus::Valid) throw Standard_Failure("Receipt fixture readback");
+        // Codec rejection must not leave partially decoded evidence.
+        auto damaged = catalog.bytes; damaged.back() ^= 1;
+        std::vector<r::Record> decoded;
+        const bool checksumRejected = r::Decode(damaged,decoded) == r::ReadStatus::Malformed && decoded.empty();
+        damaged = catalog.bytes; damaged.pop_back();
+        const bool truncatedRejected = r::Decode(damaged,decoded) == r::ReadStatus::Malformed && decoded.empty();
+        auto future = catalog.bytes; future[4] = 2;
+        const bool futureUnavailable = r::Decode(future,decoded) == r::ReadStatus::Unsupported && decoded.empty();
+        std::vector<std::uint8_t> encoded;
+        const bool duplicateRejected = !r::Encode({record,record},encoded) && encoded.empty();
+        // Failed staging is caller-aborted in the same command; existing bytes survive.
+        auto next = record; next.key.request[0] ^= 0x80;
+        document->NewCommand();
+        if (!r::Stage(owner,next,catalog)) throw Standard_Failure("Receipt abort fixture stage");
+        document->AbortCommand();
+        r::Catalog afterAbort;
+        const bool abortRestored = r::Read(document,afterAbort) == r::ReadStatus::Valid && afterAbort.bytes == catalog.bytes;
+        const bool abortPreserved = preserved();
+        // Reserved catalog identifiers fail closed in every forbidden location.
+        bool placementRejected = true;
+        for (int placement=0;placement<4;++placement) {
+            document->NewCommand();
+            const auto root=document->GetData()->Root();
+            TDF_Label invalid;
+            if (placement==0) invalid=root;
+            else if (placement==1) invalid=document->Main();
+            else if (placement==2) invalid=catalog.label.FindChild(5000,Standard_True);
+            else invalid=root.FindChild(catalog.label.Tag()+1,Standard_True);
+            TDataStd_Integer::Set(invalid,r::SchemaID(),1);
+            r::Catalog rejected;
+            placementRejected = placementRejected && r::Read(document,rejected)==r::ReadStatus::Malformed
+                && rejected.label.IsNull() && rejected.bytes.empty();
+            document->AbortCommand();
+            r::Catalog restoredCatalog;
+            placementRejected = placementRejected && r::Read(document,restoredCatalog)==r::ReadStatus::Valid
+                && restoredCatalog.bytes==catalog.bytes && preserved();
+        }
+        const std::string path = owner->save(base.path.UTF8String);
+        if (path.empty()) throw Standard_Failure("Receipt fixture save");
+        saved = [NSString stringWithUTF8String:path.c_str()];
+        NSData *data = [NSData dataWithContentsOfFile:saved];
+        if (!data) throw Standard_Failure("Receipt fixture bytes");
+        result = @{@"data":data, @"requestID":request,
+            @"entityID":[NSString stringWithUTF8String:owner->EntityIdentifierForLabel(label).c_str()],
+            @"geometrySHA":[NSString stringWithUTF8String:r::Hex(effect.geometry).c_str()],
+            @"stateSHA":[NSString stringWithUTF8String:r::Hex(effect.state).c_str()],
+            @"oneUndo":@(oneUndo), @"initiallyCurrent":@(initiallyCurrent),
+            @"undoAbsent":@(undone && undoAbsent && undoGuardOnly), @"redoCurrent":@(redone && redoCurrent),
+            @"abortRestored":@(abortRestored), @"checksumRejected":@(checksumRejected),
+            @"truncatedRejected":@(truncatedRejected), @"futureUnavailable":@(futureUnavailable),
+            @"duplicateRejected":@(duplicateRejected), @"preservation":preservation,
+            @"stagePreserved":@(stagePreserved), @"undoPreserved":@(undoPreserved),
+            @"redoPreserved":@(redoPreserved), @"abortPreserved":@(abortPreserved),
+            @"placementRejected":@(placementRejected)};
+    } catch (...) { result = nil; }
+    try {
+        if (!owner.IsNull() && !owner->Document().IsNull()) {
+            const auto document = owner->Document();
+            if (document->HasOpenCommand()) document->AbortCommand();
+            const auto application = Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!application.IsNull()) application->Close(document);
+        }
+    } catch (...) {}
+    [NSFileManager.defaultManager removeItemAtURL:base error:nil];
+    if (saved) [NSFileManager.defaultManager removeItemAtPath:saved error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:[base.path stringByAppendingString:@".xbf"] error:nil];
+    return result;
+}
+
+// Read-only DEBUG visibility into unverified component evidence. Public verified
+// reconciliation remains unavailable, including for current matching effects.
+- (NSDictionary *)debugInspectNativeReceipt:(NSString *)requestID conflict:(BOOL)conflict {
+    namespace r = core3d::receipt;
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer)
+        return @{@"presence":@"unavailable",@"effectsCurrent":@NO,@"verified":@"unavailable"};
+    const auto owner = GLController.viewer->getDocument();
+    r::Catalog catalog; r::Inspection inspected;
+    r::UUID request;
+    if (!owner.IsNull() && r::ParseUUID(requestID.UTF8String,request)) {
+        const auto status = r::Read(owner->Document(),catalog);
+        if (status == r::ReadStatus::Absent) inspected.presence = r::DocumentPresence::Absent;
+        else if (status == r::ReadStatus::Malformed) inspected.presence = r::DocumentPresence::Conflict;
+        else if (status == r::ReadStatus::Valid) {
+            inspected.presence = r::DocumentPresence::Absent;
+            for (const auto& record:catalog.records) if (record.key.request == request) {
+                auto key = record.key; if (conflict) key.command[0] ^= 1;
+                inspected = r::InspectDocument(owner,key); break;
+            }
+        }
+    }
+    NSString *presence = @"unavailable";
+    switch (inspected.presence) {
+        case r::DocumentPresence::Absent: presence = @"absent"; break;
+        case r::DocumentPresence::Present: presence = @"present"; break;
+        case r::DocumentPresence::Conflict: presence = @"conflict"; break;
+        case r::DocumentPresence::Unavailable: break;
+    }
+    NSMutableDictionary *result = [@{@"presence":presence,@"effectsCurrent":@(inspected.effectsCurrent),
+        @"verified":r::QueryVerifiedReceipt() == r::VerifiedQueryStatus::Unavailable ? @"unavailable" : @"invalid"} mutableCopy];
+    if (NSDictionary *preservation=Core3DReceiptPreservation(owner)) result[@"preservation"]=preservation;
+    if (inspected.effects.size() == 1) {
+        result[@"geometrySHA"] = [NSString stringWithUTF8String:r::Hex(inspected.effects[0].geometry).c_str()];
+        result[@"stateSHA"] = [NSString stringWithUTF8String:r::Hex(inspected.effects[0].state).c_str()];
+    }
+    return result;
+}
+
+- (void)debugNativeTombstoneProbe:(NSInteger)scenario completion:(void (^)(NSDictionary *))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
+        NSDictionary *result = Core3DRunNativeTombstoneProbe(scenario);
+        dispatch_async(dispatch_get_main_queue(), ^{completion(result);});
+    });
+}
+- (BOOL)debugNativeTombstoneRejectsMainThread {
+    core3d::tombstone::Key key;
+    key.accountScope.fill(1);key.document.fill(2);key.request.fill(3);key.command.fill(4);key.execution.fill(5);
+    return [NSThread isMainThread]
+        && core3d::tombstone::Store::ForTesting("/unused-by-main-thread-refusal").reserve(key)
+            == core3d::tombstone::Reservation::Unavailable;
 }
 
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {
@@ -9126,6 +9556,37 @@ static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parame
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion {
     [self core3d_executeEnclosure:definition context:context rebuild:NO completion:completion];
+}
+
+- (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{completion(Core3DProfileConstructionResultRejected);});
+        return;
+    }
+    if (![self isModelingPlanningContextCurrent:context]
+        || ![definition isKindOfClass:Core3DProfileDefinition.class]
+        || definition.metersPerUnit != context.scene.metersPerUnit) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    // The existing typed creator copies validated numeric profile/curve values
+    // into its private worker. Consume the original lease before that admission;
+    // failure never reconstructs authority from a serialized scene or plan.
+    context->_planningConsumed = YES;
+    _modelingConstructionContext = context;
+    __weak Core3DViewController *weakSelf = self;
+    __weak Core3DModelingPlanningContext *weakContext = context;
+    [self createProfileWithDefinition:definition expected:context.scene
+        completion:^(Core3DProfileConstructionResult result) {
+            Core3DViewController *owner = weakSelf;
+            Core3DModelingPlanningContext *finished = weakContext;
+            if (finished) finished->_planningRetired = YES;
+            if (owner && owner->_modelingConstructionContext == finished)
+                owner->_modelingConstructionContext = nil;
+            completion(result);
+        }];
 }
 
 - (void)rebuildEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition

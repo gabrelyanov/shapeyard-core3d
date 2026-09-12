@@ -1059,6 +1059,14 @@ typedef struct {
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createEnclosure(definition:context:completion:));
+//! Create one stored profile through existing polygon/circle/line-arc
+//! Extrude/Revolve admission. Unit must exactly match the captured document;
+//! no caller construction frame is admitted. Selected-profile rebuild limits
+//! do not narrow this creation API. Same one-use lease/Stop/history semantics.
+- (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createProfile(definition:context:completion:));
 //! Target is exclusively the selected enclosure captured by this exact lease.
 //! Definition must preserve its construction frame and declared native unit.
 - (void)rebuildEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
@@ -1498,6 +1506,13 @@ typedef struct {
 //! Standalone BinXCAF fixture whose XCAF document length unit is exactly one
 //! meter per model unit. Used to prove unit metadata persistence end to end.
 - (NSData *_Nullable)debugLegacyNoLengthUnitMirrorBinXCAFFixtureData;
+- (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind
+    NS_SWIFT_NAME(debugNativeReceiptFixture(_:));
+- (NSDictionary *)debugInspectNativeReceipt:(NSString *)requestID conflict:(BOOL)conflict
+    NS_SWIFT_NAME(debugInspectNativeReceipt(_:conflict:));
+- (void)debugNativeTombstoneProbe:(NSInteger)scenario completion:(void (^)(NSDictionary *result))completion
+    NS_SWIFT_NAME(debugNativeTombstoneProbe(_:completion:));
+- (BOOL)debugNativeTombstoneRejectsMainThread;
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData;
 //! Standalone fixture: saved profile binds its root but retains a different original unit.
 - (NSData *_Nullable)debugUnitStaleProfileBinXCAFFixtureData;
