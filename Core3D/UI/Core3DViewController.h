@@ -910,6 +910,11 @@ typedef struct {
 //! Release the latest issued report's retained source without changing the
 //! document. Foreign or superseded reports cannot release another request.
 - (void)discardMeshContactReport:(Core3DMeshContactReport *)report;
+//! Read-only spatial inspection of an exact current owner-issued pair.
+//! Negative/out-of-range indices, stale and foreign reports are rejected.
+- (nullable Core3DMeshContactInspection *)makeMeshContactInspectionForReport:
+    (Core3DMeshContactReport *)report pairIndex:(NSInteger)pairIndex
+    NS_SWIFT_NAME(makeMeshContactInspection(report:pairIndex:));
 #if DEBUG
 //! One-shot observations on main around the next real native contact request.
 - (void)debugSetNextMeshContactAfterCaptureHook:(void (^_Nullable)(void))afterCapture

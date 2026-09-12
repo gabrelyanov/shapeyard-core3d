@@ -27,6 +27,10 @@ struct ContactSourceCapture {
     std::vector<Triangle> triangles;
     std::array<double,12> facePlacement{};
     std::array<double,16> worldFromObject{};
+    // Exact native recentering applied before the published occurrence matrix.
+    std::array<double,3> sourceOrigin{};
+    // Exact real-world length of a document coordinate unit, from the native publication.
+    double metersPerUnit=0;
     int faceOrientation=0;
     std::vector<Point> storedNodes;
     // Original OCCT one-based indices. Public pairs remain zero-based triangle
@@ -42,6 +46,8 @@ inline bool SameContactSource(const ContactSourceCapture& a,
         || x.documentGeneration!=y.documentGeneration
         || x.modelRevision!=y.modelRevision || x.geometryRevision!=y.geometryRevision
         || a.documentTime!=b.documentTime || a.storedNodeCount!=b.storedNodeCount
+        || std::bit_cast<std::uint64_t>(a.metersPerUnit)
+            !=std::bit_cast<std::uint64_t>(b.metersPerUnit)
         || a.storedNodes.size()!=b.storedNodes.size()
         || a.triangles.size()!=b.triangles.size()
         || a.faceOrientation!=b.faceOrientation
@@ -49,6 +55,9 @@ inline bool SameContactSource(const ContactSourceCapture& a,
     for (std::size_t i=0;i<a.facePlacement.size();++i)
         if (std::bit_cast<std::uint64_t>(a.facePlacement[i])
             !=std::bit_cast<std::uint64_t>(b.facePlacement[i])) return false;
+    for (std::size_t i=0;i<a.sourceOrigin.size();++i)
+        if (std::bit_cast<std::uint64_t>(a.sourceOrigin[i])
+            !=std::bit_cast<std::uint64_t>(b.sourceOrigin[i])) return false;
     for (std::size_t i=0;i<a.worldFromObject.size();++i)
         if (std::bit_cast<std::uint64_t>(a.worldFromObject[i])
             !=std::bit_cast<std::uint64_t>(b.worldFromObject[i])) return false;

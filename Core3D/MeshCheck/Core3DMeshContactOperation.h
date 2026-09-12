@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "Core3DSceneSnapshot.h"
 NS_ASSUME_NONNULL_BEGIN
 
 // Diagnostic outcomes are explicit. Only complete reports expose contact pairs.
@@ -39,6 +40,25 @@ NS_SWIFT_SENDABLE
 // This immutable report diagnoses within one stored mesh, not other objects,
 // manifoldness, physical wall suitability, collision or general printability.
 // Non-complete results expose zero counts and an empty pair list.
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+// Immutable detached display geometry from one owner-validated contact pair.
+// It grants no model editing/selection authority. Camera publications are main
+// thread only and carry no geometry. An existing inspection is a historical
+// view; callers must revalidate its report before presenting after model edits.
+@interface Core3DMeshContactInspection : NSObject
+@property(nonatomic, readonly, strong) Core3DSceneSnapshot *scene;
+@property(nonatomic, readonly, strong) Core3DScenePresentationOverlaySnapshot *overlay;
+@property(nonatomic, readonly) NSUInteger firstTriangle;
+@property(nonatomic, readonly) NSUInteger secondTriangle;
+// Radians; finite yaw +/-1e6, pitch +/-1.5, zoom .25...16. Zoom 1 fits the
+// requested bounds with margin. Pixel dimensions must each be 1...16384.
+- (nullable Core3DSceneFrameSnapshot *)frameWithYaw:(double)yaw
+    pitch:(double)pitch zoom:(double)zoom focusPair:(BOOL)focusPair
+    viewportSize:(simd_uint2)viewportSize
+    NS_SWIFT_NAME(frame(yaw:pitch:zoom:focusPair:viewportSize:));
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end

@@ -35,4 +35,9 @@ typedef core3d::meshcheck::ContactSourceStatus (^Core3DMeshContactValidate)(
 //! thread when the immutable report is released; owner work must go to main.
 - (void)core3d_setReleaseHandler:(void (^)(void))handler;
 @end
+// Copies only bounded immutable coordinates into renderer-neutral display DTOs.
+@interface Core3DMeshContactInspection (Private)
+- (nullable instancetype)initWithSource:(const core3d::meshcheck::ContactSourceCapture&)source
+    firstTriangle:(NSUInteger)firstTriangle secondTriangle:(NSUInteger)secondTriangle;
+@end
 NS_ASSUME_NONNULL_END

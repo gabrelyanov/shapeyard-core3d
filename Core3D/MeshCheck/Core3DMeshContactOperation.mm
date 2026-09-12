@@ -239,3 +239,190 @@ NSOperationQueue *MeshContactQueue() {
     if(completion) completion(report);
 }
 @end
+
+// Contact inspection owns copied renderer-neutral display values. No OCCT,
+// document owner, diagnostic reservation, or editing capability escapes here.
+#import "../Viewport/Core3DSceneSnapshotFactory.hpp"
+#include "../Scene/SceneSnapshot.hpp"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace {
+using namespace core3d::scene;
+void ContactInclude(Bounds3d& bounds,const Point& point) {
+    if(!bounds.valid) {
+        bounds.minimum={point[0],point[1],point[2]};
+        bounds.maximum=bounds.minimum;bounds.valid=true;return;
+    }
+    bounds.minimum={std::min(bounds.minimum.x,point[0]),std::min(bounds.minimum.y,point[1]),std::min(bounds.minimum.z,point[2])};
+    bounds.maximum={std::max(bounds.maximum.x,point[0]),std::max(bounds.maximum.y,point[1]),std::max(bounds.maximum.z,point[2])};
+}
+Double3 ContactCenter(const Bounds3d& b) {
+    return {b.minimum.x+(b.maximum.x-b.minimum.x)*.5,
+        b.minimum.y+(b.maximum.y-b.minimum.y)*.5,
+        b.minimum.z+(b.maximum.z-b.minimum.z)*.5};
+}
+double ContactRadius(const Bounds3d& b) {
+    return std::hypot(b.maximum.x-b.minimum.x,
+        b.maximum.y-b.minimum.y,b.maximum.z-b.minimum.z)*.5;
+}
+bool ContactCamera(const Bounds3d& full,const Bounds3d& pair,double yaw,
+    double pitch,double zoom,bool focusPair,simd_uint2 viewport,CameraSnapshot& camera) {
+    if(!std::isfinite(yaw)||!std::isfinite(pitch)||!std::isfinite(zoom)
+        ||std::abs(yaw)>1e6||std::abs(pitch)>1.5||zoom<.25||zoom>16
+        ||viewport.x==0||viewport.y==0||viewport.x>16384||viewport.y>16384) return false;
+    const auto& bounds=focusPair?pair:full;
+    camera.projection=Projection::Orthographic;
+    camera.center=ContactCenter(bounds);
+    const double radius=std::max(ContactRadius(bounds),1e-5);
+    const double fullRadius=std::max(ContactRadius(full),1e-5);
+    camera.aspect=double(viewport.x)/double(viewport.y);
+    camera.viewportPixels={viewport.x,viewport.y};
+    camera.orthographicHeight=2.4*radius/std::min(1.0,camera.aspect)/zoom;
+    camera.verticalFovRadians=0.7853981633974483;
+    // Keep the entire context inside the depth interval even while pair-fit
+    // moves the camera center away from the full model center.
+    const double distance=8*fullRadius+1;
+    camera.eye={camera.center.x+distance*std::cos(pitch)*std::sin(yaw),
+        camera.center.y+distance*std::sin(pitch),
+        camera.center.z+distance*std::cos(pitch)*std::cos(yaw)};
+    camera.up={0,1,0};camera.nearPlane=.001;camera.farPlane=distance+4*fullRadius+2;
+    return true;
+}
+}
+
+@implementation Core3DMeshContactInspection {
+    std::string _inspectionPublication;
+    core3d::scene::Bounds3d _inspectionBounds;
+    core3d::scene::Bounds3d _inspectionPairBounds;
+    uint64_t _inspectionFrameRevision;
+}
+- (instancetype)initWithSource:(const ContactSourceCapture&)source
+    firstTriangle:(NSUInteger)firstTriangle secondTriangle:(NSUInteger)secondTriangle {
+    if(!NSThread.isMainThread || source.triangles.empty() || source.triangles.size()>20000
+        || firstTriangle>=source.triangles.size() || secondTriangle>=source.triangles.size()
+        || firstTriangle==secondTriangle) return nil;
+    self=[super init];if(!self)return nil;
+    try {
+        using namespace core3d::scene;
+        std::vector<Triangle> world;world.reserve(source.triangles.size());
+        Bounds3d worldBounds;
+        for(const auto& triangle:source.triangles) {
+            Triangle transformed;
+            for(int corner=0;corner<3;++corner) {
+                const auto& p=triangle[corner];Point local{};
+                for(int row=0;row<3;++row) {
+                    local[row]=source.facePlacement[row*4]*p[0]
+                        +source.facePlacement[row*4+1]*p[1]
+                        +source.facePlacement[row*4+2]*p[2]
+                        +source.facePlacement[row*4+3]-source.sourceOrigin[row];
+                }
+                for(int row=0;row<3;++row) {
+                    transformed[corner][row]=source.worldFromObject[row]*local[0]
+                        +source.worldFromObject[4+row]*local[1]
+                        +source.worldFromObject[8+row]*local[2]+source.worldFromObject[12+row];
+                    if(!std::isfinite(transformed[corner][row]))return nil;
+                }
+                ContactInclude(worldBounds,transformed[corner]);
+            }
+            world.push_back(transformed);
+        }
+        const auto center=ContactCenter(worldBounds);
+        const double radius=ContactRadius(worldBounds);
+        if(!std::isfinite(radius)||radius<=0)return nil;
+        const double scale=1/radius;
+        if(!std::isfinite(scale)||scale<=0)return nil;
+        // Normalize in Double before Float conversion. The detached diagnostic
+        // geometry never feeds the exact intersection predicate or saved model.
+        for(std::size_t i=0;i<world.size();++i)for(auto& p:world[i]) {
+            p={(p[0]-center.x)*scale,(p[1]-center.y)*scale,(p[2]-center.z)*scale};
+            for(double value:p)if(!std::isfinite(value))return nil;
+            ContactInclude(_inspectionBounds,p);
+            if(i==firstTriangle||i==secondTriangle)ContactInclude(_inspectionPairBounds,p);
+        }
+        SceneSnapshot scene;
+        scene.publicationSourceIdentifier=NSUUID.UUID.UUIDString.UTF8String;
+        scene.revisions={1,1,1,1,1};
+        // One normalized display unit spans radius document units. Preserve
+        // the exact native publication's physical scale despite recentering;
+        // this detached read-only scene does not authorize model edits/export.
+        if(!std::isfinite(source.metersPerUnit)||source.metersPerUnit<=0)return nil;
+        scene.metersPerUnit=source.metersPerUnit*radius;
+        if(!std::isfinite(scene.metersPerUnit)||scene.metersPerUnit<=0)return nil;
+        if(!ContactCamera(_inspectionBounds,_inspectionPairBounds,.65,.4,1,false,
+            (simd_uint2){1024,1024},scene.camera))return nil;
+        const Float4 colors[3]={{.52f,.55f,.60f,1},{1,.12f,.16f,1},{.04f,.86f,1,1}};
+        const char *names[3]={"Mesh context","First intersecting triangle","Second intersecting triangle"};
+        for(int piece=0;piece<3;++piece) {
+            MeshSnapshot mesh;mesh.definitionIdentifier="contact-piece-"+std::to_string(piece);
+            mesh.geometryRevision=1;
+            for(std::size_t i=0;i<world.size();++i) {
+                const bool include=piece==0?(i!=firstTriangle&&i!=secondTriangle)
+                    :i==(piece==1?firstTriangle:secondTriangle);
+                if(!include)continue;
+                // Assess the actual Float vertices the renderer will receive.
+                // A native nondegenerate triangle can collapse after world
+                // placement/normalization/Float conversion at extreme scale
+                // ratios. Reject the inspection rather than invent a normal
+                // for geometry that the display cannot faithfully represent.
+                Triangle triangle;
+                for(int corner=0;corner<3;++corner)for(int axis=0;axis<3;++axis)
+                    triangle[corner][axis]=double(float(world[i][corner][axis]));
+                const Point u={triangle[1][0]-triangle[0][0],triangle[1][1]-triangle[0][1],triangle[1][2]-triangle[0][2]};
+                const Point v={triangle[2][0]-triangle[0][0],triangle[2][1]-triangle[0][1],triangle[2][2]-triangle[0][2]};
+                Point n={u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]};
+                const double length=std::hypot(n[0],n[1],n[2]);
+                if(!(length>0)||!std::isfinite(length))return nil;
+                for(auto& value:n)value/=length;
+                for(const auto& p:triangle) {
+                    Vertex vertex;
+                    vertex.positionX=float(p[0]);vertex.positionY=float(p[1]);vertex.positionZ=float(p[2]);
+                    vertex.normalX=float(n[0]);vertex.normalY=float(n[1]);vertex.normalZ=float(n[2]);
+                    // Bounds describe the actual Float publication, including rounding.
+                    ContactInclude(mesh.localBounds,{double(vertex.positionX),double(vertex.positionY),double(vertex.positionZ)});
+                    mesh.indices.push_back(static_cast<std::uint32_t>(mesh.vertices.size()));
+                    mesh.vertices.push_back(vertex);
+                }
+            }
+            if(mesh.vertices.empty())continue;
+            mesh.primitives.push_back({0,static_cast<std::uint32_t>(mesh.indices.size()),0,false});
+            MaterialSnapshot material;material.identifier="contact-material-"+std::to_string(piece);
+            material.baseColor=colors[piece];material.roughness=.85f;material.cullMode=CullMode::None;
+            InstanceSnapshot instance;instance.entityIdentifier="contact-instance-"+std::to_string(piece);
+            instance.meshIndex=static_cast<std::uint32_t>(scene.meshes.size());
+            instance.name=names[piece];instance.selectable=false;instance.selected=false;
+            instance.referenceAxis=ReferenceAxisSnapshot{};
+            instance.primitiveBindings.push_back({static_cast<std::uint32_t>(scene.materials.size()),0,true});
+            scene.materials.push_back(std::move(material));scene.meshes.push_back(std::move(mesh));
+            scene.instances.push_back(std::move(instance));
+        }
+        Core3DSceneSnapshot *publicScene=Core3DCreateSceneSnapshotDTO(scene);
+        if(publicScene==nil)return nil;
+        PresentationOverlaySnapshot overlay;
+        overlay.publicationSourceIdentifier=scene.publicationSourceIdentifier;
+        overlay.baseSnapshotRevision=1;overlay.baseDocumentGeneration=1;
+        overlay.baseModelRevision=1;overlay.basePresentationRevision=1;overlay.overlayRevision=1;
+        Core3DScenePresentationOverlaySnapshot *publicOverlay=Core3DCreateScenePresentationOverlaySnapshotDTO(overlay);
+        if(publicOverlay==nil)return nil;
+        _scene=publicScene;_overlay=publicOverlay;_inspectionPublication=scene.publicationSourceIdentifier;
+        _inspectionFrameRevision=1;_firstTriangle=firstTriangle;_secondTriangle=secondTriangle;
+        return self;
+    }catch(...){return nil;}
+}
+- (Core3DSceneFrameSnapshot *)frameWithYaw:(double)yaw pitch:(double)pitch
+    zoom:(double)zoom focusPair:(BOOL)focusPair viewportSize:(simd_uint2)viewportSize {
+    if(!NSThread.isMainThread||_inspectionFrameRevision==std::numeric_limits<uint64_t>::max())return nil;
+    try {
+        core3d::scene::FrameSnapshot frame;
+        frame.publicationSourceIdentifier=_inspectionPublication;
+        const auto revision=_inspectionFrameRevision+1;
+        frame.revisions={revision,1,1,1,revision};
+        if(!ContactCamera(_inspectionBounds,_inspectionPairBounds,yaw,pitch,zoom,focusPair,
+            viewportSize,frame.camera))return nil;
+        Core3DSceneFrameSnapshot *result=Core3DCreateSceneFrameSnapshotDTO(frame);
+        if(result!=nil)_inspectionFrameRevision=revision;
+        return result;
+    }catch(...){return nil;}
+}
+@end

@@ -3001,6 +3001,8 @@ struct OcctSceneSnapshotBuilder::State {
         std::uint64_t geometryRevision=0;
         OcctGeometryRepresentation representation=OcctGeometryRepresentation::Invalid;
         std::array<double,16> worldFromObject{};
+        std::array<double,3> sourceOrigin{};
+        double metersPerUnit=0;
     };
     using NativeContactSourceMap=std::unordered_map<std::string,NativeContactSource>;
     struct DefinitionRevision {
@@ -3138,6 +3140,8 @@ OcctSceneSnapshotBuilder::CaptureNativeMeshContacts(
         captured.facePlacement=coordinates.facePlacement;
         captured.faceOrientation=coordinates.faceOrientation;
         captured.worldFromObject=source.worldFromObject;
+        captured.sourceOrigin=source.sourceOrigin;
+        captured.metersPerUnit=source.metersPerUnit;
         captured.triangles=std::move(coordinates.triangles);
         captured.storedNodes=std::move(coordinates.storedNodes);
         captured.triangleNodeIDs=std::move(coordinates.triangleNodeIDs);
@@ -5820,7 +5824,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             if (!contactSources->emplace(instance.entityIdentifier,
                 State::NativeContactSource{definition.label,
                     mesh.definitionIdentifier,mesh.geometryRevision,
-                    definition.representation,instance.worldFromObject.values}).second) return {};
+                    definition.representation,instance.worldFromObject.values,
+                    {definition.sourceOrigin.x,definition.sourceOrigin.y,definition.sourceOrigin.z},
+                    aScene.metersPerUnit}).second) return {};
         }
         aNextState.lastFullNativeContactSources=std::move(contactSources);
 

@@ -8276,6 +8276,15 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         ==ContactSourceStatus::Ready && SameContactSource(original,current);
 }
 
+- (Core3DMeshContactInspection *)makeMeshContactInspectionForReport:
+    (Core3DMeshContactReport *)report pairIndex:(NSInteger)pairIndex {
+    if (![self isMeshContactReportCurrent:report] || pairIndex<0
+        || (NSUInteger)pairIndex>=report.unexpectedPairs.count) return nil;
+    Core3DMeshContactPair *pair=report.unexpectedPairs[(NSUInteger)pairIndex];
+    return [[Core3DMeshContactInspection alloc] initWithSource:*_meshContactSource
+        firstTriangle:pair.firstTriangle secondTriangle:pair.secondTriangle];
+}
+
 - (Core3DMeshWindingRepairResult)repairMeshWindingForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
