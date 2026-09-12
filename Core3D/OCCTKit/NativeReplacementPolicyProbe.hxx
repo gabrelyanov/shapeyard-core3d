@@ -21,9 +21,13 @@ inline std::array<bool,8> RunNativeReplacementPolicyProbe() {
                 && !a.BeginManualIntent(&oldDocument,true,false)
                 && !a.BeginReplacement(&oldDocument,true,false);
             a.TransactionBoundary(&candidate); // Isolated candidate is not adoption.
+            a.SelectionBoundary(&candidate); // Provisional interactor installation.
+            a.SelectionBoundary(&oldDocument); // Confirmed restoration installs old modes.
+            const bool stillFenced=a.Valid() && a.OwnsReplacement(*lease)
+                && !a.Capture(&candidate,true,false) && !a.Capture(&oldDocument,true,false);
             const auto end=a.EndReplacement(*lease,&oldDocument,false,true,false);
             const auto after=a.Capture(&oldDocument,true,false);
-            result[0]=fenced && end==ReplacementEnd::Restored && after
+            result[0]=fenced && stillFenced && end==ReplacementEnd::Restored && after
                 && after->opening==before->opening && !(*after==*before);
         }
     }
@@ -31,7 +35,9 @@ inline std::array<bool,8> RunNativeReplacementPolicyProbe() {
         NativeEditAuthority a(nonce); a.Adopt(&oldDocument);
         const auto before=a.Capture(&oldDocument,true,false);
         const auto lease=a.BeginReplacement(&oldDocument,true,false);
-        result[1]=before && lease
+        if (lease) a.SelectionBoundary(&candidate);
+        result[1]=before && lease && a.Valid() && a.OwnsReplacement(*lease)
+            && !a.Capture(&candidate,true,false) && !a.Capture(&oldDocument,true,false)
             && a.EndReplacement(*lease,&candidate,true,true,false)==ReplacementEnd::Adopted
             && !a.Capture(&oldDocument,true,false)
             && !a.Matches(*before,&candidate,true,false)
@@ -80,7 +86,13 @@ inline std::array<bool,8> RunNativeReplacementPolicyProbe() {
             && a.EndReplacement(*lease,&candidate,false,true,false)==ReplacementEnd::Unavailable
             && !a.Valid();
         NativeEditAuthority b(otherNonce); b.Adopt(&oldDocument);
-        result[6]=badRestore && b.DebugExhaustCounter(4)
+        NativeEditAuthority foreign(nonce); foreign.Adopt(&oldDocument);
+        foreign.SelectionBoundary(&candidate); // No owned replacement: still fail closed.
+        NativeEditAuthority missing(nonce); missing.Adopt(&oldDocument);
+        const auto pending=missing.BeginReplacement(&oldDocument,true,false);
+        missing.SelectionBoundary(nullptr); // A null boundary is never legitimate.
+        result[6]=badRestore && !foreign.Valid() && pending && !missing.Valid()
+            && b.DebugExhaustCounter(4)
             && !b.BeginReplacement(&oldDocument,true,false) && !b.Valid();
     }
     {

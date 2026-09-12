@@ -98,7 +98,14 @@ public:
     // capture may be issued between an operation's preview/repair stages.
     void SelectionBoundary(const void* nativeDocument) noexcept {
         if(!OnOwner() || !Valid())return;
-        if(nativeDocument==nullptr || nativeDocument!=active_) {Fail();return;}
+        if(nativeDocument==nullptr) {Fail();return;}
+        // A replacement keeps active_ on the old document until candidate
+        // presentation/interactor installation succeeds. Those same native
+        // selection hooks also run against the provisionally assigned candidate.
+        // The already-owned replacement fences all Capture/Matches calls; its
+        // exact reservation alone may adopt or restore the settled document.
+        // Keep these interactions invalidating without poisoning that owner.
+        if(nativeDocument!=active_ && replacementSerial_==0) {Fail();return;}
         Advance(stamp_.selection);
     }
     // Private native policy only. Begin before accepting a touch tool request,
