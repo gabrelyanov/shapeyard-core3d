@@ -4628,7 +4628,9 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
     namespace r = core3d::receipt;
     Handle(OcctDocument) owner;
     NSURL *base = [NSFileManager.defaultManager.temporaryDirectory
-        URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingString:@".receipt-fixture"]];
+    // OCCT 7.8 TDocStd_PathParser needs a dotted basename to populate Trek.
+    // Preserve the real BinXCAF save path used by existing UUID.suffix fixtures.
     NSString *saved = nil;
     NSDictionary *result = nil;
     try {
@@ -4766,7 +4768,18 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
             @"stagePreserved":@(stagePreserved), @"undoPreserved":@(undoPreserved),
             @"redoPreserved":@(redoPreserved), @"abortPreserved":@(abortPreserved),
             @"placementRejected":@(placementRejected)};
-    } catch (...) { result = nil; }
+    } catch (const Standard_Failure& failure) {
+        // Keep substantive fixture failure visible; nil still fails XCTest.
+        NSString *message = failure.GetMessageString()
+            ? [NSString stringWithUTF8String:failure.GetMessageString()] : nil;
+        message = message ?: @"Native exception without UTF-8 detail";
+        NSLog(@"Native receipt fixture failed (kind %ld): %@", (long)kind,
+            [message substringToIndex:MIN(message.length, (NSUInteger)512)]);
+        result = nil;
+    } catch (...) {
+        NSLog(@"Native receipt fixture failed (kind %ld): unknown exception", (long)kind);
+        result = nil;
+    }
     try {
         if (!owner.IsNull() && !owner->Document().IsNull()) {
             const auto document = owner->Document();
