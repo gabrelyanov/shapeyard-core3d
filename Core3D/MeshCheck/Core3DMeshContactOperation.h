@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
-#import "Core3DSceneSnapshot.h"
+#import <simd/simd.h>
+@class Core3DSceneSnapshot, Core3DSceneFrameSnapshot, Core3DScenePresentationOverlaySnapshot;
 NS_ASSUME_NONNULL_BEGIN
 
 // Diagnostic outcomes are explicit. Only complete reports expose contact pairs.
