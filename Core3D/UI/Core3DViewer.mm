@@ -1832,6 +1832,14 @@ std::optional<StoredEnclosureSnapshot> Core3DViewer::storedEnclosureDefinition(
         result.parameters = state.enclosure.parameters; result.identity = identity;
         result.definitionIdentifier = state.definitionIdentifier;
         result.featureIdentifier = state.enclosure.identifier;
+        const double constructionScale = state.enclosure.parameters.definition.constructionFrame
+            ? state.enclosure.parameters.definition.constructionFrame->values[7] : 1.0;
+        const double authoredScale = state.scalars[7];
+        result.dimensionMetersPerUnit = result.parameters.metersPerUnit
+            * std::abs(constructionScale) * std::abs(authoredScale);
+        if (!std::isfinite(result.dimensionMetersPerUnit) || result.dimensionMetersPerUnit <= 0
+            || !std::isfinite(result.dimensionMetersPerUnit * 1000.0)) return {};
+        result.sourceState = state;
         result.current = state.enclosure.IsCurrent(myDoc->Document(), label)
             && enclosure::HasOnlyMetadataSubshapes(myDoc->Document(), label);
         return result;
@@ -1899,7 +1907,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
     try {
         const auto current = storedEnclosureDefinition(identity, presentationRevision, width, height);
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
-            || current->definitionIdentifier != original.definitionIdentifier) return {};
+            || current->definitionIdentifier != original.definitionIdentifier
+            || current->dimensionMetersPerUnit != original.dimensionMetersPerUnit
+            || !current->sourceState.IsEqual(original.sourceState)) return {};
         std::vector<double> originalValues, currentValues, requestedValues;
         if (!enclosure::Encode(original.parameters, originalValues)
             || !enclosure::Encode(current->parameters, currentValues) || originalValues != currentValues

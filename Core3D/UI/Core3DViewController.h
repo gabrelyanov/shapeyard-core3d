@@ -176,6 +176,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,copy,readonly) NSString *featureIdentifier;
 @property(nonatomic,strong,readonly) Core3DEnclosureDefinition *definition;
+//! Physical metres per definition length along its own axes, including authored
+//! and construction scale. Meaningful for editing only while current is YES.
+//! Pass this same opening snapshot to rebuild; changed authority is rejected.
+@property(nonatomic,readonly) double dimensionMetersPerUnit;
 @property(nonatomic,readonly) BOOL current;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -1399,6 +1403,10 @@ typedef struct {
     NS_SWIFT_NAME(debugEncodedEnclosure(_:));
 + (NSData *_Nullable)debugEnclosureFrameFixtureValues:(NSArray<NSNumber *> *)values state:(NSInteger)state
     NS_SWIFT_NAME(debugEnclosureFrameFixture(values:state:));
+//! DEBUG fixture only: commit implicit transform defaults without notifying the
+//! viewer revision, to prove an opening lease notices exact attribute presence.
+- (BOOL)debugAuthorEnclosureTransformDefaultsWithoutRevision:(NSString *)identifier
+    NS_SWIFT_NAME(debugAuthorEnclosureTransformDefaultsWithoutRevision(_:));
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureCopyOwnershipState;
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureDuplicateCapacityProbe:(NSInteger)mode;
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugEnclosureMirrorCapacityProbe:(NSInteger)mode;

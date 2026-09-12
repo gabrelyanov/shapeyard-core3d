@@ -1073,6 +1073,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         _definitionIdentifier = [[NSString alloc] initWithUTF8String:snapshot.definitionIdentifier.c_str()];
         _featureIdentifier = [[NSString alloc] initWithUTF8String:snapshot.featureIdentifier.c_str()];
         _definition = [[Core3DEnclosureDefinition alloc] initWithNativeParameters:snapshot.parameters];
+        _dimensionMetersPerUnit = snapshot.dimensionMetersPerUnit;
         _current = snapshot.current;
     }
     return self;
@@ -4814,6 +4815,53 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         }
     } catch (...) {}
     return nil;
+}
+
+// DEBUG fixture helper: a real closed OCAF metadata command with deliberately
+// unchanged viewer revision. Numeric placement and geometry remain identical.
+- (BOOL)debugAuthorEnclosureTransformDefaultsWithoutRevision:(NSString *)identifier {
+    if (![NSThread isMainThread] || identifier.length == 0 || identifier.length > 256
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    Handle(TDocStd_Document) document; bool opened = false;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull()) return NO;
+        document = owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return NO;
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(labels);
+        TDF_Label target;
+        for (int i = 1; i <= labels.Length(); ++i)
+            if (owner->EntityIdentifierForLabel(labels.Value(i)) == identifier.UTF8String)
+                target = labels.Value(i);
+        OcctObjectTransformState before;
+        if (target.IsNull() || !owner->CaptureObjectTransformStateForLabel(target,before)
+            || before.enclosure.label.IsNull() || !before.enclosure.IsCurrent(document,target)) return NO;
+        if (std::all_of(before.present.begin(),before.present.end(),
+                [](Standard_Boolean value) { return value; })) return NO;
+        const auto undo = document->GetAvailableUndos();
+        Handle(AIS_Shape) temporary = new AIS_Shape(before.shape);
+        temporary->SetLocalTransformation(before.transform);
+        document->NewCommand(); opened = true;
+        if (!owner->SaveObjectTransform(target,temporary))
+            throw Standard_Failure("Unable to stage explicit transform defaults");
+        OcctObjectTransformState staged;
+        if (!owner->CaptureObjectTransformStateForLabel(target,staged)
+            || staged.scalars != before.scalars || staged.present == before.present
+            || !staged.shape.IsEqual(before.shape) || !staged.enclosure.IsCurrent(document,target))
+            throw Standard_Failure("Explicit transform defaults changed numeric geometry");
+        const bool committed = document->CommitCommand();
+        opened = document->HasOpenCommand();
+        if (opened) { document->AbortCommand(); opened = false; return NO; }
+        if (!committed) return NO;
+        OcctObjectTransformState after;
+        return document->GetAvailableUndos() == undo+1
+            && owner->CaptureObjectTransformStateForLabel(target,after)
+            && staged.IsEqual(after) && owner->ValidateGeometryRepresentations();
+    } catch (...) {
+        if (opened && !document.IsNull()) { try { document->AbortCommand(); } catch (...) {} }
+        return NO;
+    }
 }
 
 // Faults are confined to one owned synchronous DEBUG command, always aborted.

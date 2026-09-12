@@ -72,6 +72,12 @@ namespace core3d {
         std::string definitionIdentifier;
         std::string featureIdentifier;
         bool current = false;
+        // Physical metres per recipe length, including both signed uniform scales.
+        double dimensionMetersPerUnit = 0;
+        // Main-thread-only native opening authority, never a detached worker or
+        // provider payload. Retains exact root/binding, identity and transform
+        // through the existing shared native object-state validation contract.
+        OcctObjectTransformState sourceState;
     };
     struct MeshVertexEditWork;
     struct MeshVertexEditSnapshot {
