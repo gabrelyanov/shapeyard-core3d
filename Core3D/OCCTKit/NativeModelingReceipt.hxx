@@ -195,19 +195,37 @@ inline bool Stage(const Handle(OcctDocument)& owner,const Record& record,const C
     }catch(...){return false;}
 }
 
+#if DEBUG
+// Optional bounded evidence sinks expose the exact bytes already hashed. They
+// never substitute a digest or normalize additional geometry/state values.
+struct DebugEffectCapture {
+    std::vector<std::uint8_t> geometryBytes, stateBytes;
+    const char *stage = "entry";
+};
+#endif
 class GeometryStream final:public std::streambuf {
 public:
+#if DEBUG
+    std::vector<std::uint8_t> *debugBytes = nullptr;
+#endif
     GeometryStream(){valid=CC_SHA256_Init(&context)==1;}
     bool finish(Digest& digest){return valid&&written>0&&CC_SHA256_Final(digest.data(),&context)==1;}
 protected:
     std::streamsize xsputn(const char* p,std::streamsize n)override{
         if(!valid||n<0||std::size_t(n)>8*1024*1024-written){valid=false;return 0;}
+#if DEBUG
+        if(debugBytes)debugBytes->insert(debugBytes->end(),p,p+n);
+#endif
         if(CC_SHA256_Update(&context,p,CC_LONG(n))!=1){valid=false;return 0;}written+=std::size_t(n);return n;
     }
     int_type overflow(int_type c)override{if(traits_type::eq_int_type(c,traits_type::eof()))return traits_type::not_eof(c);const char x=traits_type::to_char_type(c);return xsputn(&x,1)==1?c:traits_type::eof();}
 private:CC_SHA256_CTX context{};std::size_t written=0;bool valid=false;
 };
-inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out) noexcept {
+inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
+#if DEBUG
+    , std::vector<std::uint8_t> *debugBytes=nullptr
+#endif
+) noexcept {
     out.fill(0);try{
         if(shape.IsNull()||shape.ShapeType()!=TopAbs_SOLID)return false;
         std::vector<std::pair<TopoDS_Shape,unsigned>> pending{{shape,0}};std::size_t nodes=0;
@@ -223,7 +241,11 @@ inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out) noexcept {
         while(!pending.empty()){auto current=std::move(pending.back());pending.pop_back();if(++nodes>8192||current.second>64)return false;
             current.first.Free(Standard_True);current.first.Modified(Standard_False);current.first.Checked(Standard_False);
             for(TopoDS_Iterator it(current.first);it.More();it.Next()){if(pending.size()>=8192)return false;pending.emplace_back(it.Value(),current.second+1);}}
-        GeometryStream buffer;std::ostream stream(&buffer);stream.imbue(std::locale::classic());
+        GeometryStream buffer;
+#if DEBUG
+        if(debugBytes){debugBytes->clear();buffer.debugBytes=debugBytes;}
+#endif
+        std::ostream stream(&buffer);stream.imbue(std::locale::classic());
         // Fixed OCCT format, no cached tessellation/normals. This is exact
         // serialized representation identity, not geometric equivalence.
         BRepTools::Write(detached,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
@@ -236,12 +258,22 @@ inline bool SupportedProfile(const profile::Parameters& p){
     if(d.points.size()!=4)return false;const auto&a=d.points;
     return a[0].X()==0&&a[0].Y()==0&&a[1].X()>0&&a[1].Y()==0&&a[2].X()==a[1].X()&&a[2].Y()>0&&a[3].X()==0&&a[3].Y()==a[2].Y();
 }
-inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& label,Effect& out) noexcept {
+inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& label,Effect& out
+#if DEBUG
+    , DebugEffectCapture *debug=nullptr
+#endif
+) noexcept {
     out={};try{
         if(owner.IsNull()||owner->Document().IsNull())return false;
+#if DEBUG
+        if(debug){*debug={};debug->stage="object-state";}
+#endif
         OcctObjectNameState named;if(!owner->CaptureObjectNameStateForLabel(label,named))return false;
         const auto&s=named.object;Effect e;
         if(s.resolvedRepresentation!=OcctGeometryRepresentation::BRep||!ParseUUID(s.entityIdentifier,e.entity)||!ParseUUID(s.definitionIdentifier,e.definition))return false;
+#if DEBUG
+        if(debug)debug->stage="recipe";
+#endif
         std::vector<double> values;int schema=0;
         if(!s.enclosure.label.IsNull()){
             if(!s.profile.label.IsNull()||!s.enclosure.IsCurrent(owner->Document(),label)||!enclosure::Encode(s.enclosure.parameters,values))return false;
@@ -250,7 +282,13 @@ inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& lab
             if(s.profile.label.IsNull()||!s.profile.IsCurrent(owner->Document(),label)||!SupportedProfile(s.profile.parameters)||!profile::Encode(s.profile.parameters,values))return false;
             e.feature=Feature::Profile;schema=profile::SchemaFor(s.profile.parameters);if(!ParseUUID(s.profile.identifier,e.featureID))return false;
         }
+#if DEBUG
+        if(debug)debug->stage="geometry";
+        if(!GeometryDigest(s.shape,e.geometry,debug?&debug->geometryBytes:nullptr)||named.name.Length()>256)return false;
+        if(debug)debug->stage="state";
+#else
         if(!GeometryDigest(s.shape,e.geometry)||named.name.Length()>256)return false;
+#endif
         std::vector<std::uint8_t> bytes{'S','Y','E','F',1,std::uint8_t(e.feature),std::uint8_t(schema)};
         auto append=[&](const auto&a){bytes.insert(bytes.end(),a.begin(),a.end());};
         auto integer=[&](std::uint64_t n){for(unsigned i=0;i<8;++i)bytes.push_back(std::uint8_t(n>>(8*i)));};
@@ -258,7 +296,14 @@ inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& lab
         append(e.entity);append(e.definition);append(e.featureID);append(e.geometry);integer(values.size());for(double v:values)scalar(v);
         for(std::size_t i=0;i<s.scalars.size();++i){bytes.push_back(s.present[i]?1:0);scalar(s.scalars[i]);}
         bytes.push_back(named.namePresent?1:0);integer(std::size_t(named.name.Length()));for(int i=1;i<=named.name.Length();++i)integer(std::uint16_t(named.name.Value(i)));
-        if(!Hash(bytes.data(),bytes.size(),e.state))return false;out=e;return true;
+#if DEBUG
+        if(debug)debug->stateBytes=bytes;
+#endif
+        if(!Hash(bytes.data(),bytes.size(),e.state))return false;out=e;
+#if DEBUG
+        if(debug)debug->stage="complete";
+#endif
+        return true;
     }catch(...){out={};return false;}
 }
 inline Inspection InspectDocument(const Handle(OcctDocument)& owner,const Key& key) noexcept {

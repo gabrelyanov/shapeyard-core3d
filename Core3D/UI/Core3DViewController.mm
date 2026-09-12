@@ -1292,6 +1292,38 @@ static unsigned Core3DCanonicalModelingProfileKind(const core3d::profile::Parame
 @end
 
 #if DEBUG
+static NSDictionary *Core3DReceiptEffectFields(const core3d::receipt::Effect& effect) {
+    namespace r = core3d::receipt;
+    auto hex=[](const auto& bytes) { return [NSString stringWithUTF8String:r::Hex(bytes).c_str()]; };
+    return @{@"feature":@(static_cast<unsigned>(effect.feature)),@"entityHex":hex(effect.entity),
+        @"definitionHex":hex(effect.definition),@"featureIDHex":hex(effect.featureID),
+        @"geometrySHA":hex(effect.geometry),@"stateSHA":hex(effect.state)};
+}
+static NSDictionary *Core3DReceiptEffectDiagnostic(const Handle(OcctDocument)& owner,
+    const core3d::receipt::Effect& expected,
+    const core3d::receipt::DebugEffectCapture *issuedCapture=nullptr) {
+    namespace r = core3d::receipt;
+    r::Effect live; r::DebugEffectCapture capture; bool captured=false; unsigned matches=0;
+    if(issuedCapture){capture=*issuedCapture;live=expected;captured=true;matches=1;}
+    else if (!owner.IsNull() && !owner->Document().IsNull()) {
+        TDF_LabelSequence roots; XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
+        TDF_Label label;
+        if (roots.Length()<=50000) for(int i=1;i<=roots.Length();++i) {
+            r::UUID id;
+            if(r::ParseUUID(owner->EntityIdentifierForLabel(roots.Value(i)),id)&&id==expected.entity) {
+                label=roots.Value(i);++matches;
+            }
+        }
+        if(matches==1)captured=r::CaptureEffect(owner,label,live,&capture);
+    }
+    auto base64=[](const std::vector<std::uint8_t>& bytes) {
+        return [[NSData dataWithBytes:bytes.data() length:bytes.size()] base64EncodedStringWithOptions:0];
+    };
+    return @{@"expected":Core3DReceiptEffectFields(expected),@"live":Core3DReceiptEffectFields(live),
+        @"captured":@(captured),@"matches":@(matches),@"stage":[NSString stringWithUTF8String:capture.stage],
+        @"matchesExpected":@(captured&&live==expected),@"geometryBase64":base64(capture.geometryBytes),
+        @"stateBase64":base64(capture.stateBytes)};
+}
 // DEBUG-only preservation oracle. Reads existing native labels and values;
 // no tool is lazily created. Allocation counter values are intentionally not
 // compared: adding a shape may advance them; their GUID/type must survive.
@@ -4695,10 +4727,12 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
             : core3d::profile::Stage(document,label,profile,feature)))
             throw Standard_Failure("Receipt fixture recipe");
         r::Effect effect;
-        if (!r::CaptureEffect(owner,label,effect)) throw Standard_Failure("Receipt fixture effect");
+        r::DebugEffectCapture issuedCapture;
+        if (!r::CaptureEffect(owner,label,effect,&issuedCapture)) throw Standard_Failure("Receipt fixture effect");
         record.effects = {effect};
         if (!r::Stage(owner,record,before) || !document->CommitCommand())
             throw Standard_Failure("Receipt fixture commit");
+        NSDictionary *initialEffectDiagnostic=Core3DReceiptEffectDiagnostic(owner,effect,&issuedCapture);
         const bool stagePreserved = preserved();
         const bool oneUndo = document->GetAvailableUndos() == 1;
         const auto first = r::InspectDocument(owner,record.key);
@@ -4753,11 +4787,15 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
         }
         const std::string path = owner->save(base.path.UTF8String);
         if (path.empty()) throw Standard_Failure("Receipt fixture save");
+        const auto postSave=r::InspectDocument(owner,record.key);
+        NSDictionary *postSaveEffectDiagnostic=Core3DReceiptEffectDiagnostic(owner,effect);
         saved = [NSString stringWithUTF8String:path.c_str()];
         NSData *data = [NSData dataWithContentsOfFile:saved];
         if (!data) throw Standard_Failure("Receipt fixture bytes");
         result = @{@"data":data, @"requestID":request,
             @"entityID":[NSString stringWithUTF8String:owner->EntityIdentifierForLabel(label).c_str()],
+            @"effectDiagnostic":@{@"initial":initialEffectDiagnostic,@"postSave":postSaveEffectDiagnostic,
+                @"postSaveCurrent":@(postSave.effectsCurrent)},
             @"geometrySHA":[NSString stringWithUTF8String:r::Hex(effect.geometry).c_str()],
             @"stateSHA":[NSString stringWithUTF8String:r::Hex(effect.state).c_str()],
             @"oneUndo":@(oneUndo), @"initiallyCurrent":@(initiallyCurrent),
@@ -4826,6 +4864,7 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
         @"verified":r::QueryVerifiedReceipt() == r::VerifiedQueryStatus::Unavailable ? @"unavailable" : @"invalid"} mutableCopy];
     if (NSDictionary *preservation=Core3DReceiptPreservation(owner)) result[@"preservation"]=preservation;
     if (inspected.effects.size() == 1) {
+        result[@"effectDiagnostic"]=Core3DReceiptEffectDiagnostic(owner,inspected.effects[0]);
         result[@"geometrySHA"] = [NSString stringWithUTF8String:r::Hex(inspected.effects[0].geometry).c_str()];
         result[@"stateSHA"] = [NSString stringWithUTF8String:r::Hex(inspected.effects[0].state).c_str()];
     }
