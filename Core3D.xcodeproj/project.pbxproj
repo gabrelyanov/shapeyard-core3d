@@ -207,6 +207,7 @@
 		A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		3A3275384C537C4F2CC799D2 /* NativeModelingTombstone.mm in Sources */ = {isa = PBXBuildFile; fileRef = 4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */; };
 		8CAADF16F7C49892EFD16D0D /* NativeModelingRequest.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 666A9DCAF738B47E8737A25D /* NativeModelingRequest.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		2E70B1881BA94908AECBA472 /* RectangularLoftPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -428,6 +429,7 @@
 		C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingTombstone.hxx; sourceTree = "<group>"; };
 		4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = NativeModelingTombstone.mm; sourceTree = "<group>"; };
 		666A9DCAF738B47E8737A25D /* NativeModelingRequest.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeModelingRequest.hxx; sourceTree = "<group>"; };
+		E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RectangularLoftPersistence.hxx; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -691,6 +693,7 @@
 				322185722BB5CC1500040E84 /* GLViewController.h */,
 				322185712BB5CC1500040E84 /* GLViewController.mm */,
 				D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */,
+				E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */,
 				C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */,
 				4BDB72E9B285F0ECB4237AEE /* NativeModelingTombstone.mm */,
 				666A9DCAF738B47E8737A25D /* NativeModelingRequest.hxx */,
@@ -914,6 +917,7 @@
 				322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */,
 				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
 				0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */,
+				2E70B1881BA94908AECBA472 /* RectangularLoftPersistence.hxx in Headers */,
 				A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */,
 				8CAADF16F7C49892EFD16D0D /* NativeModelingRequest.hxx in Headers */,
 				3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */,

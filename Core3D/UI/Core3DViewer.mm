@@ -7,6 +7,9 @@
 //
 
 #include "Core3DViewer.h"
+#include "../OCCTKit/PlanarSweepSolid.hxx"
+#include "../OCCTKit/RectangularLoftSolid.hxx"
+#include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/ProfileCurveFace.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
 
@@ -1659,6 +1662,19 @@ struct EnclosureSolidGeometry {
     EnclosureSolidResult result;
     bool built = false;
 };
+struct LoftSolidGeometry {
+    std::shared_ptr<const rectangular_loft::Prepared> prepared;
+    std::atomic_bool cancelled{false};
+    rectangular_loft::SolidResult result;
+    bool built=false;
+};
+struct SweepSolidGeometry {
+    std::shared_ptr<const planar_sweep::Prepared> prepared;
+    std::atomic_bool cancelled{false};
+    planar_sweep::SolidResult result;
+    bool built=false;
+};
+
 struct AssemblySolidGeometry {
     std::vector<std::shared_ptr<ProfileSolidGeometry>> parts;
     std::atomic_bool cancelled{false};
@@ -1696,6 +1712,14 @@ std::optional<CompletedNativeSolid> CompletedNativeSolidFor(const NativeSolidGeo
         if (*p && (*p)->built && (*p)->cancelled && !(*p)->cancelled->load() && !(*p)->result.solid.IsNull())
             return CompletedNativeSolid{(*p)->result.solid,(*p)->result.bounds};
     }
+    if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
+        if (*p && (*p)->built && !(*p)->cancelled.load() && !(*p)->result.solid.IsNull())
+            return CompletedNativeSolid{(*p)->result.solid,(*p)->result.bounds};
+    }
+    if (const auto p=std::get_if<std::shared_ptr<SweepSolidGeometry>>(&payload)) {
+        if (*p && (*p)->built && !(*p)->cancelled.load() && !(*p)->result.solid.IsNull())
+            return CompletedNativeSolid{(*p)->result.solid,(*p)->result.bounds};
+    }
     return {};
 }
 
@@ -1703,6 +1727,9 @@ struct NativeSolidWork {
     std::shared_ptr<NativeModelingCommitPermit> modelingPermit; // Main only; excluded from numeric geometry payload.
     NativeSolidGeometryPayload geometry;
     OrdinaryNameLedger authority;
+    std::string sweepIdentifier; // Generated once on main, never from a provider or worker.
+    std::string loftIdentifier; // Native feature UUID; distinct from local numeric loftIdentifier.
+    std::optional<authority::Stamp> sweepRebuildStamp; // Main only, fences selection/tool ABA.
     std::vector<AssemblyPartDefinition> assemblyParts; // Main-owned metadata, never worker payload.
     std::optional<OrdinaryTransformLedger> rebuildAuthority;
     ObjectFrameIdentity identity;
@@ -1810,6 +1837,43 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareAssemblySolid(
         work->assemblyParts = parts; work->geometry = std::move(geometry);
         return work;
     } catch (...) { return {}; }
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareLoftSolid(
+    const rectangular_loft::Definition& definition,const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return {};
+    try {
+        rectangular_loft::Admission admission;
+        const auto prepared=rectangular_loft::Prepare(definition,admission);
+        if (!prepared) return {};
+        auto work=prepareNativeSolidWork(identity,presentationRevision,width,height);
+        if (!work || !work->owner->ValidateGeometryRepresentations()
+            || sweep_persistence::Bits(work->metersPerUnit)!=sweep_persistence::Bits(definition.dimensionMetersPerUnit)) return {};
+        NSString *identifier=NSUUID.UUID.UUIDString;
+        if (!identifier || !identifier.UTF8String) return {};
+        work->loftIdentifier=identifier.UTF8String;
+        auto geometry=std::make_shared<LoftSolidGeometry>();geometry->prepared=prepared;
+        work->geometry=std::move(geometry);return work;
+    } catch (...) {return {};}
+}
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareSweepSolid(
+    const planar_sweep::Definition& definition,const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return {};
+    try {
+        planar_sweep::Admission admission;
+        const auto prepared=planar_sweep::Prepare(definition,admission);
+        if (!prepared) return {};
+        auto work=prepareNativeSolidWork(identity,presentationRevision,width,height);
+        if (!work || !work->owner->ValidateGeometryRepresentations()
+            || sweep_persistence::Bits(work->metersPerUnit)!=sweep_persistence::Bits(definition.dimensionMetersPerUnit)) return {};
+        NSString *identifier=NSUUID.UUID.UUIDString;
+        if (!identifier || !identifier.UTF8String) return {};
+        work->sweepIdentifier=identifier.UTF8String;
+        auto geometry=std::make_shared<SweepSolidGeometry>();geometry->prepared=prepared;
+        work->geometry=std::move(geometry);return work;
+    } catch (...) {return {};}
 }
 
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareEnclosureSolid(
@@ -1995,6 +2059,77 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
     } catch (...) { return {}; }
 }
 
+std::optional<StoredSweepSnapshot> Core3DViewer::storedSweepDefinition(
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || myDoc.IsNull() || identity.entityIdentifier.empty() || width==0 || height==0) return {};
+    try {
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if (!stamp || !snapshot || snapshot->selectionMode!=scene::ElementKind::Object
+            || snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration!=identity.documentGeneration
+            || snapshot->revisions.model!=identity.modelRevision
+            || snapshot->revisions.presentation!=presentationRevision) return {};
+        myContext->InitSelected();if(!myContext->MoreSelected())return {};
+        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();if(myContext->MoreSelected()||selected.IsNull())return {};
+        OcctObjectTransformState state;OcctScalarAppearanceState appearance;
+        const auto label=myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label,state)
+            || state.entityIdentifier!=identity.entityIdentifier || state.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            || !state.sweep.IsCurrent(myDoc->Document(),label)
+            || !sweep_rebuild::HasOnlyMetadataSubshapes(myDoc->Document(),label)
+            || !myDoc->CaptureScalarAppearanceForSavedSweepRebuild(label,appearance)) return {};
+        const double constructionScale=state.sweep.definition.constructionFrame
+            ?state.sweep.definition.constructionFrame->values[7]:1.0;
+        const double effective=state.sweep.definition.dimensionMetersPerUnit*std::abs(constructionScale)*std::abs(state.scalars[7]);
+        const auto guard=_ordinaryEditController?_ordinaryEditController->captureSavedSweepRebuildSource():nullptr;
+        const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if (!guard || !after || !(*after==*stamp) || !std::isfinite(effective) || effective<=0
+            || !std::isfinite(effective*1000)) return {};
+        StoredSweepSnapshot result;result.definition=state.sweep.definition;result.identity=identity;
+        result.definitionIdentifier=state.definitionIdentifier;result.featureIdentifier=state.sweep.identifier;
+        result.sourceState=std::move(state);result.authorityStamp=*stamp;result.sourceGuard=guard;
+        result.effectiveDimensionMetersPerUnit=effective;result.current=true;return result;
+    } catch (...) {return {};}
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredSweepRebuild(
+    const planar_sweep::Definition& definition,const StoredSweepSnapshot& original,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !original.current || identity.entityIdentifier!=original.identity.entityIdentifier
+        || identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
+        || identity.documentGeneration!=original.identity.documentGeneration || identity.modelRevision!=original.identity.modelRevision
+        || !sweep_rebuild::FixedStructure(original.definition,definition)) return {};
+    try {
+        const auto current=storedSweepDefinition(identity,presentationRevision,width,height);
+        if (!current || !current->current || !(current->authorityStamp==original.authorityStamp)
+            || current->featureIdentifier!=original.featureIdentifier || current->definitionIdentifier!=original.definitionIdentifier
+            || current->effectiveDimensionMetersPerUnit!=original.effectiveDimensionMetersPerUnit
+            || !current->sourceState.IsEqual(original.sourceState)
+            || !sweep_rebuild::SameRawScalars(current->sourceState.scalars,original.sourceState.scalars)
+            || !_ordinaryEditController || !_ordinaryEditController->savedSweepRebuildSourceIsCurrent(original.sourceGuard)) return {};
+        planar_sweep::Admission admission;const auto prepared=planar_sweep::Prepare(definition,admission);
+        if (!prepared) return {};
+        auto work=prepareNativeSolidWork(identity,presentationRevision,width,height);
+        if (!work || sweep_persistence::Bits(work->metersPerUnit)!=sweep_persistence::Bits(definition.dimensionMetersPerUnit))return {};
+        myContext->InitSelected();const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        if(selected.IsNull())return {};
+        auto geometry=std::make_shared<SweepSolidGeometry>();geometry->prepared=prepared;work->geometry=std::move(geometry);
+        OrdinaryTransformRecord record;record.previous=current->sourceState;
+        record.requested.label=record.previous.label;record.requested.presentation=selected;
+        record.requested.shape=record.previous.shape;record.requested.transform=record.previous.transform;
+        record.requested.operation=OrdinaryTransformOperation::SweepRebuild;record.requested.sweepRebuild=definition;
+        record.requested.sweepSource=original.sourceGuard;
+        work->rebuildAuthority.emplace();work->rebuildAuthority->records.push_back(std::move(record));
+        if (!admitTransform(*work->rebuildAuthority)) return {};
+        work->sweepRebuildStamp=original.authorityStamp;work->frameFirst=false;return work;
+    } catch (...) {return {};}
+}
+
 std::shared_ptr<ProfileSolidGeometry> Core3DViewer::profileSolidGeometry(
     const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (!work) return {};
@@ -2008,6 +2143,16 @@ NativeSolidGeometryPayload Core3DViewer::nativeSolidGeometry(const std::shared_p
     return work ? work->geometry : NativeSolidGeometryPayload{};
 }
 bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept {
+    if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
+        if (!*p || (*p)->built || (*p)->cancelled.load()) return false;
+        (*p)->built=rectangular_loft::Build((*p)->prepared,(*p)->cancelled,(*p)->result)==rectangular_loft::BuildStatus::Built;
+        return (*p)->built;
+    }
+    if (const auto p=std::get_if<std::shared_ptr<SweepSolidGeometry>>(&payload)) {
+        if (!*p || (*p)->built || (*p)->cancelled.load()) return false;
+        (*p)->built=planar_sweep::Build((*p)->prepared,(*p)->cancelled,(*p)->result)==planar_sweep::BuildStatus::Built;
+        return (*p)->built;
+    }
     if (const auto assembly=std::get_if<std::shared_ptr<AssemblySolidGeometry>>(&payload))
         return BuildAssemblySolidGeometry(*assembly);
     if (const auto p=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&payload))
@@ -2021,6 +2166,14 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
 }
 void Core3DViewer::cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (!work) return;
+    if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry)) {
+        if (*p) (*p)->cancelled.store(true);
+        return;
+    }
+    if (const auto p=std::get_if<std::shared_ptr<SweepSolidGeometry>>(&work->geometry)) {
+        if (*p) (*p)->cancelled.store(true);
+        return;
+    }
     if (const auto assembly=std::get_if<std::shared_ptr<AssemblySolidGeometry>>(&work->geometry)) {
         if (*assembly) {
             (*assembly)->cancelled.store(true);
@@ -2113,6 +2266,20 @@ bool Core3DViewer::attachModelingRebuildPermit(const std::shared_ptr<NativeSolid
 
 OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (![NSThread isMainThread] || !work || work->consumed) return OrdinaryEditResult::Invalid;
+    const auto loftPayload=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry);
+    if (loftPayload && (work->modelingPermit || work->rebuildAuthority || work->sweepRebuildStamp
+        || !profile::IsIdentifier(work->loftIdentifier))) return OrdinaryEditResult::Invalid;
+    if (!loftPayload && !work->loftIdentifier.empty()) return OrdinaryEditResult::Invalid;
+    const auto sweepPayload=std::get_if<std::shared_ptr<SweepSolidGeometry>>(&work->geometry);
+    if (sweepPayload) {
+        if (work->modelingPermit) return OrdinaryEditResult::Invalid; // No sweep receipt route.
+        if (work->rebuildAuthority) {
+            if (!work->sweepIdentifier.empty() || !work->sweepRebuildStamp
+                || work->rebuildAuthority->records.size()!=1
+                || work->rebuildAuthority->records.front().requested.operation!=OrdinaryTransformOperation::SweepRebuild)
+                return OrdinaryEditResult::Invalid;
+        } else if (work->sweepRebuildStamp || !profile::IsIdentifier(work->sweepIdentifier)) return OrdinaryEditResult::Invalid;
+    }
     const auto completed=CompletedNativeSolidFor(work->geometry);
     std::shared_ptr<AssemblySolidGeometry> assembly;
     if (const auto payload=std::get_if<std::shared_ptr<AssemblySolidGeometry>>(&work->geometry)) assembly=*payload;
@@ -2136,6 +2303,10 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             || !_shapeInteractor->selectionModeAuthorityIsExact()
             || _shapeInteractor->getSelectionMode() != work->authority.selectionMode
             || !_objectInteractor->verifyOrdinaryNameAuthority(work->authority)) { return OrdinaryEditResult::Invalid; }
+        if (work->sweepRebuildStamp) {
+            const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+            if (!stamp || !(*stamp==*work->sweepRebuildStamp)) return OrdinaryEditResult::Invalid;
+        }
         if(work->modelingPermit){
             auto& p=*work->modelingPermit;
             const bool rebuild=p.operation_==receipt::Operation::RebuildEnclosure||p.operation_==receipt::Operation::RebuildProfile;
@@ -2196,11 +2367,20 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             Graphic3d_NameOfMaterial_ShinyPlastified, color.Name(), OcctGeometryRepresentation::BRep};
         NSString* identifier = work->modelingPermit
             ? [[NSUUID alloc] initWithUUIDBytes:work->modelingPermit->featureIDs_.front().data()].UUIDString
+            : loftPayload ? [NSString stringWithUTF8String:work->loftIdentifier.c_str()]
             : NSUUID.UUID.UUIDString;
         if (identifier == nil) return OrdinaryEditResult::Invalid;
         if (const auto geometry=profileSolidGeometry(work)) {
             request.profile=profile::Parameters{static_cast<const ProfileDefinition&>(*geometry),work->metersPerUnit};
             request.profileIdentifier=identifier.UTF8String;
+        } else if (loftPayload && *loftPayload && (*loftPayload)->prepared) {
+            request.loft=(*loftPayload)->prepared->definition;
+            request.loftIdentifier=work->loftIdentifier;
+            request.name=TCollection_ExtendedString("Lofted solid");
+        } else if (sweepPayload && *sweepPayload && (*sweepPayload)->prepared) {
+            request.sweep=(*sweepPayload)->prepared->definition;
+            request.sweepIdentifier=work->sweepIdentifier;
+            request.name=TCollection_ExtendedString("Swept solid");
         } else {
             const auto enclosureGeometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry);
             if (!enclosureGeometry || !*enclosureGeometry) return OrdinaryEditResult::Invalid;

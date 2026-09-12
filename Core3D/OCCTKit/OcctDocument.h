@@ -21,6 +21,7 @@
 
 #ifndef OcctDocument_h
 #define OcctDocument_h
+#include "RectangularLoftPersistence.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -49,6 +50,7 @@
 #include <vector>
 
 class Message_ProgressRange;
+namespace core3d { class OrdinaryEditController; }
 
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
@@ -107,6 +109,8 @@ struct OcctObjectTransformState
     TopoDS_Shape shape;
     core3d::profile::Record profile;
     core3d::enclosure::Record enclosure;
+    core3d::sweep_persistence::Record sweep;
+    core3d::loft_persistence::Record loft;
     gp_Trsf transform;
     std::array<Standard_Real, 8> scalars = {{0, 0, 0, 0, 0, 0, 1, 1}};
     std::array<Standard_Boolean, 8> present = {};
@@ -668,6 +672,10 @@ public:
         const TDF_Label& source,
         const TDF_Label& destination);
     void LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis);
+    // Bounded scalar-only metadata guard for the saved-sweep edit catalog.
+    // Unsupported textures/imported color links are refused, never discarded.
+    Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForSavedSweepRebuild(
+        const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForMeshCopy(
         const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
     //! Apply only Shapeyard-owned whole-object overrides. Imported XCAF
@@ -756,6 +764,9 @@ public:
     //! Replace geometry on an existing editable free definition. The caller
     //! must own an open command on this exact document; identifiers and
     //! appearance remain attached to the stable label.
+    //! Topology-changing legacy tools must refuse saved sweeps and lofts before opening work.
+    Standard_EXPORT Standard_Boolean HasNoSavedSweepForTopology(const TDF_Label& label) const noexcept;
+
     Standard_Boolean ReplaceShape(
         const TDF_Label& label,
         Handle(AIS_Shape) aisShape);
@@ -794,6 +805,11 @@ public:
     void NotifyChanges();
 
 private:
+  friend class core3d::OrdinaryEditController;
+  // Only the ordinary owner may pair geometry and an already-current record.
+  Standard_Boolean StageSavedSweepReplacement(const OcctObjectTransformState& previous,
+      const TopoDS_Shape& candidate, const core3d::planar_sweep::Definition& definition,
+      bool debugFailAfterShape = false) noexcept;
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;

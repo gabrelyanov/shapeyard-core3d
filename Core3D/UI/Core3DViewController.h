@@ -101,6 +101,102 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(capsule(center:length:diameter:rotationDegrees:identifier:vertexIdentifiers:segmentIdentifiers:));
 @end
 
+//! Sweep arc radii are positive native scalars; physical minima and G1 admission
+//! belong to Core3DSweepDefinition. Existing profile DTO bounds are unchanged.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSweepPathSegment : NSObject
+@property(nonatomic,readonly) uint32_t identifier;
+@property(nonatomic,readonly) uint32_t startVertex;
+@property(nonatomic,readonly) uint32_t endVertex;
+@property(nonatomic,readonly) Core3DProfileCurveKind kind;
+//! Unused line parameters are exactly zero. Arc endpoints must agree with the
+//! referenced vertices; this is validated when constructing the full profile.
+@property(nonatomic,readonly) CGPoint center;
+@property(nonatomic,readonly) double radius;
+@property(nonatomic,readonly) double startDegrees;
+@property(nonatomic,readonly) double sweepDegrees;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithIdentifier:(uint32_t)identifier
+    startVertex:(uint32_t)startVertex endVertex:(uint32_t)endVertex
+    kind:(Core3DProfileCurveKind)kind center:(CGPoint)center radius:(double)radius
+    startDegrees:(double)startDegrees sweepDegrees:(double)sweepDegrees
+    NS_SWIFT_NAME(init(identifier:startVertex:endVertex:kind:center:radius:startDegrees:sweepDegrees:));
+@end
+
+//! Immutable bounded planar G1 open line/arc path with a constant solid-circle section.
+//! Lengths and frame translations use raw document units. No target/lease/receipt authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSweepDefinition : NSObject
+@property(nonatomic,readonly) uint32_t pathIdentifier;
+@property(nonatomic,copy,readonly) NSArray<Core3DProfileCurveVertex *> *vertices;
+@property(nonatomic,copy,readonly) NSArray<Core3DSweepPathSegment *> *segments;
+@property(nonatomic,readonly) Core3DProfilePlane plane;
+@property(nonatomic,readonly) double radius;
+@property(nonatomic,readonly) double metersPerUnit;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+//! Open path:2…33 vertices,1…32 segments. Frame is empty or XYZ/quaternion XYZW/signed scale.
+- (nullable instancetype)initWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius metersPerUnit:(double)metersPerUnit
+    constructionFrameValues:(NSArray<NSNumber *> *)frame
+    NS_SWIFT_NAME(init(pathIdentifier:vertices:segments:plane:radius:metersPerUnit:constructionFrameValues:));
+//! Clone only the raw feature-unit circle radius. All path/frame/unit bits are retained.
+- (nullable Core3DSweepDefinition *)changingRadius:(double)radius NS_SWIFT_NAME(changingRadius(_:));
+@end
+
+//! Immutable parallel-XY rectangular station. IDs are local recipe identity, not object UUIDs.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRectangularLoftStation : NSObject
+@property(nonatomic,readonly) uint32_t identifier;
+@property(nonatomic,readonly) simd_uint4 cornerIdentifiers;
+@property(nonatomic,readonly) simd_uint4 correspondence;
+@property(nonatomic,readonly) double z;
+@property(nonatomic,readonly) double centerX;
+@property(nonatomic,readonly) double centerY;
+@property(nonatomic,readonly) double width;
+@property(nonatomic,readonly) double depth;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithIdentifier:(uint32_t)identifier cornerIdentifiers:(simd_uint4)corners
+    correspondence:(simd_uint4)correspondence z:(double)z centerX:(double)centerX centerY:(double)centerY
+    width:(double)width depth:(double)depth
+    NS_SWIFT_NAME(init(identifier:cornerIdentifiers:correspondence:z:centerX:centerY:width:depth:));
+@end
+
+//! Bounded ruled solid:2…8 strictly ordered parallel XY rectangular stations.
+//! Numeric recipe IDs and all station order are immutable. Complete native admission applies.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRectangularLoftDefinition : NSObject
+@property(nonatomic,readonly) uint32_t loftIdentifier;
+@property(nonatomic,readonly) simd_uint4 correspondence;
+@property(nonatomic,copy,readonly) NSArray<Core3DRectangularLoftStation *> *stations;
+@property(nonatomic,readonly) double metersPerUnit;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithLoftIdentifier:(uint32_t)identifier correspondence:(simd_uint4)correspondence
+    stations:(NSArray<Core3DRectangularLoftStation *> *)stations metersPerUnit:(double)metersPerUnit
+    constructionFrameValues:(NSArray<NSNumber *> *)frame
+    NS_SWIFT_NAME(init(loftIdentifier:correspondence:stations:metersPerUnit:constructionFrameValues:));
+@end
+
+//! Native-issued, main-owned selected sweep snapshot. Wire fields cannot recreate it.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DStoredSweepSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSString *definitionIdentifier;
+@property(nonatomic,copy,readonly) NSString *featureIdentifier;
+@property(nonatomic,strong,readonly) Core3DSweepDefinition *definition;
+@property(nonatomic,readonly) double effectiveDimensionMetersPerUnit;
+@property(nonatomic,readonly) BOOL current;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Immutable validated construction values. Lengths use the declared document
 //! unit; revolution parameters are degrees. No geometry or document handles.
 @interface Core3DProfileDefinition : NSObject
@@ -236,6 +332,9 @@ __attribute__((objc_subclassing_restricted))
 //! and ordered line/arc extrude/revolve recipes. Only the existing operation's
 //! depth/angle may be changed through rebuildProfileRecipe; no contour edits.
 @property(nonatomic,strong,readonly,nullable) Core3DStoredProfileSnapshot *selectedProfileRecipe;
+//! Exact selected saved sweep. Mutually exclusive with the three profile/enclosure fields.
+//! Descriptive physical values use effectiveDimensionMetersPerUnit; authority stays native.
+@property(nonatomic,strong,readonly,nullable) Core3DStoredSweepSnapshot *selectedSweep;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -1091,6 +1190,20 @@ typedef struct {
 //! Create from immutable validated values with explicit units. The declared
 //! unit must match the captured native document exactly; no implicit scaling.
 //! Uses the same cancellable worker and ordinary history as touch construction.
+//! Creates one saved native sweep through the existing ordinary worker/history path.
+- (nullable Core3DStoredSweepSnapshot *)storedSweepWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedSweep(entityIdentifier:expected:));
+- (void)rebuildStoredSweep:(Core3DStoredSweepSnapshot *)original
+    definition:(Core3DSweepDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildStoredSweep(_:definition:expected:completion:));
+- (void)createRectangularLoftWithDefinition:(Core3DRectangularLoftDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createRectangularLoft(definition:expected:completion:));
+- (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createSweep(definition:expected:completion:));
+
 - (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
@@ -1179,6 +1292,15 @@ typedef struct {
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildProfile(definition:context:completion:));
+//! Ordinary native context operations only: no reserved request/receipt tag is implied.
+- (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult result))completion
+    NS_SWIFT_NAME(createSweep(definition:context:completion:));
+- (void)rebuildSweepRadiusWithDefinition:(Core3DSweepDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult result))completion
+    NS_SWIFT_NAME(rebuildSweepRadius(definition:context:completion:));
 //! One original planning lease; only depth/angle may differ from its exact
 //! saved recipe. Delegates to the ordinary profile worker/history path.
 - (void)rebuildProfileRecipeWithDefinition:(Core3DProfileDefinition *)definition
@@ -1611,6 +1733,11 @@ typedef struct {
 //! Standalone BinXCAF fixture whose XCAF document length unit is exactly one
 //! meter per model unit. Used to prove unit metadata persistence end to end.
 - (NSData *_Nullable)debugLegacyNoLengthUnitMirrorBinXCAFFixtureData;
+- (NSDictionary *_Nullable)debugNativeLegacyReceiptFixture:(NSInteger)kind policy:(NSInteger)policy
+    NS_SWIFT_NAME(debugNativeLegacyReceiptFixture(_:policy:));
+- (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
+- (NSDictionary *)debugReceiptWire:(NSData *)data NS_SWIFT_NAME(debugReceiptWire(_:));
+- (NSDictionary *_Nullable)debugReceiptDualCatalogProbe NS_SWIFT_NAME(debugReceiptDualCatalogProbe());
 - (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind
     NS_SWIFT_NAME(debugNativeReceiptFixture(_:));
 /// DEBUG stream oracle only; no native geometry authority is issued from bytes.
@@ -1727,6 +1854,40 @@ typedef struct {
 + (NSDictionary<NSString *, id> *)debugEnclosureUpdateValues:(NSArray<NSNumber *> *)input
     dimension:(NSInteger)dimension value:(double)value
     NS_SWIFT_NAME(debugEnclosureUpdate(values:dimension:value:));
+
+//! Fixed detached sweep probes only. No document/selection/history authority.
++ (NSDictionary<NSString *, id> *)debugDetachedPlanarSweep:(NSInteger)fixture
+    metersPerUnit:(double)metersPerUnit plane:(NSInteger)plane frame:(NSInteger)frame
+    NS_SWIFT_NAME(debugDetachedPlanarSweep(fixture:metersPerUnit:plane:frame:));
++ (NSArray<NSDictionary<NSString *, id> *> *)debugDetachedPlanarSweepRejections;
++ (NSDictionary<NSString *, id> *)debugDetachedPlanarSweepCancellation;
+
+//! Fixed detached ruled-loft probes only. No document or history authority.
++ (NSDictionary<NSString *, id> *)debugDetachedRectangularLoft:(NSInteger)fixture
+    metersPerUnit:(double)metersPerUnit frame:(NSInteger)frame
+    NS_SWIFT_NAME(debugDetachedRectangularLoft(fixture:metersPerUnit:frame:));
++ (NSArray<NSDictionary<NSString *, id> *> *)debugDetachedRectangularLoftRejections;
++ (NSDictionary<NSString *, id> *)debugDetachedRectangularLoftCancellation;
+- (nullable NSDictionary<NSString *,id> *)debugStoredRectangularLoftForEntityIdentifier:(NSString *)identifier
+    NS_SWIFT_NAME(debugStoredRectangularLoft(entityIdentifier:));
+- (nullable NSData *)debugSavedRectangularLoftAdmissionFixture:(NSInteger)fault;
++ (NSDictionary<NSString *,id> *)debugRectangularLoftCodecValues:(NSArray<NSNumber *> *)values;
++ (NSDictionary<NSString *,id> *)debugRectangularLoftFamilyBudget;
+
+
+//! Read-only existing saved record and fixed malformed production-loader fixtures.
+- (nullable NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier
+    NS_SWIFT_NAME(debugStoredSweep(entityIdentifier:));
+- (nullable NSData *)debugSavedSweepAdmissionFixture:(NSInteger)fault;
+- (BOOL)debugConfigureSavedSweepPairedWriteFailure;
+- (BOOL)debugConfigureSavedSweepRebuildFault:(NSInteger)mode;
+// Owned command probe: strict Read/Stage after an intentionally stale replacement;
+// always aborts and checks the exact original. Never grants a rebind capability.
+- (NSDictionary<NSString *,id> *)debugSavedSweepStrictBindingProbe;
+
+//! Fixed raw OCAF component probes; no production sweep creation/load authority.
++ (NSDictionary<NSString *, id> *)debugSweepPersistenceScenario:(NSInteger)scenario
+    NS_SWIFT_NAME(debugSweepPersistence(scenario:));
 
 //! Pure native codec diagnostic; no live document or mutation authority.
 + (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)values

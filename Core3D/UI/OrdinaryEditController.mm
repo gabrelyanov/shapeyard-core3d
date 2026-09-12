@@ -1,4 +1,5 @@
 #include "OrdinaryEditController.hpp"
+#include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/AuthoredFrameAttributeID.hxx"
@@ -19,6 +20,17 @@
 #include <XCAFDoc_DocumentTool.hxx>
 
 namespace core3d {
+struct SweepRebuildGuard {
+    struct Entry {
+        OcctObjectVisibilityState visibility;
+        OcctScalarAppearanceState appearance;
+        OcctReferenceAxis axis;
+        OcctReferenceAxisReadState axisState;
+    };
+    using Catalog=std::map<std::string,Entry>;
+    Catalog previous,candidate;
+    OcctSavedGroupState groups;
+};
 namespace {
 
 std::string CreationLabelKey(const TDF_Label& label) {
@@ -41,11 +53,14 @@ bool CaptureCreationRoots(const Handle(OcctDocument)& owner, OrdinaryCreationCat
         if (label.IsNull() || label.Data() != document->GetData() || shape.IsNull()) { return false; }
         profile::Record storedProfile;
         enclosure::Record storedEnclosure;
+        sweep_persistence::Record storedSweep;loft_persistence::Record storedLoft;
         if (!profile::Read(document, label, storedProfile)
-            || !enclosure::Read(document, label, storedEnclosure)) return false;
+            || !enclosure::Read(document, label, storedEnclosure)
+            || !sweep_persistence::Read(document, label, storedSweep)
+            || !loft_persistence::Read(document,label,storedLoft)) return false;
         if (!roots.emplace(CreationLabelKey(label), OrdinaryCreationRoot{label, shape,
                 owner->EntityIdentifierForLabel(label), owner->DefinitionIdentifierForLabel(label),
-                owner->GeometryRepresentationForLabel(label), storedProfile, storedEnclosure}).second) { return false; }
+                owner->GeometryRepresentationForLabel(label), storedProfile, storedEnclosure, storedSweep, storedLoft}).second) { return false; }
     }
     return true;
 }
@@ -53,8 +68,71 @@ bool CreationRootsEqual(const OrdinaryCreationRoot& a, const OrdinaryCreationRoo
     return a.label.IsEqual(b.label) && a.label.Data() == b.label.Data()
         && a.shape.IsEqual(b.shape) && a.entityIdentifier == b.entityIdentifier
         && a.definitionIdentifier == b.definitionIdentifier && a.representation == b.representation && a.profile.IsEqual(b.profile)
-        && a.enclosure.IsEqual(b.enclosure);
+        && a.enclosure.IsEqual(b.enclosure) && a.sweep.IsEqual(b.sweep) && a.loft.IsEqual(b.loft);
 }
+bool CaptureSweepEditCatalog(const Handle(OcctDocument)& owner,
+    SweepRebuildGuard::Catalog& output,OcctSavedGroupState& groups) {
+    output.clear();OrdinaryCreationCatalog roots;
+    if (owner.IsNull() || !owner->ValidateGeometryRepresentations()
+        || !CaptureCreationRoots(owner,roots) || !owner->CaptureSavedGroups(groups)) return false;
+    for (const auto& [key,root]:roots) {
+        SweepRebuildGuard::Entry entry;
+        if (!owner->CaptureObjectVisibilityStateForLabel(root.label,entry.visibility)
+            || !owner->CaptureScalarAppearanceForSavedSweepRebuild(root.label,entry.appearance)) return false;
+        entry.axisState=owner->ReadReferenceAxisForLabel(root.label,entry.axis);
+        if (entry.axisState==OcctReferenceAxisReadState::Invalid || !output.emplace(key,std::move(entry)).second) return false;
+    }
+    return true;
+}
+bool SweepEditEntryEqual(const SweepRebuildGuard::Entry& a,const SweepRebuildGuard::Entry& b) {
+    if (!a.visibility.IsEqual(b.visibility) || !a.appearance.IsEqual(b.appearance)
+        || !sweep_rebuild::SameRawScalars(a.visibility.object.object.scalars,b.visibility.object.object.scalars)
+        || !sweep_rebuild::SameRawScalars(a.appearance.visualValues,b.appearance.visualValues)
+        || a.axisState!=b.axisState || a.axis.pivotSpace!=b.axis.pivotSpace
+        || a.axis.directionSpace!=b.axis.directionSpace) return false;
+    for (int i=1;i<=3;++i)
+        if (sweep_persistence::Bits(a.axis.pivot.Coord(i))!=sweep_persistence::Bits(b.axis.pivot.Coord(i))
+            || sweep_persistence::Bits(a.axis.direction.Coord(i))!=sweep_persistence::Bits(b.axis.direction.Coord(i))) return false;
+    return true;
+}
+bool SweepEditCatalogEqual(const SweepRebuildGuard::Catalog& a,const SweepRebuildGuard::Catalog& b) {
+    if (a.size()!=b.size()) return false;
+    for (const auto& [key,value]:a) {
+        const auto found=b.find(key);if(found==b.end() || !SweepEditEntryEqual(value,found->second)) return false;
+    }
+    return true;
+}
+bool SweepGuardMatches(const Handle(OcctDocument)& owner,const OrdinaryTransformLedger& ledger,bool candidate) {
+    if (!ledger.sweepGuard) return true;
+    SweepRebuildGuard::Catalog live;OcctSavedGroupState groups;
+    return CaptureSweepEditCatalog(owner,live,groups) && groups.IsEqual(ledger.sweepGuard->groups)
+        && SweepEditCatalogEqual(live,candidate?ledger.sweepGuard->candidate:ledger.sweepGuard->previous);
+}
+bool SealSweepCandidate(const Handle(OcctDocument)& owner,OrdinaryTransformLedger& ledger) {
+    if (!ledger.sweepGuard) return true;
+    if (ledger.records.size()!=1 || !ledger.records.front().requested.sweepRebuild) return false;
+    auto& guard=*ledger.sweepGuard;OcctSavedGroupState groups;
+    if (!CaptureSweepEditCatalog(owner,guard.candidate,groups) || !groups.IsEqual(guard.groups)
+        || guard.previous.size()!=guard.candidate.size()) return false;
+    const auto& record=ledger.records.front();const auto key=CreationLabelKey(record.previous.label);
+    std::vector<double> values;
+    if (!sweep_persistence::Encode(*record.requested.sweepRebuild,values)) return false;
+    bool sawTarget=false;
+    for (const auto& [oldKey,oldEntry]:guard.previous) {
+        const auto found=guard.candidate.find(oldKey);if(found==guard.candidate.end()) return false;
+        if (oldKey!=key) {if(!SweepEditEntryEqual(oldEntry,found->second))return false;continue;}
+        sawTarget=true;auto normalized=found->second;
+        const auto& before=oldEntry.visibility.object.object;
+        auto& after=normalized.visibility.object.object;
+        if (!after.shape.IsEqual(record.requested.shape) || !after.sweep.label.IsEqual(before.sweep.label)
+            || after.sweep.identifier!=before.sweep.identifier || !sweep_persistence::SameBits(after.sweep.values,values)
+            || !after.sweep.IsCurrent(owner->Document(),record.previous.label)) return false;
+        after.shape=before.shape;after.sweep=before.sweep;
+        if (!SweepEditEntryEqual(oldEntry,normalized)) return false;
+    }
+    return sawTarget;
+}
+
 bool CreationIntegerEquals(const TDF_Label& label, Standard_Integer tag, Standard_Integer expected) {
     const auto child = label.FindChild(tag, Standard_False);
     Handle(TDataStd_Integer) value;
@@ -154,6 +232,25 @@ OrdinaryEditController::OrdinaryEditController(Handle(OcctDocument) document,
                                              OrdinaryEditPresentationHost& host)
     : _document(std::move(document)), _host(host) {}
 
+std::shared_ptr<const SweepRebuildGuard> OrdinaryEditController::captureSavedSweepRebuildSource() const noexcept {
+    if (!NSThread.isMainThread || blocksNormalWork() || _document.IsNull()
+        || _document->Document().IsNull() || _document->Document()->HasOpenCommand()) return {};
+    try {
+        auto source=std::make_shared<SweepRebuildGuard>();
+        if(!CaptureSweepEditCatalog(_document,source->previous,source->groups))return {};
+        return source;
+    }catch(...){return {};}
+}
+bool OrdinaryEditController::savedSweepRebuildSourceIsCurrent(
+    const std::shared_ptr<const SweepRebuildGuard>& source) const noexcept {
+    if(!NSThread.isMainThread || !source || !source->candidate.empty())return false;
+    try {
+        SweepRebuildGuard::Catalog current;OcctSavedGroupState groups;
+        return CaptureSweepEditCatalog(_document,current,groups) && groups.IsEqual(source->groups)
+            && SweepEditCatalogEqual(current,source->previous);
+    }catch(...){return false;}
+}
+
 bool OrdinaryEditController::blocksNormalWork() const noexcept {
     return ![NSThread isMainThread] || _entering || _reconciling
         || _state != OrdinaryEditState::Idle || _pending.has_value() || _command.isRetained();
@@ -195,7 +292,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         if (permit && changes.size()!=1) return reject(OrdinaryEditResult::Invalid);
         std::unordered_set<std::string> entities;
         std::unordered_set<const AIS_Shape*> presentations;
-        bool changed = false;
+        bool changed = false, sweepNoChange = false;
         for (const auto& request : changes) {
             OrdinaryTransformRecord record;
             if (request.operation != OrdinaryTransformOperation::Translate
@@ -205,13 +302,18 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
-                && request.operation != OrdinaryTransformOperation::EnclosureRebuild) {
+                && request.operation != OrdinaryTransformOperation::EnclosureRebuild
+                && request.operation != OrdinaryTransformOperation::SweepRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)) {
+                return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.sweepRebuild.has_value() != (request.operation == OrdinaryTransformOperation::SweepRebuild)
+                || bool(request.sweepSource)!=(request.operation==OrdinaryTransformOperation::SweepRebuild)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
@@ -288,15 +390,34 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 }
             }
             const bool geometryChanges = !record.previous.shape.IsEqual(request.shape);
+            if (!record.previous.loft.label.IsNull() && geometryChanges) return reject(OrdinaryEditResult::Invalid);
+            if (!record.previous.sweep.label.IsNull() && geometryChanges
+                && request.operation!=OrdinaryTransformOperation::SweepRebuild)
+                return reject(OrdinaryEditResult::Invalid);
             if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
-                && request.operation != OrdinaryTransformOperation::EnclosureRebuild) {
+                && request.operation != OrdinaryTransformOperation::EnclosureRebuild
+                && request.operation != OrdinaryTransformOperation::SweepRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             const auto representation = record.previous.resolvedRepresentation;
+            if (request.operation==OrdinaryTransformOperation::SweepRebuild) {
+                std::vector<double> values;
+                if (permit || changes.size()!=1 || representation!=OcctGeometryRepresentation::BRep
+                    || !record.previous.sweep.IsCurrent(document,request.label)
+                    || !MatricesEqual(record.previous.transform,request.transform) || request.rotationAroundPivot
+                    || !geometryChanges || !sweep_rebuild::HasOnlyMetadataSubshapes(document,request.label)
+                    || !sweep_rebuild::FixedStructure(record.previous.sweep.definition,*request.sweepRebuild)
+                    || !sweep_persistence::Encode(*request.sweepRebuild,values)) return reject(OrdinaryEditResult::Invalid);
+                if (!savedSweepRebuildSourceIsCurrent(request.sweepSource)) return reject(OrdinaryEditResult::Invalid);
+                ledger.sweepGuard=std::make_shared<SweepRebuildGuard>(*request.sweepSource);
+                // All numeric values are finite and fixed fields bit-equal. Only
+                // mutable geometric signed-zero aliases compare numerically here.
+                sweepNoChange=values==record.previous.sweep.values;
+            }
             if (request.operation == OrdinaryTransformOperation::ProfileRebuild) {
                 std::vector<double> values;
                 if (changes.size() != 1 || representation != OcctGeometryRepresentation::BRep
@@ -380,6 +501,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         }
         if (permit && (!permit->current() || !rebuildReceiptMatches(ledger,false)))
             return reject(OrdinaryEditResult::Invalid);
+        if (!SweepGuardMatches(_document,ledger,false)) return reject(OrdinaryEditResult::Invalid);
+        if (sweepNoChange) return reject(OrdinaryEditResult::NoChange);
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
         _activeToken = ++_nextToken;
@@ -559,7 +682,18 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
             }
             if (request.name && (!OcctObjectNameIsValid(*request.name) || ledger.meshCopy))
                 return reject(OrdinaryEditResult::Invalid);
-            if (request.profile && request.enclosure) return reject(OrdinaryEditResult::Invalid);
+            if (int(request.profile.has_value())+int(request.enclosure.has_value())+int(request.sweep.has_value())+int(request.loft.has_value())>1)
+                return reject(OrdinaryEditResult::Invalid);
+            std::vector<double> sweepValues;
+            if (request.sweep ? (request.representation!=OcctGeometryRepresentation::BRep || permit || ledger.meshCopy
+                    || !profile::IsIdentifier(request.sweepIdentifier)
+                    || !sweep_persistence::Encode(*request.sweep,sweepValues))
+                    : !request.sweepIdentifier.empty()) return reject(OrdinaryEditResult::Invalid);
+            std::vector<double> loftValues;
+            if (request.loft ? (request.representation!=OcctGeometryRepresentation::BRep || permit || ledger.meshCopy
+                    || !profile::IsIdentifier(request.loftIdentifier)
+                    || !loft_persistence::Encode(*request.loft,loftValues))
+                    : !request.loftIdentifier.empty()) return reject(OrdinaryEditResult::Invalid);
             std::vector<double> enclosureValues;
             if (request.enclosure ? (request.representation != OcctGeometryRepresentation::BRep
                     || !profile::IsIdentifier(request.enclosureIdentifier)
@@ -608,7 +742,7 @@ bool OrdinaryEditController::creationReceiptMatches(const OrdinaryCreationLedger
         receipt::Catalog actual;const auto status=receipt::Read(p.document_,actual);
         const auto& expected=candidate?r.candidate:p.previous_;
         if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
-            ||actual.label!=expected.label||actual.bytes!=expected.bytes)return false;
+            ||!actual.matches(expected))return false;
         if(!candidate)return true;
         if(!r.staged||r.record.effects.size()!=ledger.records.size())return false;
         for(std::size_t i=0;i<ledger.records.size();++i){
@@ -683,6 +817,21 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                     || stored.object.enclosure.values != values
                     || !stored.object.enclosure.IsCurrent(_document->Document(),expected.object.label)) return false;
             } else if (!stored.object.enclosure.label.IsNull()) return false;
+            if (record.requested.sweep) {
+                std::vector<double> values;
+                if (!sweep_persistence::Encode(*record.requested.sweep,values)
+                    || stored.object.sweep.label.IsNull()
+                    || stored.object.sweep.identifier!=record.requested.sweepIdentifier
+                    || !sweep_persistence::SameBits(stored.object.sweep.values,values)
+                    || !stored.object.sweep.IsCurrent(_document->Document(),expected.object.label)) return false;
+            } else if (!stored.object.sweep.label.IsNull()) return false;
+            if (record.requested.loft) {
+                std::vector<double> values;
+                if (!loft_persistence::Encode(*record.requested.loft,values)
+                    || stored.object.loft.label.IsNull() || stored.object.loft.identifier!=record.requested.loftIdentifier
+                    || !loft_persistence::SameBits(stored.object.loft.values,values)
+                    || !stored.object.loft.IsCurrent(_document->Document(),expected.object.label))return false;
+            } else if (!stored.object.loft.label.IsNull())return false;
             if (ledger.meshCopy) {
                 const auto& source=*ledger.meshCopy;
                 OcctScalarAppearanceState appearance;
@@ -761,6 +910,12 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             if (record.requested.enclosure && !enclosure::Stage(_document->Document(),label,
                     *record.requested.enclosure,record.requested.enclosureIdentifier))
                 throw Standard_Failure("Enclosure definition staging failed");
+            if (record.requested.sweep && !sweep_persistence::Stage(_document->Document(),label,
+                    *record.requested.sweep,record.requested.sweepIdentifier))
+                throw Standard_Failure("Sweep definition staging failed");
+            if (record.requested.loft && !loft_persistence::Stage(_document->Document(),label,
+                    *record.requested.loft,record.requested.loftIdentifier))
+                throw Standard_Failure("Loft definition staging failed");
             if (!_document->CaptureObjectNameStateForLabel(label, record.candidate)
                 || !record.candidate.object.shape.IsEqual(record.shape)
                 || record.candidate.object.scalars != EncodedTransform(record.transform)
@@ -778,7 +933,7 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
         }
 #endif
         const bool hasFeature = std::any_of(ledger.records.begin(), ledger.records.end(),
-            [](const auto& record) { return record.requested.profile.has_value() || record.requested.enclosure.has_value(); });
+            [](const auto& record) { return record.requested.profile.has_value() || record.requested.enclosure.has_value() || record.requested.sweep.has_value() || record.requested.loft.has_value(); });
         if (((ledger.meshCopy || hasFeature) && !_document->ValidateGeometryRepresentations())
             || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
         if(!stageCreationReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
@@ -1357,7 +1512,7 @@ bool OrdinaryEditController::bindRebuildReceipt(OrdinaryTransformLedger& ledger,
             || actualBytes!=expectedBytes || !request::CommandHash(actual,digest) || digest!=permit->key_.command
             || !receipt::CaptureEffect(_document,previous.label,source) || !(source==*permit->expectedSource_)
             || (status!=receipt::ReadStatus::Absent && status!=receipt::ReadStatus::Valid)
-            || catalog.label!=permit->previous_.label || catalog.bytes!=permit->previous_.bytes) return false;
+            || !catalog.matches(permit->previous_)) return false;
         ledger.modelingReceipt.emplace(); ledger.modelingReceipt->permit=std::move(permit); return true;
     } catch (...) { return false; }
 }
@@ -1369,7 +1524,7 @@ bool OrdinaryEditController::rebuildReceiptMatches(const OrdinaryTransformLedger
         receipt::Catalog catalog; const auto status=receipt::Read(p.document_,catalog);
         const auto& expected=candidate?r.candidate:p.previous_;
         if ((status!=receipt::ReadStatus::Absent && status!=receipt::ReadStatus::Valid)
-            || catalog.label!=expected.label || catalog.bytes!=expected.bytes) return false;
+            || !catalog.matches(expected)) return false;
         receipt::Effect live;
         if (!receipt::CaptureEffect(_document,ledger.records.front().previous.label,live)) return false;
         return candidate ? r.staged && r.record.effects.size()==1 && live==r.record.effects.front()
@@ -1417,6 +1572,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;
         }
+        if (!SweepGuardMatches(_document,ledger,false)) throw Standard_Failure("Saved sweep source catalog changed");
         std::size_t index = 0;
         for (auto& record : ledger.records) {
 #ifdef DEBUG
@@ -1446,9 +1602,19 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
-            if ((!record.previous.shape.IsEqual(record.requested.shape)
+            bool sweepStaged=false;
+            if (record.requested.operation==OrdinaryTransformOperation::SweepRebuild) {
+                bool pairedFault=false;
+#if DEBUG
+                if (_stageFailureIndex==2) { _stageFailureIndex=-1;pairedFault=true; }
+#endif
+                sweepStaged=record.requested.sweepRebuild && _document->StageSavedSweepReplacement(
+                    record.previous,record.requested.shape,*record.requested.sweepRebuild,pairedFault);
+                if (!sweepStaged) throw Standard_Failure("Saved sweep paired staging failed");
+            }
+            if ((!sweepStaged && !record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
-                || !_document->SaveObjectTransform(record.previous.label, candidate)
+                || (!sweepStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
                 || (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
@@ -1465,7 +1631,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     && !record.candidate.profile.IsEqual(record.previous.profile))
                 || (record.requested.operation != OrdinaryTransformOperation::EnclosureRebuild
                     && !record.candidate.enclosure.IsEqual(record.previous.enclosure))
-                || record.candidate.scalars != EncodedTransform(record.requested.transform)
+                || (sweepStaged ? (record.candidate.present!=record.previous.present
+                    || !sweep_rebuild::SameRawScalars(record.candidate.scalars,record.previous.scalars))
+                    : record.candidate.scalars != EncodedTransform(record.requested.transform))
+                || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
@@ -1515,10 +1684,16 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     record.candidate.shape.Location(), referenceAxis)) {
                 throw Standard_Failure("Ordinary transform exceeds persisted reference-axis limits");
             }
-            for (bool present : record.candidate.present) {
+            if (!sweepStaged) for (bool present : record.candidate.present) {
                 if (!present) { throw Standard_Failure("Incomplete ordinary transform candidate"); }
             }
         }
+#if DEBUG
+        if (ledger.sweepGuard && _stageFailureIndex==3) {
+            _stageFailureIndex=-1;throw Standard_Failure("Saved sweep pre-seal fault");
+        }
+#endif
+        if (!SealSweepCandidate(_document,ledger)) throw Standard_Failure("Saved sweep complete candidate mismatch");
         if (!stageRebuildReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
             throw Standard_Failure("Ordinary rebuild receipt staging failed");
         ledger.candidateSealed = true;
@@ -1551,6 +1726,7 @@ OrdinaryEditResult OrdinaryEditController::cancel(std::uint64_t token) noexcept 
 bool OrdinaryEditController::presentationMatches(
     const OrdinaryTransformLedger& ledger, bool committed) const noexcept {
     try {
+        if (!SweepGuardMatches(_document,ledger,committed)) return false;
         for (const auto& record : ledger.records) {
             const auto& expected = committed ? record.candidate : record.previous;
             const auto& presentation = record.requested.presentation;
@@ -1618,6 +1794,7 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
                 return OrdinaryEditResult::OutcomeUnknown;
             }
         }
+        if (!SweepGuardMatches(_document,ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
@@ -1638,6 +1815,7 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
                 ledger.records[index].requested.presentation = replacements[index];
             }
         }
+        if (!SweepGuardMatches(_document,ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
 #if DEBUG
         if (candidate && ledger.modelingReceipt && ledger.modelingReceipt->permit->debugBeforeReleaseFailure_) {

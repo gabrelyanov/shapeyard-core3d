@@ -115,7 +115,8 @@ Standard_Boolean IsBRepModelingLabel(
     const TDF_Label& theLabel) noexcept
 {
     if (theDocument.IsNull() || theLabel.IsNull()
-        || !theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)) {
+        || !theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)
+        || !theDocument->HasNoSavedSweepForTopology(theLabel)) {
         return Standard_False;
     }
     const OcctGeometryRepresentation aRepresentation =

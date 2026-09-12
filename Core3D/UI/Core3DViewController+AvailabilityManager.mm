@@ -287,9 +287,21 @@ Core3DModelCapability DocumentExportCapabilities(
             }
             ++selectedDefinitionCount;
             hasSelection = true;
-            const Core3DModelCapability definitionCapabilities =
+            Core3DModelCapability definitionCapabilities =
                 CapabilitiesForRepresentation(
                     document->GeometryRepresentationForLabel(label));
+            core3d::sweep_persistence::Record sweep;
+            if (!core3d::sweep_persistence::Read(document->Document(),label,sweep)) return Core3DModelCapabilityNone;
+            core3d::loft_persistence::Record loft;
+            if (!core3d::loft_persistence::Read(document->Document(),label,loft))return Core3DModelCapabilityNone;
+            if (!sweep.label.IsNull() || !loft.label.IsNull()) {
+                // These tools lack a recipe-preserving sweep/loft operation yet.
+                definitionCapabilities=static_cast<Core3DModelCapability>(definitionCapabilities
+                    & ~(Core3DModelCapabilitySubshapeSelection|Core3DModelCapabilityNonuniformScale
+                        |Core3DModelCapabilityDuplicate|Core3DModelCapabilityMirror|Core3DModelCapabilityBoolean
+                        |Core3DModelCapabilityChamfer|Core3DModelCapabilityExtrusion|Core3DModelCapabilityShell
+                        |Core3DModelCapabilityLinearArray|Core3DModelCapabilityRadialArray));
+            }
             if (definitionCapabilities == Core3DModelCapabilityNone) {
                 return Core3DModelCapabilityNone;
             }

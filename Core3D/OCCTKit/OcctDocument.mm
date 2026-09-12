@@ -70,6 +70,8 @@
 #include <BinMNaming_NamedShapeDriver.hxx>
 #include <BinMXCAFDoc_ColorDriver.hxx>
 #include <BinMXCAFDoc_LengthUnitDriver.hxx>
+#include "SavedFeatureRecords.hxx"
+#include "SweepRebuildDefinition.hxx"
 #include <BinMXCAFDoc_LocationDriver.hxx>
 #include <BinMXCAFDoc_VisMaterialDriver.hxx>
 #include <BinMXCAFDoc_VisMaterialToolDriver.hxx>
@@ -3575,7 +3577,9 @@ Standard_Boolean ValidateGeometryDocument(
         }
         std::vector<core3d::profile::Record> profiles;
         std::vector<core3d::enclosure::Record> enclosures;
-        if (!core3d::enclosure::ValidateFeatureRecords(document, profiles, enclosures)) return Standard_False;
+        std::vector<core3d::sweep_persistence::Record> sweeps;
+        std::vector<core3d::loft_persistence::Record> lofts;
+        if (!core3d::saved_features::Validate(document, profiles, enclosures, sweeps, lofts)) return Standard_False;
         const TDF_Label aRoot = document->GetData()->Root();
         Handle(TDataStd_Integer) aRootMarker;
         Handle(TNaming_NamedShape) aRootShape;
@@ -3911,7 +3915,7 @@ Standard_Boolean ValidateGeometryDocument(
             usage.labels = aLabelCount;
             usage.graphVisits = anAggregateGraphVisitCount;
             usage.leafOccurrences = aLeafOccurrenceCount;
-            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size());
+            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size());
             *output = usage;
         }
         return Standard_True;
@@ -3960,6 +3964,13 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
     } catch (...) {
         return Standard_False;
     }
+}
+
+Standard_Boolean OcctDocument::HasNoSavedSweepForTopology(const TDF_Label& label) const noexcept {
+    core3d::sweep_persistence::Record record;
+    core3d::loft_persistence::Record loft;
+    return core3d::sweep_persistence::Read(myOcafDoc,label,record) && record.label.IsNull()
+        && core3d::loft_persistence::Read(myOcafDoc,label,loft) && loft.label.IsNull();
 }
 
 Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
@@ -4029,6 +4040,8 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                         64U * 1024U * 1024U)) return Standard_False;
             }
 
+            // No independent-copy/baked-copy policy for saved sweeps yet.
+            if (!HasNoSavedSweepForTopology(source)) return Standard_False;
             core3d::enclosure::Record sourceEnclosure;
             if (!core3d::enclosure::Read(myOcafDoc, source, sourceEnclosure)
                 || (!sourceEnclosure.label.IsNull()
@@ -5768,6 +5781,59 @@ Standard_Boolean OcctDocument::ReplaceShape(
     }
 }
 
+
+Standard_Boolean OcctDocument::StageSavedSweepReplacement(
+    const OcctObjectTransformState& previous, const TopoDS_Shape& candidate,
+    const core3d::planar_sweep::Definition& definition, bool debugFailAfterShape) noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        namespace p=core3d::sweep_persistence;
+        OcctObjectTransformState current;std::vector<double> values;
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !CaptureObjectTransformStateForLabel(previous.label,current) || !current.IsEqual(previous)
+            || !core3d::sweep_rebuild::SameRawScalars(current.scalars,previous.scalars)
+            || current.sweep.label.IsNull() || !current.sweep.IsCurrent(myOcafDoc,previous.label)
+            || !core3d::sweep_rebuild::HasOnlyMetadataSubshapes(myOcafDoc,previous.label)
+            || !core3d::sweep_rebuild::FixedStructure(current.sweep.definition,definition)
+            || !p::Encode(definition,values) || candidate.IsNull() || candidate.ShapeType()!=TopAbs_SOLID
+            || current.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            || ClassifyDefinitionGeometry(candidate,nullptr)!=DefinitionGeometryClass::BRep) return Standard_False;
+        OcctScalarAppearanceState appearance;
+        if (!CaptureScalarAppearanceForSavedSweepRebuild(previous.label,appearance)) return Standard_False;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        // No observer/readback/generic transform writer between this owner write
+        // and the paired existing-label binding/scalar write. Failure remains
+        // with the ordinary command owner; no local best-effort restoration.
+        shapes->SetShape(previous.label,candidate);
+#if DEBUG
+        if (debugFailAfterShape) throw Standard_Failure("Saved sweep paired-write fault");
+#else
+        (void)debugFailAfterShape;
+#endif
+        const auto label=previous.sweep.label;
+        TNaming_Builder(label).Select(candidate,candidate);
+        // Fixed structure means count/schema/identity and label are unchanged.
+        // Recreate scalar attributes so +0/-0 writes cannot be elided by numeric Set equality.
+        for (std::size_t i=0;i<values.size();++i) {
+            const auto child=label.FindChild(int(i)+1,Standard_False);
+            if (child.IsNull()) return Standard_False;
+            child.ForgetAttribute(TDataStd_Real::GetID());TDataStd_Real::Set(child,values[i]);
+        }
+        OcctObjectTransformState stored;OcctScalarAppearanceState after;
+        if (!CaptureObjectTransformStateForLabel(previous.label,stored)
+            || !stored.shape.IsEqual(candidate) || !stored.sweep.label.IsEqual(previous.sweep.label)
+            || stored.sweep.identifier!=previous.sweep.identifier || !p::SameBits(stored.sweep.values,values)
+            || !stored.sweep.IsCurrent(myOcafDoc,previous.label)
+            || stored.entityIdentifier!=previous.entityIdentifier || stored.definitionIdentifier!=previous.definitionIdentifier
+            || stored.present!=previous.present || !core3d::sweep_rebuild::SameRawScalars(stored.scalars,previous.scalars)
+            || !CaptureScalarAppearanceForSavedSweepRebuild(previous.label,after)
+            || !appearance.IsEqual(after) || !core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues))
+            return Standard_False;
+        return Standard_True;
+    } catch (...) {return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::SaveObjectTransform(
     const TDF_Label& label, const Handle(AIS_Shape) anAis)
 {
@@ -6624,6 +6690,79 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
     } catch (...) {output={};return Standard_False;}
 }
 
+Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
+    const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {
+    output={};
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
+        // Subshape styling needs a deliberate triangle/material mapping. The
+        // first copy rejects these labels rather than flattening their styles.
+        core3d::profile::Record profile;core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc,label,profile)
+            || !core3d::enclosure::Read(myOcafDoc,label,enclosure)
+            || !core3d::sweep_persistence::Read(myOcafDoc,label,sweep)
+            || !core3d::loft_persistence::Read(myOcafDoc,label,loft)) return Standard_False;
+        TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
+        if (children.Length()>core3d::profile::MaximumLabels) return Standard_False;
+        for (int i=1;i<=children.Length();++i) {
+            const auto child=children.Value(i);
+            if ((profile.label.IsNull() || !child.IsEqual(profile.label))
+                && (enclosure.label.IsNull() || !child.IsEqual(enclosure.label))
+                && (sweep.label.IsNull() || !child.IsEqual(sweep.label))
+                && (loft.label.IsNull() || !child.IsEqual(loft.label))) return Standard_False;
+        }
+        for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
+            if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
+        if (label.IsAttribute(NormalTextureRecipeAttributeID())
+            || label.IsAttribute(AutoPromotedEmissiveFactorAttributeID())) return Standard_False;
+        OcctScalarAppearanceState state;
+        for (int i=0;i<2;++i) {
+            const auto child=label.FindChild(11+i,Standard_False);
+            if (child.IsNull()) continue;
+            Handle(TDF_Attribute) attribute;
+            if (!child.FindAttribute(TDataStd_Integer::GetID(),attribute)) continue;
+            const auto integer=Handle(TDataStd_Integer)::DownCast(attribute);
+            if (integer.IsNull()) return Standard_False;
+            state.legacyPresent[i]=true;state.legacyValues[i]=integer->Get();
+        }
+        Handle(TDF_Attribute) marker;
+        if (label.FindAttribute(LocalPBRMaterialAttributeID(),marker)) {
+            const auto integer=Handle(TDataStd_Integer)::DownCast(marker);
+            if (integer.IsNull() || integer->Get()!=1) return Standard_False;
+            state.localPBR=true;
+        }
+        const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(label,state.materialLabel);
+        const auto material=XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if (linked != !material.IsNull() || linked != !state.materialLabel.IsNull()
+            || (state.localPBR && (material.IsNull() || !material->HasPbrMaterial()))) return Standard_False;
+        if (!material.IsNull()) {
+            if (state.materialLabel.Data()!=myOcafDoc->GetData() || material->IsEmpty()) return Standard_False;
+            const auto& p=material->PbrMaterial();const auto& c=material->CommonMaterial();
+            // Reject even disabled-model texture handles: the source state is
+            // captured completely and no payload aliases enter this contract.
+            if (!p.BaseColorTexture.IsNull() || !p.MetallicRoughnessTexture.IsNull()
+                || !p.NormalTexture.IsNull() || !p.OcclusionTexture.IsNull()
+                || !p.EmissiveTexture.IsNull() || !c.DiffuseTexture.IsNull()) return Standard_False;
+            auto& values=state.visualValues;
+            values={double(material->FaceCulling()),double(material->AlphaMode()),material->AlphaCutOff(),
+                double(p.IsDefined),double(c.IsDefined)};
+            const auto rgb=[&values](const Quantity_Color& color) {
+                values.push_back(color.Red());values.push_back(color.Green());values.push_back(color.Blue());
+            };
+            rgb(p.BaseColor.GetRGB());values.push_back(p.BaseColor.Alpha());
+            for (int i=0;i<3;++i) values.push_back(p.EmissiveFactor[i]);
+            values.push_back(p.Metallic);values.push_back(p.Roughness);values.push_back(p.RefractionIndex);
+            rgb(c.AmbientColor);rgb(c.DiffuseColor);rgb(c.SpecularColor);rgb(c.EmissiveColor);
+            values.push_back(c.Shininess);values.push_back(c.Transparency);
+            for (double value:values) if (!std::isfinite(value)) return Standard_False;
+        }
+        output=std::move(state);return Standard_True;
+    } catch (...) {output={};return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::CopyObjectAppearance(
     const TDF_Label& source,
     const TDF_Label& destination) {
@@ -7317,6 +7456,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && authoredFramesIdentity == other.authoredFramesIdentity
             && profile.IsEqual(other.profile)
             && enclosure.IsEqual(other.enclosure)
+            && sweep.IsEqual(other.sweep) && loft.IsEqual(other.loft)
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -7344,7 +7484,9 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         captured.storedRepresentation = StoredGeometryRepresentationForLabel(label);
         captured.resolvedRepresentation = GeometryRepresentationForLabel(label);
         if (!core3d::profile::Read(myOcafDoc, label, captured.profile)
-            || !core3d::enclosure::Read(myOcafDoc, label, captured.enclosure)) return Standard_False;
+            || !core3d::enclosure::Read(myOcafDoc, label, captured.enclosure)
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, captured.sweep)
+            || !core3d::loft_persistence::Read(myOcafDoc, label, captured.loft)) return Standard_False;
         OcctAuthoredFrameRecord frames;
         const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
         if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;

@@ -1,4 +1,6 @@
 #include "../OCCTKit/ProfileDefinition.hxx"
+#include "../OCCTKit/PlanarSweepDefinition.hxx"
+#include "../OCCTKit/RectangularLoftDefinition.hxx"
 //
 //  Core3DViewer.h
 //  Core3D
@@ -58,6 +60,8 @@ namespace core3d {
     struct ProfileSolidGeometry;
     struct EnclosureSolidGeometry;
     struct AssemblySolidGeometry;
+    struct SweepSolidGeometry;
+    struct LoftSolidGeometry;
     struct AssemblyPartDefinition {
         profile::Parameters parameters;
         TCollection_ExtendedString name;
@@ -66,7 +70,17 @@ namespace core3d {
     // Detached typed payload only; monostate is an invalid/unprepared request.
     using NativeSolidGeometryPayload = std::variant<std::monostate,
         std::shared_ptr<ProfileSolidGeometry>, std::shared_ptr<EnclosureSolidGeometry>,
-        std::shared_ptr<AssemblySolidGeometry>>;
+        std::shared_ptr<AssemblySolidGeometry>,std::shared_ptr<SweepSolidGeometry>,std::shared_ptr<LoftSolidGeometry>>;
+    struct StoredSweepSnapshot {
+        planar_sweep::Definition definition;
+        ObjectFrameIdentity identity;
+        std::string definitionIdentifier,featureIdentifier;
+        OcctObjectTransformState sourceState;
+        authority::Stamp authorityStamp;
+        std::shared_ptr<const SweepRebuildGuard> sourceGuard;
+        double effectiveDimensionMetersPerUnit=0;
+        bool current=false;
+    };
     struct StoredProfileSnapshot {
         profile::Parameters parameters;
         ObjectFrameIdentity identity;
@@ -159,6 +173,19 @@ namespace core3d {
         std::shared_ptr<NativeSolidWork> prepareAssemblySolid(
             const std::vector<AssemblyPartDefinition>& parts, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareLoftSolid(
+            const rectangular_loft::Definition& definition,const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareSweepSolid(
+            const planar_sweep::Definition& definition,const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept;
+        std::optional<StoredSweepSnapshot> storedSweepDefinition(
+            const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+            std::uint32_t width,std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareStoredSweepRebuild(
+            const planar_sweep::Definition& definition,const StoredSweepSnapshot& original,
+            const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+            std::uint32_t width,std::uint32_t height) noexcept;
         static NativeSolidGeometryPayload nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept;
         static bool buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(

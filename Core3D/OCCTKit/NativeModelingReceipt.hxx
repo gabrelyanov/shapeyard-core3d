@@ -25,6 +25,7 @@
 #include <utility>
 #include <locale>
 #include <limits>
+#include <iterator>
 #include <ostream>
 #include <set>
 #include <streambuf>
@@ -38,6 +39,12 @@ constexpr std::size_t MaximumRecords=128, MaximumEffects=16, MaximumBytes=256*10
 constexpr std::size_t ChunkBytes=256, MaximumChunks=MaximumBytes*2/ChunkBytes;
 inline const Standard_GUID& SchemaID(){ static const Standard_GUID id("9FB0D315-83AB-4F68-AE29-C8C85BA670C1");return id; }
 inline const Standard_GUID& CountID(){ static const Standard_GUID id("9FB0D315-83AB-4F68-AE29-C8C85BA670C2");return id; }
+// Policy1 freezes the exact qualified417 OCCT7.8/V3 analytic-zero procedure.
+// Never retarget an assigned policy. Zero denotes unversioned legacy only.
+constexpr std::uint16_t AnalyticZeroPolicy1=1;
+inline const Standard_GUID& VersionedSchemaID(){static const Standard_GUID id("42AB4BB7-6421-445F-A2B0-2DC682AB3001");return id;}
+inline const Standard_GUID& VersionedCountID(){static const Standard_GUID id("42AB4BB7-6421-445F-A2B0-2DC682AB3002");return id;}
+enum class EffectEvidenceStatus { Current, Mismatch, LegacyUnversioned, UnsupportedPolicy, Unavailable };
 enum class Operation:std::uint8_t { CreateEnclosure=1, RebuildEnclosure=2, CreateAssembly=3, RebuildProfile=4 };
 enum class Feature:std::uint8_t { Profile=1, Enclosure=2 };
 enum class ReadStatus { Absent, Valid, Unsupported, Malformed, Unavailable };
@@ -54,11 +61,24 @@ struct Effect {
     Feature feature=Feature::Profile;
     UUID entity{}, definition{}, featureID{};
     Digest geometry{}, state{};
-    bool operator==(const Effect& b)const{return feature==b.feature&&entity==b.entity&&definition==b.definition&&featureID==b.featureID&&geometry==b.geometry&&state==b.state;}
+    std::uint16_t policy=AnalyticZeroPolicy1;
+    bool operator==(const Effect& b)const{return policy==b.policy&&feature==b.feature&&entity==b.entity&&definition==b.definition&&featureID==b.featureID&&geometry==b.geometry&&state==b.state;}
 };
-struct Record {Key key;Operation operation=Operation::CreateAssembly;std::vector<Effect> effects;};
-struct Catalog {TDF_Label label;std::vector<Record> records;std::vector<std::uint8_t> bytes;};
-struct Inspection {DocumentPresence presence=DocumentPresence::Unavailable;bool effectsCurrent=false;std::vector<Effect> effects;};
+struct Record {Key key;Operation operation=Operation::CreateAssembly;std::vector<Effect> effects;std::uint16_t policy=AnalyticZeroPolicy1;};
+// label/bytes describe only the versioned component. Legacy storage is never
+// rewritten. All authority fences compare both exact components through matches.
+struct Catalog {
+    TDF_Label label,legacyLabel;
+    std::vector<Record> records; // Combined sorted request inventory, including legacy.
+    std::vector<std::uint8_t> bytes,legacyBytes;
+    bool matches(const Catalog& b)const noexcept {
+        return label==b.label&&legacyLabel==b.legacyLabel&&bytes==b.bytes&&legacyBytes==b.legacyBytes;
+    }
+    bool supportsAppend()const noexcept {
+        return std::all_of(records.begin(),records.end(),[](const Record&r){return r.policy==0||r.policy==AnalyticZeroPolicy1;});
+    }
+};
+struct Inspection {DocumentPresence presence=DocumentPresence::Unavailable;bool effectsCurrent=false;std::vector<Effect> effects;EffectEvidenceStatus evidence=EffectEvidenceStatus::Unavailable;};
 inline bool Nonzero(const auto& a){return std::any_of(a.begin(),a.end(),[](auto b){return b!=0;});}
 inline int Nibble(char c){return c>='0'&&c<='9'?c-'0':c>='A'&&c<='F'?c-'A'+10:c>='a'&&c<='f'?c-'a'+10:-1;}
 inline bool ParseUUID(const std::string& text,UUID& out){
@@ -77,7 +97,7 @@ inline bool Valid(const Record& r){
     std::set<UUID> entities,definitions,features;
     for(const auto& e:r.effects){
         const auto expected=(r.operation==Operation::CreateEnclosure||r.operation==Operation::RebuildEnclosure)?Feature::Enclosure:Feature::Profile;
-        if(e.feature!=expected||!Nonzero(e.entity)||!Nonzero(e.definition)||!Nonzero(e.featureID)||!Nonzero(e.geometry)||!Nonzero(e.state)
+        if(e.policy!=r.policy||e.feature!=expected||!Nonzero(e.entity)||!Nonzero(e.definition)||!Nonzero(e.featureID)||!Nonzero(e.geometry)||!Nonzero(e.state)
             ||!entities.insert(e.entity).second||!definitions.insert(e.definition).second||!features.insert(e.featureID).second)return false;
     }
     return true;
@@ -86,13 +106,14 @@ inline bool Encode(std::vector<Record> records,std::vector<std::uint8_t>& output
     output.clear();std::vector<std::uint8_t> out;try{
         if(records.empty()||records.size()>MaximumRecords)return false;
         std::sort(records.begin(),records.end(),[](const auto&a,const auto&b){return a.key.request<b.key.request;});
-        out={'S','Y','R','C',1,0,std::uint8_t(records.size()),std::uint8_t(records.size()>>8)};
+        out={'S','Y','R','C',2,0,std::uint8_t(records.size()),std::uint8_t(records.size()>>8)};
         auto append=[&](const auto& a){out.insert(out.end(),a.begin(),a.end());};
         UUID previous{};
         for(auto&r:records){
-            if(!Valid(r)||r.key.request==previous)return false;previous=r.key.request;
+            if(!Valid(r)||r.policy==0||r.key.request==previous)return false;previous=r.key.request;
             append(r.key.accountScope);append(r.key.document);append(r.key.request);append(r.key.command);append(r.key.execution);
             out.push_back(std::uint8_t(r.operation));out.push_back(std::uint8_t(r.effects.size()));
+            out.push_back(std::uint8_t(r.policy));out.push_back(std::uint8_t(r.policy>>8));
             std::sort(r.effects.begin(),r.effects.end(),[](const auto&a,const auto&b){return a.entity<b.entity;});
             for(const auto&e:r.effects){out.push_back(std::uint8_t(e.feature));append(e.entity);append(e.definition);append(e.featureID);append(e.geometry);append(e.state);}
             if(out.size()>MaximumBytes-32)return false;
@@ -103,7 +124,8 @@ inline bool Encode(std::vector<Record> records,std::vector<std::uint8_t>& output
 inline ReadStatus Decode(const std::vector<std::uint8_t>& bytes,std::vector<Record>& output) noexcept {
     output.clear();std::vector<Record> out;try{
         if(bytes.size()<40||bytes.size()>MaximumBytes||std::memcmp(bytes.data(),"SYRC",4))return ReadStatus::Malformed;
-        if(bytes[4]!=1)return ReadStatus::Unsupported;
+        if(bytes[4]!=1&&bytes[4]!=2)return ReadStatus::Unsupported;
+        const bool legacy=bytes[4]==1;
         if(bytes[5]!=0)return ReadStatus::Malformed;
         Digest actual,expected;std::copy(bytes.end()-32,bytes.end(),expected.begin());
         if(!Hash(bytes.data(),bytes.size()-32,actual)||actual!=expected)return ReadStatus::Malformed;
@@ -114,8 +136,12 @@ inline ReadStatus Decode(const std::vector<std::uint8_t>& bytes,std::vector<Reco
         for(std::size_t i=0;i<count;++i){
             Record r;if(!take(r.key.accountScope)||!take(r.key.document)||!take(r.key.request)||!take(r.key.command)||!take(r.key.execution)||offset+2>bytes.size()-32)return ReadStatus::Malformed;
             r.operation=Operation(bytes[offset++]);const auto n=bytes[offset++];if(n<1||n>MaximumEffects)return ReadStatus::Malformed;
+            r.policy=0;
+            if(!legacy){if(offset+2>bytes.size()-32)return ReadStatus::Malformed;
+                r.policy=std::uint16_t(bytes[offset])|(std::uint16_t(bytes[offset+1])<<8);offset+=2;
+                if(r.policy==0)return ReadStatus::Malformed;}
             UUID last{};
-            for(unsigned j=0;j<n;++j){if(offset>=bytes.size()-32)return ReadStatus::Malformed;Effect e;e.feature=Feature(bytes[offset++]);
+            for(unsigned j=0;j<n;++j){if(offset>=bytes.size()-32)return ReadStatus::Malformed;Effect e;e.policy=r.policy;e.feature=Feature(bytes[offset++]);
                 if(!take(e.entity)||!take(e.definition)||!take(e.featureID)||!take(e.geometry)||!take(e.state)||!(last<e.entity))return ReadStatus::Malformed;
                 last=e.entity;r.effects.push_back(e);
             }
@@ -124,75 +150,94 @@ inline ReadStatus Decode(const std::vector<std::uint8_t>& bytes,std::vector<Reco
         if(offset!=bytes.size()-32)return ReadStatus::Malformed;output=std::move(out);return ReadStatus::Valid;
     }catch(...){out.clear();return ReadStatus::Malformed;}
 }
-inline bool HasCatalogAttribute(const TDF_Label& label){return label.IsAttribute(SchemaID())||label.IsAttribute(CountID());}
+inline bool HasCatalogAttribute(const TDF_Label& label){
+    return label.IsAttribute(SchemaID())||label.IsAttribute(CountID())
+        ||label.IsAttribute(VersionedSchemaID())||label.IsAttribute(VersionedCountID());
+}
 inline ReadStatus Read(const Handle(TDocStd_Document)& doc,Catalog& out) noexcept {
     out={};try{
         if(doc.IsNull()||doc->GetData().IsNull())return ReadStatus::Unavailable;
         const auto root=doc->GetData()->Root();
         if(HasCatalogAttribute(root)||HasCatalogAttribute(doc->Main()))return ReadStatus::Malformed;
         Catalog found;std::size_t visited=0;
+        // Exactly one traversal pays the shared label budget, including chunk
+        // descendants. No per-catalog reset can double this ceiling.
         for(TDF_ChildIterator it(root,Standard_True);it.More();it.Next()){
             if(++visited>100000)return ReadStatus::Malformed;
-            if(!HasCatalogAttribute(it.Value()))continue;
-            // Reserved GUIDs anywhere else are malformed, including Main,
-            // XCAF tool subtrees and nested/duplicate catalog locations.
-            if(it.Value()==doc->Main()||it.Value().Father()!=root)return ReadStatus::Malformed;
-            if(!found.label.IsNull())return ReadStatus::Malformed;found.label=it.Value();
+            const auto label=it.Value();if(!HasCatalogAttribute(label))continue;
+            if(label==doc->Main()||label.Father()!=root)return ReadStatus::Malformed;
+            const bool legacy=label.IsAttribute(SchemaID())||label.IsAttribute(CountID());
+            const bool versioned=label.IsAttribute(VersionedSchemaID())||label.IsAttribute(VersionedCountID());
+            if(legacy==versioned)return ReadStatus::Malformed;
+            auto& slot=legacy?found.legacyLabel:found.label;
+            if(!slot.IsNull())return ReadStatus::Malformed;slot=label;
         }
-        if(found.label.IsNull())return ReadStatus::Absent;
-        Handle(TDataStd_Integer) schema,count;
-        if(!found.label.FindAttribute(SchemaID(),schema)||!found.label.FindAttribute(CountID(),count))return ReadStatus::Malformed;
-        if(schema->Get()!=1)return ReadStatus::Unsupported;
-        if(count->Get()<1||count->Get()>int(MaximumChunks))return ReadStatus::Malformed;
-        for(TDF_AttributeIterator a(found.label);a.More();a.Next())if(a.Value()->ID()!=SchemaID()&&a.Value()->ID()!=CountID()&&a.Value()->ID()!=TDF_TagSource::GetID())return ReadStatus::Malformed;
-        std::vector<std::string> chunks(std::size_t(count->Get()));std::size_t populated=0;
-        for(TDF_ChildIterator it(found.label,Standard_False);it.More();it.Next()){
-            if(++visited>100000)return ReadStatus::Malformed;const auto child=it.Value();
-            for(TDF_ChildIterator nested(child,Standard_True);nested.More();nested.Next())if(++visited>100000||nested.Value().HasAttribute())return ReadStatus::Malformed;
-            if(!child.HasAttribute())continue;
-            if(child.Tag()<1||child.Tag()>count->Get())return ReadStatus::Malformed;
-            Handle(TDataStd_AsciiString) value;if(!child.FindAttribute(TDataStd_AsciiString::GetID(),value))return ReadStatus::Malformed;
-            for(TDF_AttributeIterator a(child);a.More();a.Next())if(a.Value()->ID()!=TDataStd_AsciiString::GetID())return ReadStatus::Malformed;
-            const auto length=value->Get().Length();if(length<1||length>int(ChunkBytes)||(child.Tag()<count->Get()&&length!=int(ChunkBytes)))return ReadStatus::Malformed;
-            chunks[std::size_t(child.Tag()-1)]=value->Get().ToCString();++populated;
+        if(found.label.IsNull()&&found.legacyLabel.IsNull())return ReadStatus::Absent;
+        std::size_t totalBytes=0,totalChunks=0;
+        for(bool legacy:{true,false}){
+            const auto label=legacy?found.legacyLabel:found.label;if(label.IsNull())continue;
+            const auto& schemaID=legacy?SchemaID():VersionedSchemaID();
+            const auto& countID=legacy?CountID():VersionedCountID();
+            Handle(TDataStd_Integer) schema,count;
+            if(!label.FindAttribute(schemaID,schema)||!label.FindAttribute(countID,count))return ReadStatus::Malformed;
+            if(schema->Get()!=(legacy?1:2))return ReadStatus::Unsupported;
+            if(count->Get()<1||std::size_t(count->Get())>MaximumChunks-totalChunks)return ReadStatus::Malformed;
+            totalChunks+=std::size_t(count->Get());
+            for(TDF_AttributeIterator a(label);a.More();a.Next())if(a.Value()->ID()!=schemaID&&a.Value()->ID()!=countID&&a.Value()->ID()!=TDF_TagSource::GetID())return ReadStatus::Malformed;
+            std::vector<std::string> chunks(std::size_t(count->Get()));std::size_t populated=0;
+            for(TDF_ChildIterator it(label,Standard_False);it.More();it.Next()){
+                const auto child=it.Value();
+                for(TDF_ChildIterator nested(child,Standard_True);nested.More();nested.Next())if(nested.Value().HasAttribute())return ReadStatus::Malformed;
+                if(!child.HasAttribute())continue;
+                if(child.Tag()<1||child.Tag()>count->Get())return ReadStatus::Malformed;
+                Handle(TDataStd_AsciiString) value;if(!child.FindAttribute(TDataStd_AsciiString::GetID(),value))return ReadStatus::Malformed;
+                for(TDF_AttributeIterator a(child);a.More();a.Next())if(a.Value()->ID()!=TDataStd_AsciiString::GetID())return ReadStatus::Malformed;
+                const auto length=value->Get().Length();if(length<1||length>int(ChunkBytes)||(child.Tag()<count->Get()&&length!=int(ChunkBytes)))return ReadStatus::Malformed;
+                chunks[std::size_t(child.Tag()-1)]=value->Get().ToCString();++populated;
+            }
+            if(populated!=chunks.size())return ReadStatus::Malformed;
+            auto& bytes=legacy?found.legacyBytes:found.bytes;int high=-1;
+            for(const auto& chunk:chunks)for(char c:chunk){const int x=Nibble(c);if(x<0||(c>='A'&&c<='F'))return ReadStatus::Malformed;
+                if(high<0)high=x;else{if(totalBytes>=MaximumBytes)return ReadStatus::Malformed;bytes.push_back(std::uint8_t(high*16+x));high=-1;++totalBytes;}}
+            if(high>=0||bytes.size()<8||bytes[4]!=(legacy?1:2))return ReadStatus::Malformed;
+            std::vector<Record> decoded;const auto status=Decode(bytes,decoded);if(status!=ReadStatus::Valid)return status;
+            if(decoded.size()>MaximumRecords-found.records.size())return ReadStatus::Malformed;
+            found.records.insert(found.records.end(),std::make_move_iterator(decoded.begin()),std::make_move_iterator(decoded.end()));
         }
-        if(populated!=chunks.size())return ReadStatus::Malformed;
-        int high=-1;for(const auto&s:chunks)for(char c:s){const int x=Nibble(c);if(x<0||(c>='A'&&c<='F'))return ReadStatus::Malformed;
-            if(high<0)high=x;else{if(found.bytes.size()>=MaximumBytes)return ReadStatus::Malformed;found.bytes.push_back(std::uint8_t(high*16+x));high=-1;}}
-        if(high>=0)return ReadStatus::Malformed;
-        const auto result=Decode(found.bytes,found.records);if(result==ReadStatus::Valid)out=std::move(found);return result;
+        std::sort(found.records.begin(),found.records.end(),[](const auto&a,const auto&b){return a.key.request<b.key.request;});
+        UUID previous{};for(const auto& record:found.records){if(!(previous<record.key.request))return ReadStatus::Malformed;previous=record.key.request;}
+        out=std::move(found);return ReadStatus::Valid;
     }catch(...){out={};return ReadStatus::Malformed;}
 }
-// Component-level data staging seam, not an authority/admission API. No public
-// Apply calls this yet. Caller must supply native-captured effects and bind them
-// to its command. The future ordinary ledger must retain exact previous bytes,
-// revalidate candidate effects and require permanent native intent.
+// Only the native ordinary owner may use this data staging seam inside its
+// already-owned OCAF command. Legacy component attributes/chunks are untouched.
 inline bool Stage(const Handle(OcctDocument)& owner,const Record& record,const Catalog& expected) noexcept {
     try{
-        if(owner.IsNull()||owner->Document().IsNull()||!owner->Document()->HasOpenCommand()||!Valid(record))return false;
+        if(owner.IsNull()||owner->Document().IsNull()||!owner->Document()->HasOpenCommand()
+            ||!Valid(record)||record.policy!=AnalyticZeroPolicy1)return false;
         UUID document;if(!ParseUUID(owner->DocumentIdentifier(),document)||record.key.document!=document)return false;
         Catalog live;const auto status=Read(owner->Document(),live);
-        if((status!=ReadStatus::Absent&&status!=ReadStatus::Valid)||live.bytes!=expected.bytes||live.label!=expected.label)return false;
-        for(const auto&r:live.records)if(r.key.request==record.key.request)return false;
-        live.records.push_back(record);std::vector<std::uint8_t> encoded;if(!Encode(live.records,encoded))return false;
+        if((status!=ReadStatus::Absent&&status!=ReadStatus::Valid)||!live.matches(expected)||!live.supportsAppend()
+            ||live.records.size()>=MaximumRecords)return false;
+        std::vector<Record> versioned;
+        for(const auto&r:live.records){if(r.key.request==record.key.request)return false;if(r.policy!=0)versioned.push_back(r);}
+        versioned.push_back(record);std::vector<std::uint8_t> encoded;
+        if(!Encode(versioned,encoded)||encoded.size()>MaximumBytes-live.legacyBytes.size())return false;
+        const auto chunkCount=(encoded.size()*2+ChunkBytes-1)/ChunkBytes;
+        const auto legacyChunks=(live.legacyBytes.size()*2+ChunkBytes-1)/ChunkBytes;
+        if(chunkCount>MaximumChunks-legacyChunks)return false;
         auto label=live.label;
         if(label.IsNull()){
-            // Match saved-group storage: Main owns XCAF fixed tag children.
-            // A fresh root sibling cannot overwrite a lazily initialized tool;
-            // do not rely on a TagSource counter reflecting existing labels.
-            const auto root=owner->Document()->GetData()->Root();
-            Standard_Integer maximumTag=0;std::size_t visited=0;
+            const auto root=owner->Document()->GetData()->Root();Standard_Integer maximumTag=0;std::size_t visited=0;
             for(TDF_ChildIterator it(root,Standard_False);it.More();it.Next()){
-                if(++visited>100000)return false;
-                maximumTag=std::max(maximumTag,it.Value().Tag());
-            }
+                if(++visited>100000)return false;maximumTag=std::max(maximumTag,it.Value().Tag());}
             if(maximumTag==std::numeric_limits<Standard_Integer>::max())return false;
             label=root.FindChild(maximumTag+1,Standard_True);
         }
-        const auto hex=Hex(encoded);const auto count=(hex.size()+ChunkBytes-1)/ChunkBytes;
-        TDataStd_Integer::Set(label,SchemaID(),1);TDataStd_Integer::Set(label,CountID(),Standard_Integer(count));
-        for(std::size_t i=0;i<count;++i){const auto s=hex.substr(i*ChunkBytes,ChunkBytes);TDataStd_AsciiString::Set(label.FindChild(Standard_Integer(i+1)),TCollection_AsciiString(s.c_str()));}
-        Catalog readback;return Read(owner->Document(),readback)==ReadStatus::Valid&&readback.bytes==encoded;
+        const auto hex=Hex(encoded);TDataStd_Integer::Set(label,VersionedSchemaID(),2);TDataStd_Integer::Set(label,VersionedCountID(),Standard_Integer(chunkCount));
+        for(std::size_t i=0;i<chunkCount;++i){const auto chunk=hex.substr(i*ChunkBytes,ChunkBytes);TDataStd_AsciiString::Set(label.FindChild(Standard_Integer(i+1)),TCollection_AsciiString(chunk.c_str()));}
+        Catalog readback;return Read(owner->Document(),readback)==ReadStatus::Valid&&readback.label==label&&readback.bytes==encoded
+            &&readback.legacyLabel==expected.legacyLabel&&readback.legacyBytes==expected.legacyBytes;
     }catch(...){return false;}
 }
 
@@ -407,7 +452,7 @@ inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& lab
 #else
         if(!GeometryDigest(s.shape,e.geometry)||named.name.Length()>256)return false;
 #endif
-        std::vector<std::uint8_t> bytes{'S','Y','E','F',1,std::uint8_t(e.feature),std::uint8_t(schema)};
+        std::vector<std::uint8_t> bytes{'S','Y','E','F',2,std::uint8_t(e.policy),std::uint8_t(e.policy>>8),std::uint8_t(e.feature),std::uint8_t(schema)};
         auto append=[&](const auto&a){bytes.insert(bytes.end(),a.begin(),a.end());};
         auto integer=[&](std::uint64_t n){for(unsigned i=0;i<8;++i)bytes.push_back(std::uint8_t(n>>(8*i)));};
         auto scalar=[&](double d){if(!std::isfinite(d))throw Standard_Failure("Nonfinite receipt effect");std::uint64_t bits;std::memcpy(&bits,&d,8);integer(bits);};
@@ -433,12 +478,17 @@ inline Inspection InspectDocument(const Handle(OcctDocument)& owner,const Key& k
         if(status!=ReadStatus::Valid){result.presence=status==ReadStatus::Malformed?DocumentPresence::Conflict:DocumentPresence::Unavailable;return result;}
         const Record* match=nullptr;for(const auto&r:catalog.records)if(r.key.request==key.request){if(!(r.key==key)){result.presence=DocumentPresence::Conflict;return result;}match=&r;}
         if(!match){result.presence=DocumentPresence::Absent;return result;}
-        result.presence=DocumentPresence::Present;result.effects=match->effects;result.effectsCurrent=true;
+        result.presence=DocumentPresence::Present;result.effects=match->effects;
+        if(match->policy==0){result.evidence=EffectEvidenceStatus::LegacyUnversioned;return result;}
+        if(match->policy!=AnalyticZeroPolicy1){result.evidence=EffectEvidenceStatus::UnsupportedPolicy;return result;}
+        result.effectsCurrent=true;result.evidence=EffectEvidenceStatus::Current;
         TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
-        if(roots.Length()>50000){result.presence=DocumentPresence::Unavailable;result.effectsCurrent=false;return result;}
+        if(roots.Length()>50000){result.presence=DocumentPresence::Unavailable;result.effectsCurrent=false;result.evidence=EffectEvidenceStatus::Unavailable;return result;}
         for(const auto&expected:match->effects){TDF_Label found;
             for(int i=1;i<=roots.Length();++i){UUID id;if(ParseUUID(owner->EntityIdentifierForLabel(roots.Value(i)),id)&&id==expected.entity){if(!found.IsNull()){result.presence=DocumentPresence::Conflict;result.effectsCurrent=false;return result;}found=roots.Value(i);}}
-            Effect live;if(found.IsNull()||!CaptureEffect(owner,found,live)||!(live==expected))result.effectsCurrent=false;
+            if(found.IsNull()){result.effectsCurrent=false;if(result.evidence!=EffectEvidenceStatus::Unavailable)result.evidence=EffectEvidenceStatus::Mismatch;continue;}
+            Effect live;if(!CaptureEffect(owner,found,live)){result.effectsCurrent=false;result.evidence=EffectEvidenceStatus::Unavailable;continue;}
+            if(!(live==expected)){result.effectsCurrent=false;if(result.evidence!=EffectEvidenceStatus::Unavailable)result.evidence=EffectEvidenceStatus::Mismatch;}
         }
         return result;
     }catch(...){return {};}

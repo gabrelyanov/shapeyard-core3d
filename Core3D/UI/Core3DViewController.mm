@@ -1,4 +1,17 @@
 #if DEBUG
+#include "../OCCTKit/DetachedRectangularLoftProbe.hxx"
+#include <GProp_GProps.hxx>
+#include <BRepGProp.hxx>
+#include <BRepBndLib.hxx>
+#endif
+#if DEBUG
+#include "../OCCTKit/DetachedPlanarSweepProbe.hxx"
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <StlAPI_Writer.hxx>
+#endif
+#if DEBUG
+#include "../OCCTKit/SweepPersistenceProbe.hxx"
+#include "../OCCTKit/SavedFeatureRecords.hxx"
 #include "../OCCTKit/EnclosureParameters.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -51,6 +64,10 @@
 #include "../OCCTKit/NativeModelingRequest.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
+#if DEBUG
+#include "../OCCTKit/NativeModelingReceiptLegacyDebug.hxx"
+#endif
+#include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/NativeModelingTombstone.hxx"
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TDF_Tool.hxx>
@@ -898,6 +915,198 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 
 
+@implementation Core3DSweepPathSegment
+- (instancetype)initWithIdentifier:(uint32_t)identifier
+    startVertex:(uint32_t)startVertex endVertex:(uint32_t)endVertex
+    kind:(Core3DProfileCurveKind)kind center:(CGPoint)center radius:(double)radius
+    startDegrees:(double)startDegrees sweepDegrees:(double)sweepDegrees {
+    if (identifier == 0 || startVertex == 0 || endVertex == 0 || startVertex == endVertex
+        || !std::isfinite(center.x) || !std::isfinite(center.y)
+        || !std::isfinite(radius) || !std::isfinite(startDegrees)
+        || !std::isfinite(sweepDegrees)) return nil;
+    if (kind == Core3DProfileCurveKindLine) {
+        if (center.x != 0 || center.y != 0 || radius != 0
+            || startDegrees != 0 || sweepDegrees != 0) return nil;
+    } else if (kind == Core3DProfileCurveKindCircularArc) {
+        if (std::abs(center.x) > 1e6 || std::abs(center.y) > 1e6
+            || radius <= 0 || radius > 1e6 || std::abs(startDegrees) > 360
+            || std::abs(sweepDegrees) < 1e-6 || std::abs(sweepDegrees) >= 360) return nil;
+    } else return nil;
+    self = [super init];
+    if (self) {
+        _identifier = identifier; _startVertex = startVertex; _endVertex = endVertex;
+        _kind = kind; _center = center; _radius = radius;
+        _startDegrees = startDegrees; _sweepDegrees = sweepDegrees;
+    }
+    return self;
+}
+@end
+
+@implementation Core3DRectangularLoftStation
+- (instancetype)initWithIdentifier:(uint32_t)identifier cornerIdentifiers:(simd_uint4)corners
+    correspondence:(simd_uint4)correspondence z:(double)z centerX:(double)centerX centerY:(double)centerY
+    width:(double)width depth:(double)depth {
+    if (!identifier || !std::isfinite(z) || !std::isfinite(centerX) || !std::isfinite(centerY)
+        || !std::isfinite(width) || !std::isfinite(depth) || width<=0 || depth<=0
+        || std::abs(z)>1e6 || std::abs(centerX)>1e6 || std::abs(centerY)>1e6 || width>1e6 || depth>1e6) return nil;
+    for(int i=0;i<4;++i)if(!corners[i]||!correspondence[i])return nil;
+    self=[super init];if(self){_identifier=identifier;_cornerIdentifiers=corners;_correspondence=correspondence;
+        _z=z;_centerX=centerX;_centerY=centerY;_width=width;_depth=depth;}return self;
+}
+@end
+@interface Core3DRectangularLoftDefinition ()
+- (core3d::rectangular_loft::Definition)nativeDefinition;
+@end
+@implementation Core3DRectangularLoftDefinition {
+    core3d::rectangular_loft::Definition _definition;
+}
+- (instancetype)initWithLoftIdentifier:(uint32_t)identifier correspondence:(simd_uint4)correspondence
+    stations:(NSArray<Core3DRectangularLoftStation *> *)stations metersPerUnit:(double)metersPerUnit
+    constructionFrameValues:(NSArray<NSNumber *> *)frame {
+    if (![stations isKindOfClass:[NSArray class]] || stations.count<2 || stations.count>8
+        || ![frame isKindOfClass:[NSArray class]] || (frame.count!=0&&frame.count!=8))return nil;
+    try {
+        core3d::rectangular_loft::Definition d;d.loftIdentifier=identifier;d.dimensionMetersPerUnit=metersPerUnit;
+        for(int i=0;i<4;++i)d.correspondence[i]=correspondence[i];
+        for(Core3DRectangularLoftStation *value in stations) {
+            if(![value isKindOfClass:[Core3DRectangularLoftStation class]])return nil;
+            core3d::rectangular_loft::Station v;v.identifier=value.identifier;
+            for(int i=0;i<4;++i){v.cornerIdentifiers[i]=value.cornerIdentifiers[i];v.correspondence[i]=value.correspondence[i];}
+            v.z=value.z;v.centerX=value.centerX;v.centerY=value.centerY;v.width=value.width;v.depth=value.depth;d.stations.push_back(v);
+        }
+        if(frame.count==8){core3d::profile::ConstructionFrame f;for(NSUInteger i=0;i<8;++i){
+            if(![frame[i] isKindOfClass:[NSNumber class]]||CFGetTypeID((__bridge CFTypeRef)frame[i])==CFBooleanGetTypeID())return nil;
+            f.values[i]=frame[i].doubleValue;}d.constructionFrame=f;}
+        core3d::rectangular_loft::Inspection inspection;
+        if(core3d::rectangular_loft::Inspect(d,inspection)!=core3d::rectangular_loft::Admission::Accepted)return nil;
+        self=[super init];if(self){_definition=std::move(d);_stations=[stations copy];_constructionFrameValues=[frame copy];}
+        return self;
+    }catch(...){return nil;}
+}
+- (uint32_t)loftIdentifier {return _definition.loftIdentifier;}
+- (simd_uint4)correspondence {return {_definition.correspondence[0],_definition.correspondence[1],_definition.correspondence[2],_definition.correspondence[3]};}
+- (double)metersPerUnit {return _definition.dimensionMetersPerUnit;}
+- (core3d::rectangular_loft::Definition)nativeDefinition {return _definition;}
+@end
+
+@interface Core3DSweepDefinition ()
+- (core3d::planar_sweep::Definition)nativeDefinition;
+@end
+@implementation Core3DSweepDefinition {
+    core3d::planar_sweep::Definition _definition;
+}
+- (instancetype)initWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame {
+    if (![vertices isKindOfClass:[NSArray class]] || vertices.count<2 || vertices.count>33
+        || ![segments isKindOfClass:[NSArray class]] || segments.count<1 || segments.count>32
+        || vertices.count!=segments.count+1 || ![frame isKindOfClass:[NSArray class]]
+        || (frame.count!=0 && frame.count!=8)
+        || plane<Core3DProfilePlaneXY || plane>Core3DProfilePlaneYZ) return nil;
+    try {
+        core3d::planar_sweep::Definition d;d.pathIdentifier=identifier;d.plane=int(plane);
+        d.radius=radius;d.dimensionMetersPerUnit=metersPerUnit;
+        for (Core3DProfileCurveVertex *v in vertices) {
+            if (![v isKindOfClass:[Core3DProfileCurveVertex class]]) return nil;
+            d.vertices.push_back({v.identifier,gp_Pnt2d(v.point.x,v.point.y)});
+        }
+        for (Core3DSweepPathSegment *s in segments) {
+            if (![s isKindOfClass:[Core3DSweepPathSegment class]]) return nil;
+            d.segments.push_back({s.identifier,s.startVertex,s.endVertex,static_cast<core3d::ProfileCurveKind>(s.kind),
+                gp_Pnt2d(s.center.x,s.center.y),s.radius,s.startDegrees,s.sweepDegrees});
+        }
+        if (frame.count==8) {
+            core3d::profile::ConstructionFrame f;
+            for (NSUInteger i=0;i<8;++i) {
+                if (![frame[i] isKindOfClass:[NSNumber class]] || CFGetTypeID((__bridge CFTypeRef)frame[i])==CFBooleanGetTypeID()) return nil;
+                f.values[i]=frame[i].doubleValue;
+            }
+            d.constructionFrame=f;
+        }
+        core3d::planar_sweep::Inspection inspection;
+        if (core3d::planar_sweep::Inspect(d,inspection)!=core3d::planar_sweep::Admission::Accepted) return nil;
+        self=[super init];
+        if (self) {_definition=std::move(d);_vertices=[vertices copy];_segments=[segments copy];_constructionFrameValues=[frame copy];}
+        return self;
+    } catch (...) {return nil;}
+}
+- (uint32_t)pathIdentifier {return _definition.pathIdentifier;}
+- (Core3DProfilePlane)plane {return static_cast<Core3DProfilePlane>(_definition.plane);}
+- (double)radius {return _definition.radius;}
+- (double)metersPerUnit {return _definition.dimensionMetersPerUnit;}
+- (Core3DSweepDefinition *)changingRadius:(double)radius {
+    try {
+        auto d=_definition;d.radius=radius;
+        core3d::planar_sweep::Inspection inspected;
+        if(core3d::planar_sweep::Inspect(d,inspected)!=core3d::planar_sweep::Admission::Accepted)return nil;
+        // Rebuild public readonly fields from the already frozen native values,
+        // never from potentially subclassed objects supplied to the original init.
+        NSMutableArray<Core3DProfileCurveVertex *> *vertices=[NSMutableArray array];
+        NSMutableArray<Core3DSweepPathSegment *> *segments=[NSMutableArray array];
+        NSMutableArray<NSNumber *> *frame=[NSMutableArray array];
+        for(const auto& v:d.vertices){
+            auto value=[[Core3DProfileCurveVertex alloc] initWithIdentifier:v.identifier point:CGPointMake(v.point.X(),v.point.Y())];
+            if(!value)return nil;[vertices addObject:value];
+        }
+        for(const auto& v:d.segments){
+            auto value=[[Core3DSweepPathSegment alloc] initWithIdentifier:v.identifier startVertex:v.startVertex endVertex:v.endVertex
+                kind:static_cast<Core3DProfileCurveKind>(v.kind) center:CGPointMake(v.center.X(),v.center.Y()) radius:v.radius
+                startDegrees:v.startDegrees sweepDegrees:v.sweepDegrees];
+            if(!value)return nil;[segments addObject:value];
+        }
+        if(d.constructionFrame)for(double v:d.constructionFrame->values)[frame addObject:@(v)];
+        Core3DSweepDefinition *result=[[Core3DSweepDefinition alloc] initWithPathIdentifier:d.pathIdentifier vertices:vertices segments:segments
+            plane:static_cast<Core3DProfilePlane>(d.plane) radius:d.radius metersPerUnit:d.dimensionMetersPerUnit constructionFrameValues:frame];
+        if(!result)return nil;
+        std::vector<double> expected,actual;
+        if(!core3d::sweep_persistence::Encode(d,expected)||!core3d::sweep_persistence::Encode([result nativeDefinition],actual)
+            ||!core3d::sweep_persistence::SameBits(expected,actual))return nil;
+        return result;
+    }catch(...){return nil;}
+}
+- (core3d::planar_sweep::Definition)nativeDefinition {return _definition;}
+@end
+
+@interface Core3DStoredSweepSnapshot ()
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredSweepSnapshot&)snapshot;
+- (core3d::StoredSweepSnapshot)nativeSnapshot;
+@end
+@implementation Core3DStoredSweepSnapshot {
+    core3d::StoredSweepSnapshot _native;
+}
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredSweepSnapshot&)snapshot {
+    self=[super init];
+    if (self) {
+        const auto& d=snapshot.definition;
+        NSMutableArray<Core3DProfileCurveVertex *> *vertices=[NSMutableArray array];
+        NSMutableArray<Core3DSweepPathSegment *> *segments=[NSMutableArray array];
+        NSMutableArray<NSNumber *> *frame=[NSMutableArray array];
+        for (const auto& v:d.vertices) {
+            auto value=[[Core3DProfileCurveVertex alloc] initWithIdentifier:v.identifier point:CGPointMake(v.point.X(),v.point.Y())];
+            if (!value) return nil;[vertices addObject:value];
+        }
+        for (const auto& s:d.segments) {
+            auto value=[[Core3DSweepPathSegment alloc] initWithIdentifier:s.identifier startVertex:s.startVertex endVertex:s.endVertex
+                kind:static_cast<Core3DProfileCurveKind>(s.kind) center:CGPointMake(s.center.X(),s.center.Y()) radius:s.radius
+                startDegrees:s.startDegrees sweepDegrees:s.sweepDegrees];
+            if(!value)return nil;[segments addObject:value];
+        }
+        if (d.constructionFrame) for (double v:d.constructionFrame->values) [frame addObject:@(v)];
+        _definition=[[Core3DSweepDefinition alloc] initWithPathIdentifier:d.pathIdentifier vertices:vertices segments:segments
+            plane:static_cast<Core3DProfilePlane>(d.plane) radius:d.radius metersPerUnit:d.dimensionMetersPerUnit constructionFrameValues:frame];
+        if (!_definition) return nil;
+        _native=snapshot;
+        _entityIdentifier=[[NSString alloc] initWithUTF8String:snapshot.identity.entityIdentifier.c_str()];
+        _definitionIdentifier=[[NSString alloc] initWithUTF8String:snapshot.definitionIdentifier.c_str()];
+        _featureIdentifier=[[NSString alloc] initWithUTF8String:snapshot.featureIdentifier.c_str()];
+        _effectiveDimensionMetersPerUnit=snapshot.effectiveDimensionMetersPerUnit;_current=snapshot.current;
+    }
+    return self;
+}
+- (core3d::StoredSweepSnapshot)nativeSnapshot {return _native;}
+@end
+
 @interface Core3DProfileDefinition ()
 - (instancetype)initWithNativeParameters:(const core3d::profile::Parameters&)parameters;
 - (core3d::profile::Parameters)nativeParameters;
@@ -1327,6 +1536,25 @@ static bool Core3DModelingProfileRecipeSupported(const core3d::profile::Paramete
     } catch (...) {return false;}
 }
 
+// Descriptive feature-local physical wire limits. Native path/kernel admission
+// and the stored snapshot's full-root metadata/source guard remain authoritative.
+static bool Core3DModelingSweepSupported(const core3d::planar_sweep::Definition& d,double effectiveUnit) {
+    try {
+        core3d::planar_sweep::Inspection inspected;
+        if(core3d::planar_sweep::Inspect(d,inspected)!=core3d::planar_sweep::Admission::Accepted
+            ||!std::isfinite(effectiveUnit)||effectiveUnit<=0)return false;
+        const double mm=effectiveUnit*1000;
+        if(!std::isfinite(mm)||mm<=0)return false;
+        const auto scalar=[&](double v){return std::isfinite(v*mm)&&std::abs(v*mm)<=1e6;};
+        const auto length=[&](double v){return scalar(v)&&v*mm>=0.001;};
+        if(!length(d.radius))return false;
+        for(const auto& v:d.vertices)if(!scalar(v.point.X())||!scalar(v.point.Y()))return false;
+        for(const auto& edge:d.segments)if(edge.kind==core3d::ProfileCurveKind::CircularArc
+            &&(!scalar(edge.center.X())||!scalar(edge.center.Y())||!length(edge.radius)))return false;
+        return true;
+    }catch(...){return false;}
+}
+
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -1340,17 +1568,19 @@ static bool Core3DModelingProfileRecipeSupported(const core3d::profile::Paramete
     documentIdentifier:(NSString *)documentIdentifier
     enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
     profile:(Core3DStoredProfileSnapshot *)profile
-    recipe:(Core3DStoredProfileSnapshot *)recipe;
+    recipe:(Core3DStoredProfileSnapshot *)recipe
+    sweep:(Core3DStoredSweepSnapshot *)sweep;
 @end
 @implementation Core3DModelingPlanningContext
 - (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
     documentIdentifier:(NSString *)documentIdentifier
     enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
     profile:(Core3DStoredProfileSnapshot *)profile
-    recipe:(Core3DStoredProfileSnapshot *)recipe {
+    recipe:(Core3DStoredProfileSnapshot *)recipe
+    sweep:(Core3DStoredSweepSnapshot *)sweep {
     if ((self = [super init])) {
         _scene = scene; _documentIdentifier = [documentIdentifier copy];
-        _selectedEnclosure = enclosure; _selectedProfile = profile; _selectedProfileRecipe = recipe;
+        _selectedEnclosure = enclosure; _selectedProfile = profile; _selectedProfileRecipe = recipe; _selectedSweep = sweep;
     }
     return self;
 }
@@ -2113,7 +2343,7 @@ struct NativeModelingPermitIssuer final {
         receipt::UUID document;
         if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
             ||!prepared->_requestCreationCatalog
-            ||catalog.label!=prepared->_requestCreationCatalog->label||catalog.bytes!=prepared->_requestCreationCatalog->bytes
+            ||!catalog.matches(*prepared->_requestCreationCatalog)||!catalog.supportsAppend()
             ||catalog.records.size()>=receipt::MaximumRecords
             ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
         for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
@@ -2145,7 +2375,7 @@ struct NativeModelingPermitIssuer final {
         receipt::UUID document;
         if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
             ||!prepared->_requestCreationCatalog
-            ||catalog.label!=prepared->_requestCreationCatalog->label||catalog.bytes!=prepared->_requestCreationCatalog->bytes
+            ||!catalog.matches(*prepared->_requestCreationCatalog)||!catalog.supportsAppend()
             ||catalog.records.size()>=receipt::MaximumRecords
             ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
         for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
@@ -5300,8 +5530,8 @@ struct NativeModelingPermitIssuer final {
 
 // Fixture-only creation: one real OCAF command contains geometry, recipe and
 // record. This does NOT exercise or enable production AI receipt integration.
-- (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind {
-    if (![NSThread isMainThread] || kind < 0 || kind > 2) return nil;
+- (NSDictionary *_Nullable)core3d_debugReceiptFixture:(NSInteger)kind legacyPolicy:(NSInteger)legacyPolicy {
+    if (![NSThread isMainThread] || kind < 0 || kind > 2 || legacyPolicy < -1 || legacyPolicy > 2) return nil;
     namespace r = core3d::receipt;
     Handle(OcctDocument) owner;
     NSURL *base = [NSFileManager.defaultManager.temporaryDirectory
@@ -5354,7 +5584,7 @@ struct NativeModelingPermitIssuer final {
             shape = built.solid;
         }
         const std::string feature = NSUUID.UUID.UUIDString.UTF8String;
-        r::Record record;
+        r::Record record; record.policy=legacyPolicy<0?r::AnalyticZeroPolicy1:0;
         record.operation = kind == 2 ? r::Operation::CreateEnclosure : r::Operation::CreateAssembly;
         record.key.accountScope.fill(1); record.key.command.fill(2); record.key.execution.fill(3);
         NSString *request = NSUUID.UUID.UUIDString;
@@ -5373,9 +5603,9 @@ struct NativeModelingPermitIssuer final {
             throw Standard_Failure("Receipt fixture recipe");
         r::Effect effect;
         r::DebugEffectCapture issuedCapture;
-        if (!r::CaptureEffect(owner,label,effect,&issuedCapture)) throw Standard_Failure("Receipt fixture effect");
+        if (!(legacyPolicy<0?r::CaptureEffect(owner,label,effect,&issuedCapture):r::legacy_debug::Capture(owner,label,int(legacyPolicy),effect,issuedCapture))) throw Standard_Failure("Receipt fixture effect");
         record.effects = {effect};
-        if (!r::Stage(owner,record,before) || !document->CommitCommand())
+        if (!(legacyPolicy<0?r::Stage(owner,record,before):r::legacy_debug::StageLegacy(owner,record,before)) || !document->CommitCommand())
             throw Standard_Failure("Receipt fixture commit");
         NSDictionary *initialEffectDiagnostic=Core3DReceiptEffectDiagnostic(owner,effect,&issuedCapture);
         const bool stagePreserved = preserved();
@@ -5394,22 +5624,22 @@ struct NativeModelingPermitIssuer final {
         r::Catalog catalog;
         if (r::Read(document,catalog) != r::ReadStatus::Valid) throw Standard_Failure("Receipt fixture readback");
         // Codec rejection must not leave partially decoded evidence.
-        auto damaged = catalog.bytes; damaged.back() ^= 1;
+        auto damaged = (legacyPolicy<0?catalog.bytes:catalog.legacyBytes); damaged.back() ^= 1;
         std::vector<r::Record> decoded;
         const bool checksumRejected = r::Decode(damaged,decoded) == r::ReadStatus::Malformed && decoded.empty();
-        damaged = catalog.bytes; damaged.pop_back();
+        damaged = (legacyPolicy<0?catalog.bytes:catalog.legacyBytes); damaged.pop_back();
         const bool truncatedRejected = r::Decode(damaged,decoded) == r::ReadStatus::Malformed && decoded.empty();
-        auto future = catalog.bytes; future[4] = 2;
+        auto future = (legacyPolicy<0?catalog.bytes:catalog.legacyBytes); future[4] = 3;
         const bool futureUnavailable = r::Decode(future,decoded) == r::ReadStatus::Unsupported && decoded.empty();
         std::vector<std::uint8_t> encoded;
-        const bool duplicateRejected = !r::Encode({record,record},encoded) && encoded.empty();
+        const bool duplicateRejected = !(legacyPolicy<0?r::Encode({record,record},encoded):r::legacy_debug::EncodeLegacy({record,record},encoded)) && encoded.empty();
         // Failed staging is caller-aborted in the same command; existing bytes survive.
         auto next = record; next.key.request[0] ^= 0x80;
         document->NewCommand();
-        if (!r::Stage(owner,next,catalog)) throw Standard_Failure("Receipt abort fixture stage");
+        if (!(legacyPolicy<0?r::Stage(owner,next,catalog):r::legacy_debug::StageLegacy(owner,next,catalog))) throw Standard_Failure("Receipt abort fixture stage");
         document->AbortCommand();
         r::Catalog afterAbort;
-        const bool abortRestored = r::Read(document,afterAbort) == r::ReadStatus::Valid && afterAbort.bytes == catalog.bytes;
+        const bool abortRestored = r::Read(document,afterAbort) == r::ReadStatus::Valid && afterAbort.matches(catalog);
         const bool abortPreserved = preserved();
         // Reserved catalog identifiers fail closed in every forbidden location.
         bool placementRejected = true;
@@ -5419,16 +5649,16 @@ struct NativeModelingPermitIssuer final {
             TDF_Label invalid;
             if (placement==0) invalid=root;
             else if (placement==1) invalid=document->Main();
-            else if (placement==2) invalid=catalog.label.FindChild(5000,Standard_True);
-            else invalid=root.FindChild(catalog.label.Tag()+1,Standard_True);
-            TDataStd_Integer::Set(invalid,r::SchemaID(),1);
+            else if (placement==2) invalid=(legacyPolicy<0?catalog.label:catalog.legacyLabel).FindChild(5000,Standard_True);
+            else invalid=root.FindChild((legacyPolicy<0?catalog.label:catalog.legacyLabel).Tag()+1,Standard_True);
+            TDataStd_Integer::Set(invalid,legacyPolicy<0?r::VersionedSchemaID():r::SchemaID(),legacyPolicy<0?2:1);
             r::Catalog rejected;
             placementRejected = placementRejected && r::Read(document,rejected)==r::ReadStatus::Malformed
                 && rejected.label.IsNull() && rejected.bytes.empty();
             document->AbortCommand();
             r::Catalog restoredCatalog;
             placementRejected = placementRejected && r::Read(document,restoredCatalog)==r::ReadStatus::Valid
-                && restoredCatalog.bytes==catalog.bytes && preserved();
+                && restoredCatalog.matches(catalog) && preserved();
         }
         const std::string path = owner->save(base.path.UTF8String);
         if (path.empty()) throw Standard_Failure("Receipt fixture save");
@@ -5443,6 +5673,10 @@ struct NativeModelingPermitIssuer final {
                 @"postSaveCurrent":@(postSave.effectsCurrent)},
             @"geometrySHA":[NSString stringWithUTF8String:r::Hex(effect.geometry).c_str()],
             @"stateSHA":[NSString stringWithUTF8String:r::Hex(effect.state).c_str()],
+            @"catalogBytes":[NSData dataWithBytes:(legacyPolicy<0?catalog.bytes:catalog.legacyBytes).data() length:(legacyPolicy<0?catalog.bytes:catalog.legacyBytes).size()],
+            @"stateBytes":[NSData dataWithBytes:issuedCapture.stateBytes.data() length:issuedCapture.stateBytes.size()],
+            @"legacyPolicy":@(legacyPolicy),@"initiallyUnresolved":@(first.presence==r::DocumentPresence::Present&&first.evidence==r::EffectEvidenceStatus::LegacyUnversioned&&!first.effectsCurrent),
+            @"redoUnresolved":@(restored.presence==r::DocumentPresence::Present&&restored.evidence==r::EffectEvidenceStatus::LegacyUnversioned&&!restored.effectsCurrent),
             @"oneUndo":@(oneUndo), @"initiallyCurrent":@(initiallyCurrent),
             @"undoAbsent":@(undone && undoAbsent && undoGuardOnly), @"redoCurrent":@(redone && redoCurrent),
             @"abortRestored":@(abortRestored), @"checksumRejected":@(checksumRejected),
@@ -5477,8 +5711,193 @@ struct NativeModelingPermitIssuer final {
     return result;
 }
 
+- (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind {
+    return [self core3d_debugReceiptFixture:kind legacyPolicy:-1];
+}
+- (NSDictionary *_Nullable)debugNativeLegacyReceiptFixture:(NSInteger)kind policy:(NSInteger)policy {
+    if(policy<0||policy>2)return nil;
+    return [self core3d_debugReceiptFixture:kind legacyPolicy:policy];
+}
+
 // Read-only DEBUG visibility into unverified component evidence. Public verified
 // reconciliation remains unavailable, including for current matching effects.
+// Bounded read-only visibility. The returned catalogs confer no authority.
+- (NSDictionary *)debugReceiptCatalogSnapshot {
+    namespace r=core3d::receipt;
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{@"valid":@NO};
+    const auto owner=GLController.viewer->getDocument();r::Catalog catalog;
+    if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return @{@"valid":@NO};
+    const auto status=r::Read(owner->Document(),catalog);
+    NSMutableArray *policies=[NSMutableArray array];for(const auto& record:catalog.records)[policies addObject:@(record.policy)];
+    return @{@"valid":@(status==r::ReadStatus::Valid||status==r::ReadStatus::Absent),@"read":@(int(status)),
+        @"legacyBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()],
+        @"versionedBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],
+        @"policies":policies,@"appendSupported":@(catalog.supportsAppend()),
+        @"verified":@(r::QueryVerifiedReceipt()!=r::VerifiedQueryStatus::Unavailable)};
+}
+- (NSDictionary *)debugReceiptWire:(NSData *)data {
+    namespace r=core3d::receipt;
+    if(!NSThread.isMainThread||![data isKindOfClass:NSData.class]||data.length==0||data.length>r::MaximumBytes)return @{@"valid":@NO};
+    try {
+        const auto p=static_cast<const std::uint8_t*>(data.bytes);std::vector<std::uint8_t> bytes(p,p+data.length),encoded;
+        std::vector<r::Record> records;const auto status=r::Decode(bytes,records);
+        if(status!=r::ReadStatus::Valid)return @{@"valid":@NO,@"status":@(int(status)),@"count":@(records.size())};
+        const bool canEncode=r::Encode(records,encoded);NSMutableArray *policies=[NSMutableArray array];
+        for(const auto& record:records)[policies addObject:@(record.policy)];
+        return @{@"valid":@YES,@"count":@(records.size()),@"policies":policies,@"canEncode":@(canEncode),
+            @"original":data,@"encoded":[NSData dataWithBytes:encoded.data() length:encoded.size()]};
+    }catch(...){return @{@"valid":@NO};}
+}
+// Synthetic keys are confined to this disposable native document. No Store or
+// production prepare/execute entry is called by this structural component probe.
+- (NSDictionary *_Nullable)debugReceiptDualCatalogProbe {
+    if(!NSThread.isMainThread)return nil;namespace r=core3d::receipt;
+    Handle(OcctDocument) owner;NSMutableDictionary *result=[NSMutableDictionary dictionary];
+    try {
+        owner=new OcctDocument();owner->InitDoc();const auto doc=owner->Document();
+        r::Record old;old.policy=0;old.operation=r::Operation::CreateAssembly;
+        old.key.accountScope.fill(1);old.key.command.fill(2);old.key.execution.fill(3);old.key.request.fill(4);
+        if(!r::ParseUUID(owner->DocumentIdentifier(),old.key.document))throw Standard_Failure("Probe document");
+        r::Effect e;e.policy=0;e.entity.fill(5);e.definition.fill(6);e.featureID.fill(7);e.geometry.fill(8);e.state.fill(9);old.effects={e};
+        std::vector<std::uint8_t> bytes;if(!r::legacy_debug::EncodeLegacy({old},bytes))throw Standard_Failure("Probe legacy");
+        doc->NewCommand();if(!r::legacy_debug::Write(doc,bytes,true)||!doc->CommitCommand())throw Standard_Failure("Probe install");
+        r::Catalog legacy;if(r::Read(doc,legacy)!=r::ReadStatus::Valid)throw Standard_Failure("Probe read");
+        const auto initial=r::InspectDocument(owner,old.key);
+        result[@"legacyPresentUnresolved"]=@(initial.presence==r::DocumentPresence::Present&&initial.evidence==r::EffectEvidenceStatus::LegacyUnversioned&&!initial.effectsCurrent);
+        bool keysClosed=true;
+        for(int field=0;field<4;++field){auto key=old.key;if(field==0)key.accountScope[0]^=1;if(field==1)key.document[0]^=1;if(field==2)key.command[0]^=1;if(field==3)key.execution[0]^=1;
+            keysClosed=keysClosed&&r::InspectDocument(owner,key).presence==r::DocumentPresence::Conflict;}
+        result[@"fullKeysClosed"]=@(keysClosed);
+        auto next=old;next.policy=1;next.effects[0].policy=1;next.key.request[0]=12;
+        doc->NewCommand();const bool staged=r::Stage(owner,next,legacy);doc->AbortCommand();r::Catalog after;
+        result[@"abortExact"]=@(staged&&r::Read(doc,after)==r::ReadStatus::Valid&&after.matches(legacy));
+        doc->NewCommand();if(!r::Stage(owner,next,legacy)||!doc->CommitCommand())throw Standard_Failure("Probe append");
+        r::Catalog dual;if(r::Read(doc,dual)!=r::ReadStatus::Valid)throw Standard_Failure("Probe dual");
+        result[@"dualExact"]=@(dual.records.size()==2&&dual.legacyBytes==legacy.legacyBytes&&dual.legacyLabel==legacy.legacyLabel&&!dual.bytes.empty());
+        doc->NewCommand();auto third=next;third.key.request[0]=13;
+        result[@"staleVersionedRefused"]=@(!r::Stage(owner,third,legacy));doc->AbortCommand();
+        auto changed=old;changed.effects[0].state[0]^=1;std::vector<std::uint8_t> changedBytes;
+        if(!r::legacy_debug::EncodeLegacy({changed},changedBytes))throw Standard_Failure("Probe changed legacy");
+        doc->NewCommand();if(!r::legacy_debug::Write(doc,changedBytes,true,dual.legacyLabel))throw Standard_Failure("Probe changed raw");
+        r::Catalog changedCatalog;result[@"staleLegacyRefused"]=@(r::Read(doc,changedCatalog)==r::ReadStatus::Valid&&!changedCatalog.matches(dual)&&!r::Stage(owner,third,dual));doc->AbortCommand();
+        auto same=next;same.key.request=old.key.request;std::vector<std::uint8_t> duplicate;
+        if(!r::Encode({same},duplicate))throw Standard_Failure("Probe duplicate encoding");
+        doc->NewCommand();if(!r::legacy_debug::Write(doc,duplicate,false,dual.label))throw Standard_Failure("Probe duplicate staging");
+        r::Catalog rejected;result[@"crossVersionDuplicateRefused"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed&&rejected.records.empty());doc->AbortCommand();
+        auto unknown=next;unknown.policy=32767;unknown.effects[0].policy=32767;std::vector<std::uint8_t> unknownBytes;
+        if(!r::Encode({unknown},unknownBytes))throw Standard_Failure("Probe unknown encoding");
+        doc->NewCommand();if(!r::legacy_debug::Write(doc,unknownBytes,false,dual.label)||!doc->CommitCommand())throw Standard_Failure("Probe unknown commit");
+        r::Catalog unsupported;const auto inspected=r::InspectDocument(owner,unknown.key);
+        result[@"unknownRetainedUnresolved"]=@(r::Read(doc,unsupported)==r::ReadStatus::Valid&&unsupported.bytes==unknownBytes&&!unsupported.supportsAppend()
+            &&inspected.presence==r::DocumentPresence::Present&&inspected.evidence==r::EffectEvidenceStatus::UnsupportedPolicy&&!inspected.effectsCurrent);
+        doc->NewCommand();result[@"unknownAppendRefused"]=@(!r::Stage(owner,third,unsupported));doc->AbortCommand();
+        if(!doc->Undo())throw Standard_Failure("Probe unknown undo");
+        bool placement=true;for(bool oldIDs:{true,false})for(int where=0;where<4;++where){doc->NewCommand();const auto root=doc->GetData()->Root();TDF_Label target;
+            if(where==0)target=root;else if(where==1)target=doc->Main();else if(where==2)target=dual.label.FindChild(9000,Standard_True);else target=root.FindChild(dual.label.Tag()+1,Standard_True);
+            TDataStd_Integer::Set(target,oldIDs?r::SchemaID():r::VersionedSchemaID(),oldIDs?1:2);
+            placement=placement&&r::Read(doc,rejected)==r::ReadStatus::Malformed&&rejected.records.empty();doc->AbortCommand();}
+        result[@"reservedPlacementRefused"]=@(placement);
+        doc->NewCommand();auto value=TDataStd_AsciiString::Set(dual.legacyLabel.FindChild(1),TCollection_AsciiString("not-hex"));
+        result[@"legacyMalformedClosesDual"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed);doc->AbortCommand();
+        doc->NewCommand();TDataStd_Integer::Set(dual.label,r::VersionedSchemaID(),3);
+        result[@"unknownSchemaUnavailable"]=@(r::Read(doc,rejected)==r::ReadStatus::Unsupported);doc->AbortCommand();
+        // 64+64 valid records share the original128 ceiling; a129th is refused.
+        std::vector<r::Record> left,right;for(unsigned i=0;i<64;++i){auto a=old;a.key.request.fill(0);a.key.request[15]=std::uint8_t(i+1);left.push_back(a);
+            auto b=next;b.key.request.fill(0);b.key.request[15]=std::uint8_t(i+65);right.push_back(b);}
+        std::vector<std::uint8_t> leftBytes,rightBytes;if(!r::legacy_debug::EncodeLegacy(left,leftBytes)||!r::Encode(right,rightBytes))throw Standard_Failure("Probe budget encode");
+        doc->NewCommand();if(!r::legacy_debug::Write(doc,leftBytes,true,dual.legacyLabel)||!r::legacy_debug::Write(doc,rightBytes,false,dual.label))throw Standard_Failure("Probe budget write");
+        r::Catalog full;const bool read128=r::Read(doc,full)==r::ReadStatus::Valid&&full.records.size()==128;
+        result[@"sharedRecordBudget"]=@(read128&&!r::Stage(owner,third,full));
+        auto extra=next;extra.key.request.fill(0);extra.key.request[15]=129;right.push_back(extra);
+        if(!r::Encode(right,rightBytes)||!r::legacy_debug::Write(doc,rightBytes,false,dual.label))throw Standard_Failure("Probe129");
+        result[@"read129Refused"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed);doc->AbortCommand();
+        doc->NewCommand();TDataStd_Integer::Set(dual.legacyLabel,r::CountID(),int(r::MaximumChunks));TDataStd_Integer::Set(dual.label,r::VersionedCountID(),1);
+        result[@"malformedChunkPopulation"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed);doc->AbortCommand();
+        std::vector<r::Record> decoded;std::vector<std::uint8_t> tooLarge(r::MaximumBytes+1,0);
+        result[@"singleWireByteOverflow"]=@(r::Decode(tooLarge,decoded)==r::ReadStatus::Malformed&&decoded.empty());
+        // Both components below are independently encoded, decoded and Read as
+        // complete catalogs. All installation attempts stay in disposable DEBUG
+        // transactions and abort back to the exact original two-catalog snapshot.
+        // Fixed full hex chunks make the chunk ceiling dominate the byte ceiling:
+        // do not describe the second fixture as independent byte-branch coverage.
+        auto aggregateBudget=[&](bool exceedBytes)->NSDictionary * {
+            std::vector<r::Record> lhs,rhs;
+            for(unsigned i=0;i<68;++i){
+                auto a=old,b=next;a.effects.clear();b.effects.clear();
+                a.key.request.fill(0);b.key.request.fill(0);
+                a.key.request[15]=std::uint8_t(i+1);b.key.request[15]=std::uint8_t(i+69);
+                for(unsigned j=0;j<16;++j){
+                    auto le=e,re=e;le.policy=0;re.policy=1;
+                    le.entity[15]=re.entity[15]=std::uint8_t(j+1);
+                    le.definition[15]=re.definition[15]=std::uint8_t(j+1);
+                    le.featureID[15]=re.featureID[15]=std::uint8_t(j+1);
+                    // The chunk-only fixture has 15 fewer effects split 2/13
+                    // across the last records, retaining valid nonempty records.
+                    if(exceedBytes||i!=67||j<14)a.effects.push_back(le);
+                    if(exceedBytes||i!=67||j<3)b.effects.push_back(re);
+                }
+                lhs.push_back(std::move(a));rhs.push_back(std::move(b));
+            }
+            std::vector<std::uint8_t> lb,rb;std::vector<r::Record> ld,rd;
+            if(!r::legacy_debug::EncodeLegacy(lhs,lb)||!r::Encode(rhs,rb))throw Standard_Failure("Aggregate encode");
+            const bool leftDecoded=r::Decode(lb,ld)==r::ReadStatus::Valid&&ld.size()==lhs.size();
+            const bool rightDecoded=r::Decode(rb,rd)==r::ReadStatus::Valid&&rd.size()==rhs.size();
+            std::set<r::UUID> requests;bool unique=true;std::size_t effects=0;
+            for(const auto *records:{&lhs,&rhs})for(const auto& record:*records){unique=unique&&requests.insert(record.key.request).second;effects+=record.effects.size();}
+            auto reset=[&]{dual.legacyLabel.ForgetAllAttributes(Standard_True);dual.label.ForgetAllAttributes(Standard_True);};
+            auto exactPopulation=[&](const TDF_Label& label,bool legacy,const std::vector<std::uint8_t>& wire)->bool {
+                Handle(TDataStd_Integer) count;
+                if(!label.FindAttribute(legacy?r::CountID():r::VersionedCountID(),count))return false;
+                const auto expectedHex=r::Hex(wire);const auto expectedCount=(expectedHex.size()+r::ChunkBytes-1)/r::ChunkBytes;
+                if(count->Get()!=int(expectedCount))return false;
+                std::size_t populated=0;
+                for(TDF_ChildIterator it(label,Standard_False);it.More();it.Next())if(it.Value().HasAttribute())++populated;
+                if(populated!=expectedCount)return false;
+                for(std::size_t i=0;i<expectedCount;++i){
+                    Handle(TDataStd_AsciiString) value;
+                    if(!label.FindChild(int(i+1),Standard_False).FindAttribute(TDataStd_AsciiString::GetID(),value)
+                        ||std::string(value->Get().ToCString())!=expectedHex.substr(i*r::ChunkBytes,r::ChunkBytes))return false;
+                }
+                return true;
+            };
+            auto restored=[&]{r::Catalog snapshot;return r::Read(doc,snapshot)==r::ReadStatus::Valid&&snapshot.matches(dual);};
+            doc->NewCommand();reset();
+            if(!r::legacy_debug::Write(doc,lb,true,dual.legacyLabel))throw Standard_Failure("Aggregate left install");
+            r::Catalog alone;const bool leftPopulation=exactPopulation(dual.legacyLabel,true,lb);
+            const bool leftRead=r::Read(doc,alone)==r::ReadStatus::Valid&&alone.legacyBytes==lb&&alone.bytes.empty()
+                &&alone.records.size()==lhs.size()&&alone.label.IsNull();
+            doc->AbortCommand();const bool leftAbort=restored();
+            doc->NewCommand();reset();
+            if(!r::legacy_debug::Write(doc,rb,false,dual.label))throw Standard_Failure("Aggregate right install");
+            const bool rightPopulation=exactPopulation(dual.label,false,rb);
+            const bool rightRead=r::Read(doc,alone)==r::ReadStatus::Valid&&alone.bytes==rb&&alone.legacyBytes.empty()
+                &&alone.records.size()==rhs.size()&&alone.legacyLabel.IsNull();
+            doc->AbortCommand();const bool rightAbort=restored();
+            doc->NewCommand();reset();
+            if(!r::legacy_debug::Write(doc,lb,true,dual.legacyLabel)||!r::legacy_debug::Write(doc,rb,false,dual.label))throw Standard_Failure("Aggregate pair install");
+            const bool pairPopulation=exactPopulation(dual.legacyLabel,true,lb)&&exactPopulation(dual.label,false,rb);
+            r::Catalog failed;const bool pairRejected=r::Read(doc,failed)==r::ReadStatus::Malformed;
+            const bool unpublished=failed.records.empty()&&failed.bytes.empty()&&failed.legacyBytes.empty()&&failed.label.IsNull()&&failed.legacyLabel.IsNull();
+            doc->AbortCommand();const bool pairAbort=restored();
+            return @{@"leftDecoded":@(leftDecoded),@"rightDecoded":@(rightDecoded),@"leftRead":@(leftRead),@"rightRead":@(rightRead),
+                @"uniqueRequests":@(unique),@"leftPopulation":@(leftPopulation),@"rightPopulation":@(rightPopulation),@"pairPopulation":@(pairPopulation),
+                @"pairRejected":@(pairRejected),@"unpublished":@(unpublished),@"abortExact":@(leftAbort&&rightAbort&&pairAbort),
+                @"leftBytes":@(lb.size()),@"rightBytes":@(rb.size()),@"leftChunks":@((lb.size()*2+r::ChunkBytes-1)/r::ChunkBytes),
+                @"rightChunks":@((rb.size()*2+r::ChunkBytes-1)/r::ChunkBytes),@"leftRecords":@(lhs.size()),@"rightRecords":@(rhs.size()),
+                @"effects":@(effects),@"maximumBytes":@(r::MaximumBytes),@"maximumChunks":@(r::MaximumChunks),@"maximumRecords":@(r::MaximumRecords)};
+        };
+        result[@"aggregateChunkBudget"]=aggregateBudget(false);
+        result[@"aggregateByteBudget"]=aggregateBudget(true);
+        doc->NewCommand();const auto branch=doc->Main().FindChild(20000,Standard_True);
+        for(int i=1;i<=100001;++i)branch.FindChild(i,Standard_True);
+        result[@"sharedLabelBudget"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed);doc->AbortCommand();
+        result[@"verifiedUnavailable"]=@(r::QueryVerifiedReceipt()==r::VerifiedQueryStatus::Unavailable);
+    }catch(...){result=nil;}
+    try{if(!owner.IsNull()&&!owner->Document().IsNull()){const auto doc=owner->Document();if(doc->HasOpenCommand())doc->AbortCommand();
+        const auto app=Handle(TDocStd_Application)::DownCast(doc->Application());if(!app.IsNull())app->Close(doc);}}catch(...){}
+    return result;
+}
+
 - (NSDictionary *)debugReceiptGeometryStream:(NSData *)data chunkSize:(NSUInteger)chunkSize {
     if(!NSThread.isMainThread||![data isKindOfClass:NSData.class]||data.length==0
         ||data.length>8*1024*1024||chunkSize==0||chunkSize>4096)return @{@"valid":@NO};
@@ -5521,7 +5940,15 @@ struct NativeModelingPermitIssuer final {
         case r::DocumentPresence::Conflict: presence = @"conflict"; break;
         case r::DocumentPresence::Unavailable: break;
     }
-    NSMutableDictionary *result = [@{@"presence":presence,@"effectsCurrent":@(inspected.effectsCurrent),
+    NSString *evidence=@"unavailable";
+    switch(inspected.evidence){
+        case r::EffectEvidenceStatus::Current:evidence=@"current";break;
+        case r::EffectEvidenceStatus::Mismatch:evidence=@"mismatch";break;
+        case r::EffectEvidenceStatus::LegacyUnversioned:evidence=@"legacy-unversioned";break;
+        case r::EffectEvidenceStatus::UnsupportedPolicy:evidence=@"unsupported-policy";break;
+        case r::EffectEvidenceStatus::Unavailable:break;
+    }
+    NSMutableDictionary *result = [@{@"evidence":evidence,@"presence":presence,@"effectsCurrent":@(inspected.effectsCurrent),
         @"verified":r::QueryVerifiedReceipt() == r::VerifiedQueryStatus::Unavailable ? @"unavailable" : @"invalid"} mutableCopy];
     if (NSDictionary *preservation=Core3DReceiptPreservation(owner)) result[@"preservation"]=preservation;
     if (inspected.effects.size() == 1) {
@@ -5662,6 +6089,7 @@ struct NativeModelingPermitIssuer final {
     // This is explicitly document-only DEBUG evidence. It neither performs a
     // Store lookup nor upgrades QueryVerifiedReceipt from Unavailable.
     return @{@"commandStampRetained":@(stampRetained),@"read":@(int(read)),@"presence":@(int(inspection.presence)),@"effectsCurrent":@(inspection.effectsCurrent),
+        @"legacyCatalogBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()],
         @"catalogBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],@"recordCount":@(catalog.records.size()),
         @"featureIDs":features,@"entityIDs":entities,@"definitionIDs":definitions,@"frozenFeatureIDs":frozen,
         @"resolution":@(resolution?int(resolution->state()):-1),@"openCommand":@(owner->Document()->HasOpenCommand()),
@@ -6105,6 +6533,525 @@ struct NativeModelingPermitIssuer final {
         for (double scalar:encoded) [output addObject:@(scalar)];
         return @{@"accepted":@YES,@"unchanged":@(unchanged),@"values":[output copy]};
     } catch (...) {return @{@"accepted":@NO,@"exception":@YES};}
+}
+
++ (NSDictionary<NSString *, id> *)debugDetachedPlanarSweep:(NSInteger)fixture
+    metersPerUnit:(double)metersPerUnit plane:(NSInteger)plane frame:(NSInteger)frame {
+    namespace sweep=core3d::planar_sweep;
+    if (![NSThread isMainThread] || fixture<0 || fixture>4 || plane<0 || plane>2 || frame<0 || frame>3
+        || (metersPerUnit!=0.001 && metersPerUnit!=1)) return @{@"status":@"bridge-rejected"};
+    try {
+        auto source=sweep::probe::Fixture(int(fixture),metersPerUnit,int(plane),int(frame));
+        const auto before=sweep::probe::Snapshot(source);
+        sweep::Admission admission;const auto prepared=sweep::Prepare(source,admission);
+        if (!prepared) return @{@"status":@"admission",@"admission":@(sweep::probe::Name(admission))};
+        // Mutating the original authoring value after Prepare must not alter the
+        // immutable worker payload. No native authority is constructed by this probe.
+        source.radius*=10;
+        std::atomic_bool cancelled{false};sweep::SolidResult result;
+        const auto status=sweep::Build(prepared,cancelled,result);
+        if (status!=sweep::BuildStatus::Built)
+            return @{@"status":@(sweep::probe::Name(status)),@"empty":@(result.solid.IsNull())};
+        const double mm=prepared->inspection.millimetersPerUnit;
+        NSMutableArray *bounds=[NSMutableArray arrayWithCapacity:6];
+        for (double value:result.bounds) [bounds addObject:@(value*mm)];
+        NSMutableArray *ids=[NSMutableArray arrayWithObject:@(prepared->definition.pathIdentifier)];
+        for (const auto& vertex:prepared->definition.vertices) [ids addObject:@(vertex.identifier)];
+        for (const auto& segment:prepared->definition.segments) [ids addObject:@(segment.identifier)];
+        const auto after=sweep::probe::Snapshot(prepared->definition);
+        NSMutableDictionary *record=[@{@"status":@"built",@"boundsMM":[bounds copy],
+            @"volumeMM3":@(result.volume*mm*mm*mm),@"lengthMM":@(result.length*mm),@"ids":[ids copy],
+            @"frozenBefore":[NSData dataWithBytes:before.data() length:before.size()*sizeof(std::uint64_t)],
+            @"frozenAfter":[NSData dataWithBytes:after.data() length:after.size()*sizeof(std::uint64_t)],
+            @"authoringValueChanged":@(sweep::probe::Snapshot(source)!=before)} mutableCopy];
+        // Independent interior/exterior points are expressed in physical local
+        // coordinates. Compare against the real solid, including a saved-style frame.
+        struct Sample { double u,off,v;bool inside; };
+        std::vector<Sample> samples;
+        if (fixture==0 || fixture==2) samples={{0,0,150,true},{7,0,150,false},
+            {80-80/std::sqrt(2.0),0,300+80/std::sqrt(2.0),true},
+            {80-80/std::sqrt(2.0),7,300+80/std::sqrt(2.0),false}};
+        else if (fixture==1 || fixture==3) {
+            const double r=fixture==3 ? 80 : 60;
+            samples={{0,0,100,true},{2*r,0,100,true},{r,0,200+r,true},{r,0,209+r,false}};
+        } else samples={{50,0,0,true},{50,7,0,false}};
+        NSMutableArray *states=[NSMutableArray array],*expectedStates=[NSMutableArray array];
+        for (const auto& sample:samples) {
+            gp_Pnt p=plane==0 ? gp_Pnt(sample.u/mm,sample.v/mm,sample.off/mm)
+                : plane==1 ? gp_Pnt(sample.u/mm,sample.off/mm,sample.v/mm)
+                : gp_Pnt(sample.off/mm,sample.u/mm,sample.v/mm);
+            if (prepared->definition.constructionFrame) {
+                gp_Trsf transform;
+                if (!prepared->definition.constructionFrame->Transform(transform)) return @{@"status":@"frame"};
+                p.Transform(transform);
+            }
+            BRepClass3d_SolidClassifier classifier(result.solid,p,Precision::Confusion());
+            [states addObject:classifier.State()==TopAbs_IN ? @"inside" : classifier.State()==TopAbs_OUT ? @"outside" : @"boundary-or-unknown"];
+            [expectedStates addObject:sample.inside ? @"inside" : @"outside"];
+        }
+        record[@"pointStates"]=[states copy];record[@"expectedPointStates"]=[expectedStates copy];
+        // Two bounded DEBUG selected-shape exports, not the production document
+        // exporter. Both fixed fixtures are already in native millimetres.
+        if ((fixture==0 || fixture==1) && metersPerUnit==0.001 && plane==1 && frame==0) {
+            NSURL *directory=[[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+                URLByAppendingPathComponent:[@"shapeyard-sweep-probe-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
+            if (![[NSFileManager defaultManager] createDirectoryAtURL:directory withIntermediateDirectories:NO attributes:nil error:nil])
+                return @{@"status":@"export-directory"};
+            @try {
+                NSURL *file=[directory URLByAppendingPathComponent:@"detached.stl"];
+                BRepMesh_IncrementalMesh mesh(result.solid,0.02,Standard_False,0.05,Standard_False);
+                if (!mesh.IsDone() || mesh.GetStatusFlags()!=0) return @{@"status":@"mesh"};
+                StlAPI_Writer writer;writer.ASCIIMode()=Standard_False;
+                if (!writer.Write(result.solid,file.fileSystemRepresentation)) return @{@"status":@"export"};
+                NSDictionary *attributes=[[NSFileManager defaultManager] attributesOfItemAtPath:file.path error:nil];
+                unsigned long long size=[attributes[NSFileSize] unsignedLongLongValue];
+                if (size<84 || size>8*1024*1024) return @{@"status":@"export-size"};
+                NSData *data=[NSData dataWithContentsOfURL:file options:0 error:nil];
+                if (!data || data.length!=size) return @{@"status":@"export-read"};
+                record[@"stl"]=data;
+            } @finally { [[NSFileManager defaultManager] removeItemAtURL:directory error:nil]; }
+        }
+        return [record copy];
+    } catch (...) { return @{@"status":@"exception"}; }
+}
+
++ (NSArray<NSDictionary<NSString *, id> *> *)debugDetachedPlanarSweepRejections {
+    namespace sweep=core3d::planar_sweep;
+    NSMutableArray *rows=[NSMutableArray array];
+    for (const auto& value:sweep::probe::Rejections()) {
+        sweep::Inspection inspected;const auto admission=sweep::Inspect(value.definition,inspected);
+        sweep::Admission second;const auto prepared=sweep::Prepare(value.definition,second);
+        [rows addObject:@{@"name":@(value.name.c_str()),@"actual":@(sweep::probe::Name(admission)),
+            @"expected":@(sweep::probe::Name(value.expected)),@"prepared":@(bool(prepared)),
+            @"second":@(sweep::probe::Name(second)),@"emptyInspection":@(inspected.length==0 && inspected.expectedVolume==0)}];
+    }
+    return [rows copy];
+}
+
++ (NSDictionary<NSString *, id> *)debugDetachedPlanarSweepCancellation {
+    namespace sweep=core3d::planar_sweep;
+    try {
+        sweep::Admission admission;const auto prepared=sweep::Prepare(sweep::probe::Fixture(4,0.001),admission);
+        std::atomic_bool cancelled{false};sweep::SolidResult output;
+        const auto initial=sweep::Build(prepared,cancelled,output);
+        const bool initiallyNonempty=!output.solid.IsNull();
+        cancelled.store(true);const auto stopped=sweep::Build(prepared,cancelled,output);
+        const bool stoppedEmpty=output.solid.IsNull() && output.volume==0 && output.length==0;
+        cancelled.store(false);const auto invalid=sweep::Build({},cancelled,output);
+        const bool invalidEmpty=output.solid.IsNull() && output.volume==0;
+        auto outside=sweep::probe::Fixture(4,0.001);outside.constructionFrame=core3d::profile::ConstructionFrame{};
+        outside.constructionFrame->values[0]=1e6; // Valid frame scalars, actual solid exits world bounds.
+        const auto outOfBounds=sweep::Prepare(std::move(outside),admission);
+        const auto verification=sweep::Build(outOfBounds,cancelled,output);
+        const bool outsideEmpty=output.solid.IsNull() && output.volume==0 && output.length==0;
+        const auto pair=[](double offset) {
+            BRep_Builder builder;TopoDS_Compound compound;builder.MakeCompound(compound);
+            builder.Add(compound,BRepPrimAPI_MakeBox(gp_Pnt(0,0,0),10,10,10).Shape());
+            builder.Add(compound,BRepPrimAPI_MakeBox(gp_Pnt(offset,offset,offset),10,10,10).Shape());
+            return compound;
+        };
+        // Exercise the production interference component with actual intersecting
+        // and disjoint BReps. This isolated check issues no prepared sweep authority.
+        const auto overlap=sweep::detail::CheckInterference(pair(5),cancelled);
+        const auto separated=sweep::detail::CheckInterference(pair(20),cancelled);
+        cancelled.store(true);
+        const auto stoppedCheck=sweep::detail::CheckInterference(pair(5),cancelled);
+        return @{@"initial":@(sweep::probe::Name(initial)),@"initiallyNonempty":@(initiallyNonempty),
+            @"stopped":@(sweep::probe::Name(stopped)),@"stoppedEmpty":@(stoppedEmpty),
+            @"invalid":@(sweep::probe::Name(invalid)),@"invalidEmpty":@(invalidEmpty),
+            @"outsidePrepared":@(bool(outOfBounds)),@"outside":@(sweep::probe::Name(verification)),
+            @"outsideEmpty":@(outsideEmpty),@"interferenceOverlap":@(sweep::probe::Name(overlap)),
+            @"interferenceSeparated":@(sweep::probe::Name(separated)),@"interferenceCancelled":@(sweep::probe::Name(stoppedCheck))};
+    } catch (...) {return @{@"status":@"exception"};}
+}
+
++ (NSDictionary<NSString *, id> *)debugDetachedRectangularLoft:(NSInteger)fixture
+    metersPerUnit:(double)metersPerUnit frame:(NSInteger)frame {
+    namespace loft=core3d::rectangular_loft;
+    if (![NSThread isMainThread] || fixture<0 || fixture>3 || frame<0 || frame>3
+        || (metersPerUnit!=0.001 && metersPerUnit!=1)) return @{@"status":@"bridge-rejected"};
+    try {
+        auto source=loft::probe::Fixture(int(fixture),metersPerUnit,int(frame));
+        const auto before=loft::probe::Snapshot(source);
+        loft::Admission admission;const auto prepared=loft::Prepare(source,admission);
+        if (!prepared) return @{@"status":@"admission",@"admission":@(loft::probe::Name(admission))};
+        source.stations.front().width*=2; // The frozen numeric copy must remain exact.
+        std::atomic_bool cancelled{false};loft::SolidResult result;
+        const auto status=loft::Build(prepared,cancelled,result);
+        if (status!=loft::BuildStatus::Built)
+            return @{@"status":@(loft::probe::Name(status)),@"empty":@(result.solid.IsNull())};
+        const auto& d=prepared->definition;const double mm=prepared->inspection.millimetersPerUnit;
+        NSMutableArray *bounds=[NSMutableArray array],*ids=[NSMutableArray arrayWithObject:@(d.loftIdentifier)];
+        for(double x:result.bounds)[bounds addObject:@(x*mm)];
+        for(auto id:d.correspondence)[ids addObject:@(id)];
+        for(const auto& s:d.stations) {[ids addObject:@(s.identifier)];for(auto id:s.cornerIdentifiers)[ids addObject:@(id)];}
+        const auto after=loft::probe::Snapshot(d);
+        NSMutableDictionary *record=[@{@"status":@"built",@"boundsMM":[bounds copy],
+            @"volumeMM3":@(result.volume*mm*mm*mm),@"ids":[ids copy],@"stationCount":@(d.stations.size()),
+            @"frozenBefore":[NSData dataWithBytes:before.data() length:before.size()*sizeof(std::uint64_t)],
+            @"frozenAfter":[NSData dataWithBytes:after.data() length:after.size()*sizeof(std::uint64_t)],
+            @"authoringValueChanged":@(loft::probe::Snapshot(source)!=before)} mutableCopy];
+        // Independent fixture cross-sections at z30/z90: x-right/y-top boundary
+        // probes offset by0.1mm. The expected inside/outside sequence is in Swift.
+        struct Point {double x,y,z;};std::vector<Point> points;
+        if(fixture==0 || fixture==1) {
+            const double y=fixture==1 ? 9 : 8;
+            points={{15.4,0,30},{15.6,0,30},{3,y-.1,30},{3,y+.1,30},
+                {14.9,0,90},{15.1,0,90},{3,y-.1,90},{3,y+.1,90}};
+        } else points={{9.9,0,30},{10.1,0,30},{0,5.9,30},{0,6.1,30},
+            {9.9,0,90},{10.1,0,90},{0,5.9,90},{0,6.1,90}};
+        NSMutableArray *states=[NSMutableArray array];
+        for(const auto& sample:points) {
+            gp_Pnt point(sample.x/mm,sample.y/mm,sample.z/mm);
+            if(d.constructionFrame) {gp_Trsf transform;if(!d.constructionFrame->Transform(transform))return @{@"status":@"frame"};point.Transform(transform);}
+            BRepClass3d_SolidClassifier classifier(result.solid,point,Precision::Confusion());
+            [states addObject:classifier.State()==TopAbs_IN ? @"inside" : classifier.State()==TopAbs_OUT ? @"outside" : @"boundary-or-unknown"];
+        }
+        record[@"pointStates"]=[states copy];
+        if ((fixture==0 || fixture==1) && metersPerUnit==0.001 && frame==0) {
+            NSURL *directory=[[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+                URLByAppendingPathComponent:[@"shapeyard-loft-probe-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
+            if(![[NSFileManager defaultManager]createDirectoryAtURL:directory withIntermediateDirectories:NO attributes:nil error:nil])return @{@"status":@"export-directory"};
+            @try {
+                NSURL *file=[directory URLByAppendingPathComponent:@"detached.stl"];
+                BRepMesh_IncrementalMesh mesh(result.solid,0.02,Standard_False,0.05,Standard_False);
+                if(!mesh.IsDone() || mesh.GetStatusFlags()!=0)return @{@"status":@"mesh"};
+                StlAPI_Writer writer;writer.ASCIIMode()=Standard_False;
+                if(!writer.Write(result.solid,file.fileSystemRepresentation))return @{@"status":@"export"};
+                NSDictionary *attributes=[[NSFileManager defaultManager]attributesOfItemAtPath:file.path error:nil];
+                const auto size=[attributes[NSFileSize]unsignedLongLongValue];
+                if(size<84 || size>8*1024*1024)return @{@"status":@"export-size"};
+                NSData *data=[NSData dataWithContentsOfURL:file options:0 error:nil];
+                if(!data || data.length!=size)return @{@"status":@"export-read"};record[@"stl"]=data;
+            } @finally {[[NSFileManager defaultManager]removeItemAtURL:directory error:nil];}
+        }
+        return [record copy];
+    } catch (...) {return @{@"status":@"exception"};}
+}
+
++ (NSArray<NSDictionary<NSString *, id> *> *)debugDetachedRectangularLoftRejections {
+    if(![NSThread isMainThread])return @[];
+    namespace loft=core3d::rectangular_loft;NSMutableArray *rows=[NSMutableArray array];
+    for(const auto& value:loft::probe::Rejections()) {
+        loft::Inspection inspected;const auto actual=loft::Inspect(value.definition,inspected);
+        loft::Admission second;const auto prepared=loft::Prepare(value.definition,second);
+        [rows addObject:@{@"name":@(value.name.c_str()),@"actual":@(loft::probe::Name(actual)),
+            @"expected":@(loft::probe::Name(value.expected)),@"second":@(loft::probe::Name(second)),
+            @"prepared":@(bool(prepared)),@"emptyInspection":@(inspected.expectedVolume==0 && inspected.millimetersPerUnit==0)}];
+    }
+    return [rows copy];
+}
+
++ (NSDictionary<NSString *, id> *)debugDetachedRectangularLoftCancellation {
+    if(![NSThread isMainThread])return @{@"status":@"bridge-rejected"};
+    namespace loft=core3d::rectangular_loft;
+    try {
+        loft::Admission admission;const auto prepared=loft::Prepare(loft::probe::Fixture(0,.001),admission);
+        std::atomic_bool cancelled{false};loft::SolidResult output;
+        const auto initial=loft::Build(prepared,cancelled,output);
+        const bool initiallyNonempty=!output.solid.IsNull();const auto realSolid=output.solid;
+        cancelled.store(true);const auto stopped=loft::Build(prepared,cancelled,output);
+        const bool stoppedEmpty=output.solid.IsNull() && output.volume==0;
+        cancelled.store(false);const auto invalid=loft::Build({},cancelled,output);
+        const bool invalidEmpty=output.solid.IsNull() && output.volume==0;
+        if(!prepared || !initiallyNonempty)return @{@"status":@"initial-failed"};
+        auto wrongVolume=prepared->inspection;wrongVolume.expectedVolume*=2;
+        output.solid=realSolid;output.volume=47920;
+        const auto volume=loft::detail::Verify(realSolid,wrongVolume,cancelled,output);
+        const bool volumeEmpty=output.solid.IsNull() && output.volume==0;
+        auto wrongBounds=prepared->inspection;wrongBounds.expectedBounds[0]-=1;
+        output.solid=realSolid;output.volume=47920;
+        const auto bounds=loft::detail::Verify(realSolid,wrongBounds,cancelled,output);
+        const bool boundsEmpty=output.solid.IsNull() && output.volume==0;
+        cancelled.store(true);output.solid=realSolid;
+        const auto lateStop=loft::detail::Verify(realSolid,prepared->inspection,cancelled,output);
+        const bool lateStopEmpty=output.solid.IsNull() && output.volume==0;
+        cancelled.store(false);const auto recovered=loft::Build(prepared,cancelled,output);
+        return @{@"initial":@(loft::probe::Name(initial)),@"initiallyNonempty":@(initiallyNonempty),
+            @"stopped":@(loft::probe::Name(stopped)),@"stoppedEmpty":@(stoppedEmpty),
+            @"invalid":@(loft::probe::Name(invalid)),@"invalidEmpty":@(invalidEmpty),
+            @"wrongVolume":@(loft::probe::Name(volume)),@"wrongVolumeEmpty":@(volumeEmpty),
+            @"wrongBounds":@(loft::probe::Name(bounds)),@"wrongBoundsEmpty":@(boundsEmpty),
+            @"lateStop":@(loft::probe::Name(lateStop)),@"lateStopEmpty":@(lateStopEmpty),
+            @"rebuilt":@(loft::probe::Name(recovered)),@"rebuiltVolume":@(output.volume)};
+    } catch (...) {return @{@"status":@"exception"};}
+}
+
+- (NSDictionary<NSString *, id> *)debugStoredRectangularLoftForEntityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
+        || ![identifier isKindOfClass:[NSString class]] || identifier.length==0 || identifier.length>128) return nil;
+    try {
+        const auto doc=GLController.viewer->getDocument();
+        if (doc.IsNull() || doc->Document().IsNull()) return nil;
+        TDF_LabelSequence labels;XCAFDoc_DocumentTool::ShapeTool(doc->Document()->Main())->GetFreeShapes(labels);
+        if (labels.Length()>50000) return nil;
+        for (int i=1;i<=labels.Length();++i) {
+            const auto label=labels.Value(i);
+            if (doc->EntityIdentifierForLabel(label)!=std::string(identifier.UTF8String?:"")) continue;
+            OcctObjectNameState state;
+            if (!doc->CaptureObjectNameStateForLabel(label,state) || state.object.loft.label.IsNull()) return nil;
+            const auto& record=state.object.loft;
+            NSMutableArray<NSNumber *> *bits=[NSMutableArray array],*values=[NSMutableArray array];
+            NSMutableArray<NSNumber *> *objectBits=[NSMutableArray array];
+            for (double value:state.object.scalars) [objectBits addObject:@(core3d::loft_persistence::Bits(value))];
+            NSMutableArray<NSNumber *> *appearanceBits=[NSMutableArray array];
+            OcctScalarAppearanceState appearance;
+            if (doc->CaptureScalarAppearanceForSavedSweepRebuild(label,appearance)) {
+                for (int i=0;i<2;++i) {[appearanceBits addObject:@(appearance.legacyPresent[i])];[appearanceBits addObject:@(appearance.legacyValues[i])];}
+                [appearanceBits addObject:@(appearance.localPBR)];
+                for (double value:appearance.visualValues) [appearanceBits addObject:@(core3d::loft_persistence::Bits(value))];
+            }
+            for (double value:record.values) {[bits addObject:@(core3d::loft_persistence::Bits(value))];[values addObject:@(value)];}
+            const double mm=record.definition.dimensionMetersPerUnit/0.001;
+            GProp_GProps properties;BRepGProp::VolumeProperties(record.boundShape,properties);
+            Bnd_Box box;BRepBndLib::Add(record.boundShape,box,Standard_False);
+            if(box.IsVoid()||box.IsOpen())return nil;
+            double x0,y0,z0,x1,y1,z1;box.Get(x0,y0,z0,x1,y1,z1);
+            NSArray *bounds=@[@(x0*mm),@(y0*mm),@(z0*mm),@(x1*mm),@(y1*mm),@(z1*mm)];
+            return @{@"featureIdentifier": [NSString stringWithUTF8String:record.identifier.c_str()],
+                @"definitionIdentifier": [NSString stringWithUTF8String:state.object.definitionIdentifier.c_str()],
+                @"entityIdentifier": identifier,@"bits":bits,@"values":values,
+                @"appearanceBits":appearanceBits,@"objectTransformBits":objectBits,@"rawMetersPerUnit":@(record.definition.dimensionMetersPerUnit),
+                @"current":@(record.IsCurrent(doc->Document(),label)),@"volumeMM3":@(properties.Mass()*mm*mm*mm),@"boundsMM":bounds};
+        }
+        return nil;
+    } catch (...) {return nil;}
+}
+- (NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
+        || ![identifier isKindOfClass:[NSString class]] || identifier.length==0 || identifier.length>128) return nil;
+    try {
+        const auto doc=GLController.viewer->getDocument();
+        if (doc.IsNull() || doc->Document().IsNull()) return nil;
+        TDF_LabelSequence labels;XCAFDoc_DocumentTool::ShapeTool(doc->Document()->Main())->GetFreeShapes(labels);
+        if (labels.Length()>50000) return nil;
+        for (int i=1;i<=labels.Length();++i) {
+            const auto label=labels.Value(i);
+            if (doc->EntityIdentifierForLabel(label)!=std::string(identifier.UTF8String?:"")) continue;
+            OcctObjectNameState state;
+            if (!doc->CaptureObjectNameStateForLabel(label,state) || state.object.sweep.label.IsNull()) return nil;
+            const auto& record=state.object.sweep;
+            NSMutableArray<NSNumber *> *bits=[NSMutableArray array],*values=[NSMutableArray array];
+            NSMutableArray<NSNumber *> *objectBits=[NSMutableArray array];
+            for (double value:state.object.scalars) [objectBits addObject:@(core3d::sweep_persistence::Bits(value))];
+            NSMutableArray<NSNumber *> *appearanceBits=[NSMutableArray array];
+            OcctScalarAppearanceState appearance;
+            if (doc->CaptureScalarAppearanceForSavedSweepRebuild(label,appearance)) {
+                for (int i=0;i<2;++i) {[appearanceBits addObject:@(appearance.legacyPresent[i])];[appearanceBits addObject:@(appearance.legacyValues[i])];}
+                [appearanceBits addObject:@(appearance.localPBR)];
+                for (double value:appearance.visualValues) [appearanceBits addObject:@(core3d::sweep_persistence::Bits(value))];
+            }
+            for (double value:record.values) {[bits addObject:@(core3d::sweep_persistence::Bits(value))];[values addObject:@(value)];}
+            return @{@"featureIdentifier": [NSString stringWithUTF8String:record.identifier.c_str()],
+                @"definitionIdentifier": [NSString stringWithUTF8String:state.object.definitionIdentifier.c_str()],
+                @"entityIdentifier": identifier,@"bits":bits,@"values":values,
+                @"appearanceBits":appearanceBits,@"objectTransformBits":objectBits,@"rawMetersPerUnit":@(record.definition.dimensionMetersPerUnit),
+                @"current":@(record.IsCurrent(doc->Document(),label))};
+        }
+        return nil;
+    } catch (...) {return nil;}
+}
+
+// Fixed malformed candidate documents exercise the actual production loader gate.
+- (BOOL)debugConfigureSavedSweepRebuildFault:(NSInteger)mode {
+    if (mode<0 || mode>15 || ![self debugConfigureOrdinaryGestureFault:mode<=5?mode:0])return NO;
+    const auto viewer=GLController.viewer;const auto controller=viewer->debugOrdinaryEditController();
+    if (!controller || controller->blocksNormalWork())return NO;
+    auto& stamp=controller->debugCommandStamp();
+    viewer->debugSetOrdinaryRepairFailures(mode==13?1:0,mode==13?1:0);
+    controller->debugSetStageFailureIndex(mode==4?0:mode==14?2:mode==15?3:-1);
+    if(mode>=6&&mode<=8)stamp.debugSetNewCommandMode(int(mode-5));
+    if(mode==9)stamp.debugSetCommitMode(2);
+    if(mode==10||mode==11){stamp.debugSetCommitMode(1);stamp.debugSetAbortMode(mode==10?1:2);}
+    if(mode==12)stamp.debugSetPostCommitInspectionFailureCount(1);
+    return YES;
+}
+- (BOOL)debugConfigureSavedSweepPairedWriteFailure {
+    if (![self debugConfigureOrdinaryGestureFault:0])return NO;
+    const auto controller=GLController.viewer->debugOrdinaryEditController();
+    if (!controller || controller->blocksNormalWork())return NO;
+    controller->debugSetStageFailureIndex(2);return YES;
+}
+- (NSDictionary<NSString *,id> *)debugSavedSweepStrictBindingProbe {
+    if (!NSThread.isMainThread || !_isSetuped || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return @{};
+    try {
+        const auto owner=GLController.viewer->getDocument();const auto context=GLController.viewer->AisContext();
+        if(owner.IsNull()||context.IsNull())return @{};
+        context->InitSelected();if(!context->MoreSelected())return @{};
+        const auto selected=Handle(AIS_Shape)::DownCast(context->SelectedInteractive());context->NextSelected();
+        if(selected.IsNull()||context->MoreSelected())return @{};
+        const auto document=owner->Document();OcctObjectTransformState before;
+        const auto label=owner->ShapeLabel(selected);
+        if(document.IsNull()||document->HasOpenCommand()||!owner->CaptureObjectTransformStateForLabel(label,before)
+            ||before.sweep.label.IsNull())return @{};
+        document->NewCommand();
+        struct Abort {Handle(TDocStd_Document) doc;~Abort(){try{if(!doc.IsNull()&&doc->HasOpenCommand())doc->AbortCommand();}catch(...){}}} abort{document};
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        shapes->SetShape(label,BRepPrimAPI_MakeBox(10,11,12).Solid());
+        core3d::sweep_persistence::Record stale;
+        const bool readRefused=!core3d::sweep_persistence::Read(document,label,stale);
+        const bool stageRefused=!core3d::sweep_persistence::Stage(document,label,before.sweep.definition,before.sweep.identifier);
+        document->AbortCommand();OcctObjectTransformState after;
+        const bool restored=owner->CaptureObjectTransformStateForLabel(label,after)&&after.IsEqual(before)
+            &&core3d::sweep_rebuild::SameRawScalars(after.scalars,before.scalars);
+        document->NewCommand();
+        TopExp_Explorer face(before.shape,TopAbs_FACE);if(!face.More())return @{};
+        const auto faceLabel=shapes->AddSubShape(label,face.Current());if(faceLabel.IsNull())return @{};
+        TDataStd_Name::Set(faceLabel,TCollection_ExtendedString("Preserved face style guard"));
+        core3d::sweep_persistence::Record stillCurrent;
+        const bool faceRefused=core3d::sweep_persistence::Read(document,label,stillCurrent)
+            &&!core3d::sweep_rebuild::HasOnlyMetadataSubshapes(document,label);
+        document->AbortCommand();OcctObjectTransformState finalState;
+        const bool finalRestored=owner->CaptureObjectTransformStateForLabel(label,finalState)&&finalState.IsEqual(before)
+            &&core3d::sweep_rebuild::SameRawScalars(finalState.scalars,before.scalars);
+        return @{@"readRefused":@(readRefused),@"stageRefused":@(stageRefused),
+            @"faceMetadataRefused":@(faceRefused),@"restored":@(restored&&finalRestored)};
+    }catch(...){return @{};}
+}
+
+- (NSData *)debugSavedRectangularLoftAdmissionFixture:(NSInteger)fault {
+    if (![NSThread isMainThread] || fault<0 || fault>12) return nil;
+    return Core3DCreateDebugBinXCAFFixture(@"loft-admission",[fault](const Handle(TDocStd_Document)& document) {
+        namespace p=core3d::loft_persistence;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto shape=BRepPrimAPI_MakeBox(10,10,10).Shape();
+        const auto owner=shapes->AddShape(shape,Standard_False,Standard_True);
+        Core3DSetDebugGeometryRepresentation(owner,1);
+        auto definition=core3d::rectangular_loft::probe::Fixture(0,0.001,0);
+        const std::string id=NSUUID.UUID.UUIDString.UTF8String;
+        document->SetUndoLimit(10);document->NewCommand();
+        if (!p::Stage(document,owner,definition,id) || !document->CommitCommand())
+            throw Standard_Failure("Sweep admission fixture staging failed");
+        p::Record record;if (!p::Read(document,owner,record)) throw Standard_Failure("Sweep fixture read failed");
+        if (fault==0) TDataStd_Integer::Set(record.label,p::SchemaID(),99);
+        if (fault==1) record.label.FindChild(4).ForgetAllAttributes();
+        if (fault==2) TDataStd_Integer::Set(document->GetData()->Root(),p::CountID(),50);
+        if (fault==3) XCAFDoc_DocumentTool::SetLengthUnit(document,1.0);
+        if(fault==6)shapes->SetShape(owner,BRepPrimAPI_MakeBox(12,10,10).Shape());
+        if(fault==7)TDataStd_Integer::Set(owner.FindChild(99,Standard_True).FindChild(1,Standard_True),p::SchemaID(),1);
+        if(fault==8)TDataStd_Integer::Set(record.label,core3d::sweep_persistence::SchemaID(),1);
+        if(fault==9)TDataStd_AsciiString::Set(record.label,p::IdentityID(),TCollection_AsciiString("invalid-uuid"));
+        if(fault==10)TDataStd_Real::Set(record.label.FindChild(51,Standard_True),1.0);
+        if (fault==4 || fault==5 || fault==11 || fault==12) {
+            const auto second=shapes->AddShape(BRepPrimAPI_MakeBox(11,10,10).Shape(),Standard_False,Standard_True);
+            Core3DSetDebugGeometryRepresentation(second,1);
+            document->NewCommand();
+            if (fault==4) {
+                if (!p::Stage(document,second,definition,id)) throw Standard_Failure("Duplicate sweep fixture failed");
+            } else if(fault==11) {
+                core3d::enclosure::Parameters enclosure;enclosure.metersPerUnit=.001;
+                if(!core3d::enclosure::Stage(document,second,enclosure,id))throw Standard_Failure("Loft/enclosure duplicate fixture failed");
+            } else if(fault==12) {
+                const auto sweep=core3d::planar_sweep::probe::Fixture(4,.001);
+                if(!core3d::sweep_persistence::Stage(document,second,sweep,id))throw Standard_Failure("Loft/sweep duplicate fixture failed");
+            } else {
+                core3d::profile::Parameters profile;profile.metersPerUnit=0.001;
+                profile.definition.points={{0,0},{10,0},{10,10},{0,10}};profile.definition.depth=10;
+                if (!core3d::profile::Stage(document,second,profile,id)) throw Standard_Failure("Cross-family identity fixture failed");
+            }
+            if (!document->CommitCommand()) throw Standard_Failure("Duplicate identity fixture commit failed");
+        }
+    });
+}
+- (NSData *)debugSavedSweepAdmissionFixture:(NSInteger)fault {
+    if (![NSThread isMainThread] || fault<0 || fault>5) return nil;
+    return Core3DCreateDebugBinXCAFFixture(@"sweep-admission",[fault](const Handle(TDocStd_Document)& document) {
+        namespace p=core3d::sweep_persistence;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto shape=BRepPrimAPI_MakeBox(10,10,10).Shape();
+        const auto owner=shapes->AddShape(shape,Standard_False,Standard_True);
+        Core3DSetDebugGeometryRepresentation(owner,1);
+        auto definition=core3d::planar_sweep::probe::Fixture(4,0.001);
+        const std::string id=NSUUID.UUID.UUIDString.UTF8String;
+        document->SetUndoLimit(10);document->NewCommand();
+        if (!p::Stage(document,owner,definition,id) || !document->CommitCommand())
+            throw Standard_Failure("Sweep admission fixture staging failed");
+        p::Record record;if (!p::Read(document,owner,record)) throw Standard_Failure("Sweep fixture read failed");
+        if (fault==0) TDataStd_Integer::Set(record.label,p::SchemaID(),99);
+        if (fault==1) record.label.FindChild(4).ForgetAllAttributes();
+        if (fault==2) TDataStd_Integer::Set(document->GetData()->Root(),p::CountID(),24);
+        if (fault==3) XCAFDoc_DocumentTool::SetLengthUnit(document,1.0);
+        if (fault==4 || fault==5) {
+            const auto second=shapes->AddShape(BRepPrimAPI_MakeBox(11,10,10).Shape(),Standard_False,Standard_True);
+            Core3DSetDebugGeometryRepresentation(second,1);
+            document->NewCommand();
+            if (fault==4) {
+                if (!p::Stage(document,second,definition,id)) throw Standard_Failure("Duplicate sweep fixture failed");
+            } else {
+                core3d::profile::Parameters profile;profile.metersPerUnit=0.001;
+                profile.definition.points={{0,0},{10,0},{10,10},{0,10}};profile.definition.depth=10;
+                if (!core3d::profile::Stage(document,second,profile,id)) throw Standard_Failure("Cross-family identity fixture failed");
+            }
+            if (!document->CommitCommand()) throw Standard_Failure("Duplicate identity fixture commit failed");
+        }
+    });
+}
+
++ (NSDictionary<NSString *,id> *)debugRectangularLoftFamilyBudget {
+    if(!NSThread.isMainThread)return @{};
+    try {
+        namespace p=core3d::profile;namespace e=core3d::enclosure;namespace sw=core3d::sweep_persistence;namespace lf=core3d::loft_persistence;
+        sw::probe::RawDocument raw;const auto doc=raw.document;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(doc->Main());const auto box=XCAFDoc_ShapeTool::GetShape(raw.owner);
+        std::vector<p::Record> profiles;std::vector<e::Record> enclosures;std::vector<sw::Record> sweeps;std::vector<lf::Record> lofts;
+        const auto validate=[&]{return core3d::saved_features::Validate(doc,profiles,enclosures,sweeps,lofts);};
+        const auto add=[&](int kind,int ordinal){
+            const auto owner=ordinal==0?raw.owner:shapes->NewShape();if(ordinal!=0)shapes->SetShape(owner,box);
+            const std::string identity=NSUUID.UUID.UUIDString.UTF8String;
+            if(kind==3)return lf::Stage(doc,owner,core3d::rectangular_loft::probe::Fixture(0,0.001,0),identity);
+            if(kind==2)return sw::Stage(doc,owner,core3d::planar_sweep::probe::Fixture(4,0.001),identity);
+            if(kind==1){e::Parameters d;d.metersPerUnit=.001;d.definition.dimensions={100,80,40,3,3,5};return e::Stage(doc,owner,d,identity);}
+            p::Parameters d;d.metersPerUnit=.001;d.definition.points={{0,0},{10,0},{10,10},{0,10}};d.definition.depth=10;
+            return p::Stage(doc,owner,d,identity);
+        };
+        doc->NewCommand();for(int i=0;i<4096;++i)if(!add(i<4?i:0,i))return @{@"fixture":@NO};
+        const bool atLimit=validate()&&profiles.size()==4093&&enclosures.size()==1&&sweeps.size()==1&&lofts.size()==1;
+        if(!add(0,4096))return @{@"fixture":@NO};
+        const bool overLimit=!validate()&&profiles.empty()&&enclosures.empty()&&sweeps.empty()&&lofts.empty();
+        doc->AbortCommand();
+        // Independent fresh document: test the actual shared root traversal boundary.
+        sw::probe::RawDocument labels;const auto root=labels.document->GetData()->Root();
+        int count=0,maxTag=0;for(TDF_ChildIterator it(root,Standard_True);it.More();it.Next())++count;
+        for(TDF_ChildIterator it(root,Standard_False);it.More();it.Next())maxTag=std::max(maxTag,it.Value().Tag());
+        if(count>=100000||maxTag>=std::numeric_limits<int>::max()-100001)return @{@"fixture":@NO};
+        while(count<100000){root.FindChild(++maxTag,Standard_True);++count;}
+        const bool labelLimit=core3d::saved_features::Validate(labels.document,profiles,enclosures,sweeps,lofts);
+        root.FindChild(++maxTag,Standard_True);
+        const bool labelOver=!core3d::saved_features::Validate(labels.document,profiles,enclosures,sweeps,lofts)
+            &&profiles.empty()&&enclosures.empty()&&sweeps.empty()&&lofts.empty();
+        return @{@"fixture":@YES,@"records4096":@(atLimit),@"records4097Refused":@(overLimit),
+            @"labels100000":@(labelLimit),@"labels100001Refused":@(labelOver)};
+    }catch(...){return @{@"fixture":@NO};}
+}
+
++ (NSDictionary<NSString *,id> *)debugRectangularLoftCodecValues:(NSArray<NSNumber *> *)input {
+    if(![input isKindOfClass:[NSArray class]]||input.count>129)return @{@"accepted":@NO};
+    try {std::vector<double> values;for(id v in input){if(![v isKindOfClass:[NSNumber class]])return @{@"accepted":@NO};values.push_back([v doubleValue]);}
+        core3d::rectangular_loft::Definition d;const bool accepted=core3d::loft_persistence::Decode(values,d);
+        std::vector<double> encoded;NSMutableArray *bits=[NSMutableArray array];
+        if(accepted&&core3d::loft_persistence::Encode(d,encoded))for(double v:encoded)[bits addObject:@(core3d::loft_persistence::Bits(v))];
+        return @{@"accepted":@(accepted),@"bits":bits,@"stationCount":@(d.stations.size()),@"id":@(d.loftIdentifier)};
+    }catch(...){return @{@"accepted":@NO};}
+}
+
++ (NSDictionary<NSString *, id> *)debugSweepPersistenceScenario:(NSInteger)scenario {
+    if (![NSThread isMainThread] || scenario<0 || scenario>3)
+        return @{@"error": @"Unavailable sweep codec fixture"};
+    try {
+        using namespace core3d::sweep_persistence::probe;
+        Checks checks;
+        switch (scenario) {
+            case 0: checks=Numeric(); break;
+            case 1: checks=RoundTrip(); break;
+            case 2: checks=Malformed(); break;
+            case 3: checks=BindingAndTransaction(); break;
+        }
+        NSMutableDictionary<NSString *, NSNumber *> *result=[NSMutableDictionary dictionary];
+        for (const auto& check:checks) result[[NSString stringWithUTF8String:check.first.c_str()]]=@(check.second);
+        return @{@"checks": result};
+    } catch (const Standard_Failure& failure) {
+        return @{@"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT codec failure"};
+    } catch (...) { return @{@"error": @"Native sweep codec fixture failed"}; }
 }
 
 + (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)input {
@@ -10429,6 +11376,7 @@ struct NativeModelingPermitIssuer final {
                 && !Core3DRebuildSourceMatches(request,owner)) return std::nullopt;
             core3d::receipt::Catalog prior;const auto status=core3d::receipt::Read(owner->Document(),prior);
             if((status!=core3d::receipt::ReadStatus::Absent&&status!=core3d::receipt::ReadStatus::Valid)
+                ||!prior.supportsAppend()
                 ||prior.records.size()>=core3d::receipt::MaximumRecords)return std::nullopt;
             for(const auto&record:prior.records)if(record.key.request==request->_requestKey.request)return std::nullopt;
             request->_requestCreationCatalog=std::move(prior);
@@ -10906,6 +11854,7 @@ struct NativeModelingPermitIssuer final {
         Core3DStoredEnclosureSnapshot *enclosure = nil;
         Core3DStoredProfileSnapshot *profile = nil;
         Core3DStoredProfileSnapshot *recipe = nil;
+        Core3DStoredSweepSnapshot *sweep = nil;
         if (scene.selection.selectedElements.count == 1) {
             Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
             if (selected.kind == Core3DSceneElementKindObject)
@@ -10921,12 +11870,17 @@ struct NativeModelingPermitIssuer final {
                     profile = nil;
                 }
             }
+            if(!enclosure&&!profile&&!recipe&&selected.kind==Core3DSceneElementKindObject){
+                sweep=[self storedSweepWithEntityIdentifier:selected.entityIdentifier expected:scene];
+                if(sweep&&(!sweep.current||!Core3DModelingSweepSupported([sweep nativeSnapshot].definition,
+                    sweep.effectiveDimensionMetersPerUnit)))sweep=nil;
+            }
         }
         // Native reads must not acquire or refresh authority during capture.
         const auto after = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
         if (!after || !(*after == *stamp)) return nil;
         Core3DModelingPlanningContext *context = [[Core3DModelingPlanningContext alloc]
-            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile recipe:recipe];
+            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile recipe:recipe sweep:sweep];
         context->_planningOwner = self; context->_planningViewer = viewer;
         context->_planningStamp = *stamp; context->_planningOverlayRevision = overlay.overlayRevision;
         Core3DModelingPlanningContext *previous = _issuedModelingPlanningContext;
@@ -11099,6 +12053,71 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
+- (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return;
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return;}
+    if(![self isModelingPlanningContextCurrent:context]||![definition isMemberOfClass:Core3DSweepDefinition.class]
+        ||core3d::sweep_persistence::Bits(definition.metersPerUnit)!=core3d::sweep_persistence::Bits(context.scene.metersPerUnit)){
+        completion(Core3DProfileConstructionResultRejected);return;
+    }
+    context->_planningConsumed=YES;_modelingConstructionContext=context;
+    __weak Core3DViewController *weakSelf=self;
+    __weak Core3DModelingPlanningContext *weakContext=context;
+    [self createSweepWithDefinition:definition expected:context.scene completion:^(Core3DProfileConstructionResult result){
+        Core3DViewController *owner=weakSelf;Core3DModelingPlanningContext *finished=weakContext;
+        if(finished)finished->_planningRetired=YES;
+        if(owner&&owner->_modelingConstructionContext==finished)owner->_modelingConstructionContext=nil;
+        completion(result);
+    }];
+}
+
+- (void)rebuildSweepRadiusWithDefinition:(Core3DSweepDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return;
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return;}
+    if(![self isModelingPlanningContextCurrent:context]||!context.selectedSweep||context.selectedEnclosure
+        ||context.selectedProfile||context.selectedProfileRecipe||![definition isMemberOfClass:Core3DSweepDefinition.class]){
+        completion(Core3DProfileConstructionResultRejected);return;
+    }
+    try {
+        const auto original=[context.selectedSweep nativeSnapshot];auto requested=[definition nativeDefinition];
+        if(!original.current||!Core3DModelingSweepSupported(original.definition,original.effectiveDimensionMetersPerUnit)
+            ||!Core3DModelingSweepSupported(requested,original.effectiveDimensionMetersPerUnit)){
+            completion(Core3DProfileConstructionResultRejected);return;
+        }
+        // Radius is the only admitted delta, including signed-zero and optional
+        // presence bits elsewhere. Neither JSON nor a new scene can refresh it.
+        auto expected=original.definition;expected.radius=requested.radius;
+        std::vector<double> expectedValues,requestedValues;
+        if(!core3d::sweep_persistence::Encode(expected,expectedValues)
+            ||!core3d::sweep_persistence::Encode(requested,requestedValues)
+            ||!core3d::sweep_persistence::SameBits(expectedValues,requestedValues)){
+            completion(Core3DProfileConstructionResultRejected);return;
+        }
+        const double factor=original.effectiveDimensionMetersPerUnit*1000;
+        // If both raw radii advertise the exact same finite physical Double,
+        // retain original raw bits before ordinary semantic no-change admission.
+        Core3DSweepDefinition *frozen=definition;
+        if(requested.radius*factor==original.definition.radius*factor){
+            frozen=[context.selectedSweep.definition changingRadius:original.definition.radius];
+            if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
+        }
+        context->_planningConsumed=YES;_modelingConstructionContext=context;
+        __weak Core3DViewController *weakSelf=self;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        [self rebuildStoredSweep:context.selectedSweep definition:frozen expected:context.scene
+            completion:^(Core3DProfileConstructionResult result){
+                Core3DViewController *owner=weakSelf;Core3DModelingPlanningContext *finished=weakContext;
+                if(finished)finished->_planningRetired=YES;
+                if(owner&&owner->_modelingConstructionContext==finished)owner->_modelingConstructionContext=nil;
+                completion(result);
+            }];
+    }catch(...){completion(Core3DProfileConstructionResultRejected);}
+}
+
 - (void)rebuildProfileRecipeWithDefinition:(Core3DProfileDefinition *)definition
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion {
@@ -11187,6 +12206,140 @@ struct NativeModelingPermitIssuer final {
 }
 
 - (void)cancelNativeConstruction { [self cancelProfileConstruction]; }
+
+- (Core3DStoredSweepSnapshot *)storedSweepWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || _nativeSolidWork || _isLoading.load() || !_isSetuped || _isPreviewMode
+        || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+    try {
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->storedSweepDefinition(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        return result ? [[Core3DStoredSweepSnapshot alloc] initWithNativeSnapshot:*result] : nil;
+    } catch (...) { return nil; }
+}
+
+- (void)rebuildStoredSweep:(Core3DStoredSweepSnapshot *)original
+    definition:(Core3DSweepDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (![original isKindOfClass:[Core3DStoredSweepSnapshot class]]
+        || ![definition isKindOfClass:[Core3DSweepDefinition class]]) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto live = [self storedSweepWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if (!live) { completion(Core3DProfileConstructionResultRejected); return; }
+    try {
+        const CGSize size = GLController.drawableSize;
+        const auto originalNative = [original nativeSnapshot];
+        auto requested = [definition nativeDefinition];
+        const auto work = GLController.viewer->prepareStoredSweepRebuild(requested,
+            originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+
+- (void)createRectangularLoftWithDefinition:(Core3DRectangularLoftDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![definition isKindOfClass:[Core3DRectangularLoftDefinition class]]
+        || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
+        || definition.metersPerUnit != expected.metersPerUnit
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DProfileConstructionResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        const char *publication = expected.publicationSourceIdentifier.UTF8String;
+        if (!publication) { completion(Core3DProfileConstructionResultRejected); return; }
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto parameters = [definition nativeDefinition];
+        const auto work = viewer->prepareLoftSolid(parameters,identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+- (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (!_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![definition isKindOfClass:[Core3DSweepDefinition class]]
+        || expected == nil || expected.selectionMode != Core3DSceneElementKindObject
+        || definition.metersPerUnit != expected.metersPerUnit
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto viewer = GLController.viewer;
+    if (!viewer->canBeginCommittedEdit()) { completion(Core3DProfileConstructionResultBusy); return; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    try {
+        const char *publication = expected.publicationSourceIdentifier.UTF8String;
+        if (!publication) { completion(Core3DProfileConstructionResultRejected); return; }
+        core3d::ObjectFrameIdentity identity;
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto parameters = [definition nativeDefinition];
+        const auto work = viewer->prepareSweepSolid(parameters,identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
 
 - (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected

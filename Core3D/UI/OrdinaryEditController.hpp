@@ -21,7 +21,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -86,6 +86,7 @@ struct OrdinaryMeshVertexMove {
     gp_Vec worldDelta;
 };
 
+struct SweepRebuildGuard; // Opaque immutable source catalog, main only.
 struct OrdinaryTransformChange {
     TDF_Label label;
     Handle(AIS_Shape) presentation;
@@ -97,6 +98,8 @@ struct OrdinaryTransformChange {
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
     std::optional<profile::Parameters> profileRebuild;
     std::optional<enclosure::Parameters> enclosureRebuild;
+    std::optional<planar_sweep::Definition> sweepRebuild;
+    std::shared_ptr<const SweepRebuildGuard> sweepSource;
 };
 
 struct OrdinaryTransformRecord {
@@ -105,7 +108,9 @@ struct OrdinaryTransformRecord {
     OrdinaryTransformChange requested;
 };
 
+struct SweepRebuildGuard; // Main-owned bounded catalog; never dispatched to geometry workers.
 struct OrdinaryTransformLedger {
+    std::shared_ptr<SweepRebuildGuard> sweepGuard;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::vector<OrdinaryTransformRecord> records;
     bool candidateSealed = false;
@@ -195,6 +200,10 @@ struct OrdinaryCreationRequest {
     std::string profileIdentifier;
     std::optional<enclosure::Parameters> enclosure;
     std::string enclosureIdentifier;
+    std::optional<planar_sweep::Definition> sweep;
+    std::string sweepIdentifier;
+    std::optional<rectangular_loft::Definition> loft;
+    std::string loftIdentifier;
     std::optional<TCollection_ExtendedString> name; // Staged in this same creation command.
 };
 struct OrdinaryCreationRecord {
@@ -213,6 +222,8 @@ struct OrdinaryCreationRoot {
     OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
     profile::Record profile;
     enclosure::Record enclosure;
+    sweep_persistence::Record sweep;
+    loft_persistence::Record loft;
 };
 using OrdinaryCreationCatalog = std::map<std::string, OrdinaryCreationRoot>;
 //! Exact retained source and intended derived-copy metadata.
@@ -316,6 +327,8 @@ public:
                                      OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditResult reconcile() noexcept;
     bool blocksNormalWork() const noexcept;
+    std::shared_ptr<const SweepRebuildGuard> captureSavedSweepRebuildSource() const noexcept;
+    bool savedSweepRebuildSourceIsCurrent(const std::shared_ptr<const SweepRebuildGuard>& source) const noexcept;
     OrdinaryEditState state() const noexcept { return _state; }
 #ifdef DEBUG
     OrdinaryEditCommandStamp& debugCommandStamp() noexcept { return _command; }

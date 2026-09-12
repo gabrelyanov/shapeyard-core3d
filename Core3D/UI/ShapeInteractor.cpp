@@ -129,7 +129,8 @@ namespace core3d {
 			if (document.IsNull() || label.IsNull()) {
 				return Standard_False;
 			}
-			if (!document->IsEditableFreeSimpleDefinitionLabel(label)) {
+			if (!document->IsEditableFreeSimpleDefinitionLabel(label)
+                || !document->HasNoSavedSweepForTopology(label)) {
 				return Standard_False;
 			}
 			const OcctGeometryRepresentation representation =

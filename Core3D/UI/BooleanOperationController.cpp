@@ -97,7 +97,8 @@ Standard_Boolean IsBRepModelingLabel(
     if (theDocument.IsNull() || theLabel.IsNull()) {
         return Standard_False;
     }
-	if (!theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)) {
+	if (!theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)
+        || !theDocument->HasNoSavedSweepForTopology(theLabel)) {
 		return Standard_False;
 	}
     const OcctGeometryRepresentation aRepresentation =
