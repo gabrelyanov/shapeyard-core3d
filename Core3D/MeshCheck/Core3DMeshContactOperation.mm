@@ -131,6 +131,8 @@ NSOperationQueue *MeshContactQueue() {
 #if DEBUG
     void (^_afterCaptureHook)(void);
     void (^_beforeDeliveryHook)(void);
+    void (^_deliveryGate)(void (^resume)(void));
+    BOOL _deliveryGateEntered;
 #endif
 }
 #if DEBUG
@@ -138,6 +140,10 @@ NSOperationQueue *MeshContactQueue() {
               beforeDeliveryHook:(void (^)(void))beforeDelivery {
     NSAssert(NSThread.isMainThread,@"Contact test hooks require the owner thread");
     _afterCaptureHook=[afterCapture copy];_beforeDeliveryHook=[beforeDelivery copy];
+}
+- (void)core3d_setDeliveryGate:(void (^)(void (^resume)(void)))gate {
+    NSAssert(NSThread.isMainThread && !_deliveryGateEntered,@"Contact delivery gate requires setup on main");
+    _deliveryGate=[gate copy];
 }
 #endif
 - (instancetype)initWithIdentity:(const ContactSourceIdentity&)identity
@@ -205,6 +211,19 @@ NSOperationQueue *MeshContactQueue() {
 - (void)deliverOnMain {
     NSAssert(NSThread.isMainThread,@"Native contact completion requires main");
 #if DEBUG
+    if(_deliveryGate!=nil && !_deliveryGateEntered) {
+        _deliveryGateEntered=YES;
+        void (^gate)(void (^)(void))=_deliveryGate;_deliveryGate=nil;
+        auto resumed=std::make_shared<std::atomic_bool>(false);
+        // This resume closure retains the suspended operation/job. Its
+        // owner callbacks remain weak. The gate must retain/invoke resume;
+        // it must never spin the main run loop or block waiting for teardown.
+        gate(^{
+            if(resumed->exchange(true,std::memory_order_acq_rel))return;
+            dispatch_async(dispatch_get_main_queue(), ^{ [self deliverOnMain]; });
+        });
+        return;
+    }
     void (^beforeDelivery)(void)=_beforeDeliveryHook;
     _beforeDeliveryHook=nil;_afterCaptureHook=nil;
     if(beforeDelivery) beforeDelivery();

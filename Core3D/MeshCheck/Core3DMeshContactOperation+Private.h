@@ -19,6 +19,9 @@ typedef core3d::meshcheck::ContactSourceStatus (^Core3DMeshContactValidate)(
 //! They do not provide geometry, bypass validation, or block worker threads.
 - (void)core3d_setAfterCaptureHook:(void (^ _Nullable)(void))afterCapture
               beforeDeliveryHook:(void (^ _Nullable)(void))beforeDelivery;
+// The gate runs once on main before validation/delivery. Retain its resume
+// closure to suspend without blocking main; invoking it repeatedly is safe.
+- (void)core3d_setDeliveryGate:(void (^ _Nullable)(void (^resume)(void)))gate;
 #endif
 - (instancetype)initWithIdentity:(const core3d::meshcheck::ContactSourceIdentity&)identity
                       ownerToken:(NSObject *)ownerToken

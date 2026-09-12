@@ -1166,6 +1166,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     NSUInteger _debugMaximumTextureAuthoringObjects;
     void (^_debugMeshContactAfterCapture)(void);
     void (^_debugMeshContactBeforeDelivery)(void);
+    void (^_debugMeshContactDeliveryGate)(void (^resume)(void));
 #endif
 }
 
@@ -8127,6 +8128,10 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 
 #if DEBUG
+- (void)debugSetNextMeshContactDeliveryGate:(void (^)(void (^resume)(void)))gate {
+    NSAssert(NSThread.isMainThread,@"Contact delivery gate requires the owner thread");
+    _debugMeshContactDeliveryGate=[gate copy];
+}
 - (void)debugSetNextMeshContactAfterCaptureHook:(void (^)(void))afterCapture
                            beforeDeliveryHook:(void (^)(void))beforeDelivery {
     if(!NSThread.isMainThread) return;
@@ -8242,6 +8247,8 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         }];
     if(ownerThread) {
 #if DEBUG
+        [operation core3d_setDeliveryGate:_debugMeshContactDeliveryGate];
+        _debugMeshContactDeliveryGate=nil;
         [operation core3d_setAfterCaptureHook:_debugMeshContactAfterCapture
             beforeDeliveryHook:_debugMeshContactBeforeDelivery];
         _debugMeshContactAfterCapture=nil;_debugMeshContactBeforeDelivery=nil;

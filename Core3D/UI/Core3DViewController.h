@@ -920,6 +920,11 @@ typedef struct {
 - (void)debugSetNextMeshContactAfterCaptureHook:(void (^_Nullable)(void))afterCapture
                            beforeDeliveryHook:(void (^_Nullable)(void))beforeDelivery
     NS_SWIFT_NAME(debugSetNextMeshContactHooks(afterCapture:beforeDelivery:));
+//! One-shot asynchronous test gate before native validation/public delivery.
+//! Runs on main; retain resume while waiting, then invoke from any thread.
+//! Repeated resumes are ignored. No main-thread blocking or geometry injection.
+- (void)debugSetNextMeshContactDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
+    NS_SWIFT_NAME(debugSetNextMeshContactDeliveryGate(_:));
 #endif
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier
