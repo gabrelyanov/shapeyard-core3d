@@ -1257,6 +1257,12 @@ typedef struct {
 //! Pairwise shape partnership and TriangleMesh triangulation handle identity
 //! are intentionally unavailable in renderer-neutral scene snapshots.
 - (NSDictionary<NSString *, NSNumber *> *)debugGeometryCopyIndependenceState;
+//! DEBUG-only detached numeric intersection probes, never document authority.
+//! Pair data is18 little-endian binary64 coordinates per pair, no expected bytes.
+- (NSData *_Nullable)debugTriangleContactPairDecisions:(NSData *)coordinates;
+//! Whole mesh data is9 little-endian binary64 coordinates per triangle.
+- (NSDictionary<NSString *, id> *_Nullable)debugTriangleContactMesh:(NSData *)coordinates mode:(NSInteger)mode;
+
 //! Isolated native winding geometry probes; no live document writes.
 - (NSDictionary<NSString *, NSArray<NSNumber *> *> *_Nullable)debugWindingGeometryProbe;
 //! Test-only exact-label cycle seam; empty begin and real detected-state transitions.

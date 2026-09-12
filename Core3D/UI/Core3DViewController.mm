@@ -10,6 +10,7 @@
 #import "../OCCTKit/Core3DQueuedAssetRequest.h"
 #if DEBUG
 #include "../OCCTKit/NativeWindingPlanProbe.hxx"
+#include "../OCCTKit/NativeTriangleContacts.hpp"
 #include "../OCCTKit/NativeWindingCandidateProbe.hxx"
 #endif
 #if DEBUG
@@ -9724,6 +9725,78 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 
 - (BOOL)debugMutateFirstMirrorSourcePersistedTransform {
     return [GLController debugMutateFirstMirrorSourcePersistedTransform];
+}
+
+// Insert within existing DEBUG methods, with NativeTriangleContacts.hpp included
+// under DEBUG. Numeric probes have no document, viewer or selection access.
+- (NSData *)debugTriangleContactPairDecisions:(NSData *)coordinates {
+    constexpr NSUInteger stride=18*sizeof(double);
+    if(coordinates.length==0 || coordinates.length%stride!=0 || coordinates.length/stride>20000)return nil;
+    try {
+        const auto* bytes=static_cast<const std::uint8_t*>(coordinates.bytes);
+        std::vector<std::uint8_t> result;result.reserve(coordinates.length/stride);
+        for(NSUInteger offset=0;offset<coordinates.length;offset+=stride) {
+            std::array<core3d::meshcheck::Triangle,2> pair;NSUInteger index=offset;
+            for(auto& t:pair)for(auto& p:t)for(auto& value:p) {
+                std::uint64_t bits=0;for(unsigned k=0;k<8;++k)bits|=std::uint64_t(bytes[index++])<<(8*k);
+                std::memcpy(&value,&bits,sizeof(value));
+            }
+            // Expected decisions never enter this method. Every result is
+            // independently calculated from the18 supplied coordinates.
+            try {result.push_back(core3d::meshcheck::exact::unexpected(pair[0],pair[1])?1:0);}
+            catch(const std::invalid_argument&){result.push_back(2);}
+            catch(const std::length_error&){result.push_back(3);}
+            catch(...){result.push_back(4);}
+        }
+        return [NSData dataWithBytes:result.data() length:result.size()];
+    } catch(...) {return nil;}
+}
+
+- (NSDictionary<NSString *, id> *)debugTriangleContactMesh:(NSData *)coordinates mode:(NSInteger)mode {
+    constexpr NSUInteger stride=9*sizeof(double);
+    if(coordinates.length%stride!=0 || coordinates.length/stride>20001 || mode<0 || mode>8)return nil;
+    try {
+        const auto* bytes=static_cast<const std::uint8_t*>(coordinates.bytes);
+        std::vector<core3d::meshcheck::Triangle> triangles(coordinates.length/stride);NSUInteger index=0;
+        for(auto& t:triangles)for(auto& p:t)for(auto& value:p) {
+            std::uint64_t bits=0;for(unsigned k=0;k<8;++k)bits|=std::uint64_t(bytes[index++])<<(8*k);
+            std::memcpy(&value,&bits,sizeof(value));
+        }
+        const auto original=coordinates.copy;
+        std::atomic_bool cancelled{mode==1};core3d::meshcheck::ContactLimits limits;
+        if(mode==2)limits.maximumPairs=0;
+        if(mode==3)limits.maximumContacts=0;
+        if(mode==4)limits.duration=std::chrono::milliseconds(0);
+        if(mode==5)limits.maximumTriangles=1;
+        if(mode==6)limits.maximumTriangles=20001;
+        if(mode==7)limits.duration=std::chrono::milliseconds::max();
+        if(mode==8)limits.duration=std::chrono::milliseconds(1);
+        core3d::meshcheck::ContactReport report;
+        // Seed stale data to prove every non-ready path clears the output.
+        report.triangleCount=999;report.candidatePairs=999;report.unexpectedPairs={{99,100}};
+        const auto started=std::chrono::steady_clock::now();
+        const auto status=core3d::meshcheck::AnalyzeTriangleContacts(triangles,report,cancelled,limits);
+        NSString* state=nil;
+        switch(status) {
+            case core3d::meshcheck::ContactStatus::Ready:state=@"ready";break;
+            case core3d::meshcheck::ContactStatus::Invalid:state=@"invalid";break;
+            case core3d::meshcheck::ContactStatus::TooLarge:state=@"tooLarge";break;
+            case core3d::meshcheck::ContactStatus::Cancelled:state=@"cancelled";break;
+            case core3d::meshcheck::ContactStatus::TimedOut:state=@"timedOut";break;
+        }
+        NSMutableArray* pairs=[NSMutableArray arrayWithCapacity:report.unexpectedPairs.size()];
+        for(const auto& pair:report.unexpectedPairs)[pairs addObject:@[@(pair.first),@(pair.second)]];
+        // Re-encode every input value after scanning: byte equality, including
+        // NaN payloads/signed zero, is stronger than floating-point equality.
+        NSMutableData* after=[NSMutableData dataWithLength:coordinates.length];auto* output=static_cast<std::uint8_t*>(after.mutableBytes);index=0;
+        for(const auto& t:triangles)for(const auto& p:t)for(const auto value:p) {
+            std::uint64_t bits;std::memcpy(&bits,&value,sizeof(bits));
+            for(unsigned k=0;k<8;++k)output[index++]=std::uint8_t(bits>>(8*k));
+        }
+        const double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+        return @{ @"state":state,@"triangles":@(report.triangleCount),@"candidatePairs":@(report.candidatePairs),
+                  @"contacts":pairs,@"inputUnchanged":@([original isEqualToData:after]),@"elapsedSeconds":@(elapsed) };
+    } catch(...) {return nil;}
 }
 
 - (NSDictionary<NSString *, NSArray<NSNumber *> *> *)debugWindingGeometryProbe {
