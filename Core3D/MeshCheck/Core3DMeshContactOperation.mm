@@ -250,7 +250,7 @@ NSOperationQueue *MeshContactQueue() {
 
 namespace {
 using namespace core3d::scene;
-void ContactInclude(Bounds3d& bounds,const Point& point) {
+void ContactInclude(Bounds3d& bounds,const core3d::meshcheck::Point& point) {
     if(!bounds.valid) {
         bounds.minimum={point[0],point[1],point[2]};
         bounds.maximum=bounds.minimum;bounds.valid=true;return;
@@ -311,7 +311,7 @@ bool ContactCamera(const Bounds3d& full,const Bounds3d& pair,double yaw,
         for(const auto& triangle:source.triangles) {
             Triangle transformed;
             for(int corner=0;corner<3;++corner) {
-                const auto& p=triangle[corner];Point local{};
+                const auto& p=triangle[corner];core3d::meshcheck::Point local{};
                 for(int row=0;row<3;++row) {
                     local[row]=source.facePlacement[row*4]*p[0]
                         +source.facePlacement[row*4+1]*p[1]
@@ -369,9 +369,9 @@ bool ContactCamera(const Bounds3d& full,const Bounds3d& pair,double yaw,
                 Triangle triangle;
                 for(int corner=0;corner<3;++corner)for(int axis=0;axis<3;++axis)
                     triangle[corner][axis]=double(float(world[i][corner][axis]));
-                const Point u={triangle[1][0]-triangle[0][0],triangle[1][1]-triangle[0][1],triangle[1][2]-triangle[0][2]};
-                const Point v={triangle[2][0]-triangle[0][0],triangle[2][1]-triangle[0][1],triangle[2][2]-triangle[0][2]};
-                Point n={u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]};
+                const core3d::meshcheck::Point u={triangle[1][0]-triangle[0][0],triangle[1][1]-triangle[0][1],triangle[1][2]-triangle[0][2]};
+                const core3d::meshcheck::Point v={triangle[2][0]-triangle[0][0],triangle[2][1]-triangle[0][1],triangle[2][2]-triangle[0][2]};
+                core3d::meshcheck::Point n={u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]};
                 const double length=std::hypot(n[0],n[1],n[2]);
                 if(!(length>0)||!std::isfinite(length))return nil;
                 for(auto& value:n)value/=length;
