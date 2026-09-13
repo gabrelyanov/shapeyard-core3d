@@ -20,6 +20,15 @@ inline thread_local int TraceFormat=0;
 inline void Trace(const char* phase)noexcept{
     if(TraceEnabled){std::fprintf(stderr,"[receipt-v3] format=%d phase=%s\n",TraceFormat,phase);std::fflush(stderr);}
 }
+// Diagnostic operands execute exactly once; exceptions retain their original path.
+// Fixed labels contain no document data. A missing after marker locates the boundary.
+inline void TraceBoundary(const char* step,const char* edge)noexcept{
+    if(TraceEnabled){std::fprintf(stderr,"[receipt-v3] format=%d substep=%s edge=%s\n",TraceFormat,step,edge);std::fflush(stderr);}
+}
+template<class Function>
+inline auto TraceValue(const char* step,Function&& operation){
+    TraceBoundary(step,"before");auto value=operation();TraceBoundary(step,"after");return value;
+}
 // Synthetic codec/TDF fixtures only. Actual native-effect/Store workflows are
 // separate Swift methods and never accept these synthetic records as authority.
 struct DebugProbe {
@@ -196,25 +205,25 @@ struct DebugProbe {
                 if(missing.doc.IsNull())throw std::invalid_argument("Missing-geometry fixture document");
                 out[p+"missingGeometryRefused"]=!Geometry(Handle(TDocStd_Document)(),xcaf)&&!Geometry(missing.doc,xcaf);
                 Trace("old-only12-save");
-                const auto oldOnly=Save(h);out[p+"oldOnlyOldReader"]=Open(oldOnly,xcaf,true);
+                const auto oldOnly=TraceValue("old-only12-save",[&]{return Save(h);});out[p+"oldOnlyOldReader"]=TraceValue("old-only12-open-legacy",[&]{return Open(oldOnly,xcaf,true);});
                 out[p+"oldOnlyNoV3Type"]=oldOnly.find("Core3D_ModelingReceiptCatalog")==std::string::npos;
-                h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_11);
-                Trace("old-only11-save");const auto old11=Save(h);
-                out[p+"oldOnly11BothReaders"]=Open(old11,xcaf,true)&&Open(old11,xcaf,false);
-                out[p+"oldOnly11SourceGeometry"]=Geometry(h.doc,xcaf)
+                TraceBoundary("old-only-format11","before");h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_11);TraceBoundary("old-only-format11","after");
+                Trace("old-only11-save");const auto old11=TraceValue("old-only11-save",[&]{return Save(h);});
+                out[p+"oldOnly11BothReaders"]=TraceValue("old-only11-open-legacy",[&]{return Open(old11,xcaf,true);})&&TraceValue("old-only11-open-current",[&]{return Open(old11,xcaf,false);});
+                out[p+"oldOnly11SourceGeometry"]=TraceValue("old-only11-source-geometry",[&]{return Geometry(h.doc,xcaf);})
                     &&old11.find("Core3D_ModelingReceiptCatalog")==std::string::npos;
-                h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_12);
-                for(unsigned i=1;i<=144;++i)tree=tree->append(Fixture(i,tree->document(),16));
-                h.doc->NewCommand();Install(h.doc,tree);if(!h.doc->CommitCommand())throw std::invalid_argument("V3 install");
-                const auto bytes=Save(h);std::shared_ptr<const Tree> reopened;
+                TraceBoundary("source-format12","before");h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_12);TraceBoundary("source-format12","after");
+                TraceBoundary("source-v3-build144","before");for(unsigned i=1;i<=144;++i)tree=tree->append(Fixture(i,tree->document(),16));TraceBoundary("source-v3-build144","after");
+                TraceBoundary("source-v3-new-command","before");h.doc->NewCommand();TraceBoundary("source-v3-new-command","after");TraceBoundary("source-v3-install","before");Install(h.doc,tree);TraceBoundary("source-v3-install","after");if(!TraceValue("source-v3-commit",[&]{return h.doc->CommitCommand();}))throw std::invalid_argument("V3 install");
+                const auto bytes=TraceValue("v3-version12-save",[&]{return Save(h);});std::shared_ptr<const Tree> reopened;
                 out[p+"crossedBothOldLimits"]=tree->count()==144&&tree->wireBytes()>MaximumBytes;
-                out[p+"bothFormatsSharedGeometry"]=Open(bytes,xcaf,false,&reopened);
-                out[p+"oldReaderRefuses"]=!Open(bytes,xcaf,true);
-                std::ostringstream before,after;BinaryDriver::WriteNumericTree(*tree,before);
-                out[p+"numericReopenExact"]=reopened&&BinaryDriver::WriteNumericTree(*reopened,after)&&before.str()==after.str();
-                Catalog beforeRefusal;if(Read(h.doc,beforeRefusal)!=ReadStatus::Valid)throw std::invalid_argument("V3 source before refusal");
-                const auto undo=h.doc->GetAvailableUndos(),redo=h.doc->GetAvailableRedos();
-                h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_11);
+                out[p+"bothFormatsSharedGeometry"]=TraceValue("v3-version12-open-current",[&]{return Open(bytes,xcaf,false,&reopened);});
+                out[p+"oldReaderRefuses"]=!TraceValue("v3-version12-open-legacy-refusal",[&]{return Open(bytes,xcaf,true);});
+                std::ostringstream before,after;TraceValue("v3-numeric-source",[&]{return BinaryDriver::WriteNumericTree(*tree,before);});
+                out[p+"numericReopenExact"]=reopened&&TraceValue("v3-numeric-reopened",[&]{return BinaryDriver::WriteNumericTree(*reopened,after);})&&before.str()==after.str();
+                Catalog beforeRefusal;if(TraceValue("v3-source-read-before-refusal",[&]{return Read(h.doc,beforeRefusal);})!=ReadStatus::Valid)throw std::invalid_argument("V3 source before refusal");
+                TraceBoundary("v3-source-history","before");const auto undo=h.doc->GetAvailableUndos(),redo=h.doc->GetAvailableRedos();TraceBoundary("v3-source-history","after");
+                TraceBoundary("v3-format11-refusal","before");h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_11);TraceBoundary("v3-format11-refusal","after");
                 // Use the actual production driver, not a mock Base callback.
                 // No bytes can reach Base::Write before the role/version refusal.
                 Handle(BinLDrivers_DocumentStorageDriver) writer=xcaf
@@ -222,22 +231,22 @@ struct DebugProbe {
                     :Handle(BinLDrivers_DocumentStorageDriver)(new StorageDriver<BinDrivers_DocumentStorageDriver>());
                 std::ostringstream untouched;untouched<<"V3-preflight-sentinel";bool refused=false;
                 Trace("v3-old-version-direct-refusal");
-                try{writer->Write(h.doc,untouched);}catch(...){refused=true;}
+                try{TraceBoundary("v3-old-version-direct-write","before");writer->Write(h.doc,untouched);TraceBoundary("v3-old-version-direct-write","after");}catch(...){refused=true;}
                 out[p+"oldVersionRefusedBeforeOutput"]=refused&&untouched.str()=="V3-preflight-sentinel";
                 Trace("v3-old-version-app-refusal");
-                try{Save(h);out[p+"oldVersionWriteRefused"]=false;}catch(...){out[p+"oldVersionWriteRefused"]=true;}
+                try{TraceValue("v3-old-version-app-save",[&]{return Save(h);});out[p+"oldVersionWriteRefused"]=false;}catch(...){out[p+"oldVersionWriteRefused"]=true;}
                 Catalog afterRefusal;
-                out[p+"refusalSourceCatalogHistoryExact"]=Read(h.doc,afterRefusal)==ReadStatus::Valid
-                    &&afterRefusal.matches(beforeRefusal)&&Geometry(h.doc,xcaf)
+                out[p+"refusalSourceCatalogHistoryExact"]=TraceValue("v3-source-read-after-refusal",[&]{return Read(h.doc,afterRefusal);})==ReadStatus::Valid
+                    &&afterRefusal.matches(beforeRefusal)&&TraceValue("v3-source-geometry-after-refusal",[&]{return Geometry(h.doc,xcaf);})
                     &&h.doc->GetAvailableUndos()==undo&&h.doc->GetAvailableRedos()==redo
                     &&h.doc->StorageFormatVersion()==TDocStd_FormatVersion_VERSION_11;
-                h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_12);
-                Trace("v3-version12-retry-save");const auto recovered=Save(h);std::shared_ptr<const Tree> reopenedAfterRefusal;
-                const bool openedAfterRefusal=Open(recovered,xcaf,false,&reopenedAfterRefusal);
+                TraceBoundary("v3-recovery-format12","before");h.doc->ChangeStorageFormatVersion(TDocStd_FormatVersion_VERSION_12);TraceBoundary("v3-recovery-format12","after");
+                Trace("v3-version12-retry-save");const auto recovered=TraceValue("v3-version12-retry-save",[&]{return Save(h);});std::shared_ptr<const Tree> reopenedAfterRefusal;
+                const bool openedAfterRefusal=TraceValue("v3-version12-retry-open-current",[&]{return Open(recovered,xcaf,false,&reopenedAfterRefusal);});
                 std::ostringstream retry;
                 out[p+"version12RecoveryExact"]=openedAfterRefusal&&reopenedAfterRefusal
-                    &&BinaryDriver::WriteNumericTree(*reopenedAfterRefusal,retry)&&retry.str()==before.str()
-                    &&Read(h.doc,afterRefusal)==ReadStatus::Valid&&afterRefusal.matches(beforeRefusal)&&Geometry(h.doc,xcaf);
+                    &&TraceValue("v3-numeric-retry",[&]{return BinaryDriver::WriteNumericTree(*reopenedAfterRefusal,retry);})&&retry.str()==before.str()
+                    &&TraceValue("v3-source-read-after-retry",[&]{return Read(h.doc,afterRefusal);})==ReadStatus::Valid&&afterRefusal.matches(beforeRefusal)&&TraceValue("v3-source-geometry-after-retry",[&]{return Geometry(h.doc,xcaf);});
                 Trace("format-complete");
             }else if(scenario==2){
                 for(unsigned i=1;i<=129;++i)tree=tree->append(Fixture(i,tree->document()));
