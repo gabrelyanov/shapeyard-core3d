@@ -5834,6 +5834,59 @@ Standard_Boolean OcctDocument::StageSavedSweepReplacement(
     } catch (...) {return Standard_False;}
 }
 
+Standard_Boolean OcctDocument::StageSavedLoftReplacement(
+    const OcctObjectTransformState& previous, const TopoDS_Shape& candidate,
+    const core3d::rectangular_loft::Definition& definition,
+    const core3d::rectangular_loft::StationDimensionEdit& edit,bool debugFailAfterShape) noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        namespace p=core3d::loft_persistence;
+        OcctObjectTransformState current;std::vector<double> values;
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !CaptureObjectTransformStateForLabel(previous.label,current) || !current.IsEqual(previous)
+            || !core3d::sweep_rebuild::SameRawScalars(current.scalars,previous.scalars)
+            || current.loft.label.IsNull() || !current.loft.IsCurrent(myOcafDoc,previous.label)
+            || !core3d::loft_rebuild::HasOnlyMetadataSubshapes(myOcafDoc,previous.label)
+            || !core3d::loft_rebuild::Matches(current.loft.definition,edit,definition)
+            || !p::Encode(definition,values) || candidate.IsNull() || candidate.ShapeType()!=TopAbs_SOLID
+            || current.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            || ClassifyDefinitionGeometry(candidate,nullptr)!=DefinitionGeometryClass::BRep) return Standard_False;
+        OcctScalarAppearanceState appearance;
+        if (!CaptureScalarAppearanceForSavedSweepRebuild(previous.label,appearance)) return Standard_False;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        // No observer/readback/generic transform writer between this owner write
+        // and the paired existing-label binding/scalar write. Failure remains
+        // with the ordinary command owner; no local best-effort restoration.
+        shapes->SetShape(previous.label,candidate);
+#if DEBUG
+        if (debugFailAfterShape) throw Standard_Failure("Saved loft paired-write fault");
+#else
+        (void)debugFailAfterShape;
+#endif
+        const auto label=previous.loft.label;
+        TNaming_Builder(label).Select(candidate,candidate);
+        // Fixed structure means count/schema/identity and label are unchanged.
+        // Recreate scalar attributes so +0/-0 writes cannot be elided by numeric Set equality.
+        for (std::size_t i=0;i<values.size();++i) {
+            const auto child=label.FindChild(int(i)+1,Standard_False);
+            if (child.IsNull()) return Standard_False;
+            child.ForgetAttribute(TDataStd_Real::GetID());TDataStd_Real::Set(child,values[i]);
+        }
+        OcctObjectTransformState stored;OcctScalarAppearanceState after;
+        if (!CaptureObjectTransformStateForLabel(previous.label,stored)
+            || !stored.shape.IsEqual(candidate) || !stored.loft.label.IsEqual(previous.loft.label)
+            || stored.loft.identifier!=previous.loft.identifier || !p::SameBits(stored.loft.values,values)
+            || !stored.loft.IsCurrent(myOcafDoc,previous.label)
+            || stored.entityIdentifier!=previous.entityIdentifier || stored.definitionIdentifier!=previous.definitionIdentifier
+            || stored.present!=previous.present || !core3d::sweep_rebuild::SameRawScalars(stored.scalars,previous.scalars)
+            || !CaptureScalarAppearanceForSavedSweepRebuild(previous.label,after)
+            || !appearance.IsEqual(after) || !core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues))
+            return Standard_False;
+        return Standard_True;
+    } catch (...) {return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::SaveObjectTransform(
     const TDF_Label& label, const Handle(AIS_Shape) anAis)
 {

@@ -81,6 +81,16 @@ namespace core3d {
         double effectiveDimensionMetersPerUnit=0;
         bool current=false;
     };
+    struct StoredRectangularLoftSnapshot {
+        rectangular_loft::Definition definition;
+        ObjectFrameIdentity identity;
+        std::string definitionIdentifier,featureIdentifier;
+        OcctObjectTransformState sourceState;
+        authority::Stamp authorityStamp;
+        std::shared_ptr<const SweepRebuildGuard> sourceGuard;
+        double effectiveDimensionMetersPerUnit=0;
+        bool current=false;
+    };
     struct StoredProfileSnapshot {
         profile::Parameters parameters;
         ObjectFrameIdentity identity;
@@ -184,6 +194,13 @@ namespace core3d {
             std::uint32_t width,std::uint32_t height) noexcept;
         std::shared_ptr<NativeSolidWork> prepareStoredSweepRebuild(
             const planar_sweep::Definition& definition,const StoredSweepSnapshot& original,
+            const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+            std::uint32_t width,std::uint32_t height) noexcept;
+        std::optional<StoredRectangularLoftSnapshot> storedRectangularLoftDefinition(
+            const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+            std::uint32_t width,std::uint32_t height) noexcept;
+        std::shared_ptr<NativeSolidWork> prepareStoredLoftStationRebuild(
+            const rectangular_loft::StationDimensionEdit& edit,const StoredRectangularLoftSnapshot& original,
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
             std::uint32_t width,std::uint32_t height) noexcept;
         static NativeSolidGeometryPayload nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept;

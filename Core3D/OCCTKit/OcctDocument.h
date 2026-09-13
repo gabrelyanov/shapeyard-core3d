@@ -22,6 +22,7 @@
 #ifndef OcctDocument_h
 #define OcctDocument_h
 #include "RectangularLoftPersistence.hxx"
+#include "RectangularLoftRebuild.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -810,6 +811,9 @@ private:
   Standard_Boolean StageSavedSweepReplacement(const OcctObjectTransformState& previous,
       const TopoDS_Shape& candidate, const core3d::planar_sweep::Definition& definition,
       bool debugFailAfterShape = false) noexcept;
+  Standard_Boolean StageSavedLoftReplacement(const OcctObjectTransformState& previous,
+      const TopoDS_Shape& candidate,const core3d::rectangular_loft::Definition& definition,
+      const core3d::rectangular_loft::StationDimensionEdit& edit,bool debugFailAfterShape=false) noexcept;
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;

@@ -4,6 +4,7 @@
 
 #include "OrdinaryEditCommand.hpp"
 #include "../OCCTKit/NativeModelingReceipt.hxx"
+#include "../OCCTKit/RectangularLoftRebuild.hxx"
 #include "NativeModelingRequest.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
@@ -21,7 +22,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -99,6 +100,8 @@ struct OrdinaryTransformChange {
     std::optional<profile::Parameters> profileRebuild;
     std::optional<enclosure::Parameters> enclosureRebuild;
     std::optional<planar_sweep::Definition> sweepRebuild;
+    std::optional<rectangular_loft::Definition> loftRebuild;
+    std::optional<rectangular_loft::StationDimensionEdit> loftStationEdit;
     std::shared_ptr<const SweepRebuildGuard> sweepSource;
 };
 

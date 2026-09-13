@@ -955,8 +955,29 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         _z=z;_centerX=centerX;_centerY=centerY;_width=width;_depth=depth;}return self;
 }
 @end
+@interface Core3DRectangularLoftStationEdit ()
+- (core3d::rectangular_loft::StationDimensionEdit)nativeEdit;
+@end
+@implementation Core3DRectangularLoftStationEdit
+- (instancetype)initWithStationIdentifier:(uint32_t)identifier width:(NSNumber *)width depth:(NSNumber *)depth {
+    if(!identifier || (!width && !depth)
+        || (width && ![width isKindOfClass:[NSNumber class]])
+        || (depth && ![depth isKindOfClass:[NSNumber class]]))return nil;
+    for(id value in @[width ?: NSNull.null,depth ?: NSNull.null]) {
+        if(value==NSNull.null)continue;
+        if(![value isKindOfClass:[NSNumber class]] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()
+            || !std::isfinite([value doubleValue]) || [value doubleValue]<=0 || [value doubleValue]>1e6)return nil;
+    }
+    self=[super init];if(self){_stationIdentifier=identifier;_width=[width copy];_depth=[depth copy];}return self;
+}
+- (core3d::rectangular_loft::StationDimensionEdit)nativeEdit {
+    core3d::rectangular_loft::StationDimensionEdit edit;edit.stationIdentifier=_stationIdentifier;
+    if(_width)edit.width=_width.doubleValue;if(_depth)edit.depth=_depth.doubleValue;return edit;
+}
+@end
 @interface Core3DRectangularLoftDefinition ()
 - (core3d::rectangular_loft::Definition)nativeDefinition;
+- (instancetype)initWithNativeDefinition:(const core3d::rectangular_loft::Definition&)definition;
 @end
 @implementation Core3DRectangularLoftDefinition {
     core3d::rectangular_loft::Definition _definition;
@@ -982,6 +1003,31 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         if(core3d::rectangular_loft::Inspect(d,inspection)!=core3d::rectangular_loft::Admission::Accepted)return nil;
         self=[super init];if(self){_definition=std::move(d);_stations=[stations copy];_constructionFrameValues=[frame copy];}
         return self;
+    }catch(...){return nil;}
+}
+- (instancetype)initWithNativeDefinition:(const core3d::rectangular_loft::Definition&)definition {
+    try {
+        NSMutableArray<Core3DRectangularLoftStation *> *stations=[NSMutableArray array];
+        NSMutableArray<NSNumber *> *frame=[NSMutableArray array];
+        for(const auto& station:definition.stations) {
+            auto value=[[Core3DRectangularLoftStation alloc] initWithIdentifier:station.identifier
+                cornerIdentifiers:(simd_uint4){station.cornerIdentifiers[0],station.cornerIdentifiers[1],station.cornerIdentifiers[2],station.cornerIdentifiers[3]}
+                correspondence:(simd_uint4){station.correspondence[0],station.correspondence[1],station.correspondence[2],station.correspondence[3]}
+                z:station.z centerX:station.centerX centerY:station.centerY width:station.width depth:station.depth];
+            if(!value)return nil;[stations addObject:value];
+        }
+        if(definition.constructionFrame)for(double v:definition.constructionFrame->values)[frame addObject:@(v)];
+        return [self initWithLoftIdentifier:definition.loftIdentifier
+            correspondence:(simd_uint4){definition.correspondence[0],definition.correspondence[1],definition.correspondence[2],definition.correspondence[3]}
+            stations:stations metersPerUnit:definition.dimensionMetersPerUnit constructionFrameValues:frame];
+    }catch(...){return nil;}
+}
+- (Core3DRectangularLoftDefinition *)changingStation:(Core3DRectangularLoftStationEdit *)edit {
+    if(![edit isKindOfClass:[Core3DRectangularLoftStationEdit class]])return nil;
+    try {
+        core3d::rectangular_loft::Definition changed;
+        if(!core3d::loft_rebuild::Apply(_definition,[edit nativeEdit],changed))return nil;
+        return [[Core3DRectangularLoftDefinition alloc] initWithNativeDefinition:changed];
     }catch(...){return nil;}
 }
 - (uint32_t)loftIdentifier {return _definition.loftIdentifier;}
@@ -1067,6 +1113,49 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     }catch(...){return nil;}
 }
 - (core3d::planar_sweep::Definition)nativeDefinition {return _definition;}
+@end
+
+@interface Core3DStoredRectangularLoftSnapshot ()
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredRectangularLoftSnapshot&)snapshot;
+- (core3d::StoredRectangularLoftSnapshot)nativeSnapshot;
+@end
+@implementation Core3DStoredRectangularLoftSnapshot {
+    core3d::StoredRectangularLoftSnapshot _native;
+}
+- (instancetype)initWithNativeSnapshot:(const core3d::StoredRectangularLoftSnapshot&)snapshot {
+    self=[super init];if(self) {
+        _definition=[[Core3DRectangularLoftDefinition alloc] initWithNativeDefinition:snapshot.definition];
+        if(!_definition)return nil;
+        _native=snapshot;
+        _entityIdentifier=[[NSString alloc] initWithUTF8String:snapshot.identity.entityIdentifier.c_str()];
+        _definitionIdentifier=[[NSString alloc] initWithUTF8String:snapshot.definitionIdentifier.c_str()];
+        _featureIdentifier=[[NSString alloc] initWithUTF8String:snapshot.featureIdentifier.c_str()];
+        _effectiveDimensionMetersPerUnit=snapshot.effectiveDimensionMetersPerUnit;_current=snapshot.current;
+    }return self;
+}
+- (core3d::StoredRectangularLoftSnapshot)nativeSnapshot {return _native;}
+@end
+
+// Private owner dispatch keeps slot inspection inside the owning controller.
+@interface Core3DViewController (StoredLoftOperationCancellation)
+- (BOOL)core3d_cancelStoredLoftWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work;
+@end
+@interface Core3DStoredLoftEditOperation ()
+- (instancetype)initWithOwner:(Core3DViewController *)owner work:(const std::shared_ptr<core3d::NativeSolidWork>&)work;
+@end
+@implementation Core3DStoredLoftEditOperation {
+    __weak Core3DViewController *_owner;
+    std::weak_ptr<core3d::NativeSolidWork> _work;
+}
+- (instancetype)initWithOwner:(Core3DViewController *)owner work:(const std::shared_ptr<core3d::NativeSolidWork>&)work {
+    self=[super init];if(self){_owner=owner;_work=work;}return self;
+}
+- (BOOL)cancel {
+    if(![NSThread isMainThread])return NO;
+    Core3DViewController *owner=_owner;
+    const auto work=_work.lock();
+    return owner && work ? [owner core3d_cancelStoredLoftWork:work] : NO;
+}
 @end
 
 @interface Core3DStoredSweepSnapshot ()
@@ -12273,6 +12362,84 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
+
+- (Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || _nativeSolidWork || _isLoading.load() || !_isSetuped || _isPreviewMode
+        || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+    try {
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->storedRectangularLoftDefinition(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        return result ? [[Core3DStoredRectangularLoftSnapshot alloc] initWithNativeSnapshot:*result] : nil;
+    } catch (...) { return nil; }
+}
+
+- (void)rebuildStoredRectangularLoft:(Core3DStoredRectangularLoftSnapshot *)original
+    edit:(Core3DRectangularLoftStationEdit *)edit expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (![original isKindOfClass:[Core3DStoredRectangularLoftSnapshot class]]
+        || ![edit isKindOfClass:[Core3DRectangularLoftStationEdit class]]) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto live = [self storedRectangularLoftWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if (!live) { completion(Core3DProfileConstructionResultRejected); return; }
+    try {
+        const CGSize size = GLController.drawableSize;
+        const auto originalNative = [original nativeSnapshot];
+        const auto requested = [edit nativeEdit];
+        const auto work = GLController.viewer->prepareStoredLoftStationRebuild(requested,
+            originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+
+- (BOOL)core3d_cancelStoredLoftWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work {
+    if(![NSThread isMainThread] || !work || _nativeSolidWork!=work)return NO;
+    [self cancelNativeConstruction];return YES;
+}
+
+- (Core3DStoredLoftEditOperation *)beginStoredRectangularLoftEdit:(Core3DStoredRectangularLoftSnapshot *)original
+    edit:(Core3DRectangularLoftStationEdit *)edit expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return nil;
+    if(![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{completion(Core3DProfileConstructionResultRejected);});return nil;
+    }
+    // The existing entry performs all authority/validation and owns the work.
+    // Its synchronous refusal callback may itself start a different job: mark
+    // delivery BEFORE calling user code so that job can never be captured here.
+    __block BOOL delivered=NO;
+    [self rebuildStoredRectangularLoft:original edit:edit expected:expected completion:^(Core3DProfileConstructionResult result){
+        delivered=YES;completion(result);
+    }];
+    // Main has not yielded since the entry returned; a genuine admitted job
+    // cannot deliver its queued main completion before this exact slot capture.
+    if(delivered || !_nativeSolidWork)return nil;
+    return [[Core3DStoredLoftEditOperation alloc] initWithOwner:self work:_nativeSolidWork];
+}
 
 - (void)createRectangularLoftWithDefinition:(Core3DRectangularLoftDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected

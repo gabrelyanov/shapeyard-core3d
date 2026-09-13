@@ -167,6 +167,20 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(init(identifier:cornerIdentifiers:correspondence:z:centerX:centerY:width:depth:));
 @end
 
+//! One existing station's dimensions in raw feature units; nil preserves the original.
+//! This numeric edit carries no document, OCAF or receipt authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRectangularLoftStationEdit : NSObject
+@property(nonatomic,readonly) uint32_t stationIdentifier;
+@property(nonatomic,copy,readonly,nullable) NSNumber *width;
+@property(nonatomic,copy,readonly,nullable) NSNumber *depth;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithStationIdentifier:(uint32_t)identifier
+    width:(nullable NSNumber *)width depth:(nullable NSNumber *)depth
+    NS_SWIFT_NAME(init(stationIdentifier:width:depth:));
+@end
+
 //! Bounded ruled solid:2…8 strictly ordered parallel XY rectangular stations.
 //! Numeric recipe IDs and all station order are immutable. Complete native admission applies.
 __attribute__((objc_subclassing_restricted))
@@ -182,6 +196,8 @@ __attribute__((objc_subclassing_restricted))
     stations:(NSArray<Core3DRectangularLoftStation *> *)stations metersPerUnit:(double)metersPerUnit
     constructionFrameValues:(NSArray<NSNumber *> *)frame
     NS_SWIFT_NAME(init(loftIdentifier:correspondence:stations:metersPerUnit:constructionFrameValues:));
+- (nullable Core3DRectangularLoftDefinition *)changingStation:(Core3DRectangularLoftStationEdit *)edit
+    NS_SWIFT_NAME(changingStation(_:));
 @end
 
 //! Native-issued, main-owned selected sweep snapshot. Wire fields cannot recreate it.
@@ -195,6 +211,28 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) BOOL current;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Native-issued, main-owned selected rectangular-loft snapshot. Wire fields cannot recreate it.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DStoredRectangularLoftSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSString *definitionIdentifier;
+@property(nonatomic,copy,readonly) NSString *featureIdentifier;
+@property(nonatomic,strong,readonly) Core3DRectangularLoftDefinition *definition;
+@property(nonatomic,readonly) double effectiveDimensionMetersPerUnit;
+@property(nonatomic,readonly) BOOL current;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Cancellation only for the exact native work that created this handle.
+//! Cannot execute, replace, retry or cancel a later operation.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DStoredLoftEditOperation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (BOOL)cancel;
 @end
 
 //! Immutable validated construction values. Lengths use the declared document
@@ -1197,6 +1235,18 @@ typedef struct {
     definition:(Core3DSweepDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildStoredSweep(_:definition:expected:completion:));
+- (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));
+- (void)rebuildStoredRectangularLoft:(Core3DStoredRectangularLoftSnapshot *)original
+    edit:(Core3DRectangularLoftStationEdit *)edit expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult result))completion
+    NS_SWIFT_NAME(rebuildStoredRectangularLoft(_:edit:expected:completion:));
+//! Same ordinary edit, with an exact-work cancellation handle. Nil means no
+//! asynchronous work was admitted; completion still reports the actual refusal.
+- (nullable Core3DStoredLoftEditOperation *)beginStoredRectangularLoftEdit:(Core3DStoredRectangularLoftSnapshot *)original
+    edit:(Core3DRectangularLoftStationEdit *)edit expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginStoredRectangularLoftEdit(_:edit:expected:completion:));
 - (void)createRectangularLoftWithDefinition:(Core3DRectangularLoftDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createRectangularLoft(definition:expected:completion:));
