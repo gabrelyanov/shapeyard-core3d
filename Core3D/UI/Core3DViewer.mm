@@ -8,6 +8,7 @@
 
 #include "Core3DViewer.h"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
+#include "../OCCTKit/CutDisplayPreparation.hxx"
 #include "../OCCTKit/SavedFeatureRecords.hxx"
 #include "../OCCTKit/PlanarSweepSolid.hxx"
 #include "../OCCTKit/RectangularLoftSolid.hxx"
@@ -1666,6 +1667,7 @@ struct EnclosureSolidGeometry {
     bool built = false;
 };
 struct CutSolidGeometry {
+    cut_display::Settings displaySettings;
     TopoDS_Shape detachedBase;
     analytic_boolean::Recipe recipe;
     std::atomic_bool cancelled{false};
@@ -2352,6 +2354,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         // deep geometry copy with no live labels/materials reaches the worker.
         BRepBuilderAPI_Copy copy(original.source.base,Standard_True,Standard_False);if(!copy.IsDone())return {};
         auto geometry=std::make_shared<CutSolidGeometry>();geometry->detachedBase=copy.Shape();geometry->recipe=cylindrical_cut::Recipe(envelope);
+        myContext->InitSelected();const auto displaySource=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        if(displaySource.IsNull()||!cut_display::Capture(displaySource->Attributes(),geometry->displaySettings))return {};
         if(geometry->detachedBase.IsNull()||geometry->detachedBase.IsPartner(original.source.base))return {};
         auto work=prepareNativeSolidWork(identity,presentation,width,height);
         if(!work||retained_solid::Bits(work->metersPerUnit)!=retained_solid::Bits(envelope.metersPerUnit))return {};
@@ -2368,6 +2372,28 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
     }catch(...){return {};}
 }
 
+#if DEBUG
+bool Core3DViewer::debugSetCutDisplayCoefficient(double coefficient,bool pending) noexcept {
+    if(!NSThread.isMainThread||myContext.IsNull()||myDoc.IsNull()||myDoc->Document().IsNull()
+        ||myDoc->Document()->HasOpenCommand()||!std::isfinite(coefficient)||coefficient<=0)return false;
+    try {
+        myContext->InitSelected();if(!myContext->MoreSelected())return false;
+        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+        if(selected.IsNull()||myContext->MoreSelected()||selected->Attributes().IsNull())return false;
+        const auto drawer=selected->Attributes();drawer->SetDeviationCoefficient(coefficient);
+        if(!pending){
+            // Settle through actual display/selection work before any source
+            // snapshot is captured. Do not pretend a pending change was applied.
+            myContext->Redisplay(selected,Standard_False);
+            myContext->RecomputeSelectionOnly(selected);
+            myContext->UpdateCurrentViewer();
+            cut_display::Settings settings;if(!cut_display::Capture(drawer,settings))return false;
+        }
+        return true;
+    }catch(...){return false;}
+}
+#endif
+
 std::shared_ptr<ProfileSolidGeometry> Core3DViewer::profileSolidGeometry(
     const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (!work) return {};
@@ -2383,7 +2409,8 @@ NativeSolidGeometryPayload Core3DViewer::nativeSolidGeometry(const std::shared_p
 bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept {
     if(const auto p=std::get_if<std::shared_ptr<CutSolidGeometry>>(&payload)) {
         if(!*p||(*p)->built||(*p)->cancelled.load())return false;
-        (*p)->built=analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,(*p)->result)==analytic_boolean::Status::Built;
+        (*p)->built=analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,(*p)->result)==analytic_boolean::Status::Built
+            &&cut_display::Prepare((*p)->result.solid,(*p)->displaySettings,(*p)->cancelled);
         return (*p)->built;
     }
     if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
@@ -2640,6 +2667,12 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             OcctObjectTransformState current;
             if (!myDoc->CaptureObjectTransformStateForLabel(record.previous.label, current)
                 || !current.IsEqual(record.previous)) return OrdinaryEditResult::Invalid;
+            if(const auto cut=std::get_if<std::shared_ptr<CutSolidGeometry>>(&work->geometry)){
+                cut_display::Settings currentDisplay;
+                if(!*cut||record.requested.presentation.IsNull()
+                    ||!cut_display::Capture(record.requested.presentation->Attributes(),currentDisplay)
+                    ||!(currentDisplay==(*cut)->displaySettings))return OrdinaryEditResult::Invalid;
+            }
             record.requested.shape = completed->solid;
             OrdinaryEditResult result = OrdinaryEditResult::Invalid;
             auto lease = work->modelingPermit

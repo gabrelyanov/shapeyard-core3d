@@ -1553,6 +1553,7 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(cancelRigidPlacement(_:));
 #if DEBUG
 //! Component evidence only; no native verified receipt or retry permission.
+- (BOOL)debugSetCutDisplayCoefficient:(double)coefficient pending:(BOOL)pending NS_SWIFT_NAME(debugSetCutDisplayCoefficient(_:pending:));
 - (nullable NSDictionary<NSString *,id> *)debugCylindricalCutEvidence:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutEvidence(_:));
 + (NSDictionary<NSString *,NSNumber *> *)debugCylindricalCutSimilarityProbe;
 - (NSDictionary<NSString *,NSNumber *> *)debugCutSceneGuardMutation:(NSInteger)mode target:(NSString *)target sibling:(NSString *)sibling;

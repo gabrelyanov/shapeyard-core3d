@@ -3073,6 +3073,10 @@ struct NativeModelingPermitIssuer final {
         return @{@"positive":@(positive),@"changedValid":@(valid),@"changedRejected":@(refused),@"restored":@(restored)};
     }catch(...){Core3DAbortCommandNoThrow(document);return @{};}
 }
+- (BOOL)debugSetCutDisplayCoefficient:(double)coefficient pending:(BOOL)pending {
+    return NSThread.isMainThread&&GLController&&GLController.viewer
+        &&GLController.viewer->debugSetCutDisplayCoefficient(coefficient,pending);
+}
 - (NSDictionary<NSString *,id> *)debugCylindricalCutEvidence:(NSString *)entity {
     if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity||entity.length>128)return nil;
     try {

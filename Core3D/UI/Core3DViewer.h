@@ -210,6 +210,9 @@ namespace core3d {
             std::uint32_t width,std::uint32_t height) noexcept;
         std::optional<CylindricalCutSnapshot> cylindricalCutSource(const ObjectFrameIdentity&,
         std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+#if DEBUG
+    bool debugSetCutDisplayCoefficient(double coefficient,bool pending) noexcept;
+#endif
     std::shared_ptr<NativeSolidWork> prepareCylindricalCut(const CylindricalCutSnapshot&,
         const std::optional<cylindrical_cut::CreateEdit>&,const std::optional<cylindrical_cut::RadiusEdit>&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
