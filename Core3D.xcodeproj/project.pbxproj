@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E21B4D902A0684A1CCC615CA /* NativeRigidPlacementEvidence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1D489F58EEF9A8B4F1577DD /* NativeRigidPlacementEvidence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */; };
 		C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */; };
 		C03D90910000000000000002 /* mikktspace.c in Sources */ = {isa = PBXBuildFile; fileRef = C03D90920000000000000002 /* mikktspace.c */; };
@@ -211,6 +212,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C1D489F58EEF9A8B4F1577DD /* NativeRigidPlacementEvidence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeRigidPlacementEvidence.hxx; sourceTree = "<group>"; };
 		C03D91020000000000000005 /* GLViewController+QueuedAssetLoading.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GLViewController+QueuedAssetLoading.h"; sourceTree = "<group>"; };
 		C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DQueuedAssetRequest.mm"; sourceTree = "<group>"; };
 		C03D91020000000000000003 /* Core3DQueuedAssetRequest.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DQueuedAssetRequest.h"; sourceTree = "<group>"; };
@@ -692,6 +694,7 @@
 				322185732BB5CC1500040E84 /* GLView.mm */,
 				322185722BB5CC1500040E84 /* GLViewController.h */,
 				322185712BB5CC1500040E84 /* GLViewController.mm */,
+				C1D489F58EEF9A8B4F1577DD /* NativeRigidPlacementEvidence.hxx */,
 				D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */,
 				E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */,
 				C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */,
@@ -916,6 +919,7 @@
 				322185792BB5CC1500040E84 /* CafShapePrs.h in Headers */,
 				322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */,
 				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
+				E21B4D902A0684A1CCC615CA /* NativeRigidPlacementEvidence.hxx in Headers */,
 				0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */,
 				2E70B1881BA94908AECBA472 /* RectangularLoftPersistence.hxx in Headers */,
 				A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */,

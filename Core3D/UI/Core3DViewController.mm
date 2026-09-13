@@ -62,6 +62,7 @@
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/NativeModelingRequest.hxx"
+#include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #if DEBUG
@@ -1664,6 +1665,22 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
     return true;
 }
 
+@interface Core3DRigidPlacementPreparation () {
+@public
+    __weak Core3DViewController *_placementOwner;
+    Core3DTransformInspectorSnapshot *_placementSnapshot;
+    core3d::placement::Evidence _placementEvidence;
+    double _placementRawValue;
+    Core3DRigidPlacementKind _placementKind;
+    Core3DTransformInspectorAxis _placementAxis;
+    BOOL _placementConsumed;
+}
+- (instancetype)initPrivate;
+@end
+@implementation Core3DRigidPlacementPreparation
+- (instancetype)initPrivate { return [super init]; }
+@end
+
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -1837,14 +1854,21 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
             foreign=original;foreign.execution[0]^=1;
             expect(@"executionConflict",reopened.reserve(foreign)==t::Reservation::Conflict);
             expect(@"unknownAbsent",reopened.lookup(key(2))==t::Presence::Absent);
-            const auto bytes=read(path+"/NativeModelingRequests/records");std::vector<t::Key> decoded;
-            expect(@"exactStoredBinding",t::Decode(bytes,decoded)&&decoded.size()==1&&decoded[0]==original);
+            const auto rootBytes=read(path+"/NativeModelingRequests/records");t::detail::IndexRoot index;
+            t::detail::FD root(::open((path+"/NativeModelingRequests").c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
+            auto pages=t::detail::OpenPages(root.value,false);std::vector<t::detail::Step> steps;t::detail::Page leaf;bool empty=true;
+            expect(@"exactStoredBinding",t::detail::ReadRoot(rootBytes,index)&&index.count==1
+                &&t::detail::Find(pages.value,index,original.request,steps,leaf,empty)&&!empty&&leaf.bit==128&&leaf.key==original);
+            std::vector<std::uint8_t> bytes;std::vector<t::Key> decoded;
+            expect(@"legacyCodecUnchanged",t::Encode({original},bytes)&&t::Decode(bytes,decoded)&&decoded.size()==1&&decoded[0]==original);
+            expect(@"legacyReaderRefusesIndex",!t::Decode(rootBytes,decoded)&&decoded.empty());
+            if(bytes.size()!=40+t::RecordBytes)throw std::runtime_error("Legacy codec fixture length");
             auto damaged=bytes;damaged.back()^=1;
             expect(@"checksumClosed",!t::Decode(damaged,decoded)&&decoded.empty());
             damaged=bytes;damaged.pop_back();expect(@"truncatedClosed",!t::Decode(damaged,decoded)&&decoded.empty());
             damaged=bytes;damaged[4]=2;expect(@"futureClosed",!t::Decode(damaged,decoded)&&decoded.empty());
             std::vector<std::uint8_t> encoded;expect(@"duplicateCodecClosed",!t::Encode({original,original},encoded)&&encoded.empty());
-            expect(@"boundedBytes",bytes.size()==40+t::RecordBytes);
+            expect(@"boundedBytes",bytes.size()==40+t::RecordBytes&&rootBytes.size()==t::detail::IndexRootBytes);
         } else if (scenario==1) {
             const auto path=parent(@"concurrent");constexpr unsigned count=8;
             std::array<t::Reservation,count> results;std::array<std::thread,count> workers;
@@ -1872,13 +1896,14 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
             const auto path=parent(@"capacity");auto store=t::Store::ForTesting(path);bool all=true;
             for(unsigned i=1;i<=t::MaximumRecords;++i)all=store.reserve(key(i))==t::Reservation::Reserved&&all;
             expect(@"all128Retained",all);
-            const auto before=read(path+"/NativeModelingRequests/records");
-            expect(@"capacityRefuses129",store.reserve(key(129))==t::Reservation::Capacity);
-            expect(@"capacityDoesNotEvict",before==read(path+"/NativeModelingRequests/records"));
-            auto reopened=t::Store::ForTesting(path);
+            expect(@"request129Admitted",store.reserve(key(129))==t::Reservation::Reserved);
+            expect(@"request256Admitted",store.reserve(key(256))==t::Reservation::Reserved);
+            auto reopened=t::Store::ForTesting(path);bool retained=true;
+            for(unsigned i=1;i<=129;++i)retained=reopened.reserve(key(i))==t::Reservation::AlreadyReserved&&retained;
+            expect(@"capacityDoesNotEvict",retained&&reopened.reserve(key(256))==t::Reservation::AlreadyReserved);
             expect(@"oldestNeverReadmitted",reopened.reserve(key(1))==t::Reservation::AlreadyReserved);
-            expect(@"newestNeverReadmitted",reopened.reserve(key(128))==t::Reservation::AlreadyReserved);
-            expect(@"bounded128Bytes",before.size()==t::MaximumBytes);
+            expect(@"newestNeverReadmitted",reopened.reserve(key(256))==t::Reservation::AlreadyReserved);
+            expect(@"boundedRootBytes",read(path+"/NativeModelingRequests/records").size()==t::detail::IndexRootBytes);
         } else if (scenario==3) {
             const std::array<t::Store::Fault,4> faults{t::Store::Fault::AfterPartialPendingWrite,t::Store::Fault::AfterPendingSync,
                 t::Store::Fault::AfterRename,t::Store::Fault::AfterDirectorySync};
@@ -2247,18 +2272,19 @@ static core3d::request::ReservationDelivery Core3DRunPrivateReservation(
             if(config.scenario==10)store.setNextFault(t::Store::Fault::AfterPendingSync);
             if(config.scenario==11)store.setNextFault(t::Store::Fault::AfterDirectorySync);
             if(config.scenario==7) {
-                // Seed a closed128-record private fixture through the real codec;
-                // the existing component tests separately exercise128 fsynced
-                // reservations. This probe qualifies actual admission routing.
+                // Seed a valid legacy128-record catalog containing this UUID
+                // with a different binding. V2 must migrate and refuse it as a
+                // conflict, rather than evict it or retain the obsolete cap.
                 std::vector<t::Key> full;
                 for(unsigned i=1;i<=t::MaximumRecords;++i){auto occupied=key;occupied.request.fill(0);
                     occupied.request[0]=0x80;occupied.request[1]=key.request[1]^0xff;
                     occupied.request[15]=std::uint8_t(i);full.push_back(occupied);}
+                full.pop_back();auto migratedConflict=key;migratedConflict.command[0]^=1;full.push_back(migratedConflict);
                 std::vector<std::uint8_t> bytes;
                 t::detail::FD seeded(::open((root+"/records").c_str(),O_WRONLY|O_TRUNC|O_NOFOLLOW|O_CLOEXEC));
                 if(!t::Encode(full,bytes)||!t::detail::Owned(seeded.value,false,0600)
                     ||!t::detail::WriteAll(seeded.value,bytes.data(),bytes.size())||!t::detail::FileSync(seeded.value))
-                    throw std::runtime_error("Private reservation capacity fixture");
+                    throw std::runtime_error("Private reservation legacy migration fixture");
             }
             t::detail::FD heldLock(config.scenario==8?
                 ::open((root+"/lock").c_str(),O_RDWR|O_CLOEXEC|O_NOFOLLOW):-1);
@@ -2271,7 +2297,9 @@ static core3d::request::ReservationDelivery Core3DRunPrivateReservation(
     // This is a disposable DEBUG qualification root, never the permanent native
     // production store. Its actual readback precedes bounded known-file cleanup.
     bool clean=true;
-    for(const char *name:{"pending","records","lock"})
+    { t::detail::FD directory(::open(root.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
+      if(!t::detail::Owned(directory.value,true,0700)||!t::detail::RemoveTestingPages(directory.value))clean=false; }
+    for(const char *name:{"pending","records","lock","legacy-v1"})
         if(::unlink((root+"/"+name).c_str())!=0&&errno!=ENOENT)clean=false;
     if(::rmdir(root.c_str())!=0&&errno!=ENOENT)clean=false;
     if(::rmdir(parent.c_str())!=0)clean=false;
@@ -13337,6 +13365,148 @@ struct NativeModelingPermitIssuer final {
     } catch (...) {
     }
 }
+
+- (Core3DRigidPlacementPreparation *)prepareRigidPlacementValue:(double)value
+    kind:(Core3DRigidPlacementKind)kind axis:(Core3DTransformInspectorAxis)axis
+    expected:(Core3DTransformInspectorSnapshot *)snapshot {
+    if(![NSThread isMainThread]||!_isSetuped||!GLController||!GLController.viewer
+        ||![self core3d_canBeginCommittedEdit]
+        ||![snapshot isKindOfClass:Core3DTransformInspectorSnapshot.class]
+        ||!snapshot.canEditPosition||!snapshot.presentationMatchesDocument
+        ||snapshot.positionEditGeneration==0||snapshot.documentEditGeneration==0||snapshot.geometryEditGeneration==0
+        ||snapshot.representation!=Core3DTransformInspectorRepresentationBRep
+        ||!std::isfinite(value)||std::abs(value)>1e6
+        ||!std::isfinite(snapshot.metersPerUnit)||snapshot.metersPerUnit<=0
+        ||(kind!=Core3DRigidPlacementKindPosition&&kind!=Core3DRigidPlacementKindRotation)
+        ||(axis!=Core3DTransformInspectorAxisX&&axis!=Core3DTransformInspectorAxisY&&axis!=Core3DTransformInspectorAxisZ))return nil;
+    try {
+        double factor=0;
+        if(!core3d::placement::MillimetersPerUnit(snapshot.metersPerUnit,factor))return nil;
+        const double original=axis==Core3DTransformInspectorAxisX?snapshot.position.x
+            :axis==Core3DTransformInspectorAxisY?snapshot.position.y:snapshot.position.z;
+        const double raw=kind==Core3DRigidPlacementKindPosition
+            ?(value==original*factor?original:value/factor):value;
+        if(!std::isfinite(raw)||std::abs(raw)>Core3DTransformInspectorMaximumPositionMagnitude)return nil;
+        auto doc=GLController.viewer->getDocument();TDF_Label label;core3d::placement::Evidence evidence;
+        if(!snapshot.entityIdentifier.UTF8String||!snapshot.definitionIdentifier.UTF8String
+            ||!core3d::placement::Find(doc,snapshot.entityIdentifier.UTF8String,label)
+            ||!core3d::placement::Capture(doc,label,evidence)
+            ||doc->DefinitionIdentifierForLabel(label)!=snapshot.definitionIdentifier.UTF8String)return nil;
+        double unit=0;
+        if(!XCAFDoc_DocumentTool::GetLengthUnit(doc->Document(),unit)
+            ||core3d::sweep_persistence::Bits(unit)!=core3d::sweep_persistence::Bits(snapshot.metersPerUnit))return nil;
+        auto prepared=[[Core3DRigidPlacementPreparation alloc] initPrivate];
+        if(!prepared)return nil;
+        prepared->_placementOwner=self;prepared->_placementSnapshot=snapshot;
+        prepared->_placementEvidence=std::move(evidence);prepared->_placementRawValue=raw;
+        prepared->_placementKind=kind;prepared->_placementAxis=axis;
+        return prepared;
+    }catch(...){return nil;}
+}
+- (void)cancelRigidPlacement:(Core3DRigidPlacementPreparation *)prepared {
+    if(![NSThread isMainThread]||![prepared isKindOfClass:Core3DRigidPlacementPreparation.class]
+        ||prepared->_placementOwner!=self)return;
+    // This exact preparation owns no right to cancel a later inspector capture.
+    prepared->_placementConsumed=YES;prepared->_placementSnapshot=nil;
+}
+- (Core3DTransformInspectorPositionCommitResult)executeRigidPlacement:(Core3DRigidPlacementPreparation *)prepared {
+    if(![NSThread isMainThread]||![prepared isKindOfClass:Core3DRigidPlacementPreparation.class]
+        ||prepared->_placementOwner!=self||prepared->_placementConsumed)return Core3DTransformInspectorPositionCommitResultStale;
+    // Detach/consume before any native publication or reentrant callback.
+    auto snapshot=prepared->_placementSnapshot;
+    prepared->_placementConsumed=YES;prepared->_placementSnapshot=nil;
+    if(!_isSetuped||!GLController||!GLController.viewer||![self core3d_canBeginCommittedEdit])
+        return Core3DTransformInspectorPositionCommitResultBusy;
+    try {
+        auto doc=GLController.viewer->getDocument();TDF_Label label;core3d::placement::Evidence live;
+        if(!snapshot||!snapshot.entityIdentifier.UTF8String
+            ||!core3d::placement::Find(doc,snapshot.entityIdentifier.UTF8String,label)
+            ||!core3d::placement::Capture(doc,label,live)||!(live==prepared->_placementEvidence))
+            return Core3DTransformInspectorPositionCommitResultStale;
+        // Shared touch engine performs the final exact native lease, selection,
+        // presentation/unit/tool checks and owns the one ordinary transaction.
+        // Never infer or override its outcome from a later diagnostic capture.
+        return [self commitTransformInspectorValue:prepared->_placementRawValue
+            axis:prepared->_placementAxis expectedSnapshot:snapshot
+            kind:prepared->_placementKind==Core3DRigidPlacementKindPosition
+                ?core3d::TransformInspectorEditKind::Position:core3d::TransformInspectorEditKind::Rotation];
+    }catch(...){return Core3DTransformInspectorPositionCommitResultInternalFailure;}
+}
+#if DEBUG
+- (NSDictionary *)debugRigidPlacementEvidence:(NSString *)entity {
+    if(![NSThread isMainThread]||!GLController||!GLController.viewer||!entity.UTF8String)return nil;
+    try {
+        auto doc=GLController.viewer->getDocument();TDF_Label label;core3d::placement::Evidence e;
+        if(!core3d::placement::Find(doc,entity.UTF8String,label)||!core3d::placement::Capture(doc,label,e))return nil;
+        OcctObjectTransformState state;std::vector<std::uint8_t> geometryBytes;core3d::receipt::Digest digest;
+        if(!doc->CaptureObjectTransformStateForLabel(label,state)
+            ||!core3d::receipt::GeometryDigestForPolicy(state.shape,digest,false,&geometryBytes)||digest!=e.geometry)return nil;
+        auto hex=[](const auto& a){return [NSString stringWithUTF8String:core3d::receipt::Hex(a).c_str()];};
+        return @{@"version":@1,@"family":@(unsigned(e.family)),@"schema":@(e.schema),
+            @"document":hex(e.document),@"entity":hex(e.entity),@"definition":hex(e.definition),@"feature":hex(e.feature),
+            @"recipeSHA":hex(e.recipe),@"geometrySHA":hex(e.geometry),@"stateSHA":hex(e.state),
+            @"geometryBytes":[NSData dataWithBytes:geometryBytes.data() length:geometryBytes.size()],
+            @"transformBytes":[NSData dataWithBytes:e.transformBytes.data() length:e.transformBytes.size()],
+            @"recipeBytes":[NSData dataWithBytes:e.recipeBytes.data() length:e.recipeBytes.size()],
+            @"stateBytes":[NSData dataWithBytes:e.stateBytes.data() length:e.stateBytes.size()]};
+    }catch(...){return nil;}
+}
+// Isolated real OCAF metadata probe; never changes the viewer document.
+- (NSDictionary *)debugRigidPlacementAdmissionProbe {
+    if(!NSThread.isMainThread)return nil;
+    NSMutableDictionary *result=[NSMutableDictionary dictionary];
+    try {
+        double factor=123;
+        result[@"overflowUnitRefused"]=@(!core3d::placement::MillimetersPerUnit(std::numeric_limits<double>::max(),factor)&&factor==0);
+        result[@"zeroUnitRefused"]=@(!core3d::placement::MillimetersPerUnit(0,factor));
+        result[@"negativeUnitRefused"]=@(!core3d::placement::MillimetersPerUnit(-1,factor));
+        result[@"nanUnitRefused"]=@(!core3d::placement::MillimetersPerUnit(std::numeric_limits<double>::quiet_NaN(),factor));
+        result[@"mmFactorExact"]=@(core3d::placement::MillimetersPerUnit(.001,factor)&&factor==1);
+        result[@"metreFactorExact"]=@(core3d::placement::MillimetersPerUnit(1,factor)&&factor==1000);
+        for(int kind=0;kind<4;++kind) {
+            struct Scope {
+                Handle(OcctDocument) owner;
+                ~Scope()noexcept {try{if(!owner.IsNull()&&!owner->Document().IsNull()){
+                    auto doc=owner->Document();if(doc->HasOpenCommand())doc->AbortCommand();
+                    const auto app=Handle(TDocStd_Application)::DownCast(doc->Application());if(!app.IsNull())app->Close(doc);
+                }}catch(...) {}}
+            } scope;
+            scope.owner=new OcctDocument();scope.owner->InitDoc();auto doc=scope.owner->Document();
+            if(doc.IsNull())return nil;
+            XCAFDoc_DocumentTool::SetLengthUnit(doc,.001);
+            doc->NewCommand();
+            Handle(AIS_Shape) shape=new AIS_Shape(BRepPrimAPI_MakeBox(100,80,40).Shape());
+            const auto label=scope.owner->AddShape(shape,OcctGeometryRepresentation::BRep);
+            if(label.IsNull()||!doc->CommitCommand())return nil;
+            core3d::placement::Evidence before;
+            if(!core3d::placement::Capture(scope.owner,label,before)
+                ||before.family!=core3d::placement::Family::UnparametrizedSolid||before.schema!=0)return nil;
+            if(kind==0){result[@"actualBareSolidAccepted"]=@YES;continue;}
+            doc->NewCommand();
+            if(kind==1)TDataStd_Integer::Set(label.FindChild(13),core3d::profile::SchemaID(),1);
+            if(kind==2)TDataStd_Integer::Set(label.FindChild(13),core3d::sweep_persistence::SchemaID(),1);
+            if(kind==3) {
+                core3d::enclosure::Parameters enclosure;enclosure.metersPerUnit=.001;
+                enclosure.definition.dimensions={100,80,40,3,3,5};
+                if(!core3d::enclosure::Stage(doc,label,enclosure,NSUUID.UUID.UUIDString.UTF8String))return nil;
+                core3d::profile::Parameters profile;profile.metersPerUnit=.001;
+                profile.definition.points={{0,0},{100,0},{100,80},{0,80}};profile.definition.depth=40;
+                if(!core3d::profile::Stage(doc,label,profile,NSUUID.UUID.UUIDString.UTF8String))return nil;
+                // Deliberately corrupt cross-family metadata on this private
+                // owner. Strict enclosure Read refuses the conflicting profile.
+            }
+            if(!doc->CommitCommand())return nil;
+            core3d::placement::Evidence rejected;OcctObjectTransformState state;
+            const bool strictRefusal=!scope.owner->CaptureObjectTransformStateForLabel(label,state);
+            const bool evidenceRefusal=!core3d::placement::Capture(scope.owner,label,rejected);
+            NSString *key=kind==1?@"partialProfileRefused":kind==2?@"partialSweepRefused":@"ambiguousFamiliesRefused";
+            result[key]=@(strictRefusal&&evidenceRefusal);
+        }
+        return result;
+    }catch(...){return nil;}
+}
+
+#endif
 
 - (Core3DTransformInspectorPositionCommitResult)
     commitTransformInspectorPositionValue:(double)value

@@ -354,6 +354,17 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(cylinder(name:radiusMM:heightMM:positionMM:rotationXYZW:));
 @end
 
+//! Single component: Position is physical mm; Rotation is absolute extrinsic
+//! XYZ degrees. This ordinary preparation is not an AI request or receipt.
+typedef NS_ENUM(NSInteger, Core3DRigidPlacementKind) {
+    Core3DRigidPlacementKindPosition=0, Core3DRigidPlacementKindRotation=1,
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRigidPlacementPreparation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! One-use planning lease issued by one live native owner. Its immutable
 //! descriptions may inform a provider; none of their serialized fields can
 //! recreate permission. Keep this object on the main thread. Capture requires
@@ -1458,6 +1469,27 @@ typedef struct {
 //! the current interaction or tool is unsafe for alternate presentation.
 - (Core3DScenePresentationOverlaySnapshot *_Nullable)
     captureScenePresentationOverlay;
+
+//! Freeze one bounded saved-recipe or unparametrized-solid placement intent against the original
+//! inspector lease. Execution may still refuse stale/busy authority. Does not
+//! reserve, refresh selection, mutate geometry or open history. Main only.
+- (nullable Core3DRigidPlacementPreparation *)prepareRigidPlacementValue:(double)value
+    kind:(Core3DRigidPlacementKind)kind axis:(Core3DTransformInspectorAxis)axis
+    expected:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(prepareRigidPlacement(value:kind:axis:expected:));
+//! One use, including stale/busy/failure. Exact native ordinary result only.
+- (Core3DTransformInspectorPositionCommitResult)executeRigidPlacement:(Core3DRigidPlacementPreparation *)prepared
+    NS_SWIFT_NAME(executeRigidPlacement(_:));
+//! Retire only this preparation, never a newer inspector lease. Main only.
+- (void)cancelRigidPlacement:(Core3DRigidPlacementPreparation *)prepared
+    NS_SWIFT_NAME(cancelRigidPlacement(_:));
+#if DEBUG
+//! Component evidence only; no native verified receipt or retry permission.
+- (nullable NSDictionary *)debugRigidPlacementEvidence:(NSString *)entity
+    NS_SWIFT_NAME(debugRigidPlacementEvidence(_:));
+- (nullable NSDictionary *)debugRigidPlacementAdmissionProbe
+    NS_SWIFT_NAME(debugRigidPlacementAdmissionProbe());
+#endif
 
 //! Capture authoritative single-selection transform values. Main-thread only.
 //! A BRep cache miss returns Measuring immediately and retains `completion`
