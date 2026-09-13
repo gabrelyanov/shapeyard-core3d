@@ -364,6 +364,7 @@ struct OcctPBRScalarPatch {
 struct OcctPBRScalarDebugEvidence {
     std::vector<std::uint8_t> material,preserved,table;
     std::map<std::string,std::array<unsigned char,32>> geometry;
+    std::map<std::string,std::vector<std::uint8_t>> geometryStreams;
 };
 #endif
 struct OcctPBRScalarState;

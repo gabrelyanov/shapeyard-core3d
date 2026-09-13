@@ -6299,14 +6299,16 @@ void PBRIntegerAttribute(PBRWriter& w,const TDF_Label& l,const Standard_GUID& id
     if(found){auto value=Handle(TDataStd_Integer)::DownCast(a);if(value.IsNull())throw Standard_Failure("Malformed appearance integer");w.integer(static_cast<std::uint64_t>(value->Get()));}
 }
 class PBRGeometryStream final:public std::streambuf {
-    CC_SHA256_CTX context{};std::size_t& aggregate;std::size_t bytes=0;bool good;
+    CC_SHA256_CTX context{};std::size_t& aggregate;std::size_t bytes=0;bool good;PBRBytes* captured;
 public:
-    explicit PBRGeometryStream(std::size_t& total):aggregate(total),good(CC_SHA256_Init(&context)==1){}
+    explicit PBRGeometryStream(std::size_t& total,PBRBytes* copy=nullptr):aggregate(total),good(CC_SHA256_Init(&context)==1),captured(copy){}
     bool finish(PBRDigest& out){return good&&bytes&&CC_SHA256_Final(out.data(),&context)==1;}
 protected:
     std::streamsize xsputn(const char* p,std::streamsize n)override{
         if(!good||n<0||std::size_t(n)>8*1024*1024-bytes||std::size_t(n)>128*1024*1024-aggregate){good=false;return 0;}
-        good=CC_SHA256_Update(&context,p,static_cast<CC_LONG>(n))==1;bytes+=n;aggregate+=n;return good?n:0;
+        good=CC_SHA256_Update(&context,p,static_cast<CC_LONG>(n))==1;
+        if(good&&captured)captured->insert(captured->end(),p,p+n);
+        bytes+=n;aggregate+=n;return good?n:0;
     }
     int overflow(int c)override{if(c==traits_type::eof())return traits_type::not_eof(c);char b=char(c);return xsputn(&b,1)==1?c:traits_type::eof();}
 };
@@ -6542,7 +6544,7 @@ std::optional<OcctPBRScalarDebugEvidence> OcctDocument::DebugPBRScalarEvidence(c
         const auto state=CapturePBRScalarState(target);if(!state)return {};
         const auto link=state->links.find(state->target);if(link==state->links.end())return {};
         const auto material=state->materials.find(link->second);if(material==state->materials.end())return {};
-        OcctPBRScalarDebugEvidence output;output.material=material->second.material;
+        OcctPBRScalarDebugEvidence output;output.material=material->second.material;std::size_t diagnosticBytes=0;
         PBRWriter protectedBytes;protectedBytes.string(TCollection_AsciiString(DocumentIdentifier().c_str()));protectedBytes.scalar(state->metersPerUnit);
         for(const auto& [key,entry]:state->roots){const auto& object=entry.object.object.object;
             protectedBytes.string(TCollection_AsciiString(key.c_str()));protectedBytes.string(TCollection_AsciiString(object.entityIdentifier.c_str()));protectedBytes.string(TCollection_AsciiString(object.definitionIdentifier.c_str()));
@@ -6554,6 +6556,11 @@ std::optional<OcctPBRScalarDebugEvidence> OcctDocument::DebugPBRScalarEvidence(c
             for(const auto& l:entry.object.layers)protectedBytes.string(TCollection_AsciiString(PBRLabelKey(l).c_str()));
             for(bool b:entry.object.layerInvisibleAttributePresent)protectedBytes.integer(b);
             output.geometry.emplace(key,entry.geometry);
+            // DEBUG raw evidence only; identical bounded serializer, no normalization.
+            auto& rawGeometry=output.geometryStreams[key];PBRGeometryStream stream(diagnosticBytes,&rawGeometry);
+            std::ostream encoded(&stream);encoded.imbue(std::locale::classic());
+            BRepTools::Write(object.shape,encoded,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
+            PBRDigest digest{};if(!encoded.good()||!stream.finish(digest)||digest!=entry.geometry)return {};
         }
         for(const auto& g:state->groups.groups){protectedBytes.string(TCollection_AsciiString(g.identifier.c_str()));protectedBytes.name(g.name);for(const auto& l:g.members)protectedBytes.string(TCollection_AsciiString(PBRLabelKey(l).c_str()));}
         output.preserved=std::move(protectedBytes.bytes);

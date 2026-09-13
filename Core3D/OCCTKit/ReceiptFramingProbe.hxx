@@ -26,9 +26,17 @@
 #include <map>
 #include <cmath>
 #include <vector>
+#include <cstdio>
 
 namespace core3d::debug::receipt_framing_probe {
 namespace frame = core3d::persistence::receipt_framing;
+// Fixed, bounded DEBUG phase labels only; no document or credential contents.
+inline thread_local bool TraceEnabled=false;
+inline thread_local int TraceFormat=0,TraceVersion=0;
+inline void Trace(const char* phase,int detail=0) noexcept {
+    if(TraceEnabled){std::fprintf(stderr,"[receipt-framing] format=%d version=%d phase=%s detail=%d\n",
+        TraceFormat,TraceVersion,phase,detail);std::fflush(stderr);}
+}
 class ProbeAttribute : public TDF_Attribute {
 public:
     DEFINE_STANDARD_RTTIEXT(ProbeAttribute,TDF_Attribute)
@@ -100,6 +108,21 @@ private:
     void Prepare(const Handle(CDM_Document)& doc){
         const auto d=Handle(TDocStd_Document)::DownCast(doc);
         state_->allowDirect=!d.IsNull()&&d->StorageFormatVersion()>=TDocStd_FormatVersion_VERSION_12;
+        if(d.IsNull()||d->GetData().IsNull())Standard_Failure::Raise("Private D1 writer document");
+        if(!state_->allowDirect){
+            // Reject our actual private direct role BEFORE native WriteSubTree
+            // creates buffers/shape-section state. Old-only version11 still
+            // exercises the unchanged real native writer and reader below.
+            const auto root=d->GetData()->Root();std::size_t labels=0;
+            if(root.IsAttribute(ProbeAttribute::Guid()))Standard_Failure::Raise("Private D1 old-version role");
+            for(TDF_ChildIterator it(root,Standard_True);it.More();it.Next()){
+                if(++labels>1000)Standard_Failure::Raise("Private D1 preflight labels");
+                if(it.Value().IsAttribute(ProbeAttribute::Guid())){
+                    Trace("old-version-private-role-refused");
+                    Standard_Failure::Raise("Private D1 old-version role");
+                }
+            }
+        }
     }
     const std::shared_ptr<State> state_;
     const Handle(Driver) driver_;
@@ -114,7 +137,8 @@ inline frame::TraversalLimits Limits(){
 struct AppScope {
     Handle(TDocStd_Application) app=new TDocStd_Application();
     Handle(TDocStd_Document) doc;
-    ~AppScope(){try{if(!doc.IsNull())app->Close(doc);}catch(...) {}}
+    ~AppScope(){Trace("scope-close-begin");try{if(!doc.IsNull())app->Close(doc);Trace("scope-close-complete");}
+        catch(...){Trace("scope-close-exception");}}
 };
 using Factory=std::function<Handle(PCDM_RetrievalDriver)(const Handle(frame::FrameDriver)&,frame::TraversalLimits)>;
 inline void Configure(const Handle(TDocStd_Application)& app,bool xcaf,const std::shared_ptr<State>& state,
@@ -125,6 +149,7 @@ inline void Configure(const Handle(TDocStd_Application)& app,bool xcaf,const std
     app->DefineFormat(xcaf?"BinXCAF":"BinOcaf","Private D1 framing fixture",xcaf?"xbf":"cbf",r,w);
 }
 inline std::string Build(bool xcaf,int probes,bool nested,int chain,int version,const Factory& reader,bool roleAlias=false){
+    TraceVersion=version;Trace("build-begin",probes);
     AppScope s;auto state=std::make_shared<State>();Configure(s.app,xcaf,state,true,Limits(),reader);
     s.app->NewDocument(xcaf?"BinXCAF":"BinOcaf",s.doc);if(s.doc.IsNull())return {};
     s.doc->ChangeStorageFormatVersion(static_cast<TDocStd_FormatVersion>(version));
@@ -144,13 +169,21 @@ inline std::string Build(bool xcaf,int probes,bool nested,int chain,int version,
     }
     if(chain){auto l=s.doc->Main().FindChild(200,true);for(int i=0;i<chain;++i)l=l.FindChild(1,true);TDataStd_Integer::Set(l,17);}
     std::ostringstream out(std::ios::out|std::ios::binary);
-    try {if(s.app->SaveAs(s.doc,out)!=PCDM_SS_OK)return {};}catch(...){return {};}
-    return out.str();
+    Trace("save-begin",probes);
+    try {const auto status=s.app->SaveAs(s.doc,out);Trace("save-return",int(status));if(status!=PCDM_SS_OK)return {};}
+    catch(...){Trace("save-exception");return {};}
+    Trace("build-complete");return out.str();
 }
 inline bool Geometry(const Handle(TDocStd_Document)& doc,bool xcaf){
-    if(doc.IsNull())return false;std::array<TopoDS_Shape,2> shapes;
+    Trace("geometry-begin");
+    if(doc.IsNull()||doc->GetData().IsNull()){Trace("geometry-missing-document");return false;}
+    const auto main=doc->Main();if(main.IsNull()){Trace("geometry-missing-main");return false;}
+    std::array<TopoDS_Shape,2> shapes;
     for(int i=0;i<2;++i){Handle(TNaming_NamedShape)n;
-        if(!doc->Main().FindChild(101+i,false).FindAttribute(TNaming_NamedShape::GetID(),n))return false;
+        const auto label=main.FindChild(101+i,false);
+        if(label.IsNull()||!label.FindAttribute(TNaming_NamedShape::GetID(),n)||n.IsNull()){
+            Trace("geometry-missing-shape",101+i);return false;}
+
         shapes[std::size_t(i)]=TNaming_Tool::GetShape(n);if(shapes[std::size_t(i)].IsNull())return false;
         GProp_GProps g;BRepGProp::VolumeProperties(shapes[std::size_t(i)],g);
         if(std::abs(g.Mass()-24)>1e-9)return false;
@@ -160,18 +193,21 @@ inline bool Geometry(const Handle(TDocStd_Document)& doc,bool xcaf){
            std::abs(e-shift-2)>1e-6 || std::abs(f-3)>1e-6 || std::abs(h-4)>1e-6)return false;
     }
     Handle(TDataStd_TreeNode) parent,child;
-    if(!doc->Main().FindChild(110,false).FindAttribute(TDataStd_TreeNode::GetDefaultTreeID(),parent) ||
-       !doc->Main().FindChild(111,false).FindAttribute(TDataStd_TreeNode::GetDefaultTreeID(),child) ||
+    const auto parentLabel=main.FindChild(110,false),childLabel=main.FindChild(111,false);
+    if(parentLabel.IsNull()||childLabel.IsNull() ||
+       !parentLabel.FindAttribute(TDataStd_TreeNode::GetDefaultTreeID(),parent) ||
+       !childLabel.FindAttribute(TDataStd_TreeNode::GetDefaultTreeID(),child) ||
        parent.IsNull() || child.IsNull() || parent->First()!=child || child->Father()!=parent)return false;
     if(xcaf){Handle(XCAFDoc_Location) loc;
-        if(!doc->Main().FindChild(103,false).FindAttribute(XCAFDoc_Location::GetID(),loc)||loc.IsNull())return false;
+        const auto label=main.FindChild(103,false);
+        if(label.IsNull()||!label.FindAttribute(XCAFDoc_Location::GetID(),loc)||loc.IsNull())return false;
         const auto transform=loc->Get().Transformation();
         for(int row=1;row<=3;++row)for(int col=1;col<=4;++col){
             const double expected=col==4?(row==1?10:0):(row==col?1:0);
             if(transform.Value(row,col)!=expected)return false;
         }
     }
-    return shapes[0].TShape()==shapes[1].TShape();
+    Trace("geometry-complete");return shapes[0].TShape()==shapes[1].TShape();
 }
 struct Result{bool admitted=false,geometry=false,probe=false,rejected=false,reentryRefused=false;int calls=0;};
 inline Result Open(const std::string& bytes,bool xcaf,bool modern,frame::TraversalLimits limits,
@@ -188,16 +224,20 @@ inline Result Open(const std::string& bytes,bool xcaf,bool modern,frame::Travers
         reentryRefused=status!=PCDM_RS_OK&&state->budget->rejected;
         if(!doc.IsNull())s.app->Close(doc);
     };
+    Trace("open-begin",modern?1:0);
     std::istringstream in(bytes,std::ios::in|std::ios::binary);PCDM_ReaderStatus status=PCDM_RS_DriverFailure;
     try{if(cancel){Handle(Cancel)c=new Cancel();status=s.app->Open(in,s.doc,c->Start());}
         else if(filtered){Handle(PCDM_ReaderFilter) f=new PCDM_ReaderFilter();status=s.app->Open(in,s.doc,f);}
-        else status=s.app->Open(in,s.doc);}catch(...){}
-    Result r;r.rejected=Core3DSafeBinaryReadWasRejected();r.admitted=status==PCDM_RS_OK&&!r.rejected;
+        else status=s.app->Open(in,s.doc);}catch(...){Trace("open-exception");}
+    Trace("open-return",int(status));
+    Result r;r.rejected=Core3DSafeBinaryReadWasRejected();r.admitted=status==PCDM_RS_OK&&!r.rejected&&!s.doc.IsNull()&&!s.doc->GetData().IsNull();
     r.calls=state->pasteCalls;r.reentryRefused=reentryRefused;
-    if(r.admitted){r.geometry=Geometry(s.doc,xcaf);Handle(ProbeAttribute)a;
+    if(r.admitted){
+        try{r.geometry=Geometry(s.doc,xcaf);}catch(...){Trace("geometry-exception");r.geometry=false;}
+        Handle(ProbeAttribute)a;
         const auto l=s.doc->GetData()->Root().FindChild(80,false);
         r.probe=!l.IsNull()&&l.FindAttribute(ProbeAttribute::Guid(),a)&&!a.IsNull()&&a->valid;}
-    state->afterPaste={};return r;
+    Trace("open-complete",r.admitted?1:0);state->afterPaste={};return r;
 }
 inline std::vector<std::size_t> Bodies(const std::string& bytes){
     std::vector<std::size_t> result;std::size_t p=0;
@@ -242,8 +282,12 @@ inline bool CompletePrefixProbe(std::int32_t prefix,bool inverse,bool replaceDri
     return n<0&&rejected&&state->budget->rejected&&state->pasteCalls==0;
 }
 inline std::map<std::string,bool> Run(int scenario,const Factory& reader){
+    struct TraceScope { bool previous=TraceEnabled;int format=TraceFormat,version=TraceVersion;
+        ~TraceScope(){TraceEnabled=previous;TraceFormat=format;TraceVersion=version;} } traceScope;
+    TraceEnabled=scenario==0;
     std::map<std::string,bool> result;
     for(bool xcaf:{false,true}){
+        TraceFormat=xcaf?1:0;TraceVersion=0;Trace("format-begin");
         const std::string prefix=xcaf?"xcaf.":"ocaf.";
         const auto good=Build(xcaf,1,false,0,12,reader);const auto locations=Bodies(good);
         if(good.empty()||locations.size()!=1||locations[0]<32){result[prefix+"setup"]=false;continue;}

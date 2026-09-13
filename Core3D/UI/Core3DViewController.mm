@@ -2960,7 +2960,8 @@ struct NativeModelingPermitIssuer final {
         TDF_Label target;for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){if(!target.IsNull())return nil;target=roots.Value(i);}
         const auto e=owner->DebugPBRScalarEvidence(target);if(!e)return nil;
         NSMutableDictionary* geometry=[NSMutableDictionary dictionary];for(const auto& [key,digest]:e->geometry)geometry[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:digest.data() length:digest.size()];
-        return @{@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
+        NSMutableDictionary* streams=[NSMutableDictionary dictionary];for(const auto& [key,bytes]:e->geometryStreams)streams[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:bytes.data() length:bytes.size()];
+        return @{@"geometryStreams":streams,@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
             @"tableBytes":[NSData dataWithBytes:e->table.data() length:e->table.size()],@"geometry":geometry};
     }catch(...){return nil;}
 }
