@@ -397,6 +397,7 @@ __attribute__((objc_subclassing_restricted))
 typedef NS_ENUM(NSInteger, Core3DModelingEvidenceCoverage) {
     Core3DModelingEvidenceCoverageCanonicalEffect = 0,
     Core3DModelingEvidenceCoverageUnverifiedProfile,
+    Core3DModelingEvidenceCoverageExactLoftEffect,
 };
 typedef NS_ENUM(NSInteger, Core3DModelingRequestExecutionResult) {
     Core3DModelingRequestExecutionResultUnavailable = 0,
@@ -420,7 +421,9 @@ typedef NS_ENUM(NSInteger, Core3DModelingAsyncDisposition) {
     Core3DModelingAsyncDispositionRejected, Core3DModelingAsyncDispositionFailed,
     Core3DModelingAsyncDispositionPreviouslySeen, Core3DModelingAsyncDispositionConflict,
     Core3DModelingAsyncDispositionCapacity, Core3DModelingAsyncDispositionBusy,
-    Core3DModelingAsyncDispositionUncertain, Core3DModelingAsyncDispositionUnsupported
+    Core3DModelingAsyncDispositionUncertain, Core3DModelingAsyncDispositionUnsupported,
+    //! Source-checked no-change invocation; no OCAF command or receipt was added.
+    Core3DModelingAsyncDispositionUnchanged
 };
 typedef NS_ENUM(NSInteger, Core3DModelingStorageObservation) {
     Core3DModelingStorageObservationNotAttempted, Core3DModelingStorageObservationReserved,
@@ -1292,6 +1295,11 @@ typedef struct {
     rebuild:(BOOL)rebuild context:(Core3DModelingPlanningContext *)context
     session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID
     NS_SWIFT_NAME(prepareProfileRequest(definition:rebuild:context:session:requestID:));
+//! Read-only selected-loft request. Public async execution remains unsupported.
+//! The original selected recipe, unit, IDs, frame and exact effect are bound.
+- (nullable Core3DModelingPreparedRequest *)prepareLoftStationRequest:(Core3DRectangularLoftStationEdit *)edit
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
+    requestID:(NSUUID *)requestID NS_SWIFT_NAME(prepareLoftStationRequest(edit:context:session:requestID:));
 - (nullable Core3DModelingPreparedRequest *)prepareAssemblyRequest:(NSArray<Core3DAssemblyPartDefinition *> *)parts
     context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
     requestID:(NSUUID *)requestID NS_SWIFT_NAME(prepareAssemblyRequest(parts:context:session:requestID:));
@@ -1303,8 +1311,9 @@ typedef struct {
 //! qualified. Does not consume context, reserve storage or change history.
 - (Core3DModelingRequestExecutionResult)executeModelingPreparedRequest:(Core3DModelingPreparedRequest *)request
     NS_SWIFT_NAME(executeModelingPreparedRequest(_:));
-//! Main-owned async creation only (enclosure/assembly). Exactly one main result
-//! for a nonnull completion; all other prepared operations remain unsupported.
+//! Main-owned async enclosure/assembly creation or exact selected-loft station rebuild.
+//! Exactly one main result for a nonnull completion; other operations remain unsupported.
+//! Unchanged proves only this invocation opened no command/receipt/history step.
 //! First actual permanent reservation is required. No fallback or replay.
 - (void)executeModelingPreparedRequest:(nullable Core3DModelingPreparedRequest *)request
     completion:(void (^)(Core3DModelingAsyncOutcome *))completion
@@ -1851,6 +1860,11 @@ typedef struct {
     deliveryGate:(void (^_Nullable)(void (^_Nonnull)(void)))gate
     receiptFailure:(BOOL)receiptFailure afterStart:(void (^_Nullable)(void))afterStart
     NS_SWIFT_NAME(debugConfigureAsyncModelingRequest(_:storageScenario:deliveryGate:receiptFailure:afterStart:));
+/// DEBUG only: main-owned observation after outcome sealing, before public callback.
+/// It cannot supply a result, execute geometry or enter any utility worker.
+- (BOOL)debugObserveAsyncModelingCompletion:(Core3DModelingPreparedRequest *)request
+    observer:(void (^)(void))observer
+    NS_SWIFT_NAME(debugObserveAsyncModelingCompletion(_:observer:));
 /// Actual numeric dispatcher observation; no path or execution authority.
 - (NSDictionary *)debugAsyncModelingStorageState:(Core3DModelingPreparedRequest *)request
     NS_SWIFT_NAME(debugAsyncModelingStorageState(_:));

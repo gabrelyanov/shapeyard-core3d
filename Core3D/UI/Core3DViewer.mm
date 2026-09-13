@@ -2328,8 +2328,25 @@ bool Core3DViewer::attachModelingRebuildPermit(const std::shared_ptr<NativeSolid
             part.recipe=request::Recipe::Profile;part.schema=profile::SchemaFor(parameters);
             if(!profile::Encode(parameters,part.values))return false;
             std::vector<double> requested;if(!profile::Encode(*record.requested.profileRebuild,requested)||requested!=part.values)return false;
+        }else if(actual.operation==request::Operation::RebuildLoftStation){
+            const auto geometry=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry);
+            if(!geometry||!*geometry||!(*geometry)->prepared||!work->loftRebuildStamp
+                ||work->sweepRebuildStamp||!work->loftIdentifier.empty()
+                ||record.requested.operation!=OrdinaryTransformOperation::LoftStationRebuild
+                ||!record.requested.loftRebuild||!record.requested.loftStationEdit
+                ||record.requested.profileRebuild||record.requested.enclosureRebuild||record.requested.sweepRebuild
+                ||permit->expectedSource_->policy!=receipt::ExactLoftPolicy4097
+                ||permit->expectedSource_->feature!=receipt::Feature::RectangularLoft
+                ||!receipt::ParseUUID(record.previous.loft.identifier,feature)
+                ||!receipt::LoftStationDescriptor(record.previous.loft.definition,*record.requested.loftStationEdit,actual))return false;
+            std::vector<double> prepared,requested;
+            if(!loft_persistence::Encode((*geometry)->prepared->definition,prepared)
+                ||!loft_persistence::Encode(*record.requested.loftRebuild,requested)
+                ||!loft_persistence::SameBits(prepared,requested)
+                ||!loft_persistence::SameBits(prepared,actual.parts.front().values))return false;
         }else return false;
-        actual.parts.push_back(std::move(part));std::vector<std::uint8_t> a,b;request::Digest digest;receipt::Effect source;
+        if(actual.operation!=request::Operation::RebuildLoftStation)actual.parts.push_back(std::move(part));
+        std::vector<std::uint8_t> a,b;request::Digest digest;receipt::Effect source;
         if(feature!=permit->featureIDs_.front()||feature!=permit->expectedSource_->featureID
             ||!request::Encode(actual,a)||!request::Encode(permit->descriptor_,b)||a!=b
             ||!request::CommandHash(actual,digest)||digest!=permit->key_.command
@@ -2342,7 +2359,10 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
     if (![NSThread isMainThread] || !work || work->consumed) return OrdinaryEditResult::Invalid;
     const auto loftPayload=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry);
     if(loftPayload) {
-        if(work->modelingPermit || work->sweepRebuildStamp)return OrdinaryEditResult::Invalid;
+        if(work->sweepRebuildStamp)return OrdinaryEditResult::Invalid;
+        if(work->modelingPermit && (!work->rebuildAuthority
+            ||work->modelingPermit->operation_!=receipt::Operation::RebuildLoftStation
+            ||!work->modelingPermit->attached_))return OrdinaryEditResult::Invalid;
         if(work->rebuildAuthority) {
             if(!work->loftIdentifier.empty() || !work->loftRebuildStamp || work->rebuildAuthority->records.size()!=1
                 || work->rebuildAuthority->records.front().requested.operation!=OrdinaryTransformOperation::LoftStationRebuild)
@@ -2393,7 +2413,8 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
         }
         if(work->modelingPermit){
             auto& p=*work->modelingPermit;
-            const bool rebuild=p.operation_==receipt::Operation::RebuildEnclosure||p.operation_==receipt::Operation::RebuildProfile;
+            const bool rebuild=p.operation_==receipt::Operation::RebuildEnclosure||p.operation_==receipt::Operation::RebuildProfile
+                ||p.operation_==receipt::Operation::RebuildLoftStation;
             if(bool(work->rebuildAuthority)!=rebuild)return OrdinaryEditResult::Invalid;
             if(!p.current()||!p.admission_
                 ||!p.admission_->geometryReady(true,true)||!p.admission_->takeForOrdinary(true))return OrdinaryEditResult::Invalid;

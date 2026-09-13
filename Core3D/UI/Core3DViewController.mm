@@ -2004,6 +2004,7 @@ static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
     core3d::request::Key _requestKey;
     std::vector<core3d::request::UUID> _requestFeatureIDs;
     std::optional<core3d::profile::Parameters> _requestProfile;
+    std::optional<core3d::rectangular_loft::StationDimensionEdit> _requestLoftEdit;
     std::optional<core3d::enclosure::Parameters> _requestEnclosure;
     std::vector<core3d::AssemblyPartDefinition> _requestAssembly;
     BOOL _requestRetired;
@@ -2020,6 +2021,7 @@ static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
     BOOL _requestAsyncReceiptFailure;
     void (^_requestAsyncGate)(void (^resume)(void));
     void (^_requestAsyncAfterStart)(void);
+    void (^_requestAsyncBeforeCompletion)(void);
 #endif
 }
 - (instancetype)initPrivateWithRequest:(NSUUID *)request document:(NSString *)document
@@ -2325,6 +2327,11 @@ static NSDictionary *Core3DReservationDebugResult(Core3DReservationOutcome outco
     Core3DModelingStorageObservation _storage;
     void (^_completion)(Core3DModelingAsyncOutcome *);
     BOOL _finished;
+    BOOL _loftResolutionBound;
+    core3d::receipt::UUID _loftEntity;
+#if DEBUG
+    void (^_beforeCompletion)(void);
+#endif
 }
 @end
 @implementation Core3DModelingAsyncCompletion
@@ -2339,13 +2346,24 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
         const auto& record=resolution->record();
         const bool same=record.key.accountScope==box->_key.accountScope&&record.key.document==box->_key.document
             &&record.key.request==box->_key.request&&record.key.command==box->_key.command
-            &&record.key.execution==box->_key.execution&&!record.effects.empty()&&record.effects.size()<=16;
+            &&record.key.execution==box->_key.execution&&!record.effects.empty()&&record.effects.size()<=16
+            &&(!box->_loftResolutionBound||(record.operation==core3d::receipt::Operation::RebuildLoftStation
+                &&record.policy==core3d::receipt::ExactLoftPolicy4097&&record.effects.size()==1
+                &&record.effects.front().entity==box->_loftEntity));
         if(same){
             disposition=Core3DModelingAsyncDispositionCommitted;
             for(const auto&effect:record.effects)
                 [entities addObject:[[NSUUID alloc] initWithUUIDBytes:effect.entity.data()].UUIDString];
         }else disposition=Core3DModelingAsyncDispositionUncertain;
-    }else if(disposition==Core3DModelingAsyncDispositionCommitted){
+    }else if(resolution&&resolution->state()==core3d::NativeModelingReceiptResolution::State::Unchanged){
+        // This state is sealed only by the source/permit/prior-catalog-checked
+        // ordinary no-change path. It has no receipt record or saved proof.
+        if(box->_loftResolutionBound&&box->_storage==Core3DModelingStorageObservationReserved){
+            disposition=Core3DModelingAsyncDispositionUnchanged;
+            [entities addObject:[[NSUUID alloc] initWithUUIDBytes:box->_loftEntity.data()].UUIDString];
+        }else disposition=Core3DModelingAsyncDispositionUncertain;
+    }else if(disposition==Core3DModelingAsyncDispositionCommitted
+        ||disposition==Core3DModelingAsyncDispositionUnchanged){
         // A generic geometry result cannot manufacture a committed receipt.
         disposition=Core3DModelingAsyncDispositionUncertain;
     }
@@ -2353,12 +2371,17 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
     auto completion=box->_completion;box->_completion=nil;
 #if DEBUG
     Core3DModelingPreparedRequest *prepared=box->_prepared;
-    if(prepared){prepared->_requestAsyncGate=nil;prepared->_requestAsyncAfterStart=nil;}
+    if(prepared){prepared->_requestAsyncGate=nil;prepared->_requestAsyncAfterStart=nil;prepared->_requestAsyncBeforeCompletion=nil;}
+    auto observer=box->_beforeCompletion;box->_beforeCompletion=nil;
 #endif
     box->_prepared=nil;box->_owner=nil;box->_resolution.reset();
     Core3DModelingAsyncOutcome *outcome=[[Core3DModelingAsyncOutcome alloc]
         initWithDisposition:disposition storage:box->_storage request:box->_requestID
         document:box->_documentID entities:entities];
+#if DEBUG
+    // Ownership/result are already detached and immutable before reentrancy.
+    if(observer)observer();
+#endif
     if(completion)completion(outcome);
 }
 static Core3DModelingStorageObservation Core3DAsyncStorage(
@@ -2389,6 +2412,7 @@ static Core3DModelingAsyncDisposition Core3DAsyncReservationDisposition(Core3DRe
 static Core3DModelingAsyncDisposition Core3DAsyncConstructionDisposition(Core3DProfileConstructionResult value){
     switch(value){
         case Core3DProfileConstructionResultCommitted:return Core3DModelingAsyncDispositionCommitted;
+        case Core3DProfileConstructionResultUnchanged:return Core3DModelingAsyncDispositionUnchanged;
         case Core3DProfileConstructionResultCancelled:return Core3DModelingAsyncDispositionCancelled;
         case Core3DProfileConstructionResultRejected:return Core3DModelingAsyncDispositionRejected;
         case Core3DProfileConstructionResultFailed:return Core3DModelingAsyncDispositionFailed;
@@ -2426,6 +2450,26 @@ namespace core3d {
 // Defined only at the main-owned actual-reservation boundary. No public
 // constructor, serialized ticket, callback outcome or numeric enum issues one.
 struct NativeModelingPermitIssuer final {
+    static bool bindAsyncLoft(Core3DModelingAsyncCompletion *box, Core3DModelingPreparedRequest *prepared,
+        const std::shared_ptr<NativeModelingCommitPermit>& permit) noexcept {
+        if(!NSThread.isMainThread||!box||box->_finished||box->_loftResolutionBound||box->_resolution
+            ||box->_prepared!=prepared||!prepared||box->_owner!=prepared->_requestOwner
+            ||box->_storage!=Core3DModelingStorageObservationReserved||!permit||!permit->current()
+            ||permit!=prepared->_requestCommitPermit||!permit->resolution_
+            ||permit->resolution_->state()!=NativeModelingReceiptResolution::State::Pending
+            ||permit->operation_!=receipt::Operation::RebuildLoftStation
+            ||prepared.evidenceCoverage!=Core3DModelingEvidenceCoverageExactLoftEffect
+            ||prepared->_requestDescriptor.operation!=request::Operation::RebuildLoftStation
+            ||!permit->expectedSource_||!request::Nonzero(permit->expectedSource_->entity)
+            ||!(box->_key==prepared->_requestKey)
+            ||permit->key_.accountScope!=box->_key.accountScope||permit->key_.document!=box->_key.document
+            ||permit->key_.request!=box->_key.request||permit->key_.command!=box->_key.command
+            ||permit->key_.execution!=box->_key.execution)return false;
+        box->_loftEntity=permit->expectedSource_->entity;
+        box->_resolution=permit->resolution_; // shared_ptr copy is nonthrowing
+        box->_loftResolutionBound=YES;
+        return true;
+    }
 #if DEBUG
     static bool failBeforeRelease(Core3DModelingPreparedRequest *request) {
         if(!NSThread.isMainThread||!request||!request->_requestCommitPermit
@@ -2480,7 +2524,8 @@ struct NativeModelingPermitIssuer final {
             ||!prepared->_requestEpoch||prepared->_requestEpoch->retired
             ||!prepared->_requestSession->_hostEpoch||prepared->_requestSession->_hostEpoch->retired)return {};
         const auto operation=prepared->_requestDescriptor.operation;
-        if(operation!=request::Operation::RebuildEnclosure&&operation!=request::Operation::RebuildProfile)return {};
+        if(operation!=request::Operation::RebuildEnclosure&&operation!=request::Operation::RebuildProfile
+            &&operation!=request::Operation::RebuildLoftStation)return {};
         if(!Core3DRebuildSourceMatches(prepared,owner))return {};
         receipt::Catalog catalog;const auto status=receipt::Read(owner->Document(),catalog);
         receipt::UUID document;
@@ -2533,6 +2578,8 @@ struct NativeModelingPermitIssuer final {
 }
 
 - (BOOL)core3d_startReservedRebuild:(Core3DModelingPreparedRequest *)request completion:(void (^)(Core3DProfileConstructionResult))completion;
+- (BOOL)core3d_startReservedRebuild:(Core3DModelingPreparedRequest *)request
+    asyncCompletion:(Core3DModelingAsyncCompletion *)box completion:(void (^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_startReservedCreation:(Core3DModelingPreparedRequest *)request completion:(void (^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_canBeginCommittedEdit;
 - (Core3DModelingPreparedRequest *)core3d_prepareRequest:(const core3d::request::Descriptor&)descriptor
@@ -6369,6 +6416,12 @@ struct NativeModelingPermitIssuer final {
     request->_requestAsyncConfigured=YES;request->_requestAsyncScenario=scenario;
     request->_requestAsyncGate=[gate copy];request->_requestAsyncReceiptFailure=receiptFailure;
     request->_requestAsyncAfterStart=[afterStart copy];return YES;
+}
+- (BOOL)debugObserveAsyncModelingCompletion:(Core3DModelingPreparedRequest *)request
+    observer:(void (^)(void))observer {
+    if(!NSThread.isMainThread||!observer||![self isModelingPreparedRequestCurrent:request]
+        ||request->_requestAsyncBeforeCompletion)return NO;
+    request->_requestAsyncBeforeCompletion=[observer copy];return YES;
 }
 - (void)debugLookupPermanentModelingRequest:(Core3DModelingPreparedRequest *)request
     completion:(void (^)(NSDictionary *))completion {
@@ -11613,12 +11666,14 @@ struct NativeModelingPermitIssuer final {
     try {
         const auto operation=request->_requestDescriptor.operation;
         if(operation==core3d::request::Operation::CreateEnclosure||operation==core3d::request::Operation::CreateAssembly
-            ||operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile){
+            ||operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile
+            ||operation==core3d::request::Operation::RebuildLoftStation){
             // Fail known catalog conflicts before any permanent reservation.
             if(!GLController||!GLController.viewer)return std::nullopt;
             const auto owner=GLController.viewer->getDocument();
             if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return std::nullopt;
-            if ((operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile)
+            if ((operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile
+                ||operation==core3d::request::Operation::RebuildLoftStation)
                 && !Core3DRebuildSourceMatches(request,owner)) return std::nullopt;
             core3d::receipt::Catalog prior;const auto status=core3d::receipt::Read(owner->Document(),prior);
             if((status!=core3d::receipt::ReadStatus::Absent&&status!=core3d::receipt::ReadStatus::Valid)
@@ -11731,6 +11786,13 @@ struct NativeModelingPermitIssuer final {
             target=context.selectedEnclosure.entityIdentifier;authority.scalar(original.dimensionMetersPerUnit);
             authority.text(original.featureIdentifier);
         }
+        if (descriptor.operation==r::Operation::RebuildLoftStation) {
+            if (!context.selectedLoft) return nil;
+            const auto original=[context.selectedLoft nativeSnapshot];
+            if (!core3d::loft_persistence::Encode(original.definition,originalValues)) return nil;
+            target=context.selectedLoft.entityIdentifier;authority.scalar(original.effectiveDimensionMetersPerUnit);
+            authority.text(original.featureIdentifier);
+        }
         authority.integer(originalValues.size(),4);for(double value:originalValues) authority.scalar(value);
         if (target) {
             const auto viewer=context->_planningViewer.lock();if (!viewer) return nil;
@@ -11754,7 +11816,13 @@ struct NativeModelingPermitIssuer final {
             if (!expectedSource) return nil;
             // Append a tagged rebuild-only authority extension. Creation bytes
             // and native command descriptors retain their existing encodings.
-            authority.text("rebuild-source-effect/v1");
+            if(descriptor.operation==r::Operation::RebuildLoftStation){
+                if(expectedSource->policy!=core3d::receipt::ExactLoftPolicy4097
+                    ||expectedSource->feature!=core3d::receipt::Feature::RectangularLoft)return nil;
+                authority.text("loft-rebuild-source-effect/v1");
+                authority.integer(expectedSource->policy,2);
+                authority.integer(core3d::loft_persistence::Schema,4);
+            }else authority.text("rebuild-source-effect/v1");
             authority.integer(std::uint8_t(expectedSource->feature),1);
             authority.raw(expectedSource->entity.data(),expectedSource->entity.size());
             authority.raw(expectedSource->definition.data(),expectedSource->definition.size());
@@ -11828,6 +11896,26 @@ struct NativeModelingPermitIssuer final {
     } catch (...) {return nil;}
 }
 
+- (Core3DModelingPreparedRequest *)prepareLoftStationRequest:(Core3DRectangularLoftStationEdit *)edit
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
+    requestID:(NSUUID *)requestID {
+    if(![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)
+        ||![edit isKindOfClass:Core3DRectangularLoftStationEdit.class]||!context.selectedLoft)return nil;
+    try {
+        const auto original=[context.selectedLoft nativeSnapshot];
+        const auto numeric=[edit nativeEdit];core3d::rectangular_loft::Definition candidate;
+        core3d::request::Descriptor descriptor;core3d::receipt::UUID feature;
+        if(!original.current||!core3d::loft_rebuild::Apply(original.definition,numeric,candidate)
+            ||!Core3DModelingLoftSupported(candidate,original.effectiveDimensionMetersPerUnit)
+            ||!core3d::receipt::LoftStationDescriptor(original.definition,numeric,descriptor)
+            ||!core3d::receipt::ParseUUID(original.featureIdentifier,feature))return nil;
+        Core3DModelingPreparedRequest *request=[self core3d_prepareRequest:descriptor context:context session:session
+            requestID:requestID featureIDs:(std::vector<core3d::request::UUID>{feature})
+            coverage:Core3DModelingEvidenceCoverageExactLoftEffect];
+        if(request)request->_requestLoftEdit=numeric;return request;
+    }catch(...){return nil;}
+}
+
 - (Core3DModelingPreparedRequest *)prepareAssemblyRequest:(NSArray<Core3DAssemblyPartDefinition *> *)parts
     context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID {
     if (![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)
@@ -11865,7 +11953,7 @@ struct NativeModelingPermitIssuer final {
         ||request->_requestOwner!=self||![_issuedModelingPreparedRequests containsObject:request]) return;
     request->_requestRetired=YES;
 #if DEBUG
-    request->_requestAsyncGate=nil;request->_requestAsyncAfterStart=nil;
+    request->_requestAsyncGate=nil;request->_requestAsyncAfterStart=nil;request->_requestAsyncBeforeCompletion=nil;
 #endif
     if(request->_requestEpoch)request->_requestEpoch->retired=true;
     [self retireModelingPlanningContext:request->_requestContext];
@@ -11897,11 +11985,15 @@ struct NativeModelingPermitIssuer final {
     box->_owner=self;box->_prepared=request;box->_requestID=request.requestIdentifier;
     box->_documentID=request.documentIdentifier;box->_key=request->_requestKey;
     const auto operation=request->_requestDescriptor.operation;
-    if(request.evidenceCoverage!=Core3DModelingEvidenceCoverageCanonicalEffect
-        ||(operation!=core3d::request::Operation::CreateEnclosure&&operation!=core3d::request::Operation::CreateAssembly)){
+    const bool loft=operation==core3d::request::Operation::RebuildLoftStation
+        &&request.evidenceCoverage==Core3DModelingEvidenceCoverageExactLoftEffect;
+    const bool creation=request.evidenceCoverage==Core3DModelingEvidenceCoverageCanonicalEffect
+        &&(operation==core3d::request::Operation::CreateEnclosure||operation==core3d::request::Operation::CreateAssembly);
+    if(!creation&&!loft){
         Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionUnsupported);return;
     }
 #if DEBUG
+    box->_beforeCompletion=request->_requestAsyncBeforeCompletion;request->_requestAsyncBeforeCompletion=nil;
     Core3DReservationTestConfig configuration;
     const BOOL privateStore=request->_requestAsyncConfigured&&request->_requestAsyncScenario>=0;
     if(privateStore){
@@ -11929,10 +12021,13 @@ struct NativeModelingPermitIssuer final {
             const BOOL failReceipt=prepared->_requestAsyncReceiptFailure;
             void (^afterStart)(void)=prepared->_requestAsyncAfterStart;prepared->_requestAsyncAfterStart=nil;
 #endif
-            const BOOL started=[owner core3d_startReservedCreation:prepared completion:^(Core3DProfileConstructionResult result){
+            void (^nativeCompletion)(Core3DProfileConstructionResult)=^(Core3DProfileConstructionResult result){
                 Core3DFinishAsyncModeling(box,Core3DAsyncConstructionDisposition(result));
-            }];
-            if(!box->_finished&&prepared->_requestCommitPermit)
+            };
+            const BOOL started=loft
+                ?[owner core3d_startReservedRebuild:prepared asyncCompletion:box completion:nativeCompletion]
+                :[owner core3d_startReservedCreation:prepared completion:nativeCompletion];
+            if(!loft&&!box->_finished&&prepared->_requestCommitPermit)
                 box->_resolution=prepared->_requestCommitPermit->resolution();
             if(!started){
                 [owner stopModelingPreparedRequest:prepared];
@@ -12020,6 +12115,10 @@ struct NativeModelingPermitIssuer final {
 
 - (BOOL)core3d_startReservedRebuild:(Core3DModelingPreparedRequest *)request
     completion:(void (^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_startReservedRebuild:request asyncCompletion:nil completion:completion];
+}
+- (BOOL)core3d_startReservedRebuild:(Core3DModelingPreparedRequest *)request
+    asyncCompletion:(Core3DModelingAsyncCompletion *)box completion:(void (^)(Core3DProfileConstructionResult))completion {
     if(!NSThread.isMainThread||!completion||!request
         ||!_reservedModelingCapability||_reservedModelingCapability->_taken
         ||_reservedModelingCapability->_entry->_prepared!=request
@@ -12032,6 +12131,9 @@ struct NativeModelingPermitIssuer final {
         auto permit=core3d::NativeModelingPermitIssuer::takeRebuild(_reservedModelingCapability,document);
         if(!permit){[self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;}
         request->_requestCommitPermit=permit;
+        if(box&&!core3d::NativeModelingPermitIssuer::bindAsyncLoft(box,request,permit)){
+            [self stopModelingPreparedRequest:request];completion(Core3DProfileConstructionResultRejected);return YES;
+        }
         _reservedModelingCapability=nil; // Moved authority cannot be reconstructed from the key.
         const auto context=request->_requestContext;
         const auto size=GLController.view.bounds.size;
@@ -12050,6 +12152,11 @@ struct NativeModelingPermitIssuer final {
                 &&request->_requestProfile&&context.selectedProfile){
                 const auto original=[context.selectedProfile nativeSnapshot]; identity.entityIdentifier=original.identity.entityIdentifier;
                 work=viewer->prepareStoredProfileRebuild(*request->_requestProfile,original,identity,
+                    context.scene.revisions.presentationRevision,std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+            }else if(request->_requestDescriptor.operation==core3d::request::Operation::RebuildLoftStation
+                &&request->_requestLoftEdit&&context.selectedLoft){
+                const auto original=[context.selectedLoft nativeSnapshot];identity.entityIdentifier=original.identity.entityIdentifier;
+                work=viewer->prepareStoredLoftStationRebuild(*request->_requestLoftEdit,original,identity,
                     context.scene.revisions.presentationRevision,std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
             }
         }

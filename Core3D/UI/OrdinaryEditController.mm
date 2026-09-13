@@ -437,7 +437,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             }
             if(request.operation==OrdinaryTransformOperation::LoftStationRebuild) {
                 std::vector<double> values;
-                if(permit || changes.size()!=1 || representation!=OcctGeometryRepresentation::BRep
+                if((permit&&permit->operation_!=receipt::Operation::RebuildLoftStation) || changes.size()!=1 || representation!=OcctGeometryRepresentation::BRep
                     || !record.previous.loft.IsCurrent(document,request.label)
                     || !MatricesEqual(record.previous.transform,request.transform) || request.rotationAroundPivot
                     || !geometryChanges || !loft_rebuild::HasOnlyMetadataSubshapes(document,request.label)
@@ -446,6 +446,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !savedSweepRebuildSourceIsCurrent(request.sweepSource)) return reject(OrdinaryEditResult::Invalid);
                 ledger.sweepGuard=std::make_shared<SweepRebuildGuard>(*request.sweepSource);
                 sweepNoChange=loft_persistence::SameBits(values,record.previous.loft.values);
+                if(sweepNoChange&&permit)return unchanged();
             }
             if (request.operation == OrdinaryTransformOperation::ProfileRebuild) {
                 std::vector<double> values;
@@ -1531,8 +1532,17 @@ bool OrdinaryEditController::bindRebuildReceipt(OrdinaryTransformLedger& ledger,
                 || !receipt::ParseUUID(previous.profile.identifier,feature)) return false;
             part.recipe=request::Recipe::Profile; part.schema=profile::SchemaFor(*change.profileRebuild);
             if (!profile::Encode(*change.profileRebuild,part.values)) return false;
+        } else if(actual.operation==request::Operation::RebuildLoftStation){
+            if(change.operation!=OrdinaryTransformOperation::LoftStationRebuild
+                ||!change.loftRebuild||!change.loftStationEdit||change.profileRebuild||change.enclosureRebuild||change.sweepRebuild
+                ||permit->expectedSource_->policy!=receipt::ExactLoftPolicy4097
+                ||permit->expectedSource_->feature!=receipt::Feature::RectangularLoft
+                ||!receipt::ParseUUID(previous.loft.identifier,feature)
+                ||!loft_rebuild::Matches(previous.loft.definition,*change.loftStationEdit,*change.loftRebuild)
+                ||!receipt::LoftStationDescriptor(previous.loft.definition,*change.loftStationEdit,actual))return false;
         } else return false;
-        actual.parts.push_back(std::move(part)); request::Digest digest;
+        if(actual.operation!=request::Operation::RebuildLoftStation)actual.parts.push_back(std::move(part));
+        request::Digest digest;
         std::vector<std::uint8_t> expectedBytes,actualBytes;
         receipt::Effect source; receipt::Catalog catalog;
         const auto status=receipt::Read(permit->document_,catalog);
@@ -1570,6 +1580,10 @@ bool OrdinaryEditController::stageRebuildReceipt(OrdinaryTransformLedger& ledger
             || effect.entity!=p.expectedSource_->entity || effect.definition!=p.expectedSource_->definition
             || effect.feature!=p.expectedSource_->feature || effect.featureID!=p.expectedSource_->featureID) return false;
         r.record.key=p.key_; r.record.operation=p.operation_; r.record.effects={effect};
+        if(p.operation_==receipt::Operation::RebuildLoftStation){
+            if(effect.policy!=receipt::ExactLoftPolicy4097||effect.feature!=receipt::Feature::RectangularLoft)return false;
+            r.record.policy=receipt::ExactLoftPolicy4097;
+        }
         if (!receipt::Valid(r.record) || !receipt::Stage(_document,r.record,p.previous_)
             || receipt::Read(p.document_,r.candidate)!=receipt::ReadStatus::Valid) return false;
         r.staged=true;
