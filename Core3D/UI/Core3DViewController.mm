@@ -1498,6 +1498,35 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
     if (completion) completion(result);
 }
 
+#if DEBUG
+// Test closures remain on main, keyed by the same immutable completion token.
+// The actual utility worker still carries no client callback or live owner.
+static NSMutableDictionary<NSUUID *, id> *Core3DNativeSolidGeometryDeliveryGates() {
+    static NSMutableDictionary<NSUUID *, id> *gates;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gates=[NSMutableDictionary dictionary]; });
+    return gates;
+}
+static void Core3DGateNativeSolidGeometryDelivery(NSUUID *token,dispatch_block_t delivery) {
+    NSCAssert(NSThread.isMainThread,@"Geometry delivery gate is main-owned");
+    auto gates=Core3DNativeSolidGeometryDeliveryGates();
+    void (^gate)(void (^)(void))=gates[token];
+    [gates removeObjectForKey:token];
+    if(!gate){delivery();return;}
+    // Clear the exact pending delivery before admission or any reentrant call.
+    // Repeated/off-main resumes cannot promote an owner or consume newer work.
+    __block dispatch_block_t pending=[delivery copy];
+    gate(^{
+        dispatch_block_t resume=^{
+            dispatch_block_t once=pending;pending=nil;
+            if(once)once();
+        };
+        if(NSThread.isMainThread)resume();
+        else dispatch_async(dispatch_get_main_queue(),resume);
+    });
+}
+#endif
+
 @interface Core3DAssemblyPartDefinition ()
 - (instancetype)initWithKind:(Core3DAssemblyPartKind)kind name:(NSString *)name
     width:(double)width depth:(double)depth height:(double)height radius:(double)radius
@@ -2052,6 +2081,7 @@ static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
     BOOL _requestAsyncReceiptFailure;
     void (^_requestAsyncGate)(void (^resume)(void));
     void (^_requestAsyncAfterStart)(void);
+    void (^_requestAsyncGeometryDeliveryGate)(void (^resume)(void));
     void (^_requestAsyncBeforeCompletion)(void);
 #endif
 }
@@ -2413,7 +2443,7 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
     auto completion=box->_completion;box->_completion=nil;
 #if DEBUG
     Core3DModelingPreparedRequest *prepared=box->_prepared;
-    if(prepared){prepared->_requestAsyncGate=nil;prepared->_requestAsyncAfterStart=nil;prepared->_requestAsyncBeforeCompletion=nil;}
+    if(prepared){prepared->_requestAsyncGate=nil;prepared->_requestAsyncAfterStart=nil;prepared->_requestAsyncBeforeCompletion=nil;prepared->_requestAsyncGeometryDeliveryGate=nil;}
     auto observer=box->_beforeCompletion;box->_beforeCompletion=nil;
 #endif
     box->_prepared=nil;box->_owner=nil;box->_resolution.reset();
@@ -2720,6 +2750,11 @@ struct NativeModelingPermitIssuer final {
 @interface Core3DViewController (ProfileConstructionPrivate)
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion;
+#if DEBUG
+- (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
+    debugGeometryDeliveryGate:(void (^)(void (^)(void)))gate
+    completion:(void(^)(Core3DProfileConstructionResult))completion;
+#endif
 - (void)constructProfileWithPoints:(NSArray<NSValue *> *)points
                             plane:(Core3DProfilePlane)plane parameter:(double)parameter
                           revolve:(BOOL)revolve
@@ -6734,6 +6769,15 @@ struct NativeModelingPermitIssuer final {
     request->_requestAsyncConfigured=YES;request->_requestAsyncScenario=scenario;
     request->_requestAsyncGate=[gate copy];request->_requestAsyncReceiptFailure=receiptFailure;
     request->_requestAsyncAfterStart=[afterStart copy];return YES;
+}
+- (BOOL)debugGateAsyncCreationGeometryDelivery:(Core3DModelingPreparedRequest *)request
+    gate:(void (^)(void (^)(void)))gate {
+    if(!NSThread.isMainThread||!gate||![self isModelingPreparedRequestCurrent:request]
+        ||request->_requestAsyncGeometryDeliveryGate
+        ||request.evidenceCoverage!=Core3DModelingEvidenceCoverageCanonicalEffect
+        ||(request->_requestDescriptor.operation!=core3d::request::Operation::CreateEnclosure
+            &&request->_requestDescriptor.operation!=core3d::request::Operation::CreateAssembly))return NO;
+    request->_requestAsyncGeometryDeliveryGate=[gate copy];return YES;
 }
 - (BOOL)debugObserveAsyncModelingCompletion:(Core3DModelingPreparedRequest *)request
     observer:(void (^)(void))observer {
@@ -12283,7 +12327,7 @@ struct NativeModelingPermitIssuer final {
         ||request->_requestOwner!=self||![_issuedModelingPreparedRequests containsObject:request]) return;
     request->_requestRetired=YES;
 #if DEBUG
-    request->_requestAsyncGate=nil;request->_requestAsyncAfterStart=nil;request->_requestAsyncBeforeCompletion=nil;
+    request->_requestAsyncGate=nil;request->_requestAsyncAfterStart=nil;request->_requestAsyncBeforeCompletion=nil;request->_requestAsyncGeometryDeliveryGate=nil;
 #endif
     if(request->_requestEpoch)request->_requestEpoch->retired=true;
     [self retireModelingPlanningContext:request->_requestContext];
@@ -12452,7 +12496,13 @@ struct NativeModelingPermitIssuer final {
         __weak Core3DModelingPlanningContext *weakContext=context;
         // runNativeSolidWork stores this callback in its main-only registry.
         // Its utility block still captures geometry and weak native owners only.
+#if DEBUG
+        auto geometryDeliveryGate=request->_requestAsyncGeometryDeliveryGate;
+        request->_requestAsyncGeometryDeliveryGate=nil;
+        [self runNativeSolidWork:work debugGeometryDeliveryGate:geometryDeliveryGate completion:^(Core3DProfileConstructionResult result){
+#else
         [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){
+#endif
             Core3DViewController *owner=weakOwner;Core3DModelingPreparedRequest *issued=weakRequest;
             // Stop may release the last request before this late completion.
             // The owner's occupied context slot independently keeps this weak
@@ -13297,8 +13347,18 @@ struct NativeModelingPermitIssuer final {
 
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion {
+#if DEBUG
+        [self runNativeSolidWork:work debugGeometryDeliveryGate:nil completion:completion];
+}
+- (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
+    debugGeometryDeliveryGate:(void (^)(void (^)(void)))gate
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+#endif
         NSUUID *completionToken = Core3DRegisterNativeSolidCompletion(completion);
         if (!completionToken) { completion(Core3DProfileConstructionResultBusy); return; }
+#if DEBUG
+        if(gate)Core3DNativeSolidGeometryDeliveryGates()[completionToken]=[gate copy];
+#endif
         _nativeSolidWork = work; _nativeSolidCancelled = NO;
         __weak Core3DModelingPlanningContext *weakPlanningContext = _modelingConstructionContext;
         const auto geometry = core3d::Core3DViewer::nativeSolidGeometry(work);
@@ -13307,6 +13367,9 @@ struct NativeModelingPermitIssuer final {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry);
             dispatch_async(dispatch_get_main_queue(), ^{
+#if DEBUG
+                dispatch_block_t delivery=^{
+#endif
                 Core3DViewController* controller = weakSelf;
                 if (!controller) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return; }
                 Core3DModelingPlanningContext *planningContext = weakPlanningContext;
@@ -13353,6 +13416,10 @@ struct NativeModelingPermitIssuer final {
                     case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
                 }
                 Core3DDeliverNativeSolidCompletion(completionToken, result);
+#if DEBUG
+                };
+                Core3DGateNativeSolidGeometryDelivery(completionToken,delivery);
+#endif
             });
         });
 }

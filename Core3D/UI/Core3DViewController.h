@@ -1926,6 +1926,11 @@ __attribute__((objc_subclassing_restricted))
     deliveryGate:(void (^_Nullable)(void (^_Nonnull)(void)))gate
     receiptFailure:(BOOL)receiptFailure afterStart:(void (^_Nullable)(void))afterStart
     NS_SWIFT_NAME(debugConfigureAsyncModelingRequest(_:storageScenario:deliveryGate:receiptFailure:afterStart:));
+/// DEBUG only: exact creation request's real geometry delivery, before owner
+/// promotion/admission. The main-only gate cannot supply geometry or an outcome.
+- (BOOL)debugGateAsyncCreationGeometryDelivery:(Core3DModelingPreparedRequest *)request
+    gate:(void (^_Nonnull)(void (^_Nonnull)(void)))gate
+    NS_SWIFT_NAME(debugGateAsyncCreationGeometryDelivery(_:gate:));
 /// DEBUG only: main-owned observation after outcome sealing, before public callback.
 /// It cannot supply a result, execute geometry or enter any utility worker.
 - (BOOL)debugObserveAsyncModelingCompletion:(Core3DModelingPreparedRequest *)request
