@@ -99,6 +99,7 @@
 #include <TDataStd_TreeNode.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDF_Tool.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
