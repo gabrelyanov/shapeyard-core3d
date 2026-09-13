@@ -9,6 +9,7 @@
 
 #include "TransformInspectorMeasurementController.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
+#include "../OCCTKit/CylindricalCutDefinition.hxx"
 
 #include <gp_Quaternion.hxx>
 
@@ -366,12 +367,16 @@ bool Core3DQuaternionMatchesEuler(
     }
 }
 
-bool Core3DHasExpectedCapabilities(
+constexpr bool Core3DHasExpectedCapabilities(
     const Core3DTransformInspectorRepresentation representation,
     const std::uint64_t capabilities) noexcept {
     switch (representation) {
         case Core3DTransformInspectorRepresentationBRep:
-            return capabilities == kBRepModelCapabilities;
+            // Native retained-cut capture emits this exact reduced mask. This
+            // validates a DTO shape, not retained-feature or Reserved authority.
+            return capabilities == kBRepModelCapabilities
+                || capabilities == (kBRepModelCapabilities
+                    & ~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities);
         case Core3DTransformInspectorRepresentationTriangleMesh:
             return capabilities == kTriangleMeshModelCapabilities;
         case Core3DTransformInspectorRepresentationUnknown:
@@ -379,6 +384,22 @@ bool Core3DHasExpectedCapabilities(
     }
     return false;
 }
+
+// Compile-time negative boundary evidence: no arbitrary subset, mixed retained
+// construction bit, unknown high bit, or cross-representation mask is accepted.
+constexpr auto kRetainedCutInspectorCapabilities = kBRepModelCapabilities
+    & ~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+static_assert(Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
+    kRetainedCutInspectorCapabilities));
+static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep, 0));
+static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
+    kRetainedCutInspectorCapabilities | static_cast<std::uint64_t>(Core3DModelCapabilityBoolean)));
+static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
+    kRetainedCutInspectorCapabilities & ~static_cast<std::uint64_t>(Core3DModelCapabilityTranslate)));
+static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
+    kBRepModelCapabilities | (1ull << 63)));
+static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationTriangleMesh,
+    kRetainedCutInspectorCapabilities));
 
 bool Core3DHasValidDimensions(
     const core3d::TransformInspectorMeasurement& measurement) noexcept {
