@@ -8985,4 +8985,15 @@ std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard
         default:return {{"invalidScenario",false}};
     }
 }
+#include "SavedCutTrimDomainProbe.hxx"
+std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe(){
+    auto checks=core3d::saved_cut_trim_domain::probe::Run();
+    std::size_t failed=0;
+    for(const auto& check:checks)if(!check.second){
+        if(failed++<128)std::fprintf(stderr,"[cut-trim-probe] failed=%.*s\n",192,check.first.c_str());
+    }
+    if(failed>128)std::fprintf(stderr,"[cut-trim-probe] omitted-failures=%zu\n",failed-128);
+    if(failed)std::fflush(stderr);
+    return checks;
+}
 #endif

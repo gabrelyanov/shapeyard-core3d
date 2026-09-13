@@ -43,14 +43,14 @@ inline bool SameFrame(const std::optional<profile::ConstructionFrame>& a,const s
 inline bool Curve(const TopoDS_Edge& edge,double mm,Budget& budget,d::Curve& out){
     TopLoc_Location loc;double first=0,last=0;auto curve=BRep_Tool::Curve(edge,loc,first,last);
     if(!d::Range(first,last)||!d::Location(loc,budget))return false;
-    Handle(Geom_Line) line;Handle(Geom_Circle) circle;
+    d::Curve c;Handle(Geom_Line) line;Handle(Geom_Circle) circle;
     for(unsigned n=0;n<d::MaximumWrappers&&!curve.IsNull();++n){
         line=Handle(Geom_Line)::DownCast(curve);circle=Handle(Geom_Circle)::DownCast(curve);
         if(!line.IsNull()||!circle.IsNull())break;
         const auto trim=Handle(Geom_TrimmedCurve)::DownCast(curve);
-        if(trim.IsNull()||first<trim->FirstParameter()||last>trim->LastParameter())return false;curve=trim->BasisCurve();
+        if(trim.IsNull()||!d::RetainTrim(c.trims,first,last,trim->FirstParameter(),trim->LastParameter()))return false;curve=trim->BasisCurve();
     }
-    d::Curve c;c.first=first;c.last=last;c.location=loc;
+    c.first=first;c.last=last;c.location=loc;
     if(!line.IsNull()){const auto l=line->Lin();c.c=d::V(l.Location());c.a=gp_Vec(l.Direction());}
     else if(!circle.IsNull()){
         const double pi=std::acos(-1.0);
@@ -91,10 +91,10 @@ inline bool PCurves(const Edge& edge,const Face& face,double mm,Budget& b,std::v
         const auto gc=Handle(BRep_GCurve)::DownCast(rep);if(++found!=1||gc.IsNull())return false;
         double first=0,last=0;gc->Range(first,last);if(!Bits(first,edge.curve.first)||!Bits(last,edge.curve.last))return false;
         for(unsigned k=0;k<(rep->IsCurveOnClosedSurface()?2u:1u);++k){
-            auto pc=k?rep->PCurve2():rep->PCurve();Handle(Geom2d_Line) line;
+            d::PCurve value;auto pc=k?rep->PCurve2():rep->PCurve();Handle(Geom2d_Line) line;
             for(unsigned n=0;n<8&&!pc.IsNull();++n){line=Handle(Geom2d_Line)::DownCast(pc);if(!line.IsNull())break;
-                const auto trim=Handle(Geom2d_TrimmedCurve)::DownCast(pc);if(trim.IsNull()||first<trim->FirstParameter()||last>trim->LastParameter())return false;pc=trim->BasisCurve();}
-            if(line.IsNull())return false;d::PCurve value;value.first=first;value.last=last;value.stored=true;
+                const auto trim=Handle(Geom2d_TrimmedCurve)::DownCast(pc);if(trim.IsNull()||!d::RetainTrim(value.trims,first,last,trim->FirstParameter(),trim->LastParameter()))return false;pc=trim->BasisCurve();}
+            if(line.IsNull())return false;value.first=first;value.last=last;value.stored=true;
             value.c=line->Location();value.a=gp_Vec2d(line->Direction());
             if(!d::PCurveMagnitude(value,face.surface,mm,b))return false;out.push_back(value);
         }
@@ -179,6 +179,8 @@ inline Report Inspect(const TopoDS_Shape& result,const retained_solid::Envelope&
         const double error=std::max(1e-9,2048*std::numeric_limits<double>::epsilon()*budget.arithmeticMagnitudeMM);
         if(!std::isfinite(error)||error>1e-6)return fail();report.errorMM=error;report.kernelToleranceMM=budget.maximumKernelToleranceMM;
         report.faces=faces.size();report.uniqueEdges=edges.size();report.uniqueVertices=vertexMap.Extent();
+        report.phase="curve-trim-domains";
+        for(const auto& edge:edges){double charge=0;if(!d::CurveTrimCharge(edge.curve,mm,charge)||charge>error)return fail();}
         report.phase="bore-support";
         if(d::Norm(sourceVector.Crossed(axis))/d::Norm(sourceVector)*(high-low)*mm>error)return fail();
         unsigned bore=0,found=0;

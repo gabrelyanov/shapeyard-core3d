@@ -166,8 +166,25 @@ inline Evidence Run(){
             add("wrong-radius-refuses",Inspect(built.solid,wrongOld,wrongNext,*stop).status==Status::Refused);
             wrongNext=next;wrongNext.point[(next.axis+1)%3]+=1/mm;
             add("tool-change-refuses",Inspect(built.solid,old,wrongNext,*stop).status==Status::Refused);
-            TopoDS_Compound extra;builder.MakeCompound(extra);builder.Add(extra,built.solid);builder.Add(extra,newBase);
-            add("compound-extra-solid-refuses",Inspect(extra,old,next,*stop).status==Status::Refused);
+            // TopoDS_Builder::Add freezes its child's shared TShape. Assemble
+            // this negative fixture from independent serialized copies only.
+            const bool originalsBeforeCompound=Bytes(built.solid)==before&&Bytes(original.solid)==originalBytes
+                &&Bytes(oldBase)==oldBytes&&Bytes(newBase)==newBytes;
+            TopoDS_Shape compoundCut,compoundBase;
+            std::istringstream cutInput(before),baseInput(newBytes);
+            cutInput.imbue(std::locale::classic());baseInput.imbue(std::locale::classic());
+            BRepTools::Read(compoundCut,cutInput,builder);BRepTools::Read(compoundBase,baseInput,builder);
+            const bool privateCompoundInputs=!compoundCut.IsNull()&&!compoundBase.IsNull()
+                &&compoundCut.ShapeType()==TopAbs_SOLID&&compoundBase.ShapeType()==TopAbs_SOLID
+                &&!compoundCut.IsPartner(built.solid)&&!compoundCut.IsPartner(newBase)
+                &&!compoundBase.IsPartner(built.solid)&&!compoundBase.IsPartner(newBase)
+                &&!compoundCut.IsPartner(compoundBase);
+            TopoDS_Compound extra;builder.MakeCompound(extra);
+            if(privateCompoundInputs){builder.Add(extra,compoundCut);builder.Add(extra,compoundBase);}
+            const bool originalsAfterCompound=Bytes(built.solid)==before&&Bytes(original.solid)==originalBytes
+                &&Bytes(oldBase)==oldBytes&&Bytes(newBase)==newBytes;
+            add("compound-extra-solid-refuses",originalsBeforeCompound&&privateCompoundInputs&&extra.NbChildren()==2
+                &&originalsAfterCompound&&Inspect(extra,old,next,*stop).status==Status::Refused);
             stop->store(true);add("already-stopped-cancels",Inspect(built.solid,old,next,*stop).status==Status::Cancelled);stop->store(false);
             // Deliberate limitation witness: alter the exterior without changing
             // the independently observed bore. NO result-success authority exists.

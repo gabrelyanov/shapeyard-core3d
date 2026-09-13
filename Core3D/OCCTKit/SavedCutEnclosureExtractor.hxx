@@ -134,20 +134,93 @@ inline bool Tolerance(double value,const TopoDS_Shape& shape,double mm,Inspectio
     if(!Location(shape.Location(),r))return false;const double scaled=value*shape.Location().Transformation().ScaleFactor()*mm;
     if(!std::isfinite(scaled)||scaled<0||scaled>KernelToleranceMM)return false;r.maximumKernelToleranceMM=std::max(r.maximumKernelToleranceMM,scaled);return true;
 }
-struct Curve {bool circle=false;gp_Vec c,a,b;TopLoc_Location location;double first=0,last=0;}; // line c+t*a; circle c+cos(t)*a+sin(t)*b
-struct PCurve {bool circle=false;gp_Pnt2d c;gp_Vec2d a,b;double first=0,last=0;bool stored=false;};
+struct TrimDomains {
+    std::array<std::array<double,2>,MaximumWrappers> values{};unsigned count=0;
+    std::size_t size()const noexcept{return count;}
+    const std::array<double,2>* begin()const noexcept{return values.data();}
+    const std::array<double,2>* end()const noexcept{return values.data()+count;}
+};
+struct Curve {bool circle=false;gp_Vec c,a,b;TopLoc_Location location;double first=0,last=0;TrimDomains trims;}; // line c+t*a; circle c+cos(t)*a+sin(t)*b
+struct PCurve {bool circle=false;gp_Pnt2d c;gp_Vec2d a,b;double first=0,last=0;bool stored=false;TrimDomains trims;};
 struct Surface {bool cylinder=false;gp_Vec c,x,y,z,rawC,rawX,rawY,rawZ;TopLoc_Location location;Handle(Geom_Surface) handle;std::vector<std::array<double,4>> boxes;};
 inline bool Range(double first,double last){return std::isfinite(first)&&std::isfinite(last)&&first<last;}
+// A BRep V3 topology interval is written with15 significant digits, whereas
+// GeomTools trim bounds use17. Retain every domain; never clamp a range or
+// mutate a wrapper. Full analytic physical charges are checked only against
+// the independently fixed comparison error below.
+inline bool RetainTrim(TrimDomains& trims,double first,double last,double lower,double upper){
+    if(!Range(first,last)||!Range(lower,upper)||trims.size()>=MaximumWrappers)return false;
+    double lo=std::max(first,lower),hi=std::min(last,upper);
+    for(const auto& t:trims){lo=std::max(lo,t[0]);hi=std::min(hi,t[1]);}
+    if(!(lo<hi))return false;trims.values[trims.count++]={lower,upper};return true;
+}
+// Positive arithmetic is rounded outward; overflow/nonfinite stays refusal.
+inline bool TrimUpperAdd(double a,double b,double& out){
+    if(!std::isfinite(a)||!std::isfinite(b)||a<0||b<0)return false;
+    if(a==0){out=b;return true;}if(b==0){out=a;return true;}
+    const double v=a+b;if(!std::isfinite(v))return false;
+    out=std::nextafter(v,std::numeric_limits<double>::infinity());return std::isfinite(out);
+}
+inline bool TrimUpperMultiply(double a,double b,double& out){
+    if(!std::isfinite(a)||!std::isfinite(b)||a<0||b<0)return false;
+    if(a==0||b==0){out=0;return true;}const double v=a*b;
+    if(!std::isfinite(v))return false;out=std::nextafter(v,std::numeric_limits<double>::infinity());return std::isfinite(out);
+}
+inline bool TrimUpperProduct3(double a,double b,double c,double& out){
+    double ab=0;return TrimUpperMultiply(a,b,ab)&&TrimUpperMultiply(ab,c,out);
+}
+inline bool TrimL1(const gp_Vec& v,double& out){
+    double xy=0;return TrimUpperAdd(std::abs(v.X()),std::abs(v.Y()),xy)&&TrimUpperAdd(xy,std::abs(v.Z()),out);
+}
+inline bool TrimSpan(const TrimDomains& trims,double first,double last,double& out){
+    out=0;if(!Range(first,last)||trims.size()>MaximumWrappers)return false;
+    double lo=first,hi=last;
+    for(const auto& t:trims){
+        if(!Range(t[0],t[1]))return false;lo=std::max(lo,t[0]);hi=std::min(hi,t[1]);
+        const double left=t[0]-first,right=last-t[1];
+        if(!std::isfinite(left)||!std::isfinite(right))return false;
+        const double v=std::max({0.,left,right});
+        if(v>0){const double u=std::nextafter(v,std::numeric_limits<double>::infinity());if(!std::isfinite(u))return false;out=std::max(out,u);}
+    }return lo<hi;
+}
+inline bool CurveTrimCharge(const Curve& c,double mm,double& out){
+    out=0;double span=0;if(!std::isfinite(mm)||mm<=0||!TrimSpan(c.trims,c.first,c.last,span))return false;
+    if(span==0)return true;double a=0,b=0,speed=0,scaled=0;
+    if(!TrimL1(c.a,a)||(c.circle&&!TrimL1(c.b,b))||!TrimUpperAdd(a,b,speed)||speed<=0
+        ||!TrimUpperMultiply(speed,mm,scaled)||!TrimUpperMultiply(span,scaled,out))return false;return true;
+}
+inline bool PCurveTrimCharge(const PCurve& pc,const Surface& s,double mm,double& out){
+    out=0;double span=0;if(!std::isfinite(mm)||mm<=0||!TrimSpan(pc.trims,pc.first,pc.last,span))return false;
+    if(span==0)return true;double x=0,y=0,z=0,speed=0,scaled=0;
+    if(!TrimL1(s.x,x)||!TrimL1(s.y,y)||!TrimL1(s.z,z))return false;
+    if(s.cylinder){
+        if(pc.circle)return false;double radial=0,u=0,v=0;
+        if(!TrimUpperAdd(x,y,radial)||!TrimUpperMultiply(radial,std::abs(pc.a.X()),u)
+            ||!TrimUpperMultiply(z,std::abs(pc.a.Y()),v)||!TrimUpperAdd(u,v,speed))return false;
+    }else{
+        double ux=0,vy=0,a=0,b=0;
+        if(!TrimUpperMultiply(x,std::abs(pc.a.X()),ux)||!TrimUpperMultiply(y,std::abs(pc.a.Y()),vy)||!TrimUpperAdd(ux,vy,a))return false;
+        if(pc.circle&&(!TrimUpperMultiply(x,std::abs(pc.b.X()),ux)||!TrimUpperMultiply(y,std::abs(pc.b.Y()),vy)||!TrimUpperAdd(ux,vy,b)))return false;
+        if(!TrimUpperAdd(a,b,speed))return false;
+    }
+    return speed>0&&TrimUpperMultiply(speed,mm,scaled)&&TrimUpperMultiply(span,scaled,out);
+}
+inline bool TrimResidualWithin(const Curve& c,const PCurve& pc,const Surface& s,double mm,double residualMM,double error){
+    if(!std::isfinite(residualMM)||residualMM<0||!std::isfinite(error)||error<0)return false;
+    double curve=0,pcurve=0,total=0;
+    return CurveTrimCharge(c,mm,curve)&&PCurveTrimCharge(pc,s,mm,pcurve)
+        &&TrimUpperAdd(residualMM,curve,total)&&TrimUpperAdd(total,pcurve,total)&&total<=error;
+}
 inline bool ReadCurve(const TopoDS_Edge& edge,double mm,Inspection& r,Curve& out){
     TopLoc_Location loc;double first=0,last=0;auto curve=BRep_Tool::Curve(edge,loc,first,last);
     if(!ENC483_CHECK(Range(first,last),"curve-range",first,last,0,0)||!ENC483_CHECK(Location(loc,r),"curve-location",0,0,0,0))return false;
-    Handle(Geom_Line) line;Handle(Geom_Circle) circle;
+    Curve c;Handle(Geom_Line) line;Handle(Geom_Circle) circle;
     for(unsigned n=0;n<MaximumWrappers&&!curve.IsNull();++n){
         line=Handle(Geom_Line)::DownCast(curve);circle=Handle(Geom_Circle)::DownCast(curve);if(!line.IsNull()||!circle.IsNull())break;
         const auto trim=Handle(Geom_TrimmedCurve)::DownCast(curve);
-        if(trim.IsNull()||first<trim->FirstParameter()||last>trim->LastParameter())return false;curve=trim->BasisCurve();
+        if(trim.IsNull()||!RetainTrim(c.trims,first,last,trim->FirstParameter(),trim->LastParameter()))return false;curve=trim->BasisCurve();
     }
-    Curve c;c.location=loc;c.first=first;c.last=last;
+    c.location=loc;c.first=first;c.last=last;
     if(!line.IsNull()){const auto l=line->Lin();c.c=V(l.Location());c.a=gp_Vec(l.Direction());}
     else if(!circle.IsNull()){
         if(std::max(std::abs(first),std::abs(last))>32*std::acos(-1.0)||last-first>std::acos(-1.0))return false;
@@ -207,7 +280,7 @@ inline bool ReadPCurve(const TopoDS_Edge& edge,const Surface& surface,const Curv
         const auto line=Handle(Geom2d_Line)::DownCast(curve);const auto circle=Handle(Geom2d_Circle)::DownCast(curve);
         if(!line.IsNull()){const auto x=line->Lin2d();pc.c=x.Location();pc.a=gp_Vec2d(x.Direction());out=pc;return true;}
         if(!circle.IsNull()){const auto x=circle->Circ2d();pc.circle=true;pc.c=x.Location();pc.a=gp_Vec2d(x.Position().XDirection())*x.Radius();pc.b=gp_Vec2d(x.Position().YDirection())*x.Radius();out=pc;return true;}
-        const auto trim=Handle(Geom2d_TrimmedCurve)::DownCast(curve);if(trim.IsNull()||f<trim->FirstParameter()||l>trim->LastParameter())return false;curve=trim->BasisCurve();
+        const auto trim=Handle(Geom2d_TrimmedCurve)::DownCast(curve);if(trim.IsNull()||!RetainTrim(pc.trims,f,l,trim->FirstParameter(),trim->LastParameter()))return false;curve=trim->BasisCurve();
     }return false;
 }
 inline gp_Vec Evaluate(const Curve& c,double t){return c.circle?c.c+c.a*std::cos(t)+c.b*std::sin(t):c.c+c.a*t;}
@@ -253,14 +326,22 @@ inline bool PCurveIdentity(const Curve& c,const PCurve& pc,const Surface& s,doub
         if(c.circle){
             const double rate=pc.a.X(),sign=rate<0?-1:1;if(std::abs(rate)<.5)return false;
             composed.c=s.c+s.z*pc.c.Y();composed.a=radial;composed.b=(s.x*(-std::sin(phase))+s.y*std::cos(phase))*sign;
-            drift=(Norm(s.x)+Norm(s.y))*std::abs(rate-sign)*extent+Norm(s.z)*std::abs(pc.a.Y())*extent;
+            double radialSpeed=0,u=0,v=0;
+            if(!TrimUpperAdd(Norm(s.x),Norm(s.y),radialSpeed)
+                ||!TrimUpperProduct3(radialSpeed,std::abs(rate-sign),extent,u)
+                ||!TrimUpperProduct3(Norm(s.z),std::abs(pc.a.Y()),extent,v)||!TrimUpperAdd(u,v,drift))return false;
         }else{
             composed.c=s.c+radial+s.z*pc.c.Y();composed.a=s.z*pc.a.Y();
-            drift=(Norm(s.x)+Norm(s.y))*std::abs(pc.a.X())*extent;
+            double radialSpeed=0;if(!TrimUpperAdd(Norm(s.x),Norm(s.y),radialSpeed)
+                ||!TrimUpperProduct3(radialSpeed,std::abs(pc.a.X()),extent,drift))return false;
         }
     }
-    const double residual=Norm(composed.c-c.c)+(c.circle?Norm(composed.a-c.a)+Norm(composed.b-c.b):extent*Norm(composed.a-c.a))+drift;
-    return ENC483_CHECK(std::isfinite(residual*mm)&&residual*mm<=error,"pcurve-coefficient-residual",residual*mm,error,drift*mm,extent);
+    double coefficient=0,residual=0,residualMM=0;
+    if(c.circle){if(!TrimUpperAdd(Norm(composed.a-c.a),Norm(composed.b-c.b),coefficient))return false;}
+    else if(!TrimUpperMultiply(extent,Norm(composed.a-c.a),coefficient))return false;
+    if(!TrimUpperAdd(Norm(composed.c-c.c),coefficient,residual)||!TrimUpperAdd(residual,drift,residual)
+        ||!TrimUpperMultiply(residual,mm,residualMM))return false;
+    return ENC483_CHECK(TrimResidualWithin(c,pc,s,mm,residualMM,error),"pcurve-coefficient-and-trim-residual",residualMM,error,drift*mm,extent);
 }
 struct Use {TopoDS_Edge edge;Curve curve;PCurve pc;TopoDS_Vertex a,b;};
 struct Face {TopoDS_Face face;Surface surface;std::vector<std::vector<Use>> wires;};

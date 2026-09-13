@@ -436,6 +436,8 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugEnclosureCorrespondencePro
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe(Standard_Integer scenario);
 //! DEBUG observer/whole-result fixtures only; no source-edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard_Integer scenario);
+//! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }

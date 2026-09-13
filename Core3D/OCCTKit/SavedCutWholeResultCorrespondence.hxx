@@ -77,8 +77,10 @@ inline bool FullPlanarCircleIdentity(const d::Curve& c,const d::PCurve& pc,const
         const double radius=std::hypot(a,b);if(!std::isfinite(radius)||center-radius<box[axis*2]||center+radius>box[axis*2+1])return false;
     }
     const auto center=s.c+s.x*pc.c.X()+s.y*pc.c.Y(),a=s.x*pc.a.X()+s.y*pc.a.Y(),b=s.x*pc.b.X()+s.y*pc.b.Y();
-    const double residual=(d::Norm(center-c.c)+d::Norm(a-c.a)+d::Norm(b-c.b))*mm;
-    return std::isfinite(residual)&&residual<=error;
+    double ab=0,residual=0,residualMM=0;
+    if(!d::TrimUpperAdd(d::Norm(a-c.a),d::Norm(b-c.b),ab)||!d::TrimUpperAdd(d::Norm(center-c.c),ab,residual)
+        ||!d::TrimUpperMultiply(residual,mm,residualMM))return false;
+    return d::TrimResidualWithin(c,pc,s,mm,residualMM,error);
 }
 inline bool OriginalCurve(const d::Curve& c,const enclosure_correspondence::ExpectedEdge& e,const Expected& expected,bool forward,double mm,double error){
     if(c.circle!=e.circle)return false;

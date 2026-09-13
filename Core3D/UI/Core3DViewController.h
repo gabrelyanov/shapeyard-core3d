@@ -1926,6 +1926,9 @@ __attribute__((objc_subclassing_restricted))
 //! Read-only detached observer/whole-result native probes.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutResultCorrespondenceProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutResultCorrespondenceProbe(_:));
+//! Detached DEBUG trim-domain qualification only.
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedCutTrimDomainProbe
+    NS_SWIFT_NAME(debugSavedCutTrimDomainProbe());
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugScalableReceiptSnapshot NS_SWIFT_NAME(debugScalableReceiptSnapshot());
 - (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario NS_SWIFT_NAME(debugScalableReceiptProbe(_:));
