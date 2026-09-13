@@ -213,6 +213,37 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! Axis and centre are original object-local coordinates, in document units.
+//! Radius is physical world millimetres; only positive uniform occurrence scale is supported.
+typedef NS_ENUM(NSInteger, Core3DCylindricalCutAxis) { Core3DCylindricalCutAxisX=0,Core3DCylindricalCutAxisY=1,Core3DCylindricalCutAxisZ=2 };
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutDefinition : NSObject
+@property(nonatomic,readonly) Core3DCylindricalCutAxis axis;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double worldRadiusMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z worldRadiusMM:(double)radius;
+@end
+//! Native-issued source identity is not reconstructible from serialized fields.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSString *definitionIdentifier;
+@property(nonatomic,readonly) BOOL rebuilding;
+@property(nonatomic,readonly) double worldRadiusMM; // zero until first creation
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutOperation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (BOOL)cancel;
+@end
+
 //! Native-issued, main-owned selected rectangular-loft snapshot. Wire fields cannot recreate it.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DStoredRectangularLoftSnapshot : NSObject
@@ -1272,6 +1303,16 @@ __attribute__((objc_subclassing_restricted))
     definition:(Core3DSweepDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildStoredSweep(_:definition:expected:completion:));
+- (nullable Core3DCylindricalCutSnapshot *)cylindricalCutSourceWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(cylindricalCutSource(entityIdentifier:expected:));
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCut:(Core3DCylindricalCutSnapshot *)original
+    definition:(Core3DCylindricalCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCut(_:definition:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutRadius:(Core3DCylindricalCutSnapshot *)original
+    worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutRadius(_:worldRadiusMM:expected:completion:));
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));
 - (void)rebuildStoredRectangularLoft:(Core3DStoredRectangularLoftSnapshot *)original
@@ -1512,6 +1553,9 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(cancelRigidPlacement(_:));
 #if DEBUG
 //! Component evidence only; no native verified receipt or retry permission.
+- (nullable NSDictionary<NSString *,id> *)debugCylindricalCutEvidence:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutEvidence(_:));
++ (NSDictionary<NSString *,NSNumber *> *)debugCylindricalCutSimilarityProbe;
+- (NSDictionary<NSString *,NSNumber *> *)debugCutSceneGuardMutation:(NSInteger)mode target:(NSString *)target sibling:(NSString *)sibling;
 - (nullable NSDictionary *)debugRigidPlacementEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugRigidPlacementEvidence(_:));
 - (nullable NSDictionary *)debugRigidPlacementAdmissionProbe
@@ -1867,6 +1911,8 @@ __attribute__((objc_subclassing_restricted))
 //! Actual isolated OCCT reader/writer framing fixtures, not receipt execution.
 + (NSDictionary<NSString *, NSNumber *> *)debugReceiptFramingProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugReceiptFramingProbe(_:));
++ (NSDictionary<NSString *, NSNumber *> *)debugRetainedSolidProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugRetainedSolidProbe(_:));
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugScalableReceiptSnapshot NS_SWIFT_NAME(debugScalableReceiptSnapshot());
 - (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario NS_SWIFT_NAME(debugScalableReceiptProbe(_:));

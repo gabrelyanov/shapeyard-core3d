@@ -53,7 +53,7 @@ class EvidenceReader final {
         OcctObjectNameState named;
         if(!owner->CaptureObjectNameStateForLabel(label,named))return false;
         const auto& s=named.object;Evidence e;
-        if(s.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+        if(s.retained.value || s.resolvedRepresentation!=OcctGeometryRepresentation::BRep
             ||!receipt::ParseUUID(owner->DocumentIdentifier(),e.document)
             ||!receipt::ParseUUID(s.entityIdentifier,e.entity)
             ||!receipt::ParseUUID(s.definitionIdentifier,e.definition))return false;

@@ -51,6 +51,12 @@
 #include "Core3DBoundedAuthoredFrameDriver.hxx"
 #include "ReceiptFramedTraversal.hxx"
 #include "ReceiptCatalogBinaryDriver.hxx"
+#include "RetainedSolidBinaryDriver.hxx"
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <Precision.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #if DEBUG
 #include "ReceiptFramingProbe.hxx"
 #endif
@@ -1456,8 +1462,20 @@ public:
                 try {
                     // Base Read must use precisely the validated assigned table.
                     myDrivers = aSupportedDrivers;
+                    auto retainedRole=core3d::retained_solid::Assigned(myDrivers);
+                    Standard_GUID retainedID=core3d::retained_solid::AttributeID();
+#if DEBUG
+                    if(myRetainedRoleFault==1)retainedRole.Nullify();
+                    if(myRetainedRoleFault==2&&!retainedRole.IsNull()){
+                        Handle(BinMDF_ADriver) nativeShapes;myDrivers->GetDriver(STANDARD_TYPE(TNaming_NamedShape),nativeShapes);
+                        retainedRole=new core3d::retained_solid::BinaryDriver(Message::DefaultMessenger(),
+                            Handle(BinMNaming_NamedShapeDriver)::DownCast(nativeShapes),myRetainedBudget,RejectSafeBinaryRead);
+                    }
+                    if(myRetainedRoleFault==3)retainedID=Standard_GUID("EFE0D323-2207-4EA5-AEBC-90FCC8924351");
+#endif
                     myReceiptTraversal = std::make_unique<core3d::persistence::receipt_framing::Traversal>(
-                        myDrivers, receiptType, myReceiptFrameDriver, myReceiptLimits, RejectSafeBinaryRead);
+                        myDrivers, receiptType, myReceiptFrameDriver, myReceiptLimits, RejectSafeBinaryRead,
+                        retainedRole,retainedID);
                 } catch (...) { budget.refuse(); rejectTypes(); return; }
             }
         }
@@ -1478,6 +1496,9 @@ public:
                 if(core3d::receipt::Read(Handle(TDocStd_Document)::DownCast(theDocument),catalog)
                    !=core3d::receipt::ReadStatus::Valid||!catalog.tree)rejectTypes();
             }
+            if(myReaderStatus==PCDM_RS_OK&&myRetainedBudget
+                &&(myRetainedBudget->rejected||(myRetainedBudget->records&&!Core3DValidateRetainedSolidDocument(
+                    Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
             if (myValidateFrameOwners && myReaderStatus == PCDM_RS_OK) {
                 Standard_Size frameBytes = 0;
                 if (gSafeBinaryReadRejected || !Core3DValidateAuthoredFrameOwners(
@@ -1489,6 +1510,12 @@ public:
         }
         ResetAggregateReadBudgets();
     }
+
+#if DEBUG
+    void DebugRejectRetainedSolidType(){myAllowRetainedSolid=false;}
+    void DebugSetRetainedRoleFault(int fault){myRetainedRoleFault=fault;}
+    void DebugSetRetainedEnvelopeLimit(std::size_t limit){myRetainedBudget->limit=std::min(limit,core3d::retained_solid::MaximumAggregateEnvelopeBytes);}
+#endif
 
     Handle(BinMDF_ADriverTable) AttributeDrivers(
         const Handle(Message_Messenger)& theMessageDriver) override
@@ -1543,6 +1570,7 @@ public:
                 BinMXCAFDoc_VisMaterialToolDriver>(theMessageDriver));
         aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
             theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
+        if (myAllowRetainedSolid) core3d::retained_solid::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
         if (!myReceiptFrameDriver.IsNull()) aTable->AddDriver(myReceiptFrameDriver);
         return aTable;
     }
@@ -1569,6 +1597,7 @@ private:
     void ResetAggregateReadBudgets() noexcept
     {
         if (myFrameBudget) { myFrameBudget->bytes = 0; myFrameBudget->rejected = false; }
+        if (myRetainedBudget) myRetainedBudget->reset();
         if (myAggregateTextureBytes != nullptr) {
             *myAggregateTextureBytes = 0;
         }
@@ -1581,6 +1610,11 @@ private:
     core3d::persistence::receipt_framing::TraversalLimits myReceiptLimits;
     std::unique_ptr<core3d::persistence::receipt_framing::Traversal> myReceiptTraversal;
     bool myReceiptLoadActive = false;
+    std::shared_ptr<core3d::retained_solid::ReadBudget> myRetainedBudget=std::make_shared<core3d::retained_solid::ReadBudget>();
+    bool myAllowRetainedSolid=true;
+#if DEBUG
+    int myRetainedRoleFault=0;
+#endif
 };
 
 // These GUIDs are persistent schema identifiers. They identify the attribute
@@ -3225,13 +3259,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<BinDrivers_DocumentStorageDriver>());
+        new core3d::receipt::v3::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>());
+        new core3d::receipt::v3::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>());
 }
 
 #if DEBUG
@@ -3681,7 +3715,8 @@ Standard_Boolean ValidateGeometryDocument(
         std::vector<core3d::enclosure::Record> enclosures;
         std::vector<core3d::sweep_persistence::Record> sweeps;
         std::vector<core3d::loft_persistence::Record> lofts;
-        if (!core3d::saved_features::Validate(document, profiles, enclosures, sweeps, lofts)) return Standard_False;
+        std::vector<core3d::retained_solid::Record> retained;
+        if (!core3d::saved_features::Validate(document, profiles, enclosures, sweeps, lofts,&retained)) return Standard_False;
         const TDF_Label aRoot = document->GetData()->Root();
         Handle(TDataStd_Integer) aRootMarker;
         Handle(TNaming_NamedShape) aRootShape;
@@ -3770,6 +3805,21 @@ Standard_Boolean ValidateGeometryDocument(
             if (!enclosure.boundShape.IsEqual(XCAFDoc_ShapeTool::GetShape(enclosure.label.Father()))
                 && ClassifyDefinitionGeometry(enclosure.boundShape, &aBudget) != DefinitionGeometryClass::BRep)
                 return Standard_False;
+        }
+
+        // Charge EACH retained reference just as each current definition is
+        // charged. Shared codec identity does not waive an occurrence's budget.
+        for(const auto& record:retained){
+            const auto& base=record.value->base;
+            if(ClassifyDefinitionGeometry(base,&aBudget)!=DefinitionGeometryClass::BRep
+                ||!BRepCheck_Analyzer(base,Standard_True).IsValid())return Standard_False;
+            unsigned shells=0;for(TopExp_Explorer shell(base,TopAbs_SHELL);shell.More();shell.Next()){
+                ++shells;if(!BRep_Tool::IsClosed(shell.Current()))return Standard_False;
+            }
+            if(!shells)return Standard_False;
+            BRepClass3d_SolidClassifier classifier(base);classifier.PerformInfinitePoint(Precision::Confusion());
+            GProp_GProps volume;BRepGProp::VolumeProperties(base,volume,Standard_True,Standard_False,Standard_False);
+            if(classifier.State()!=TopAbs_OUT||!std::isfinite(volume.Mass())||volume.Mass()<=0)return Standard_False;
         }
 
         Standard_Size aDefinitionCount = 0;
@@ -4017,7 +4067,7 @@ Standard_Boolean ValidateGeometryDocument(
             usage.labels = aLabelCount;
             usage.graphVisits = anAggregateGraphVisitCount;
             usage.leafOccurrences = aLeafOccurrenceCount;
-            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size());
+            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size() + 2*retained.size());
             *output = usage;
         }
         return Standard_True;
@@ -4027,6 +4077,10 @@ Standard_Boolean ValidateGeometryDocument(
 }
 
 } // namespace
+
+Standard_Boolean Core3DValidateRetainedSolidDocument(const Handle(TDocStd_Document)& document){
+    return ValidateGeometryDocument(document,nullptr);
+}
 
 Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
     const Handle(TDocStd_Document)& document) const
@@ -4069,6 +4123,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
 }
 
 Standard_Boolean OcctDocument::HasNoSavedSweepForTopology(const TDF_Label& label) const noexcept {
+    if(core3d::retained_solid::HasRecord(label))return Standard_False;
     core3d::sweep_persistence::Record record;
     core3d::loft_persistence::Record loft;
     return core3d::sweep_persistence::Read(myOcafDoc,label,record) && record.label.IsNull()
@@ -5884,6 +5939,107 @@ Standard_Boolean OcctDocument::ReplaceShape(
 }
 
 
+Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
+    const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept {
+    output={};if(!NSThread.isMainThread)return Standard_False;
+    try {
+        OcctCylindricalCutSource result;OcctScalarAppearanceState appearance;
+        if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
+            ||!CaptureObjectTransformStateForLabel(label,result.original)
+            ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            ||result.original.authoredFramesPresent||result.original.meshUVAtlasVersion
+            ||result.original.shape.ShapeType()!=TopAbs_SOLID
+            ||result.original.shape.Orientation()!=TopAbs_FORWARD
+            ||!CaptureScalarAppearanceForSavedCut(label,appearance))return Standard_False;
+        const auto& state=result.original;double unit=0,scale=0;
+        if(!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc,unit)
+            ||!core3d::cylindrical_cut::EffectiveMM(state.transform,unit,scale,result.effectiveMM))return Standard_False;
+        auto& e=result.envelope;
+        const unsigned families=unsigned(!state.profile.label.IsNull())+unsigned(!state.enclosure.label.IsNull())
+            +unsigned(!state.sweep.label.IsNull())+unsigned(!state.loft.label.IsNull())+unsigned(bool(state.retained.value));
+        if(families!=1)return Standard_False;
+        TDF_Label metadata;
+        if(state.retained.value){
+            e=state.retained.value->envelope;result.base=state.retained.value->base;
+            result.rebuilding=true;metadata=state.retained.label;
+        }else{
+            e.metersPerUnit=unit;
+            if(!core3d::retained_solid::ReadUUID(myOcafDoc->Main(),DocumentIdentifierAttributeID(),e.document)
+                ||!core3d::retained_solid::ReadUUID(label,EntityIdentifierAttributeID(),e.entity)
+                ||!core3d::retained_solid::ReadUUID(label,DefinitionIdentifierAttributeID(),e.definition))return Standard_False;
+            std::string identifier;
+            if(!state.profile.label.IsNull()){
+                if(!state.profile.IsCurrent(myOcafDoc,label))return Standard_False;
+                e.sourceFamily=1;e.sourceSchema=core3d::profile::SchemaFor(state.profile.parameters);
+                e.sourceValues=state.profile.values;metadata=state.profile.label;identifier=state.profile.identifier;
+            }else if(!state.enclosure.label.IsNull()){
+                if(!state.enclosure.IsCurrent(myOcafDoc,label))return Standard_False;
+                e.sourceFamily=2;e.sourceSchema=state.enclosure.parameters.definition.constructionFrame?2:1;
+                e.sourceValues=state.enclosure.values;metadata=state.enclosure.label;identifier=state.enclosure.identifier;
+            }else return Standard_False;
+            if(!core3d::receipt::ParseUUID(identifier,e.sourceFeature))return Standard_False;
+            result.base=state.shape;
+        }
+        if(core3d::retained_solid::Bits(e.metersPerUnit)!=core3d::retained_solid::Bits(unit)
+            ||result.base.IsNull()||result.base.ShapeType()!=TopAbs_SOLID)return Standard_False;
+        TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
+        if(children.Length()>core3d::profile::MaximumLabels)return Standard_False;
+        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(metadata))return Standard_False;
+        output=std::move(result);return Standard_True;
+    }catch(...){output={};return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
+    const OcctObjectTransformState& previous,const TopoDS_Shape& candidate,
+    const std::shared_ptr<const core3d::retained_solid::Payload>& payload,bool debugFailAfterShape)noexcept {
+    if(!NSThread.isMainThread)return Standard_False;
+    try {
+        namespace r=core3d::retained_solid;OcctCylindricalCutSource source;std::vector<std::uint8_t> bytes;
+        if(myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()||!payload
+            ||!CaptureCylindricalCutSource(previous.label,source)||!source.original.IsEqual(previous)
+            ||!core3d::sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)
+            ||!payload->base.IsEqual(source.base)||!r::Encode(payload->envelope,bytes)||bytes!=payload->bytes
+            ||candidate.IsNull()||candidate.ShapeType()!=TopAbs_SOLID||candidate.Orientation()!=TopAbs_FORWARD
+            ||ClassifyDefinitionGeometry(candidate,nullptr)!=DefinitionGeometryClass::BRep)return Standard_False;
+        auto expected=source.envelope;
+        if(source.rebuilding){
+            if(!core3d::cylindrical_cut::SameFixedEnvelope(expected,payload->envelope))return Standard_False;
+        }else{
+            expected.derivedFeature=payload->envelope.derivedFeature;expected.operandID=payload->envelope.operandID;
+            expected.axis=payload->envelope.axis;expected.point=payload->envelope.point;expected.radius=payload->envelope.radius;
+            std::vector<std::uint8_t> actual;if(!r::Encode(expected,actual)||actual!=payload->bytes)return Standard_False;
+        }
+        OcctScalarAppearanceState appearance;if(!CaptureScalarAppearanceForSavedCut(previous.label,appearance))return Standard_False;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());if(shapes.IsNull())return Standard_False;
+        const auto metadata=source.rebuilding?previous.retained.label:
+            !previous.profile.label.IsNull()?previous.profile.label:previous.enclosure.label;
+        if(metadata.IsNull()||metadata.Tag()<r::MinimumRecordTag)return Standard_False;
+        // Single ordinary-owned command: preserve original occurrence scalars,
+        // material/name/identity labels and pair owner result with the carrier.
+        shapes->SetShape(previous.label,candidate);
+#if DEBUG
+        if(debugFailAfterShape)throw Standard_Failure("Cylindrical cut paired-write fault");
+#else
+        (void)debugFailAfterShape;
+#endif
+        if(!source.rebuilding)metadata.ForgetAllAttributes(Standard_True);
+        TNaming_Builder(metadata).Select(candidate,candidate);
+        Handle(r::Attribute) attribute;
+        if(!metadata.FindAttribute(r::AttributeID(),attribute)){attribute=new r::Attribute();metadata.AddAttribute(attribute);}
+        attribute->Backup();attribute->value_=payload;
+        OcctObjectTransformState stored;OcctScalarAppearanceState after;
+        if(!CaptureObjectTransformStateForLabel(previous.label,stored)||!stored.shape.IsEqual(candidate)
+            ||!stored.retained.value||stored.retained.value->bytes!=payload->bytes
+            ||!stored.retained.value->base.IsEqual(payload->base)||!stored.profile.label.IsNull()||!stored.enclosure.label.IsNull()
+            ||stored.entityIdentifier!=previous.entityIdentifier||stored.definitionIdentifier!=previous.definitionIdentifier
+            ||stored.present!=previous.present||!core3d::sweep_rebuild::SameRawScalars(stored.scalars,previous.scalars)
+            ||!CaptureScalarAppearanceForSavedCut(previous.label,after)||!appearance.IsEqual(after)
+            ||!core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues)
+            ||!ValidateGeometryRepresentations())return Standard_False;
+        return Standard_True;
+    }catch(...){return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::StageSavedSweepReplacement(
     const OcctObjectTransformState& previous, const TopoDS_Shape& candidate,
     const core3d::planar_sweep::Definition& definition, bool debugFailAfterShape) noexcept {
@@ -6459,6 +6615,203 @@ bool OcctDocument::PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScal
     if(myOcafDoc.IsNull()||!expected||expected->data!=myOcafDoc->GetData())return false;
     const auto i=expected->roots.find(expected->target);if(i==expected->roots.end())return false;
     const auto live=CapturePBRScalarState(i->second.object.object.object.label);return live&&live->equals(*expected);
+}
+
+// This guard deliberately does not change the scalar/sweep capture contract.
+namespace {
+struct CutRootEvidence {
+    OcctAuthoredFrameRecord frames;
+    OcctAuthoredFrameReadState frameState=OcctAuthoredFrameReadState::Invalid;
+    PBRDigest retainedBase{};
+    PBRBytes retainedEnvelope,stableRaw;
+    bool equals(const CutRootEvidence& b)const noexcept {
+        return frameState==b.frameState&&frames.archive==b.frames.archive&&frames.identity==b.frames.identity
+            &&frames.cornerCount==b.frames.cornerCount&&frames.nativeBytes==b.frames.nativeBytes
+            &&retainedBase==b.retainedBase&&retainedEnvelope==b.retainedEnvelope&&stableRaw==b.stableRaw;
+    }
+};
+// Only the selected result shape and its old/new feature slots may differ.
+// Raw scalars/axis, appearance, frame/atlas, presence, name and visibility stay exact.
+bool CutStableRootEqual(const PBRRootEntry& a,const PBRRootEntry& b) {
+    auto left=a.object,right=b.object;
+    auto& x=left.object.object;auto& y=right.object.object;
+    x.shape=y.shape;x.profile=y.profile;x.enclosure=y.enclosure;x.retained=y.retained;
+    return left.IsEqual(right)&&a.object.object.object.sweep.IsEqual(b.object.object.object.sweep)
+        &&a.object.object.object.loft.IsEqual(b.object.object.object.loft);
+}
+}
+struct OcctSavedCutSceneState {
+    std::shared_ptr<const OcctPBRScalarState> scene;
+    std::map<std::string,CutRootEvidence> roots;
+    std::map<std::string,PBRBytes> layers,layerGraph;
+    bool equals(const OcctSavedCutSceneState& b)const noexcept {
+        if(!scene||!b.scene||!scene->equals(*b.scene)||layers!=b.layers||layerGraph!=b.layerGraph||roots.size()!=b.roots.size())return false;
+        for(const auto& [k,v]:roots){auto i=b.roots.find(k);if(i==b.roots.end()||!v.equals(i->second))return false;}return true;
+    }
+};
+std::shared_ptr<const OcctSavedCutSceneState> OcctDocument::CaptureSavedCutSceneState(const TDF_Label& target) const noexcept {
+    if(![NSThread isMainThread])return {};
+    try {
+        if(!ValidateGeometryRepresentations())return {};
+        OcctScalarAppearanceState selected;if(!CaptureScalarAppearanceForSavedCut(target,selected))return {};
+        auto captured=std::make_shared<OcctSavedCutSceneState>();captured->scene=CapturePBRScalarState(target);
+        if(!captured->scene)return {};const auto& scene=*captured->scene;
+        Standard_Size frameBytes=0;if(!Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes))return {};
+        // Source + candidate each retain at most 64 MiB frame archives. Kernel,
+        // renderer and map buffers are not part of this retained-vector bound.
+        std::size_t geometry=0,archives=0;
+        for(const auto& [key,entry]:scene.roots) {
+            const auto& object=entry.object.object.object;CutRootEvidence e;
+            e.frameState=Core3DReadAuthoredFrameOwner(myOcafDoc,object.label,e.frames);
+            if(e.frameState==OcctAuthoredFrameReadState::Invalid||e.frames.archive.size()>64U*1024U*1024U-archives)return {};
+            archives+=e.frames.archive.size();
+            // Re-charge current and retained base streams together. The first
+            // existing PBR capture has its own transient counter but owns no streams.
+            PBRGeometryStream current(geometry);std::ostream currentOut(&current);currentOut.imbue(std::locale::classic());
+            BRepTools::Write(object.shape,currentOut,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
+            PBRDigest currentDigest{};if(!currentOut.good()||!current.finish(currentDigest)||currentDigest!=entry.geometry)return {};
+            if(object.retained.value){
+                e.retainedEnvelope=object.retained.value->bytes;PBRGeometryStream stream(geometry);std::ostream out(&stream);out.imbue(std::locale::classic());
+                BRepTools::Write(object.retained.value->base,out,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
+                if(!out.good()||!stream.finish(e.retainedBase))return {};
+            }
+            PBRWriter stable;for(double x:object.scalars)stable.scalar(x);
+            OcctReferenceAxis axis;const auto axisState=ReadReferenceAxisForLabel(object.label,axis);if(axisState==OcctReferenceAxisReadState::Invalid)return {};
+            stable.integer(static_cast<unsigned>(axisState));stable.integer(static_cast<unsigned>(axis.pivotSpace));stable.integer(static_cast<unsigned>(axis.directionSpace));
+            for(int n=1;n<=3;++n){stable.scalar(axis.pivot.Coord(n));stable.scalar(axis.direction.Coord(n));}
+            e.stableRaw=std::move(stable.bytes);captured->roots.emplace(key,std::move(e));
+        }
+        // Whole-object embedded materials only. Per-face/imported ColorTool
+        // styling is not silently omitted from a purported full-scene proof.
+        for(const auto& [endpoint,material]:scene.links)if(!scene.roots.contains(endpoint))return {};
+        TDF_LabelSequence colors;
+        if(XCAFDoc_DocumentTool::CheckColorTool(myOcafDoc->Main()))XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main())->GetColors(colors);
+        if(!colors.IsEmpty())return {}; // Unbound imported color table state is also unsupported.
+        TDF_LabelSequence layerLabels;
+        if(XCAFDoc_DocumentTool::CheckLayerTool(myOcafDoc->Main()))XCAFDoc_DocumentTool::LayerTool(myOcafDoc->Main())->GetLayerLabels(layerLabels);
+        if(layerLabels.Length()>1024)return {};
+        for(int n=1;n<=layerLabels.Length();++n){const auto l=layerLabels.Value(n);PBRWriter w;
+            if(l.IsNull()||l.Data()!=scene.data)return {};
+            for(TDF_ChildIterator child(l,Standard_True);child.More();child.Next())if(child.Value().HasAttribute())return {};
+            for(TDF_AttributeIterator it(l);it.More();it.Next()){
+                const auto& id=it.Value()->ID();if(id!=TDataStd_Name::GetID()&&id!=XCAFDoc::InvisibleGUID()&&id!=XCAFDoc::LayerRefGUID())return {};
+            }
+            Handle(TDataStd_Name) name;if(!l.FindAttribute(TDataStd_Name::GetID(),name)||name.IsNull())return {};w.name(name->Get());
+            Handle(TDF_Attribute) invisible;const bool hidden=l.FindAttribute(XCAFDoc::InvisibleGUID(),invisible);
+            if(hidden&&Handle(TDataStd_UAttribute)::DownCast(invisible).IsNull())return {};w.integer(hidden);
+            if(!captured->layers.emplace(PBRLabelKey(l),std::move(w.bytes)).second)return {};
+        }
+        std::vector<TDF_Label> labels{myOcafDoc->GetData()->Root()};std::size_t graphEdges=0;
+        std::set<std::pair<std::string,std::string>> forward,reverse;
+        for(std::size_t n=0;n<labels.size();++n){const auto l=labels[n];const auto key=PBRLabelKey(l);
+            for(TDF_ChildIterator c(l,Standard_False);c.More();c.Next()){if(labels.size()>=kMaximumDocumentLabels)return {};labels.push_back(c.Value());}
+            for(auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})if(l.IsAttribute(XCAFDoc::ColorRefGUID(color)))return {};
+            if(l.IsAttribute(XCAFDoc::ColorByLayerGUID()))return {};
+            Handle(TDF_Attribute) attr;if(!l.FindAttribute(XCAFDoc::LayerRefGUID(),attr))continue;
+            const auto graph=Handle(XCAFDoc_GraphNode)::DownCast(attr);const bool layer=captured->layers.contains(key),root=scene.roots.contains(key);
+            if(graph.IsNull()||(!layer&&!root)||(layer&&graph->NbFathers()!=0)||(root&&graph->NbChildren()!=0)
+                ||graph->NbFathers()<0||graph->NbChildren()<0||graph->NbFathers()>1024||graph->NbChildren()>50000)return {};
+            PBRWriter w;w.integer(graph->NbFathers());w.integer(graph->NbChildren());
+            for(int i=1;i<=graph->NbFathers();++i){auto father=graph->GetFather(i);if(father.IsNull()||father->Label().IsNull()||father->Label().Data()!=scene.data)return {};
+                Handle(XCAFDoc_GraphNode) owned;if(!father->Label().FindAttribute(XCAFDoc::LayerRefGUID(),owned)||owned!=father)return {};const auto parent=PBRLabelKey(father->Label());
+                if(++graphEdges>kMaximumDocumentLabels||!captured->layers.contains(parent)||!forward.emplace(parent,key).second)return {};w.string(TCollection_AsciiString(parent.c_str()));}
+            for(int i=1;i<=graph->NbChildren();++i){auto child=graph->GetChild(i);if(child.IsNull()||child->Label().IsNull()||child->Label().Data()!=scene.data)return {};
+                Handle(XCAFDoc_GraphNode) owned;if(!child->Label().FindAttribute(XCAFDoc::LayerRefGUID(),owned)||owned!=child)return {};const auto endpoint=PBRLabelKey(child->Label());
+                if(++graphEdges>kMaximumDocumentLabels||!scene.roots.contains(endpoint)||!reverse.emplace(key,endpoint).second)return {};w.string(TCollection_AsciiString(endpoint.c_str()));}
+            captured->layerGraph.emplace(key,std::move(w.bytes));
+        }
+        if(forward!=reverse)return {};return captured;
+    }catch(...){return {};}
+}
+bool OcctDocument::SavedCutSceneStateMatches(const std::shared_ptr<const OcctSavedCutSceneState>& expected)const noexcept {
+    if(!expected||!expected->scene)return false;
+    const auto i=expected->scene->roots.find(expected->scene->target);if(i==expected->scene->roots.end())return false;
+    const auto actual=CaptureSavedCutSceneState(i->second.object.object.object.label);return actual&&actual->equals(*expected);
+}
+bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+    const TopoDS_Shape& result,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
+    std::shared_ptr<const OcctSavedCutSceneState>& candidate)const noexcept {
+    candidate.reset();if(!previous||!previous->scene||!payload||result.IsNull())return false;
+    try {
+        const auto& before=*previous->scene;const auto selected=before.roots.find(before.target);if(selected==before.roots.end())return false;
+        const auto after=CaptureSavedCutSceneState(selected->second.object.object.object.label);if(!after||!after->scene)return false;const auto& now=*after->scene;
+        if(before.data!=now.data||before.target!=now.target||std::memcmp(&before.metersPerUnit,&now.metersPerUnit,8)
+            ||before.materials!=now.materials||before.links!=now.links||before.objectMaterialAttributes!=now.objectMaterialAttributes
+            ||!before.groups.IsEqual(now.groups)||!before.receipts.matches(now.receipts)||before.roots.size()!=now.roots.size()
+            ||previous->layers!=after->layers||previous->layerGraph!=after->layerGraph)return false;
+        for(const auto& [key,old]:before.roots){auto at=now.roots.find(key);auto extra=after->roots.find(key);auto prior=previous->roots.find(key);
+            if(at==now.roots.end()||extra==after->roots.end()||prior==previous->roots.end())return false;
+            if(key!=before.target){if(!old.equals(at->second)||!prior->second.equals(extra->second))return false;continue;}
+            const auto& source=old.object.object.object;const auto& actual=at->second.object.object.object;
+            if(!actual.shape.IsEqual(result)||!actual.retained.value||actual.retained.value->bytes!=payload->bytes
+                ||!actual.retained.value->base.IsEqual(payload->base)||!actual.profile.label.IsNull()||!actual.enclosure.label.IsNull()
+                ||!CutStableRootEqual(old,at->second)||prior->second.stableRaw!=extra->second.stableRaw
+                ||prior->second.frameState!=extra->second.frameState||prior->second.frames.archive!=extra->second.frames.archive)return false;
+            // StageCylindricalCutReplacement owns the exact recipe transition.
+            // This independently binds the archived source geometry, including
+            // mutable shared-TShape contents which handle equality cannot prove.
+            const auto expectedBase=source.retained.value?prior->second.retainedBase:old.geometry;
+            if(extra->second.retainedBase!=expectedBase||extra->second.retainedEnvelope!=payload->bytes)return false;
+        }
+        candidate=after;return true;
+    }catch(...){return false;}
+}
+
+namespace {
+bool CutPlacementRawEqual(const PBRBytes& original,const PBRBytes& candidate,
+    const OcctObjectTransformState& before,const OcctObjectTransformState& after) {
+    PBRWriter x,y;for(double value:before.scalars)x.scalar(value);for(double value:after.scalars)y.scalar(value);
+    if(x.bytes.size()!=64||y.bytes.size()!=64||original.size()<64||candidate.size()!=original.size()
+        ||!std::equal(x.bytes.begin(),x.bytes.end(),original.begin())
+        ||!std::equal(y.bytes.begin(),y.bytes.end(),candidate.begin()))return false;
+    return std::equal(original.begin()+64,original.end(),candidate.begin()+64);
+}
+bool CutPlacementStableRootEqual(const PBRRootEntry& before,const PBRRootEntry& after,const gp_Trsf& expected) {
+    auto left=before.object;const auto& right=after.object;
+    auto& x=left.object.object;const auto& y=right.object.object;
+    if(!x.retained.value||!y.retained.value||!x.retained.IsEqual(y.retained)||before.geometry!=after.geometry)return false;
+    const auto rotation=expected.GetRotation();
+    const std::array<double,8> values{{expected.TranslationPart().X(),expected.TranslationPart().Y(),expected.TranslationPart().Z(),
+        rotation.X(),rotation.Y(),rotation.Z(),rotation.W(),expected.ScaleFactor()}};
+    for(std::size_t i=0;i<values.size();++i)if(!y.present[i]||y.scalars[i]!=values[i])return false;
+    // CaptureObjectTransformStateForLabel derives y.transform from these
+    // actual persisted scalars using TryObjectTransformForLabel. Requiring the
+    // pre-serialization matrix bitwise here would incorrectly equate a
+    // quaternion encode/decode round trip with identity; the eight committed
+    // values above are the exact existing SaveObjectTransform contract.
+    if(!CutPlacementRawEqual(before.raw,after.raw,x,y))return false;
+    // Only these independently checked occurrence fields may differ. Shape,
+    // material, reference axis, recipe and retained metadata are not erased.
+    x.transform=y.transform;x.scalars=y.scalars;x.present=y.present;
+    return left.IsEqual(right);
+}
+}
+bool OcctDocument::SealSavedCutPlacementState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+    const gp_Trsf& expected,std::shared_ptr<const OcctSavedCutSceneState>& candidate)const noexcept {
+    candidate.reset();if(!previous||!previous->scene)return false;
+    try {
+        const auto& before=*previous->scene;const auto selected=before.roots.find(before.target);if(selected==before.roots.end())return false;
+        const auto after=CaptureSavedCutSceneState(selected->second.object.object.object.label);if(!after||!after->scene)return false;const auto& now=*after->scene;
+        if(before.data!=now.data||before.target!=now.target||std::memcmp(&before.metersPerUnit,&now.metersPerUnit,8)
+            ||before.materials!=now.materials||before.links!=now.links||before.objectMaterialAttributes!=now.objectMaterialAttributes
+            ||!before.groups.IsEqual(now.groups)||!before.receipts.matches(now.receipts)||before.roots.size()!=now.roots.size()
+            ||previous->layers!=after->layers||previous->layerGraph!=after->layerGraph)return false;
+        for(const auto& [key,old]:before.roots) {
+            auto at=now.roots.find(key);auto extra=after->roots.find(key);auto prior=previous->roots.find(key);
+            if(at==now.roots.end()||extra==after->roots.end()||prior==previous->roots.end())return false;
+            if(key!=before.target){if(!old.equals(at->second)||!prior->second.equals(extra->second))return false;continue;}
+            const auto& source=old.object.object.object;const auto& actual=at->second.object.object.object;
+            double beforeRadius=0,afterRadius=0;
+            if(!source.retained.value||!actual.retained.value
+                ||!core3d::cylindrical_cut::OccurrenceRadius(source.retained.value->envelope,source.transform,beforeRadius)
+                ||!core3d::cylindrical_cut::OccurrenceRadius(actual.retained.value->envelope,actual.transform,afterRadius)
+                ||!CutPlacementStableRootEqual(old,at->second,expected)
+                ||!CutPlacementRawEqual(prior->second.stableRaw,extra->second.stableRaw,source,actual))return false;
+            auto stable=prior->second;stable.stableRaw=extra->second.stableRaw;
+            if(!stable.equals(extra->second))return false; // exact base/envelope and complete frame archive
+        }
+        candidate=after;return true;
+    }catch(...){return false;}
 }
 
 std::shared_ptr<const OcctPBRScalarPreparation> OcctDocument::PreparePBRScalarPatch(
@@ -7218,6 +7571,83 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
     } catch (...) {output={};return Standard_False;}
 }
 
+// Cut-specific retained metadata admission. Existing sweep/loft guard stays exact.
+Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedCut(
+    const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {
+    output={};
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
+        // Subshape styling needs a deliberate triangle/material mapping. The
+        // first copy rejects these labels rather than flattening their styles.
+        core3d::profile::Record profile;core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc,label,profile)
+            || !core3d::enclosure::Read(myOcafDoc,label,enclosure)
+            || !core3d::sweep_persistence::Read(myOcafDoc,label,sweep)
+            || !core3d::loft_persistence::Read(myOcafDoc,label,loft)) return Standard_False;
+        core3d::retained_solid::Record retained;
+        if(!core3d::retained_solid::Read(myOcafDoc,label,retained))return Standard_False;
+        TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
+        if (children.Length()>core3d::profile::MaximumLabels) return Standard_False;
+        for (int i=1;i<=children.Length();++i) {
+            const auto child=children.Value(i);
+            if ((profile.label.IsNull() || !child.IsEqual(profile.label))
+                && (enclosure.label.IsNull() || !child.IsEqual(enclosure.label))
+                && (sweep.label.IsNull() || !child.IsEqual(sweep.label))
+                && (loft.label.IsNull() || !child.IsEqual(loft.label))
+                && (retained.label.IsNull() || !child.IsEqual(retained.label))) return Standard_False;
+        }
+        for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
+            if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
+        if (label.IsAttribute(NormalTextureRecipeAttributeID())
+            || label.IsAttribute(AutoPromotedEmissiveFactorAttributeID())) return Standard_False;
+        OcctScalarAppearanceState state;
+        for (int i=0;i<2;++i) {
+            const auto child=label.FindChild(11+i,Standard_False);
+            if (child.IsNull()) continue;
+            Handle(TDF_Attribute) attribute;
+            if (!child.FindAttribute(TDataStd_Integer::GetID(),attribute)) continue;
+            const auto integer=Handle(TDataStd_Integer)::DownCast(attribute);
+            if (integer.IsNull()) return Standard_False;
+            state.legacyPresent[i]=true;state.legacyValues[i]=integer->Get();
+        }
+        Handle(TDF_Attribute) marker;
+        if (label.FindAttribute(LocalPBRMaterialAttributeID(),marker)) {
+            const auto integer=Handle(TDataStd_Integer)::DownCast(marker);
+            if (integer.IsNull() || integer->Get()!=1) return Standard_False;
+            state.localPBR=true;
+        }
+        const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(label,state.materialLabel);
+        const auto material=XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if (linked != !material.IsNull() || linked != !state.materialLabel.IsNull()
+            || (state.localPBR && (material.IsNull() || !material->HasPbrMaterial()))) return Standard_False;
+        if (!material.IsNull()) {
+            if (state.materialLabel.Data()!=myOcafDoc->GetData() || material->IsEmpty()) return Standard_False;
+            const auto& p=material->PbrMaterial();const auto& c=material->CommonMaterial();
+            // Reject even disabled-model texture handles: the source state is
+            // captured completely and no payload aliases enter this contract.
+            if (!p.BaseColorTexture.IsNull() || !p.MetallicRoughnessTexture.IsNull()
+                || !p.NormalTexture.IsNull() || !p.OcclusionTexture.IsNull()
+                || !p.EmissiveTexture.IsNull() || !c.DiffuseTexture.IsNull()) return Standard_False;
+            auto& values=state.visualValues;
+            values={double(material->FaceCulling()),double(material->AlphaMode()),material->AlphaCutOff(),
+                double(p.IsDefined),double(c.IsDefined)};
+            const auto rgb=[&values](const Quantity_Color& color) {
+                values.push_back(color.Red());values.push_back(color.Green());values.push_back(color.Blue());
+            };
+            rgb(p.BaseColor.GetRGB());values.push_back(p.BaseColor.Alpha());
+            for (int i=0;i<3;++i) values.push_back(p.EmissiveFactor[i]);
+            values.push_back(p.Metallic);values.push_back(p.Roughness);values.push_back(p.RefractionIndex);
+            rgb(c.AmbientColor);rgb(c.DiffuseColor);rgb(c.SpecularColor);rgb(c.EmissiveColor);
+            values.push_back(c.Shininess);values.push_back(c.Transparency);
+            for (double value:values) if (!std::isfinite(value)) return Standard_False;
+        }
+        output=std::move(state);return Standard_True;
+    } catch (...) {output={};return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::CopyObjectAppearance(
     const TDF_Label& source,
     const TDF_Label& destination) {
@@ -7911,7 +8341,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && authoredFramesIdentity == other.authoredFramesIdentity
             && profile.IsEqual(other.profile)
             && enclosure.IsEqual(other.enclosure)
-            && sweep.IsEqual(other.sweep) && loft.IsEqual(other.loft)
+            && sweep.IsEqual(other.sweep) && loft.IsEqual(other.loft) && retained.IsEqual(other.retained)
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -7941,7 +8371,8 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         if (!core3d::profile::Read(myOcafDoc, label, captured.profile)
             || !core3d::enclosure::Read(myOcafDoc, label, captured.enclosure)
             || !core3d::sweep_persistence::Read(myOcafDoc, label, captured.sweep)
-            || !core3d::loft_persistence::Read(myOcafDoc, label, captured.loft)) return Standard_False;
+            || !core3d::loft_persistence::Read(myOcafDoc, label, captured.loft)
+            || !core3d::retained_solid::Read(myOcafDoc,label,captured.retained)) return Standard_False;
         OcctAuthoredFrameRecord frames;
         const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
         if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;
@@ -8339,3 +8770,10 @@ void OcctDocument::NotifyChanges() {
      postNotificationName:@"OcctDocumentChanges"
      object:[NSValue valueWithPointer:this]];
 }
+
+#if DEBUG
+#include "RetainedSolidProbe.hxx"
+std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario){
+    return core3d::retained_solid::Probe::Run(scenario);
+}
+#endif

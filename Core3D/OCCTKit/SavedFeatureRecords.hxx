@@ -1,13 +1,15 @@
 #pragma once
 #include "RectangularLoftPersistence.hxx"
+#include "RetainedSolidAttribute.hxx"
 
 namespace core3d::saved_features {
 // One traversal/aggregate budget and feature-identity namespace for all families.
 // Existing profile/enclosure codec semantics are retained, including legacy records.
 inline bool Validate(const Handle(TDocStd_Document)& document,
     std::vector<profile::Record>& profiles,std::vector<enclosure::Record>& enclosures,
-    std::vector<sweep_persistence::Record>& sweeps,std::vector<loft_persistence::Record>& lofts) noexcept {
-    profiles.clear();enclosures.clear();sweeps.clear();lofts.clear();
+    std::vector<sweep_persistence::Record>& sweeps,std::vector<loft_persistence::Record>& lofts,
+    std::vector<retained_solid::Record>* retainedOutput=nullptr) noexcept {
+    profiles.clear();enclosures.clear();sweeps.clear();lofts.clear();if(retainedOutput)retainedOutput->clear();
     const auto clear=[&] {profiles.clear();enclosures.clear();sweeps.clear();lofts.clear();return false;};
     try {
         if (document.IsNull() || document->GetData().IsNull()) return false;
@@ -38,6 +40,14 @@ inline bool Validate(const Handle(TDocStd_Document)& document,
                 lofts.push_back(std::move(loft));
             }
         }
+        std::vector<retained_solid::Record> retained;
+        if(!retained_solid::ReadAll(document,retained))return clear();
+        for(const auto& record:retained){
+            if(identities.size()>profile::MaximumRecords-2
+                ||!identities.insert(retained_solid::UUIDText(record.value->envelope.sourceFeature)).second
+                ||!identities.insert(retained_solid::UUIDText(record.value->envelope.derivedFeature)).second)return clear();
+        }
+        if(retainedOutput)*retainedOutput=std::move(retained);
         return true;
     } catch (...) {return clear();}
 }

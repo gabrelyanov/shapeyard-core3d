@@ -263,6 +263,7 @@ Core3DModelCapability DocumentExportCapabilities(
         TDF_LabelMap selectedDefinitionLabels;
         Standard_Size selectedDefinitionCount = 0;
         bool hasSelection = false;
+        bool hasRetainedOccurrence = false;
         for (context->InitSelected(); context->MoreSelected();
              context->NextSelected()) {
             const Handle(AIS_InteractiveObject) selected =
@@ -294,6 +295,13 @@ Core3DModelCapability DocumentExportCapabilities(
             if (!core3d::sweep_persistence::Read(document->Document(),label,sweep)) return Core3DModelCapabilityNone;
             core3d::loft_persistence::Record loft;
             if (!core3d::loft_persistence::Read(document->Document(),label,loft))return Core3DModelCapabilityNone;
+            core3d::retained_solid::Record retained;
+            if(!core3d::retained_solid::Read(document->Document(),label,retained))return Core3DModelCapabilityNone;
+            if(retained.value) {
+                hasRetainedOccurrence=true;
+                definitionCapabilities=static_cast<Core3DModelCapability>(
+                    static_cast<std::uint64_t>(definitionCapabilities)&~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities);
+            }
             if (!sweep.label.IsNull() || !loft.label.IsNull()) {
                 // These tools lack a recipe-preserving sweep/loft operation yet.
                 definitionCapabilities=static_cast<Core3DModelCapability>(definitionCapabilities
@@ -314,6 +322,8 @@ Core3DModelCapability DocumentExportCapabilities(
         // Linear/Radial Array and Shell deliberately have single-source
         // semantics in their first touch contracts. Other common capabilities
         // remain intersection-based for multi-selection.
+        if(hasRetainedOccurrence&&selectedDefinitionCount!=1)capabilities=static_cast<Core3DModelCapability>(
+            capabilities&~(Core3DModelCapabilityTranslate|Core3DModelCapabilityRotate|Core3DModelCapabilityUniformScale));
         if (selectedDefinitionCount != 1) {
             capabilities = static_cast<Core3DModelCapability>(
                 static_cast<NSUInteger>(capabilities)

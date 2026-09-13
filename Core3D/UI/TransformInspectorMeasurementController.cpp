@@ -207,6 +207,18 @@ bool TryInspectorRepresentation(
     return false;
 }
 
+bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF_Label& label,
+    TransformInspectorGeometryRepresentation& representation,std::uint64_t& capabilities) noexcept {
+    try {
+        if(owner.IsNull()||label.IsNull()
+            ||!TryInspectorRepresentation(owner->StoredGeometryRepresentationForLabel(label),representation,capabilities))return false;
+        core3d::retained_solid::Record retained;
+        if(!core3d::retained_solid::Read(owner->Document(),label,retained))return false;
+        if(retained.value)capabilities&=~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+        return true;
+    }catch(...){return false;}
+}
+
 bool TryReadMetersPerUnit(
     const Handle(TDocStd_Document)& theDocument,
     double& theMetersPerUnit) noexcept
@@ -1612,10 +1624,7 @@ TransformInspectorMeasurementController::capture(
             return aMeasurement;
         }
 
-        const OcctGeometryRepresentation aStoredRepresentation =
-            myDoc->StoredGeometryRepresentationForLabel(aDefinition);
-        if (!TryInspectorRepresentation(
-                aStoredRepresentation,
+        if (!TryInspectorOwnedRepresentation(myDoc,aDefinition,
                 aMeasurement.representation,
                 aMeasurement.modelCapabilities)) {
             aMeasurement.state =
@@ -2199,8 +2208,7 @@ TransformInspectorMeasurementController::commitPosition(
         TransformInspectorGeometryRepresentation aRepresentation =
             TransformInspectorGeometryRepresentation::Invalid;
         std::uint64_t aCapabilities = 0;
-        if (!TryInspectorRepresentation(
-                myDoc->StoredGeometryRepresentationForLabel(aDefinition),
+        if (!TryInspectorOwnedRepresentation(myDoc,aDefinition,
                 aRepresentation,
                 aCapabilities)
             || aRepresentation != anEditContext.representation
@@ -2249,7 +2257,14 @@ TransformInspectorMeasurementController::commitPosition(
         if(placementPermit&&(scales||sizes)){
             anOutcome.result=TransformInspectorPositionCommitResult::Unsupported;return anOutcome;
         }
-        if (unchangedPlacement&&!placementPermit) {
+        // Derived cuts must prove live ordinary source/catalog admission even
+        // for no-op requests. They remain excluded from reserved placement.
+        core3d::retained_solid::Record retainedPlacement;
+        if(!core3d::retained_solid::Read(aDocument,aDefinition,retainedPlacement)
+            ||(retainedPlacement.value&&(placementPermit||sizes||(scales&&theRequest.value<=0)))) {
+            anOutcome.result=TransformInspectorPositionCommitResult::Unsupported;return anOutcome;
+        }
+        if (unchangedPlacement&&!placementPermit&&!retainedPlacement.value) {
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unchanged;
             return anOutcome;
@@ -2472,8 +2487,7 @@ void TransformInspectorMeasurementController::acceptWorkerResult(
                 std::uint64_t aCurrentCapabilities = 0;
                 const bool hasCurrentRepresentation =
                     !aLabel.IsNull()
-                    && TryInspectorRepresentation(
-                        myDoc->StoredGeometryRepresentationForLabel(aLabel),
+                    && TryInspectorOwnedRepresentation(myDoc,aLabel,
                         aCurrentRepresentation,
                         aCurrentCapabilities);
                 double aCurrentMetersPerUnit = 0.0;

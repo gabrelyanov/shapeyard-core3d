@@ -23,7 +23,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -118,6 +118,8 @@ struct OrdinaryTransformChange {
     std::optional<rectangular_loft::Definition> loftRebuild;
     std::optional<rectangular_loft::StationDimensionEdit> loftStationEdit;
     std::shared_ptr<const SweepRebuildGuard> sweepSource;
+    std::shared_ptr<const retained_solid::Payload> cut;
+    std::shared_ptr<const OcctSavedCutSceneState> cutSource;
 };
 
 struct OrdinaryTransformRecord {
@@ -129,6 +131,7 @@ struct OrdinaryTransformRecord {
 struct SweepRebuildGuard; // Main-owned bounded catalog; never dispatched to geometry workers.
 struct OrdinaryTransformLedger {
     std::shared_ptr<SweepRebuildGuard> sweepGuard;
+    std::shared_ptr<const OcctSavedCutSceneState> cutPrevious,cutCandidate;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::vector<OrdinaryTransformRecord> records;
     bool candidateSealed = false;

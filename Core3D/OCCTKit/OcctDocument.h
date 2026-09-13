@@ -23,6 +23,7 @@
 #define OcctDocument_h
 #include "RectangularLoftPersistence.hxx"
 #include "RectangularLoftRebuild.hxx"
+#include "CylindricalCutDefinition.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -117,6 +118,7 @@ struct OcctObjectTransformState
     core3d::enclosure::Record enclosure;
     core3d::sweep_persistence::Record sweep;
     core3d::loft_persistence::Record loft;
+    core3d::retained_solid::Record retained;
     gp_Trsf transform;
     std::array<Standard_Real, 8> scalars = {{0, 0, 0, 0, 0, 0, 1, 1}};
     std::array<Standard_Boolean, 8> present = {};
@@ -133,6 +135,16 @@ struct OcctObjectTransformState
     //! oriented shape identity, label/data and metadata must all agree.
     Standard_EXPORT Standard_Boolean IsEqual(
         const OcctObjectTransformState& other) const noexcept;
+};
+
+//! Main-only source data. Viewer-issued wrapper additionally binds selection,
+//! source stamp, publication/revisions and exact catalog; this is not a lease.
+struct OcctCylindricalCutSource {
+    OcctObjectTransformState original;
+    core3d::retained_solid::Envelope envelope; // Creation template has no derived UUID/radius until preparation.
+    TopoDS_Shape base;
+    double effectiveMM=0;
+    bool rebuilding=false;
 };
 
 //! Exact authored name and object authority. Attribute absence is distinct
@@ -322,6 +334,9 @@ struct OcctAuthoredFrameRecord {
 Standard_EXPORT OcctAuthoredFrameReadState Core3DReadAuthoredFrameOwner(
     const Handle(TDocStd_Document)& document, const TDF_Label& label,
     OcctAuthoredFrameRecord& record) noexcept;
+//! Full existing document admission, including retained owner and shape budgets.
+Standard_EXPORT Standard_Boolean Core3DValidateRetainedSolidDocument(const Handle(TDocStd_Document)& document);
+
 //! Scans every label, including hidden/unbound/orphan records and foreign arrays.
 //! This validates frame ownership, not the rest of the document schema. Callers
 //! must combine it with their existing geometry/material admission and budgets.
@@ -367,6 +382,7 @@ struct OcctPBRScalarDebugEvidence {
     std::map<std::string,std::vector<std::uint8_t>> geometryStreams;
 };
 #endif
+struct OcctSavedCutSceneState;
 struct OcctPBRScalarState;
 struct OcctPBRScalarPreparation;
 
@@ -411,6 +427,7 @@ namespace core3d::authority { class NativeObservedApplication; }
 #include <string>
 //! Private full-reader framing fixtures; no receipt owner or authority integration.
 Standard_EXPORT std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Standard_Integer scenario);
+Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario);
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
@@ -691,6 +708,9 @@ public:
     Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> PBRScalarOriginal(
         const std::shared_ptr<const OcctPBRScalarPreparation>&) const noexcept;
     Standard_EXPORT TDF_Label PBRScalarTarget(const std::shared_ptr<const OcctPBRScalarPreparation>&) const noexcept;
+    // Cut-only read evidence; cannot grant a lease or choose ignored fields.
+    Standard_EXPORT std::shared_ptr<const OcctSavedCutSceneState> CaptureSavedCutSceneState(const TDF_Label&) const noexcept;
+    Standard_EXPORT bool SavedCutSceneStateMatches(const std::shared_ptr<const OcctSavedCutSceneState>&) const noexcept;
     Standard_EXPORT bool PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScalarState>&) const noexcept;
     Standard_EXPORT bool StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalarPreparation>&,
         std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
@@ -719,6 +739,10 @@ public:
     void LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis);
     // Bounded scalar-only metadata guard for the saved-sweep edit catalog.
     // Unsupported textures/imported color links are refused, never discarded.
+    Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForSavedCut(
+        const TDF_Label& label,OcctScalarAppearanceState& output)const noexcept;
+    Standard_EXPORT Standard_Boolean CaptureCylindricalCutSource(
+        const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept;
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForSavedSweepRebuild(
         const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForMeshCopy(
@@ -858,6 +882,14 @@ private:
   Standard_Boolean StageSavedLoftReplacement(const OcctObjectTransformState& previous,
       const TopoDS_Shape& candidate,const core3d::rectangular_loft::Definition& definition,
       const core3d::rectangular_loft::StationDimensionEdit& edit,bool debugFailAfterShape=false) noexcept;
+  bool SealSavedCutPlacementState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+      const gp_Trsf& expected,std::shared_ptr<const OcctSavedCutSceneState>& candidate) const noexcept;
+  bool SealSavedCutSceneState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+      const TopoDS_Shape& result,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
+      std::shared_ptr<const OcctSavedCutSceneState>& candidate) const noexcept;
+  Standard_Boolean StageCylindricalCutReplacement(const OcctObjectTransformState& previous,
+      const TopoDS_Shape& candidate,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
+      bool debugFailAfterShape=false)noexcept;
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;

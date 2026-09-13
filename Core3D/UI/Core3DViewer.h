@@ -63,6 +63,7 @@ namespace core3d {
     struct AssemblySolidGeometry;
     struct SweepSolidGeometry;
     struct LoftSolidGeometry;
+    struct CutSolidGeometry;
     struct AssemblyPartDefinition {
         profile::Parameters parameters;
         TCollection_ExtendedString name;
@@ -71,7 +72,13 @@ namespace core3d {
     // Detached typed payload only; monostate is an invalid/unprepared request.
     using NativeSolidGeometryPayload = std::variant<std::monostate,
         std::shared_ptr<ProfileSolidGeometry>, std::shared_ptr<EnclosureSolidGeometry>,
-        std::shared_ptr<AssemblySolidGeometry>,std::shared_ptr<SweepSolidGeometry>,std::shared_ptr<LoftSolidGeometry>>;
+        std::shared_ptr<AssemblySolidGeometry>,std::shared_ptr<SweepSolidGeometry>,std::shared_ptr<LoftSolidGeometry>,std::shared_ptr<CutSolidGeometry>>;
+    struct CylindricalCutSnapshot {
+        OcctCylindricalCutSource source;
+        ObjectFrameIdentity identity;
+        authority::Stamp authorityStamp;
+        std::shared_ptr<const OcctSavedCutSceneState> guard;
+    };
     struct StoredSweepSnapshot {
         planar_sweep::Definition definition;
         ObjectFrameIdentity identity;
@@ -201,7 +208,12 @@ namespace core3d {
             const planar_sweep::Definition& definition,const StoredSweepSnapshot& original,
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
             std::uint32_t width,std::uint32_t height) noexcept;
-        std::optional<StoredRectangularLoftSnapshot> storedRectangularLoftDefinition(
+        std::optional<CylindricalCutSnapshot> cylindricalCutSource(const ObjectFrameIdentity&,
+        std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    std::shared_ptr<NativeSolidWork> prepareCylindricalCut(const CylindricalCutSnapshot&,
+        const std::optional<cylindrical_cut::CreateEdit>&,const std::optional<cylindrical_cut::RadiusEdit>&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    std::optional<StoredRectangularLoftSnapshot> storedRectangularLoftDefinition(
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
             std::uint32_t width,std::uint32_t height) noexcept;
         std::shared_ptr<NativeSolidWork> prepareStoredLoftStationRebuild(

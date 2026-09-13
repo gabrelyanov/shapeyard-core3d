@@ -97,13 +97,21 @@ public:
     // at every attribute; they cannot be substituted during Paste callbacks.
     Traversal(Handle(BinMDF_ADriverTable) table, Standard_Integer typeID,
               Handle(FrameDriver) receipt, TraversalLimits limits,
-              std::function<void()> reject)
+              std::function<void()> reject,
+              Handle(BinMDF_ADriver) shapeDriver=Handle(BinMDF_ADriver)(),
+              const Standard_GUID& shapeID=Standard_GUID())
         : table_(std::move(table)), typeID_(typeID), receipt_(std::move(receipt)),
-          limits_(limits), reject_(std::move(reject)), ids_(Less{this}) {
+          limits_(limits), reject_(std::move(reject)), shapeDriver_(std::move(shapeDriver)), shapeID_(shapeID), ids_(Less{this}) {
         if(receipt_.IsNull() || table_.IsNull() || !limits_.valid() || typeID_<=0 ||
            table_->GetDriver(typeID_)!=receipt_ || receipt_->SourceType().IsNull() ||
            receipt_->TypeName().IsEmpty() || !receipt_->budget()) throw Refusal{};
         targetType_=receipt_->SourceType();typeName_=receipt_->TypeName();targetID_=receipt_->AttributeID();
+        if(!shapeDriver_.IsNull()){
+            shapeType_=shapeDriver_->SourceType();shapeName_=shapeDriver_->TypeName();Handle(BinMDF_ADriver) assigned;
+            shapeTypeID_=table_->GetDriver(shapeType_,assigned);
+            if(shapeTypeID_<=0||assigned!=shapeDriver_||shapeType_==targetType_||shapeName_.IsEmpty()
+                ||shapeID_==Standard_GUID()||shapeID_==targetID_)throw Refusal{};
+        }
         budget_=receipt_->budget();
         if(budget_->rejected || budget_->seenReceipt || budget_->chargedWireBytes!=0 ||
            budget_->maximumWireBytes!=limits_.wireBytes) throw Refusal{};
@@ -162,7 +170,9 @@ private:
         return !table_.IsNull() && !receipt_.IsNull() && budget_ && !budget_->rejected &&
             receipt_->budget()==budget_ && budget_->maximumWireBytes==limits_.wireBytes &&
             budget_->chargedWireBytes<=limits_.wireBytes && receipt_->SourceType()==targetType_ &&
-            receipt_->TypeName()==typeName_ && receipt_->AttributeID()==targetID_ && table_->GetDriver(typeID_)==receipt_;
+            receipt_->TypeName()==typeName_ && receipt_->AttributeID()==targetID_ && table_->GetDriver(typeID_)==receipt_
+            && (shapeDriver_.IsNull()||(table_->GetDriver(shapeTypeID_)==shapeDriver_
+                &&shapeDriver_->SourceType()==shapeType_&&shapeDriver_->TypeName()==shapeName_));
     }
     std::uint64_t Position() const {
         if(!source_ || !*source_)throw Refusal{};
@@ -221,7 +231,8 @@ private:
             }else{
                 if(driver->SourceType()==targetType_ ||
                    (signedID<0)!=(driver->SourceType()==STANDARD_TYPE(TNaming_NamedShape) ||
-                                    driver->SourceType()==STANDARD_TYPE(XCAFDoc_Location)) ||
+                                    driver->SourceType()==STANDARD_TYPE(XCAFDoc_Location) ||
+                                    (!shapeDriver_.IsNull()&&type==shapeTypeID_&&driver==shapeDriver_)) ||
                    std::uint64_t(length)>limits_.bufferedAttributeBytes ||
                    buffered_>limits_.aggregateBufferedBytes ||
                    std::uint64_t(length)>limits_.aggregateBufferedBytes-buffered_)throw Refusal{};
@@ -241,13 +252,15 @@ private:
                 }
                 persistent.SetIStream(*source_);
                 auto target=wasBound ? Handle(TDF_Attribute)::DownCast(relocation_->Find(id)) : driver->NewEmpty();
-                if(target.IsNull() || !target->Label().IsNull() || target->DynamicType()!=driver->SourceType())throw Refusal{};
+                if(target.IsNull() || !target->Label().IsNull() || target->DynamicType()!=driver->SourceType()
+                    ||(!shapeDriver_.IsNull()&&type==shapeTypeID_&&target->ID()!=shapeID_))throw Refusal{};
                 try{label.AddAttribute(target);}catch(const Standard_DomainError&){
                     // Preserve OCCT arbitrary-GUID scalar/array attribute loading.
                     static const Standard_GUID invalid;target->SetID(invalid);label.AddAttribute(target);
                 }
                 if(!driver->Paste(persistent,target,*relocation_))throw Refusal{};
-                Step();if(Position()!=directEnd || target->Label()!=label || target->ID()==targetID_)throw Refusal{};
+                Step();if(Position()!=directEnd || target->Label()!=label || target->ID()==targetID_
+                    ||(!shapeDriver_.IsNull()&&type==shapeTypeID_&&target->ID()!=shapeID_))throw Refusal{};
                 if(!wasBound)relocation_->Bind(id,target);
             }
             if(count==INT32_MAX)throw Refusal{};++count;
@@ -271,6 +284,12 @@ private:
     const Handle(FrameDriver) receipt_;
     const TraversalLimits limits_;
     const std::function<void()> reject_;
+    // Optional source-owned shared-shape role; absent preserves old admission.
+    const Handle(BinMDF_ADriver) shapeDriver_;
+    const Standard_GUID shapeID_;
+    Handle(Standard_Type) shapeType_;
+    TCollection_AsciiString shapeName_;
+    Standard_Integer shapeTypeID_=0;
     Handle(Standard_Type) targetType_;
     Standard_GUID targetID_;
     TCollection_AsciiString typeName_;
