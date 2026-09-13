@@ -1,3 +1,24 @@
+
+#if DEBUG // Cut475 phase diagnostics only
+#include <cstdio>
+#include <atomic>
+namespace {
+// Thread-safe bounded diagnostics; literals/integers, no document or user text.
+void Cut475Trace(const char* stage, int detail=-1) noexcept {
+    static std::atomic<unsigned> emitted{0};
+    unsigned count=emitted.load(std::memory_order_relaxed);
+    while(count<4096){
+        if(emitted.compare_exchange_weak(count,count+1,std::memory_order_relaxed)){
+            std::fprintf(stderr,"[Cut475] %s detail=%d\n",stage,detail);break;
+        }
+    }
+}
+struct Cut475Scope {
+    const char* phase;
+    ~Cut475Scope() noexcept {if(phase)Cut475Trace(phase);}
+};
+}
+#endif // Cut475 phase diagnostics only
 #include "OrdinaryEditController.hpp"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
@@ -1865,6 +1886,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(_stageFailureIndex==2){_stageFailureIndex=-1;pairedFault=true;}
 #endif
                 cutStaged=_document->StageCylindricalCutReplacement(record.previous,record.requested.shape,record.requested.cut,pairedFault);
+
+#if DEBUG // Cut475 phase diagnostics only
+                Cut475Trace("ordinary.stage-return",int(cutStaged));
+#endif // Cut475 phase diagnostics only
                 if(!cutStaged)throw Standard_Failure("Saved cylindrical cut paired staging failed");
             }
             const bool featureStaged=sweepStaged||loftStaged||cutStaged;
@@ -1957,18 +1982,30 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             const bool sealed=request.operation==OrdinaryTransformOperation::CylindricalCut
                 ?_document->SealSavedCutSceneState(ledger.cutPrevious,request.shape,request.cut,ledger.cutCandidate)
                 :_document->SealSavedCutPlacementState(ledger.cutPrevious,request.transform,ledger.cutCandidate);
+
+#if DEBUG // Cut475 phase diagnostics only
+            Cut475Trace("ordinary.seal-return",int(sealed));
+#endif // Cut475 phase diagnostics only
             if(!sealed)throw Standard_Failure("Saved cut complete scene mismatch");
         }
         if (!SealSweepCandidate(_document,ledger)) throw Standard_Failure("Saved sweep complete candidate mismatch");
         if (!stageRebuildReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
             throw Standard_Failure("Ordinary rebuild receipt staging failed");
         ledger.candidateSealed = true;
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.before-close");
+#endif // Cut475 phase diagnostics only
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
             _state = OrdinaryEditState::OutcomeUnknown;
             _activeToken = 0;
             return OrdinaryEditResult::OutcomeUnknown;
         }
     } catch (...) {
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(_pending && std::holds_alternative<OrdinaryTransformLedger>(*_pending) && std::get<OrdinaryTransformLedger>(*_pending).cutPrevious)Cut475Trace("ordinary.stage-catch");
+#endif // Cut475 phase diagnostics only
         // The retained before/candidate ledger decides the outcome. No blind
         // rollback or success claim based on a Commit Boolean/exception.
     }
@@ -2049,8 +2086,16 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
 #endif
         auto observation = _command.observe();
         if (observation == OrdinaryCommandObservation::OpenOwned) { observation = _command.abortAndObserve(); }
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.closed-observation",int(observation));
+#endif // Cut475 phase diagnostics only
         const bool candidate = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
         const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.candidate-sealed",int(ledger.candidateSealed));
+#endif // Cut475 phase diagnostics only
         if ((!candidate && !previous) || (candidate && !ledger.candidateSealed)) {
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;
@@ -2061,8 +2106,16 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
                 return OrdinaryEditResult::OutcomeUnknown;
             }
         }
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.before-repair-guard");
+#endif // Cut475 phase diagnostics only
         if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.repair-enter");
+#endif // Cut475 phase diagnostics only
         _committed = candidate;
         _state = OrdinaryEditState::RepairPending;
         if (!_host.repairTransform(ledger, candidate) || !presentationMatches(ledger, candidate)) {
@@ -2082,6 +2135,10 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
                 ledger.records[index].requested.presentation = replacements[index];
             }
         }
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.after-repair-guard");
+#endif // Cut475 phase diagnostics only
         if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
 #if DEBUG
@@ -2093,6 +2150,10 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
         // Retain Publishing through synchronous observers. Host/observer
         // reentrancy remains Busy until this entire method has returned.
         _state = OrdinaryEditState::Publishing;
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(ledger.cutPrevious)Cut475Trace("ordinary.release-enter");
+#endif // Cut475 phase diagnostics only
         if (!_command.releaseClosed()) {
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;

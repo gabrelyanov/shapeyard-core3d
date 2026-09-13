@@ -1,3 +1,24 @@
+
+#if DEBUG // Cut475 phase diagnostics only
+#include <cstdio>
+#include <atomic>
+namespace {
+// Thread-safe bounded diagnostics; literals/integers, no document or user text.
+void Cut475Trace(const char* stage, int detail=-1) noexcept {
+    static std::atomic<unsigned> emitted{0};
+    unsigned count=emitted.load(std::memory_order_relaxed);
+    while(count<4096){
+        if(emitted.compare_exchange_weak(count,count+1,std::memory_order_relaxed)){
+            std::fprintf(stderr,"[Cut475] %s detail=%d\n",stage,detail);break;
+        }
+    }
+}
+struct Cut475Scope {
+    const char* phase;
+    ~Cut475Scope() noexcept {if(phase)Cut475Trace(phase);}
+};
+}
+#endif // Cut475 phase diagnostics only
 #include "NativeObservedApplication.hxx"
 #include "NativeMeshVertexMove.hxx"
 #include "NativeMeshWindingCandidate.hxx"
@@ -1378,6 +1399,9 @@ public:
         const Message_ProgressRange& theProgress =
             Message_ProgressRange()) override
     {
+#if DEBUG
+        ++myRetainedReadCount;
+#endif
         // Reentrant reuse must not replace the exact active load's driver/budget.
         if (!myReceiptFrameDriver.IsNull() && myReceiptLoadActive) {
             if (!myReceiptFrameDriver.IsNull() && myReceiptFrameDriver->budget())
@@ -1513,6 +1537,7 @@ public:
     }
 
 #if DEBUG
+    unsigned DebugRetainedReadCount()const{return myRetainedReadCount;}
     void DebugRejectRetainedSolidType(){myAllowRetainedSolid=false;}
     void DebugSetRetainedRoleFault(int fault){myRetainedRoleFault=fault;}
     void DebugSetRetainedEnvelopeLimit(std::size_t limit){myRetainedBudget->limit=std::min(limit,core3d::retained_solid::MaximumAggregateEnvelopeBytes);}
@@ -1615,6 +1640,7 @@ private:
     bool myAllowRetainedSolid=true;
 #if DEBUG
     int myRetainedRoleFault=0;
+    unsigned myRetainedReadCount=0;
 #endif
 };
 
@@ -5993,6 +6019,10 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
 Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
     const OcctObjectTransformState& previous,const TopoDS_Shape& candidate,
     const std::shared_ptr<const core3d::retained_solid::Payload>& payload,bool debugFailAfterShape)noexcept {
+
+#if DEBUG // Cut475 phase diagnostics only
+    Cut475Scope cut475{"stage.preflight"};
+#endif // Cut475 phase diagnostics only
     if(!NSThread.isMainThread)return Standard_False;
     try {
         namespace r=core3d::retained_solid;OcctCylindricalCutSource source;std::vector<std::uint8_t> bytes;
@@ -6002,6 +6032,10 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             ||!payload->base.IsEqual(source.base)||!r::Encode(payload->envelope,bytes)||bytes!=payload->bytes
             ||candidate.IsNull()||candidate.ShapeType()!=TopAbs_SOLID||candidate.Orientation()!=TopAbs_FORWARD
             ||ClassifyDefinitionGeometry(candidate,nullptr)!=DefinitionGeometryClass::BRep)return Standard_False;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="stage.envelope-transition";
+#endif // Cut475 phase diagnostics only
         auto expected=source.envelope;
         if(source.rebuilding){
             if(!core3d::cylindrical_cut::SameFixedEnvelope(expected,payload->envelope))return Standard_False;
@@ -6010,6 +6044,10 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             expected.axis=payload->envelope.axis;expected.point=payload->envelope.point;expected.radius=payload->envelope.radius;
             std::vector<std::uint8_t> actual;if(!r::Encode(expected,actual)||actual!=payload->bytes)return Standard_False;
         }
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="stage.appearance-before";
+#endif // Cut475 phase diagnostics only
         OcctScalarAppearanceState appearance;if(!CaptureScalarAppearanceForSavedCut(previous.label,appearance))return Standard_False;
         const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());if(shapes.IsNull())return Standard_False;
         const auto metadata=source.rebuilding?previous.retained.label:
@@ -6017,17 +6055,29 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
         if(metadata.IsNull()||metadata.Tag()<r::MinimumRecordTag)return Standard_False;
         // Single ordinary-owned command: preserve original occurrence scalars,
         // material/name/identity labels and pair owner result with the carrier.
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="stage.owner-write";
+#endif // Cut475 phase diagnostics only
         shapes->SetShape(previous.label,candidate);
 #if DEBUG
         if(debugFailAfterShape)throw Standard_Failure("Cylindrical cut paired-write fault");
 #else
         (void)debugFailAfterShape;
 #endif
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="stage.metadata-write";
+#endif // Cut475 phase diagnostics only
         if(!source.rebuilding)metadata.ForgetAllAttributes(Standard_True);
         TNaming_Builder(metadata).Select(candidate,candidate);
         Handle(r::Attribute) attribute;
         if(!metadata.FindAttribute(r::AttributeID(),attribute)){attribute=new r::Attribute();metadata.AddAttribute(attribute);}
         attribute->Backup();attribute->value_=payload;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="stage.readback";
+#endif // Cut475 phase diagnostics only
         OcctObjectTransformState stored;OcctScalarAppearanceState after;
         if(!CaptureObjectTransformStateForLabel(previous.label,stored)||!stored.shape.IsEqual(candidate)
             ||!stored.retained.value||stored.retained.value->bytes!=payload->bytes
@@ -6037,6 +6087,10 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             ||!CaptureScalarAppearanceForSavedCut(previous.label,after)||!appearance.IsEqual(after)
             ||!core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues)
             ||!ValidateGeometryRepresentations())return Standard_False;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase=nullptr;Cut475Trace("stage.success");
+#endif // Cut475 phase diagnostics only
         return Standard_True;
     }catch(...){return Standard_False;}
 }
@@ -6646,21 +6700,63 @@ struct OcctSavedCutSceneState {
     std::map<std::string,CutRootEvidence> roots;
     std::map<std::string,PBRBytes> layers,layerGraph;
     bool equals(const OcctSavedCutSceneState& b)const noexcept {
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(scene&&b.scene){
+            if(!scene->equals(*b.scene))Cut475Trace("match.scene-state-diff");
+            for(const auto& [key,old]:scene->roots){
+                const auto at=b.scene->roots.find(key);
+                if(at==b.scene->roots.end()){Cut475Trace("match.root-missing");continue;}
+                const int selected=key==scene->target?1:0;
+                if(old.geometry!=at->second.geometry)Cut475Trace("match.current-geometry-diff",selected);
+                if(old.raw!=at->second.raw)Cut475Trace("match.root-raw-diff",selected);
+                if(!old.object.IsEqual(at->second.object))Cut475Trace("match.root-object-diff",selected);
+            }
+            for(const auto& [key,old]:roots){
+                const auto at=b.roots.find(key);if(at==b.roots.end()){Cut475Trace("match.extra-root-missing");continue;}
+                const int selected=key==scene->target?1:0;
+                if(old.retainedBase!=at->second.retainedBase)Cut475Trace("match.base-content-diff",selected);
+                if(old.retainedEnvelope!=at->second.retainedEnvelope)Cut475Trace("match.envelope-diff",selected);
+                if(old.stableRaw!=at->second.stableRaw)Cut475Trace("match.stable-scalars-diff",selected);
+                if(old.frames.archive!=at->second.frames.archive)Cut475Trace("match.frame-archive-diff",selected);
+            }
+        }
+#endif // Cut475 phase diagnostics only
         if(!scene||!b.scene||!scene->equals(*b.scene)||layers!=b.layers||layerGraph!=b.layerGraph||roots.size()!=b.roots.size())return false;
         for(const auto& [k,v]:roots){auto i=b.roots.find(k);if(i==b.roots.end()||!v.equals(i->second))return false;}return true;
     }
 };
 std::shared_ptr<const OcctSavedCutSceneState> OcctDocument::CaptureSavedCutSceneState(const TDF_Label& target) const noexcept {
+
+#if DEBUG // Cut475 phase diagnostics only
+    Cut475Scope cut475{"capture.geometry-admission"};
+#endif // Cut475 phase diagnostics only
     if(![NSThread isMainThread])return {};
     try {
         if(!ValidateGeometryRepresentations())return {};
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.selected-appearance";
+#endif // Cut475 phase diagnostics only
         OcctScalarAppearanceState selected;if(!CaptureScalarAppearanceForSavedCut(target,selected))return {};
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.pbr-scene";
+#endif // Cut475 phase diagnostics only
         auto captured=std::make_shared<OcctSavedCutSceneState>();captured->scene=CapturePBRScalarState(target);
         if(!captured->scene)return {};const auto& scene=*captured->scene;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.frame-budget";
+#endif // Cut475 phase diagnostics only
         Standard_Size frameBytes=0;if(!Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes))return {};
         // Source + candidate each retain at most 64 MiB frame archives. Kernel,
         // renderer and map buffers are not part of this retained-vector bound.
         std::size_t geometry=0,archives=0;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.root-content";
+#endif // Cut475 phase diagnostics only
         for(const auto& [key,entry]:scene.roots) {
             const auto& object=entry.object.object.object;CutRootEvidence e;
             e.frameState=Core3DReadAuthoredFrameOwner(myOcafDoc,object.label,e.frames);
@@ -6684,10 +6780,22 @@ std::shared_ptr<const OcctSavedCutSceneState> OcctDocument::CaptureSavedCutScene
         }
         // Whole-object embedded materials only. Per-face/imported ColorTool
         // styling is not silently omitted from a purported full-scene proof.
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.style-links";
+#endif // Cut475 phase diagnostics only
         for(const auto& [endpoint,material]:scene.links)if(!scene.roots.contains(endpoint))return {};
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.color-table";
+#endif // Cut475 phase diagnostics only
         TDF_LabelSequence colors;
         if(XCAFDoc_DocumentTool::CheckColorTool(myOcafDoc->Main()))XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main())->GetColors(colors);
         if(!colors.IsEmpty())return {}; // Unbound imported color table state is also unsupported.
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.layers";
+#endif // Cut475 phase diagnostics only
         TDF_LabelSequence layerLabels;
         if(XCAFDoc_DocumentTool::CheckLayerTool(myOcafDoc->Main()))XCAFDoc_DocumentTool::LayerTool(myOcafDoc->Main())->GetLayerLabels(layerLabels);
         if(layerLabels.Length()>1024)return {};
@@ -6702,6 +6810,10 @@ std::shared_ptr<const OcctSavedCutSceneState> OcctDocument::CaptureSavedCutScene
             if(hidden&&Handle(TDataStd_UAttribute)::DownCast(invisible).IsNull())return {};w.integer(hidden);
             if(!captured->layers.emplace(PBRLabelKey(l),std::move(w.bytes)).second)return {};
         }
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="capture.layer-graph";
+#endif // Cut475 phase diagnostics only
         std::vector<TDF_Label> labels{myOcafDoc->GetData()->Root()};std::size_t graphEdges=0;
         std::set<std::pair<std::string,std::string>> forward,reverse;
         for(std::size_t n=0;n<labels.size();++n){const auto l=labels[n];const auto key=PBRLabelKey(l);
@@ -6721,28 +6833,60 @@ std::shared_ptr<const OcctSavedCutSceneState> OcctDocument::CaptureSavedCutScene
                 if(++graphEdges>kMaximumDocumentLabels||!scene.roots.contains(endpoint)||!reverse.emplace(key,endpoint).second)return {};w.string(TCollection_AsciiString(endpoint.c_str()));}
             captured->layerGraph.emplace(key,std::move(w.bytes));
         }
+
+#if DEBUG // Cut475 phase diagnostics only
+        if(forward==reverse)cut475.phase=nullptr;
+#endif // Cut475 phase diagnostics only
         if(forward!=reverse)return {};return captured;
     }catch(...){return {};}
 }
 bool OcctDocument::SavedCutSceneStateMatches(const std::shared_ptr<const OcctSavedCutSceneState>& expected)const noexcept {
     if(!expected||!expected->scene)return false;
     const auto i=expected->scene->roots.find(expected->scene->target);if(i==expected->scene->roots.end())return false;
+
+#if DEBUG // Cut475 phase diagnostics only
+    Cut475Trace("match.requested");
+#endif // Cut475 phase diagnostics only
     const auto actual=CaptureSavedCutSceneState(i->second.object.object.object.label);return actual&&actual->equals(*expected);
 }
 bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
     const TopoDS_Shape& result,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
     std::shared_ptr<const OcctSavedCutSceneState>& candidate)const noexcept {
+
+#if DEBUG // Cut475 phase diagnostics only
+    Cut475Scope cut475{"seal.preflight"};
+#endif // Cut475 phase diagnostics only
     candidate.reset();if(!previous||!previous->scene||!payload||result.IsNull())return false;
     try {
         const auto& before=*previous->scene;const auto selected=before.roots.find(before.target);if(selected==before.roots.end())return false;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="seal.capture";
+#endif // Cut475 phase diagnostics only
         const auto after=CaptureSavedCutSceneState(selected->second.object.object.object.label);if(!after||!after->scene)return false;const auto& now=*after->scene;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="seal.global-stable";
+#endif // Cut475 phase diagnostics only
         if(before.data!=now.data||before.target!=now.target||std::memcmp(&before.metersPerUnit,&now.metersPerUnit,8)
             ||before.materials!=now.materials||before.links!=now.links||before.objectMaterialAttributes!=now.objectMaterialAttributes
             ||!before.groups.IsEqual(now.groups)||!before.receipts.matches(now.receipts)||before.roots.size()!=now.roots.size()
             ||previous->layers!=after->layers||previous->layerGraph!=after->layerGraph)return false;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="seal.root-membership";
+#endif // Cut475 phase diagnostics only
         for(const auto& [key,old]:before.roots){auto at=now.roots.find(key);auto extra=after->roots.find(key);auto prior=previous->roots.find(key);
             if(at==now.roots.end()||extra==after->roots.end()||prior==previous->roots.end())return false;
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="seal.unrelated-root";
+#endif // Cut475 phase diagnostics only
             if(key!=before.target){if(!old.equals(at->second)||!prior->second.equals(extra->second))return false;continue;}
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="seal.selected-stable";
+#endif // Cut475 phase diagnostics only
             const auto& source=old.object.object.object;const auto& actual=at->second.object.object.object;
             if(!actual.shape.IsEqual(result)||!actual.retained.value||actual.retained.value->bytes!=payload->bytes
                 ||!actual.retained.value->base.IsEqual(payload->base)||!actual.profile.label.IsNull()||!actual.enclosure.label.IsNull()
@@ -6751,9 +6895,17 @@ bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedC
             // StageCylindricalCutReplacement owns the exact recipe transition.
             // This independently binds the archived source geometry, including
             // mutable shared-TShape contents which handle equality cannot prove.
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase="seal.retained-base-content";
+#endif // Cut475 phase diagnostics only
             const auto expectedBase=source.retained.value?prior->second.retainedBase:old.geometry;
             if(extra->second.retainedBase!=expectedBase||extra->second.retainedEnvelope!=payload->bytes)return false;
         }
+
+#if DEBUG // Cut475 phase diagnostics only
+        cut475.phase=nullptr;Cut475Trace("seal.success");
+#endif // Cut475 phase diagnostics only
         candidate=after;return true;
     }catch(...){return false;}
 }

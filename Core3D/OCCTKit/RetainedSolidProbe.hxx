@@ -64,28 +64,40 @@ struct Probe {
         return out.str();
     }
     static bool Open(const std::string& bytes,bool oldReader,std::vector<Record>* result=nullptr,
-                     std::size_t envelopeLimit=MaximumAggregateEnvelopeBytes,bool requireV3=false,int roleFault=0){
-        App holder;Core3DDefineSafeBinXCAFFormat(holder.app);
+                     std::size_t envelopeLimit=MaximumAggregateEnvelopeBytes,bool requireV3=false,int roleFault=0,
+                     bool* readerVerified=nullptr,double* reopenedUnit=nullptr){
+        if(readerVerified)*readerVerified=false;if(reopenedUnit)*reopenedUnit=0;
+        App holder;std::array<Core3DBoundedBinXCAFRetrievalDriver*,2> readers{};
+        bool registered=false;
         if(oldReader||envelopeLimit!=MaximumAggregateEnvelopeBytes||roleFault){
             for(bool xcaf:{false,true}){
                 auto* reader=new Core3DBoundedBinXCAFRetrievalDriver();if(oldReader)reader->DebugRejectRetainedSolidType();
                 reader->DebugSetRetainedEnvelopeLimit(envelopeLimit);reader->DebugSetRetainedRoleFault(roleFault);
                 Handle(PCDM_StorageDriver) writer=xcaf?Handle(PCDM_StorageDriver)(new BinXCAFDrivers_DocumentStorageDriver())
                     :Handle(PCDM_StorageDriver)(new BinDrivers_DocumentStorageDriver());
-                holder.app->DefineFormat(xcaf?"BinXCAF":"BinOcaf","Historical type table",xcaf?"xbf":"cbf",reader,writer);
+                const auto format=xcaf?"BinXCAF":"BinOcaf";
+                holder.app->DefineFormat(format,"Private retained-solid reader",xcaf?"xbf":"cbf",reader,writer);
+                if(holder.app->ReaderFromFormat(format).get()!=reader)throw std::invalid_argument("probe exact reader registration");
+                readers[xcaf?1:0]=reader;
             }
-        }
+            registered=true;
+        }else Core3DDefineSafeBinXCAFFormat(holder.app);
+        // DefineFormat inserts without replacing an existing registration.
+        // Prove exactly one of these fresh injected instances actually read.
+        const auto verifyReader=[&](){if(readerVerified)*readerVerified=registered
+            &&readers[0]->DebugRetainedReadCount()+readers[1]->DebugRetainedReadCount()==1;};
         try{
             std::istringstream in(bytes,std::ios::in|std::ios::binary);
-            Core3DBeginSafeBinaryRead();const auto status=holder.app->Open(in,holder.doc);
+            Core3DBeginSafeBinaryRead();const auto status=holder.app->Open(in,holder.doc);verifyReader();
             if(status!=PCDM_RS_OK||Core3DSafeBinaryReadWasRejected()||holder.doc.IsNull())return false;
+            if(reopenedUnit&&!XCAFDoc_DocumentTool::GetLengthUnit(holder.doc,*reopenedUnit))return false;
             std::vector<Record> records;if(!ReadAll(holder.doc,records)||records.empty()
                 ||!Core3DValidateRetainedSolidDocument(holder.doc))return false;
             if(requireV3){core3d::receipt::Catalog catalog;
                 if(core3d::receipt::Read(holder.doc,catalog)!=core3d::receipt::ReadStatus::Valid||!catalog.tree||catalog.count()!=1)return false;
             }
             if(result)*result=std::move(records);return true;
-        }catch(...){return false;}
+        }catch(...){verifyReader();return false;}
     }
     static bool BoxGeometry(const TopoDS_Shape& shape,double unit,double scale=1){
         Bnd_Box box;BRepBndLib::AddOptimal(shape,box,Standard_False,Standard_False);
@@ -110,11 +122,15 @@ struct Probe {
                 for(bool xcaf:{false,true})for(int version:{10,11,12}){
                     const std::string prefix=std::string(xcaf?"xcaf":"ocaf")+"."+std::to_string(version)+".";
                     App holder;const auto f=New(holder,xcaf,version);const auto bytes=Save(holder);
-                    std::vector<Record> records;const bool opened=Open(bytes,false,&records);
+                    std::vector<Record> records;double unit=0;
+                    const bool opened=Open(bytes,false,&records,MaximumAggregateEnvelopeBytes,false,0,nullptr,&unit);
+                    checks[prefix+"reopenedUnit"]=opened&&Bits(unit)==Bits(.001);
                     checks[prefix+"roundtrip"]=opened&&records.size()==1&&records[0].value->bytes==f.bytes
                         &&BoxGeometry(records[0].value->base,.001);
                     if(scenario==0){
-                        checks[prefix+"oldReaderRefuses"]=!Open(bytes,true);
+                        bool oldReaderSelected=false;
+                        checks[prefix+"oldReaderRefuses"]=!Open(bytes,true,nullptr,MaximumAggregateEnvelopeBytes,false,0,&oldReaderSelected);
+                        checks[prefix+"oldReaderSelected"]=oldReaderSelected;
                         {
                             using RP=core3d::receipt::v3::DebugProbe;
                             auto tree=RP::EmptyFor(holder.doc);tree=tree->append(RP::Fixture(1,tree->document()));
@@ -128,9 +144,13 @@ struct Probe {
                             const auto mixed=Save(holder);std::vector<Record> mixedRecords;
                             checks[prefix+"mixedV3"]=Open(mixed,false,&mixedRecords,MaximumAggregateEnvelopeBytes,true)&&mixedRecords.size()==1
                                 &&mixedRecords[0].value->bytes==f.bytes;
-                            checks[prefix+"mixedOldReaderRefuses"]=!Open(mixed,true);
-                            for(int fault=1;fault<=3;++fault)checks[prefix+"roleFault"+std::to_string(fault)]=
-                                !Open(mixed,false,nullptr,MaximumAggregateEnvelopeBytes,true,fault);
+                            bool mixedReaderSelected=false;
+                            checks[prefix+"mixedOldReaderRefuses"]=!Open(mixed,true,nullptr,MaximumAggregateEnvelopeBytes,false,0,&mixedReaderSelected);
+                            checks[prefix+"mixedOldReaderSelected"]=mixedReaderSelected;
+                            for(int fault=1;fault<=3;++fault){bool selected=false;
+                                checks[prefix+"roleFault"+std::to_string(fault)]=!Open(mixed,false,nullptr,MaximumAggregateEnvelopeBytes,true,fault,&selected);
+                                checks[prefix+"roleFault"+std::to_string(fault)+"ReaderSelected"]=selected;
+                            }
                         }
                         continue;
                     }
@@ -197,9 +217,11 @@ struct Probe {
                         &&Raw(attribute->value()->base)==raw
                         &&XCAFDoc_ShapeTool::GetShape(f.owner).IsEqual(currentBefore);
                     const auto stored=Save(holder);std::vector<Record> reopened;
-                    checks[std::string(prefix)+"fresh"]=Open(stored,false,&reopened)&&reopened.size()==1
+                    double reopenedUnit=0;
+                    checks[std::string(prefix)+"fresh"]=Open(stored,false,&reopened,MaximumAggregateEnvelopeBytes,false,0,nullptr,&reopenedUnit)&&reopened.size()==1
                         &&reopened[0].value->bytes==beforeAbort->bytes
                         &&BoxGeometry(reopened[0].value->base,unit);
+                    checks[std::string(prefix)+"freshUnit"]=Bits(reopenedUnit)==Bits(unit);
                 }
             }else if(scenario==3){
                 App holder;auto f=New(holder,true,12);auto doc=holder.doc;
@@ -214,10 +236,19 @@ struct Probe {
                 checks["foreignOwnerRefused"]=!Core3DValidateRetainedSolidDocument(foreign.doc);
                 foreign.doc->AbortCommand();checks["foreignAbortRestores"]=Core3DValidateRetainedSolidDocument(foreign.doc);
                 const auto singleFile=Save(holder);
-                checks["singleEnvelopeBudgetPositive"]=Open(singleFile,false,nullptr,f.bytes.size());
+                bool singleReader=false;
+                checks["singleEnvelopeBudgetPositive"]=Open(singleFile,false,nullptr,f.bytes.size(),false,0,&singleReader);
+                checks["singleEnvelopeReaderSelected"]=singleReader;
                 auto sharedOriginal=original->base;auto tool=XCAFDoc_DocumentTool::ShapeTool(doc->Main());doc->NewCommand();
                 gp_Trsf t;t.SetTranslation(gp_Vec(200,0,0));auto current=sharedOriginal.Moved(TopLoc_Location(t));
-                const auto second=tool->AddShape(current,Standard_False);auto e=f.envelope;e.entity.fill(30);e.definition.fill(31);e.sourceFeature.fill(32);e.derivedFeature.fill(33);
+                // AddShape(located) creates a reference plus an unplaced definition.
+                // The fixture needs a distinct free current owner sharing only
+                // the immutable historical base, not a component/reference.
+                const auto second=tool->NewShape();if(second.IsNull())throw std::invalid_argument("probe second definition");
+                tool->SetShape(second,current);
+                checks["sharedFreeDefinition"]=!tool->IsReference(second)&&tool->IsFree(second)
+                    &&XCAFDoc_ShapeTool::GetShape(second).IsEqual(current);
+                auto e=f.envelope;e.entity.fill(30);e.definition.fill(31);e.sourceFeature.fill(32);e.derivedFeature.fill(33);
                 Identity(second,EntityIdentifierAttributeID(),e.entity);Identity(second,DefinitionIdentifierAttributeID(),e.definition);
                 TDataStd_Integer::Set(second,GeometryRepresentationAttributeID(),1);const auto record=second.FindChild(13,true);
                 TNaming_Builder(record).Select(current,current);Install(doc,record,e,sharedOriginal);
@@ -227,8 +258,11 @@ struct Probe {
                 std::vector<Record> reopened;checks["sharedCodecIdentity"]=Open(sharedFile,false,&reopened)&&reopened.size()==2
                     &&reopened[0].value->base.IsEqual(reopened[1].value->base);
                 const std::size_t jointBytes=f.bytes.size()*2;
-                checks["aggregateExactBudgetPositive"]=Open(sharedFile,false,nullptr,jointBytes);
-                checks["aggregateBudgetRefused"]=!Open(sharedFile,false,nullptr,jointBytes-1);
+                bool exactReader=false,refusalReader=false;
+                checks["aggregateExactBudgetPositive"]=Open(sharedFile,false,nullptr,jointBytes,false,0,&exactReader);
+                checks["aggregateBudgetRefused"]=!Open(sharedFile,false,nullptr,jointBytes-1,false,0,&refusalReader);
+                checks["aggregateExactReaderSelected"]=exactReader;
+                checks["aggregateRefusalReaderSelected"]=refusalReader;
                 doc->NewCommand();e.sourceFeature=f.envelope.sourceFeature;Install(doc,record,e,sharedOriginal);
                 checks["duplicateNamespaceRefused"]=!Core3DValidateRetainedSolidDocument(doc);doc->AbortCommand();
                 checks["namespaceAbortRestores"]=Core3DValidateRetainedSolidDocument(doc);

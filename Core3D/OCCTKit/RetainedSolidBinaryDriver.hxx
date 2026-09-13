@@ -1,6 +1,8 @@
 #pragma once
 #include "RetainedSolidAttribute.hxx"
 #include <BinMNaming_NamedShapeDriver.hxx>
+#include <BinMXCAFDoc_LengthUnitDriver.hxx>
+#include <XCAFDoc_LengthUnit.hxx>
 #include <BinMDF_ADriverTable.hxx>
 #include <BinTools_LocationSet.hxx>
 #include <BinTools_ShapeSet.hxx>
@@ -137,7 +139,14 @@ inline void Register(const Handle(BinMDF_ADriverTable)& table,const Handle(Messa
 template<class Base>class StorageDriver:public Base {
 public:
     Handle(BinMDF_ADriverTable) AttributeDrivers(const Handle(Message_Messenger)& messenger)override{
-        auto table=Base::AttributeDrivers(messenger);Register(table,messenger,std::make_shared<ReadBudget>());return table;
+        auto table=Base::AttributeDrivers(messenger);
+        // BinOcaf's base table omits this authoritative XCAF document unit.
+        // Add only the missing scalar writer; retain the existing XCAF driver
+        // and exact shared NamedShape/Location instances in either format.
+        Handle(BinMDF_ADriver) unitDriver;
+        table->GetDriver(STANDARD_TYPE(XCAFDoc_LengthUnit),unitDriver);
+        if(unitDriver.IsNull())table->AddDriver(new BinMXCAFDoc_LengthUnitDriver(messenger));
+        Register(table,messenger,std::make_shared<ReadBudget>());return table;
     }
     void Write(const Handle(CDM_Document)& doc,const TCollection_ExtendedString& file,
                const Message_ProgressRange& progress=Message_ProgressRange())override{
