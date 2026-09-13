@@ -14,6 +14,25 @@
 #include "ListOfColors.h"
 #include <cmath>
 
+@implementation Core3DPBRScalarEdit
+- (instancetype)initWithBaseColorSRGB:(NSArray<NSNumber *> *)rgb metallic:(NSNumber *)metallic roughness:(NSNumber *)roughness {
+    const auto number=[](id v,double& output){
+        if(![v isKindOfClass:NSNumber.class]||CFGetTypeID((__bridge CFTypeRef)v)==CFBooleanGetTypeID())return false;
+        output=[v doubleValue];return std::isfinite(output)&&output>=0&&output<=1;
+    };
+    if(!rgb&&!metallic&&!roughness)return nil;
+    if(rgb&&![rgb isKindOfClass:NSArray.class])return nil;
+    NSArray<NSNumber*>* frozenRGB=[rgb copy];double channels[3]={0,0,0},m=0,r=0;
+    if(frozenRGB&&frozenRGB.count!=3)return nil;
+    if(frozenRGB)for(NSUInteger i=0;i<3;++i)if(!number(frozenRGB[i],channels[i]))return nil;
+    if((metallic&&!number(metallic,m))||(roughness&&!number(roughness,r)))return nil;
+    if((self=[super init])){if(frozenRGB)_baseColorSRGB=@[@(channels[0]),@(channels[1]),@(channels[2])];
+        if(metallic)_metallic=@(m);if(roughness)_roughness=@(r);}
+    return self;
+}
+- (id)copyWithZone:(NSZone *)zone {return self;}
+@end
+
 @implementation Core3DMaterial {
     
 }

@@ -6,6 +6,7 @@
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/RectangularLoftRebuild.hxx"
 #include "NativeModelingRequest.hxx"
+#include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
 #include <map>
@@ -57,6 +58,7 @@ private:
     std::vector<receipt::UUID> featureIDs_;
     Handle(TDocStd_Document) document_;
     receipt::Catalog previous_;
+    std::optional<placement::Evidence> expectedPlacement_;
     std::optional<receipt::Effect> expectedSource_; // Rebuild-only, main-owned native proof.
     std::shared_ptr<NativeModelingEpoch> session_,request_;
     std::shared_ptr<NativeModelingReceiptResolution> resolution_;
@@ -87,6 +89,18 @@ struct OrdinaryMeshVertexMove {
     gp_Vec worldDelta;
 };
 
+// Minted only after the inspector validates its exact original lease and
+// computes the candidate through the shared touch calculation. Ordinary
+// admission compares the descriptor, baseline and matrix before opening OCAF.
+class NativePlacementContinuation final {
+    friend class TransformInspectorMeasurementController;
+    friend class OrdinaryEditController;
+    NativePlacementContinuation()=default;
+    request::Descriptor descriptor_;
+    gp_Trsf candidate_;
+    TopoDS_Shape shape_;
+    TDF_Label label_;
+};
 struct SweepRebuildGuard; // Opaque immutable source catalog, main only.
 struct OrdinaryTransformChange {
     TDF_Label label;
@@ -97,6 +111,7 @@ struct OrdinaryTransformChange {
     std::optional<OrdinaryRotationAroundPivot> rotationAroundPivot;
     OcctMeshUVAtlasOptions meshUVAtlasOptions;
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
+    std::shared_ptr<const NativePlacementContinuation> placementContinuation;
     std::optional<profile::Parameters> profileRebuild;
     std::optional<enclosure::Parameters> enclosureRebuild;
     std::optional<planar_sweep::Definition> sweepRebuild;
@@ -180,6 +195,13 @@ struct OrdinaryVisibilityLedger {
     std::vector<Handle(AIS_Shape)> targetPresentations;
 };
 
+struct OrdinaryAppearanceLedger {
+    std::shared_ptr<const OcctPBRScalarPreparation> prepared;
+    std::shared_ptr<const OcctPBRScalarState> previous,candidate;
+    OrdinaryNameLedger authority;
+    bool candidateSealed=false;
+};
+
 //! Organization is a distinct durable family; names of objects, geometry,
 //! transforms and existing presentation/selection authority are preserved.
 struct OrdinaryGroupingLedger {
@@ -261,6 +283,8 @@ public:
     virtual bool admitMeshCopy(OrdinaryCreationLedger&) noexcept { return false; }
     virtual bool repairMeshCopy(const OrdinaryCreationLedger&, bool) noexcept { return false; }
     virtual bool repairCreation(const OrdinaryCreationLedger&, bool) noexcept { return false; }
+    virtual bool admitAppearance(OrdinaryAppearanceLedger&) noexcept { return false; }
+    virtual bool repairAppearance(const OrdinaryAppearanceLedger&, bool) noexcept { return false; }
     virtual bool admitGrouping(OrdinaryGroupingLedger&) noexcept { return false; }
     virtual bool repairGrouping(const OrdinaryGroupingLedger&, bool) noexcept { return false; }
     virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
@@ -322,6 +346,10 @@ public:
         std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept;
     OrdinaryEditLease beginModelingRebuild(const OrdinaryTransformChange& change,
         std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept;
+    OrdinaryEditLease beginModelingPlacement(const OrdinaryTransformChange& change,
+        std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept;
+    OrdinaryEditLease beginAppearance(const std::shared_ptr<const OcctPBRScalarPreparation>&,
+        OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginGrouping(const std::vector<OcctSavedGroup>& groups,
                                    OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
@@ -340,7 +368,7 @@ public:
 #endif
 private:
     friend class OrdinaryEditLease;
-    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger, OrdinaryCreationLedger>;
+    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger, OrdinaryCreationLedger, OrdinaryAppearanceLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileImpl() noexcept;
@@ -348,9 +376,12 @@ private:
     OrdinaryEditResult reconcileCreationImpl() noexcept;
     OrdinaryEditLease beginTransformImpl(const std::vector<OrdinaryTransformChange>& changes,
         OrdinaryEditResult* failure, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
+    bool bindPlacementReceipt(OrdinaryTransformLedger& ledger,const OrdinaryTransformChange& change,
+        const OcctObjectTransformState& previous,std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
+    bool capturePlacementReceipt(const OrdinaryTransformLedger& ledger,placement::Evidence& out) noexcept;
     bool bindRebuildReceipt(OrdinaryTransformLedger& ledger, const OrdinaryTransformChange& change,
         const OcctObjectTransformState& previous, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
-    bool rebuildReceiptMatches(const OrdinaryTransformLedger& ledger, bool candidate) const noexcept;
+    bool rebuildReceiptMatches(const OrdinaryTransformLedger& ledger, bool candidate) noexcept;
     bool stageRebuildReceipt(OrdinaryTransformLedger& ledger) noexcept;
     bool stageCreationReceipt(OrdinaryCreationLedger& ledger) noexcept;
     bool creationReceiptMatches(const OrdinaryCreationLedger& ledger, bool candidate) const noexcept;
@@ -359,6 +390,8 @@ private:
         std::optional<OrdinaryMeshCopySource> meshCopy, OrdinaryEditResult* failure,
         std::shared_ptr<NativeModelingCommitPermit> permit = {}) noexcept;
     bool meshCopySourceMatches(const OrdinaryMeshCopySource& source, bool candidate) const noexcept;
+    OrdinaryEditResult stageAppearanceAndCommit(std::uint64_t token) noexcept;
+    OrdinaryEditResult reconcileAppearanceImpl() noexcept;
     OrdinaryEditResult stageGroupingAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileGroupingImpl() noexcept;
     bool groupingMatches(const OrdinaryGroupingLedger& ledger, bool candidate) const noexcept;

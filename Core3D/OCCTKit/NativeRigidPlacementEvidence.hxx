@@ -1,9 +1,10 @@
 #pragma once
-// Placement evidence v1 only: no catalog, durable receipt, admission or retry
-// authority. Numeric request/coupled receipt integration remains separate.
+// Placement evidence v1 and placement-specific descriptor/effect conversion.
+// Numeric evidence alone never grants reservation, execution or retry authority.
 #include "NativeModelingReceipt.hxx"
 #include <pthread.h>
 
+namespace core3d { class OrdinaryEditController; }
 namespace core3d::placement {
 using Digest = receipt::Digest;
 using UUID = receipt::UUID;
@@ -37,10 +38,16 @@ inline bool MillimetersPerUnit(double unit,double& factor)noexcept {
     if(!std::isfinite(candidate)||candidate<=0)return false;
     factor=candidate;return true;
 }
-inline bool Capture(const Handle(OcctDocument)& owner,const TDF_Label& label,Evidence& out)noexcept {
+inline bool Capture(const Handle(OcctDocument)&,const TDF_Label&,Evidence&)noexcept;
+// Only the ordinary controller can use this private owned-command reader.
+// Its call site additionally proves exact ledger/permit/document/stamp ownership.
+class EvidenceReader final {
+    friend class core3d::OrdinaryEditController;
+    friend bool Capture(const Handle(OcctDocument)&,const TDF_Label&,Evidence&)noexcept;
+    static bool Read(const Handle(OcctDocument)& owner,const TDF_Label& label,Evidence& out,bool ownedCommand)noexcept {
     out={};try{
         if(!pthread_main_np()||owner.IsNull()||owner->Document().IsNull()
-            ||owner->Document()->HasOpenCommand()
+            ||(owner->Document()->HasOpenCommand()&&!ownedCommand)
             ||!XCAFDoc_DocumentTool::CheckShapeTool(owner->Document()->Main())||label.IsNull()
             ||!owner->IsEditableFreeSimpleDefinitionLabel(label))return false;
         OcctObjectNameState named;
@@ -108,6 +115,25 @@ inline bool Capture(const Handle(OcctDocument)& owner,const TDF_Label& label,Evi
         for(int i=1;i<=named.name.Length();++i)Integer(e.stateBytes,std::uint16_t(named.name.Value(i)));
         if(!receipt::Hash(e.stateBytes.data(),e.stateBytes.size(),e.state))return false;
         out=std::move(e);return true;
+    }catch(...){out={};return false;}
+}
+};
+inline bool Capture(const Handle(OcctDocument)& owner,const TDF_Label& label,Evidence& out)noexcept {
+    return EvidenceReader::Read(owner,label,out,false);
+}
+inline receipt::Effect Effect(const Evidence&e) {
+    receipt::Effect out;out.policy=receipt::ExactPlacementPolicy8193;
+    out.feature=e.family==Family::UnparametrizedSolid?receipt::Feature::PlacementBareSolid:receipt::Feature::PlacementObject;
+    out.entity=e.entity;out.definition=e.definition;out.featureID=e.feature;out.geometry=e.geometry;out.state=e.state;
+    return out;
+}
+inline bool Descriptor(const Evidence&e,double unit,std::uint8_t kind,std::uint8_t axis,double value,request::Descriptor& out)noexcept {
+    out={};try{
+        request::PlacementIntent p;p.entity=e.entity;p.definition=e.definition;p.feature=e.feature;
+        p.geometry=e.geometry;p.recipe=e.recipe;p.state=e.state;p.family=std::uint8_t(e.family);p.schema=e.schema;
+        p.metersPerUnit=unit;p.kind=kind;p.axis=axis;p.value=value;
+        out.operation=request::Operation::SetPlacement;out.placement=p;
+        std::vector<std::uint8_t> bytes;return request::Encode(out,bytes);
     }catch(...){out={};return false;}
 }
 // Unique current free definition. No entity prefix/mesh suffix guessing.

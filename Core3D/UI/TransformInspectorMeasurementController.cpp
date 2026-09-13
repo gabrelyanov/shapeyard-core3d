@@ -1933,7 +1933,8 @@ TransformInspectorMeasurementController::commitPosition(
     const std::shared_ptr<ObjectInteractor>& theObjectInteractor,
     const std::shared_ptr<ShapeInteractor>& theShapeInteractor,
     const TransformInspectorPositionCommitRequest& theRequest,
-    const std::shared_ptr<OrdinaryEditController>& theEdits) noexcept
+    const std::shared_ptr<OrdinaryEditController>& theEdits,
+    std::shared_ptr<NativeModelingCommitPermit> placementPermit) noexcept
 {
     TransformInspectorPositionCommitOutcome anOutcome;
     anOutcome.result =
@@ -2243,13 +2244,17 @@ TransformInspectorMeasurementController::commitPosition(
             &aCandidatePosition.y,
             &aCandidatePosition.z,
         };
-        if (*aCandidateComponents[anAxis] == theRequest.value
-            || (rotates && std::remainder(theRequest.value - *aCandidateComponents[anAxis], 360.0) == 0.0)) {
+        const bool unchangedPlacement=(*aCandidateComponents[anAxis] == theRequest.value
+            || (rotates && std::remainder(theRequest.value - *aCandidateComponents[anAxis], 360.0) == 0.0));
+        if(placementPermit&&(scales||sizes)){
+            anOutcome.result=TransformInspectorPositionCommitResult::Unsupported;return anOutcome;
+        }
+        if (unchangedPlacement&&!placementPermit) {
             anOutcome.result =
                 TransformInspectorPositionCommitResult::Unchanged;
             return anOutcome;
         }
-        *aCandidateComponents[anAxis] = theRequest.value;
+        if(!unchangedPlacement)*aCandidateComponents[anAxis] = theRequest.value;
 
         OcctObjectTransformState exactBaseline;
         if (!myDoc->CaptureObjectTransformStateForLabel(aDefinition, exactBaseline)) {
@@ -2260,7 +2265,10 @@ TransformInspectorMeasurementController::commitPosition(
         // controller, preserving its Translate basis invariant.
         gp_Trsf aCandidateTransform = exactBaseline.transform;
         TopoDS_Shape candidateShape = aStoredShape;
-        if (sizes) {
+        if(unchangedPlacement) {
+            // Reserved no-op proceeds with the exact original transform to
+            // ordinary source/catalog proof, without a receipt-only command.
+        } else if (sizes) {
             // Same affine BRep operation as axis scaling. Build from the exact
             // captured definition around its measured local center; no extra
             // synchronous exact-bounds sweep is needed for this diagonal map.
@@ -2323,8 +2331,19 @@ TransformInspectorMeasurementController::commitPosition(
                 fault == 1 ? 3 : fault == 2 ? 4 : 1);
         }
 #endif
+        if(placementPermit){
+            placement::Evidence source;
+            auto continuation=std::shared_ptr<NativePlacementContinuation>(new NativePlacementContinuation);
+            if(!placement::Capture(myDoc,aDefinition,source)
+                ||!placement::Descriptor(source,aMetersPerUnit,rotates?1:0,std::uint8_t(anAxis),theRequest.value,continuation->descriptor_)){
+                anOutcome.result=TransformInspectorPositionCommitResult::Stale;return anOutcome;
+            }
+            continuation->candidate_=aCandidateTransform;continuation->shape_=candidateShape;continuation->label_=aDefinition;
+            change.placementContinuation=std::move(continuation);
+        }
         OrdinaryEditResult result = OrdinaryEditResult::Invalid;
-        auto lease = theEdits->beginTransform({change}, &result);
+        auto lease = placementPermit?theEdits->beginModelingPlacement(change,std::move(placementPermit),&result)
+            :theEdits->beginTransform({change}, &result);
         if (lease) { result = lease.stageAndCommit(); }
         switch (result) {
             case OrdinaryEditResult::Committed:

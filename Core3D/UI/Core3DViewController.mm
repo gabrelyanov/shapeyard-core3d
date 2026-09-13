@@ -1689,6 +1689,8 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
     std::weak_ptr<core3d::Core3DViewer> _planningViewer;
     core3d::authority::Stamp _planningStamp;
     uint64_t _planningOverlayRevision;
+    Core3DTransformInspectorSnapshot *_planningPlacementSnapshot;
+    std::optional<core3d::placement::Evidence> _planningPlacementEvidence;
     BOOL _planningConsumed;
     BOOL _planningRetired;
 }
@@ -1714,6 +1716,7 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
     }
     return self;
 }
+- (Core3DTransformInspectorSnapshot *)placementSnapshot { return _planningPlacementSnapshot; }
 @end
 
 #if DEBUG
@@ -2032,6 +2035,7 @@ static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
     std::vector<core3d::request::UUID> _requestFeatureIDs;
     std::optional<core3d::profile::Parameters> _requestProfile;
     std::optional<core3d::rectangular_loft::StationDimensionEdit> _requestLoftEdit;
+    Core3DRigidPlacementPreparation *_requestPlacement;
     std::optional<core3d::enclosure::Parameters> _requestEnclosure;
     std::vector<core3d::AssemblyPartDefinition> _requestAssembly;
     BOOL _requestRetired;
@@ -2357,6 +2361,8 @@ static NSDictionary *Core3DReservationDebugResult(Core3DReservationOutcome outco
     Core3DModelingStorageObservation _storage;
     void (^_completion)(Core3DModelingAsyncOutcome *);
     BOOL _finished;
+    BOOL _placementResolutionBound;
+    core3d::receipt::UUID _placementEntity;
     BOOL _loftResolutionBound;
     core3d::receipt::UUID _loftEntity;
 #if DEBUG
@@ -2379,7 +2385,10 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
             &&record.key.execution==box->_key.execution&&!record.effects.empty()&&record.effects.size()<=16
             &&(!box->_loftResolutionBound||(record.operation==core3d::receipt::Operation::RebuildLoftStation
                 &&record.policy==core3d::receipt::ExactLoftPolicy4097&&record.effects.size()==1
-                &&record.effects.front().entity==box->_loftEntity));
+                &&record.effects.front().entity==box->_loftEntity))
+            &&(!box->_placementResolutionBound||(record.operation==core3d::receipt::Operation::SetPlacement
+                &&record.policy==core3d::receipt::ExactPlacementPolicy8193&&record.effects.size()==1
+                &&record.effects.front().entity==box->_placementEntity));
         if(same){
             disposition=Core3DModelingAsyncDispositionCommitted;
             for(const auto&effect:record.effects)
@@ -2388,7 +2397,10 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
     }else if(resolution&&resolution->state()==core3d::NativeModelingReceiptResolution::State::Unchanged){
         // This state is sealed only by the source/permit/prior-catalog-checked
         // ordinary no-change path. It has no receipt record or saved proof.
-        if(box->_loftResolutionBound&&box->_storage==Core3DModelingStorageObservationReserved){
+        if(box->_placementResolutionBound&&box->_storage==Core3DModelingStorageObservationReserved){
+            disposition=Core3DModelingAsyncDispositionUnchanged;
+            [entities addObject:[[NSUUID alloc] initWithUUIDBytes:box->_placementEntity.data()].UUIDString];
+        }else if(box->_loftResolutionBound&&box->_storage==Core3DModelingStorageObservationReserved){
             disposition=Core3DModelingAsyncDispositionUnchanged;
             [entities addObject:[[NSUUID alloc] initWithUUIDBytes:box->_loftEntity.data()].UUIDString];
         }else disposition=Core3DModelingAsyncDispositionUncertain;
@@ -2476,6 +2488,28 @@ static bool Core3DRebuildSourceMatches(Core3DModelingPreparedRequest *request,
     } catch (...) { return false; }
 }
 
+static bool Core3DPlacementSourceMatches(Core3DModelingPreparedRequest *request,const Handle(OcctDocument)& owner) noexcept {
+    try{
+        if(!NSThread.isMainThread||!request||!request->_requestContext||!request->_requestPlacement||!request->_requestPlacement->_placementSnapshot
+            ||!request->_requestPlacement->_placementSnapshot.entityIdentifier.UTF8String||request->_requestPlacement->_placementConsumed
+            ||!request->_requestContext->_planningPlacementEvidence||!request->_requestSourceEffect
+            ||request->_requestPlacement->_placementOwner!=request->_requestOwner
+            ||request->_requestPlacement->_placementViewer.lock()!=request->_requestContext->_planningViewer.lock()
+            ||!(request->_requestPlacement->_placementStamp==request->_requestContext->_planningStamp))return false;
+        const auto& original=*request->_requestContext->_planningPlacementEvidence;
+        TDF_Label label;core3d::placement::Evidence live;
+        if(!core3d::placement::Find(owner,request->_requestPlacement->_placementSnapshot.entityIdentifier.UTF8String,label)
+            ||!core3d::placement::Capture(owner,label,live)||!(live==original)
+            ||!(live==request->_requestPlacement->_placementEvidence)
+            ||!(core3d::placement::Effect(live)==*request->_requestSourceEffect))return false;
+        core3d::request::Descriptor actual;std::vector<std::uint8_t> a,b;
+        auto* p=request->_requestPlacement;
+        const auto axis=p->_placementAxis==Core3DTransformInspectorAxisX?0:p->_placementAxis==Core3DTransformInspectorAxisY?1:2;
+        return core3d::placement::Descriptor(live,p->_placementSnapshot.metersPerUnit,
+            p->_placementKind==Core3DRigidPlacementKindRotation?1:0,axis,p->_placementRawValue,actual)
+            &&core3d::request::Encode(actual,a)&&core3d::request::Encode(request->_requestDescriptor,b)&&a==b;
+    }catch(...){return false;}
+}
 namespace core3d {
 // Defined only at the main-owned actual-reservation boundary. No public
 // constructor, serialized ticket, callback outcome or numeric enum issues one.
@@ -2576,6 +2610,43 @@ struct NativeModelingPermitIssuer final {
         if(!p->admission_->beginGeometry(true))return {};
         capability->_taken=YES;return p;
     }
+    static std::shared_ptr<NativeModelingCommitPermit> takePlacement(Core3DModelingReservedCapability *capability,
+        const Handle(OcctDocument)& owner) {
+        if(!NSThread.isMainThread||!capability||capability->_taken||!capability->_entry
+            ||owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return {};
+        auto *entry=capability->_entry;auto *prepared=entry->_prepared;
+        if(!prepared||!entry->_owner||![entry->_owner core3d_reservationMatches:prepared]
+            ||capability->_delivery.disposition!=tombstone::Reservation::Reserved
+            ||!(entry->_dispatch.key==capability->_delivery.key)||!entry->_admission
+            ||entry->_admission->phase()!=request::Phase::Reserved
+            ||!prepared->_requestEpoch||prepared->_requestEpoch->retired
+            ||!prepared->_requestSession->_hostEpoch||prepared->_requestSession->_hostEpoch->retired)return {};
+        const auto operation=prepared->_requestDescriptor.operation;
+        if(operation!=request::Operation::SetPlacement||!prepared->_requestFeatureIDs.empty())return {};
+        if(!Core3DPlacementSourceMatches(prepared,owner))return {};
+        receipt::Catalog catalog;const auto status=receipt::Read(owner->Document(),catalog);
+        receipt::UUID document;
+        if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
+            ||!prepared->_requestCreationCatalog
+            ||!catalog.matches(*prepared->_requestCreationCatalog)||!catalog.supportsAppend()
+            ||catalog.records.size()>=receipt::MaximumRecords
+            ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
+        for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
+        auto p=std::shared_ptr<NativeModelingCommitPermit>(new NativeModelingCommitPermit);
+        p->key_.accountScope=prepared->_requestKey.accountScope;p->key_.document=prepared->_requestKey.document;
+        p->key_.request=prepared->_requestKey.request;p->key_.command=prepared->_requestKey.command;p->key_.execution=prepared->_requestKey.execution;
+        p->operation_=static_cast<receipt::Operation>(operation);p->descriptor_=prepared->_requestDescriptor;
+        p->featureIDs_=prepared->_requestFeatureIDs;p->document_=owner->Document();p->previous_=std::move(catalog);
+        p->expectedSource_=prepared->_requestSourceEffect;
+        p->expectedPlacement_=prepared->_requestContext->_planningPlacementEvidence;
+        p->session_=prepared->_requestSession->_hostEpoch;p->request_=prepared->_requestEpoch;
+        p->resolution_=std::make_shared<NativeModelingReceiptResolution>();p->admission_=entry->_admission;
+        // No geometry worker is needed for a numeric rigid transform. Move
+        // the real Reserved capability through the same one-use admission.
+        if(!p->admission_->beginGeometry(true)||!p->admission_->geometryReady(true,true)
+            ||!p->admission_->takeForOrdinary(true))return {};
+        p->attached_=true;capability->_taken=YES;return p;
+    }
 };
 }
 
@@ -2664,6 +2735,24 @@ struct NativeModelingPermitIssuer final {
                               axis:(Core3DTransformInspectorAxis)axis
                   expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
                           kind:(core3d::TransformInspectorEditKind)kind;
+- (Core3DTransformInspectorPositionCommitResult)commitTransformInspectorValue:(double)value
+    axis:(Core3DTransformInspectorAxis)axis expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    kind:(core3d::TransformInspectorEditKind)kind placementPermit:(std::shared_ptr<core3d::NativeModelingCommitPermit>)permit;
+- (Core3DTransformInspectorPositionCommitResult)core3d_executeReservedPlacement:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure;
+- (Core3DTransformInspectorPositionCommitResult)core3d_executeReservedPlacement:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure asyncCompletion:(Core3DModelingAsyncCompletion *)box;
+@end
+
+@interface Core3DPBRScalarPreparation () {
+@public
+    __weak Core3DViewController* _scalarOwner;
+    std::shared_ptr<core3d::NativePBRScalarWork> _scalarWork;
+}
+- (instancetype)initPrivate;
+@end
+@implementation Core3DPBRScalarPreparation
+- (instancetype)initPrivate {return [super init];}
 @end
 
 @implementation Core3DViewController {
@@ -2862,6 +2951,90 @@ struct NativeModelingPermitIssuer final {
                             | UIStateChangingHistory];
 }
 
+#if DEBUG
+- (NSDictionary<NSString *,id> *)debugScalarPBREvidence:(NSString *)entity {
+    if(![NSThread isMainThread]||!entity||entity.length>128||!GLController||!GLController.viewer)return nil;
+    try{
+        auto owner=GLController.viewer->getDocument();if(owner.IsNull()||owner->Document().IsNull())return nil;
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return nil;
+        TDF_Label target;for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){if(!target.IsNull())return nil;target=roots.Value(i);}
+        const auto e=owner->DebugPBRScalarEvidence(target);if(!e)return nil;
+        NSMutableDictionary* geometry=[NSMutableDictionary dictionary];for(const auto& [key,digest]:e->geometry)geometry[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:digest.data() length:digest.size()];
+        return @{@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
+            @"tableBytes":[NSData dataWithBytes:e->table.data() length:e->table.size()],@"geometry":geometry};
+    }catch(...){return nil;}
+}
+- (BOOL)debugSeedScalarPBRCommonMismatch {
+    if(![NSThread isMainThread]||!GLController||!GLController.viewer||![self core3d_canBeginCommittedEdit])return NO;
+    auto viewer=GLController.viewer;auto owner=viewer->getDocument();auto context=viewer->AisContext();
+    if(owner.IsNull()||context.IsNull()||context->NbSelected()!=1)return NO;
+    auto document=owner->Document();if(document.IsNull()||document->HasOpenCommand())return NO;
+    try{
+        context->InitSelected();const auto shape=Handle(AIS_Shape)::DownCast(context->SelectedInteractive());const auto label=owner->ShapeLabel(shape);
+        const auto material=XCAFDoc_VisMaterialTool::GetShapeMaterial(label);if(material.IsNull()||!material->HasPbrMaterial())return NO;
+        auto common=material->CommonMaterial();common.IsDefined=true;common.AmbientColor=Quantity_Color(.11,.12,.13,Quantity_TOC_RGB);
+        common.DiffuseColor=Quantity_Color(.6,.4,.2,Quantity_TOC_RGB);common.SpecularColor=Quantity_Color(.3,.4,.5,Quantity_TOC_RGB);
+        common.EmissiveColor=Quantity_Color(.1,.2,.3,Quantity_TOC_RGB);common.Shininess=.17f;common.Transparency=.23f;
+        document->NewCommand();if(!document->HasOpenCommand())return NO;material->SetCommonMaterial(common);
+        if(!document->CommitCommand()){Core3DAbortCommandNoThrow(document);return NO;}
+        owner->NotifyChanges();owner->LoadObjectMeterial(label,shape);context->Redisplay(shape,Standard_False);context->UpdateCurrentViewer();return YES;
+    }catch(...){Core3DAbortCommandNoThrow(document);return NO;}
+}
+#endif
+
+- (Core3DPBRScalarPreparation *)prepareScalarPBREdit:(Core3DPBRScalarEdit *)edit expected:(Core3DSceneSnapshot *)expected {
+    if(![NSThread isMainThread]||!edit||edit.class!=Core3DPBRScalarEdit.class||!expected||expected.class!=Core3DSceneSnapshot.class||!_isSetuped||!GLController||!GLController.viewer
+        ||!GLController.viewer->canBeginCommittedEdit())return nil;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        ||size.width>UINT32_MAX||size.height>UINT32_MAX)return nil;
+    try{
+        core3d::ObjectFrameIdentity identity;const char* source=expected.publicationSourceIdentifier.UTF8String;if(!source)return nil;
+        identity.publicationSourceIdentifier.assign(source,[expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
+        OcctPBRScalarPatch patch;if(edit.baseColorSRGB){if(edit.baseColorSRGB.count!=3)return nil;patch.baseColorSRGB=std::array<double,3>{edit.baseColorSRGB[0].doubleValue,edit.baseColorSRGB[1].doubleValue,edit.baseColorSRGB[2].doubleValue};}
+        if(edit.metallic)patch.metallic=edit.metallic.doubleValue;if(edit.roughness)patch.roughness=edit.roughness.doubleValue;
+        auto work=GLController.viewer->preparePBRScalar(patch,identity,expected.revisions.presentationRevision,std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+        if(!work)return nil;auto prepared=[[Core3DPBRScalarPreparation alloc]initPrivate];if(!prepared)return nil;
+        prepared->_scalarOwner=self;prepared->_scalarWork=std::move(work);return prepared;
+    }catch(...){return nil;}
+}
+- (void)cancelScalarPBRPreparation:(Core3DPBRScalarPreparation *)prepared {
+    if(![NSThread isMainThread]||!prepared||prepared.class!=Core3DPBRScalarPreparation.class||prepared->_scalarOwner!=self)return;
+    auto work=std::move(prepared->_scalarWork);
+    if(GLController&&GLController.viewer)GLController.viewer->cancelPBRScalar(work);
+}
+- (Core3DPBRScalarResult)executeScalarPBRPreparation:(Core3DPBRScalarPreparation *)prepared {
+    if(![NSThread isMainThread]||!prepared||prepared.class!=Core3DPBRScalarPreparation.class||prepared->_scalarOwner!=self
+        ||!prepared->_scalarWork||!GLController||!GLController.viewer)return Core3DPBRScalarResultInvalid;
+    auto work=std::move(prepared->_scalarWork); // Consume before any publication/reentry.
+    const auto viewer=GLController.viewer;const auto result=viewer->executePBRScalar(work);
+    if(result==core3d::OrdinaryEditResult::Committed||result==core3d::OrdinaryEditResult::NoChange){
+        // Actual durable result is already sealed; publication cannot downgrade it.
+        try{
+            auto context=viewer->AisContext();auto doc=viewer->getDocument();NSMutableArray<Core3DPBRMaterial*>* values=[NSMutableArray array];
+            if(!context.IsNull()&&!doc.IsNull())for(context->InitSelected();context->MoreSelected();context->NextSelected()){
+                const auto label=doc->ShapeLabel(context->SelectedInteractive());XCAFDoc_VisMaterialPBR p;
+                if(!label.IsNull()&&doc->TryEffectivePBRMaterialForLabel(label,p)){
+                    auto value=Core3DMakePBRMaterial(p,doc->SupportsScalarPBRMaterialEditingForLabel(label),doc->SupportsBaseColorTextureEditingForLabel(label),
+                        doc->SupportsEmissiveTextureEditingForLabel(label),doc->SupportsMaterialTextureEditingForLabel(label,OcctMaterialTextureSlot::MetallicRoughness),
+                        doc->SupportsMaterialTextureEditingForLabel(label,OcctMaterialTextureSlot::Occlusion),doc->SupportsMaterialTextureEditingForLabel(label,OcctMaterialTextureSlot::Normal));
+                    if(value)[values addObject:value];
+                }
+            }
+            [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];[self.materialController didChangeSelectionWithPBRMaterials:values];
+            [self sendNotifyUIState:UIStateChangingApplyMaterial|UIStateChangingHistory];
+        }catch(...){}
+    }
+    switch(result){
+        case core3d::OrdinaryEditResult::Committed:return Core3DPBRScalarResultCommitted;
+        case core3d::OrdinaryEditResult::NoChange:return Core3DPBRScalarResultUnchanged;
+        case core3d::OrdinaryEditResult::Busy:return Core3DPBRScalarResultBusy;
+        case core3d::OrdinaryEditResult::OutcomeUnknown:return Core3DPBRScalarResultOutcomeUnknown;
+        default:return Core3DPBRScalarResultInvalid;
+    }
+}
+
 -(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material {
     if (material == nil || !material.supportsScalarEditing) {
         return;
@@ -2871,6 +3044,28 @@ struct NativeModelingPermitIssuer final {
 		|| ![self core3d_canBeginCommittedEdit]) {
 		return;
 	}
+
+    // Existing single-selected touch values now share immutable source/ledger
+    // authority. Multiselection keeps the unchanged legacy batch path below.
+    auto selectedContext=GLController.viewer->AisContext();
+    bool preserveLegacyStamping=false;
+    if(!selectedContext.IsNull()&&selectedContext->NbSelected()==1){
+        selectedContext->InitSelected();const auto doc=GLController.viewer->getDocument();
+        if(!doc.IsNull())preserveLegacyStamping=doc->StoredGeometryRepresentationForLabel(doc->ShapeLabel(selectedContext->SelectedInteractive()))==OcctGeometryRepresentation::LegacyUnknown;
+    }
+    // The existing legacy-touch contract stamps BRep inside its ordinary color
+    // command. Choose that contract before any prepared admission, never as a retry.
+    if(!selectedContext.IsNull()&&selectedContext->NbSelected()==1&&!preserveLegacyStamping){
+        CGFloat r=0,g=0,b=0,a=0;
+        if(![material.baseColor getRed:&r green:&g blue:&b alpha:&a]||!std::isfinite(r)||!std::isfinite(g)||!std::isfinite(b)
+            ||!std::isfinite(a)||a<0||a>1)return;
+        auto edit=[[Core3DPBRScalarEdit alloc]initWithBaseColorSRGB:@[@(std::clamp(r,CGFloat(0),CGFloat(1))),@(std::clamp(g,CGFloat(0),CGFloat(1))),@(std::clamp(b,CGFloat(0),CGFloat(1)))]
+            metallic:@(material.metallic) roughness:@(material.roughness)];
+        auto snapshot=[self captureSceneSnapshot];
+        auto prepared=edit&&snapshot?[self prepareScalarPBREdit:edit expected:snapshot]:nil;
+        if(prepared)[self executeScalarPBRPreparation:prepared];
+        return;
+    }
 
     auto context = GLController.viewer->AisContext();
     auto doc = GLController.viewer->getDocument();
@@ -6032,6 +6227,20 @@ struct NativeModelingPermitIssuer final {
 // Read-only DEBUG visibility into unverified component evidence. Public verified
 // reconciliation remains unavailable, including for current matching effects.
 // Bounded read-only visibility. The returned catalogs confer no authority.
++ (NSDictionary<NSString *, NSNumber *> *)debugReceiptFramingProbe:(NSInteger)scenario {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return @{ @"invalidScenario": @NO };
+    try {
+        const auto checks = Core3DDebugReceiptFramingProbe(static_cast<Standard_Integer>(scenario));
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
 - (NSDictionary *)debugReceiptCatalogSnapshot {
     namespace r=core3d::receipt;
     if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{@"valid":@NO};
@@ -6357,6 +6566,84 @@ struct NativeModelingPermitIssuer final {
 - (BOOL)debugFailCreationReceiptResolutionBeforeRelease:(Core3DModelingPreparedRequest *)request {
     if(!NSThread.isMainThread||!request||request->_requestOwner!=self)return NO;
     return core3d::NativeModelingPermitIssuer::failBeforeRelease(request);
+}
+- (Core3DTransformInspectorPositionCommitResult)debugExecuteReservedPlacement:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure {
+    return [self core3d_executeReservedPlacement:request receiptFailure:receiptFailure];
+}
+- (NSDictionary *)debugPlacementRequestCodecProbe {
+    namespace q=core3d::request;namespace r=core3d::receipt;
+    try{
+        q::Descriptor legacy;legacy.operation=q::Operation::CreateProfile;q::Part part;part.schema=1;part.values={0.0,-0.0};legacy.parts={part};
+        std::vector<std::uint8_t> bytes;const bool oldCommand=q::Encode(legacy,bytes)&&r::Hex(bytes)=="53594d44010501000101000000000000000200000000000000000000000000000000000080";
+        r::Record record;record.operation=r::Operation::RebuildProfile;
+        record.key.accountScope.fill(1);record.key.document.fill(2);record.key.request.fill(3);record.key.command.fill(4);record.key.execution.fill(5);
+        r::Effect effect;effect.entity.fill(6);effect.definition.fill(7);effect.featureID.fill(8);effect.geometry.fill(9);effect.state.fill(10);record.effects={effect};
+        const bool oldReceipt=r::Encode({record},bytes)&&r::Hex(bytes)=="53595243020001000101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020303030303030303030303030303030304040404040404040404040404040404040404040404040404040404040404040505050505050505050505050505050505050505050505050505050505050505040101000106060606060606060606060606060606070707070707070707070707070707070808080808080808080808080808080809090909090909090909090909090909090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a86ea7dbde0df6079095b8c7e74b3b2f6aba9de9fcff7d61e9de2aa9cc7acd398";
+        unsigned oldUnknown=0;
+        for(auto op:{r::Operation::CreateEnclosure,r::Operation::RebuildEnclosure,r::Operation::CreateAssembly,r::Operation::RebuildProfile,r::Operation::RebuildLoftStation}){
+            auto unknown=record;unknown.operation=op;unknown.policy=r::ExactPlacementPolicy8193;unknown.effects.front().policy=unknown.policy;
+            unknown.effects.front().feature=op==r::Operation::RebuildLoftStation?r::Feature::RectangularLoft:
+                (op==r::Operation::CreateEnclosure||op==r::Operation::RebuildEnclosure?r::Feature::Enclosure:r::Feature::Profile);
+            std::vector<r::Record> decoded;r::Catalog catalog;
+            if(r::Encode({unknown},bytes)&&r::Decode(bytes,decoded)==r::ReadStatus::Valid){
+                catalog.records=decoded;std::vector<std::uint8_t> reencoded;
+                if(!catalog.supportsAppend()&&r::Encode(decoded,reencoded)&&reencoded==bytes)++oldUnknown;
+            }
+        }
+        q::Descriptor placement;placement.operation=q::Operation::SetPlacement;q::PlacementIntent intent;
+        intent.entity.fill(6);intent.definition.fill(7);intent.geometry.fill(9);intent.recipe.fill(11);intent.state.fill(10);
+        intent.family=5;intent.schema=0;intent.metersPerUnit=0.001;intent.value=-0.0;placement.placement=intent;
+        q::Descriptor decoded;const bool bare=q::Encode(placement,bytes)&&bytes.size()==180&&bytes[4]==3&&q::Decode(bytes,decoded);
+        unsigned negatives=0;
+        for(unsigned i=0;i<12;++i){auto bad=placement;switch(i){
+            case 0:bad.parts={part};break;case 1:bad.placement->feature.fill(1);break;case 2:bad.placement->schema=1;break;
+            case 3:bad.placement->family=1;break;case 4:bad.placement->axis=3;break;case 5:bad.placement->kind=2;break;
+            case 6:bad.placement->value=std::numeric_limits<double>::quiet_NaN();break;
+            case 7:bad.placement->metersPerUnit=std::numeric_limits<double>::max();break;
+            case 8:bad.placement->geometry.fill(0);break;case 9:bad.placement->state.fill(0);break;
+            case 10:bad.operation=q::Operation::CreateProfile;break;case 11:bad.loftStationEdit=q::LoftStationEdit{};break;}
+            std::vector<std::uint8_t> refused;if(!q::Encode(bad,refused)&&refused.empty())++negatives;
+        }
+        if(!q::Encode(placement,bytes)||bytes.size()!=180)return @{};
+        unsigned malformed=0;
+        for(unsigned i=0;i<4;++i){auto bad=bytes;if(i==0)bad[4]=1;else if(i==1)bad.push_back(0);else if(i==2)bad.pop_back();else bad[6]=1;
+            q::Descriptor refused;if(!q::Decode(bad,refused))++malformed;}
+        auto placed=record;placed.operation=r::Operation::SetPlacement;placed.policy=r::ExactPlacementPolicy8193;
+        placed.effects.front().policy=placed.policy;placed.effects.front().feature=r::Feature::PlacementBareSolid;placed.effects.front().featureID.fill(0);
+        std::vector<r::Record> decodedRecords;const bool bareRecord=r::Encode({placed},bytes)&&r::Decode(bytes,decodedRecords)==r::ReadStatus::Valid;
+        auto invalid=placed;invalid.effects.front().feature=r::Feature::PlacementObject;
+        const bool absentRefused=!r::Valid(invalid);invalid=record;invalid.effects.front().featureID.fill(0);
+        const bool legacyAbsentRefused=!r::Valid(invalid);
+        placed.policy=8194;placed.effects.front().policy=8194;
+        r::Catalog unsupported;const bool unknownPlacement=r::Encode({placed},bytes)&&r::Decode(bytes,unsupported.records)==r::ReadStatus::Valid&&!unsupported.supportsAppend();
+        return @{@"oldCommand":@(oldCommand),@"oldReceipt":@(oldReceipt),@"oldUnknown":@(oldUnknown),@"bare":@(bare),
+            @"negatives":@(negatives),@"malformed":@(malformed),@"bareRecord":@(bareRecord),@"absentRefused":@(absentRefused),
+            @"legacyAbsentRefused":@(legacyAbsentRefused),@"unknownPlacement":@(unknownPlacement)};
+    }catch(...){return @{};}
+}
+- (NSDictionary *)debugPlacementReceiptState:(Core3DModelingPreparedRequest *)request {
+    if(!NSThread.isMainThread||!request||request->_requestOwner!=self||!GLController||!GLController.viewer)return @{};
+    try{
+        const auto document=GLController.viewer->getDocument();core3d::receipt::Catalog catalog;
+        if(document.IsNull()||document->Document().IsNull())return @{};
+        const auto read=core3d::receipt::Read(document->Document(),catalog);
+        bool current=false;std::size_t matching=0;
+        for(const auto&record:catalog.records)if(record.key.request==request->_requestKey.request){
+            ++matching;
+            if(record.operation!=core3d::receipt::Operation::SetPlacement||record.policy!=core3d::receipt::ExactPlacementPolicy8193
+                ||record.effects.size()!=1||!request->_requestContext->_planningPlacementSnapshot)continue;
+            TDF_Label label;core3d::placement::Evidence evidence;
+            const auto entity=request->_requestContext->_planningPlacementSnapshot.entityIdentifier;
+            current=entity.UTF8String&&core3d::placement::Find(document,entity.UTF8String,label)
+                &&core3d::placement::Capture(document,label,evidence)&&core3d::placement::Effect(evidence)==record.effects.front();
+        }
+        const auto resolution=request->_requestCommitPermit?request->_requestCommitPermit->resolution():nullptr;
+        return @{@"read":@(int(read)),@"records":@(catalog.records.size()),@"matching":@(matching),@"current":@(current),
+            @"resolution":@(resolution?int(resolution->state()):-1),@"openCommand":@(document->Document()->HasOpenCommand()),
+            @"versionedBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],
+            @"legacyBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()]};
+    }catch(...){return @{};}
 }
 - (BOOL)debugExecuteReservedCreation:(Core3DModelingPreparedRequest *)request
     receiptFailure:(BOOL)receiptFailure completion:(void (^)(Core3DProfileConstructionResult))completion {
@@ -11697,7 +11984,7 @@ struct NativeModelingPermitIssuer final {
         const auto operation=request->_requestDescriptor.operation;
         if(operation==core3d::request::Operation::CreateEnclosure||operation==core3d::request::Operation::CreateAssembly
             ||operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile
-            ||operation==core3d::request::Operation::RebuildLoftStation){
+            ||operation==core3d::request::Operation::RebuildLoftStation||operation==core3d::request::Operation::SetPlacement){
             // Fail known catalog conflicts before any permanent reservation.
             if(!GLController||!GLController.viewer)return std::nullopt;
             const auto owner=GLController.viewer->getDocument();
@@ -11705,6 +11992,7 @@ struct NativeModelingPermitIssuer final {
             if ((operation==core3d::request::Operation::RebuildEnclosure||operation==core3d::request::Operation::RebuildProfile
                 ||operation==core3d::request::Operation::RebuildLoftStation)
                 && !Core3DRebuildSourceMatches(request,owner)) return std::nullopt;
+            if(operation==core3d::request::Operation::SetPlacement&&!Core3DPlacementSourceMatches(request,owner))return std::nullopt;
             core3d::receipt::Catalog prior;const auto status=core3d::receipt::Read(owner->Document(),prior);
             if((status!=core3d::receipt::ReadStatus::Absent&&status!=core3d::receipt::ReadStatus::Valid)
                 ||!prior.supportsAppend()
@@ -11859,6 +12147,17 @@ struct NativeModelingPermitIssuer final {
             authority.raw(expectedSource->featureID.data(),expectedSource->featureID.size());
             authority.raw(expectedSource->geometry.data(),expectedSource->geometry.size());
             authority.raw(expectedSource->state.data(),expectedSource->state.size());
+        }
+        if(descriptor.operation==r::Operation::SetPlacement){
+            if(!context->_planningPlacementEvidence||!context->_planningPlacementSnapshot||!descriptor.placement||!featureIDs.empty())return nil;
+            const auto& evidence=*context->_planningPlacementEvidence;
+            authority.text("selected-placement-source/v1");
+            authority.integer(core3d::receipt::ExactPlacementPolicy8193,2);
+            authority.integer(context->_planningPlacementSnapshot.positionEditGeneration);
+            authority.integer(context->_planningPlacementSnapshot.documentEditGeneration);
+            authority.integer(context->_planningPlacementSnapshot.geometryEditGeneration);
+            authority.integer(evidence.stateBytes.size(),4);authority.raw(evidence.stateBytes.data(),evidence.stateBytes.size());
+            expectedSource=core3d::placement::Effect(evidence);
         }
         authority.integer(featureIDs.size(),4);
         for (const auto&identifier:featureIDs) {if (!r::Nonzero(identifier)) return nil;authority.raw(identifier.data(),identifier.size());}
@@ -12019,7 +12318,9 @@ struct NativeModelingPermitIssuer final {
         &&request.evidenceCoverage==Core3DModelingEvidenceCoverageExactLoftEffect;
     const bool creation=request.evidenceCoverage==Core3DModelingEvidenceCoverageCanonicalEffect
         &&(operation==core3d::request::Operation::CreateEnclosure||operation==core3d::request::Operation::CreateAssembly);
-    if(!creation&&!loft){
+    const bool placement=operation==core3d::request::Operation::SetPlacement
+        &&request.evidenceCoverage==Core3DModelingEvidenceCoverageExactPlacementEffect;
+    if(!creation&&!loft&&!placement){
         Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionUnsupported);return;
     }
 #if DEBUG
@@ -12051,6 +12352,31 @@ struct NativeModelingPermitIssuer final {
             const BOOL failReceipt=prepared->_requestAsyncReceiptFailure;
             void (^afterStart)(void)=prepared->_requestAsyncAfterStart;prepared->_requestAsyncAfterStart=nil;
 #endif
+            if(placement){
+#if DEBUG
+                prepared->_requestAsyncAfterStart=afterStart;
+#endif
+                // The private shared route binds this exact resolution/entity
+                // before any ordinary notification or synchronous completion.
+                const auto result=[owner core3d_executeReservedPlacement:prepared
+                    receiptFailure:
+#if DEBUG
+                    failReceipt
+#else
+                    NO
+#endif
+                    asyncCompletion:box];
+                Core3DModelingAsyncDisposition disposition=Core3DModelingAsyncDispositionRejected;
+                switch(result){
+                    case Core3DTransformInspectorPositionCommitResultCommitted:disposition=Core3DModelingAsyncDispositionCommitted;break;
+                    case Core3DTransformInspectorPositionCommitResultUnchanged:disposition=Core3DModelingAsyncDispositionUnchanged;break;
+                    case Core3DTransformInspectorPositionCommitResultBusy:disposition=Core3DModelingAsyncDispositionBusy;break;
+                    case Core3DTransformInspectorPositionCommitResultUnsupported:disposition=Core3DModelingAsyncDispositionUnsupported;break;
+                    case Core3DTransformInspectorPositionCommitResultInternalFailure:disposition=Core3DModelingAsyncDispositionUncertain;break;
+                    default:break;
+                }
+                Core3DFinishAsyncModeling(box,disposition);return;
+            }
             void (^nativeCompletion)(Core3DProfileConstructionResult)=^(Core3DProfileConstructionResult result){
                 Core3DFinishAsyncModeling(box,Core3DAsyncConstructionDisposition(result));
             };
@@ -12279,6 +12605,86 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return nil; }
 }
 
+- (Core3DModelingPlanningContext *)captureModelingPlacementContext {
+    Core3DModelingPlanningContext *context=[self captureModelingPlanningContext];
+    if(!context)return nil;
+    try{
+        Core3DTransformInspectorSnapshot *snapshot=[self requestTransformInspectorSnapshotWithCompletion:nil];
+        const auto document=GLController.viewer->getDocument();TDF_Label label;core3d::placement::Evidence evidence;
+        if(context.scene.selection.selectedElements.count!=1||!snapshot.canEditPosition||!snapshot.presentationMatchesDocument
+            ||snapshot.representation!=Core3DTransformInspectorRepresentationBRep
+            ||!snapshot.positionEditGeneration||!snapshot.documentEditGeneration||!snapshot.geometryEditGeneration
+            ||![snapshot.entityIdentifier isEqualToString:context.scene.selection.selectedElements.firstObject.entityIdentifier]
+            ||!snapshot.entityIdentifier.UTF8String||!snapshot.definitionIdentifier.UTF8String
+            ||!core3d::placement::Find(document,snapshot.entityIdentifier.UTF8String,label)
+            ||!core3d::placement::Capture(document,label,evidence)
+            ||document->DefinitionIdentifierForLabel(label)!=snapshot.definitionIdentifier.UTF8String
+            ||core3d::sweep_persistence::Bits(snapshot.metersPerUnit)!=core3d::sweep_persistence::Bits(context.scene.metersPerUnit)
+            ||![self isModelingPlanningContextCurrent:context]){
+            [self retireModelingPlanningContext:context];return nil;
+        }
+        context->_planningPlacementSnapshot=snapshot;context->_planningPlacementEvidence=std::move(evidence);return context;
+    }catch(...){[self retireModelingPlanningContext:context];return nil;}
+}
+- (Core3DModelingPreparedRequest *)preparePlacementRequestWithValue:(double)value
+    kind:(Core3DRigidPlacementKind)kind axis:(Core3DTransformInspectorAxis)axis
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID {
+    if(![self isModelingPlanningContextCurrent:context]||!Core3DHostSessionCurrent(session)
+        ||!context->_planningPlacementSnapshot||!context->_planningPlacementEvidence)return nil;
+    try{
+        auto prepared=[self prepareRigidPlacementValue:value kind:kind axis:axis expected:context->_planningPlacementSnapshot];
+        if(!prepared||!(prepared->_placementEvidence==*context->_planningPlacementEvidence)
+            ||prepared->_placementViewer.lock()!=context->_planningViewer.lock()
+            ||!(prepared->_placementStamp==context->_planningStamp))return nil;
+        core3d::request::Descriptor descriptor;
+        const auto nativeAxis=axis==Core3DTransformInspectorAxisX?0:axis==Core3DTransformInspectorAxisY?1:2;
+        if(!core3d::placement::Descriptor(prepared->_placementEvidence,context.scene.metersPerUnit,
+            kind==Core3DRigidPlacementKindRotation?1:0,nativeAxis,prepared->_placementRawValue,descriptor))return nil;
+        auto request=[self core3d_prepareRequest:descriptor context:context session:session requestID:requestID
+            featureIDs:(std::vector<core3d::request::UUID>{}) coverage:Core3DModelingEvidenceCoverageExactPlacementEffect];
+        if(request)request->_requestPlacement=prepared;return request;
+    }catch(...){return nil;}
+}
+- (Core3DTransformInspectorPositionCommitResult)core3d_executeReservedPlacement:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure {
+    return [self core3d_executeReservedPlacement:request receiptFailure:receiptFailure asyncCompletion:nil];
+}
+- (Core3DTransformInspectorPositionCommitResult)core3d_executeReservedPlacement:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure asyncCompletion:(Core3DModelingAsyncCompletion *)box {
+    if(!NSThread.isMainThread||![request isKindOfClass:Core3DModelingPreparedRequest.class]
+        ||request->_requestOwner!=self||!_reservedModelingCapability||_reservedModelingCapability->_taken
+        ||_reservedModelingCapability->_entry->_prepared!=request||request->_requestCommitPermit
+        ||!request->_requestPlacement||!GLController||!GLController.viewer)return Core3DTransformInspectorPositionCommitResultStale;
+    try{
+        if(![self core3d_reservationMatches:request]){[self stopModelingPreparedRequest:request];return Core3DTransformInspectorPositionCommitResultStale;}
+        if(box&&(box->_finished||box->_owner!=self||box->_prepared!=request
+            ||box->_storage!=Core3DModelingStorageObservationReserved||!(box->_key.accountScope==request->_requestKey.accountScope&&box->_key.document==request->_requestKey.document
+                &&box->_key.request==request->_requestKey.request&&box->_key.command==request->_requestKey.command
+                &&box->_key.execution==request->_requestKey.execution))){
+            [self stopModelingPreparedRequest:request];return Core3DTransformInspectorPositionCommitResultStale;
+        }
+        auto permit=core3d::NativeModelingPermitIssuer::takePlacement(_reservedModelingCapability,GLController.viewer->getDocument());
+        if(!permit){[self stopModelingPreparedRequest:request];return Core3DTransformInspectorPositionCommitResultStale;}
+        request->_requestCommitPermit=permit;_reservedModelingCapability=nil;
+        if(box){box->_resolution=permit->resolution();box->_placementResolutionBound=YES;
+            box->_placementEntity=request->_requestDescriptor.placement->entity;}
+#if DEBUG
+        if(receiptFailure)core3d::NativeModelingPermitIssuer::failReceiptStage(request);
+        if(box){auto afterStart=request->_requestAsyncAfterStart;request->_requestAsyncAfterStart=nil;if(afterStart)afterStart();}
+#endif
+        auto prepared=request->_requestPlacement;auto snapshot=prepared->_placementSnapshot;
+        prepared->_placementConsumed=YES;prepared->_placementSnapshot=nil;
+        // Synchronous main-only shared inspector path. The original request is
+        // retained on this stack through publication; resolution seals before callbacks.
+        const auto result=[self commitTransformInspectorValue:prepared->_placementRawValue axis:prepared->_placementAxis
+            expectedSnapshot:snapshot kind:prepared->_placementKind==Core3DRigidPlacementKindPosition
+                ?core3d::TransformInspectorEditKind::Position:core3d::TransformInspectorEditKind::Rotation
+            placementPermit:std::move(permit)];
+        [self core3d_releaseReservation:request];request->_requestRetired=YES;request->_requestContext->_planningRetired=YES;
+        // Epoch lifetime stays in the unresolved ledger when recovery owns it.
+        return result;
+    }catch(...){[self stopModelingPreparedRequest:request];return Core3DTransformInspectorPositionCommitResultInternalFailure;}
+}
 - (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
     matchesAllowingConsumed:(BOOL)allowConsumed {
     if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
@@ -13564,6 +13970,11 @@ struct NativeModelingPermitIssuer final {
                               axis:(Core3DTransformInspectorAxis)axis
                   expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
                           kind:(core3d::TransformInspectorEditKind)kind {
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:kind placementPermit:std::shared_ptr<core3d::NativeModelingCommitPermit>{}];
+}
+- (Core3DTransformInspectorPositionCommitResult)commitTransformInspectorValue:(double)value
+    axis:(Core3DTransformInspectorAxis)axis expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    kind:(core3d::TransformInspectorEditKind)kind placementPermit:(std::shared_ptr<core3d::NativeModelingCommitPermit>)permit {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
         || GLController.viewer == nullptr) {
         return Core3DTransformInspectorPositionCommitResultUnavailable;
@@ -13637,7 +14048,7 @@ struct NativeModelingPermitIssuer final {
         request.value = value;
         request.kind = kind;
         nativeResult = GLController.viewer
-            ->commitTransformInspectorPosition(request);
+            ->commitTransformInspectorPosition(request,std::move(permit));
     } catch (...) {
         nativeResult =
             core3d::TransformInspectorPositionCommitResult::InternalFailure;

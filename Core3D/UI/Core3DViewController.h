@@ -387,6 +387,8 @@ __attribute__((objc_subclassing_restricted))
 //! Exact saved ruled rectangular loft, exclusive of every other selected feature.
 //! Descriptive prerequisite only: no AI command, reserved execution or receipt is enabled.
 @property(nonatomic,strong,readonly,nullable) Core3DStoredRectangularLoftSnapshot *selectedLoft;
+//! Original composite placement capture only; recipe contexts return nil.
+@property(nonatomic,strong,readonly,nullable) Core3DTransformInspectorSnapshot *placementSnapshot;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -409,6 +411,7 @@ typedef NS_ENUM(NSInteger, Core3DModelingEvidenceCoverage) {
     Core3DModelingEvidenceCoverageCanonicalEffect = 0,
     Core3DModelingEvidenceCoverageUnverifiedProfile,
     Core3DModelingEvidenceCoverageExactLoftEffect,
+    Core3DModelingEvidenceCoverageExactPlacementEffect,
 };
 typedef NS_ENUM(NSInteger, Core3DModelingRequestExecutionResult) {
     Core3DModelingRequestExecutionResultUnavailable = 0,
@@ -1011,6 +1014,16 @@ typedef struct {
 @property (nonatomic, readonly) double occupancy;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DPBRScalarResult) {
+    Core3DPBRScalarResultCommitted=0, Core3DPBRScalarResultUnchanged=1,
+    Core3DPBRScalarResultInvalid=2, Core3DPBRScalarResultBusy=3, Core3DPBRScalarResultOutcomeUnknown=4
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPBRScalarPreparation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 @interface Core3DViewController : UIViewController {
     UIStateChanging _currentStateChanging;
     PrimitiveSelectionType _currentSelectionType;
@@ -1087,6 +1100,13 @@ typedef struct {
 //! committed Shell result remains indeterminate, or before the native viewer
 //! has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
+//! Main-thread exact single selected source, one use; no AI receipt authority.
+- (Core3DPBRScalarPreparation *_Nullable)prepareScalarPBREdit:(Core3DPBRScalarEdit *)edit
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(prepareScalarPBR(edit:expected:));
+- (Core3DPBRScalarResult)executeScalarPBRPreparation:(Core3DPBRScalarPreparation *)prepared
+    NS_SWIFT_NAME(executeScalarPBR(_:));
+- (void)cancelScalarPBRPreparation:(Core3DPBRScalarPreparation *)prepared
+    NS_SWIFT_NAME(cancelScalarPBR(_:));
 //! Observe one native frame and its invalidation, main-thread only. The callback
 //! receives a camera only after actual Draw and successful presentation; a later
 //! redraw/edit/lifecycle invalidation reports nil and releases the observer.
@@ -1296,6 +1316,13 @@ typedef struct {
 //! valid; any observed semantic selection/tool or native edit/history boundary
 //! invalidates it, even if geometry or selection later returns to the same value.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContext;
+//! Composite original planning+inspector authority. No recapture after an await.
+//! Public async dispatch is intentionally unavailable for this operation.
+- (nullable Core3DModelingPlanningContext *)captureModelingPlacementContext;
+- (nullable Core3DModelingPreparedRequest *)preparePlacementRequestWithValue:(double)value
+    kind:(Core3DRigidPlacementKind)kind axis:(Core3DTransformInspectorAxis)axis
+    context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session requestID:(NSUUID *)requestID
+    NS_SWIFT_NAME(preparePlacementRequest(value:kind:axis:context:session:requestID:));
 //! Stage A read-only preparation; existing native lease/unit/recipe validators
 //! stay authoritative. The host session must be currently installed on main.
 - (nullable Core3DModelingPreparedRequest *)prepareEnclosureRequest:(Core3DEnclosureDefinition *)definition
@@ -1837,6 +1864,9 @@ typedef struct {
 - (NSData *_Nullable)debugLegacyNoLengthUnitMirrorBinXCAFFixtureData;
 - (NSDictionary *_Nullable)debugNativeLegacyReceiptFixture:(NSInteger)kind policy:(NSInteger)policy
     NS_SWIFT_NAME(debugNativeLegacyReceiptFixture(_:policy:));
+//! Actual isolated OCCT reader/writer framing fixtures, not receipt execution.
++ (NSDictionary<NSString *, NSNumber *> *)debugReceiptFramingProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugReceiptFramingProbe(_:));
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugReceiptWire:(NSData *)data NS_SWIFT_NAME(debugReceiptWire(_:));
 - (NSDictionary *_Nullable)debugReceiptDualCatalogProbe NS_SWIFT_NAME(debugReceiptDualCatalogProbe());
@@ -1861,6 +1891,10 @@ typedef struct {
     NS_SWIFT_NAME(debugModelingPreparedDescriptor(_:));
 
 /// Creation coupling qualification only; requires an actual first-reserved private test capability.
+- (Core3DTransformInspectorPositionCommitResult)debugExecuteReservedPlacement:(Core3DModelingPreparedRequest *)request
+    receiptFailure:(BOOL)receiptFailure NS_SWIFT_NAME(debugExecuteReservedPlacement(_:receiptFailure:));
+- (NSDictionary *)debugPlacementReceiptState:(Core3DModelingPreparedRequest *)request;
+- (NSDictionary *)debugPlacementRequestCodecProbe;
 - (BOOL)debugExecuteReservedCreation:(Core3DModelingPreparedRequest *)request receiptFailure:(BOOL)receiptFailure
     completion:(void (^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(debugExecuteReservedCreation(_:receiptFailure:completion:));
@@ -2030,6 +2064,8 @@ typedef struct {
     NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:));
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
+- (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;
+- (BOOL)debugSeedScalarPBRCommonMismatch;
 //! Lower the selected-object admission cap for aggregate texture-authoring
 //! budget tests. Values above the production cap reset to that cap.
 - (void)debugSetMaximumTextureAuthoringObjects:(NSUInteger)limit;

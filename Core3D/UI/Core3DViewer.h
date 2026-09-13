@@ -55,6 +55,7 @@ namespace core3d {
         std::uint64_t previewGeneration = 0;
     };
 
+    struct NativePBRScalarWork;
     struct NativeSolidWork;
     class NativeModelingCommitPermit;
     struct ProfileSolidGeometry;
@@ -143,6 +144,10 @@ namespace core3d {
         void addPrimitivesFromJSON(NSString* json);
         //! Typed creation requires exact document units and no caller-supplied
         //! construction frame. Stored rebuild has separate frame authority.
+        std::shared_ptr<NativePBRScalarWork> preparePBRScalar(const OcctPBRScalarPatch&,
+            const ObjectFrameIdentity&,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
+        OrdinaryEditResult executePBRScalar(const std::shared_ptr<NativePBRScalarWork>&) noexcept;
+        void cancelPBRScalar(const std::shared_ptr<NativePBRScalarWork>&) noexcept;
         std::shared_ptr<NativeSolidWork> prepareProfileSolid(
             const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
@@ -369,7 +374,8 @@ namespace core3d {
             TransformInspectorMeasurementCompletion completion = {}) noexcept;
         TransformInspectorPositionCommitResult
             commitTransformInspectorPosition(
-                const TransformInspectorPositionCommitRequest& request)
+                const TransformInspectorPositionCommitRequest& request,
+                std::shared_ptr<NativeModelingCommitPermit> placementPermit = {})
                 noexcept;
         //! Suppress any pending transform-inspector completion. Exact worker
         //! work already inside OCCT may still populate its bounded cache.
@@ -610,6 +616,8 @@ namespace core3d {
         bool admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept override;
         bool repairMeshCopy(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
         bool repairCreation(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
+        bool admitAppearance(OrdinaryAppearanceLedger&) noexcept override;
+        bool repairAppearance(const OrdinaryAppearanceLedger&,bool) noexcept override;
         bool admitGrouping(OrdinaryGroupingLedger& ledger) noexcept override;
         bool repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept override;
         bool admitNames(OrdinaryNameLedger& ledger) noexcept override;

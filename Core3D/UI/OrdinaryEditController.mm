@@ -277,6 +277,14 @@ OrdinaryEditLease OrdinaryEditController::beginModelingRebuild(const OrdinaryTra
     try { return beginTransformImpl({change}, failure, std::move(permit)); }
     catch (...) { if (failure) *failure=OrdinaryEditResult::Invalid; return {}; }
 }
+OrdinaryEditLease OrdinaryEditController::beginModelingPlacement(const OrdinaryTransformChange& change,
+    std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept {
+    if(!permit||permit->operation_!=receipt::Operation::SetPlacement||!change.placementContinuation){
+        if(failure)*failure=OrdinaryEditResult::Invalid;return {};
+    }
+    try{return beginTransformImpl({change},failure,std::move(permit));}
+    catch(...){if(failure)*failure=OrdinaryEditResult::Invalid;return {};}
+}
 OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
     const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure,
     std::shared_ptr<NativeModelingCommitPermit> permit) noexcept
@@ -341,7 +349,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 || !presentations.insert(request.presentation.get()).second) {
                 return reject(OrdinaryEditResult::Invalid);
             }
-            if (permit && !bindRebuildReceipt(ledger, request, record.previous, permit))
+            if(bool(request.placementContinuation)!=(permit&&permit->operation_==receipt::Operation::SetPlacement))
+                return reject(OrdinaryEditResult::Invalid);
+            if (permit && !(permit->operation_==receipt::Operation::SetPlacement
+                ?bindPlacementReceipt(ledger,request,record.previous,permit)
+                :bindRebuildReceipt(ledger, request, record.previous, permit)))
                 return reject(OrdinaryEditResult::Invalid);
             const auto unchanged = [&]() {
                 if (permit) {
@@ -518,6 +530,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     return reject(OrdinaryEditResult::Invalid);
                 }
             }
+            if(permit&&permit->operation_==receipt::Operation::SetPlacement
+                &&!geometryChanges&&MatricesEqual(record.previous.transform,request.transform))return unchanged();
             changed = changed || geometryChanges || !MatricesEqual(record.previous.transform, request.transform);
             record.requested = request;
             ledger.records.push_back(std::move(record));
@@ -1023,6 +1037,68 @@ OrdinaryEditResult OrdinaryEditController::reconcileCreationImpl() noexcept {
     } catch (...) { _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown; }
 }
 
+OrdinaryEditLease OrdinaryEditController::beginAppearance(
+    const std::shared_ptr<const OcctPBRScalarPreparation>& prepared, OrdinaryEditResult* failure) noexcept {
+    const auto reject=[&](OrdinaryEditResult r){if(failure)*failure=r;return OrdinaryEditLease();};
+    if(![NSThread isMainThread]||!prepared||_document.IsNull())return reject(OrdinaryEditResult::Invalid);
+    if(blocksNormalWork())return reject(OrdinaryEditResult::Busy);
+    if(_nextToken==std::numeric_limits<std::uint64_t>::max())return reject(OrdinaryEditResult::Invalid);
+    _entering=true;struct Reset{bool& b;~Reset(){b=false;}} reset{_entering};
+    try{
+        auto self=shared_from_this();auto lifetime=std::make_shared<const std::uint8_t>(0);
+        if(_document->Document().IsNull()||_document->Document()->HasOpenCommand())return reject(OrdinaryEditResult::Busy);
+        OrdinaryAppearanceLedger ledger;ledger.prepared=prepared;ledger.previous=_document->PBRScalarOriginal(prepared);
+        if(!ledger.previous||!_document->PBRScalarStateMatches(ledger.previous)||!_host.admitAppearance(ledger)
+            ||!_document->PBRScalarStateMatches(ledger.previous))return reject(OrdinaryEditResult::Invalid);
+        _pending.emplace(std::move(ledger));_leaseLifetime=lifetime;_activeToken=++_nextToken;
+        const auto began=_command.begin(_document);
+        if(began!=OrdinaryCommandBeginResult::Started){
+            if(began==OrdinaryCommandBeginResult::OutcomeUnknown){_state=OrdinaryEditState::OutcomeUnknown;return reject(OrdinaryEditResult::OutcomeUnknown);}
+            _pending.reset();_activeToken=0;return reject(began==OrdinaryCommandBeginResult::Busy?OrdinaryEditResult::Busy:OrdinaryEditResult::RetryableFailure);
+        }
+        _state=OrdinaryEditState::OpenOwned;return OrdinaryEditLease(self,_activeToken,lifetime);
+    }catch(...){if(_command.isRetained()){_state=OrdinaryEditState::OutcomeUnknown;return reject(OrdinaryEditResult::OutcomeUnknown);}
+        _pending.reset();_activeToken=0;return reject(OrdinaryEditResult::Invalid);}
+}
+OrdinaryEditResult OrdinaryEditController::stageAppearanceAndCommit(std::uint64_t token) noexcept {
+    try{
+        auto& ledger=std::get<OrdinaryAppearanceLedger>(*_pending);
+        if(!_document->PBRScalarStateMatches(ledger.previous))return cancel(token);
+        if(_command.observe()!=OrdinaryCommandObservation::OpenOwned){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+#ifdef DEBUG
+        if(_stageFailureIndex==0){_stageFailureIndex=-1;throw Standard_Failure("Appearance before-stage fault");}
+#endif
+        if(!_document->StagePBRScalarPatch(ledger.prepared,ledger.candidate))throw Standard_Failure("Appearance exact stage/readback failure");
+#ifdef DEBUG
+        if(_stageFailureIndex==1){_stageFailureIndex=-1;throw Standard_Failure("Appearance after-stage fault");}
+#endif
+        ledger.candidateSealed=true;
+        if(_command.commitAndObserve()==OrdinaryCommandObservation::Unavailable){_state=OrdinaryEditState::OutcomeUnknown;_activeToken=0;return OrdinaryEditResult::OutcomeUnknown;}
+    }catch(...){}
+    _state=OrdinaryEditState::OutcomeUnknown;_activeToken=0;return reconcile();
+}
+OrdinaryEditResult OrdinaryEditController::reconcileAppearanceImpl() noexcept {
+    try{
+        auto& ledger=std::get<OrdinaryAppearanceLedger>(*_pending);
+#ifdef DEBUG
+        if(_truthUnavailableCount>0){--_truthUnavailableCount;_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+#endif
+        auto observed=_command.observe();if(observed==OrdinaryCommandObservation::OpenOwned)observed=_command.abortAndObserve();
+        const bool candidate=observed==OrdinaryCommandObservation::ClosedWithCandidateMarker;
+        const bool previous=observed==OrdinaryCommandObservation::ClosedWithPriorMarker;
+        const auto& expected=candidate?ledger.candidate:ledger.previous;
+        if((!candidate&&!previous)||(candidate&&!ledger.candidateSealed)||!_document->PBRScalarStateMatches(expected)){
+            _state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+        _committed=candidate;_state=OrdinaryEditState::RepairPending;
+        if(!_host.repairAppearance(ledger,candidate))return OrdinaryEditResult::OutcomeUnknown;
+        if(!_document->PBRScalarStateMatches(expected)){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+        _state=OrdinaryEditState::Publishing;
+        if(!_command.releaseClosed()){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+        if(candidate&&!_didPublish){_didPublish=true;try{_document->NotifyChanges();}catch(...){}}
+        clearResolved();return candidate?OrdinaryEditResult::Committed:OrdinaryEditResult::RetryableFailure;
+    }catch(...){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+}
+
 OrdinaryEditLease OrdinaryEditController::beginGrouping(
     const std::vector<OcctSavedGroup>& groups, OrdinaryEditResult* failure) noexcept {
     const auto reject = [&](OrdinaryEditResult result) {
@@ -1506,6 +1582,54 @@ bool OrdinaryEditController::captureMatches(const OcctObjectTransformState& expe
 
 // Receipt coupling is opt-in for one exact stored rebuild. Ordinary touch,
 // arbitrary profiles and every other transform retain their existing path.
+bool OrdinaryEditController::bindPlacementReceipt(OrdinaryTransformLedger& ledger,
+    const OrdinaryTransformChange& change,const OcctObjectTransformState& previous,
+    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
+    try {
+        if(!permit||ledger.modelingReceipt||permit->admitted_||!permit->attached_||!permit->current()
+            ||permit->operation_!=receipt::Operation::SetPlacement||!permit->expectedPlacement_||!permit->expectedSource_
+            ||!permit->featureIDs_.empty()||!permit->admission_
+            ||permit->admission_->terminal()!=request::Terminal::HandedToOrdinary
+            ||permit->document_!=_document->Document()||!permit->resolution_
+            ||permit->resolution_->state()!=NativeModelingReceiptResolution::State::Pending
+            ||!change.placementContinuation||!permit->descriptor_.placement)return false;
+        permit->admitted_=true;
+        const auto& continuation=*change.placementContinuation;
+        const auto& intent=*permit->descriptor_.placement;
+        if(change.operation!=(intent.kind?OrdinaryTransformOperation::Rotate:OrdinaryTransformOperation::Translate)
+            ||change.rotationAroundPivot||change.label!=continuation.label_
+            ||!change.shape.IsEqual(continuation.shape_)||!change.shape.IsEqual(previous.shape)
+            ||!MatricesEqual(change.transform,continuation.candidate_))return false;
+        std::vector<std::uint8_t> expected,actual;request::Digest digest;
+        placement::Evidence source;receipt::Catalog catalog;
+        const auto status=receipt::Read(permit->document_,catalog);
+        if(!request::Encode(permit->descriptor_,expected)||!request::Encode(continuation.descriptor_,actual)
+            ||expected!=actual||!request::CommandHash(continuation.descriptor_,digest)||digest!=permit->key_.command
+            ||!placement::Capture(_document,previous.label,source)||!(source==*permit->expectedPlacement_)
+            ||!(placement::Effect(source)==*permit->expectedSource_)
+            ||(status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
+            ||!catalog.matches(permit->previous_))return false;
+        ledger.modelingReceipt.emplace();ledger.modelingReceipt->permit=std::move(permit);return true;
+    }catch(...){return false;}
+}
+bool OrdinaryEditController::capturePlacementReceipt(const OrdinaryTransformLedger& ledger,placement::Evidence& out) noexcept {
+    out={};try{
+        if(!ledger.modelingReceipt||ledger.records.size()!=1)return false;
+        const auto& permit=ledger.modelingReceipt->permit;
+        if(!permit||permit->operation_!=receipt::Operation::SetPlacement||!permit->expectedPlacement_
+            ||permit->document_!=_document->Document()||!permit->admitted_||!permit->attached_)return false;
+        const auto label=ledger.records.front().previous.label;
+        if(_document->Document()->HasOpenCommand()){
+            // No general open-command bypass: only this controller's exact
+            // retained transform ledger and original moved permit may capture.
+            if(!_pending||!std::holds_alternative<OrdinaryTransformLedger>(*_pending)
+                ||&std::get<OrdinaryTransformLedger>(*_pending)!=&ledger||_activeToken==0
+                ||_command.observe()!=OrdinaryCommandObservation::OpenOwned)return false;
+            return placement::EvidenceReader::Read(_document,label,out,true);
+        }
+        return placement::Capture(_document,label,out);
+    }catch(...){out={};return false;}
+}
 bool OrdinaryEditController::bindRebuildReceipt(OrdinaryTransformLedger& ledger,
     const OrdinaryTransformChange& change, const OcctObjectTransformState& previous,
     std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
@@ -1555,7 +1679,7 @@ bool OrdinaryEditController::bindRebuildReceipt(OrdinaryTransformLedger& ledger,
         ledger.modelingReceipt.emplace(); ledger.modelingReceipt->permit=std::move(permit); return true;
     } catch (...) { return false; }
 }
-bool OrdinaryEditController::rebuildReceiptMatches(const OrdinaryTransformLedger& ledger,bool candidate) const noexcept {
+bool OrdinaryEditController::rebuildReceiptMatches(const OrdinaryTransformLedger& ledger,bool candidate) noexcept {
     if (!ledger.modelingReceipt) return true;
     try {
         const auto& r=*ledger.modelingReceipt; const auto& p=*r.permit;
@@ -1565,7 +1689,15 @@ bool OrdinaryEditController::rebuildReceiptMatches(const OrdinaryTransformLedger
         if ((status!=receipt::ReadStatus::Absent && status!=receipt::ReadStatus::Valid)
             || !catalog.matches(expected)) return false;
         receipt::Effect live;
-        if (!receipt::CaptureEffect(_document,ledger.records.front().previous.label,live)) return false;
+        if(p.operation_==receipt::Operation::SetPlacement){
+            placement::Evidence evidence;if(!capturePlacementReceipt(ledger,evidence))return false;
+            live=placement::Effect(evidence);
+            if(!p.expectedPlacement_||evidence.recipeBytes!=p.expectedPlacement_->recipeBytes
+                ||evidence.recipe!=p.expectedPlacement_->recipe||evidence.geometry!=p.expectedPlacement_->geometry
+                ||evidence.stateBytes.size()<206||p.expectedPlacement_->stateBytes.size()<206
+                ||std::vector<std::uint8_t>(evidence.stateBytes.begin()+206,evidence.stateBytes.end())
+                    !=std::vector<std::uint8_t>(p.expectedPlacement_->stateBytes.begin()+206,p.expectedPlacement_->stateBytes.end()))return false;
+        }else if (!receipt::CaptureEffect(_document,ledger.records.front().previous.label,live)) return false;
         return candidate ? r.staged && r.record.effects.size()==1 && live==r.record.effects.front()
             : live==*p.expectedSource_;
     } catch (...) { return false; }
@@ -1576,10 +1708,19 @@ bool OrdinaryEditController::stageRebuildReceipt(OrdinaryTransformLedger& ledger
         auto& r=*ledger.modelingReceipt; auto& p=*r.permit;
         if (ledger.records.size()!=1 || !p.current() || !p.expectedSource_ || r.staged) return false;
         receipt::Effect effect;
-        if (!receipt::CaptureEffect(_document,ledger.records.front().candidate.label,effect)
-            || effect.entity!=p.expectedSource_->entity || effect.definition!=p.expectedSource_->definition
+        if(p.operation_==receipt::Operation::SetPlacement){
+            placement::Evidence evidence;if(!capturePlacementReceipt(ledger,evidence))return false;
+            effect=placement::Effect(evidence);
+            if(!p.expectedPlacement_||evidence.recipeBytes!=p.expectedPlacement_->recipeBytes
+                ||evidence.recipe!=p.expectedPlacement_->recipe||evidence.geometry!=p.expectedPlacement_->geometry
+                ||evidence.stateBytes.size()<206||p.expectedPlacement_->stateBytes.size()<206
+                ||std::vector<std::uint8_t>(evidence.stateBytes.begin()+206,evidence.stateBytes.end())
+                    !=std::vector<std::uint8_t>(p.expectedPlacement_->stateBytes.begin()+206,p.expectedPlacement_->stateBytes.end()))return false;
+        }else if(!receipt::CaptureEffect(_document,ledger.records.front().candidate.label,effect))return false;
+        if (effect.entity!=p.expectedSource_->entity || effect.definition!=p.expectedSource_->definition
             || effect.feature!=p.expectedSource_->feature || effect.featureID!=p.expectedSource_->featureID) return false;
         r.record.key=p.key_; r.record.operation=p.operation_; r.record.effects={effect};
+        if(p.operation_==receipt::Operation::SetPlacement)r.record.policy=receipt::ExactPlacementPolicy8193;
         if(p.operation_==receipt::Operation::RebuildLoftStation){
             if(effect.policy!=receipt::ExactLoftPolicy4097||effect.feature!=receipt::Feature::RectangularLoft)return false;
             r.record.policy=receipt::ExactLoftPolicy4097;
@@ -1598,6 +1739,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
         || !_pending || token == 0 || token != _activeToken) { return OrdinaryEditResult::Busy; }
+    if (std::holds_alternative<OrdinaryAppearanceLedger>(*_pending)) { return stageAppearanceAndCommit(token); }
     if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return stageCreationAndCommit(token); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return stageGroupingAndCommit(token); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return stageVisibilityAndCommit(token); }
@@ -1822,6 +1964,7 @@ OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
 }
 
 OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
+    if (std::holds_alternative<OrdinaryAppearanceLedger>(*_pending)) { return reconcileAppearanceImpl(); }
     if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return reconcileCreationImpl(); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return reconcileGroupingImpl(); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return reconcileVisibilityImpl(); }

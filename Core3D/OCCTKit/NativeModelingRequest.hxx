@@ -15,12 +15,21 @@ namespace core3d::request {
 using UUID=std::array<std::uint8_t,16>;
 using Digest=std::array<std::uint8_t,32>;
 constexpr std::size_t MaximumBytes=65536,MaximumParts=16,MaximumValues=8192;
-enum class Operation:std::uint8_t {CreateEnclosure=1,RebuildEnclosure=2,CreateAssembly=3,RebuildProfile=4,CreateProfile=5,RebuildLoftStation=6};
+enum class Operation:std::uint8_t {CreateEnclosure=1,RebuildEnclosure=2,CreateAssembly=3,RebuildProfile=4,CreateProfile=5,RebuildLoftStation=6,SetPlacement=7};
 enum class Recipe:std::uint8_t {Profile=1,Enclosure=2,RectangularLoft=3};
 struct Part {Recipe recipe=Recipe::Profile;std::uint32_t schema=0;std::string name;std::vector<double> values;};
 // V2 extension is numeric intent only, never executable native authority.
 struct LoftStationEdit {std::uint32_t identifier=0;std::optional<double> width,depth;};
-struct Descriptor {Operation operation=Operation::CreateProfile;std::vector<Part> parts;std::optional<LoftStationEdit> loftStationEdit;};
+// V3 selected-object identity is distinct from an authored Part. Family5
+// alone carries an absent feature UUID. All source digests are native-owned.
+struct PlacementIntent {
+    UUID entity{},definition{},feature{};
+    Digest geometry{},recipe{},state{};
+    std::uint8_t family=0,kind=0,axis=0;
+    std::uint32_t schema=0;
+    double metersPerUnit=0,value=0; // native-frozen model-unit position or degrees
+};
+struct Descriptor {Operation operation=Operation::CreateProfile;std::vector<Part> parts;std::optional<LoftStationEdit> loftStationEdit;std::optional<PlacementIntent> placement;};
 struct Key {
     Digest accountScope{},command{},execution{};UUID document{},request{};
     bool operator==(const Key&b)const noexcept{return accountScope==b.accountScope&&command==b.command&&execution==b.execution&&document==b.document&&request==b.request;}
@@ -50,6 +59,26 @@ public:
 };
 inline bool Encode(const Descriptor&d,std::vector<std::uint8_t>&out)noexcept{
     out.clear();try{
+        if(d.operation==Operation::SetPlacement){
+            if(!d.parts.empty()||d.loftStationEdit||!d.placement)return false;
+            const auto&p=*d.placement;
+            if(!Nonzero(p.entity)||!Nonzero(p.definition)||!Nonzero(p.geometry)||!Nonzero(p.recipe)||!Nonzero(p.state)
+                ||p.family<1||p.family>5||(p.family==5?Nonzero(p.feature)||p.schema!=0:!Nonzero(p.feature)||p.schema<1)
+                ||(p.family==1&&p.schema>4)||(p.family==2&&p.schema>2)
+                ||((p.family==3||p.family==4)&&p.schema!=1)
+                ||p.kind>1||p.axis>2||!std::isfinite(p.metersPerUnit)||p.metersPerUnit<=0
+                ||!std::isfinite(p.metersPerUnit*1000)||p.metersPerUnit*1000<=0
+                ||!std::isfinite(p.value)||std::abs(p.value)>1e6)return false;
+            Writer w;w.raw(reinterpret_cast<const std::uint8_t*>("SYMD"),4);
+            w.integer(3,1);w.integer(7,1);w.integer(0,1);w.integer(0,1);
+            w.raw(reinterpret_cast<const std::uint8_t*>("PLOB"),4);w.integer(1,1);
+            for(const auto&id:{p.entity,p.definition,p.feature})w.raw(id.data(),id.size());
+            for(const auto&hash:{p.geometry,p.recipe,p.state})w.raw(hash.data(),hash.size());
+            w.integer(p.family,1);w.integer(p.schema,4);w.integer(p.kind,1);w.integer(p.axis,1);
+            w.scalar(p.metersPerUnit);w.scalar(p.value);
+            if(!w.valid)return false;out=std::move(w.bytes);return true;
+        }
+        if(d.placement)return false;
         const bool loft=d.operation==Operation::RebuildLoftStation;
         if(d.operation<Operation::CreateEnclosure||d.operation>Operation::RebuildLoftStation||d.parts.empty()||d.parts.size()>MaximumParts
             ||(d.operation!=Operation::CreateAssembly&&d.parts.size()!=1))return false;
@@ -75,9 +104,23 @@ inline bool Encode(const Descriptor&d,std::vector<std::uint8_t>&out)noexcept{
 }
 inline bool Decode(const std::vector<std::uint8_t>&bytes,Descriptor&out)noexcept{
     out={};try{
-        if(bytes.size()<8||bytes.size()>MaximumBytes||std::memcmp(bytes.data(),"SYMD",4)||(bytes[4]!=1&&bytes[4]!=2)||bytes[7]!=0)return false;
+        if(bytes.size()<8||bytes.size()>MaximumBytes||std::memcmp(bytes.data(),"SYMD",4)||(bytes[4]!=1&&bytes[4]!=2&&bytes[4]!=3)||bytes[7]!=0)return false;
         std::size_t cursor=8;auto integer=[&](unsigned n,std::uint64_t&x){x=0;if(n>bytes.size()-cursor)return false;for(unsigned i=0;i<n;++i)x|=std::uint64_t(bytes[cursor++])<<(8*i);return true;};
         Descriptor d;d.operation=Operation(bytes[5]);
+        if(bytes[4]==3){
+            if(bytes[5]!=7||bytes[6]!=0||bytes.size()!=180||std::memcmp(bytes.data()+8,"PLOB",4)||bytes[12]!=1)return false;
+            cursor=13;PlacementIntent p;
+            auto raw=[&](auto&v){if(v.size()>bytes.size()-cursor)return false;std::copy_n(bytes.begin()+cursor,v.size(),v.begin());cursor+=v.size();return true;};
+            if(!raw(p.entity)||!raw(p.definition)||!raw(p.feature)||!raw(p.geometry)||!raw(p.recipe)||!raw(p.state))return false;
+            std::uint64_t n;if(!integer(1,n))return false;p.family=std::uint8_t(n);
+            if(!integer(4,n))return false;p.schema=std::uint32_t(n);
+            if(!integer(1,n))return false;p.kind=std::uint8_t(n);
+            if(!integer(1,n))return false;p.axis=std::uint8_t(n);
+            if(!integer(8,n))return false;std::memcpy(&p.metersPerUnit,&n,8);
+            if(!integer(8,n))return false;std::memcpy(&p.value,&n,8);d.placement=p;
+            std::vector<std::uint8_t> canonical;if(cursor!=bytes.size()||!Encode(d,canonical)||canonical!=bytes)return false;
+            out=std::move(d);return true;
+        }
         if((bytes[4]==2)!=(d.operation==Operation::RebuildLoftStation))return false;
         const auto count=bytes[6];if(!count||count>MaximumParts)return false;
         for(unsigned i=0;i<count;++i){Part p;std::uint64_t n;

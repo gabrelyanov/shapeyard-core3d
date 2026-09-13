@@ -20,6 +20,7 @@
 #include <gp_Trsf.hxx>
 
 namespace core3d {
+class NativeModelingCommitPermit;
 
 class ObjectInteractor;
 class ShapeInteractor;
@@ -224,7 +225,8 @@ public:
         const std::shared_ptr<ObjectInteractor>& objectInteractor,
         const std::shared_ptr<ShapeInteractor>& shapeInteractor,
         const TransformInspectorPositionCommitRequest& request,
-        const std::shared_ptr<OrdinaryEditController>& edits) noexcept;
+        const std::shared_ptr<OrdinaryEditController>& edits,
+        std::shared_ptr<NativeModelingCommitPermit> placementPermit = {}) noexcept;
 
     //! Invalidate the current generation and suppress its completion. Exact
     //! AddOptimal work already inside OCCT may finish and populate the cache.

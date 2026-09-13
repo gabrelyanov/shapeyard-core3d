@@ -10,6 +10,19 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+//! Strict sRGB patch. Null fields preserve native bits; alpha is not editable.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPBRScalarEdit : NSObject <NSCopying>
+@property(nonatomic,copy,readonly,nullable) NSArray<NSNumber *> *baseColorSRGB;
+@property(nonatomic,copy,readonly,nullable) NSNumber *metallic;
+@property(nonatomic,copy,readonly,nullable) NSNumber *roughness;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithBaseColorSRGB:(nullable NSArray<NSNumber *> *)rgb
+    metallic:(nullable NSNumber *)metallic roughness:(nullable NSNumber *)roughness
+    NS_SWIFT_NAME(init(baseColorSRGB:metallic:roughness:));
+@end
+
 @interface Core3DColor : NSObject
 
 @property (nonatomic, readonly) NSUInteger identity;

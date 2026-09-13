@@ -1465,7 +1465,8 @@ Core3DViewer::captureTransformInspectorMeasurement(
 
 TransformInspectorPositionCommitResult
 Core3DViewer::commitTransformInspectorPosition(
-    const TransformInspectorPositionCommitRequest& theRequest) noexcept
+    const TransformInspectorPositionCommitRequest& theRequest,
+    std::shared_ptr<NativeModelingCommitPermit> placementPermit) noexcept
 {
     if (hasUnresolvedOrdinaryEdit() || !_transformInspectorMeasurementController
         || !_ordinaryEditController) {
@@ -1480,7 +1481,7 @@ Core3DViewer::commitTransformInspectorPosition(
     }
 #endif
     return _transformInspectorMeasurementController->commitPosition(
-        _objectInteractor, _shapeInteractor, theRequest, _ordinaryEditController).result;
+        _objectInteractor, _shapeInteractor, theRequest, _ordinaryEditController,std::move(placementPermit)).result;
 }
 
 void Core3DViewer::cancelTransformInspectorMeasurement() noexcept
@@ -1721,6 +1722,74 @@ std::optional<CompletedNativeSolid> CompletedNativeSolidFor(const NativeSolidGeo
             return CompletedNativeSolid{(*p)->result.solid,(*p)->result.bounds};
     }
     return {};
+}
+
+struct NativePBRScalarWork {
+    std::shared_ptr<const OcctPBRScalarPreparation> prepared;
+    OrdinaryNameLedger authority;Handle(OcctDocument) owner;Handle(TDocStd_Document) document;
+    ObjectFrameIdentity identity;std::uint64_t presentationRevision=0;std::uint32_t width=0,height=0;
+    core3d::authority::Stamp stamp;Standard_Integer documentTime=0;bool consumed=false,changed=false;
+};
+std::shared_ptr<NativePBRScalarWork> Core3DViewer::preparePBRScalar(
+    const OcctPBRScalarPatch& patch,const ObjectFrameIdentity& identity,std::uint64_t presentation,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+    try{
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if(!stamp||!snapshot||snapshot->selectionMode!=scene::ElementKind::Object||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||snapshot->revisions.documentGeneration!=identity.documentGeneration||snapshot->revisions.model!=identity.modelRevision
+            ||snapshot->revisions.presentation!=presentation)return {};
+        myContext->InitSelected();if(!myContext->MoreSelected())return {};const auto selected=myContext->SelectedInteractive();myContext->NextSelected();
+        if(myContext->MoreSelected())return {};const auto label=myDoc->ShapeLabel(selected);
+        if(label.IsNull())return {};
+        auto work=std::make_shared<NativePBRScalarWork>();work->owner=myDoc;work->document=myDoc->Document();
+        if(work->document.IsNull()||!admitNames(work->authority)||work->authority.selectedPresentations.size()!=1)return {};
+        work->identity=identity;work->identity.entityIdentifier=myDoc->EntityIdentifierForLabel(label);
+        work->stamp=*stamp;work->presentationRevision=presentation;work->width=width;work->height=height;work->documentTime=work->document->GetData()->Time();
+        work->prepared=myDoc->PreparePBRScalarPatch(label,patch,work->changed);
+        const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(!work->prepared||!after||!(*after==work->stamp)||!myDoc->PBRScalarStateMatches(myDoc->PBRScalarOriginal(work->prepared)))return {};
+        return work;
+    }catch(...){return {};}
+}
+void Core3DViewer::cancelPBRScalar(const std::shared_ptr<NativePBRScalarWork>& work) noexcept {
+    if([NSThread isMainThread]&&work&&work->owner==myDoc)work->consumed=true;
+}
+OrdinaryEditResult Core3DViewer::executePBRScalar(const std::shared_ptr<NativePBRScalarWork>& work) noexcept {
+    if(![NSThread isMainThread]||!work||work->owner!=myDoc||work->consumed)return OrdinaryEditResult::Invalid;
+    work->consumed=true;
+    if(!canBeginCommittedEdit()||!_ordinaryEditController)return OrdinaryEditResult::Busy;
+    try{
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        const auto snapshot=captureSceneSnapshot(work->width,work->height);
+        if(!stamp||!(*stamp==work->stamp)||!snapshot||myDoc->Document()!=work->document||work->document->GetData()->Time()!=work->documentTime
+            ||snapshot->publicationSourceIdentifier!=work->identity.publicationSourceIdentifier
+            ||snapshot->revisions.documentGeneration!=work->identity.documentGeneration||snapshot->revisions.model!=work->identity.modelRevision
+            ||snapshot->revisions.presentation!=work->presentationRevision||!_objectInteractor||!_shapeInteractor
+            ||!_shapeInteractor->selectionModeAuthorityIsExact()||_shapeInteractor->getSelectionMode()!=work->authority.selectionMode
+            ||!_objectInteractor->verifyOrdinaryNameAuthority(work->authority)
+            ||!myDoc->PBRScalarStateMatches(myDoc->PBRScalarOriginal(work->prepared)))return OrdinaryEditResult::Invalid;
+        if(!work->changed)return OrdinaryEditResult::NoChange;
+        OrdinaryEditResult result=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginAppearance(work->prepared,&result);
+        if(lease)result=lease.stageAndCommit();return result;
+    }catch(...){return OrdinaryEditResult::OutcomeUnknown;}
+}
+bool Core3DViewer::admitAppearance(OrdinaryAppearanceLedger& ledger) noexcept {
+    if(!admitNames(ledger.authority)||ledger.authority.selectedPresentations.size()!=1)return false;
+    const auto target=myDoc->PBRScalarTarget(ledger.prepared);
+    return !target.IsNull()&&myDoc->ShapeLabel(ledger.authority.selectedPresentations.front().presentation).IsEqual(target);
+}
+bool Core3DViewer::repairAppearance(const OrdinaryAppearanceLedger& ledger,bool committed) noexcept {
+    if(!repairNames(ledger.authority,committed))return false;
+    try{
+        const auto target=myDoc->PBRScalarTarget(ledger.prepared);
+        const auto shape=ledger.authority.selectedPresentations.front().presentation;
+        if(shape.IsNull()||target.IsNull())return false;
+        shape->UnsetColor();myDoc->LoadObjectMeterial(target,shape);
+        myContext->UpdateCurrentViewer();
+        return repairNames(ledger.authority,committed);
+    }catch(...){return false;}
 }
 
 struct NativeSolidWork {

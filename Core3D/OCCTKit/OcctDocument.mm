@@ -37,11 +37,22 @@
 #import <CommonCrypto/CommonDigest.h>
 
 #include "OcctDocument.h"
+#include "NativeModelingReceipt.hxx"
+#include <CommonCrypto/CommonDigest.h>
+#include <cstring>
+#include <map>
+#include <set>
+#include <locale>
+#include <TDF_AttributeIterator.hxx>
 #include "AuthoredFrameAttributeID.hxx"
 #include "NativeAuthoredFrameGeometry.hxx"
 #include <TDataStd_ByteArray.hxx>
 #include <TDF_AttributeIterator.hxx>
 #include "Core3DBoundedAuthoredFrameDriver.hxx"
+#include "ReceiptFramedTraversal.hxx"
+#if DEBUG
+#include "ReceiptFramingProbe.hxx"
+#endif
 #include "CafShapePrs.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 
@@ -1335,6 +1346,15 @@ public:
         : Core3DBoundedBinXCAFRetrievalDriver() { myFrameBudget = std::move(budget); myValidateFrameOwners = false; }
 #endif
 
+#if DEBUG
+    Core3DBoundedBinXCAFRetrievalDriver(
+        const Handle(core3d::persistence::receipt_framing::FrameDriver)& driver,
+        core3d::persistence::receipt_framing::TraversalLimits limits)
+        : Core3DBoundedBinXCAFRetrievalDriver() {
+        myReceiptFrameDriver = driver; myReceiptLimits = limits;
+    }
+#endif
+
     void Read(
         Standard_IStream& theStream,
         const Handle(Storage_Data)& theStorageData,
@@ -1345,6 +1365,17 @@ public:
         const Message_ProgressRange& theProgress =
             Message_ProgressRange()) override
     {
+        // Reentrant reuse must not replace the exact active load's driver/budget.
+        if (!myReceiptFrameDriver.IsNull() && myReceiptLoadActive) {
+            if (!myReceiptFrameDriver.IsNull() && myReceiptFrameDriver->budget())
+                myReceiptFrameDriver->budget()->refuse();
+            myReaderStatus = PCDM_RS_TypeFailure; RejectSafeBinaryRead(); return;
+        }
+        struct ReceiptScope {
+            Core3DBoundedBinXCAFRetrievalDriver* owner;
+            bool active = false;
+            ~ReceiptScope() { if (active) { owner->myReceiptTraversal.reset(); owner->myReceiptLoadActive = false; } }
+        } receiptScope{this};
         ResetAggregateReadBudgets();
         const auto rejectTypes = [&]() {
             myReaderStatus = PCDM_RS_TypeFailure;
@@ -1403,6 +1434,27 @@ public:
                 return;
             }
         }
+        if (!myReceiptFrameDriver.IsNull()) {
+            Standard_Integer receiptType = 0;
+            for (Standard_Integer i = 1; i <= aTypeNames.Length(); ++i)
+                if (aTypeNames(i) == myReceiptFrameDriver->TypeName()) receiptType = i;
+            if (receiptType != 0) {
+                if (version < TDocStd_FormatVersion_VERSION_12 || !theFilter.IsNull() ||
+                    !myReceiptLimits.valid() || !myReceiptFrameDriver->budget()) {
+                    rejectTypes(); return;
+                }
+                myReceiptLoadActive = true; receiptScope.active = true;
+                auto& budget = *myReceiptFrameDriver->budget();
+                budget = core3d::persistence::receipt_framing::LoadBudget{};
+                budget.maximumWireBytes = myReceiptLimits.wireBytes;
+                try {
+                    // Base Read must use precisely the validated assigned table.
+                    myDrivers = aSupportedDrivers;
+                    myReceiptTraversal = std::make_unique<core3d::persistence::receipt_framing::Traversal>(
+                        myDrivers, receiptType, myReceiptFrameDriver, myReceiptLimits, RejectSafeBinaryRead);
+                } catch (...) { budget.refuse(); rejectTypes(); return; }
+            }
+        }
         try {
             BinDrivers_DocumentRetrievalDriver::Read(
                 theStream,
@@ -1411,6 +1463,9 @@ public:
                 theApplication,
                 theFilter,
                 theProgress);
+            if (myReaderStatus == PCDM_RS_OK && myReceiptTraversal && !myReceiptTraversal->complete()) {
+                rejectTypes();
+            }
             if (myValidateFrameOwners && myReaderStatus == PCDM_RS_OK) {
                 Standard_Size frameBytes = 0;
                 if (gSafeBinaryReadRejected || !Core3DValidateAuthoredFrameOwners(
@@ -1476,7 +1531,19 @@ public:
                 BinMXCAFDoc_VisMaterialToolDriver>(theMessageDriver));
         aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
             theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
+        if (!myReceiptFrameDriver.IsNull()) aTable->AddDriver(myReceiptFrameDriver);
         return aTable;
+    }
+
+    Standard_Integer ReadSubTree(Standard_IStream& stream, const TDF_Label& label,
+        const Handle(PCDM_ReaderFilter)& filter, const Standard_Boolean& quick,
+        const Message_ProgressRange& range) override {
+        if (!myReceiptTraversal)
+            return BinDrivers_DocumentRetrievalDriver::ReadSubTree(stream,label,filter,quick,range);
+        const auto result = myReceiptTraversal->Read(stream,label,myDrivers,myRelocTable,filter,quick,range);
+        if (result < 0) myReaderStatus = myReceiptTraversal->cancelled()
+            ? PCDM_RS_UserBreak : PCDM_RS_UnrecognizedFileFormat;
+        return result;
     }
 
     void Clear() override
@@ -1498,6 +1565,10 @@ private:
     std::shared_ptr<Standard_Size> myAggregateTextureBytes;
     std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> myFrameBudget;
     bool myValidateFrameOwners = true;
+    Handle(core3d::persistence::receipt_framing::FrameDriver) myReceiptFrameDriver;
+    core3d::persistence::receipt_framing::TraversalLimits myReceiptLimits;
+    std::unique_ptr<core3d::persistence::receipt_framing::Traversal> myReceiptTraversal;
+    bool myReceiptLoadActive = false;
 };
 
 // These GUIDs are persistent schema identifiers. They identify the attribute
@@ -3152,6 +3223,17 @@ void Core3DDefineSafeBinXCAFFormat(
 }
 
 #if DEBUG
+std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Standard_Integer scenario) {
+    if (scenario < 0 || scenario > 3) return {{"invalidScenario",false}};
+    try {
+        using namespace core3d::persistence::receipt_framing;
+        return core3d::debug::receipt_framing_probe::Run(scenario,
+            [](const Handle(FrameDriver)& driver, TraversalLimits limits)->Handle(PCDM_RetrievalDriver) {
+                if (driver.IsNull()) return new Core3DBoundedBinXCAFRetrievalDriver();
+                return new Core3DBoundedBinXCAFRetrievalDriver(driver,limits);
+            });
+    } catch (...) { return {{"setupException",false}}; }
+}
 void Core3DDebugDefineFrameBinXCAFFormat(
     const Handle(TDocStd_Application)& application,
     const std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget>& budget)
@@ -6196,10 +6278,297 @@ void OcctDocument::SetMaximumVisualMaterialDefinitionsForTesting(
             kMaximumVisualMaterialDefinitions));
 }
 
+// Exact source for a scalar appearance command. Geometry serialization includes
+// triangles/normals/UVs; it is a same-process preservation guard, not a released
+// canonical geometry or receipt policy. No numeric normalization is performed.
+namespace {
+using PBRBytes=std::vector<std::uint8_t>;
+using PBRDigest=std::array<unsigned char,32>;
+struct PBRWriter {
+    PBRBytes bytes;
+    void integer(std::uint64_t x){for(int i=0;i<8;++i)bytes.push_back((x>>(i*8))&255);}
+    void scalar(double x){if(!std::isfinite(x))throw Standard_Failure("Nonfinite appearance");std::uint64_t b;std::memcpy(&b,&x,8);integer(b);}
+    void string(const TCollection_AsciiString& s){if(s.Length()>4096)throw Standard_Failure("Appearance string limit");integer(s.Length());bytes.insert(bytes.end(),s.ToCString(),s.ToCString()+s.Length());}
+    void name(const TCollection_ExtendedString& s){if(s.Length()>4096)throw Standard_Failure("Appearance name limit");integer(s.Length());for(int i=1;i<=s.Length();++i)integer(s.Value(i));}
+    void rgb(const Quantity_Color& c){scalar(c.Red());scalar(c.Green());scalar(c.Blue());}
+};
+std::string PBRLabelKey(const TDF_Label& l){if(l.IsNull())return {};TCollection_AsciiString s;TDF_Tool::Entry(l,s);return s.ToCString();}
+void PBRIntegerAttribute(PBRWriter& w,const TDF_Label& l,const Standard_GUID& id){
+    Handle(TDF_Attribute) a;const bool found=!l.IsNull()&&l.FindAttribute(id,a);w.integer(found);
+    if(found){auto value=Handle(TDataStd_Integer)::DownCast(a);if(value.IsNull())throw Standard_Failure("Malformed appearance integer");w.integer(static_cast<std::uint64_t>(value->Get()));}
+}
+class PBRGeometryStream final:public std::streambuf {
+    CC_SHA256_CTX context{};std::size_t& aggregate;std::size_t bytes=0;bool good;
+public:
+    explicit PBRGeometryStream(std::size_t& total):aggregate(total),good(CC_SHA256_Init(&context)==1){}
+    bool finish(PBRDigest& out){return good&&bytes&&CC_SHA256_Final(out.data(),&context)==1;}
+protected:
+    std::streamsize xsputn(const char* p,std::streamsize n)override{
+        if(!good||n<0||std::size_t(n)>8*1024*1024-bytes||std::size_t(n)>128*1024*1024-aggregate){good=false;return 0;}
+        good=CC_SHA256_Update(&context,p,static_cast<CC_LONG>(n))==1;bytes+=n;aggregate+=n;return good?n:0;
+    }
+    int overflow(int c)override{if(c==traits_type::eof())return traits_type::not_eof(c);char b=char(c);return xsputn(&b,1)==1?c:traits_type::eof();}
+};
+void PBRTexture(PBRWriter& w,const Handle(Image_Texture)& texture,std::size_t& total){
+    w.integer(!texture.IsNull());if(texture.IsNull())return;
+    const auto& data=texture->DataBuffer();
+    // Never read external paths or allow a file-backed alias into immutable proof.
+    if(!texture->FilePath().IsEmpty()||data.IsNull()||data->Data()==nullptr||data->Size()==0
+        ||data->Size()>kMaximumEmbeddedTextureBytes||data->Size()>kMaximumAggregateTextureBytes-total
+        ||texture->TextureId().IsEmpty()||texture->TextureId().Length()>kMaximumPersistentTextureIdentifierBytes)
+        throw Standard_Failure("Unsupported appearance payload");
+    total+=data->Size();w.string(texture->TextureId());w.string(texture->FilePath());
+    w.integer(texture->FileOffset());w.integer(texture->FileLength());w.integer(data->Size());
+    PBRDigest digest{};if(!CC_SHA256(data->Data(),static_cast<CC_LONG>(data->Size()),digest.data()))throw Standard_Failure("Texture hash failed");
+    w.bytes.insert(w.bytes.end(),digest.begin(),digest.end());
+}
+PBRBytes PBRMaterialBytes(const Handle(XCAFDoc_VisMaterial)& m,std::size_t& total){
+    if(m.IsNull()||m->IsEmpty())throw Standard_Failure("Empty appearance");
+    PBRWriter w;const auto& p=m->PbrMaterial();const auto& c=m->CommonMaterial();
+    w.integer(m->FaceCulling());w.integer(m->AlphaMode());w.scalar(m->AlphaCutOff());
+    w.integer(p.IsDefined);w.rgb(p.BaseColor.GetRGB());w.scalar(p.BaseColor.Alpha());
+    for(int i=0;i<3;++i)w.scalar(p.EmissiveFactor[i]);w.scalar(p.Metallic);w.scalar(p.Roughness);w.scalar(p.RefractionIndex);
+    w.integer(c.IsDefined);w.rgb(c.AmbientColor);w.rgb(c.DiffuseColor);w.rgb(c.SpecularColor);w.rgb(c.EmissiveColor);w.scalar(c.Shininess);w.scalar(c.Transparency);
+    for(const auto& t:{p.BaseColorTexture,p.EmissiveTexture,p.MetallicRoughnessTexture,p.OcclusionTexture,p.NormalTexture,c.DiffuseTexture})PBRTexture(w,t,total);
+    return std::move(w.bytes);
+}
+bool PBRMaterialsExactlyEqual(const Handle(XCAFDoc_VisMaterial)& a,const Handle(XCAFDoc_VisMaterial)& b){std::size_t x=0,y=0;return PBRMaterialBytes(a,x)==PBRMaterialBytes(b,y);}
+struct PBRTableEntry {PBRBytes material,attributes;bool operator==(const PBRTableEntry&)const=default;};
+struct PBRRootEntry {OcctObjectVisibilityState object;PBRDigest geometry{};PBRBytes raw;
+    bool equals(const PBRRootEntry& b)const noexcept{return object.IsEqual(b.object)&&geometry==b.geometry&&raw==b.raw;}};
+}
+struct OcctPBRScalarState {
+    Handle(TDF_Data) data;double metersPerUnit=0;std::string target;
+    std::map<std::string,PBRTableEntry> materials;
+    std::map<std::string,std::string> links;
+    std::map<std::string,PBRBytes> objectMaterialAttributes;
+    std::map<std::string,PBRRootEntry> roots;
+    OcctSavedGroupState groups;core3d::receipt::Catalog receipts;
+    bool equals(const OcctPBRScalarState& b)const noexcept {
+        if(data.IsNull()||data!=b.data||target!=b.target||std::memcmp(&metersPerUnit,&b.metersPerUnit,8)
+            ||materials!=b.materials||links!=b.links||objectMaterialAttributes!=b.objectMaterialAttributes||roots.size()!=b.roots.size()||!groups.IsEqual(b.groups)||!receipts.matches(b.receipts))return false;
+        for(const auto& [k,v]:roots){auto i=b.roots.find(k);if(i==b.roots.end()||!v.equals(i->second))return false;}return true;
+    }
+};
+struct OcctPBRScalarPreparation {
+    std::shared_ptr<const OcctPBRScalarState> source;
+    OcctPBRScalarPatch patch;TDF_Label target;
+    Handle(XCAFDoc_VisMaterial) material; // Newly allocated, private; bytes rechecked before staging.
+    PBRBytes materialBytes;std::set<std::string> reclaim;
+    bool changed=false;
+};
+
+std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(const TDF_Label& target) const noexcept {
+    if(![NSThread isMainThread])return {};
+    try{
+        if(myOcafDoc.IsNull()||target.IsNull()||target.Data()!=myOcafDoc->GetData()
+            ||!IsEditableFreeSimpleDefinitionLabel(target)||!XCAFDoc_DocumentTool::CheckShapeTool(myOcafDoc->Main())
+            ||!XCAFDoc_DocumentTool::CheckVisMaterialTool(myOcafDoc->Main()))return {};
+        auto state=std::make_shared<OcctPBRScalarState>();state->data=myOcafDoc->GetData();state->target=PBRLabelKey(target);
+        if(!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc,state->metersPerUnit)||!std::isfinite(state->metersPerUnit)||state->metersPerUnit<=0||!CaptureSavedGroups(state->groups))return {};
+        const auto receiptStatus=core3d::receipt::Read(myOcafDoc,state->receipts);if(receiptStatus!=core3d::receipt::ReadStatus::Absent&&receiptStatus!=core3d::receipt::ReadStatus::Valid)return {};
+        auto tool=XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());TDF_LabelSequence materials;tool->GetMaterials(materials);
+        if(materials.Length()>kMaximumVisualMaterialDefinitions)return {};std::size_t textures=0,geometry=0;
+        for(int i=1;i<=materials.Length();++i){const auto l=materials.Value(i);PBRTableEntry e;e.material=PBRMaterialBytes(tool->GetMaterial(l),textures);PBRWriter w;
+            for(TDF_AttributeIterator it(l);it.More();it.Next()){
+                const auto& id=it.Value()->ID();if(id!=XCAFDoc_VisMaterial::GetID()&&id!=TDataStd_Name::GetID()
+                    &&id!=OwnedPBRMaterialDefinitionAttributeID()&&id!=XCAFDoc::VisMaterialRefGUID())return {};
+            }
+            Handle(TDF_Attribute) owned;
+            if(l.FindAttribute(OwnedPBRMaterialDefinitionAttributeID(),owned)){auto marker=Handle(TDataStd_Integer)::DownCast(owned);if(marker.IsNull()||marker->Get()!=1)return {};}
+            PBRIntegerAttribute(w,l,OwnedPBRMaterialDefinitionAttributeID());Handle(TDF_Attribute) a;
+            const bool named=l.FindAttribute(TDataStd_Name::GetID(),a);w.integer(named);
+            if(named){auto n=Handle(TDataStd_Name)::DownCast(a);if(n.IsNull())return {};w.name(n->Get());}
+            e.attributes=std::move(w.bytes);if(!state->materials.emplace(PBRLabelKey(l),std::move(e)).second)return {};
+        }
+        // All reference endpoints are protected, including hidden/subshape/imported
+        // references. Orphan and malformed tree/link state refuses via native save preflight.
+        std::vector<TDF_Label> labels{myOcafDoc->GetData()->Root()};
+        for(std::size_t index=0;index<labels.size();++index){if(labels.size()>kMaximumDocumentLabels)return {};const auto l=labels[index];
+            for(TDF_ChildIterator child(l,Standard_False);child.More();child.Next()){if(labels.size()>=kMaximumDocumentLabels)return {};labels.push_back(child.Value());}
+            Handle(TDF_Attribute) direct;
+            if(l.FindAttribute(XCAFDoc_VisMaterial::GetID(),direct)&&!state->materials.contains(PBRLabelKey(l)))return {};
+            Handle(TDF_Attribute) reference;const bool referenced=l.FindAttribute(XCAFDoc::VisMaterialRefGUID(),reference);
+            auto node=Handle(TDataStd_TreeNode)::DownCast(reference);
+            if(referenced&&(node.IsNull()||(!state->materials.contains(PBRLabelKey(l))&&(!node->HasFather()||node->HasFirst()))))return {};
+            TDF_Label material;const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(l,material);
+            if(linked){if(material.IsNull()||!state->materials.contains(PBRLabelKey(material)))return {};state->links.emplace(PBRLabelKey(l),PBRLabelKey(material));}
+        }
+        std::map<std::string,std::string> graphLinks;std::size_t edgeCount=0;
+        for(int i=1;i<=materials.Length();++i){const auto l=materials.Value(i);Handle(TDataStd_TreeNode) node;
+            if(!l.FindAttribute(XCAFDoc::VisMaterialRefGUID(),node))continue;
+            if(node.IsNull()||node->HasFather()||node->HasNext())return {};
+            for(auto child=node->First();!child.IsNull();child=child->Next()){
+                if(++edgeCount>kMaximumDocumentLabels||child->Father()!=node
+                    ||!graphLinks.emplace(PBRLabelKey(child->Label()),PBRLabelKey(l)).second)return {};
+            }
+        }
+        if(graphLinks!=state->links)return {};
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return {};
+        for(int i=1;i<=roots.Length();++i){const auto l=roots.Value(i);PBRRootEntry e;
+            if(!CaptureObjectVisibilityStateForLabel(l,e.object))return {};
+            PBRGeometryStream stream(geometry);std::ostream out(&stream);out.imbue(std::locale::classic());
+            BRepTools::Write(e.object.object.object.shape,out,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
+            if(!out.good()||!stream.finish(e.geometry))return {};
+            PBRWriter raw;for(double x:e.object.object.object.scalars)raw.scalar(x);
+            for(const auto* values:{&e.object.object.object.profile.values,&e.object.object.object.enclosure.values,&e.object.object.object.sweep.values,&e.object.object.object.loft.values}){
+                raw.integer(values->size());for(double x:*values)raw.scalar(x);}
+            // Reference axis values are outside transform/recipe capture.
+            OcctReferenceAxis axis;const auto axisState=ReadReferenceAxisForLabel(l,axis);if(axisState==OcctReferenceAxisReadState::Invalid)return {};
+            raw.integer(static_cast<unsigned>(axisState));raw.integer(static_cast<unsigned>(axis.pivotSpace));raw.integer(static_cast<unsigned>(axis.directionSpace));
+            for(int n=1;n<=3;++n){raw.scalar(axis.pivot.Coord(n));raw.scalar(axis.direction.Coord(n));}
+            e.raw=std::move(raw.bytes);const auto key=PBRLabelKey(l);state->roots.emplace(key,std::move(e));
+            const auto linkedMaterial=XCAFDoc_VisMaterialTool::GetShapeMaterial(l);
+            for(const auto* id:{&LocalPBRMaterialAttributeID(),&AutoPromotedEmissiveFactorAttributeID()}){
+                Handle(TDF_Attribute) a;if(l.FindAttribute(*id,a)){auto value=Handle(TDataStd_Integer)::DownCast(a);
+                    if(value.IsNull()||value->Get()!=1||linkedMaterial.IsNull()||!linkedMaterial->HasPbrMaterial())return {};
+                }
+            }
+            if(l.IsAttribute(NormalTextureRecipeAttributeID())&&(linkedMaterial.IsNull()||linkedMaterial->PbrMaterial().NormalTexture.IsNull()
+                ||!Core3DValidateNormalTextureBinding(myOcafDoc,l)))return {};
+            PBRWriter attributes;PBRIntegerAttribute(attributes,l,LocalPBRMaterialAttributeID());PBRIntegerAttribute(attributes,l,NormalTextureRecipeAttributeID());PBRIntegerAttribute(attributes,l,AutoPromotedEmissiveFactorAttributeID());
+            for(int tag:{11,12})PBRIntegerAttribute(attributes,l.FindChild(tag,Standard_False),TDataStd_Integer::GetID());
+            state->objectMaterialAttributes.emplace(key,std::move(attributes.bytes));
+        }
+        if(!state->roots.contains(state->target))return {};return state;
+    }catch(...){return {};}
+}
+bool OcctDocument::PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScalarState>& expected) const noexcept {
+    if(myOcafDoc.IsNull()||!expected||expected->data!=myOcafDoc->GetData())return false;
+    const auto i=expected->roots.find(expected->target);if(i==expected->roots.end())return false;
+    const auto live=CapturePBRScalarState(i->second.object.object.object.label);return live&&live->equals(*expected);
+}
+
+std::shared_ptr<const OcctPBRScalarPreparation> OcctDocument::PreparePBRScalarPatch(
+    const TDF_Label& target,const OcctPBRScalarPatch& patch,bool& changed) const noexcept {
+    changed=false;
+    if(!patch.IsValid()||![NSThread isMainThread])return {};
+    try{
+        if(!SupportsScalarPBRMaterialEditingForLabel(target))return {};
+        auto source=CapturePBRScalarState(target);if(!source)return {};
+        auto prepared=std::make_shared<OcctPBRScalarPreparation>();prepared->source=source;prepared->target=target;prepared->patch=patch;
+        auto old=XCAFDoc_VisMaterialTool::GetShapeMaterial(target);
+        XCAFDoc_VisMaterialPBR p;
+        const bool hasEffective=TryEffectivePBRMaterialForLabel(target,p);
+        if(!hasEffective){
+            Graphic3d_MaterialAspect legacy(MaterialNameForLabel(target));const auto& basis=legacy.PBRMaterial();
+            p.BaseColor=Quantity_ColorRGBA(Quantity_Color(ColorNameForLabel(target)),basis.Alpha());p.EmissiveFactor=basis.Emission();p.Metallic=basis.Metallic();p.Roughness=basis.NormalizedRoughness();p.RefractionIndex=basis.IOR();p.IsDefined=true;
+        }
+        if(!old.IsNull()&&old->HasPbrMaterial()){
+            const auto& stored=old->PbrMaterial();
+            if(!hasEffective&&(!patch.baseColorSRGB||!patch.metallic||!patch.roughness))return {};
+            if(hasEffective&&!patch.baseColorSRGB){
+                const auto& a=stored.BaseColor.GetRGB();const auto& b=p.BaseColor.GetRGB();
+                if(a.Red()!=b.Red()||a.Green()!=b.Green()||a.Blue()!=b.Blue())return {};
+            }
+            p=stored; // Omitted persistent values never take the display round trip.
+        }
+        const auto original=p;
+        if(patch.baseColorSRGB){const auto& rgb=*patch.baseColorSRGB;p.BaseColor.SetRGB(Quantity_Color(rgb[0],rgb[1],rgb[2],Quantity_TOC_sRGB));}
+        if(patch.metallic)p.Metallic=static_cast<float>(*patch.metallic);
+        if(patch.roughness)p.Roughness=static_cast<float>(*patch.roughness);
+        auto equalFloat=[](float a,float b){return std::memcmp(&a,&b,sizeof(a))==0;};
+        bool identical=equalFloat(p.Metallic,original.Metallic)&&equalFloat(p.Roughness,original.Roughness);
+        for(int i=0;i<3;++i){const double a=(i==0?p.BaseColor.GetRGB().Red():i==1?p.BaseColor.GetRGB().Green():p.BaseColor.GetRGB().Blue()),b=(i==0?original.BaseColor.GetRGB().Red():i==1?original.BaseColor.GetRGB().Green():original.BaseColor.GetRGB().Blue());identical=identical&&std::memcmp(&a,&b,8)==0;}
+        prepared->material=CreatePersistedPBRMaterial(p,old);
+        if(prepared->material.IsNull())return {};
+        // OCCT7.8 ConvertToCommonMaterial mapping, applied only to requested
+        // inputs. Existing deliberate Common/PBR disagreement remains elsewhere.
+        if(!old.IsNull()){
+            auto c=old->CommonMaterial();const auto& derived=prepared->material->CommonMaterial();
+            if(patch.baseColorSRGB)c.DiffuseColor=derived.DiffuseColor;
+            if(patch.metallic)c.SpecularColor=derived.SpecularColor;
+            if(patch.roughness)c.Shininess=derived.Shininess;
+            prepared->material->SetCommonMaterial(c);
+        }
+        std::size_t bytes=0;prepared->materialBytes=PBRMaterialBytes(prepared->material,bytes);
+        // Compare actual native persisted candidate, including selectively derived
+        // Common fields: equal PBR with a requested mismatched Common field changes.
+        if(!old.IsNull()){bytes=0;identical=prepared->materialBytes==PBRMaterialBytes(old,bytes);}
+        prepared->changed=!identical;changed=prepared->changed;
+        std::vector<TDF_Label> reclaim;
+        if(changed&&!CanSaveObjectPBRMaterials({{target,p,p.BaseColorTexture,p.EmissiveTexture}},&reclaim,prepared->material))return {};
+        for(const auto& label:reclaim)prepared->reclaim.insert(PBRLabelKey(label));
+        return prepared;
+    }catch(...){changed=false;return {};}
+}
+std::shared_ptr<const OcctPBRScalarState> OcctDocument::PBRScalarOriginal(const std::shared_ptr<const OcctPBRScalarPreparation>& p) const noexcept{return p?p->source:nullptr;}
+TDF_Label OcctDocument::PBRScalarTarget(const std::shared_ptr<const OcctPBRScalarPreparation>& p) const noexcept{return p?p->target:TDF_Label();}
+
+bool OcctDocument::StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalarPreparation>& p,
+    std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept {
+    sealed.reset();
+    try{
+        if(!p||!p->changed||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()||!PBRScalarStateMatches(p->source))return false;
+        std::size_t bytes=0;if(PBRMaterialBytes(p->material,bytes)!=p->materialBytes)return false;
+        const auto& material=p->material->PbrMaterial();
+        if(!SaveObjectPBRMaterialsImpl({{p->target,material,material.BaseColorTexture,material.EmissiveTexture}},p->material))return false;
+        auto after=CapturePBRScalarState(p->target);if(!after)return false;
+        const auto& before=*p->source;const auto target=before.target;
+        if(after->data!=before.data||after->roots.size()!=before.roots.size()||!after->groups.IsEqual(before.groups)
+            ||!after->receipts.matches(before.receipts)||std::memcmp(&after->metersPerUnit,&before.metersPerUnit,8))return false;
+        for(const auto& [key,root]:before.roots){auto i=after->roots.find(key);if(i==after->roots.end()||!root.equals(i->second))return false;}
+        auto oldLinks=before.links,newLinks=after->links;oldLinks.erase(target);newLinks.erase(target);if(oldLinks!=newLinks)return false;
+        auto link=after->links.find(target);if(link==after->links.end())return false;
+        auto result=after->materials.find(link->second);if(result==after->materials.end()||result->second.material!=p->materialBytes)return false;
+        for(const auto& [key,entry]:before.materials){auto i=after->materials.find(key);
+            if(p->reclaim.contains(key)){if(i!=after->materials.end()&&key!=link->second)return false;}
+            else if(i==after->materials.end()||!(i->second==entry))return false;
+        }
+        PBRWriter authoredAttributes;authoredAttributes.integer(1);authoredAttributes.integer(1);authoredAttributes.integer(1);authoredAttributes.name(TCollection_ExtendedString("Shapeyard PBR"));
+        for(const auto& [key,entry]:after->materials)if(!before.materials.contains(key)||p->reclaim.contains(key)){
+            if(key!=link->second||entry.attributes!=authoredAttributes.bytes)return false;
+        }
+        auto oldAttributes=before.objectMaterialAttributes,newAttributes=after->objectMaterialAttributes;
+        oldAttributes.erase(target);newAttributes.erase(target);if(oldAttributes!=newAttributes)return false;
+        // Expected authoring changes are local-PBR=1 and removal of legacy preset
+        // scalars. The original normal recipe and emissive ownership remain exact.
+        PBRWriter expected;expected.integer(1);expected.integer(1);
+        PBRIntegerAttribute(expected,p->target,NormalTextureRecipeAttributeID());PBRIntegerAttribute(expected,p->target,AutoPromotedEmissiveFactorAttributeID());
+        expected.integer(0);expected.integer(0);
+        if(after->objectMaterialAttributes.at(target)!=expected.bytes)return false;
+        // Compare retained middle fields to their pre-command encoding, not merely
+        // self-read values. Prefix is local presence+optionalvalue; suffix legacy.
+        const auto& oldAttr=before.objectMaterialAttributes.at(target);const auto& newAttr=after->objectMaterialAttributes.at(target);
+        auto middle=[](const PBRBytes& b){auto read=[&](std::size_t at){std::uint64_t v=0;for(int i=0;i<8;++i)v|=std::uint64_t(b.at(at+i))<<(i*8);return v;};std::size_t start=8+(read(0)?8:0),end=start;for(int i=0;i<2;++i)end+=8+(read(end)?8:0);return PBRBytes(b.begin()+start,b.begin()+end);};
+        if(middle(oldAttr)!=middle(newAttr))return false;
+        sealed=std::move(after);return true;
+    }catch(...){return false;}
+}
+#ifdef DEBUG
+std::optional<OcctPBRScalarDebugEvidence> OcctDocument::DebugPBRScalarEvidence(const TDF_Label& target) const noexcept {
+    try{
+        const auto state=CapturePBRScalarState(target);if(!state)return {};
+        const auto link=state->links.find(state->target);if(link==state->links.end())return {};
+        const auto material=state->materials.find(link->second);if(material==state->materials.end())return {};
+        OcctPBRScalarDebugEvidence output;output.material=material->second.material;
+        PBRWriter protectedBytes;protectedBytes.string(TCollection_AsciiString(DocumentIdentifier().c_str()));protectedBytes.scalar(state->metersPerUnit);
+        for(const auto& [key,entry]:state->roots){const auto& object=entry.object.object.object;
+            protectedBytes.string(TCollection_AsciiString(key.c_str()));protectedBytes.string(TCollection_AsciiString(object.entityIdentifier.c_str()));protectedBytes.string(TCollection_AsciiString(object.definitionIdentifier.c_str()));
+            protectedBytes.integer(entry.object.object.namePresent);protectedBytes.name(entry.object.object.name);
+            protectedBytes.integer(entry.raw.size());protectedBytes.bytes.insert(protectedBytes.bytes.end(),entry.raw.begin(),entry.raw.end());
+            for(auto b:object.authoredFramesIdentity)protectedBytes.integer(b);
+            protectedBytes.integer(object.meshUVAtlasVersion);for(auto n:object.meshUVAtlasSettings)protectedBytes.integer(n);
+            protectedBytes.integer(entry.object.invisibleAttributePresent);protectedBytes.integer(entry.object.layerLinkPresent);
+            for(const auto& l:entry.object.layers)protectedBytes.string(TCollection_AsciiString(PBRLabelKey(l).c_str()));
+            for(bool b:entry.object.layerInvisibleAttributePresent)protectedBytes.integer(b);
+            output.geometry.emplace(key,entry.geometry);
+        }
+        for(const auto& g:state->groups.groups){protectedBytes.string(TCollection_AsciiString(g.identifier.c_str()));protectedBytes.name(g.name);for(const auto& l:g.members)protectedBytes.string(TCollection_AsciiString(PBRLabelKey(l).c_str()));}
+        output.preserved=std::move(protectedBytes.bytes);
+        PBRWriter table;for(const auto& [key,entry]:state->materials){table.string(TCollection_AsciiString(key.c_str()));table.integer(entry.material.size());table.bytes.insert(table.bytes.end(),entry.material.begin(),entry.material.end());table.integer(entry.attributes.size());table.bytes.insert(table.bytes.end(),entry.attributes.begin(),entry.attributes.end());}
+        for(const auto& [key,value]:state->links){table.string(TCollection_AsciiString(key.c_str()));table.string(TCollection_AsciiString(value.c_str()));}
+        output.table=std::move(table.bytes);return output;
+    }catch(...){return {};}
+}
+#endif
+
 Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
     const std::vector<OcctPBRMaterialUpdate>& updates,
-    std::vector<TDF_Label>* reclaimMaterialLabels) const
+    std::vector<TDF_Label>* reclaimMaterialLabels,
+    const Handle(XCAFDoc_VisMaterial)& scalarMaterial) const
 {
+    if (!scalarMaterial.IsNull() && updates.size()!=1) return Standard_False;
     if (reclaimMaterialLabels != nullptr) {
         reclaimMaterialLabels->clear();
     }
@@ -6332,8 +6701,8 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
         XCAFDoc_VisMaterialTool::GetShapeMaterial(
             update.label, aPreviousLabel);
         const Handle(XCAFDoc_VisMaterial) aCandidate =
-            CreatePersistedPBRMaterial(
-                update.material, aPreviousMaterial);
+            (scalarMaterial.IsNull() ? CreatePersistedPBRMaterial(
+                update.material, aPreviousMaterial) : scalarMaterial);
         if (aCandidate.IsNull()) {
             return Standard_False;
         }
@@ -6341,8 +6710,7 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
         Standard_Integer aTargetExisting = -1;
         for (std::size_t index = 0;
              index < existingDefinitions.size(); ++index) {
-            if (existingDefinitions[index].material->IsEqual(
-                    aCandidate)) {
+            if ((scalarMaterial.IsNull()?existingDefinitions[index].material->IsEqual(aCandidate):PBRMaterialsExactlyEqual(existingDefinitions[index].material,aCandidate))) {
                 aTargetExisting =
                     static_cast<Standard_Integer>(index);
                 break;
@@ -6353,7 +6721,7 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
             for (const Handle(XCAFDoc_VisMaterial)& projected :
                  newDefinitions) {
                 if (!projected.IsNull()
-                    && projected->IsEqual(aCandidate)) {
+                    && (scalarMaterial.IsNull()?projected->IsEqual(aCandidate):PBRMaterialsExactlyEqual(projected,aCandidate))) {
                     isAlreadyProjected = true;
                     break;
                 }
@@ -6478,6 +6846,13 @@ Standard_Boolean OcctDocument::CanSaveObjectPBRMaterials(
 Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
     const std::vector<OcctPBRMaterialUpdate>& updates)
 {
+    return SaveObjectPBRMaterialsImpl(updates, Handle(XCAFDoc_VisMaterial)());
+}
+Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
+    const std::vector<OcctPBRMaterialUpdate>& updates,
+    const Handle(XCAFDoc_VisMaterial)& scalarMaterial)
+{
+    if (!scalarMaterial.IsNull() && updates.size()!=1) return Standard_False;
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
         || updates.empty()) {
         return Standard_False;
@@ -6541,7 +6916,7 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
     }
     std::vector<TDF_Label> reclaimMaterialLabels;
     if (!CanSaveObjectPBRMaterials(
-            updates, &reclaimMaterialLabels)) {
+            updates, &reclaimMaterialLabels, scalarMaterial)) {
         return Standard_False;
     }
     const Handle(XCAFDoc_VisMaterialTool) aTool =
@@ -6568,8 +6943,8 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
         XCAFDoc_VisMaterialTool::GetShapeMaterial(
             update.label, aPreviousMaterialLabel);
         const Handle(XCAFDoc_VisMaterial) aMaterial =
-            CreatePersistedPBRMaterial(
-                update.material, aPreviousMaterial);
+            (scalarMaterial.IsNull()?CreatePersistedPBRMaterial(
+                update.material, aPreviousMaterial):scalarMaterial);
         if (aMaterial.IsNull()) {
             return Standard_False;
         }
@@ -6577,7 +6952,7 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
             update.label, aPreviousMaterialLabel, aMaterial});
     }
     for (const PreparedUpdate& update : preparedUpdates) {
-        if (!EnsureGeometryRepresentationForMutation(update.label)) {
+        if (!(scalarMaterial.IsNull()?EnsureGeometryRepresentationForMutation(update.label):ValidateGeometryRepresentationForLabel(update.label))) {
             return Standard_False;
         }
     }
@@ -6604,7 +6979,7 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
                 XCAFDoc_VisMaterialTool::GetMaterial(
                     existingLabels.Value(index));
             if (!existing.IsNull()
-                && existing->IsEqual(update.material)) {
+                && (scalarMaterial.IsNull()?existing->IsEqual(update.material):PBRMaterialsExactlyEqual(existing,update.material))) {
                 aMaterialLabel = existingLabels.Value(index);
                 break;
             }

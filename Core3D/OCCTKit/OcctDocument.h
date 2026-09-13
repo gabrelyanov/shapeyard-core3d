@@ -49,6 +49,11 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <optional>
+#include <map>
+#include <memory>
+#include <cmath>
+class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
 namespace core3d { class OrdinaryEditController; }
@@ -343,6 +348,27 @@ enum class OcctMaterialTextureSlot { BaseColor, Emissive, MetallicRoughness, Occ
 Standard_EXPORT Handle(Image_Texture)& Core3DMaterialTexture(
     XCAFDoc_VisMaterialPBR& material, OcctMaterialTextureSlot slot);
 
+//! Optional fields are patches, not a round-tripped full display material.
+struct OcctPBRScalarPatch {
+    std::optional<std::array<double,3>> baseColorSRGB;
+    std::optional<double> metallic, roughness;
+    bool IsValid() const noexcept {
+        const auto unit=[](double x){return std::isfinite(x)&&x>=0&&x<=1;};
+        if (!baseColorSRGB&&!metallic&&!roughness) return false;
+        if (baseColorSRGB) for(double x:*baseColorSRGB) if(!unit(x)) return false;
+        return (!metallic||unit(*metallic))&&(!roughness||unit(*roughness));
+    }
+};
+// Private immutable values; no mutable material or viewer handle is exposed.
+#ifdef DEBUG
+struct OcctPBRScalarDebugEvidence {
+    std::vector<std::uint8_t> material,preserved,table;
+    std::map<std::string,std::array<unsigned char,32>> geometry;
+};
+#endif
+struct OcctPBRScalarState;
+struct OcctPBRScalarPreparation;
+
 struct OcctPBRMaterialUpdate
 {
     TDF_Label label;
@@ -380,6 +406,10 @@ Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
 #include <memory>
 namespace core3d::authority { class NativeObservedApplication; }
 #if DEBUG
+#include <map>
+#include <string>
+//! Private full-reader framing fixtures; no receipt owner or authority integration.
+Standard_EXPORT std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Standard_Integer scenario);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
 //! Isolated tests with a custom wire budget and no final geometry-owner gate.
@@ -650,6 +680,18 @@ public:
     //! Validate and persist a complete authoring batch. The final material
     //! definition set is checked against the safe reader's per-serialized-slot
     //! texture-byte budget before any table entry is added, removed, or linked.
+#ifdef DEBUG
+    Standard_EXPORT std::optional<OcctPBRScalarDebugEvidence> DebugPBRScalarEvidence(const TDF_Label&) const noexcept;
+#endif
+    // Complete immutable source and staged readback for one scalar appearance edit.
+    Standard_EXPORT std::shared_ptr<const OcctPBRScalarPreparation> PreparePBRScalarPatch(
+        const TDF_Label&, const OcctPBRScalarPatch&, bool& changed) const noexcept;
+    Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> PBRScalarOriginal(
+        const std::shared_ptr<const OcctPBRScalarPreparation>&) const noexcept;
+    Standard_EXPORT TDF_Label PBRScalarTarget(const std::shared_ptr<const OcctPBRScalarPreparation>&) const noexcept;
+    Standard_EXPORT bool PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScalarState>&) const noexcept;
+    Standard_EXPORT bool StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalarPreparation>&,
+        std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
     Standard_Boolean SaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates);
     //! DEBUG seam for exercising aggregate occurrence limits with small valid
@@ -817,9 +859,13 @@ private:
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;
+    std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&) const noexcept;
+    Standard_Boolean SaveObjectPBRMaterialsImpl(const std::vector<OcctPBRMaterialUpdate>&,
+        const Handle(XCAFDoc_VisMaterial)& scalarMaterial);
     Standard_Boolean CanSaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates,
-        std::vector<TDF_Label>* reclaimMaterialLabels) const;
+        std::vector<TDF_Label>* reclaimMaterialLabels,
+        const Handle(XCAFDoc_VisMaterial)& scalarMaterial = Handle(XCAFDoc_VisMaterial)()) const;
     
 #if DEBUG
   // Exact pointer created below and kept alive by myApp; no foreign downcast.
