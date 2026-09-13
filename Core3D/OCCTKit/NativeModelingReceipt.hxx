@@ -6,6 +6,8 @@
 #include "OcctDocument.h"
 #include "ProfilePersistence.hxx"
 #include "EnclosurePersistence.hxx"
+#include "RectangularLoftRebuild.hxx"
+#include "NativeModelingRequest.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <BRepTools.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -42,11 +44,17 @@ inline const Standard_GUID& CountID(){ static const Standard_GUID id("9FB0D315-8
 // Policy1 freezes the exact qualified417 OCCT7.8/V3 analytic-zero procedure.
 // Never retarget an assigned policy. Zero denotes unversioned legacy only.
 constexpr std::uint16_t AnalyticZeroPolicy1=1;
+// Separate policy namespace for exact OCCT7.8/V3 loft representation. No
+// numeric zero rewriting. Initial/reopen phase compatibility is not presumed.
+constexpr std::uint16_t ExactLoftPolicy4097=4097;
 inline const Standard_GUID& VersionedSchemaID(){static const Standard_GUID id("42AB4BB7-6421-445F-A2B0-2DC682AB3001");return id;}
 inline const Standard_GUID& VersionedCountID(){static const Standard_GUID id("42AB4BB7-6421-445F-A2B0-2DC682AB3002");return id;}
 enum class EffectEvidenceStatus { Current, Mismatch, LegacyUnversioned, UnsupportedPolicy, Unavailable };
-enum class Operation:std::uint8_t { CreateEnclosure=1, RebuildEnclosure=2, CreateAssembly=3, RebuildProfile=4 };
-enum class Feature:std::uint8_t { Profile=1, Enclosure=2 };
+enum class Operation:std::uint8_t { CreateEnclosure=1, RebuildEnclosure=2, CreateAssembly=3, RebuildProfile=4, RebuildLoftStation=6 };
+enum class Feature:std::uint8_t { Profile=1, Enclosure=2, RectangularLoft=3 };
+inline bool SupportedPolicy(Operation operation,std::uint16_t policy)noexcept {
+    return operation==Operation::RebuildLoftStation?policy==ExactLoftPolicy4097:policy==AnalyticZeroPolicy1;
+}
 enum class ReadStatus { Absent, Valid, Unsupported, Malformed, Unavailable };
 enum class DocumentPresence { Absent, Present, Conflict, Unavailable };
 enum class VerifiedQueryStatus { Unavailable };
@@ -75,7 +83,7 @@ struct Catalog {
         return label==b.label&&legacyLabel==b.legacyLabel&&bytes==b.bytes&&legacyBytes==b.legacyBytes;
     }
     bool supportsAppend()const noexcept {
-        return std::all_of(records.begin(),records.end(),[](const Record&r){return r.policy==0||r.policy==AnalyticZeroPolicy1;});
+        return std::all_of(records.begin(),records.end(),[](const Record&r){return r.policy==0||SupportedPolicy(r.operation,r.policy);});
     }
 };
 struct Inspection {DocumentPresence presence=DocumentPresence::Unavailable;bool effectsCurrent=false;std::vector<Effect> effects;EffectEvidenceStatus evidence=EffectEvidenceStatus::Unavailable;};
@@ -92,11 +100,16 @@ inline bool Hash(const std::uint8_t* p,std::size_t n,Digest& out){out.fill(0);re
 inline bool Valid(const Record& r){
     if(!Nonzero(r.key.accountScope)||!Nonzero(r.key.command)||!Nonzero(r.key.execution)||!Nonzero(r.key.document)||!Nonzero(r.key.request)
         ||r.effects.empty()||r.effects.size()>MaximumEffects)return false;
-    if(r.operation<Operation::CreateEnclosure||r.operation>Operation::RebuildProfile
-        ||(r.operation!=Operation::CreateAssembly&&r.effects.size()!=1))return false;
+    const bool loft=r.operation==Operation::RebuildLoftStation;
+    if((!loft&&(r.operation<Operation::CreateEnclosure||r.operation>Operation::RebuildProfile))
+        ||(r.operation!=Operation::CreateAssembly&&r.effects.size()!=1)
+        ||(loft&&(r.policy==0||r.policy==AnalyticZeroPolicy1)))return false;
+    // An assigned loft policy cannot retroactively invalidate unknown-policy
+    // records on older operations. SupportedPolicy keeps them unresolved and
+    // nonappendable without changing their structural bytes.
     std::set<UUID> entities,definitions,features;
     for(const auto& e:r.effects){
-        const auto expected=(r.operation==Operation::CreateEnclosure||r.operation==Operation::RebuildEnclosure)?Feature::Enclosure:Feature::Profile;
+        const auto expected=(r.operation==Operation::CreateEnclosure||r.operation==Operation::RebuildEnclosure)?Feature::Enclosure:(loft?Feature::RectangularLoft:Feature::Profile);
         if(e.policy!=r.policy||e.feature!=expected||!Nonzero(e.entity)||!Nonzero(e.definition)||!Nonzero(e.featureID)||!Nonzero(e.geometry)||!Nonzero(e.state)
             ||!entities.insert(e.entity).second||!definitions.insert(e.definition).second||!features.insert(e.featureID).second)return false;
     }
@@ -214,7 +227,7 @@ inline ReadStatus Read(const Handle(TDocStd_Document)& doc,Catalog& out) noexcep
 inline bool Stage(const Handle(OcctDocument)& owner,const Record& record,const Catalog& expected) noexcept {
     try{
         if(owner.IsNull()||owner->Document().IsNull()||!owner->Document()->HasOpenCommand()
-            ||!Valid(record)||record.policy!=AnalyticZeroPolicy1)return false;
+            ||!Valid(record)||!SupportedPolicy(record.operation,record.policy))return false;
         UUID document;if(!ParseUUID(owner->DocumentIdentifier(),document)||record.key.document!=document)return false;
         Catalog live;const auto status=Read(owner->Document(),live);
         if((status!=ReadStatus::Absent&&status!=ReadStatus::Valid)||!live.matches(expected)||!live.supportsAppend()
@@ -359,16 +372,16 @@ public:
 #if DEBUG
     std::vector<std::uint8_t> *debugBytes = nullptr;
 #endif
-    GeometryStream(){valid=CC_SHA256_Init(&context)==1;}
+    explicit GeometryStream(bool analytic=true):analytic(analytic){valid=CC_SHA256_Init(&context)==1;}
     bool finish(Digest& digest){
         auto sink=[&](const char*p,std::size_t n){return emit(p,n);};
-        return valid&&written>0&&filter.finish(sink)&&CC_SHA256_Final(digest.data(),&context)==1;
+        return valid&&written>0&&(!analytic||filter.finish(sink))&&CC_SHA256_Final(digest.data(),&context)==1;
     }
 protected:
     std::streamsize xsputn(const char* p,std::streamsize n)override{
         if(!valid||n<0||std::size_t(n)>8*1024*1024-written){valid=false;return 0;}
         auto sink=[&](const char*bytes,std::size_t count){return emit(bytes,count);};
-        if(!filter.write(p,std::size_t(n),sink)){valid=false;return 0;}written+=std::size_t(n);return n;
+        if(!(analytic?filter.write(p,std::size_t(n),sink):emit(p,std::size_t(n)))){valid=false;return 0;}written+=std::size_t(n);return n;
     }
     int_type overflow(int_type c)override{if(traits_type::eq_int_type(c,traits_type::eof()))return traits_type::not_eof(c);const char x=traits_type::to_char_type(c);return xsputn(&x,1)==1?c:traits_type::eof();}
 private:
@@ -380,10 +393,11 @@ private:
 #endif
         return true;
     }
+    const bool analytic;
     AnalyticGeometryZeroFilter filter;
     CC_SHA256_CTX context{};std::size_t written=0;bool valid=false;
 };
-inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
+inline bool GeometryDigestForPolicy(const TopoDS_Shape& shape,Digest& out,bool analytic
 #if DEBUG
     , std::vector<std::uint8_t> *debugBytes=nullptr
 #endif
@@ -403,7 +417,7 @@ inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
         while(!pending.empty()){auto current=std::move(pending.back());pending.pop_back();if(++nodes>8192||current.second>64)return false;
             current.first.Free(Standard_True);current.first.Modified(Standard_False);current.first.Checked(Standard_False);
             for(TopoDS_Iterator it(current.first);it.More();it.Next()){if(pending.size()>=8192)return false;pending.emplace_back(it.Value(),current.second+1);}}
-        GeometryStream buffer;
+        GeometryStream buffer(analytic);
 #if DEBUG
         if(debugBytes){debugBytes->clear();buffer.debugBytes=debugBytes;}
 #endif
@@ -414,6 +428,33 @@ inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
         BRepTools::Write(detached,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
         return stream.good()&&buffer.finish(out);
     }catch(...){out.fill(0);return false;}
+}
+// Existing callers keep the exact original analytic policy and byte stream.
+inline bool GeometryDigest(const TopoDS_Shape& shape,Digest& out
+#if DEBUG
+    , std::vector<std::uint8_t> *debugBytes=nullptr
+#endif
+) noexcept {
+    return GeometryDigestForPolicy(shape,out,true
+#if DEBUG
+        ,debugBytes
+#endif
+    );
+}
+// Only validated native recipe data can make the reusable numeric descriptor.
+// This helper does not create a request, source lease, reservation or receipt.
+inline bool LoftStationDescriptor(const rectangular_loft::Definition& source,
+    const rectangular_loft::StationDimensionEdit& edit,request::Descriptor& output)noexcept {
+    output={};try{
+        rectangular_loft::Definition candidate;
+        if(!loft_rebuild::Apply(source,edit,candidate)||!loft_rebuild::Matches(source,edit,candidate))return false;
+        request::Part part;part.recipe=request::Recipe::RectangularLoft;part.schema=loft_persistence::Schema;
+        if(!loft_persistence::Encode(candidate,part.values))return false;
+        request::Descriptor d;d.operation=request::Operation::RebuildLoftStation;d.parts={std::move(part)};
+        d.loftStationEdit=request::LoftStationEdit{edit.stationIdentifier,edit.width,edit.depth};
+        std::vector<std::uint8_t> encoded;if(!request::Encode(d,encoded))return false;
+        output=std::move(d);return true;
+    }catch(...){output={};return false;}
 }
 inline bool SupportedProfile(const profile::Parameters& p){
     const auto&d=p.definition;if(d.revolve||d.curves||!d.holes.empty())return false;
@@ -438,7 +479,12 @@ inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& lab
         if(debug)debug->stage="recipe";
 #endif
         std::vector<double> values;int schema=0;
-        if(!s.enclosure.label.IsNull()){
+        if(!s.loft.label.IsNull()){
+            if(!s.enclosure.label.IsNull()||!s.profile.label.IsNull()||!s.sweep.label.IsNull()
+                ||!s.loft.IsCurrent(owner->Document(),label)||!loft_persistence::Encode(s.loft.definition,values))return false;
+            e.feature=Feature::RectangularLoft;e.policy=ExactLoftPolicy4097;schema=loft_persistence::Schema;
+            if(!ParseUUID(s.loft.identifier,e.featureID))return false;
+        }else if(!s.enclosure.label.IsNull()){
             if(!s.profile.label.IsNull()||!s.enclosure.IsCurrent(owner->Document(),label)||!enclosure::Encode(s.enclosure.parameters,values))return false;
             e.feature=Feature::Enclosure;schema=s.enclosure.parameters.definition.constructionFrame?enclosure::FramedSchemaVersion:enclosure::SchemaVersion;if(!ParseUUID(s.enclosure.identifier,e.featureID))return false;
         }else{
@@ -447,10 +493,10 @@ inline bool CaptureEffect(const Handle(OcctDocument)& owner,const TDF_Label& lab
         }
 #if DEBUG
         if(debug)debug->stage="geometry";
-        if(!GeometryDigest(s.shape,e.geometry,debug?&debug->geometryBytes:nullptr)||named.name.Length()>256)return false;
+        if(!GeometryDigestForPolicy(s.shape,e.geometry,e.policy==AnalyticZeroPolicy1,debug?&debug->geometryBytes:nullptr)||named.name.Length()>256)return false;
         if(debug)debug->stage="state";
 #else
-        if(!GeometryDigest(s.shape,e.geometry)||named.name.Length()>256)return false;
+        if(!GeometryDigestForPolicy(s.shape,e.geometry,e.policy==AnalyticZeroPolicy1)||named.name.Length()>256)return false;
 #endif
         std::vector<std::uint8_t> bytes{'S','Y','E','F',2,std::uint8_t(e.policy),std::uint8_t(e.policy>>8),std::uint8_t(e.feature),std::uint8_t(schema)};
         auto append=[&](const auto&a){bytes.insert(bytes.end(),a.begin(),a.end());};
@@ -480,7 +526,7 @@ inline Inspection InspectDocument(const Handle(OcctDocument)& owner,const Key& k
         if(!match){result.presence=DocumentPresence::Absent;return result;}
         result.presence=DocumentPresence::Present;result.effects=match->effects;
         if(match->policy==0){result.evidence=EffectEvidenceStatus::LegacyUnversioned;return result;}
-        if(match->policy!=AnalyticZeroPolicy1){result.evidence=EffectEvidenceStatus::UnsupportedPolicy;return result;}
+        if(!SupportedPolicy(match->operation,match->policy)){result.evidence=EffectEvidenceStatus::UnsupportedPolicy;return result;}
         result.effectsCurrent=true;result.evidence=EffectEvidenceStatus::Current;
         TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
         if(roots.Length()>50000){result.presence=DocumentPresence::Unavailable;result.effectsCurrent=false;result.evidence=EffectEvidenceStatus::Unavailable;return result;}

@@ -1645,6 +1645,25 @@ static bool Core3DModelingSweepSupported(const core3d::planar_sweep::Definition&
     }catch(...){return false;}
 }
 
+// Bounded physical description of the existing native ruled-loft recipe.
+// Inspect retains exact schema/frame/order/correspondence and kernel limits;
+// this adds only feature-local physical bounds for a later provider contract.
+static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definition& d,double effectiveUnit) {
+    core3d::rectangular_loft::Inspection inspected;
+    if(core3d::rectangular_loft::Inspect(d,inspected)!=core3d::rectangular_loft::Admission::Accepted
+        ||!std::isfinite(effectiveUnit)||effectiveUnit<=0)return false;
+    const double mm=effectiveUnit*1000;
+    if(!std::isfinite(mm)||mm<=0)return false;
+    const auto coordinate=[&](double v){return std::isfinite(v*mm)&&std::abs(v*mm)<=1e6;};
+    const auto length=[&](double v){return coordinate(v)&&v*mm>=0.001;};
+    for(std::size_t i=0;i<d.stations.size();++i){const auto& station=d.stations[i];
+        if(!coordinate(station.z)||!coordinate(station.centerX)||!coordinate(station.centerY)
+            ||!length(station.width)||!length(station.depth)
+            ||(i&&!length(station.z-d.stations[i-1].z)))return false;
+    }
+    return true;
+}
+
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -1659,7 +1678,8 @@ static bool Core3DModelingSweepSupported(const core3d::planar_sweep::Definition&
     enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
     profile:(Core3DStoredProfileSnapshot *)profile
     recipe:(Core3DStoredProfileSnapshot *)recipe
-    sweep:(Core3DStoredSweepSnapshot *)sweep;
+    sweep:(Core3DStoredSweepSnapshot *)sweep
+    loft:(Core3DStoredRectangularLoftSnapshot *)loft;
 @end
 @implementation Core3DModelingPlanningContext
 - (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
@@ -1667,10 +1687,11 @@ static bool Core3DModelingSweepSupported(const core3d::planar_sweep::Definition&
     enclosure:(Core3DStoredEnclosureSnapshot *)enclosure
     profile:(Core3DStoredProfileSnapshot *)profile
     recipe:(Core3DStoredProfileSnapshot *)recipe
-    sweep:(Core3DStoredSweepSnapshot *)sweep {
+    sweep:(Core3DStoredSweepSnapshot *)sweep
+    loft:(Core3DStoredRectangularLoftSnapshot *)loft {
     if ((self = [super init])) {
         _scene = scene; _documentIdentifier = [documentIdentifier copy];
-        _selectedEnclosure = enclosure; _selectedProfile = profile; _selectedProfileRecipe = recipe; _selectedSweep = sweep;
+        _selectedEnclosure = enclosure; _selectedProfile = profile; _selectedProfileRecipe = recipe; _selectedSweep = sweep; _selectedLoft = loft;
     }
     return self;
 }
@@ -5620,8 +5641,10 @@ struct NativeModelingPermitIssuer final {
 
 // Fixture-only creation: one real OCAF command contains geometry, recipe and
 // record. This does NOT exercise or enable production AI receipt integration.
-- (NSDictionary *_Nullable)core3d_debugReceiptFixture:(NSInteger)kind legacyPolicy:(NSInteger)legacyPolicy {
-    if (![NSThread isMainThread] || kind < 0 || kind > 2 || legacyPolicy < -1 || legacyPolicy > 2) return nil;
+- (NSDictionary *_Nullable)core3d_debugReceiptFixture:(NSInteger)kind legacyPolicy:(NSInteger)legacyPolicy
+    metersPerUnit:(double)unit {
+    if (![NSThread isMainThread] || kind < 0 || kind > 4 || legacyPolicy < -1 || legacyPolicy > 2
+        || (unit!=0.001&&unit!=1) || (kind<3&&unit!=0.001) || (kind>=3&&legacyPolicy!=-1)) return nil;
     namespace r = core3d::receipt;
     Handle(OcctDocument) owner;
     NSURL *base = [NSFileManager.defaultManager.temporaryDirectory
@@ -5634,6 +5657,7 @@ struct NativeModelingPermitIssuer final {
         owner = new OcctDocument(); owner->InitDoc();
         const auto document = owner->Document();
         if (document.IsNull()) throw Standard_Failure("Receipt fixture document");
+        if(kind>=3)XCAFDoc_DocumentTool::SetLengthUnit(document,unit);
         // Existing ordinary shape and saved group predate this instruction.
         // Clearing only fixture setup history leaves one real receipt Undo.
         document->NewCommand();
@@ -5644,6 +5668,25 @@ struct NativeModelingPermitIssuer final {
         if (guardLabel.IsNull() || !owner->SetObjectNameForLabel(guardLabel,TCollection_ExtendedString("Receipt guard"))
             || !owner->StageSavedGroups({guardGroup}) || !document->CommitCommand())
             throw Standard_Failure("Receipt guard fixture");
+        if(kind>=3){
+            // A genuine preexisting legacy component shares this private document.
+            // Its guard profile matches the original placed1x2x3 box exactly.
+            core3d::profile::Parameters guardProfile;guardProfile.metersPerUnit=unit;
+            guardProfile.definition.points={{0,0},{1,0},{1,2},{0,2}};guardProfile.definition.depth=3;
+            core3d::profile::ConstructionFrame f;f.values={200,0,0,0,0,0,1,1};guardProfile.definition.constructionFrame=f;
+            document->NewCommand();
+            if(!core3d::profile::Stage(document,guardLabel,guardProfile,NSUUID.UUID.UUIDString.UTF8String))
+                throw Standard_Failure("Loft legacy guard profile");
+            r::Effect old;r::DebugEffectCapture oldCapture;
+            if(!r::legacy_debug::Capture(owner,guardLabel,2,old,oldCapture))throw Standard_Failure("Loft legacy guard effect");
+            r::Record legacy;legacy.policy=0;legacy.operation=r::Operation::CreateAssembly;legacy.effects={old};
+            legacy.key.accountScope.fill(8);legacy.key.command.fill(9);legacy.key.execution.fill(10);
+            if(!r::ParseUUID(owner->DocumentIdentifier(),legacy.key.document)
+                ||!r::ParseUUID(NSUUID.UUID.UUIDString.UTF8String,legacy.key.request))throw Standard_Failure("Loft legacy guard key");
+            r::Catalog empty;if(r::Read(document,empty)!=r::ReadStatus::Absent
+                ||!r::legacy_debug::StageLegacy(owner,legacy,empty)||!document->CommitCommand())
+                throw Standard_Failure("Loft legacy guard catalog");
+        }
         document->ClearUndos();
         OcctObjectNameState guardBefore; OcctSavedGroupState groupsBefore;
         NSDictionary *preservation=Core3DReceiptPreservation(owner);
@@ -5657,6 +5700,7 @@ struct NativeModelingPermitIssuer final {
                 && [preservation isEqual:Core3DReceiptPreservation(owner)];
         };
         TopoDS_Shape shape;
+        core3d::rectangular_loft::Definition loft;
         core3d::profile::Parameters profile; profile.metersPerUnit = 0.001;
         profile.definition.depth = 30;
         core3d::enclosure::Parameters enclosure; enclosure.metersPerUnit = 0.001;
@@ -5666,6 +5710,14 @@ struct NativeModelingPermitIssuer final {
         } else if (kind == 1) {
             profile.definition.circle = core3d::ProfileCircularSection{gp_Pnt2d(0,0),20,0};
             shape = BRepPrimAPI_MakeCylinder(20,30).Shape();
+        } else if(kind>=3) {
+            loft=core3d::rectangular_loft::probe::Fixture(int(kind-3),unit);
+            core3d::rectangular_loft::Admission admission;
+            const auto prepared=core3d::rectangular_loft::Prepare(loft,admission);
+            std::atomic_bool cancelled{false};core3d::rectangular_loft::SolidResult built;
+            if(core3d::rectangular_loft::Build(prepared,cancelled,built)!=core3d::rectangular_loft::BuildStatus::Built)
+                throw Standard_Failure("Receipt loft fixture");
+            shape=built.solid;
         } else {
             core3d::EnclosureSolidResult built;
             if (!core3d::BuildEnclosureSolidGeometry(enclosure.definition,
@@ -5674,22 +5726,23 @@ struct NativeModelingPermitIssuer final {
             shape = built.solid;
         }
         const std::string feature = NSUUID.UUID.UUIDString.UTF8String;
-        r::Record record; record.policy=legacyPolicy<0?r::AnalyticZeroPolicy1:0;
-        record.operation = kind == 2 ? r::Operation::CreateEnclosure : r::Operation::CreateAssembly;
+        r::Record record; record.policy=kind>=3?r::ExactLoftPolicy4097:(legacyPolicy<0?r::AnalyticZeroPolicy1:0);
+        // A synthetic component record, not proof of an executed AI operation.
+        record.operation = kind>=3?r::Operation::RebuildLoftStation:(kind == 2 ? r::Operation::CreateEnclosure : r::Operation::CreateAssembly);
         record.key.accountScope.fill(1); record.key.command.fill(2); record.key.execution.fill(3);
         NSString *request = NSUUID.UUID.UUIDString;
         if (!r::ParseUUID(owner->DocumentIdentifier(), record.key.document)
             || !r::ParseUUID(request.UTF8String, record.key.request))
             throw Standard_Failure("Receipt fixture key");
         r::Catalog before;
-        if (r::Read(document,before) != r::ReadStatus::Absent)
-            throw Standard_Failure("Receipt fixture nonempty catalog");
+        if (r::Read(document,before) != (kind>=3?r::ReadStatus::Valid:r::ReadStatus::Absent))
+            throw Standard_Failure("Receipt fixture prior catalog");
         document->NewCommand();
         Handle(AIS_Shape) ais = new AIS_Shape(shape);
         const auto label = owner->AddShape(ais,OcctGeometryRepresentation::BRep);
-        if (label.IsNull() || !(kind == 2
-            ? core3d::enclosure::Stage(document,label,enclosure,feature)
-            : core3d::profile::Stage(document,label,profile,feature)))
+        if (label.IsNull() || !(kind>=3?core3d::loft_persistence::Stage(document,label,loft,feature):
+            (kind == 2 ? core3d::enclosure::Stage(document,label,enclosure,feature)
+            : core3d::profile::Stage(document,label,profile,feature))))
             throw Standard_Failure("Receipt fixture recipe");
         r::Effect effect;
         r::DebugEffectCapture issuedCapture;
@@ -5703,7 +5756,8 @@ struct NativeModelingPermitIssuer final {
         const auto first = r::InspectDocument(owner,record.key);
         const bool initiallyCurrent = first.presence == r::DocumentPresence::Present && first.effectsCurrent;
         const bool undone = document->Undo();
-        r::Catalog absent; const bool undoAbsent = r::Read(document,absent) == r::ReadStatus::Absent;
+        r::Catalog absent; const bool undoAbsent = r::Read(document,absent) == (kind>=3?r::ReadStatus::Valid:r::ReadStatus::Absent)
+            && absent.matches(before);
         TDF_LabelSequence roots; XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(roots);
         const bool undoGuardOnly = roots.Length()==1 && roots.Value(1)==guardLabel;
         const bool undoPreserved = preserved();
@@ -5713,6 +5767,31 @@ struct NativeModelingPermitIssuer final {
         const bool redoPreserved = preserved();
         r::Catalog catalog;
         if (r::Read(document,catalog) != r::ReadStatus::Valid) throw Standard_Failure("Receipt fixture readback");
+        // Unknown policies stay readable but unresolved/nonappendable, including
+        // preexisting profile/enclosure4097 records. This is a private fixture
+        // command, never admission or retrospective policy reinterpretation.
+        bool unknownPolicyPreserved=true;
+        if(legacyPolicy<0){
+            auto unknown=record;unknown.policy=kind>=3?r::ExactLoftPolicy4097+1:r::ExactLoftPolicy4097;
+            for(auto&e:unknown.effects)e.policy=unknown.policy;
+            std::vector<std::uint8_t> raw;
+            if(!r::Encode({unknown},raw))throw Standard_Failure("Loft unknown policy encode");
+            document->NewCommand();
+            if(!r::legacy_debug::Write(document,raw,false,catalog.label)||!document->CommitCommand())
+                throw Standard_Failure("Loft unknown policy fixture");
+            r::Catalog loaded;const auto inspected=r::InspectDocument(owner,record.key);
+            unknownPolicyPreserved=r::Read(document,loaded)==r::ReadStatus::Valid&&!loaded.supportsAppend()
+                &&loaded.bytes==raw&&inspected.presence==r::DocumentPresence::Present
+                &&inspected.evidence==r::EffectEvidenceStatus::UnsupportedPolicy&&!inspected.effectsCurrent;
+            document->NewCommand();
+            auto forbidden=record;forbidden.key.request[0]^=0x20;
+            unknownPolicyPreserved=unknownPolicyPreserved&&!r::Stage(owner,forbidden,loaded);
+            document->AbortCommand();
+            unknownPolicyPreserved=unknownPolicyPreserved&&document->Undo();
+            r::Catalog restoredUnknown;
+            unknownPolicyPreserved=unknownPolicyPreserved&&r::Read(document,restoredUnknown)==r::ReadStatus::Valid
+                &&restoredUnknown.matches(catalog)&&preserved();
+        }
         // Codec rejection must not leave partially decoded evidence.
         auto damaged = (legacyPolicy<0?catalog.bytes:catalog.legacyBytes); damaged.back() ^= 1;
         std::vector<r::Record> decoded;
@@ -5765,8 +5844,10 @@ struct NativeModelingPermitIssuer final {
             @"stateSHA":[NSString stringWithUTF8String:r::Hex(effect.state).c_str()],
             @"catalogBytes":[NSData dataWithBytes:(legacyPolicy<0?catalog.bytes:catalog.legacyBytes).data() length:(legacyPolicy<0?catalog.bytes:catalog.legacyBytes).size()],
             @"stateBytes":[NSData dataWithBytes:issuedCapture.stateBytes.data() length:issuedCapture.stateBytes.size()],
+            @"legacyCatalogBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()],
             @"legacyPolicy":@(legacyPolicy),@"initiallyUnresolved":@(first.presence==r::DocumentPresence::Present&&first.evidence==r::EffectEvidenceStatus::LegacyUnversioned&&!first.effectsCurrent),
             @"redoUnresolved":@(restored.presence==r::DocumentPresence::Present&&restored.evidence==r::EffectEvidenceStatus::LegacyUnversioned&&!restored.effectsCurrent),
+            @"unknownPolicyPreserved":@(unknownPolicyPreserved),
             @"oneUndo":@(oneUndo), @"initiallyCurrent":@(initiallyCurrent),
             @"undoAbsent":@(undone && undoAbsent && undoGuardOnly), @"redoCurrent":@(redone && redoCurrent),
             @"abortRestored":@(abortRestored), @"checksumRejected":@(checksumRejected),
@@ -5802,11 +5883,73 @@ struct NativeModelingPermitIssuer final {
 }
 
 - (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind {
-    return [self core3d_debugReceiptFixture:kind legacyPolicy:-1];
+    if(kind<0||kind>2)return nil;
+    return [self core3d_debugReceiptFixture:kind legacyPolicy:-1 metersPerUnit:0.001];
 }
 - (NSDictionary *_Nullable)debugNativeLegacyReceiptFixture:(NSInteger)kind policy:(NSInteger)policy {
-    if(policy<0||policy>2)return nil;
-    return [self core3d_debugReceiptFixture:kind legacyPolicy:policy];
+    if(kind<0||kind>2||policy<0||policy>2)return nil;
+    return [self core3d_debugReceiptFixture:kind legacyPolicy:policy metersPerUnit:0.001];
+}
+
+- (NSDictionary *_Nullable)debugLoftReceiptFixture:(NSInteger)variant metersPerUnit:(double)unit {
+    if(variant<0||variant>1)return nil;
+    return [self core3d_debugReceiptFixture:variant+3 legacyPolicy:-1 metersPerUnit:unit];
+}
++ (NSDictionary *)debugLoftRequestCodec {
+    if(!NSThread.isMainThread)return @{};
+    namespace n=core3d::request;namespace r=core3d::receipt;
+    try {
+        NSMutableArray *legacy=[NSMutableArray array];
+        for(unsigned operation=1;operation<=5;++operation){n::Descriptor d;d.operation=n::Operation(operation);
+            n::Part p;p.recipe=(operation==1||operation==2)?n::Recipe::Enclosure:n::Recipe::Profile;p.schema=1;p.values={1.25,-0.0};d.parts={p};
+            std::vector<std::uint8_t> bytes;n::Descriptor decoded;
+            if(!n::Encode(d,bytes)||!n::Decode(bytes,decoded))return @{};
+            [legacy addObject:[NSData dataWithBytes:bytes.data() length:bytes.size()]];
+        }
+        auto source=core3d::rectangular_loft::probe::Fixture(0,0.001);
+        core3d::rectangular_loft::StationDimensionEdit edit;edit.stationIdentifier=101;edit.width=36;
+        n::Descriptor d;if(!r::LoftStationDescriptor(source,edit,d))return @{};
+        std::vector<std::uint8_t> bytes;n::Digest digest;n::Descriptor decoded;
+        if(!n::Encode(d,bytes)||!n::CommandHash(d,digest)||!n::Decode(bytes,decoded))return @{};
+        std::vector<std::uint8_t> roundtrip;if(!n::Encode(decoded,roundtrip))return @{};
+        NSMutableArray *variants=[NSMutableArray array];
+        for(int mode=0;mode<6;++mode){auto changed=source;auto wanted=edit;
+            if(mode==0)wanted.depth=20; // presence matters even when value is unchanged
+            if(mode==1)wanted.width=38;
+            if(mode==2)wanted.stationIdentifier=100;
+            if(mode==3)changed.stations.back().centerY=-0.0;
+            if(mode==4){auto f=core3d::rectangular_loft::probe::Fixture(0,0.001,3);changed=f;}
+            if(mode==5)changed.loftIdentifier=999;
+            n::Descriptor variant;n::Digest hash;
+            if(!r::LoftStationDescriptor(changed,wanted,variant)||!n::CommandHash(variant,hash))return @{};
+            [variants addObject:@(r::Hex(hash).c_str())];
+        }
+        bool malformed=true;
+        for(int mode=0;mode<6;++mode){auto bad=bytes;
+            if(mode==0)bad[4]=1;
+            if(mode==1)bad.push_back(0);
+            if(mode==2)bad.pop_back();
+            if(mode==3)bad[5]=5;
+            if(mode==4)bad[bad.size()-9]=0; // LSED mask (one width scalar)
+            if(mode==5)bad[bad.size()-9]=4;
+            n::Descriptor refused;malformed=malformed&&!n::Decode(bad,refused)&&refused.parts.empty();
+        }
+        auto invalid=edit;invalid.stationIdentifier=999;n::Descriptor refused;
+        const bool missing=!r::LoftStationDescriptor(source,invalid,refused)&&refused.parts.empty();
+        auto mixed=d;mixed.operation=n::Operation::CreateProfile;std::vector<std::uint8_t> discarded;
+        const bool legacyCannotCarryLoft=!n::Encode(mixed,discarded)&&discarded.empty();
+        // The raw loft stream must preserve zero spellings under arbitrary chunks.
+        const std::string raw="CASCADE Topology V3, (c) Open Cascade\n\nLocations 0\n\nCurve2ds 1\n1 -0 0 1 -0 \nCurves 0\nSurfaces 1\n1 0 0 0 0 0 1 1 -0 0 -0 1 -0 \n";
+        bool rawExact=true;
+        for(std::size_t chunk:{1u,7u,512u}){r::GeometryStream stream(false);std::vector<std::uint8_t> actual;stream.debugBytes=&actual;
+            std::ostream out(&stream);for(std::size_t offset=0;offset<raw.size();offset+=chunk)out.write(raw.data()+offset,std::min(chunk,raw.size()-offset));
+            r::Digest hash;rawExact=rawExact&&out.good()&&stream.finish(hash)&&actual==std::vector<std::uint8_t>(raw.begin(),raw.end());
+        }
+        return @{@"legacy":legacy,@"descriptor":[NSData dataWithBytes:bytes.data() length:bytes.size()],
+            @"roundtrip":[NSData dataWithBytes:roundtrip.data() length:roundtrip.size()],@"commandSHA":@(r::Hex(digest).c_str()),
+            @"variants":variants,@"malformedRejected":@(malformed),@"missingStationRejected":@(missing),
+            @"legacyCannotCarryLoft":@(legacyCannotCarryLoft),@"rawStreamExact":@(rawExact)};
+    }catch(...){return @{};}
 }
 
 // Read-only DEBUG visibility into unverified component evidence. Public verified
@@ -11958,6 +12101,7 @@ struct NativeModelingPermitIssuer final {
         Core3DStoredProfileSnapshot *profile = nil;
         Core3DStoredProfileSnapshot *recipe = nil;
         Core3DStoredSweepSnapshot *sweep = nil;
+        Core3DStoredRectangularLoftSnapshot *loft = nil;
         if (scene.selection.selectedElements.count == 1) {
             Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
             if (selected.kind == Core3DSceneElementKindObject)
@@ -11978,12 +12122,17 @@ struct NativeModelingPermitIssuer final {
                 if(sweep&&(!sweep.current||!Core3DModelingSweepSupported([sweep nativeSnapshot].definition,
                     sweep.effectiveDimensionMetersPerUnit)))sweep=nil;
             }
+            if(!enclosure&&!profile&&!recipe&&!sweep&&selected.kind==Core3DSceneElementKindObject){
+                loft=[self storedRectangularLoftWithEntityIdentifier:selected.entityIdentifier expected:scene];
+                if(loft&&(!loft.current||!Core3DModelingLoftSupported([loft nativeSnapshot].definition,
+                    loft.effectiveDimensionMetersPerUnit)))loft=nil;
+            }
         }
         // Native reads must not acquire or refresh authority during capture.
         const auto after = document->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
         if (!after || !(*after == *stamp)) return nil;
         Core3DModelingPlanningContext *context = [[Core3DModelingPlanningContext alloc]
-            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile recipe:recipe sweep:sweep];
+            initWithScene:scene documentIdentifier:documentID enclosure:enclosure profile:profile recipe:recipe sweep:sweep loft:loft];
         context->_planningOwner = self; context->_planningViewer = viewer;
         context->_planningStamp = *stamp; context->_planningOverlayRevision = overlay.overlayRevision;
         Core3DModelingPlanningContext *previous = _issuedModelingPlanningContext;
@@ -12174,6 +12323,45 @@ struct NativeModelingPermitIssuer final {
         if(owner&&owner->_modelingConstructionContext==finished)owner->_modelingConstructionContext=nil;
         completion(result);
     }];
+}
+
+- (Core3DRectangularLoftStationEdit *)modelingLoftStationEdit:(uint32_t)stationIdentifier
+    widthMM:(NSNumber *)width depthMM:(NSNumber *)depth context:(Core3DModelingPlanningContext *)context {
+    if(![self isModelingPlanningContextCurrent:context]||!context.selectedLoft||!stationIdentifier
+        ||context.selectedEnclosure||context.selectedProfile||context.selectedProfileRecipe||context.selectedSweep
+        ||(!width&&!depth))return nil;
+    try {
+        const auto source=[context.selectedLoft nativeSnapshot];
+        if(!source.current||!Core3DModelingLoftSupported(source.definition,source.effectiveDimensionMetersPerUnit))return nil;
+        const core3d::rectangular_loft::Station *station=nullptr;
+        for(const auto& value:source.definition.stations)if(value.identifier==stationIdentifier){
+            if(station)return nil;station=&value;
+        }
+        if(!station)return nil;
+        const double factor=source.effectiveDimensionMetersPerUnit*1000;
+        auto convert=[&](NSNumber *value,double original,NSNumber *__strong *result){
+            *result=nil;if(!value)return true;
+            if(![value isKindOfClass:NSNumber.class]||CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID())return false;
+            const double physical=value.doubleValue;
+            if(!std::isfinite(physical)||physical<0.001||physical>1e6)return false;
+            // Preserve exact native bits when the requested physical Double is
+            // the same as the advertised value; never round-trip a no-op.
+            const double raw=physical==original*factor?original:physical/factor;
+            if(!std::isfinite(raw)||raw<=0)return false;
+            *result=@(raw);return true;
+        };
+        NSNumber *nativeWidth=nil,*nativeDepth=nil;
+        if(!convert(width,station->width,&nativeWidth)||!convert(depth,station->depth,&nativeDepth))return nil;
+        Core3DRectangularLoftStationEdit *edit=[[Core3DRectangularLoftStationEdit alloc]
+            initWithStationIdentifier:stationIdentifier width:nativeWidth depth:nativeDepth];
+        if(!edit)return nil;
+        core3d::rectangular_loft::Definition candidate;
+        if(!core3d::loft_rebuild::Apply(source.definition,[edit nativeEdit],candidate)
+            ||!Core3DModelingLoftSupported(candidate,source.effectiveDimensionMetersPerUnit)
+            ||![self isModelingPlanningContextCurrent:context])return nil;
+        // Numeric preparation never consumes or replaces the original lease.
+        return edit;
+    }catch(...){return nil;}
 }
 
 - (void)rebuildSweepRadiusWithDefinition:(Core3DSweepDefinition *)definition

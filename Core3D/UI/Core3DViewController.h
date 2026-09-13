@@ -373,6 +373,9 @@ __attribute__((objc_subclassing_restricted))
 //! Exact selected saved sweep. Mutually exclusive with the three profile/enclosure fields.
 //! Descriptive physical values use effectiveDimensionMetersPerUnit; authority stays native.
 @property(nonatomic,strong,readonly,nullable) Core3DStoredSweepSnapshot *selectedSweep;
+//! Exact saved ruled rectangular loft, exclusive of every other selected feature.
+//! Descriptive prerequisite only: no AI command, reserved execution or receipt is enabled.
+@property(nonatomic,strong,readonly,nullable) Core3DStoredRectangularLoftSnapshot *selectedLoft;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -1342,6 +1345,14 @@ typedef struct {
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildProfile(definition:context:completion:));
+//! Validates one station's physical dimensions against the ORIGINAL current lease.
+//! nil dimensions preserve original raw bits; at least one dimension is required.
+//! Returns numeric data only; does not consume the lease, build, mutate or reserve.
+//! Future reserved loft execution still requires its own descriptor/effect coupling.
+- (nullable Core3DRectangularLoftStationEdit *)modelingLoftStationEdit:(uint32_t)stationIdentifier
+    widthMM:(nullable NSNumber *)width depthMM:(nullable NSNumber *)depth
+    context:(Core3DModelingPlanningContext *)context
+    NS_SWIFT_NAME(modelingLoftStationEdit(stationIdentifier:widthMM:depthMM:context:));
 //! Ordinary native context operations only: no reserved request/receipt tag is implied.
 - (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
     context:(Core3DModelingPlanningContext *)context
@@ -1788,6 +1799,10 @@ typedef struct {
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugReceiptWire:(NSData *)data NS_SWIFT_NAME(debugReceiptWire(_:));
 - (NSDictionary *_Nullable)debugReceiptDualCatalogProbe NS_SWIFT_NAME(debugReceiptDualCatalogProbe());
+//! Synthetic component evidence only; no production reservation or verified result.
+- (NSDictionary *_Nullable)debugLoftReceiptFixture:(NSInteger)variant metersPerUnit:(double)unit
+    NS_SWIFT_NAME(debugLoftReceiptFixture(_:metersPerUnit:));
++ (NSDictionary *)debugLoftRequestCodec NS_SWIFT_NAME(debugLoftRequestCodec());
 - (NSDictionary *_Nullable)debugNativeReceiptFixture:(NSInteger)kind
     NS_SWIFT_NAME(debugNativeReceiptFixture(_:));
 /// DEBUG stream oracle only; no native geometry authority is issued from bytes.
