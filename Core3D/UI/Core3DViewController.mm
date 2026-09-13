@@ -1668,6 +1668,8 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 @interface Core3DRigidPlacementPreparation () {
 @public
     __weak Core3DViewController *_placementOwner;
+    std::weak_ptr<core3d::Core3DViewer> _placementViewer;
+    core3d::authority::Stamp _placementStamp;
     Core3DTransformInspectorSnapshot *_placementSnapshot;
     core3d::placement::Evidence _placementEvidence;
     double _placementRawValue;
@@ -13387,7 +13389,12 @@ struct NativeModelingPermitIssuer final {
         const double raw=kind==Core3DRigidPlacementKindPosition
             ?(value==original*factor?original:value/factor):value;
         if(!std::isfinite(raw)||std::abs(raw)>Core3DTransformInspectorMaximumPositionMagnitude)return nil;
-        auto doc=GLController.viewer->getDocument();TDF_Label label;core3d::placement::Evidence evidence;
+        const auto viewer=GLController.viewer;
+        const auto doc=viewer->getDocument();
+        if(doc.IsNull())return nil;
+        const auto stamp=doc->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if(!stamp)return nil;
+        TDF_Label label;core3d::placement::Evidence evidence;
         if(!snapshot.entityIdentifier.UTF8String||!snapshot.definitionIdentifier.UTF8String
             ||!core3d::placement::Find(doc,snapshot.entityIdentifier.UTF8String,label)
             ||!core3d::placement::Capture(doc,label,evidence)
@@ -13395,9 +13402,12 @@ struct NativeModelingPermitIssuer final {
         double unit=0;
         if(!XCAFDoc_DocumentTool::GetLengthUnit(doc->Document(),unit)
             ||core3d::sweep_persistence::Bits(unit)!=core3d::sweep_persistence::Bits(snapshot.metersPerUnit))return nil;
+        const auto after=doc->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if(!after||!(*after==*stamp))return nil;
         auto prepared=[[Core3DRigidPlacementPreparation alloc] initPrivate];
         if(!prepared)return nil;
         prepared->_placementOwner=self;prepared->_placementSnapshot=snapshot;
+        prepared->_placementViewer=viewer;prepared->_placementStamp=*stamp;
         prepared->_placementEvidence=std::move(evidence);prepared->_placementRawValue=raw;
         prepared->_placementKind=kind;prepared->_placementAxis=axis;
         return prepared;
@@ -13418,11 +13428,21 @@ struct NativeModelingPermitIssuer final {
     if(!_isSetuped||!GLController||!GLController.viewer||![self core3d_canBeginCommittedEdit])
         return Core3DTransformInspectorPositionCommitResultBusy;
     try {
-        auto doc=GLController.viewer->getDocument();TDF_Label label;core3d::placement::Evidence live;
+        const auto viewer=prepared->_placementViewer.lock();
+        if(!viewer||viewer!=GLController.viewer)return Core3DTransformInspectorPositionCommitResultStale;
+        const auto doc=viewer->getDocument();
+        if(doc.IsNull())return Core3DTransformInspectorPositionCommitResultStale;
+        const auto stamp=doc->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if(!stamp||!(*stamp==prepared->_placementStamp))return Core3DTransformInspectorPositionCommitResultStale;
+        TDF_Label label;core3d::placement::Evidence live;
         if(!snapshot||!snapshot.entityIdentifier.UTF8String
             ||!core3d::placement::Find(doc,snapshot.entityIdentifier.UTF8String,label)
             ||!core3d::placement::Capture(doc,label,live)||!(live==prepared->_placementEvidence))
             return Core3DTransformInspectorPositionCommitResultStale;
+        const auto after=doc->CaptureNativePlanningStamp(viewer->canBeginCommittedEdit());
+        if(!after||!(*after==prepared->_placementStamp))return Core3DTransformInspectorPositionCommitResultStale;
+        // Native opening/edit/selection epochs above reject ABA even when the
+        // restored geometry and transform are byte-identical to preparation.
         // Shared touch engine performs the final exact native lease, selection,
         // presentation/unit/tool checks and owns the one ordinary transaction.
         // Never infer or override its outcome from a later diagnostic capture.
