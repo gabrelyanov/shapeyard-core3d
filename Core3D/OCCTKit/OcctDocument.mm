@@ -9,6 +9,7 @@
 #include "CoherentMeshUVAtlas.hpp"
 #include <TDataStd_UAttribute.hxx>
 #include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_GraphNode.hxx>
 #include <TDataStd_Name.hxx>
 // Copyright (c) 2017 OPEN CASCADE SAS
