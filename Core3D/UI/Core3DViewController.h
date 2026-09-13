@@ -1917,6 +1917,12 @@ __attribute__((objc_subclassing_restricted))
 //! Native/value prerequisite probes only; no document command authority.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutSourcePrerequisiteProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutSourcePrerequisiteProbe(_:));
+//! Detached bounded enclosure correspondence qualification, not source editing.
++ (NSDictionary<NSString *, NSNumber *> *)debugEnclosureCorrespondenceProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugEnclosureCorrespondenceProbe(_:));
+//! Read-only recipe/interval qualification, not a native edit capability.
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedCutBoreClearanceProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugSavedCutBoreClearanceProbe(_:));
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugScalableReceiptSnapshot NS_SWIFT_NAME(debugScalableReceiptSnapshot());
 - (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario NS_SWIFT_NAME(debugScalableReceiptProbe(_:));

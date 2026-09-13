@@ -430,6 +430,10 @@ Standard_EXPORT std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Stand
 Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario);
 //! Detached/value-only prerequisites; no ordinary source-edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutSourcePrerequisiteProbe(Standard_Integer scenario);
+//! Detached enclosure matcher qualification only; no owner/edit authority.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugEnclosureCorrespondenceProbe(Standard_Integer scenario);
+//! Read-only recipe/interval qualification; no document, shape or edit authority.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe(Standard_Integer scenario);
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }

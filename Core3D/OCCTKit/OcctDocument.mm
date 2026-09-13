@@ -8929,8 +8929,26 @@ void OcctDocument::NotifyChanges() {
 std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario){
     return core3d::retained_solid::Probe::Run(scenario);
 }
+#include "SavedCutSourceBoreClearanceIntervalProbe.hxx"
+std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe(Standard_Integer scenario){
+    using namespace core3d::saved_cut_bore_clearance;
+    probe::Rows rows;
+    switch(scenario){
+        case 0:rows=probe::Run();break;
+        case 1:rows=interval_probe::Arithmetic();break;
+        case 2:rows=interval_probe::Admission();break;
+        default:return {{"invalidScenario",false}};
+    }
+    std::map<std::string,bool> checks;
+    for(const auto& row:rows)if(!checks.emplace(row.first,row.second).second)return {{"duplicateKey",false}};
+    return checks;
+}
 #include "SavedCutSourcePrerequisiteProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedCutSourcePrerequisiteProbe(Standard_Integer scenario){
     return core3d::saved_cut_source_prerequisite_probe::Run(scenario);
+}
+#include "EnclosureCorrespondenceQualificationProbe.hxx"
+std::map<std::string,bool> Core3DDebugEnclosureCorrespondenceProbe(Standard_Integer scenario){
+    return core3d::enclosure_correspondence::qualification_probe::Run(scenario);
 }
 #endif
