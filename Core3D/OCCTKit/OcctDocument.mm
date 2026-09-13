@@ -59,6 +59,7 @@ struct Cut475Scope {
 #import <CommonCrypto/CommonDigest.h>
 
 #include "OcctDocument.h"
+#include "SavedCutSourceDetachedWork.hxx"
 #include "NativeModelingReceipt.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <cstring>
@@ -6906,6 +6907,156 @@ bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedC
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase=nullptr;Cut475Trace("seal.success");
 #endif // Cut475 phase diagnostics only
+        candidate=after;return true;
+    }catch(...){return false;}
+}
+
+// External candidate only. Requires SavedCutSourceDetachedWork.hxx and private
+// OcctDocument declarations; no ordinary operation calls this yet.
+Standard_Boolean OcctDocument::StageSavedCutSourceReplacement(
+    const OcctObjectTransformState& previous,
+    const core3d::saved_cut_source_edit::Patch& patch,
+    const std::shared_ptr<const core3d::SavedCutSourceDetachedResult>& built,
+    std::shared_ptr<const core3d::retained_solid::Payload>& staged,
+    bool debugFailAfterShape) noexcept {
+    staged.reset();if(!NSThread.isMainThread)return Standard_False;
+    try {
+        namespace r=core3d::retained_solid;
+        namespace e=core3d::saved_cut_source_edit;
+        OcctCylindricalCutSource source;
+        if(myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()||!built||built->noChange
+            ||!CaptureCylindricalCutSource(previous.label,source)||!source.rebuilding
+            ||!source.original.IsEqual(previous)||!previous.retained.value
+            ||!core3d::sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)
+            ||built->newBase.IsNull()||built->newResult.IsNull()
+            ||!built->cut.solid.IsEqual(built->newResult)
+            ||built->newBase.ShapeType()!=TopAbs_SOLID||built->newBase.Orientation()!=TopAbs_FORWARD
+            ||built->newResult.ShapeType()!=TopAbs_SOLID||built->newResult.Orientation()!=TopAbs_FORWARD
+            ||ClassifyDefinitionGeometry(built->newBase,nullptr)!=DefinitionGeometryClass::BRep
+            ||ClassifyDefinitionGeometry(built->newResult,nullptr)!=DefinitionGeometryClass::BRep)return Standard_False;
+        // Reapply the actual declared patch to the recaptured retained bytes.
+        // Only native worker construction can issue built; a matching digest
+        // alone is never used to classify a caller-supplied shape.
+        const std::atomic_bool checking(false);e::Values expected;
+        if(!e::PrepareValues(*source.original.retained.value,patch,checking,expected)
+            ||!expected.changed||expected.oldBytes!=built->values.oldBytes
+            ||expected.newBytes!=built->values.newBytes)return Standard_False;
+        std::size_t aggregate=0;
+        e::ShapeCommitment oldBase,oldResult,newBase,newResult;
+        if(!e::Commit(source.base,checking,aggregate,oldBase)
+            ||!e::Commit(source.original.shape,checking,aggregate,oldResult)
+            ||!e::Commit(built->newBase,checking,aggregate,newBase)
+            ||!e::Commit(built->newResult,checking,aggregate,newResult)
+            ||!(oldBase==built->sourceBase)||!(oldResult==built->sourceResult)
+            ||!(newBase==built->generatedBase)||!(newResult==built->generatedResult))return Standard_False;
+        auto value=std::make_shared<r::Payload>();value->envelope=expected.newEnvelope;
+        value->bytes=expected.newBytes;value->base=built->newBase;
+        const auto metadata=previous.retained.label;
+        if(metadata.IsNull()||metadata.Tag()<r::MinimumRecordTag)return Standard_False;
+        Handle(r::Attribute) attribute;
+        if(!metadata.FindAttribute(r::AttributeID(),attribute)||attribute.IsNull()
+            ||attribute->value()!=source.original.retained.value)return Standard_False;
+        OcctScalarAppearanceState appearance;
+        if(!CaptureScalarAppearanceForSavedCut(previous.label,appearance))return Standard_False;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if(shapes.IsNull())return Standard_False;
+        // One existing ordinary-owned command pairs owner and retained carrier.
+        // A failure is aborted/reconciled by that owner; no local restoration.
+        shapes->SetShape(previous.label,built->newResult);
+#if DEBUG
+        if(debugFailAfterShape)throw Standard_Failure("Saved cut source paired-write fault");
+#else
+        (void)debugFailAfterShape;
+#endif
+        TNaming_Builder(metadata).Select(built->newResult,built->newResult);
+        attribute->Backup();attribute->value_=value;
+        OcctObjectTransformState actual;OcctScalarAppearanceState after;
+        if(!CaptureObjectTransformStateForLabel(previous.label,actual)
+            ||!actual.shape.IsEqual(built->newResult)||!actual.retained.value
+            ||!actual.retained.label.IsEqual(metadata)
+            ||actual.retained.value->bytes!=value->bytes
+            ||!actual.retained.value->base.IsEqual(value->base)
+            ||!actual.profile.label.IsNull()||!actual.enclosure.label.IsNull()
+            ||actual.entityIdentifier!=previous.entityIdentifier
+            ||actual.definitionIdentifier!=previous.definitionIdentifier
+            ||actual.present!=previous.present
+            ||!core3d::sweep_rebuild::SameRawScalars(actual.scalars,previous.scalars)
+            ||!CaptureScalarAppearanceForSavedCut(previous.label,after)||!appearance.IsEqual(after)
+            ||!core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues)
+            ||!ValidateGeometryRepresentations())return Standard_False;
+        e::ShapeCommitment readBase,readResult;
+        if(!e::Commit(actual.retained.value->base,checking,aggregate,readBase)
+            ||!e::Commit(actual.shape,checking,aggregate,readResult)
+            ||!(readBase==built->generatedBase)||!(readResult==built->generatedResult))return Standard_False;
+        staged=std::move(value);return Standard_True;
+    }catch(...){return Standard_False;}
+}
+
+// Place after OcctSavedCutSceneState/CutRootEvidence definitions. Existing
+// SealSavedCutSceneState keeps its radius-only retained-base equality unchanged.
+bool OcctDocument::SealSavedCutSourceState(
+    const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+    const core3d::saved_cut_source_edit::Patch& patch,
+    const std::shared_ptr<const core3d::SavedCutSourceDetachedResult>& built,
+    const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
+    std::shared_ptr<const OcctSavedCutSceneState>& candidate)const noexcept {
+    candidate.reset();if(!NSThread.isMainThread||!previous||!previous->scene
+        ||!built||built->noChange||!payload)return false;
+    try {
+        namespace e=core3d::saved_cut_source_edit;
+        const auto& before=*previous->scene;
+        const auto selected=before.roots.find(before.target);
+        if(selected==before.roots.end())return false;
+        const auto& original=selected->second.object.object.object;
+        if(!original.retained.value||original.retained.value->bytes!=built->values.oldBytes)return false;
+        const std::atomic_bool checking(false);e::Values expected;
+        if(!e::PrepareValues(*original.retained.value,patch,checking,expected)||!expected.changed
+            ||expected.oldBytes!=built->values.oldBytes||expected.newBytes!=built->values.newBytes
+            ||payload->bytes!=expected.newBytes||!payload->base.IsEqual(built->newBase))return false;
+        std::vector<std::uint8_t> encoded;
+        if(!core3d::retained_solid::Encode(payload->envelope,encoded)||encoded!=payload->bytes)return false;
+        const auto after=CaptureSavedCutSceneState(original.label);
+        if(!after||!after->scene)return false;const auto& now=*after->scene;
+        if(before.data!=now.data||before.target!=now.target||std::memcmp(&before.metersPerUnit,&now.metersPerUnit,8)
+            ||before.materials!=now.materials||before.links!=now.links
+            ||before.objectMaterialAttributes!=now.objectMaterialAttributes
+            ||!before.groups.IsEqual(now.groups)||!before.receipts.matches(now.receipts)
+            ||before.roots.size()!=now.roots.size()||previous->roots.size()!=after->roots.size()
+            ||previous->layers!=after->layers||previous->layerGraph!=after->layerGraph)return false;
+        for(const auto& [key,old]:before.roots){
+            const auto at=now.roots.find(key);
+            const auto prior=previous->roots.find(key),extra=after->roots.find(key);
+            if(at==now.roots.end()||prior==previous->roots.end()||extra==after->roots.end())return false;
+            if(key!=before.target){if(!old.equals(at->second)||!prior->second.equals(extra->second))return false;continue;}
+            const auto& actual=at->second.object.object.object;
+            if(!actual.shape.IsEqual(built->newResult)||!actual.retained.value
+                ||!actual.retained.label.IsEqual(original.retained.label)
+                ||actual.retained.value->bytes!=payload->bytes
+                ||!actual.retained.value->base.IsEqual(built->newBase)
+                ||!actual.profile.label.IsNull()||!actual.enclosure.label.IsNull()
+                ||!CutStableRootEqual(old,at->second)
+                ||prior->second.stableRaw!=extra->second.stableRaw
+                ||prior->second.frameState!=extra->second.frameState
+                ||prior->second.frames.archive!=extra->second.frames.archive
+                ||prior->second.frames.identity!=extra->second.frames.identity
+                ||prior->second.frames.cornerCount!=extra->second.frames.cornerCount
+                ||prior->second.frames.nativeBytes!=extra->second.frames.nativeBytes
+                ||prior->second.retainedEnvelope!=built->values.oldBytes
+                ||extra->second.retainedEnvelope!=built->values.newBytes
+                ||old.geometry!=built->sourceResult.sha256
+                ||prior->second.retainedBase!=built->sourceBase.sha256
+                ||at->second.geometry!=built->generatedResult.sha256
+                ||extra->second.retainedBase!=built->generatedBase.sha256)return false;
+            // Also recheck the old payload's shared TShapes after paired writes.
+            // The archived old digest is insufficient if storage mutated in place.
+            std::size_t aggregate=0;e::ShapeCommitment oldBase,oldResult,newBase,newResult;
+            if(!e::Commit(original.retained.value->base,checking,aggregate,oldBase)
+                ||!e::Commit(original.shape,checking,aggregate,oldResult)
+                ||!e::Commit(actual.retained.value->base,checking,aggregate,newBase)
+                ||!e::Commit(actual.shape,checking,aggregate,newResult)
+                ||!(oldBase==built->sourceBase)||!(oldResult==built->sourceResult)
+                ||!(newBase==built->generatedBase)||!(newResult==built->generatedResult))return false;
+        }
         candidate=after;return true;
     }catch(...){return false;}
 }

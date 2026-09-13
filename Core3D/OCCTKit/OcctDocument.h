@@ -24,6 +24,7 @@
 #include "RectangularLoftPersistence.hxx"
 #include "RectangularLoftRebuild.hxx"
 #include "CylindricalCutDefinition.hxx"
+#include "SavedCutSourceEdit.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -57,7 +58,7 @@
 class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
-namespace core3d { class OrdinaryEditController; }
+namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; }
 
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
@@ -900,6 +901,17 @@ private:
   Standard_Boolean StageCylindricalCutReplacement(const OcctObjectTransformState& previous,
       const TopoDS_Shape& candidate,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
       bool debugFailAfterShape=false)noexcept;
+  // Only this same ordinary owner may update retained source, base and result.
+  Standard_Boolean StageSavedCutSourceReplacement(const OcctObjectTransformState& previous,
+      const core3d::saved_cut_source_edit::Patch& patch,
+      const std::shared_ptr<const core3d::SavedCutSourceDetachedResult>& built,
+      std::shared_ptr<const core3d::retained_solid::Payload>& staged,
+      bool debugFailAfterShape=false) noexcept;
+  bool SealSavedCutSourceState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+      const core3d::saved_cut_source_edit::Patch& patch,
+      const std::shared_ptr<const core3d::SavedCutSourceDetachedResult>& built,
+      const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
+      std::shared_ptr<const OcctSavedCutSceneState>& candidate) const noexcept;
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;

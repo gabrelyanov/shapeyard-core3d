@@ -213,6 +213,57 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! Values use source-recipe millimetres, BEFORE construction-frame and occurrence
+//! scaling. They do not change the bore, source plane, construction frame or IDs.
+typedef NS_ENUM(NSInteger, Core3DSavedCutSourceFamily) { Core3DSavedCutSourceFamilyPolygon NS_SWIFT_NAME(polygon)=1, Core3DSavedCutSourceFamilyEnclosure NS_SWIFT_NAME(enclosure)=2 };
+typedef NS_ENUM(NSInteger, Core3DSavedCutSourceComponent) { Core3DSavedCutSourceComponentU NS_SWIFT_NAME(u)=0, Core3DSavedCutSourceComponentV NS_SWIFT_NAME(v)=1 };
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSavedCutSourceCoordinate : NSObject
+@property(nonatomic,readonly) uint32_t ordinal; // Original polygon order; not a persistent vertex ID.
+@property(nonatomic,readonly) Core3DSavedCutSourceComponent component;
+@property(nonatomic,readonly) double valueMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithOrdinal:(uint32_t)ordinal component:(Core3DSavedCutSourceComponent)component valueMM:(double)value
+    NS_SWIFT_NAME(init(ordinal:component:valueMM:));
+@end
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSavedCutSourcePatch : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithPolygonCoordinates:(NSArray<Core3DSavedCutSourceCoordinate *> *)coordinates depthMM:(nullable NSNumber *)depth
+    NS_SWIFT_NAME(init(polygonCoordinates:depthMM:));
+- (nullable instancetype)initWithEnclosureWidthMM:(nullable NSNumber *)width depthMM:(nullable NSNumber *)depth
+    heightMM:(nullable NSNumber *)height wallMM:(nullable NSNumber *)wall floorMM:(nullable NSNumber *)floor
+    cornerRadiusMM:(nullable NSNumber *)corner
+    NS_SWIFT_NAME(init(enclosureWidthMM:depthMM:heightMM:wallMM:floorMM:cornerRadiusMM:));
+@end
+//! Native-issued descriptive values copied from the SAME cut snapshot. No new
+//! capture occurs and these fields cannot recreate source/transaction authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSavedCutSourceValues : NSObject
+@property(nonatomic,readonly) Core3DSavedCutSourceFamily family;
+@property(nonatomic,readonly) Core3DProfilePlane plane;
+@property(nonatomic,readonly) double metersPerUnit;
+@property(nonatomic,copy,readonly) NSArray<NSValue *> *polygonPointsMM; // CGPoint U/V in original order; empty for enclosure.
+@property(nonatomic,copy,readonly,nullable) NSNumber *widthMM;
+@property(nonatomic,copy,readonly,nullable) NSNumber *depthMM;
+@property(nonatomic,copy,readonly,nullable) NSNumber *heightMM;
+@property(nonatomic,copy,readonly,nullable) NSNumber *wallMM;
+@property(nonatomic,copy,readonly,nullable) NSNumber *floorMM;
+@property(nonatomic,copy,readonly,nullable) NSNumber *cornerRadiusMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSavedCutSourceOperation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+//! Main-only, exact still-pending job. Settled, old and repeated Stop return NO.
+//! Cancellation releases native authority now; callback waits for actual worker drain.
+- (BOOL)cancel;
+@end
+
 //! Axis and centre are original object-local coordinates, in document units.
 //! Radius is physical world millimetres; only positive uniform occurrence scale is supported.
 typedef NS_ENUM(NSInteger, Core3DCylindricalCutAxis) { Core3DCylindricalCutAxisX=0,Core3DCylindricalCutAxisY=1,Core3DCylindricalCutAxisZ=2 };
@@ -234,6 +285,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,readonly) BOOL rebuilding;
 @property(nonatomic,readonly) double worldRadiusMM; // zero until first creation
+@property(nonatomic,strong,readonly,nullable) Core3DSavedCutSourceValues *sourceRecipeMM;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -1313,6 +1365,17 @@ __attribute__((objc_subclassing_restricted))
     worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutRadius(_:worldRadiusMM:expected:completion:));
+//! Native source edit; no UI/AI activation. Main callback may refuse synchronously.
+- (nullable Core3DSavedCutSourceOperation *)beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginSavedCutSourceEdit(_:patch:expected:completion:));
+#if DEBUG
+//! One-shot main delivery gate for real worker lifecycle qualification.
+- (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
+    NS_SWIFT_NAME(debugSetSavedCutSourceDeliveryGate(_:));
++ (NSDictionary<NSString *,NSNumber *> *)debugSavedCutSourceMMConversionProbe;
+#endif
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));
 - (void)rebuildStoredRectangularLoft:(Core3DStoredRectangularLoftSnapshot *)original
@@ -1554,6 +1617,20 @@ __attribute__((objc_subclassing_restricted))
 #if DEBUG
 //! Component evidence only; no native verified receipt or retry permission.
 - (BOOL)debugSetCutDisplayCoefficient:(double)coefficient pending:(BOOL)pending NS_SWIFT_NAME(debugSetCutDisplayCoefficient(_:pending:));
+// DEBUG fixture dispatch only; no product Objective-C source-edit operation.
+- (NSDictionary<NSString *,NSNumber *> *)debugSavedCutSourceViewerQualification:(Core3DCylindricalCutSnapshot *)original
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(debugSavedCutSourceViewerQualification(_:expected:));
+- (NSDictionary<NSString *,id> *)debugSavedCutSourceFixtureEdit:(NSInteger)fixture valueMM:(double)valueMM depthMM:(double)depthMM
+    original:(Core3DCylindricalCutSnapshot *)original expected:(Core3DSceneSnapshot *)expected
+    cancelPoint:(NSInteger)cancelPoint beforeCommit:(nullable void (^)(void))beforeCommit
+    NS_SWIFT_NAME(debugSavedCutSourceFixtureEdit(_:valueMM:depthMM:original:expected:cancelPoint:beforeCommit:));
+- (NSDictionary<NSString *,NSNumber *> *)debugSavedCutBracketGeometry:(NSString *)entity lengthMM:(double)lengthMM depthMM:(double)depthMM
+    NS_SWIFT_NAME(debugSavedCutBracketGeometry(_:lengthMM:depthMM:));
+- (NSDictionary<NSString *,id> *)debugSavedCutSourceEnclosureWidth:(double)widthMM
+    original:(Core3DCylindricalCutSnapshot *)original expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(debugSavedCutSourceEnclosureWidth(_:original:expected:));
+- (NSDictionary<NSString *,NSNumber *> *)debugSavedCutEnclosureGeometry:(NSString *)entity widthMM:(double)widthMM
+    NS_SWIFT_NAME(debugSavedCutEnclosureGeometry(_:widthMM:));
 - (nullable NSDictionary<NSString *,id> *)debugCylindricalCutEvidence:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutEvidence(_:));
 + (NSDictionary<NSString *,NSNumber *> *)debugCylindricalCutSimilarityProbe;
 - (NSDictionary<NSString *,NSNumber *> *)debugCutSceneGuardMutation:(NSInteger)mode target:(NSString *)target sibling:(NSString *)sibling;

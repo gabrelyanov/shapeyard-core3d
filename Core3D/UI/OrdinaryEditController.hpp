@@ -7,6 +7,7 @@
 #include "../OCCTKit/RectangularLoftRebuild.hxx"
 #include "NativeModelingRequest.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
+#include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
 #include <map>
@@ -23,7 +24,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -120,6 +121,9 @@ struct OrdinaryTransformChange {
     std::shared_ptr<const SweepRebuildGuard> sweepSource;
     std::shared_ptr<const retained_solid::Payload> cut;
     std::shared_ptr<const OcctSavedCutSceneState> cutSource;
+    // Separate native source/base/result path. No radius payload or AI permit.
+    std::optional<saved_cut_source_edit::Patch> cutSourcePatch;
+    std::shared_ptr<const SavedCutSourceDetachedResult> cutSourceRebuild;
 };
 
 struct OrdinaryTransformRecord {
@@ -132,6 +136,8 @@ struct SweepRebuildGuard; // Main-owned bounded catalog; never dispatched to geo
 struct OrdinaryTransformLedger {
     std::shared_ptr<SweepRebuildGuard> sweepGuard;
     std::shared_ptr<const OcctSavedCutSceneState> cutPrevious,cutCandidate;
+    // Minted by the paired document stage, never supplied as a request payload.
+    std::shared_ptr<const retained_solid::Payload> cutSourcePayload;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::vector<OrdinaryTransformRecord> records;
     bool candidateSealed = false;
@@ -405,6 +411,8 @@ private:
     bool captureMatches(const OcctObjectVisibilityState& expected) const noexcept;
     bool captureMatches(const OcctObjectNameState& expected) const noexcept;
     bool captureMatches(const OcctObjectTransformState& expected) const noexcept;
+    bool savedCutSourceChangeMatches(const OrdinaryTransformChange& request,
+        const OcctObjectTransformState& previous) const noexcept;
     bool presentationMatches(const OrdinaryTransformLedger& ledger, bool committed) const noexcept;
     void clearResolved() noexcept;
 

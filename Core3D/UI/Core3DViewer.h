@@ -1,3 +1,4 @@
+#include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include "../OCCTKit/ProfileDefinition.hxx"
 #include "../OCCTKit/PlanarSweepDefinition.hxx"
 #include "../OCCTKit/RectangularLoftDefinition.hxx"
@@ -22,6 +23,9 @@
 #include "OrdinaryEditController.hpp"
 #include <gp_Pnt2d.hxx>
 #include <optional>
+#if DEBUG
+#include <map>
+#endif
 #include <variant>
 #include "../OCCTKit/NativeMeshElementSelection.hpp"
 
@@ -57,6 +61,8 @@ namespace core3d {
 
     struct NativePBRScalarWork;
     struct NativeSolidWork;
+    class SavedCutSourceEditWork;
+    class SavedCutSourceEditCancellation;
     class NativeModelingCommitPermit;
     struct ProfileSolidGeometry;
     struct EnclosureSolidGeometry;
@@ -211,11 +217,37 @@ namespace core3d {
         std::optional<CylindricalCutSnapshot> cylindricalCutSource(const ObjectFrameIdentity&,
         std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
 #if DEBUG
+        std::map<std::string,bool> debugSavedCutSourceViewerQualification(const CylindricalCutSnapshot&,
+            const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t);
     bool debugSetCutDisplayCoefficient(double coefficient,bool pending) noexcept;
 #endif
     std::shared_ptr<NativeSolidWork> prepareCylindricalCut(const CylindricalCutSnapshot&,
         const std::optional<cylindrical_cut::CreateEdit>&,const std::optional<cylindrical_cut::RadiusEdit>&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    // Separate native-only source-edit lease. Main-thread authority never goes
+    // to the geometry worker; no Objective-C or provider route is activated.
+    static std::shared_ptr<SavedCutSourceEditWork> makeSavedCutSourceEditWork() noexcept;
+    bool prepareSavedCutSourceEdit(const std::shared_ptr<SavedCutSourceEditWork>&,
+        const CylindricalCutSnapshot&,const saved_cut_source_edit::Patch&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    static std::shared_ptr<SavedCutSourceDetachedWork> savedCutSourceEditGeometry(
+        const std::shared_ptr<SavedCutSourceEditWork>&) noexcept;
+    // Obtain before synchronous prepare. Only this token may cross threads.
+    static std::shared_ptr<SavedCutSourceEditCancellation> savedCutSourceEditCancellation(
+        const std::shared_ptr<SavedCutSourceEditWork>&) noexcept;
+    // Thread-safe signal: token owns no document, AIS or main lease handles.
+    static bool cancelSavedCutSourceEdit(const std::shared_ptr<SavedCutSourceEditCancellation>&) noexcept;
+    bool discardSavedCutSourceEdit(const std::shared_ptr<SavedCutSourceEditWork>&) noexcept;
+    OrdinaryEditResult commitSavedCutSourceEdit(const std::shared_ptr<SavedCutSourceEditWork>&,
+        const std::shared_ptr<const SavedCutSourceDetachedResult>&) noexcept;
+    // Detached-only source rebuild. Lifecycle owns work before synchronous prep.
+    static std::shared_ptr<SavedCutSourceDetachedWork> makeSavedCutSourceDetachedWork() noexcept;
+    bool prepareSavedCutSourceDetached(const std::shared_ptr<SavedCutSourceDetachedWork>&,
+        const CylindricalCutSnapshot&,const saved_cut_source_edit::Patch&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    static std::shared_ptr<const SavedCutSourceDetachedResult> buildSavedCutSourceDetached(
+        const std::shared_ptr<SavedCutSourceDetachedWork>&) noexcept;
+    static void cancelSavedCutSourceDetached(const std::shared_ptr<SavedCutSourceDetachedWork>&) noexcept;
     std::optional<StoredRectangularLoftSnapshot> storedRectangularLoftDefinition(
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
             std::uint32_t width,std::uint32_t height) noexcept;
@@ -606,6 +638,8 @@ namespace core3d {
 
     private:
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
+        // Weak slot cannot keep a dropped main-thread lease or scene alive.
+        std::weak_ptr<SavedCutSourceEditWork> _savedCutSourceEditWork;
         std::shared_ptr<MeshVertexEditWork> _meshVertexEditWork;
         std::shared_ptr<DocumentReplacementWork> _documentReplacementWork;
         std::shared_ptr<QueuedAssetLoadWork> _queuedAssetLoadWork;
