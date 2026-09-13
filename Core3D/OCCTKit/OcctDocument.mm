@@ -8929,4 +8929,8 @@ void OcctDocument::NotifyChanges() {
 std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario){
     return core3d::retained_solid::Probe::Run(scenario);
 }
+#include "SavedCutSourcePrerequisiteProbe.hxx"
+std::map<std::string,bool> Core3DDebugSavedCutSourcePrerequisiteProbe(Standard_Integer scenario){
+    return core3d::saved_cut_source_prerequisite_probe::Run(scenario);
+}
 #endif

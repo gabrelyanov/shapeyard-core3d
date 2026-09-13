@@ -1914,6 +1914,9 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugReceiptFramingProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugRetainedSolidProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugRetainedSolidProbe(_:));
+//! Native/value prerequisite probes only; no document command authority.
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedCutSourcePrerequisiteProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugSavedCutSourcePrerequisiteProbe(_:));
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugScalableReceiptSnapshot NS_SWIFT_NAME(debugScalableReceiptSnapshot());
 - (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario NS_SWIFT_NAME(debugScalableReceiptProbe(_:));

@@ -6415,6 +6415,20 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return @{ @"setupException": @NO }; }
 }
 
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedCutSourcePrerequisiteProbe:(NSInteger)scenario {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return @{ @"invalidScenario": @NO };
+    try {
+        const auto checks = Core3DDebugSavedCutSourcePrerequisiteProbe(static_cast<Standard_Integer>(scenario));
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
 - (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario {
     if(!NSThread.isMainThread||scenario<0||scenario>4||!GLController||!GLController.viewer)return @{};
     const auto owner=GLController.viewer->getDocument();

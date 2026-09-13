@@ -428,6 +428,8 @@ namespace core3d::authority { class NativeObservedApplication; }
 //! Private full-reader framing fixtures; no receipt owner or authority integration.
 Standard_EXPORT std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario);
+//! Detached/value-only prerequisites; no ordinary source-edit authority.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutSourcePrerequisiteProbe(Standard_Integer scenario);
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
