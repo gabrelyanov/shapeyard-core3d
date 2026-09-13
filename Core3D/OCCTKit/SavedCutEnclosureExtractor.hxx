@@ -40,7 +40,28 @@
 
 namespace core3d::enclosure_correspondence {
 enum class Classification { Refused, Cancelled, MatchedBoundary };
+#if DEBUG
+struct Diagnostic483 {bool recorded=false;const char* branch="none";std::array<double,4> operands{};};
+inline thread_local Diagnostic483* activeDiagnostic483=nullptr;
+struct DiagnosticScope483 {Diagnostic483* prior;explicit DiagnosticScope483(Diagnostic483& value):prior(activeDiagnostic483){activeDiagnostic483=&value;}~DiagnosticScope483(){activeDiagnostic483=prior;}};
+inline bool Check483(bool value,const char* branch,double a=0,double b=0,double c=0,double d=0){
+    if(!value&&activeDiagnostic483&&!activeDiagnostic483->recorded){
+        activeDiagnostic483->recorded=true;activeDiagnostic483->branch=branch;activeDiagnostic483->operands={a,b,c,d};}
+    return value;
+}
+#define ENC483_CHECK(value,branch,a,b,c,d) ([&](){const bool result483=(value);return ::core3d::enclosure_correspondence::Check483(result483,(branch),(a),(b),(c),(d));}())
+inline bool Equal483(double a,double b,const char* branch){return Check483(a==b,branch,a,b);}
+#define ENC483_EQUAL(a,b,branch) ::core3d::enclosure_correspondence::Equal483((a),(b),(branch))
+#define ENC483_REFUSE(branch,expression) (::core3d::enclosure_correspondence::Check483(false,(branch)),(expression))
+#else
+#define ENC483_CHECK(value,branch,a,b,c,d) (value)
+#define ENC483_EQUAL(a,b,branch) ((a)==(b))
+#define ENC483_REFUSE(branch,expression) (expression)
+#endif
 struct Inspection {
+#if DEBUG
+    Diagnostic483 diagnostic483;
+#endif
     std::size_t vertices=0,edges=0,faces=0,wires=0,coedges=0,storedPCurves=0,generatedPCurves=0;
     double arithmeticMagnitudeMM=0,comparisonErrorMM=0,maximumKernelToleranceMM=0,minimumFeatureSeparationMM=0;
     double maximumLocationCompositionMagnitude=0;
@@ -119,7 +140,7 @@ struct Surface {bool cylinder=false;gp_Vec c,x,y,z,rawC,rawX,rawY,rawZ;TopLoc_Lo
 inline bool Range(double first,double last){return std::isfinite(first)&&std::isfinite(last)&&first<last;}
 inline bool ReadCurve(const TopoDS_Edge& edge,double mm,Inspection& r,Curve& out){
     TopLoc_Location loc;double first=0,last=0;auto curve=BRep_Tool::Curve(edge,loc,first,last);
-    if(!Range(first,last)||!Location(loc,r))return false;
+    if(!ENC483_CHECK(Range(first,last),"curve-range",first,last,0,0)||!ENC483_CHECK(Location(loc,r),"curve-location",0,0,0,0))return false;
     Handle(Geom_Line) line;Handle(Geom_Circle) circle;
     for(unsigned n=0;n<MaximumWrappers&&!curve.IsNull();++n){
         line=Handle(Geom_Line)::DownCast(curve);circle=Handle(Geom_Circle)::DownCast(curve);if(!line.IsNull()||!circle.IsNull())break;
@@ -169,7 +190,7 @@ inline bool ReadPCurve(const TopoDS_Edge& edge,const Surface& surface,const Curv
         if(gc.IsNull()||++matches!=1||gc->IsCurveOnClosedSurface())return false;
         gc->Range(f,l);curve=gc->PCurve();
     }
-    if(f!=c.first||l!=c.last||!Range(f,l))return false;PCurve pc;pc.first=f;pc.last=l;pc.stored=matches!=0;
+    if(!ENC483_EQUAL(f,c.first,"pcurve-first")||!ENC483_EQUAL(l,c.last,"pcurve-last")||!ENC483_CHECK(Range(f,l),"pcurve-range",f,l,0,0))return false;PCurve pc;pc.first=f;pc.last=l;pc.stored=matches!=0;
     if(matches==0){
         if(surface.cylinder)return false;
         // An absent planar pcurve is represented by its complete analytic
@@ -219,8 +240,8 @@ inline bool PCBounds(const PCurve& p,std::array<double,4>& box){
 // Complete analytic parameter identity. Residual is a uniform interval bound,
 // never endpoint sampling of an arc or a cylinder's nonlinear image.
 inline bool PCurveIdentity(const Curve& c,const PCurve& pc,const Surface& s,double mm,double error){
-    std::array<double,4> bounds;if(!PCBounds(pc,bounds))return false;
-    for(const auto& box:s.boxes)for(unsigned axis=0;axis<2;++axis)if(bounds[axis*2]<box[axis*2]||bounds[axis*2+1]>box[axis*2+1])return false;
+    std::array<double,4> bounds;if(!ENC483_CHECK(PCBounds(pc,bounds),"pcurve-wrapper-bounds",pc.first,pc.last,pc.circle,0))return false;
+    for(const auto& box:s.boxes)for(unsigned axis=0;axis<2;++axis)if(!ENC483_CHECK(!(bounds[axis*2]<box[axis*2]||bounds[axis*2+1]>box[axis*2+1]),"pcurve-wrapper-domain",bounds[axis*2],bounds[axis*2+1],box[axis*2],box[axis*2+1]))return false;
     Curve composed;composed.circle=c.circle;composed.first=c.first;composed.last=c.last;
     const double extent=std::max(std::abs(c.first),std::abs(c.last));double drift=0;
     if(!s.cylinder){
@@ -239,7 +260,7 @@ inline bool PCurveIdentity(const Curve& c,const PCurve& pc,const Surface& s,doub
         }
     }
     const double residual=Norm(composed.c-c.c)+(c.circle?Norm(composed.a-c.a)+Norm(composed.b-c.b):extent*Norm(composed.a-c.a))+drift;
-    return std::isfinite(residual*mm)&&residual*mm<=error;
+    return ENC483_CHECK(std::isfinite(residual*mm)&&residual*mm<=error,"pcurve-coefficient-residual",residual*mm,error,drift*mm,extent);
 }
 struct Use {TopoDS_Edge edge;Curve curve;PCurve pc;TopoDS_Vertex a,b;};
 struct Face {TopoDS_Face face;Surface surface;std::vector<std::vector<Use>> wires;};
@@ -265,20 +286,20 @@ inline bool VertexPreflight(const TopoDS_Vertex& vertex,double mm,Inspection& r)
 }
 inline bool SurfacePreflight(const TopoDS_Face& face,Inspection& r){const auto data=Handle(BRep_TFace)::DownCast(face.TShape());return !data.IsNull()&&std::isfinite(data->Tolerance())&&data->Tolerance()>=0&&PairLocation(face.Location(),data->Location(),r);}
 inline bool MatchCurve(const Curve& c,const ExpectedEdge& e,const ExpectedBoundary& expected,bool forward,double mm,double error){
-    if(c.circle!=e.circle)return false;
+    if(!ENC483_CHECK(c.circle==e.circle,"curve-kind",c.circle,e.circle,0,0))return false;
     const auto start=V(expected.vertices[forward?e.start:e.end]),end=V(expected.vertices[forward?e.end:e.start]);
-    if(!Close(Evaluate(c,c.first),start,mm,error)||!Close(Evaluate(c,c.last),end,mm,error))return false;
+    if(!ENC483_CHECK(Close(Evaluate(c,c.first),start,mm,error)&&Close(Evaluate(c,c.last),end,mm,error),"curve-endpoints",Norm(Evaluate(c,c.first)-start)*mm,Norm(Evaluate(c,c.last)-end)*mm,error,mm))return false;
     if(!c.circle)return true; // analytic affine segment over complete finite range
     const double r=Norm(c.a),q=Norm(c.b);
-    if(!Close(c.c,V(e.center),mm,error)||!std::isfinite(r)||r<=0||!std::isfinite(q)||q<=0
-        ||std::abs(r-e.radius)*mm>error||std::abs(q-e.radius)*mm>error
-        ||std::abs(c.a.Dot(c.b))/(r*q)*e.radius*mm>error
-        ||std::abs((c.last-c.first)-std::acos(-1.0)/2)*e.radius*mm>error)return false;
+    if(!ENC483_CHECK(Close(c.c,V(e.center),mm,error),"circle-center",Norm(c.c-V(e.center))*mm,error,0,0)||!std::isfinite(r)||r<=0||!std::isfinite(q)||q<=0
+        ||!ENC483_CHECK(!(std::abs(r-e.radius)*mm>error),"circle-radius-a",r*mm,e.radius*mm,error,0)||!ENC483_CHECK(!(std::abs(q-e.radius)*mm>error),"circle-radius-b",q*mm,e.radius*mm,error,0)
+        ||!ENC483_CHECK(!(std::abs(c.a.Dot(c.b))/(r*q)*e.radius*mm>error),"circle-orthogonality",std::abs(c.a.Dot(c.b))/(r*q)*e.radius*mm,error,0,0)
+        ||!ENC483_CHECK(!(std::abs((c.last-c.first)-std::acos(-1.0)/2)*e.radius*mm>error),"circle-quarter-range",c.first,c.last,std::abs((c.last-c.first)-std::acos(-1.0)/2)*e.radius*mm,error))return false;
     // Center plus non-collinear endpoints fixes the circle plane; quarter-range
     // excludes the opposite major arc and any extra periodic covering.
     const auto wanted=(start-V(e.center)).Crossed(end-V(e.center));const auto actual=c.a.Crossed(c.b);
     const double a=Norm(actual),w=Norm(wanted);if(a<=0||w<=0)return false;
-    return Norm(actual/a-wanted/w)*e.radius*mm<=error;
+    return ENC483_CHECK(Norm(actual/a-wanted/w)*e.radius*mm<=error,"circle-directed-plane",Norm(actual/a-wanted/w)*e.radius*mm,error,0,0);
 }
 inline bool WireMatch(const std::vector<std::pair<unsigned,bool>>& actual,const std::vector<EdgeUse>& expected){
     if(actual.size()!=expected.size())return false;
@@ -287,23 +308,23 @@ inline bool WireMatch(const std::vector<std::pair<unsigned,bool>>& actual,const 
     return a.size()==actual.size()&&a==b;
 }
 inline bool MatchSurface(const Face& face,const ExpectedFace& e,double mm,double error){
-    const auto& s=face.surface;if(s.cylinder!=e.cylinder)return false;
+    const auto& s=face.surface;if(!ENC483_CHECK(s.cylinder==e.cylinder,"surface-kind",s.cylinder,e.cylinder,0,0))return false;
     const double side=face.face.Orientation()==TopAbs_FORWARD?1:-1;
     if(!s.cylinder){
         auto n=s.x.Crossed(s.y);const double length=Norm(n),wanted=Norm(e.normalOrAxis);if(length<=0||wanted<=0)return false;
         n*=side/length;
         // Parallel support and explicit signed normal; polygon/arc loops then
         // specify the complete finite trim, including the annular top face.
-        return Norm(n-e.normalOrAxis/wanted)*std::max(Norm(s.x),Norm(s.y))*mm<=error
-            &&std::abs((s.c-V(e.origin)).Dot(n))*mm<=error;
+        return ENC483_CHECK(Norm(n-e.normalOrAxis/wanted)*std::max(Norm(s.x),Norm(s.y))*mm<=error,"plane-signed-normal",Norm(n-e.normalOrAxis/wanted)*std::max(Norm(s.x),Norm(s.y))*mm,error,0,0)
+            &&ENC483_CHECK(std::abs((s.c-V(e.origin)).Dot(n))*mm<=error,"plane-support-distance",std::abs((s.c-V(e.origin)).Dot(n))*mm,error,0,0);
     }
     const double radius=Norm(s.x),other=Norm(s.y),axis=Norm(s.z),want=Norm(e.normalOrAxis);
-    if(radius<=0||other<=0||axis<=0||want<=0||std::abs(radius-e.radius)*mm>error||std::abs(other-e.radius)*mm>error)return false;
+    if(radius<=0||other<=0||axis<=0||want<=0||!ENC483_CHECK(!(std::abs(radius-e.radius)*mm>error),"cylinder-radius-x",radius*mm,e.radius*mm,error,0)||!ENC483_CHECK(!(std::abs(other-e.radius)*mm>error),"cylinder-radius-y",other*mm,e.radius*mm,error,0))return false;
     const auto unit=s.z/axis,wanted=e.normalOrAxis/want;
-    if(Norm(unit.Crossed(wanted))*e.radius*mm>error)return false;
-    const auto offset=s.c-V(e.origin);if(Norm(offset-unit*offset.Dot(unit))*mm>error)return false;
+    if(!ENC483_CHECK(!(Norm(unit.Crossed(wanted))*e.radius*mm>error),"cylinder-axis",Norm(unit.Crossed(wanted))*e.radius*mm,error,0,0))return false;
+    const auto offset=s.c-V(e.origin);if(!ENC483_CHECK(!(Norm(offset-unit*offset.Dot(unit))*mm>error),"cylinder-support-distance",Norm(offset-unit*offset.Dot(unit))*mm,error,0,0))return false;
     const double handed=s.x.Crossed(s.y).Dot(s.z);if(!std::isfinite(handed)||handed==0)return false;
-    return (handed>0?1:-1)*side==e.radialSign;
+    return ENC483_CHECK((handed>0?1:-1)*side==e.radialSign,"cylinder-orientation",handed,side,e.radialSign,0);
 }
 }
 inline Classification InspectEnclosure(const TopoDS_Shape& retained,const enclosure::Parameters& parameters,
@@ -311,58 +332,61 @@ inline Classification InspectEnclosure(const TopoDS_Shape& retained,const enclos
     using namespace detail;output={};Inspection report;
     const auto refuse=[&](){output=report;return stop.load()?Classification::Cancelled:Classification::Refused;};
     try{
-        if(stop.load())return refuse();ExpectedBoundary expected;
-        std::vector<double> encoded;if(!enclosure::Encode(parameters,encoded)||!BuildExpectedBoundary(parameters.definition,expected))return refuse();
-        const double mm=parameters.metersPerUnit*1000;if(!std::isfinite(mm)||mm<=0)return refuse();
+#if DEBUG
+        DiagnosticScope483 diagnosticScope(report.diagnostic483);
+#endif
+        if(stop.load())return ENC483_REFUSE("InspectEnclosure-return-1",refuse());ExpectedBoundary expected;
+        std::vector<double> encoded;if(!enclosure::Encode(parameters,encoded)||!BuildExpectedBoundary(parameters.definition,expected))return ENC483_REFUSE("InspectEnclosure-return-2",refuse());
+        const double mm=parameters.metersPerUnit*1000;if(!std::isfinite(mm)||mm<=0)return ENC483_REFUSE("InspectEnclosure-return-3",refuse());
         // Source frame has eight bounded scalar inputs, with proper quaternion
         // and positive scale; its conversion is fixed-size, never a datum chain.
-        gp_Trsf frame;if(parameters.definition.constructionFrame&&!parameters.definition.constructionFrame->Transform(frame))return refuse();
-        if(!Matrix(frame))return refuse();
+        gp_Trsf frame;if(parameters.definition.constructionFrame&&!parameters.definition.constructionFrame->Transform(frame))return ENC483_REFUSE("InspectEnclosure-return-4",refuse());
+        if(!Matrix(frame))return ENC483_REFUSE("InspectEnclosure-return-5",refuse());
         const auto& dimensions=parameters.definition.dimensions;
         std::array<double,3> rawSums{dimensions.width+dimensions.depth+dimensions.height,dimensions.width+dimensions.depth+dimensions.height,dimensions.width+dimensions.depth+dimensions.height};
-        if(!AffineMagnitude(rawSums,frame,false,mm,report))return refuse();
-        for(const auto& v:expected.vertices)if(!Track(std::abs(v.X())+std::abs(v.Y())+std::abs(v.Z()),mm,report))return refuse();
-        if(retained.IsNull()||retained.ShapeType()!=TopAbs_SOLID||retained.Orientation()!=TopAbs_FORWARD||!Location(retained.Location(),report))return refuse();
+        if(!AffineMagnitude(rawSums,frame,false,mm,report))return ENC483_REFUSE("InspectEnclosure-return-6",refuse());
+        for(const auto& v:expected.vertices)if(!Track(std::abs(v.X())+std::abs(v.Y())+std::abs(v.Z()),mm,report))return ENC483_REFUSE("InspectEnclosure-return-7",refuse());
+        if(retained.IsNull()||retained.ShapeType()!=TopAbs_SOLID||retained.Orientation()!=TopAbs_FORWARD||!Location(retained.Location(),report))return ENC483_REFUSE("InspectEnclosure-return-8",refuse());
         report.phase="collect";std::vector<TopoDS_Shape> shells,rawFaces;
-        if(!Children(retained,TopAbs_SHELL,1,shells,report)||shells.size()!=1||!Children(shells[0],TopAbs_FACE,19,rawFaces,report)||rawFaces.size()!=19)return refuse();
+        if(!Children(retained,TopAbs_SHELL,1,shells,report)||shells.size()!=1||!Children(shells[0],TopAbs_FACE,19,rawFaces,report)||rawFaces.size()!=19)return ENC483_REFUSE("InspectEnclosure-return-9",refuse());
         std::vector<Face> faces;unsigned totalUses=0;TopTools_IndexedMapOfShape faceMap,wireMap;
         for(const auto& rawFace:rawFaces){
-            if(stop.load())return refuse();Face face;face.face=TopoDS::Face(rawFace);
-            if(faceMap.Contains(face.face)||!SurfacePreflight(face.face,report)||!Tolerance(BRep_Tool::Tolerance(face.face),face.face,mm,report)||!ReadSurface(face.face,mm,report,face.surface))return refuse();faceMap.Add(face.face);
-            std::vector<TopoDS_Shape> wires;if(!Children(face.face,TopAbs_WIRE,2,wires,report)||wires.empty())return refuse();
+            if(stop.load())return ENC483_REFUSE("InspectEnclosure-return-10",refuse());Face face;face.face=TopoDS::Face(rawFace);
+            if(faceMap.Contains(face.face)||!ENC483_CHECK(SurfacePreflight(face.face,report),"surface-preflight",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(Tolerance(BRep_Tool::Tolerance(face.face),face.face,mm,report),"surface-tolerance",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(ReadSurface(face.face,mm,report,face.surface),"surface-read",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude))return ENC483_REFUSE("InspectEnclosure-return-11",refuse());faceMap.Add(face.face);
+            std::vector<TopoDS_Shape> wires;if(!Children(face.face,TopAbs_WIRE,2,wires,report)||wires.empty())return ENC483_REFUSE("InspectEnclosure-return-12",refuse());
             for(const auto& wire:wires){
-                if(wireMap.Contains(wire))return refuse();wireMap.Add(wire);std::vector<TopoDS_Shape> edges;
-                if(!Children(wire,TopAbs_EDGE,8,edges,report)||edges.size()<4)return refuse();std::vector<Use> uses;
+                if(wireMap.Contains(wire))return ENC483_REFUSE("InspectEnclosure-return-13",refuse());wireMap.Add(wire);std::vector<TopoDS_Shape> edges;
+                if(!Children(wire,TopAbs_EDGE,8,edges,report)||edges.size()<4)return ENC483_REFUSE("InspectEnclosure-return-14",refuse());std::vector<Use> uses;
                 for(const auto& rawEdge:edges){
-                    if(stop.load()||++totalUses>96)return refuse();Use use;use.edge=TopoDS::Edge(rawEdge);
+                    if(stop.load()||++totalUses>96)return ENC483_REFUSE("InspectEnclosure-return-15",refuse());Use use;use.edge=TopoDS::Edge(rawEdge);
                     const auto forward=TopoDS::Edge(use.edge.Oriented(TopAbs_FORWARD));
-                    if(!EdgeRepresentations(forward,report)||!PairLocation(face.surface.location,forward.Location(),report)||BRep_Tool::Degenerated(forward)||BRep_Tool::IsClosed(forward,face.face)
-                        ||!BRep_Tool::SameParameter(forward)||!BRep_Tool::SameRange(forward)||!Tolerance(BRep_Tool::Tolerance(forward),forward,mm,report))return refuse();
-                    std::vector<TopoDS_Shape> vertices;if(!Children(forward,TopAbs_VERTEX,2,vertices,report)||vertices.size()!=2)return refuse();
-                    for(const auto& v:vertices){if(v.Orientation()==TopAbs_FORWARD){if(!use.a.IsNull())return refuse();use.a=TopoDS::Vertex(v);}else{if(!use.b.IsNull())return refuse();use.b=TopoDS::Vertex(v);}}
-                    if(!VertexPreflight(use.a,mm,report)||!VertexPreflight(use.b,mm,report)||!ReadCurve(forward,mm,report,use.curve)||!PairLocation(use.curve.location,face.surface.location,report)||!ReadPCurve(forward,face.surface,use.curve,use.pc,report)
-                        ||!PCurveMagnitude(use.pc,face.surface,mm,report))return refuse();
-                    if(!PairLocation(use.a.Location(),forward.Location(),report)||!PairLocation(use.b.Location(),forward.Location(),report)
-                        ||BRep_Tool::Parameter(use.a,forward)!=use.curve.first||BRep_Tool::Parameter(use.b,forward)!=use.curve.last)return refuse();
+                    if(!ENC483_CHECK(EdgeRepresentations(forward,report),"edge-representations",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(PairLocation(face.surface.location,forward.Location(),report),"edge-surface-location",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||BRep_Tool::Degenerated(forward)||BRep_Tool::IsClosed(forward,face.face)
+                        ||!ENC483_CHECK(BRep_Tool::SameParameter(forward),"edge-same-parameter",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(BRep_Tool::SameRange(forward),"edge-same-range",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(Tolerance(BRep_Tool::Tolerance(forward),forward,mm,report),"edge-tolerance",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude))return ENC483_REFUSE("InspectEnclosure-return-16",refuse());
+                    std::vector<TopoDS_Shape> vertices;if(!Children(forward,TopAbs_VERTEX,2,vertices,report)||vertices.size()!=2)return ENC483_REFUSE("InspectEnclosure-return-17",refuse());
+                    for(const auto& v:vertices){if(v.Orientation()==TopAbs_FORWARD){if(!use.a.IsNull())return ENC483_REFUSE("InspectEnclosure-return-18",refuse());use.a=TopoDS::Vertex(v);}else{if(!use.b.IsNull())return ENC483_REFUSE("InspectEnclosure-return-19",refuse());use.b=TopoDS::Vertex(v);}}
+                    if(!ENC483_CHECK(VertexPreflight(use.a,mm,report),"vertex-a-preflight",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(VertexPreflight(use.b,mm,report),"vertex-b-preflight",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(ReadCurve(forward,mm,report,use.curve),"curve-read",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(PairLocation(use.curve.location,face.surface.location,report),"curve-surface-location",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)||!ENC483_CHECK(ReadPCurve(forward,face.surface,use.curve,use.pc,report),"pcurve-read",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude)
+                        ||!ENC483_CHECK(PCurveMagnitude(use.pc,face.surface,mm,report),"pcurve-magnitude",report.arithmeticMagnitudeMM,report.maximumKernelToleranceMM,report.maximumLocationDepth,report.maximumLocationCompositionMagnitude))return ENC483_REFUSE("InspectEnclosure-return-20",refuse());
+                    if(!ENC483_CHECK(PairLocation(use.a.Location(),forward.Location(),report),"vertex-a-location",0,0,0,0)||!ENC483_CHECK(PairLocation(use.b.Location(),forward.Location(),report),"vertex-b-location",0,0,0,0)
+                        ||!ENC483_EQUAL(BRep_Tool::Parameter(use.a,forward),use.curve.first,"vertex-first-parameter")||!ENC483_EQUAL(BRep_Tool::Parameter(use.b,forward),use.curve.last,"vertex-last-parameter"))return ENC483_REFUSE("InspectEnclosure-return-21",refuse());
                     uses.push_back(std::move(use));
                 }face.wires.push_back(std::move(uses));
             }faces.push_back(std::move(face));
         }
-        if(totalUses!=96||wireMap.Extent()!=20)return refuse();
+        if(totalUses!=96||wireMap.Extent()!=20)return ENC483_REFUSE("InspectEnclosure-return-22",refuse());
         // Proposed numerical conditioning policy, NOT a universal proof of all
         // libm/kernel rounding. Location chains/powers and affine magnitudes are
         // bounded first; never grow this allowance during matching or from the
         // shape's kernel tolerances. Native adversarial qualification is pending.
         // Include affine composition intermediates even when a point is zero.
-        if(!Track(report.maximumLocationCompositionMagnitude,mm,report))return refuse();
+        if(!Track(report.maximumLocationCompositionMagnitude,mm,report))return ENC483_REFUSE("InspectEnclosure-return-23",refuse());
         report.comparisonErrorMM=std::max(1e-9,2048*std::numeric_limits<double>::epsilon()*report.arithmeticMagnitudeMM);
-        if(!std::isfinite(report.comparisonErrorMM)||report.comparisonErrorMM>ConditioningLimitMM)return refuse();
+        if(!std::isfinite(report.comparisonErrorMM)||report.comparisonErrorMM>ConditioningLimitMM)return ENC483_REFUSE("InspectEnclosure-return-24",refuse());
         const double error=report.comparisonErrorMM;report.phase="boundary";
         report.minimumFeatureSeparationMM=std::numeric_limits<double>::infinity();
         for(unsigned i=0;i<32;++i)for(unsigned j=0;j<i;++j)report.minimumFeatureSeparationMM=std::min(report.minimumFeatureSeparationMM,expected.vertices[i].Distance(expected.vertices[j])*mm);
         // Also separate close nested walls/floor/radii, not just boundary vertices.
         report.minimumFeatureSeparationMM=std::min(report.minimumFeatureSeparationMM,std::min({dimensions.wall,dimensions.floor,dimensions.height-dimensions.floor,dimensions.cornerRadius-dimensions.wall,dimensions.width-2*dimensions.cornerRadius,dimensions.depth-2*dimensions.cornerRadius})*frame.ScaleFactor()*mm);
-        if(!std::isfinite(report.minimumFeatureSeparationMM)||report.minimumFeatureSeparationMM<=2*error+4*report.maximumKernelToleranceMM)return refuse();
+        if(!std::isfinite(report.minimumFeatureSeparationMM)||report.minimumFeatureSeparationMM<=2*error+4*report.maximumKernelToleranceMM)return ENC483_REFUSE("InspectEnclosure-return-25",refuse());
         TopTools_IndexedMapOfShape vertexMap,edgeMap;std::vector<unsigned> vertexIDs;
         std::array<bool,32> claimedVertices{};std::array<bool,48> claimedEdges{};std::array<bool,19> claimedFaces{};
         struct EdgeRecord {unsigned expected=0,a=0,b=0;TopoDS_Edge shape;unsigned plus=0,minus=0;std::vector<TopoDS_Face> faces;};std::vector<EdgeRecord> edgeRecords;
@@ -370,22 +394,22 @@ inline Classification InspectEnclosure(const TopoDS_Shape& retained,const enclos
             const int prior=vertexMap.FindIndex(v);if(prior){id=vertexIDs[prior-1];return true;}
             if(vertexMap.Extent()>=32)return false;const auto p=BRep_Tool::Pnt(v);unsigned count=0,found=0;
             for(unsigned i=0;i<32;++i)if(Close(V(p),V(expected.vertices[i]),mm,error)){found=i;++count;}
-            if(count!=1||claimedVertices[found])return false;claimedVertices[found]=true;vertexMap.Add(v);vertexIDs.push_back(found);id=found;return true;
+            if(!ENC483_CHECK(count==1,"vertex-unique-match",count,p.X(),p.Y(),p.Z())||!ENC483_CHECK(!claimedVertices[found],"vertex-already-claimed",found,0,0,0))return false;claimedVertices[found]=true;vertexMap.Add(v);vertexIDs.push_back(found);id=found;return true;
         };
         for(const auto& face:faces){
-            if(stop.load())return refuse();std::vector<std::vector<std::pair<unsigned,bool>>> actualWires;
+            if(stop.load())return ENC483_REFUSE("InspectEnclosure-return-26",refuse());std::vector<std::vector<std::pair<unsigned,bool>>> actualWires;
             for(const auto& wire:face.wires){std::vector<std::pair<unsigned,bool>> actual;
                 for(const auto& use:wire){
-                    if(stop.load())return refuse();unsigned a=0,b=0;if(!vertex(use.a,a)||!vertex(use.b,b)||a==b)return refuse();
+                    if(stop.load())return ENC483_REFUSE("InspectEnclosure-return-27",refuse());unsigned a=0,b=0;if(!vertex(use.a,a)||!vertex(use.b,b)||a==b)return ENC483_REFUSE("InspectEnclosure-return-28",refuse());
                     unsigned role=0,count=0;bool orientation=false;
                     for(unsigned i=0;i<48;++i){const auto& e=expected.edges[i];if((e.start==a&&e.end==b)||(e.start==b&&e.end==a)){role=i;orientation=e.start==a;++count;}}
-                    if(count!=1||!MatchCurve(use.curve,expected.edges[role],expected,orientation,mm,error)||!PCurveIdentity(use.curve,use.pc,face.surface,mm,error))return refuse();
+                    if(!ENC483_CHECK(count==1,"edge-unique-match",count,a,b,0)||!ENC483_CHECK(MatchCurve(use.curve,expected.edges[role],expected,orientation,mm,error),"edge-curve-correspondence",role,error,use.curve.first,use.curve.last)||!ENC483_CHECK(PCurveIdentity(use.curve,use.pc,face.surface,mm,error),"edge-pcurve-correspondence",role,error,use.pc.first,use.pc.last))return ENC483_REFUSE("InspectEnclosure-return-29",refuse());
                     if(use.pc.stored)++report.storedPCurves;else ++report.generatedPCurves;
                     int prior=edgeMap.FindIndex(use.edge);if(!prior){
-                        if(edgeMap.Extent()>=48||claimedEdges[role])return refuse();claimedEdges[role]=true;prior=edgeMap.Add(use.edge);
+                        if(edgeMap.Extent()>=48||claimedEdges[role])return ENC483_REFUSE("InspectEnclosure-return-30",refuse());claimedEdges[role]=true;prior=edgeMap.Add(use.edge);
                         EdgeRecord e;e.expected=role;e.a=a;e.b=b;e.shape=TopoDS::Edge(use.edge.Oriented(TopAbs_FORWARD));edgeRecords.push_back(e);
                     }
-                    auto& edge=edgeRecords[prior-1];if(edge.a!=a||edge.b!=b||edge.expected!=role||edge.faces.size()>=2)return refuse();
+                    auto& edge=edgeRecords[prior-1];if(edge.a!=a||edge.b!=b||edge.expected!=role||edge.faces.size()>=2)return ENC483_REFUSE("InspectEnclosure-return-31",refuse());
                     edge.faces.push_back(face.face);const bool useForward=use.edge.Orientation()==TopAbs_FORWARD;if(useForward)++edge.plus;else ++edge.minus;
                     actual.emplace_back(role,useForward==orientation);
                 }actualWires.push_back(std::move(actual));
@@ -395,34 +419,44 @@ inline Classification InspectEnclosure(const TopoDS_Shape& retained,const enclos
                 std::set<unsigned> matched;bool all=true;for(const auto& wire:actualWires){unsigned n=0,index=0;for(unsigned j=0;j<wanted.wires.size();++j)if(WireMatch(wire,wanted.wires[j])){index=j;++n;}if(n!=1||!matched.insert(index).second){all=false;break;}}
                 if(all){role=i;++count;}
             }
-            if(count!=1||claimedFaces[role]||!MatchSurface(face,expected.faces[role],mm,error))return refuse();claimedFaces[role]=true;
+            if(!ENC483_CHECK(count==1,"face-unique-match",count,role,0,0)||!ENC483_CHECK(!claimedFaces[role],"face-already-claimed",role,0,0,0)||!ENC483_CHECK(MatchSurface(face,expected.faces[role],mm,error),"face-support",role,error,Norm(face.surface.x),Norm(face.surface.y)))return ENC483_REFUSE("InspectEnclosure-return-32",refuse());claimedFaces[role]=true;
         }
-        if(vertexMap.Extent()!=32||edgeMap.Extent()!=48||faceMap.Extent()!=19)return refuse();report.phase="representations";
+        if(vertexMap.Extent()!=32||edgeMap.Extent()!=48||faceMap.Extent()!=19)return ENC483_REFUSE("InspectEnclosure-return-33",refuse());report.phase="representations";
         for(const auto& edge:edgeRecords){
-            if(stop.load()||edge.plus!=1||edge.minus!=1||edge.faces.size()!=2)return refuse();
+            if(stop.load()||edge.plus!=1||edge.minus!=1||edge.faces.size()!=2)return ENC483_REFUSE("InspectEnclosure-return-34",refuse());
             const auto data=Handle(BRep_TEdge)::DownCast(edge.shape.TShape());unsigned curves=0;std::array<unsigned,2> pcurves{};
             for(BRep_ListIteratorOfListOfCurveRepresentation it(data->Curves());it.More();it.Next()){
-                const auto& rep=it.Value();if(rep->IsCurve3D()){if(++curves!=1)return refuse();continue;}
-                if(rep->IsCurveOnClosedSurface())return refuse();
+                const auto& rep=it.Value();if(rep->IsCurve3D()){if(++curves!=1)return ENC483_REFUSE("InspectEnclosure-return-35",refuse());continue;}
+                if(rep->IsCurveOnClosedSurface())return ENC483_REFUSE("InspectEnclosure-return-36",refuse());
                 if(rep->IsCurveOnSurface()){unsigned matches=0;
                     for(unsigned j=0;j<2;++j){TopLoc_Location loc;const auto s=BRep_Tool::Surface(edge.faces[j],loc);
-                        if(!PairLocation(loc,edge.shape.Location(),report))return refuse();
-                        loc=loc.Predivided(edge.shape.Location());if(!Location(loc,report))return refuse();
-                        if(rep->IsCurveOnSurface(s,loc)){++matches;if(++pcurves[j]>1)return refuse();}}
-                    if(matches!=1)return refuse();
+                        if(!PairLocation(loc,edge.shape.Location(),report))return ENC483_REFUSE("InspectEnclosure-return-37",refuse());
+                        loc=loc.Predivided(edge.shape.Location());if(!Location(loc,report))return ENC483_REFUSE("InspectEnclosure-return-38",refuse());
+                        if(rep->IsCurveOnSurface(s,loc)){++matches;if(++pcurves[j]>1)return ENC483_REFUSE("InspectEnclosure-return-39",refuse());}}
+                    if(!ENC483_CHECK(matches==1,"pcurve-support-owners",matches,edge.expected,0,0))return ENC483_REFUSE("InspectEnclosure-return-40",refuse());
                 }else if(rep->IsRegularity()){
                     TopLoc_Location a,b;const auto sa=BRep_Tool::Surface(edge.faces[0],a),sb=BRep_Tool::Surface(edge.faces[1],b);
-                    if(!PairLocation(a,edge.shape.Location(),report)||!PairLocation(b,edge.shape.Location(),report))return refuse();
+                    if(!PairLocation(a,edge.shape.Location(),report)||!PairLocation(b,edge.shape.Location(),report))return ENC483_REFUSE("InspectEnclosure-return-41",refuse());
                     a=a.Predivided(edge.shape.Location());b=b.Predivided(edge.shape.Location());
-                    if(!Location(a,report)||!Location(b,report))return refuse();
-                    if(!rep->IsRegularity(sa,sb,a,b))return refuse();
-                }else if(!rep->IsPolygon3D()&&!rep->IsPolygonOnTriangulation())return refuse();
-            }if(curves!=1)return refuse();
+                    if(!Location(a,report)||!Location(b,report))return ENC483_REFUSE("InspectEnclosure-return-42",refuse());
+                    if(!ENC483_CHECK(rep->IsRegularity(sa,sb,a,b),"regularity-support-owners",edge.expected,0,0,0))return ENC483_REFUSE("InspectEnclosure-return-43",refuse());
+                }else if(!rep->IsPolygon3D()&&!rep->IsPolygonOnTriangulation())return ENC483_REFUSE("InspectEnclosure-return-44",refuse());
+            }if(curves!=1)return ENC483_REFUSE("InspectEnclosure-return-45",refuse());
         }
         // This classifier does not replace retained/native validity admission and
         // does not invoke a generic kernel analyzer over uninspected caches.
         // Every accepted boundary support, trim and incidence was checked above.
-        if(stop.load())return refuse();report.vertices=32;report.edges=48;report.faces=19;report.wires=20;report.coedges=96;report.phase="matched";output=report;return Classification::MatchedBoundary;
-    }catch(...){return refuse();}
+        if(stop.load())return ENC483_REFUSE("InspectEnclosure-return-46",refuse());report.vertices=32;report.edges=48;report.faces=19;report.wires=20;report.coedges=96;report.phase="matched";output=report;return Classification::MatchedBoundary;
+    }catch(...){
+#if DEBUG
+        // The inner scope has restored any outer TLS before this catch.
+        // Record into this result directly; never alter the prior inspection.
+        if(!report.diagnostic483.recorded){report.diagnostic483.recorded=true;report.diagnostic483.branch="InspectEnclosure-exception";}
+#endif
+        return refuse();}
 }
 }
+
+#undef ENC483_CHECK
+#undef ENC483_EQUAL
+#undef ENC483_REFUSE

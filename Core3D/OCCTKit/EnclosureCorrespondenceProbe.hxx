@@ -15,6 +15,7 @@ struct ProbeReport {
     std::map<std::string,bool> checks;
     Inspection before,reopened;
     std::string phase="setup";
+    std::string diagnosticOriginal483,diagnosticReopened483;bool diagnosticArchiveRequested483=false;
 };
 inline bool ProbeBytes(const TopoDS_Shape& shape,std::string& bytes){
     bytes.clear();if(shape.IsNull())return false;std::ostringstream out;out.imbue(std::locale::classic());
@@ -40,6 +41,13 @@ inline ProbeReport ProbeGenerated(int plane,double metersPerUnit,bool framed,boo
         r.phase="private-brep-reopen";std::istringstream input(before);input.imbue(std::locale::classic());TopoDS_Shape reopened;BRep_Builder builder;
         BRepTools::Read(reopened,input,builder);if(reopened.IsNull())return r;
         r.checks["privateBRepReopenMatches"]=InspectEnclosure(reopened,p,*stop,r.reopened)==Classification::MatchedBoundary;
+        // Only AFTER the original failing predicate: capture post-inspection
+        // diagnostic bytes, not evidence of pre-inspection preservation.
+        r.diagnosticArchiveRequested483=framed&&plane==0&&metersPerUnit==.001&&!widened;
+        if(r.diagnosticArchiveRequested483)try{
+            std::string fresh;if(before.size()<=512*1024&&ProbeBytes(reopened,fresh)&&fresh.size()<=512*1024){
+                r.diagnosticOriginal483=before;r.diagnosticReopened483=std::move(fresh);}
+        }catch(...){r.diagnosticOriginal483.clear();r.diagnosticReopened483.clear();}
         auto wrong=p;wrong.definition.dimensions.width+=(widened?-20.:20.)*k;Inspection refused;
         r.checks["differentWidthRefuses"]=InspectEnclosure(made.solid,wrong,*stop,refused)==Classification::Refused;
         wrong=p;wrong.definition.dimensions.floor=3*k;

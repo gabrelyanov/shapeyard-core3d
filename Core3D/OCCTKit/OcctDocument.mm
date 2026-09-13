@@ -8951,4 +8951,38 @@ std::map<std::string,bool> Core3DDebugSavedCutSourcePrerequisiteProbe(Standard_I
 std::map<std::string,bool> Core3DDebugEnclosureCorrespondenceProbe(Standard_Integer scenario){
     return core3d::enclosure_correspondence::qualification_probe::Run(scenario);
 }
+#include "SavedCutBoreResultObservationProbe.hxx"
+#include "SavedCutWholeResultCorrespondenceProbe.hxx"
+#include <cstdio>
+namespace {
+template<class Evidence>
+std::map<std::string,bool> SavedCutResultProbeChecks(Evidence evidence,const char* kind,std::size_t expected){
+    bool failed=evidence.checks.size()!=expected;
+    for(const auto& row:evidence.checks)if(!row.second)failed=true;
+    if(failed){
+        // Source-created keys/phases only. No geometry, personal data or handles.
+        // At most512 failed-key and512 phase lines; each string at most192 bytes.
+        std::fprintf(stderr,"[cut-result-probe] kind=%s checks=%zu expected=%zu phases=%zu\n",
+            kind,evidence.checks.size(),expected,evidence.phases.size());
+        std::size_t shown=0,total=0;
+        for(const auto& row:evidence.checks)if(!row.second){++total;if(shown++<512)
+            std::fprintf(stderr,"[cut-result-probe] kind=%s failed=%.*s\n",kind,192,row.first.c_str());}
+        if(total>512)std::fprintf(stderr,"[cut-result-probe] omitted-failures=%zu\n",total-512);
+        shown=0;
+        for(const auto& row:evidence.phases){if(shown++>=512)break;
+            std::fprintf(stderr,"[cut-result-probe] kind=%s case=%.*s phase=%.*s\n",
+                kind,192,row.first.c_str(),192,row.second.c_str());}
+        if(evidence.phases.size()>512)std::fprintf(stderr,"[cut-result-probe] omitted-phases=%zu\n",evidence.phases.size()-512);
+        std::fflush(stderr);
+    }
+    return std::move(evidence.checks);
+}
+}
+std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard_Integer scenario){
+    switch(scenario){
+        case 0:return SavedCutResultProbeChecks(core3d::saved_cut_bore_result::probe::Run(),"observer",228);
+        case 1:return SavedCutResultProbeChecks(core3d::saved_cut_whole_result::probe::Run(),"whole",504);
+        default:return {{"invalidScenario",false}};
+    }
+}
 #endif

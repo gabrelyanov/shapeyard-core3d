@@ -4,6 +4,7 @@
 #include "EnclosureCorrespondenceProbe.hxx"
 #include <TopExp_Explorer.hxx>
 #include <stdexcept>
+#include <cstdio>
 
 namespace core3d::enclosure_correspondence::qualification_probe {
 using Checks=std::map<std::string,bool>;
@@ -11,6 +12,31 @@ inline std::string FullBRep(const TopoDS_Shape& shape) {
     std::string bytes;
     if(!ProbeBytes(shape,bytes))throw std::invalid_argument("enclosure probe serialization");
     return bytes;
+}
+// Bounded DEBUG failure evidence only. It changes neither checks nor admission.
+inline void LogFailure483(const std::string& prefix,const ProbeReport& r) noexcept {
+    try {
+        const auto result=r.checks.find("privateBRepReopenMatches");if(result==r.checks.end()||result->second)return;
+        static std::atomic_uint count{0};if(count.fetch_add(1)>=24)return;
+        const auto print=[&](const char* which,const Inspection& x){
+            const auto& d=x.diagnostic483;
+            std::fprintf(stderr,"ENC483 case=%s shape=%s phase=%s branch=%s a=%.17g b=%.17g c=%.17g d=%.17g magnitudeMM=%.17g errorMM=%.17g kernelMM=%.17g separationMM=%.17g locationDepth=%u composition=%.17g storedPC=%zu generatedPC=%zu V=%zu E=%zu F=%zu W=%zu uses=%zu\n",
+                prefix.c_str(),which,x.phase,d.branch,d.operands[0],d.operands[1],d.operands[2],d.operands[3],
+                x.arithmeticMagnitudeMM,x.comparisonErrorMM,x.maximumKernelToleranceMM,x.minimumFeatureSeparationMM,
+                x.maximumLocationDepth,x.maximumLocationCompositionMagnitude,x.storedPCurves,x.generatedPCurves,x.vertices,x.edges,x.faces,x.wires,x.coedges);
+        };print("original",r.before);print("reopened",r.reopened);
+        if(r.diagnosticArchiveRequested483){
+            const auto archive=[&](const char* which,const char* capture,const std::string& bytes){
+                if(bytes.empty()||bytes.size()>512*1024){std::fprintf(stderr,"ENC483_ARCHIVE_UNAVAILABLE case=%s shape=%s\n",prefix.c_str(),which);return;}
+                // One stdio write for the complete length-framed payload. The
+                // offline consumer must reject truncation/interleaving; never
+                // repair or normalize the retained body to make it parse.
+                const auto message=std::string("ENC483_BREP_BEGIN case=")+prefix+" shape="+which+" capture="+capture+" bytes="+std::to_string(bytes.size())+"\n"
+                    +bytes+"\nENC483_BREP_END case="+prefix+" shape="+which+"\n";
+                std::fwrite(message.data(),1,message.size(),stderr);
+            };archive("original","pre-inspection",r.diagnosticOriginal483);archive("reopened","post-inspection",r.diagnosticReopened483);
+        }
+    }catch(...){std::fputs("ENC483_DIAGNOSTIC_UNAVAILABLE\n",stderr);}
 }
 inline Checks Generated() {
     Checks out;
@@ -21,6 +47,7 @@ inline Checks Generated() {
         const std::string prefix=std::string(unit==.001?"mm":"metre")+".plane"+std::to_string(plane)
             +(framed?".framed":".plain")+(widened?".width120.":".width100.");
         const auto report=ProbeGenerated(plane,unit,framed,widened);
+        LogFailure483(prefix,report);
         std::set<std::string> actual;for(const auto& row:report.checks)actual.insert(row.first);
         // A partial/empty report is never accepted by vacuous all-true iteration.
         out[prefix+"phaseComplete"]=report.phase=="complete"&&actual==keys;

@@ -1923,6 +1923,9 @@ __attribute__((objc_subclassing_restricted))
 //! Read-only recipe/interval qualification, not a native edit capability.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutBoreClearanceProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutBoreClearanceProbe(_:));
+//! Read-only detached observer/whole-result native probes.
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedCutResultCorrespondenceProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugSavedCutResultCorrespondenceProbe(_:));
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
 - (NSDictionary *)debugScalableReceiptSnapshot NS_SWIFT_NAME(debugScalableReceiptSnapshot());
 - (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario NS_SWIFT_NAME(debugScalableReceiptProbe(_:));
