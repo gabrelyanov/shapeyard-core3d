@@ -3,6 +3,9 @@
 #include "ReceiptFramedTraversal.hxx"
 #include <BinDrivers_DocumentStorageDriver.hxx>
 #include <BinXCAFDrivers_DocumentStorageDriver.hxx>
+#include <BinMDF_ADriverTable.hxx>
+#include <BinMNaming_NamedShapeDriver.hxx>
+#include <TNaming_NamedShape.hxx>
 #include <TDocStd_FormatVersion.hxx>
 #include <Message.hxx>
 #include <istream>
@@ -104,6 +107,20 @@ public:
         std::make_shared<persistence::receipt_framing::LoadBudget>(),writeAllowed_)){}
     Handle(BinMDF_ADriverTable) AttributeDrivers(const Handle(Message_Messenger)& messenger)override {
         auto table=Base::AttributeDrivers(messenger);table->AddDriver(driver_);return table;
+    }
+    void EnableQuickPartWriting(const Handle(Message_Messenger)& messenger,
+                                const Standard_Boolean requestedMode)override {
+        if(this->myDrivers.IsNull())this->myDrivers=this->AttributeDrivers(messenger);
+        if(this->myDrivers.IsNull())Standard_Failure::Raise("Receipt shape driver table");
+        Handle(BinMDF_ADriver) existing;
+        this->myDrivers->GetDriver(STANDARD_TYPE(TNaming_NamedShape),existing);
+        const auto shapes=Handle(BinMNaming_NamedShapeDriver)::DownCast(existing);
+        if(shapes.IsNull())Standard_Failure::Raise("Receipt named shape driver type");
+        // Nonquick section writes clear contents but retain the concrete cache.
+        // Keep the same driver held by Location; recreate only its mode-specific
+        // cache through OCCT's existing lazy ShapeSet construction.
+        if(shapes->IsQuickPart()!=requestedMode)shapes->Clear();
+        Base::EnableQuickPartWriting(messenger,requestedMode);
     }
     void Write(const Handle(CDM_Document)& doc,const TCollection_ExtendedString& file,
                const Message_ProgressRange& progress=Message_ProgressRange())override {
