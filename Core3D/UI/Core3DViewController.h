@@ -1868,6 +1868,8 @@ __attribute__((objc_subclassing_restricted))
 + (NSDictionary<NSString *, NSNumber *> *)debugReceiptFramingProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugReceiptFramingProbe(_:));
 - (NSDictionary *)debugReceiptCatalogSnapshot NS_SWIFT_NAME(debugReceiptCatalogSnapshot());
+- (NSDictionary *)debugScalableReceiptSnapshot NS_SWIFT_NAME(debugScalableReceiptSnapshot());
+- (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario NS_SWIFT_NAME(debugScalableReceiptProbe(_:));
 - (NSDictionary *)debugReceiptWire:(NSData *)data NS_SWIFT_NAME(debugReceiptWire(_:));
 - (NSDictionary *_Nullable)debugReceiptDualCatalogProbe NS_SWIFT_NAME(debugReceiptDualCatalogProbe());
 //! Synthetic component evidence only; no production reservation or verified result.

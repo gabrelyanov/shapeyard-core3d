@@ -160,8 +160,8 @@ private:
 
 // Caller supplies the actual remaining bytes in both the current label and file
 // after the cached 12-byte header, before the direct uint64 size field. The
-// unimplemented traversal must derive these from checked positions/label frames.
-// No body-count allocation occurs here; the future tree decoder charges memory.
+// framed traversal derives these from checked positions and label frames.
+// No body-count allocation occurs here; the immutable tree decoder charges memory.
 template<class Decoder>
 bool ReadDirectFrame(std::istream& original, const ValidatedHeader& header,
                      bool inverse, std::uint64_t enclosingRemaining,

@@ -411,6 +411,7 @@ namespace core3d::authority { class NativeObservedApplication; }
 #include <string>
 //! Private full-reader framing fixtures; no receipt owner or authority integration.
 Standard_EXPORT std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Standard_Integer scenario);
+void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
 //! Isolated tests with a custom wire budget and no final geometry-owner gate.

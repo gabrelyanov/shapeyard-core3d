@@ -50,6 +50,7 @@
 #include <TDF_AttributeIterator.hxx>
 #include "Core3DBoundedAuthoredFrameDriver.hxx"
 #include "ReceiptFramedTraversal.hxx"
+#include "ReceiptCatalogBinaryDriver.hxx"
 #if DEBUG
 #include "ReceiptFramingProbe.hxx"
 #endif
@@ -1339,6 +1340,10 @@ public:
     : myAggregateTextureBytes(std::make_shared<Standard_Size>(0)),
       myFrameBudget(std::make_shared<core3d::persistence::AuthoredFrameReadBudget>())
     {
+        myReceiptLimits=core3d::receipt::v3::ReaderLimits();
+        auto budget=std::make_shared<core3d::persistence::receipt_framing::LoadBudget>();
+        budget->maximumWireBytes=myReceiptLimits.wireBytes;
+        myReceiptFrameDriver=new core3d::receipt::v3::BinaryDriver(std::move(budget));
     }
 
 #if DEBUG
@@ -1466,6 +1471,12 @@ public:
                 theProgress);
             if (myReaderStatus == PCDM_RS_OK && myReceiptTraversal && !myReceiptTraversal->complete()) {
                 rejectTypes();
+            }
+            if(myReaderStatus==PCDM_RS_OK&&myReceiptTraversal&&
+               myReceiptFrameDriver->AttributeID()==core3d::receipt::ScalableSchemaID()){
+                core3d::receipt::Catalog catalog;
+                if(core3d::receipt::Read(Handle(TDocStd_Document)::DownCast(theDocument),catalog)
+                   !=core3d::receipt::ReadStatus::Valid||!catalog.tree)rejectTypes();
             }
             if (myValidateFrameOwners && myReaderStatus == PCDM_RS_OK) {
                 Standard_Size frameBytes = 0;
@@ -3214,16 +3225,24 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new BinDrivers_DocumentStorageDriver());
+        new core3d::receipt::v3::StorageDriver<BinDrivers_DocumentStorageDriver>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new BinXCAFDrivers_DocumentStorageDriver());
+        new core3d::receipt::v3::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>());
 }
 
 #if DEBUG
+void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application) {
+    if(application.IsNull())return;
+    using namespace core3d::persistence::receipt_framing;
+    application->DefineFormat("BinOcaf","Private unchanged legacy reader","cbf",
+        new Core3DBoundedBinXCAFRetrievalDriver(Handle(FrameDriver)(),TraversalLimits()),new BinDrivers_DocumentStorageDriver());
+    application->DefineFormat("BinXCAF","Private unchanged legacy reader","xbf",
+        new Core3DBoundedBinXCAFRetrievalDriver(Handle(FrameDriver)(),TraversalLimits()),new BinXCAFDrivers_DocumentStorageDriver());
+}
 std::map<std::string, bool> Core3DDebugReceiptFramingProbe(Standard_Integer scenario) {
     if (scenario < 0 || scenario > 3) return {{"invalidScenario",false}};
     try {

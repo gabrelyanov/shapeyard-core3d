@@ -65,8 +65,10 @@
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
+#include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceiptLegacyDebug.hxx"
+#include "../OCCTKit/ReceiptCatalogProbe.hxx"
 #endif
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include <XCAFDoc_ShapeMapTool.hxx>
@@ -2593,9 +2595,9 @@ struct NativeModelingPermitIssuer final {
         if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
             ||!prepared->_requestCreationCatalog
             ||!catalog.matches(*prepared->_requestCreationCatalog)||!catalog.supportsAppend()
-            ||catalog.records.size()>=receipt::MaximumRecords
+            ||!catalog.canAppend()
             ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
-        for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
+        if(catalog.contains(prepared->_requestKey.request))return {};
         auto p=std::shared_ptr<NativeModelingCommitPermit>(new NativeModelingCommitPermit);
         p->key_.accountScope=prepared->_requestKey.accountScope;p->key_.document=prepared->_requestKey.document;
         p->key_.request=prepared->_requestKey.request;p->key_.command=prepared->_requestKey.command;p->key_.execution=prepared->_requestKey.execution;
@@ -2626,9 +2628,9 @@ struct NativeModelingPermitIssuer final {
         if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
             ||!prepared->_requestCreationCatalog
             ||!catalog.matches(*prepared->_requestCreationCatalog)||!catalog.supportsAppend()
-            ||catalog.records.size()>=receipt::MaximumRecords
+            ||!catalog.canAppend()
             ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
-        for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
+        if(catalog.contains(prepared->_requestKey.request))return {};
         auto p=std::shared_ptr<NativeModelingCommitPermit>(new NativeModelingCommitPermit);
         p->key_.accountScope=prepared->_requestKey.accountScope;p->key_.document=prepared->_requestKey.document;
         p->key_.request=prepared->_requestKey.request;p->key_.command=prepared->_requestKey.command;p->key_.execution=prepared->_requestKey.execution;
@@ -2659,9 +2661,9 @@ struct NativeModelingPermitIssuer final {
         if((status!=receipt::ReadStatus::Absent&&status!=receipt::ReadStatus::Valid)
             ||!prepared->_requestCreationCatalog
             ||!catalog.matches(*prepared->_requestCreationCatalog)||!catalog.supportsAppend()
-            ||catalog.records.size()>=receipt::MaximumRecords
+            ||!catalog.canAppend()
             ||!receipt::ParseUUID(owner->DocumentIdentifier(),document)||document!=prepared->_requestKey.document)return {};
-        for(const auto&record:catalog.records)if(record.key.request==prepared->_requestKey.request)return {};
+        if(catalog.contains(prepared->_requestKey.request))return {};
         auto p=std::shared_ptr<NativeModelingCommitPermit>(new NativeModelingCommitPermit);
         p->key_.accountScope=prepared->_requestKey.accountScope;p->key_.document=prepared->_requestKey.document;
         p->key_.request=prepared->_requestKey.request;p->key_.command=prepared->_requestKey.command;p->key_.execution=prepared->_requestKey.execution;
@@ -6277,6 +6279,38 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return @{ @"setupException": @NO }; }
 }
 
+- (NSDictionary *)debugScalableReceiptProbe:(NSInteger)scenario {
+    if(!NSThread.isMainThread||scenario<0||scenario>4||!GLController||!GLController.viewer)return @{};
+    const auto owner=GLController.viewer->getDocument();
+    try{
+        const auto rows=scenario==4?core3d::receipt::v3::DebugProbe::Migration(owner)
+            :core3d::receipt::v3::DebugProbe::Run(int(scenario));
+        NSMutableDictionary *result=[NSMutableDictionary dictionary];
+        for(const auto& row:rows)result[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+        return result;
+    }catch(...){if(!owner.IsNull()&&!owner->Document().IsNull()&&owner->Document()->HasOpenCommand())owner->Document()->AbortCommand();return @{};}
+}
+- (NSDictionary *)debugScalableReceiptSnapshot {
+    namespace r=core3d::receipt;
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{@"valid":@NO};
+    try {
+        const auto owner=GLController.viewer->getDocument();r::Catalog catalog;
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand())return @{@"valid":@NO};
+        const auto status=r::Read(owner->Document(),catalog);
+        if(status!=r::ReadStatus::Absent&&status!=r::ReadStatus::Valid)return @{@"valid":@NO,@"read":@(int(status))};
+        std::ostringstream raw(std::ios::out|std::ios::binary);
+        if(catalog.tree&&!r::v3::BinaryDriver::WriteNumericTree(*catalog.tree,raw))return @{@"valid":@NO};
+        const auto bytes=raw.str();
+        return @{@"valid":@YES,@"read":@(int(status)),@"count":@(catalog.count()),@"v3":@(bool(catalog.tree)),
+            @"wireBytes":@(catalog.tree?catalog.tree->wireBytes():0),
+            @"graphBytes":@(catalog.tree?catalog.tree->budget()->bytes():0),
+            @"processBytes":@(r::v3::AllocationBudget::processBytes()),
+            @"rootWire":[NSData dataWithBytes:bytes.data() length:bytes.size()],
+            @"legacyBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()],
+            @"versionedBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],
+            @"supportsAppend":@(catalog.supportsAppend()),@"verifiedQueryAvailable":@NO};
+    }catch(...){return @{@"valid":@NO};}
+}
 - (NSDictionary *)debugReceiptCatalogSnapshot {
     namespace r=core3d::receipt;
     if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{@"valid":@NO};
@@ -6356,13 +6390,14 @@ struct NativeModelingPermitIssuer final {
         result[@"legacyMalformedClosesDual"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed);doc->AbortCommand();
         doc->NewCommand();TDataStd_Integer::Set(dual.label,r::VersionedSchemaID(),3);
         result[@"unknownSchemaUnavailable"]=@(r::Read(doc,rejected)==r::ReadStatus::Unsupported);doc->AbortCommand();
-        // 64+64 valid records share the original128 ceiling; a129th is refused.
+        // Old components retain their shared128 representation ceiling. The new
+        // V3 migration path is exercised independently; StageLegacy stays closed.
         std::vector<r::Record> left,right;for(unsigned i=0;i<64;++i){auto a=old;a.key.request.fill(0);a.key.request[15]=std::uint8_t(i+1);left.push_back(a);
             auto b=next;b.key.request.fill(0);b.key.request[15]=std::uint8_t(i+65);right.push_back(b);}
         std::vector<std::uint8_t> leftBytes,rightBytes;if(!r::legacy_debug::EncodeLegacy(left,leftBytes)||!r::Encode(right,rightBytes))throw Standard_Failure("Probe budget encode");
         doc->NewCommand();if(!r::legacy_debug::Write(doc,leftBytes,true,dual.legacyLabel)||!r::legacy_debug::Write(doc,rightBytes,false,dual.label))throw Standard_Failure("Probe budget write");
         r::Catalog full;const bool read128=r::Read(doc,full)==r::ReadStatus::Valid&&full.records.size()==128;
-        result[@"sharedRecordBudget"]=@(read128&&!r::Stage(owner,third,full));
+        result[@"sharedRecordBudget"]=@(read128&&!r::StageLegacy(owner,third,full));
         auto extra=next;extra.key.request.fill(0);extra.key.request[15]=129;right.push_back(extra);
         if(!r::Encode(right,rightBytes)||!r::legacy_debug::Write(doc,rightBytes,false,dual.label))throw Standard_Failure("Probe129");
         result[@"read129Refused"]=@(r::Read(doc,rejected)==r::ReadStatus::Malformed);doc->AbortCommand();
@@ -6482,9 +6517,10 @@ struct NativeModelingPermitIssuer final {
         else if (status == r::ReadStatus::Malformed) inspected.presence = r::DocumentPresence::Conflict;
         else if (status == r::ReadStatus::Valid) {
             inspected.presence = r::DocumentPresence::Absent;
-            for (const auto& record:catalog.records) if (record.key.request == request) {
+            r::Record record;
+            if (catalog.lookup(request,record)) {
                 auto key = record.key; if (conflict) key.command[0] ^= 1;
-                inspected = r::InspectDocument(owner,key); break;
+                inspected = r::InspectDocument(owner,key);
             }
         }
     }
@@ -6594,7 +6630,7 @@ struct NativeModelingPermitIssuer final {
     const auto owner=GLController.viewer->getDocument();
     if(owner.IsNull()||owner->Document().IsNull())return @{};
     core3d::receipt::Catalog catalog;const auto status=core3d::receipt::Read(owner->Document(),catalog);
-    return @{@"read":@(int(status)),@"recordCount":@(catalog.records.size()),
+    return @{@"read":@(int(status)),@"recordCount":@(catalog.count()),
         @"hasConstructionContext":@(_modelingConstructionContext!=nil),
         @"hasPendingReservation":@(_pendingModelingReservation!=nil),
         @"openCommand":@(owner->Document()->HasOpenCommand())};
@@ -6665,17 +6701,19 @@ struct NativeModelingPermitIssuer final {
         if(document.IsNull()||document->Document().IsNull())return @{};
         const auto read=core3d::receipt::Read(document->Document(),catalog);
         bool current=false;std::size_t matching=0;
-        for(const auto&record:catalog.records)if(record.key.request==request->_requestKey.request){
+        core3d::receipt::Record record;
+        if(catalog.lookup(request->_requestKey.request,record)){
             ++matching;
-            if(record.operation!=core3d::receipt::Operation::SetPlacement||record.policy!=core3d::receipt::ExactPlacementPolicy8193
-                ||record.effects.size()!=1||!request->_requestContext->_planningPlacementSnapshot)continue;
-            TDF_Label label;core3d::placement::Evidence evidence;
-            const auto entity=request->_requestContext->_planningPlacementSnapshot.entityIdentifier;
-            current=entity.UTF8String&&core3d::placement::Find(document,entity.UTF8String,label)
-                &&core3d::placement::Capture(document,label,evidence)&&core3d::placement::Effect(evidence)==record.effects.front();
+            if(record.operation==core3d::receipt::Operation::SetPlacement&&record.policy==core3d::receipt::ExactPlacementPolicy8193
+                &&record.effects.size()==1&&request->_requestContext->_planningPlacementSnapshot){
+                TDF_Label label;core3d::placement::Evidence evidence;
+                const auto entity=request->_requestContext->_planningPlacementSnapshot.entityIdentifier;
+                current=entity.UTF8String&&core3d::placement::Find(document,entity.UTF8String,label)
+                    &&core3d::placement::Capture(document,label,evidence)&&core3d::placement::Effect(evidence)==record.effects.front();
+            }
         }
         const auto resolution=request->_requestCommitPermit?request->_requestCommitPermit->resolution():nullptr;
-        return @{@"read":@(int(read)),@"records":@(catalog.records.size()),@"matching":@(matching),@"current":@(current),
+        return @{@"read":@(int(read)),@"records":@(catalog.count()),@"matching":@(matching),@"current":@(current),
             @"resolution":@(resolution?int(resolution->state()):-1),@"openCommand":@(document->Document()->HasOpenCommand()),
             @"versionedBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],
             @"legacyBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()]};
@@ -6723,7 +6761,7 @@ struct NativeModelingPermitIssuer final {
     // Store lookup nor upgrades QueryVerifiedReceipt from Unavailable.
     return @{@"commandStampRetained":@(stampRetained),@"read":@(int(read)),@"presence":@(int(inspection.presence)),@"effectsCurrent":@(inspection.effectsCurrent),
         @"legacyCatalogBytes":[NSData dataWithBytes:catalog.legacyBytes.data() length:catalog.legacyBytes.size()],
-        @"catalogBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],@"recordCount":@(catalog.records.size()),
+        @"catalogBytes":[NSData dataWithBytes:catalog.bytes.data() length:catalog.bytes.size()],@"recordCount":@(catalog.count()),
         @"featureIDs":features,@"entityIDs":entities,@"definitionIDs":definitions,@"frozenFeatureIDs":frozen,
         @"resolution":@(resolution?int(resolution->state()):-1),@"openCommand":@(owner->Document()->HasOpenCommand()),
         @"verifiedQueryAvailable":@(core3d::receipt::QueryVerifiedReceipt()!=core3d::receipt::VerifiedQueryStatus::Unavailable)};
@@ -12041,8 +12079,8 @@ struct NativeModelingPermitIssuer final {
             core3d::receipt::Catalog prior;const auto status=core3d::receipt::Read(owner->Document(),prior);
             if((status!=core3d::receipt::ReadStatus::Absent&&status!=core3d::receipt::ReadStatus::Valid)
                 ||!prior.supportsAppend()
-                ||prior.records.size()>=core3d::receipt::MaximumRecords)return std::nullopt;
-            for(const auto&record:prior.records)if(record.key.request==request->_requestKey.request)return std::nullopt;
+                ||!prior.canAppend())return std::nullopt;
+            if(prior.contains(request->_requestKey.request))return std::nullopt;
             request->_requestCreationCatalog=std::move(prior);
         }
         Core3DModelingReservationEntry *entry=[Core3DModelingReservationEntry new];

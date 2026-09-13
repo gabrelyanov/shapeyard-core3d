@@ -18,8 +18,8 @@
 
 namespace core3d::persistence::receipt_framing {
 
-// New receipt drivers must share this exact per-reader load budget. There is no
-// production implementation/registration of the future V3 attribute in this D1.
+// Receipt drivers share this exact per-reader load budget. The V3 owner
+// successor registers the production immutable catalog driver separately.
 class FrameDriver : public BinMDF_ADriver {
 public:
     virtual const Standard_GUID& AttributeID() const = 0;
