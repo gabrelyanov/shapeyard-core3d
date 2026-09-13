@@ -19,6 +19,8 @@
 #include <algorithm>
 #ifdef DEBUG
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepTools_ShapeSet.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #endif
@@ -2058,6 +2060,79 @@ NSString *ErrorDescription(const NativeExportResult& result) {
     return @"The native export failed.";
 }
 
+
+#ifdef DEBUG
+// This is a fixed analytic-face test oracle, not a production persistence digest.
+std::string DebugExportBRep(const TopoDS_Shape& shape) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    BRepTools::Write(shape, stream, Standard_False, Standard_False,
+                    TopTools_FormatVersion_VERSION_3);
+    if (!stream || stream.str().empty() || stream.str().size() > 128 * 1024) {
+        throw std::runtime_error("Invalid bounded export-probe BRep");
+    }
+    return stream.str();
+}
+
+std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
+    BRepTools_ShapeSet shapes(Standard_False, Standard_False);
+    shapes.SetFormatNb(TopTools_FormatVersion_VERSION_3);
+    // Add recursively inserts children before the root (OCCT 7.8). This fixture
+    // has exactly one face, one wire, four edges and four vertices.
+    const auto count = shapes.Add(face);
+    if (count != 10) throw std::runtime_error("Unexpected probe topology");
+    std::ostringstream locations;
+    locations.imbue(std::locale::classic());
+    shapes.Locations().Write(locations);
+    std::istringstream locationInput(locations.str());
+    std::string label; int locationCount = -1;
+    locationInput >> label >> locationCount;
+    locationInput >> std::ws;
+    // All geometric and topological locations of this fixed fixture are identity.
+    // Refuse unexpected transforms instead of using the location writer's 15-digit
+    // representation as an exact matrix proof.
+    if (label != "Locations" || locationCount != 0 || !locationInput.eof()) {
+        throw std::runtime_error("Unexpected probe location");
+    }
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(std::numeric_limits<double>::max_digits10);
+    // Native geometry tables include complete surfaces, 3D curves and pcurves.
+    // OCCT's GeomTools writers use 17 digits. Per-shape geometry below retains
+    // vertex points, tolerances, all curve ranges and edge geometric flags.
+    shapes.WriteGeometry(stream);
+    std::array<int, 8> counts{};
+    for (int index = 1; index <= count; ++index) {
+        const auto& shape = shapes.Shape(index);
+        const int type = static_cast<int>(shape.ShapeType());
+        if (type < 0 || type >= static_cast<int>(counts.size())
+            || !shape.Location().IsIdentity()) {
+            throw std::runtime_error("Invalid probe shape");
+        }
+        ++counts[type];
+        stream << "shape " << index << ' ' << type << ' ';
+        shapes.Write(shape, stream);
+        stream << ' ' << shape.Orientable() << ' ' << shape.Closed()
+               << ' ' << shape.Infinite() << ' ' << shape.Convex() << '\n';
+        shapes.WriteGeometry(shape, stream);
+        // Free/Modified/Checked are deliberately not a private-derivative geometry
+        // invariant: OCCT cache updates write operational TShape flags. The original
+        // source is separately compared using the complete, unfiltered BRep bytes.
+        for (TopoDS_Iterator child(shape, Standard_False, Standard_False);
+             child.More(); child.Next()) {
+            shapes.Write(child.Value(), stream); // exact order, orientation and link
+        }
+        stream << "end\n";
+    }
+    if (counts[TopAbs_VERTEX] != 4 || counts[TopAbs_EDGE] != 4
+        || counts[TopAbs_WIRE] != 1 || counts[TopAbs_FACE] != 1
+        || !stream || stream.str().empty() || stream.str().size() > 128 * 1024) {
+        throw std::runtime_error("Incomplete probe geometry proof");
+    }
+    return stream.str();
+}
+#endif
+
 } // namespace
 
 @interface Core3DNativeExportArtifact ()
@@ -2363,7 +2438,8 @@ NSString *ErrorDescription(const NativeExportResult& result) {
 
 #ifdef DEBUG
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit {
-    if (![NSThread isMainThread] || (metersPerUnit!=0.001 && metersPerUnit!=1.0)) return @{};
+    NSString *stage = @"admission";
+    if (![NSThread isMainThread] || (metersPerUnit!=0.001 && metersPerUnit!=1.0)) return @{@"failureStage":stage};
     try {
         const double scale=0.001/metersPerUnit, requested=0.12*scale;
         TColgp_Array2OfPnt poles(1,2,1,2);
@@ -2372,21 +2448,52 @@ NSString *ErrorDescription(const NativeExportResult& result) {
         TColStd_Array1OfReal knots(1,2); knots(1)=0; knots(2)=1;
         TColStd_Array1OfInteger multiplicities(1,2); multiplicities(1)=2; multiplicities(2)=2;
         Handle(Geom_BSplineSurface) surface=new Geom_BSplineSurface(poles,knots,knots,multiplicities,multiplicities,1,1);
+        stage = @"make-face";
         BRepBuilderAPI_MakeFace maker(surface,Precision::Confusion());
-        if (!maker.IsDone()) return @{};
-        const TopoDS_Face face=maker.Face();
+        if (!maker.IsDone()) return @{@"failureStage":stage};
+        const TopoDS_Face source = maker.Face();
+        stage = @"source-write";
+        const auto sourceBefore = DebugExportBRep(source);
+        // Production exports deserialize a separate saved OCAF document. This
+        // bounded probe reproduces the geometry isolation through an actual native
+        // serialize/read, rather than remeshing the object named "source".
+        stage = @"private-read";
+        TopoDS_Shape privateShape;
+        std::istringstream snapshot(sourceBefore);
+        snapshot.imbue(std::locale::classic());
+        BRepTools::Read(privateShape, snapshot, BRep_Builder());
+        if (snapshot.fail() || privateShape.IsNull() || privateShape.ShapeType() != TopAbs_FACE) return @{@"failureStage":stage};
+        const TopoDS_Face face = TopoDS::Face(privateShape);
+        stage = @"isolation";
+        BRepTools_ShapeSet sourceShapes(Standard_False, Standard_False), privateShapes(Standard_False, Standard_False);
+        const auto sourceCount = sourceShapes.Add(source), privateCount = privateShapes.Add(face);
+        if (sourceCount != 10 || privateCount != 10) return @{@"failureStage":stage};
+        bool isolated = BRep_Tool::Surface(source) != BRep_Tool::Surface(face);
+        for (int a = 1; a <= sourceCount; ++a) {
+            for (int b = 1; b <= privateCount; ++b) {
+                isolated = isolated && !sourceShapes.Shape(a).IsPartner(privateShapes.Shape(b));
+            }
+        }
+        if (!isolated) return @{@"failureStage":stage};
+        stage = @"initial-geometry";
+        const auto derivativeBefore = DebugExportAnalyticGeometry(face);
+        const auto derivativeBRepBefore = DebugExportBRep(face);
+        // Independent bilinear-corner interpolation error; this is not the
+        // deflection of the standard mesher, which can already insert vertices.
+        gp_Pnt center; surface->D0(0.5, 0.5, center);
+        const gp_Pnt diagonalA((poles(1,1).XYZ() + poles(2,2).XYZ()) * 0.5);
+        const gp_Pnt diagonalB((poles(2,1).XYZ() + poles(1,2).XYZ()) * 0.5);
+        const double cornerGap = std::max(center.Distance(diagonalA), center.Distance(diagonalB));
+        stage = @"baseline-mesh";
         BRepMesh_IncrementalMesh baseline(face,requested,Standard_False,0.1,Standard_False);
         TopLoc_Location location;
         const auto baselineMesh=BRep_Tool::Triangulation(face,location);
-        if (baselineMesh.IsNull()) return @{};
+        if (baselineMesh.IsNull()) return @{@"failureStage":stage};
         const double baselineDeflection=baselineMesh->Deflection();
         const bool baselineRejected=!BRepTools::Triangulation(face,requested);
-        const auto geometryBytes=[&]() {
-            std::ostringstream stream;stream.imbue(std::locale::classic());
-            BRepTools::Write(face,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
-            return stream.str();
-        };
-        const auto before=geometryBytes();
+        stage = @"baseline-geometry";
+        const auto baselineGeometry = DebugExportAnalyticGeometry(face);
+        stage = @"limited-mesh";
         BRepTools::Clean(face);
         BRepMesh_IncrementalMesh limited;
         limited.SetShape(face);limited.ChangeParameters().Deflection=requested;
@@ -2395,26 +2502,59 @@ NSString *ErrorDescription(const NativeExportResult& result) {
         limitedContext->SetFaceDiscret(new BRepMesh_FaceDiscret(new ExportParametricFactory(requested,0)));
         limited.Perform(limitedContext);
         const bool budgetRefused=!BRepTools::Triangulation(face,requested);
+        stage = @"limited-geometry";
+        const auto limitedGeometry = DebugExportAnalyticGeometry(face);
         auto state=std::make_shared<NativeExportState>();
         state->meshQuality=Core3DExportMeshQualityFine; state->exportType=ExportTypeStl;
         state->deflectionType=Aspect_TOD_ABSOLUTE;state->maximalChordialDeviation=requested;
         state->deviationAngle=0.1;
+        stage = @"refinement";
         MeshPrivateExportSurfaces(face,state,Message_ProgressRange());
         const auto refined=BRep_Tool::Triangulation(face,location);
-        if(refined.IsNull())return @{};
-        const bool unchanged=before==geometryBytes();
+        if(refined.IsNull())return @{@"failureStage":stage};
+        stage = @"refined-geometry";
+        const auto refinedGeometry = DebugExportAnalyticGeometry(face);
+        stage = @"cancel";
         bool cancelled=false;state->cancelled.store(true);
         try {MeshPrivateExportSurfaces(face,state,Message_ProgressRange());}
         catch(const NativeExportFailure& failure){cancelled=failure.Code()==Core3DNativeExportErrorCancelled;}
+        stage = @"final-source";
+        const auto sourceAfter = DebugExportBRep(source);
+        const bool unchanged = sourceBefore == sourceAfter;
+        stage = @"cancelled-geometry";
+        const auto cancelledGeometry = DebugExportAnalyticGeometry(face);
+        const bool derivativeUnchanged = derivativeBefore == baselineGeometry
+            && derivativeBefore == limitedGeometry && derivativeBefore == refinedGeometry
+            && derivativeBefore == cancelledGeometry;
+        stage = @"diagnostics";
+        NSDictionary *failureDiagnostics = @{};
+        if (!unchanged || !derivativeUnchanged) {
+            const auto nativeText = [](const std::string& bytes) -> NSString * {
+                return [[NSString alloc] initWithBytes:bytes.data() length:bytes.size()
+                    encoding:NSUTF8StringEncoding];
+            };
+            failureDiagnostics = @{@"sourceBefore":nativeText(sourceBefore),
+                @"sourceAfter":nativeText(sourceAfter),
+                @"privateBRepBefore":nativeText(derivativeBRepBefore),
+                @"privateBRepAfter":nativeText(DebugExportBRep(face)),
+                @"geometryBefore":nativeText(derivativeBefore),
+                @"geometryAfterBaseline":nativeText(baselineGeometry),
+                @"geometryAfterLimited":nativeText(limitedGeometry),
+                @"geometryAfterRefinement":nativeText(refinedGeometry),
+                @"geometryAfterCancellation":nativeText(cancelledGeometry)};
+        }
+        stage = @"eligibility-controls";
         auto rational=Handle(Geom_BSplineSurface)::DownCast(surface->Copy());rational->SetWeight(1,1,2.0);
         auto higher=Handle(Geom_BSplineSurface)::DownCast(surface->Copy());higher->IncreaseDegree(2,2);
         return @{@"baselineDone":@(baseline.IsDone() && baseline.GetStatusFlags()==0),
             @"baselineQualityRejected":@(baselineRejected),@"baselineDeflection":@(baselineDeflection),
             @"requested":@(requested),@"refinedAccepted":@(BRepTools::Triangulation(face,requested)),
             @"refinedDeflection":@(refined->Deflection()),@"sourceBRepUnchanged":@(unchanged),
+            @"privateSnapshotIsolated":@(isolated),@"derivativeGeometryUnchanged":@(derivativeUnchanged),
+            @"bilinearCornerGap":@(cornerGap),@"failureDiagnostics":failureDiagnostics,
             @"budgetRefused":@(budgetRefused),@"cancelled":@(cancelled),
             @"rationalRefused":@(!ExportBilinearSurface(rational)),@"higherDegreeRefused":@(!ExportBilinearSurface(higher))};
-    } catch (...) {return @{};}
+    } catch (...) {return @{@"failureStage":stage};}
 }
 
 + (void)debugSetWorkerPaused:(BOOL)paused {
