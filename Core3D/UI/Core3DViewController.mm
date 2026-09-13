@@ -3380,22 +3380,45 @@ struct NativeModelingPermitIssuer final {
     }catch(...){return @{@"phase":@"exception",@"prepared":@NO};}
 }
 - (NSDictionary<NSString *,NSNumber *> *)debugSavedCutEnclosureGeometry:(NSString *)entity widthMM:(double)widthMM {
-    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{};
-    const auto source=[self cylindricalCutSourceWithEntityIdentifier:entity expected:[self captureSceneSnapshot]];
-    if(!source)return @{};
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity||entity.length==0||entity.length>128)return @{};
     try {
+        // History redraw may clear selection. Observation uses the saved entity;
+        // it must neither acquire edit authority nor alter the user's selection.
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand()
+            ||GLController.viewer->hasUnresolvedOrdinaryEdit())return @{};
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
+        if(roots.Length()>50000)return @{};
+        TDF_Label target;
+        for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){
+            if(!target.IsNull())return @{};target=roots.Value(i);
+        }
+        OcctCylindricalCutSource source;
+        if(target.IsNull()||!owner->CaptureCylindricalCutSource(target,source))return @{};
         NSMutableDictionary *checks=[NSMutableDictionary dictionary];
-        for(const auto& row:core3d::saved_cut_source_changed_probe::Enclosure([source nativeSnapshot].source,widthMM))
+        for(const auto& row:core3d::saved_cut_source_changed_probe::Enclosure(source,widthMM))
             checks[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
         return checks;
     }catch(...){return @{};}
 }
 - (NSDictionary<NSString *,NSNumber *> *)debugSavedCutBracketGeometry:(NSString *)entity lengthMM:(double)lengthMM depthMM:(double)depthMM {
-    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return @{};
-    const auto source=[self cylindricalCutSourceWithEntityIdentifier:entity expected:[self captureSceneSnapshot]];
-    if(!source)return @{};
-    try {NSMutableDictionary *checks=[NSMutableDictionary dictionary];
-        for(const auto& row:core3d::saved_cut_source_changed_probe::Bracket([source nativeSnapshot].source,lengthMM,depthMM))
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity||entity.length==0||entity.length>128)return @{};
+    try {
+        // History redraw may clear selection. Observation uses the saved entity;
+        // it must neither acquire edit authority nor alter the user's selection.
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand()
+            ||GLController.viewer->hasUnresolvedOrdinaryEdit())return @{};
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
+        if(roots.Length()>50000)return @{};
+        TDF_Label target;
+        for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){
+            if(!target.IsNull())return @{};target=roots.Value(i);
+        }
+        OcctCylindricalCutSource source;
+        if(target.IsNull()||!owner->CaptureCylindricalCutSource(target,source))return @{};
+        NSMutableDictionary *checks=[NSMutableDictionary dictionary];
+        for(const auto& row:core3d::saved_cut_source_changed_probe::Bracket(source,lengthMM,depthMM))
             checks[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
         return checks;
     }catch(...){return @{};}
