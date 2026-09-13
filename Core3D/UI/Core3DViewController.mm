@@ -5673,7 +5673,7 @@ struct NativeModelingPermitIssuer final {
             // Its guard profile matches the original placed1x2x3 box exactly.
             core3d::profile::Parameters guardProfile;guardProfile.metersPerUnit=unit;
             guardProfile.definition.points={{0,0},{1,0},{1,2},{0,2}};guardProfile.definition.depth=3;
-            core3d::profile::ConstructionFrame f;f.values={200,0,0,0,0,0,1,1};guardProfile.definition.constructionFrame=f;
+            core3d::profile::ConstructionFrame f;f.values={200,0,0,0,0,0,1,1};guardProfile.constructionFrame=f;
             document->NewCommand();
             if(!core3d::profile::Stage(document,guardLabel,guardProfile,NSUUID.UUID.UUIDString.UTF8String))
                 throw Standard_Failure("Loft legacy guard profile");
