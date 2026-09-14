@@ -1897,6 +1897,7 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugConfigureOrdinaryCreationFault:(NSInteger)mode;
 - (BOOL)debugConfigureMeshCopyFault:(NSInteger)mode;
 - (BOOL)debugProbeMeshVertexStorageChange:(NSInteger)mode;
+- (BOOL)debugProbeMeshUVRepackStorageRefusal:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;

@@ -5408,26 +5408,64 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
             || source.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh
             || (options.version == 1 && source.meshUVAtlasVersion != 0)) { return Standard_False; }
         if (!core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc, label)) return Standard_False;
-        // Replacing UVs under an image would silently change its appearance.
+        // Repacking explicitly changes how attached images wrap. Keep this
+        // opt-in narrow: only an owned coherent/authored layout can be
+        // repacked under images; arbitrary imports and legacy grid UVs retain
+        // their historical refusal.
         TDF_Label materialLabel;
         XCAFDoc_VisMaterialTool::GetShapeMaterial(label, materialLabel);
+        bool hasImages = false;
         if (!materialLabel.IsNull()) {
             const auto materials = XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
             const auto material = materials->GetMaterial(materialLabel);
             if (material.IsNull()) { return Standard_False; }
-            if (material->HasCommonMaterial() && !material->CommonMaterial().DiffuseTexture.IsNull()) { return Standard_False; }
+            hasImages = material->HasCommonMaterial() && !material->CommonMaterial().DiffuseTexture.IsNull();
             if (material->HasPbrMaterial()) {
                 const auto& pbr = material->PbrMaterial();
-                if (!pbr.BaseColorTexture.IsNull() || !pbr.EmissiveTexture.IsNull()
+                hasImages = hasImages || !pbr.BaseColorTexture.IsNull() || !pbr.EmissiveTexture.IsNull()
                     || !pbr.NormalTexture.IsNull() || !pbr.MetallicRoughnessTexture.IsNull()
-                    || !pbr.OcclusionTexture.IsNull()) { return Standard_False; }
+                    || !pbr.OcclusionTexture.IsNull();
             }
+        }
+        if (hasImages) {
+            if (options.version != 2
+                || (source.meshUVAtlasVersion != 2 && source.meshUVAtlasVersion != 3)
+                || source.authoredFramesPresent) return Standard_False;
+            const auto recipe = Core3DNormalTextureRecipeForLabel(label);
+            XCAFDoc_VisMaterialPBR material;
+            const bool hasNormal = TryPBRMaterialForLabel(label, material) && !material.NormalTexture.IsNull();
+            Standard_Size resident = 0;
+            if (recipe < 0 || recipe > 1 || hasNormal != (recipe == 1)
+                || !Core3DValidateOwnedFrameUsage(myOcafDoc, resident)) return Standard_False;
         }
         TopoDS_Face face; Handle(Poly_Triangulation) mesh;
         if (!TriangleAtlasFace(source.shape, face, mesh)) { return Standard_False; }
         const int count = mesh->NbTriangles();
+        if (count <= 0 || (options.version == 2 && count > 4096)) return Standard_False;
         int originals = mesh->NbNodes();
-        if (source.meshUVAtlasVersion != 0) {
+        if (source.meshUVAtlasVersion == 3) {
+            double unit = 0;
+            const auto recipe = Core3DNormalTextureRecipeForLabel(label);
+            XCAFDoc_VisMaterialPBR material;
+            const bool hasNormal = TryPBRMaterialForLabel(label, material) && !material.NormalTexture.IsNull();
+            Standard_Size resident = 0;
+            std::atomic_bool cancelled{false};
+            core3d::meshedit::NativeTopologyCapture captured;
+            if (options.version != 2 || source.authoredFramesPresent
+                || !XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, unit) || unit != 0.001
+                || recipe < 0 || recipe > 1 || hasNormal != (recipe == 1)
+                || !Core3DValidateOwnedFrameUsage(myOcafDoc, resident)
+                || !mesh->HasUVNodes() || !mesh->HasNormals()
+                || mesh->NbNodes() != 3 * count
+                || core3d::meshedit::CaptureNativeTopology(source.shape, captured, cancelled)
+                    != core3d::meshedit::TopologyResult::Ready
+                || captured.sourceMesh != mesh
+                || !core3d::meshedit::HasFlatCornerLayout(captured, 0)) return Standard_False;
+            // Preserve each exact authored corner position/normal as the v2
+            // original prefix. Prefix UVs are intentionally canonical zero;
+            // Undo owns restoration of the old authored UV bytes.
+            originals = 3 * count;
+        } else if (source.meshUVAtlasVersion != 0) {
             originals -= 3 * count;
             if (!mesh->HasUVNodes() || originals <= 0
                 || (source.meshUVAtlasVersion == 2 && source.meshUVAtlasSettings[2] != originals)) { return Standard_False; }
@@ -5862,6 +5900,33 @@ Standard_Boolean OcctDocument::MarkTriangleUVAtlas(const TDF_Label& label, const
         return Standard_True;
     } catch (...) { return Standard_False; }
 }
+
+#ifdef DEBUG
+Standard_Boolean OcctDocument::DebugProbeMeshUVRepackRecipeMismatch(const TDF_Label& label) const noexcept {
+    if(![NSThread isMainThread])return Standard_False;
+    try {
+        OcctObjectTransformState before;
+        if(myOcafDoc.IsNull()||myOcafDoc->HasOpenCommand()
+            ||!CaptureObjectTransformStateForLabel(label,before)||before.meshUVAtlasVersion!=3
+            ||Core3DNormalTextureRecipeForLabel(label)!=1)return Standard_False;
+        const auto undos=myOcafDoc->GetAvailableUndos(),redos=myOcafDoc->GetAvailableRedos();
+        myOcafDoc->NewCommand();
+        TDataStd_Integer::Set(label,NormalTextureRecipeAttributeID(),0);
+        TopoDS_Shape candidate;
+        const bool refused=!PrepareTriangleUVAtlas(label,candidate,OcctMeshUVAtlasOptions{2,1024,8})
+            && candidate.IsNull();
+        myOcafDoc->AbortCommand();
+        OcctObjectTransformState after;
+        return refused&&!myOcafDoc->HasOpenCommand()
+            &&myOcafDoc->GetAvailableUndos()==undos&&myOcafDoc->GetAvailableRedos()==redos
+            &&Core3DNormalTextureRecipeForLabel(label)==1
+            &&CaptureObjectTransformStateForLabel(label,after)&&before.IsEqual(after);
+    }catch(...){
+        try{if(!myOcafDoc.IsNull()&&myOcafDoc->HasOpenCommand())myOcafDoc->AbortCommand();}catch(...){}
+        return Standard_False;
+    }
+}
+#endif
 
 Standard_Boolean OcctDocument::IsPresentationEditable(
     Handle(AIS_InteractiveObject) object) const {

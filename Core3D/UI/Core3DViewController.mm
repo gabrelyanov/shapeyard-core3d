@@ -5616,6 +5616,12 @@ struct NativeModelingPermitIssuer final {
     return GLController.viewer->debugProbeMeshVertexStorageChange(static_cast<int>(mode));
 }
 
+- (BOOL)debugProbeMeshUVRepackStorageRefusal:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 2
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    return GLController.viewer->debugProbeMeshUVRepackStorageRefusal(static_cast<int>(mode));
+}
+
 - (BOOL)debugConfigureMeshCopyFault:(NSInteger)mode {
     if (mode<0 || mode>16 || ![self debugConfigureOrdinaryCreationFault:mode<=13?mode:0]) return NO;
     const auto controller=GLController.viewer->debugOrdinaryEditController();

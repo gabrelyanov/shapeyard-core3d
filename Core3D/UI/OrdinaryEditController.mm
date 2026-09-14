@@ -22,6 +22,7 @@ struct Cut475Scope {
 #include "OrdinaryEditController.hpp"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
+#include "../OCCTKit/NativeMeshTopologyCapture.hxx"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/AuthoredFrameAttributeID.hxx"
 #import <Foundation/Foundation.h>
@@ -2035,6 +2036,12 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             // its validated mapless frame owner in the same owned command so
             // failed staging, cancellation and Undo restore both atomically.
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
+                if (!_document->ValidateTriangleUVAtlas(record.previous.label,
+                        record.requested.shape, record.requested.meshUVAtlasOptions)) {
+                    throw Standard_Failure("Stale mesh UV atlas candidate");
+                }
+                // Validation must observe the original frame authority. Only
+                // the already-validated candidate may clear it in this command.
                 record.previous.label.ForgetAttribute(persistence::AuthoredFrameAttributeID());
             }
             if(record.requested.operation==OrdinaryTransformOperation::MeshVertexMove
@@ -2179,8 +2186,23 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     throw Standard_Failure("Ordinary UV retained stale authored frames");
                 }
                 const auto& options=record.requested.meshUVAtlasOptions;
+                Standard_Integer exactRepackPrefix=0;
+                if(options.version==2 && record.previous.meshUVAtlasVersion==3) {
+                    std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture original;
+                    if(meshedit::CaptureNativeTopology(record.previous.shape,original,cancelled)
+                            !=meshedit::TopologyResult::Ready
+                        || original.sourceMesh.IsNull() || original.sourceMesh->NbTriangles()<=0
+                        || original.sourceMesh->NbTriangles()>4096)
+                        throw Standard_Failure("Ordinary UV source prefix unavailable");
+                    exactRepackPrefix=3*original.sourceMesh->NbTriangles();
+                }
                 if (options.version == 2 && (record.candidate.meshUVAtlasSettings[0]!=options.resolution
-                    || record.candidate.meshUVAtlasSettings[1]!=options.gutterPixels)) {
+                    || record.candidate.meshUVAtlasSettings[1]!=options.gutterPixels
+                    || record.candidate.meshUVAtlasSettings[2]<=0
+                    || (record.previous.meshUVAtlasVersion==3
+                        && record.candidate.meshUVAtlasSettings[2]!=exactRepackPrefix)
+                    || (record.previous.meshUVAtlasVersion==2
+                        && record.candidate.meshUVAtlasSettings[2]!=record.previous.meshUVAtlasSettings[2]))) {
                     throw Standard_Failure("Ordinary UV settings readback failed");
                 }
             } else if (record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude) {
@@ -2192,7 +2214,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || record.candidate.authoredFramesIdentity != record.previous.authoredFramesIdentity) {
                 throw Standard_Failure("Ordinary transform changed geometry-owned metadata");
             }
-            if (record.requested.operation == OrdinaryTransformOperation::MeshVertexMove
+            if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
+                || record.requested.operation == OrdinaryTransformOperation::MeshVertexMove
                 || record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
                 || record.requested.operation == OrdinaryTransformOperation::MeshWindingRepair) {
                 Standard_Size bytes=0;

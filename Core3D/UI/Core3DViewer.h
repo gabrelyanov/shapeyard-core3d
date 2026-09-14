@@ -420,6 +420,7 @@ namespace core3d {
             _debugOrdinaryRedrawAttempts = 0;
         }
         bool debugProbeMeshVertexStorageChange(int mode) noexcept;
+        bool debugProbeMeshUVRepackStorageRefusal(int mode) noexcept;
         int debugOrdinaryRedrawAttempts() const noexcept { return _debugOrdinaryRedrawAttempts; }
         std::shared_ptr<OrdinaryEditController> debugOrdinaryEditController() const noexcept {
             return _ordinaryEditController;

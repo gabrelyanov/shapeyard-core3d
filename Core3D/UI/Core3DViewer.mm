@@ -4573,6 +4573,53 @@ bool Core3DViewer::debugProbeMeshVertexStorageChange(int mode) noexcept {
         && after.deflection==work->geometry.deflection
         && after.triangleNodeIDs==work->geometry.triangleNodeIDs;
 }
+
+// Test-only, synchronous corruption window over an exact selected marker-3
+// owner. Restore the same triangulation handle and every byte before return.
+bool Core3DViewer::debugProbeMeshUVRepackStorageRefusal(int mode) noexcept {
+    if(![NSThread isMainThread] || mode<0 || mode>2 || !canBeginCommittedEdit()
+        || myContext.IsNull() || myDoc.IsNull())return false;
+    myContext->InitSelected();if(!myContext->MoreSelected())return false;
+    const auto selected=myContext->SelectedInteractive();myContext->NextSelected();
+    if(myContext->MoreSelected())return false;
+    const auto label=myDoc->ShapeLabel(selected);OcctObjectTransformState state;
+    if(label.IsNull() || !myDoc->CaptureObjectTransformStateForLabel(label,state)
+        || state.meshUVAtlasVersion!=3)return false;
+    if(mode==2)return myDoc->DebugProbeMeshUVRepackRecipeMismatch(label);
+    std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture captured;
+    if(meshedit::CaptureNativeTopology(state.shape,captured,cancelled)!=meshedit::TopologyResult::Ready
+        || captured.sourceMesh.IsNull() || !captured.sourceMesh->HasNormals())return false;
+    const auto mesh=captured.sourceMesh;Handle(Poly_Triangulation) saved;
+    try{saved=mesh->Copy();}catch(...){return false;}
+    if(saved.IsNull()||saved==mesh)return false;
+    const auto document=myDoc->Document();const auto beforeTime=document->GetData()->Time();
+    const auto beforeUndo=document->GetAvailableUndos(),beforeRedo=document->GetAvailableRedos();
+    const auto restore=[&]() noexcept {
+        try {
+            for(int node=1;node<=mesh->NbNodes();++node){
+                mesh->SetNode(node,saved->Node(node));mesh->SetUVNode(node,saved->UVNode(node));
+                gp_Vec3f normal;saved->Normal(node,normal);mesh->SetNormal(node,normal);
+            }
+            for(int triangle=1;triangle<=mesh->NbTriangles();++triangle)
+                mesh->SetTriangle(triangle,saved->Triangle(triangle));
+            mesh->Deflection(saved->Deflection());return true;
+        }catch(...){return false;}
+    };
+    TopoDS_Shape candidate;bool refused=false;
+    try {
+        if(mode==0){int a,b,c;mesh->Triangle(1).Get(a,b,c);mesh->SetTriangle(1,Poly_Triangle(b,c,a));}
+        else {gp_Vec3f n;mesh->Normal(1,n);mesh->SetNormal(1,gp_Vec3f(-n[0],-n[1],-n[2]));}
+        refused=!myDoc->PrepareTriangleUVAtlas(label,candidate,OcctMeshUVAtlasOptions{2,1024,8})
+            && candidate.IsNull();
+    }catch(...){refused=false;}
+    if(!restore()||!refused||document->GetData()->Time()!=beforeTime
+        ||document->GetAvailableUndos()!=beforeUndo||document->GetAvailableRedos()!=beforeRedo)return false;
+    meshedit::NativeTopologyCapture after;
+    return meshedit::CaptureNativeTopology(state.shape,after,cancelled)==meshedit::TopologyResult::Ready
+        && after.sourceMesh==mesh && after.storedNodes==captured.storedNodes
+        && after.storedUVs==captured.storedUVs && after.storedNormals==captured.storedNormals
+        && after.triangleNodeIDs==captured.triangleNodeIDs;
+}
 #endif
 
 OrdinaryEditResult Core3DViewer::createSourceRetainedMeshCopy(

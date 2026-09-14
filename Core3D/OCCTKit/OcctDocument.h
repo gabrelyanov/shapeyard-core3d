@@ -822,6 +822,9 @@ public:
     Standard_EXPORT Standard_Boolean MarkAuthoredMeshUVLayout(const TDF_Label& label) noexcept;
     Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
     Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label, const OcctMeshUVAtlasOptions& options = {}) noexcept;
+#ifdef DEBUG
+    Standard_EXPORT Standard_Boolean DebugProbeMeshUVRepackRecipeMismatch(const TDF_Label& label) const noexcept;
+#endif
     //! False for a read-only XCAF component occurrence.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;
