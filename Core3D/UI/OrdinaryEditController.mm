@@ -271,7 +271,7 @@ bool PrepareCollectiveGroupOrigin(const Handle(OcctDocument)& owner,OrdinaryTran
             }
         }
     }
-    for(auto& group:ledger.groupsRequested){
+    for(auto& group:ledger.groupsRequested.groups){
         if(!group.originPresent||group.members.size()!=labels.size())continue;
         bool exact=true;for(const auto& member:group.members)exact=exact&&labels.count(CreationLabelKey(member));
         if(!exact)continue;
