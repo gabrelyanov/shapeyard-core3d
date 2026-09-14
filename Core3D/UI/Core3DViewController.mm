@@ -10403,7 +10403,7 @@ struct NativeModelingPermitIssuer final {
 }
 
 - (NSData *_Nullable)debugSavedGroupBinXCAFFixture:(NSInteger)mode {
-    if (mode < 0 || mode > 17) { return nil; }
+    if (mode < 0 || mode > 23) { return nil; }
     return Core3DCreateDebugBinXCAFFixture(@"saved-group-schema", [mode](const Handle(TDocStd_Document)& document) {
         // Independent on-disk schema fixture, deliberately repeats persistent
         // GUIDs instead of asking production helpers to author a valid record.
@@ -10411,7 +10411,9 @@ struct NativeModelingPermitIssuer final {
         const Standard_GUID recordID("EC7B5F15-218F-47E4-BF6A-61BF42861402");
         const Standard_GUID nameID("EC7B5F15-218F-47E4-BF6A-61BF42861403");
         const Standard_GUID memberID("EC7B5F15-218F-47E4-BF6A-61BF42861404");
-        const Standard_GUID originID("EC7B5F15-218F-47E4-BF6A-61BF42861405");
+        const Standard_GUID originXID("EC7B5F15-218F-47E4-BF6A-61BF42861405");
+        const Standard_GUID originYID("EC7B5F15-218F-47E4-BF6A-61BF42861406");
+        const Standard_GUID originZID("EC7B5F15-218F-47E4-BF6A-61BF42861407");
         const Standard_GUID entityID("0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
         const Standard_GUID definitionID("3611F2B2-C694-4E12-AED8-A2A97A3D283B");
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
@@ -10425,13 +10427,26 @@ struct NativeModelingPermitIssuer final {
         if (mode != 5) {
             TDataStd_Name::Set(record, nameID, TCollection_ExtendedString(mode == 6 ? " bad name " : "Imported group"));
         }
-        if (mode == 13) { TDataStd_Integer::Set(record, originID, 1); }
-        else if (mode >= 14 && mode <= 17) {
-            const auto origin = TDataStd_RealArray::Set(record, originID, 1, mode == 14 ? 2 : 3);
-            origin->SetValue(1, mode == 16 ? 1000001.0 : mode == 17 ? -1000001.0 : 1.0);
-            origin->SetValue(2, 2.0);
-            if (mode == 15) { origin->SetValue(3, std::numeric_limits<double>::quiet_NaN()); }
-            else if (mode != 14) { origin->SetValue(3, 3.0); }
+        if (mode == 13) { TDataStd_Integer::Set(record, originXID, 1); }
+        else if (mode == 14) {
+            // The never-shipped RealArray draft remains unsupported.
+            const auto origin = TDataStd_RealArray::Set(record, originXID, 1, 3);
+            origin->SetValue(1, 1.0); origin->SetValue(2, 2.0); origin->SetValue(3, 3.0);
+        } else if (mode >= 15 && mode <= 19) {
+            TDataStd_Real::Set(record, originXID,
+                mode == 16 ? 1000001.0 : mode == 17 ? -1000001.0 : 1.0);
+            if (mode != 18) TDataStd_Real::Set(record, originYID, 2.0);
+            if (mode != 19) TDataStd_Real::Set(record, originZID,
+                mode == 15 ? std::numeric_limits<double>::quiet_NaN() : 3.0);
+        } else if (mode == 20) {
+            TDataStd_Real::Set(record, originYID, 2.0);
+            TDataStd_Real::Set(record, originZID, 3.0);
+        } else if (mode == 21) {
+            TDataStd_Real::Set(root, originYID, 2.0);
+        } else if (mode == 23) {
+            TDataStd_Real::Set(record, originXID, 1.0);
+            TDataStd_Real::Set(record, originYID, 2.0);
+            TDataStd_Real::Set(record, originZID, 3.0);
         }
         if (mode == 7) {
             const auto duplicate = container.FindChild(2, Standard_True);
@@ -10455,6 +10470,7 @@ struct NativeModelingPermitIssuer final {
             TDataStd_AsciiString::Set(label, definitionID, TCollection_AsciiString(NSUUID.UUID.UUIDString.UTF8String));
             if (mode == 11) { TDataStd_Integer::Set(label, memberID, 1); }
             else { TDataStd_AsciiString::Set(label, memberID, TCollection_AsciiString(mode == 12 ? "9824816B-0E48-45A5-B874-1D703D68D23E" : id.c_str())); }
+            if (mode == 22 && i == 0) { TDataStd_Real::Set(label, originZID, 3.0); }
         }
     });
 }

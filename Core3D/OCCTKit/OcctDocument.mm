@@ -34,7 +34,6 @@ struct Cut475Scope {
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_GraphNode.hxx>
 #include <TDataStd_Name.hxx>
-#include <TDataStd_RealArray.hxx>
 // Copyright (c) 2017 OPEN CASCADE SAS
 //
 // This file is part of the examples of the Open CASCADE Technology software library.
@@ -2908,8 +2907,14 @@ const Standard_GUID& SavedGroupNameID() {
 const Standard_GUID& SavedGroupMembershipID() {
     static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861404"); return id;
 }
-const Standard_GUID& SavedGroupOriginID() {
+const Standard_GUID& SavedGroupOriginXID() {
     static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861405"); return id;
+}
+const Standard_GUID& SavedGroupOriginYID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861406"); return id;
+}
+const Standard_GUID& SavedGroupOriginZID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861407"); return id;
 }
 constexpr std::size_t kMaximumSavedGroups = 128;
 constexpr std::size_t kMaximumSavedGroupMembers = 32;
@@ -2926,7 +2931,9 @@ bool HasSavedGroupAttribute(const TDF_Label& label) {
         || label.FindAttribute(SavedGroupRecordID(), attribute)
         || label.FindAttribute(SavedGroupNameID(), attribute)
         || label.FindAttribute(SavedGroupMembershipID(), attribute)
-        || label.FindAttribute(SavedGroupOriginID(), attribute);
+        || label.FindAttribute(SavedGroupOriginXID(), attribute)
+        || label.FindAttribute(SavedGroupOriginYID(), attribute)
+        || label.FindAttribute(SavedGroupOriginZID(), attribute);
 }
 bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupState& output) noexcept {
     output = OcctSavedGroupState();
@@ -2943,29 +2950,34 @@ bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupSta
         for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
             if (++count > kMaximumGeometryDocumentLabels) { return false; }
             const TDF_Label label = it.Value();
-            Handle(TDF_Attribute) marker, record, name, member, origin;
+            Handle(TDF_Attribute) marker, record, name, member, originX, originY, originZ;
             const bool hasMarker = label.FindAttribute(SavedGroupContainerID(), marker);
             const bool hasRecord = label.FindAttribute(SavedGroupRecordID(), record);
             const bool hasName = label.FindAttribute(SavedGroupNameID(), name);
             const bool hasMember = label.FindAttribute(SavedGroupMembershipID(), member);
-            const bool hasOrigin = label.FindAttribute(SavedGroupOriginID(), origin);
+            const bool hasOriginX = label.FindAttribute(SavedGroupOriginXID(), originX);
+            const bool hasOriginY = label.FindAttribute(SavedGroupOriginYID(), originY);
+            const bool hasOriginZ = label.FindAttribute(SavedGroupOriginZID(), originZ);
+            const bool hasAnyOrigin = hasOriginX || hasOriginY || hasOriginZ;
             if (hasMarker) {
                 const auto typed = Handle(TDataStd_Integer)::DownCast(marker);
                 if (typed.IsNull() || typed->Get() != 1 || !label.Father().IsEqual(root)
                     || label.IsEqual(document->Main()) || !state.container.IsNull()
-                    || hasRecord || hasName || hasMember || hasOrigin) { return false; }
+                    || hasRecord || hasName || hasMember || hasAnyOrigin) { return false; }
                 state.container = label;
             }
-            if (hasRecord || hasName || hasOrigin) {
+            if (hasRecord || hasName || hasAnyOrigin) {
                 if (!hasRecord || !hasName || hasMember
                     || Handle(TDataStd_AsciiString)::DownCast(record).IsNull()
                     || Handle(TDataStd_Name)::DownCast(name).IsNull()
                     || records.size() >= kMaximumSavedGroups) { return false; }
                 records.push_back(label);
             }
-            if (hasOrigin && Handle(TDataStd_RealArray)::DownCast(origin).IsNull()) { return false; }
+            if ((hasOriginX && Handle(TDataStd_Real)::DownCast(originX).IsNull())
+                || (hasOriginY && Handle(TDataStd_Real)::DownCast(originY).IsNull())
+                || (hasOriginZ && Handle(TDataStd_Real)::DownCast(originZ).IsNull())) { return false; }
             if (hasMember) {
-                if (hasOrigin || Handle(TDataStd_AsciiString)::DownCast(member).IsNull()
+                if (hasAnyOrigin || Handle(TDataStd_AsciiString)::DownCast(member).IsNull()
                     || members.size() >= kMaximumSavedGroups * kMaximumSavedGroupMembers) { return false; }
                 members.push_back(label);
             }
@@ -2983,11 +2995,14 @@ bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupSta
                 || !OcctObjectNameIsValid(name->Get())
                 || !indices.emplace(group.identifier, state.groups.size()).second) { return false; }
             group.name = name->Get();
-            Handle(TDataStd_RealArray) origin;
-            if (label.FindAttribute(SavedGroupOriginID(), origin)) {
-                if (origin.IsNull() || origin->Lower() != 1 || origin->Upper() != 3) { return false; }
-                const double x=origin->Value(1), y=origin->Value(2), z=origin->Value(3);
-                group.origin=gp_Pnt(x,y,z);
+            Handle(TDataStd_Real) originX, originY, originZ;
+            const bool hasOriginX = label.FindAttribute(SavedGroupOriginXID(), originX);
+            const bool hasOriginY = label.FindAttribute(SavedGroupOriginYID(), originY);
+            const bool hasOriginZ = label.FindAttribute(SavedGroupOriginZID(), originZ);
+            if (hasOriginX || hasOriginY || hasOriginZ) {
+                if (!hasOriginX || !hasOriginY || !hasOriginZ
+                    || originX.IsNull() || originY.IsNull() || originZ.IsNull()) { return false; }
+                group.origin=gp_Pnt(originX->Get(),originY->Get(),originZ->Get());
                 if (!OcctDocument::IsAdmittedSavedGroupOrigin(group.origin)) { return false; }
                 group.originPresent=Standard_True;
             }
@@ -9309,7 +9324,9 @@ Standard_Boolean OcctDocument::StageSavedGroups(const std::vector<OcctSavedGroup
             for (const auto& label : group.members) { label.ForgetAttribute(SavedGroupMembershipID()); }
             group.recordLabel.ForgetAttribute(SavedGroupRecordID());
             group.recordLabel.ForgetAttribute(SavedGroupNameID());
-            group.recordLabel.ForgetAttribute(SavedGroupOriginID());
+            group.recordLabel.ForgetAttribute(SavedGroupOriginXID());
+            group.recordLabel.ForgetAttribute(SavedGroupOriginYID());
+            group.recordLabel.ForgetAttribute(SavedGroupOriginZID());
         }
         Standard_Integer maximumTag = 0;
         for (TDF_ChildIterator it(container, Standard_False); it.More(); it.Next()) {
@@ -9331,8 +9348,9 @@ Standard_Boolean OcctDocument::StageSavedGroups(const std::vector<OcctSavedGroup
             TDataStd_Name::Set(label, SavedGroupNameID(), group.name);
             if (group.originPresent) {
                 if (!IsAdmittedSavedGroupOrigin(group.origin)) return Standard_False;
-                const auto origin=TDataStd_RealArray::Set(label,SavedGroupOriginID(),1,3);
-                origin->SetValue(1,group.origin.X());origin->SetValue(2,group.origin.Y());origin->SetValue(3,group.origin.Z());
+                TDataStd_Real::Set(label,SavedGroupOriginXID(),group.origin.X());
+                TDataStd_Real::Set(label,SavedGroupOriginYID(),group.origin.Y());
+                TDataStd_Real::Set(label,SavedGroupOriginZID(),group.origin.Z());
             }
             for (const auto& member : group.members) {
                 TDataStd_AsciiString::Set(member, SavedGroupMembershipID(), TCollection_AsciiString(group.identifier.c_str()));
