@@ -296,6 +296,31 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)cancel;
 @end
 
+//! Descriptive values for one stable bore of a retained cut program. Native
+//! issue only; clients cannot manufacture authority from these fields.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutBore : NSObject
+@property(nonatomic,readonly) uint32_t operandIdentifier;
+@property(nonatomic,readonly) Core3DCylindricalCutAxis axis;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double worldRadiusMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+//! Native-issued whole-program snapshot of a retained cut: the complete recipe
+//! and every stable operand ride one opaque aggregate. No one-bore local view
+//! is exposed as native authority, and wire fields cannot recreate it.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutProgramSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSString *definitionIdentifier;
+@property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutBore *> *bores;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Native-issued, main-owned selected rectangular-loft snapshot. Wire fields cannot recreate it.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DStoredRectangularLoftSnapshot : NSObject
@@ -1368,6 +1393,22 @@ __attribute__((objc_subclassing_restricted))
     worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutRadius(_:worldRadiusMM:expected:completion:));
+//! Whole-program snapshot of a retained cut: every stable bore of the complete
+//! recipe. Nil for bare sources and unchanged for legacy one-bore authority.
+- (nullable Core3DCylindricalCutProgramSnapshot *)cylindricalCutProgramWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(cylindricalCutProgram(entityIdentifier:expected:));
+//! Append one separated same-axis through-all bore. The next persisted
+//! high-water operand identifier is issued natively; first-cut APIs unchanged.
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutAppendBore:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DCylindricalCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutAppendBore(_:definition:expected:completion:));
+//! Change exactly the addressed stable operand's radius inside the original
+//! full recipe. Unknown identifiers and legacy payloads refuse explicitly.
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutBoreRadius:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)operandIdentifier worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutBoreRadius(_:operandIdentifier:worldRadiusMM:expected:completion:));
 //! Native source edit; no UI/AI activation. Main callback may refuse synchronously.
 - (nullable Core3DSavedCutSourceOperation *)beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
@@ -1640,6 +1681,15 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *,NSNumber *> *)debugSavedCutEnclosureGeometry:(NSString *)entity widthMM:(double)widthMM
     NS_SWIFT_NAME(debugSavedCutEnclosureGeometry(_:widthMM:));
 - (nullable NSDictionary<NSString *,id> *)debugCylindricalCutEvidence:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutEvidence(_:));
+//! Read-only whole-program observation: complete recipe bytes, stable bore
+//! values and independent geometry evidence. No edit or selection authority.
+- (nullable NSDictionary<NSString *,id> *)debugCylindricalCutProgramEvidence:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutProgramEvidence(_:));
+//! Bounded DEBUG read-only observation of the ACTUAL BRep cylindrical hole
+//! faces: kernel-measured axis/location/radius/trim extents/orientation plus
+//! topology validity, independent of any stored recipe value; the production
+//! program matcher is not called. Refuses with an open or unresolved command.
+//! No selection or edit authority is acquired or altered.
+- (nullable NSDictionary<NSString *,id> *)debugCylindricalCutHoleFaces:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutHoleFaces(_:));
 + (NSDictionary<NSString *,NSNumber *> *)debugCylindricalCutSimilarityProbe;
 - (NSDictionary<NSString *,NSNumber *> *)debugCutSceneGuardMutation:(NSInteger)mode target:(NSString *)target sibling:(NSString *)sibling;
 - (nullable NSDictionary *)debugRigidPlacementEvidence:(NSString *)entity
@@ -2011,6 +2061,8 @@ __attribute__((objc_subclassing_restricted))
 //! Read-only detached observer/whole-result native probes.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutResultCorrespondenceProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutResultCorrespondenceProbe(_:));
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanProgramProbe
+    NS_SWIFT_NAME(debugSavedBooleanProgramProbe());
 //! Detached DEBUG trim-domain qualification only.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutTrimDomainProbe
     NS_SWIFT_NAME(debugSavedCutTrimDomainProbe());

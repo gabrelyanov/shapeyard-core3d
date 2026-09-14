@@ -99,6 +99,7 @@
 #include <Graphic3d_TextureParams.hxx>
 #include "BRep_Tool.hxx"
 #include "BRepCheck_Analyzer.hxx"
+#include <BRepAdaptor_Surface.hxx>
 #include "BRepTools.hxx"
 #include "BRepPrimAPI_MakeBox.hxx"
 #include "BRepPrimAPI_MakePrism.hxx"
@@ -1309,6 +1310,55 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     self=[super init];if(self){_owner=owner;_work=work;}return self;
 }
 - (BOOL)cancel {if(!NSThread.isMainThread)return NO;Core3DViewController *owner=_owner;const auto work=_work.lock();return owner&&work?[owner core3d_cancelCutWork:work]:NO;}
+@end
+
+@interface Core3DCylindricalCutBore ()
+- (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)effectiveMM;
+@end
+@implementation Core3DCylindricalCutBore
+- (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)effectiveMM {
+    const double world=operand.radius*effectiveMM;
+    if(!operand.identifier||static_cast<unsigned>(operand.axis)>2||!std::isfinite(world)||world<.001||world>1e6)return nil;
+    self=[super init];if(self){_operandIdentifier=operand.identifier;
+        _axis=static_cast<Core3DCylindricalCutAxis>(operand.axis);
+        _localX=operand.point[0];_localY=operand.point[1];_localZ=operand.point[2];_worldRadiusMM=world;}return self;
+}
+@end
+@interface Core3DCylindricalCutProgramSnapshot ()
+- (instancetype)initWithNative:(const core3d::CylindricalCutProgramSnapshot&)native owner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer;
+- (core3d::CylindricalCutProgramSnapshot)nativeSnapshot;
+- (BOOL)matchesOwner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer;
+@end
+@implementation Core3DCylindricalCutProgramSnapshot {
+    core3d::CylindricalCutProgramSnapshot _native;
+    __weak Core3DViewController *_owner;
+    std::weak_ptr<core3d::Core3DViewer> _viewer;
+}
+- (instancetype)initWithNative:(const core3d::CylindricalCutProgramSnapshot&)native owner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer {
+    self=[super init];if(!self)return nil;
+    // Descriptive bore values projected from the complete captured recipe.
+    NSMutableArray<Core3DCylindricalCutBore *> *bores=[NSMutableArray array];
+    if(const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&native.source.recipe)){
+        core3d::analytic_boolean::Operand operand;operand.identifier=legacy->operandID;
+        operand.axis=static_cast<core3d::analytic_boolean::Axis>(legacy->axis);
+        operand.point=legacy->point;operand.radius=legacy->radius;
+        Core3DCylindricalCutBore *bore=[[Core3DCylindricalCutBore alloc] initWithOperand:operand effectiveMM:native.source.effectiveMM];
+        if(!bore)return nil;[bores addObject:bore];
+    }else{
+        for(const auto& step:std::get<core3d::retained_boolean::Program>(native.source.recipe).steps){
+            Core3DCylindricalCutBore *bore=[[Core3DCylindricalCutBore alloc] initWithOperand:step.operand effectiveMM:native.source.effectiveMM];
+            if(!bore)return nil;[bores addObject:bore];
+        }
+    }
+    _native=native;_owner=owner;_viewer=viewer;
+    _entityIdentifier=[NSString stringWithUTF8String:native.source.original.entityIdentifier.c_str()];
+    _definitionIdentifier=[NSString stringWithUTF8String:native.source.original.definitionIdentifier.c_str()];
+    _bores=bores;return self;
+}
+- (core3d::CylindricalCutProgramSnapshot)nativeSnapshot {return _native;}
+- (BOOL)matchesOwner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer {
+    return NSThread.isMainThread&&owner&&_owner==owner&&viewer&&_viewer.lock()==viewer;
+}
 @end
 
 @interface Core3DStoredRectangularLoftSnapshot ()
@@ -3464,12 +3514,102 @@ struct NativeModelingPermitIssuer final {
             @"rebuilding":@(source.rebuilding),@"effectiveMM":@(source.effectiveMM)} mutableCopy];
         if(state.retained.value){const auto& payload=*state.retained.value;
             out[@"envelope"]=[NSData dataWithBytes:payload.bytes.data() length:payload.bytes.size()];
-            out[@"feature"]=[NSString stringWithUTF8String:core3d::retained_solid::UUIDText(payload.envelope.derivedFeature).c_str()];
-            out[@"radiusBits"]=@(core3d::retained_solid::Bits(payload.envelope.radius));
-            out[@"axis"]=@(static_cast<unsigned>(payload.envelope.axis));
-            out[@"worldRadiusMM"]=@(payload.envelope.radius*source.effectiveMM);
+            out[@"feature"]=[NSString stringWithUTF8String:core3d::retained_solid::UUIDText(std::get<core3d::retained_solid::Envelope>(payload.envelope).derivedFeature).c_str()];
+            out[@"radiusBits"]=@(core3d::retained_solid::Bits(std::get<core3d::retained_solid::Envelope>(payload.envelope).radius));
+            out[@"axis"]=@(static_cast<unsigned>(std::get<core3d::retained_solid::Envelope>(payload.envelope).axis));
+            out[@"worldRadiusMM"]=@(std::get<core3d::retained_solid::Envelope>(payload.envelope).radius*source.effectiveMM);
         }
         return out;
+    }catch(...){return nil;}
+}
+- (NSDictionary<NSString *,id> *)debugCylindricalCutProgramEvidence:(NSString *)entity {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity||entity.length>128)return nil;
+    try {
+        // Read-only whole-program observation of the exact saved entity. No
+        // selection, edit or command authority is acquired or altered. An open
+        // OCAF command or an unresolved ordinary edit refuses observation at
+        // this DEBUG boundary, matching the neighboring geometry observers.
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand()
+            ||GLController.viewer->hasUnresolvedOrdinaryEdit())return nil;
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return nil;
+        TDF_Label target;for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){if(!target.IsNull())return nil;target=roots.Value(i);}
+        OcctCylindricalCutProgramSource source;if(target.IsNull()||!owner->CaptureCylindricalCutProgramSource(target,source))return nil;
+        const auto& state=source.original;GProp_GProps actual,base;
+        BRepGProp::VolumeProperties(state.shape,actual);BRepGProp::VolumeProperties(source.base,base);
+        double unit=0;if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return nil;
+        const double mm=unit*1000;Bnd_Box box;BRepBndLib::AddOptimal(state.shape,box,Standard_False,Standard_False);
+        if(box.IsVoid()||box.IsOpen())return nil;double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+        NSMutableArray *boxMM=[NSMutableArray array],*bits=[NSMutableArray array],*matrix=[NSMutableArray array],*present=[NSMutableArray array],*recipe=[NSMutableArray array];
+        for(double x:bounds)[boxMM addObject:@(x*mm)];for(double x:state.scalars)[bits addObject:@(core3d::retained_solid::Bits(x))];
+        for(bool x:state.present)[present addObject:@(x)];for(int i=1;i<=3;++i)for(int j=1;j<=4;++j)[matrix addObject:@(state.transform.Value(i,j))];
+        const auto identity=core3d::retained_boolean::Identities(source.recipe);
+        std::vector<double> sourceValues;std::uint64_t nextOperand=0;
+        NSMutableArray *bores=[NSMutableArray array];
+        const auto appendBore=[&](const core3d::analytic_boolean::Operand& operand){
+            NSMutableArray *pointBits=[NSMutableArray array];
+            for(double x:operand.point)[pointBits addObject:@(core3d::retained_solid::Bits(x))];
+            [bores addObject:@{@"operand":@(operand.identifier),@"axis":@(static_cast<unsigned>(operand.axis)),
+                @"pointBits":pointBits,@"radiusBits":@(core3d::retained_solid::Bits(operand.radius)),
+                @"worldRadiusMM":@(operand.radius*source.effectiveMM)}];
+        };
+        if(const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&source.recipe)){
+            sourceValues=legacy->sourceValues;nextOperand=std::uint64_t(legacy->operandID)+1;
+            core3d::analytic_boolean::Operand operand;operand.identifier=legacy->operandID;
+            operand.axis=static_cast<core3d::analytic_boolean::Axis>(legacy->axis);
+            operand.point=legacy->point;operand.radius=legacy->radius;appendBore(operand);
+        }else{
+            const auto& program=std::get<core3d::retained_boolean::Program>(source.recipe);
+            sourceValues=program.source.values;nextOperand=program.nextOperandID;
+            for(const auto& step:program.steps)appendBore(step.operand);
+        }
+        for(double x:sourceValues)[recipe addObject:@(core3d::retained_solid::Bits(x))];
+        OcctScalarAppearanceState appearance;if(!owner->CaptureScalarAppearanceForSavedCut(target,appearance))return nil;
+        NSMutableArray *appearanceBits=[NSMutableArray array];for(double x:appearance.visualValues)[appearanceBits addObject:@(core3d::retained_solid::Bits(x))];
+        for(int i=0;i<2;++i){[appearanceBits addObject:@(appearance.legacyPresent[i])];[appearanceBits addObject:@(appearance.legacyValues[i])];}[appearanceBits addObject:@(appearance.localPBR)];
+        return @{@"entity":entity,@"definition":[NSString stringWithUTF8String:state.definitionIdentifier.c_str()],
+            @"sourceFeature":[NSString stringWithUTF8String:core3d::retained_solid::UUIDText(identity.sourceFeature).c_str()],
+            @"feature":[NSString stringWithUTF8String:core3d::retained_solid::UUIDText(identity.derivedFeature).c_str()],
+            @"sourceBits":recipe,@"transformBits":bits,@"present":present,@"matrix":matrix,@"appearanceBits":appearanceBits,
+            @"boundsMM":boxMM,@"volumeMM3":@(actual.Mass()*mm*mm*mm),@"baseVolumeMM3":@(base.Mass()*mm*mm*mm),
+            @"effectiveMM":@(source.effectiveMM),@"bores":bores,@"nextOperand":@(nextOperand),
+            @"program":[NSData dataWithBytes:source.recipeBytes.data() length:source.recipeBytes.size()]};
+    }catch(...){return nil;}
+}
+- (NSDictionary<NSString *,id> *)debugCylindricalCutHoleFaces:(NSString *)entity {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity||entity.length>128)return nil;
+    try {
+        // Bounded DEBUG read-only observation of the ACTUAL cylindrical hole
+        // faces of the retained result solid. Every reported value is measured
+        // from kernel surfaces and trim bounds, never projected from the stored
+        // recipe, and the production program matcher is not called. An open
+        // OCAF command or an unresolved ordinary edit refuses the observation
+        // outright at this DEBUG boundary; the shared capture itself stays
+        // Stage-compatible and unchanged. No selection, edit or command
+        // authority is acquired.
+        const auto owner=GLController.viewer->getDocument();if(owner.IsNull()||owner->Document().IsNull())return nil;
+        if(owner->Document()->HasOpenCommand()||GLController.viewer->hasUnresolvedOrdinaryEdit())return nil;
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return nil;
+        TDF_Label target;for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){if(!target.IsNull())return nil;target=roots.Value(i);}
+        OcctCylindricalCutProgramSource source;if(target.IsNull()||!owner->CaptureCylindricalCutProgramSource(target,source))return nil;
+        double unit=0;if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return nil;
+        const double mm=unit*1000;int faces=0;NSMutableArray *holes=[NSMutableArray array];
+        for(TopExp_Explorer it(source.original.shape,TopAbs_FACE);it.More();it.Next()){
+            if(++faces>10000)return nil;
+            const auto face=TopoDS::Face(it.Current());
+            if(face.Orientation()!=TopAbs_FORWARD&&face.Orientation()!=TopAbs_REVERSED)return nil;
+            const BRepAdaptor_Surface surface(face,Standard_True);
+            if(surface.GetType()!=GeomAbs_Cylinder)continue;
+            const auto cylinder=surface.Cylinder();const auto axis=cylinder.Axis();
+            [holes addObject:@{@"axis":@[@(axis.Direction().X()),@(axis.Direction().Y()),@(axis.Direction().Z())],
+                @"location":@[@(axis.Location().X()*mm),@(axis.Location().Y()*mm),@(axis.Location().Z()*mm)],
+                @"radiusMM":@(cylinder.Radius()*mm),
+                @"uSpan":@(surface.LastUParameter()-surface.FirstUParameter()),
+                @"vMinMM":@(surface.FirstVParameter()*mm),@"vMaxMM":@(surface.LastVParameter()*mm),
+                @"reversed":@(face.Orientation()==TopAbs_REVERSED)}];
+        }
+        return @{@"entity":entity,@"faces":@(faces),@"holes":holes,
+            @"valid":@(BRepCheck_Analyzer(source.original.shape,Standard_True).IsValid()?YES:NO)};
     }catch(...){return nil;}
 }
 - (NSDictionary<NSString *,id> *)debugScalarPBREvidence:(NSString *)entity {
@@ -6822,6 +6962,20 @@ struct NativeModelingPermitIssuer final {
     if (![NSThread isMainThread] || scenario < 0 || scenario > 1) return @{ @"invalidScenario": @NO };
     try {
         const auto checks = Core3DDebugSavedCutResultCorrespondenceProbe(static_cast<Standard_Integer>(scenario));
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanProgramProbe {
+    if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
+    try {
+        const auto checks = Core3DDebugSavedBooleanProgramProbe();
         NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
         for (const auto& check : checks) {
             NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
@@ -14017,6 +14171,82 @@ struct NativeModelingPermitIssuer final {
 - (Core3DCylindricalCutOperation *)beginCylindricalCutRadius:(Core3DCylindricalCutSnapshot *)original
     worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion {
     return [self core3d_beginCut:original definition:nil radius:std::optional<double>(radius) expected:expected completion:completion];
+}
+
+- (Core3DCylindricalCutProgramSnapshot *)cylindricalCutProgramWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || _nativeSolidWork || _isLoading.load() || !_isSetuped || _isPreviewMode
+        || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+    try {
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->cylindricalCutProgramSource(identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        return result ? [[Core3DCylindricalCutProgramSnapshot alloc] initWithNative:*result owner:self viewer:GLController.viewer] : nil;
+    } catch (...) { return nil; }
+}
+- (Core3DCylindricalCutOperation *)core3d_beginProgramEdit:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DCylindricalCutDefinition *)definition
+    radius:(std::optional<core3d::retained_boolean::SetBoreRadius>)radius
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return nil;
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(_nativeSolidWork||_isLoading.load()){completion(Core3DProfileConstructionResultBusy);return nil;}
+    // Runtime class and exclusivity validation on the correct main-thread
+    // completion path BEFORE any definition selector is read, exactly like
+    // core3d_beginCut; a wrong-class input rejects here, never at the callers.
+    if(![original isKindOfClass:Core3DCylindricalCutProgramSnapshot.class]||!GLController||!GLController.viewer
+        ||![original matchesOwner:self viewer:GLController.viewer]
+        ||bool(radius)==bool(definition)||(definition&&![definition isKindOfClass:Core3DCylindricalCutDefinition.class])){
+        completion(Core3DProfileConstructionResultRejected);return nil;
+    }
+    // Live capture supplies only current admission identity, never a new edit target.
+    const auto live=[self cylindricalCutProgramWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if(!live){completion(Core3DProfileConstructionResultRejected);return nil;}
+    try {
+        const auto before=[original nativeSnapshot];const auto identity=[live nativeSnapshot].identity;
+        core3d::retained_boolean::ProgramEdit edit;
+        if(radius)edit=*radius;
+        else edit=core3d::retained_boolean::AppendBore{
+            core3d::cylindrical_cut::CreateEdit{static_cast<core3d::analytic_boolean::Axis>(definition.axis),
+                {definition.localX,definition.localY,definition.localZ},definition.worldRadiusMM}};
+        const CGSize size=GLController.drawableSize;
+        const auto work=GLController.viewer->prepareCylindricalCutProgramEdit(before,edit,identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if(!work){completion(Core3DProfileConstructionResultRejected);return nil;}
+        __block BOOL delivered=NO;
+        [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){delivered=YES;completion(result);}];
+        // No yield: only this exact admitted work receives cancellation rights.
+        if(delivered||_nativeSolidWork!=work)return nil;
+        return [[Core3DCylindricalCutOperation alloc] initWithOwner:self work:work];
+    }catch(...){completion(Core3DProfileConstructionResultRejected);return nil;}
+}
+- (Core3DCylindricalCutOperation *)beginCylindricalCutAppendBore:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DCylindricalCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!definition){if(completion){if(NSThread.isMainThread)completion(Core3DProfileConstructionResultRejected);
+        else dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});}return nil;}
+    return [self core3d_beginProgramEdit:original definition:definition radius:std::nullopt expected:expected completion:completion];
+}
+- (Core3DCylindricalCutOperation *)beginCylindricalCutBoreRadius:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)operandIdentifier worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_beginProgramEdit:original definition:nil
+        radius:std::optional<core3d::retained_boolean::SetBoreRadius>(core3d::retained_boolean::SetBoreRadius{operandIdentifier,radius})
+        expected:expected completion:completion];
 }
 
 - (Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier

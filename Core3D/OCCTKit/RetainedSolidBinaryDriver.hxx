@@ -47,7 +47,7 @@ public:
                 ||budget_->records>=std::size_t(profile::MaximumRecords)/2)return Refuse();
             std::vector<std::uint8_t> bytes(std::size_t(count),0);
             if(!source.GetByteArray(bytes.data(),count))return Refuse();
-            Envelope envelope;if(!Decode(bytes,envelope))return Refuse();
+            retained_boolean::Recipe envelope;if(!retained_boolean::Decode(bytes,envelope))return Refuse();
             TopoDS_Shape base;
             // This exact shared instance is owned by the enclosing native
             // document driver. Never instantiate a second shape reader here.
@@ -100,7 +100,7 @@ public:
             ||TDocStd_Document::Get(attribute->Label())->StorageFormatVersion()>TDocStd_FormatVersion_CURRENT)
             Standard_Failure::Raise("Retained solid writer source/version");
         const auto& value=*attribute->value_;std::vector<std::uint8_t> encoded;
-        if(!Encode(value.envelope,encoded)||encoded!=value.bytes||value.base.IsNull()
+        if(!retained_boolean::Encode(value.envelope,encoded)||encoded!=value.bytes||value.base.IsNull()
             ||value.base.ShapeType()!=TopAbs_SOLID||value.base.Orientation()!=TopAbs_FORWARD)
             Standard_Failure::Raise("Retained solid writer envelope/shape");
         target<<Standard_Integer(1)<<Standard_Integer(encoded.size())<<Standard_Integer(shapes_->IsQuickPart()?1:0);

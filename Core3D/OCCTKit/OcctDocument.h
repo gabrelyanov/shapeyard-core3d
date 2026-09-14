@@ -25,6 +25,7 @@
 #include "RectangularLoftRebuild.hxx"
 #include "CylindricalCutDefinition.hxx"
 #include "SavedCutSourceEdit.hxx"
+#include "RetainedBooleanEditValues.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -146,6 +147,18 @@ struct OcctCylindricalCutSource {
     TopoDS_Shape base;
     double effectiveMM=0;
     bool rebuilding=false;
+};
+
+//! Main-only whole-program source data for the public append/radius packet.
+//! The COMPLETE retained recipe (legacy or program) plus its exact persisted
+//! bytes; no single-bore projection is exposed as native authority. Capture
+//! requires an existing retained carrier: bare-source first cuts stay legacy.
+struct OcctCylindricalCutProgramSource {
+    OcctObjectTransformState original;
+    core3d::retained_boolean::Recipe recipe;
+    std::vector<std::uint8_t> recipeBytes;
+    TopoDS_Shape base;
+    double effectiveMM=0;
 };
 
 //! Exact authored name and object authority. Attribute absence is distinct
@@ -437,6 +450,7 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugEnclosureCorrespondencePro
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe(Standard_Integer scenario);
 //! DEBUG observer/whole-result fixtures only; no source-edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard_Integer scenario);
+Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe();
 //! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
@@ -754,6 +768,8 @@ public:
         const TDF_Label& label,OcctScalarAppearanceState& output)const noexcept;
     Standard_EXPORT Standard_Boolean CaptureCylindricalCutSource(
         const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept;
+    Standard_EXPORT Standard_Boolean CaptureCylindricalCutProgramSource(
+        const TDF_Label& label,OcctCylindricalCutProgramSource& output)const noexcept;
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForSavedSweepRebuild(
         const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForMeshCopy(
@@ -900,7 +916,7 @@ private:
       std::shared_ptr<const OcctSavedCutSceneState>& candidate) const noexcept;
   Standard_Boolean StageCylindricalCutReplacement(const OcctObjectTransformState& previous,
       const TopoDS_Shape& candidate,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
-      bool debugFailAfterShape=false)noexcept;
+      const std::optional<core3d::retained_boolean::ProgramEdit>& edit,bool debugFailAfterShape=false)noexcept;
   // Only this same ordinary owner may update retained source, base and result.
   Standard_Boolean StageSavedCutSourceReplacement(const OcctObjectTransformState& previous,
       const core3d::saved_cut_source_edit::Patch& patch,

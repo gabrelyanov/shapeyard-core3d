@@ -8,12 +8,14 @@ inline Classification InspectRetainedEnclosureBase(const retained_solid::Payload
     const std::atomic_bool& stop,Inspection& report)noexcept{
     report={};try{
         if(stop.load())return Classification::Cancelled;
+        const auto* legacy=std::get_if<retained_solid::Envelope>(&payload.envelope);
+        if(!legacy)return Classification::Refused;
         std::vector<std::uint8_t> encoded;
-        if(!retained_solid::Encode(payload.envelope,encoded)||encoded!=payload.bytes
-            ||payload.envelope.sourceFamily!=2)return Classification::Refused;
+        if(!retained_boolean::Encode(payload.envelope,encoded)||encoded!=payload.bytes
+            ||legacy->sourceFamily!=2)return Classification::Refused;
         enclosure::Parameters parameters;
-        if(!enclosure::Decode(int(payload.envelope.sourceSchema),payload.envelope.sourceValues,parameters)
-            ||retained_solid::Bits(parameters.metersPerUnit)!=retained_solid::Bits(payload.envelope.metersPerUnit))return Classification::Refused;
+        if(!enclosure::Decode(int(legacy->sourceSchema),legacy->sourceValues,parameters)
+            ||retained_solid::Bits(parameters.metersPerUnit)!=retained_solid::Bits(legacy->metersPerUnit))return Classification::Refused;
         return InspectEnclosure(payload.base,parameters,stop,report);
     }catch(...){return stop.load()?Classification::Cancelled:Classification::Refused;}
 }

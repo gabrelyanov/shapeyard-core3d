@@ -371,6 +371,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             if(bool(request.cut)!=(request.operation==OrdinaryTransformOperation::CylindricalCut)
                 ||bool(request.cutSource)!=(request.operation==OrdinaryTransformOperation::CylindricalCut||sourceRebuild)
                 ||request.cutSourcePatch.has_value()!=sourceRebuild||bool(request.cutSourceRebuild)!=sourceRebuild
+                ||(request.cutProgramEdit.has_value()&&request.operation!=OrdinaryTransformOperation::CylindricalCut)
                 ||(sourceRebuild&&(permit||changes.size()!=1)))
                 return reject(OrdinaryEditResult::Invalid);
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
@@ -471,23 +472,47 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             const auto representation = record.previous.resolvedRepresentation;
             if(request.operation==OrdinaryTransformOperation::CylindricalCut) {
                 OcctCylindricalCutSource source;std::vector<std::uint8_t> encoded;
-                if(permit||changes.size()!=1||representation!=OcctGeometryRepresentation::BRep||request.rotationAroundPivot
+                if(!request.cut)return reject(OrdinaryEditResult::Invalid);
+                const auto* legacy=std::get_if<retained_solid::Envelope>(&request.cut->envelope);
+                if(!legacy){
+                    // Whole-program append/identified-radius admission: the exact
+                    // typed transition is recomputed from the freshly captured
+                    // original full recipe and matched against prepared bytes.
+                    OcctCylindricalCutProgramSource program;
+                    if(!request.cutProgramEdit||!std::holds_alternative<retained_boolean::Program>(request.cut->envelope)
+                        ||permit||changes.size()!=1||representation!=OcctGeometryRepresentation::BRep||request.rotationAroundPivot
+                        ||!MatricesEqual(record.previous.transform,request.transform)
+                        ||!_document->CaptureCylindricalCutProgramSource(request.label,program)
+                        ||!program.original.IsEqual(record.previous)
+                        ||!request.cut->base.IsEqual(program.base)
+                        ||!retained_boolean::Encode(request.cut->envelope,encoded)||encoded!=request.cut->bytes
+                        ||!_document->SavedCutSceneStateMatches(request.cutSource))return reject(OrdinaryEditResult::Invalid);
+                    const auto expected=retained_boolean::Apply(program.recipe,*request.cutProgramEdit,program.effectiveMM);
+                    if(!expected||expected->oldBytes!=program.recipeBytes||expected->newBytes!=request.cut->bytes
+                        ||!std::holds_alternative<retained_boolean::Program>(expected->recipe))return reject(OrdinaryEditResult::Invalid);
+                    if(!geometryChanges&&program.recipeBytes!=request.cut->bytes)return reject(OrdinaryEditResult::Invalid);
+                    ledger.cutPrevious=request.cutSource;
+                    sweepNoChange=program.recipeBytes==request.cut->bytes;
+                }else{
+                if(request.cutProgramEdit
+                    ||permit||changes.size()!=1||representation!=OcctGeometryRepresentation::BRep||request.rotationAroundPivot
                     ||!MatricesEqual(record.previous.transform,request.transform)
                     ||!_document->CaptureCylindricalCutSource(request.label,source)||!source.original.IsEqual(record.previous)
                     ||!request.cut->base.IsEqual(source.base)
-                    ||!retained_solid::Encode(request.cut->envelope,encoded)||encoded!=request.cut->bytes
+                    ||!retained_solid::Encode((*legacy),encoded)||encoded!=request.cut->bytes
                     ||!_document->SavedCutSceneStateMatches(request.cutSource))return reject(OrdinaryEditResult::Invalid);
                 auto expected=source.envelope;
                 if(source.rebuilding){
-                    if(!cylindrical_cut::SameFixedEnvelope(expected,request.cut->envelope))return reject(OrdinaryEditResult::Invalid);
+                    if(!cylindrical_cut::SameFixedEnvelope(expected,(*legacy)))return reject(OrdinaryEditResult::Invalid);
                 }else{
-                    expected.derivedFeature=request.cut->envelope.derivedFeature;expected.operandID=request.cut->envelope.operandID;
-                    expected.axis=request.cut->envelope.axis;expected.point=request.cut->envelope.point;expected.radius=request.cut->envelope.radius;
+                    expected.derivedFeature=(*legacy).derivedFeature;expected.operandID=(*legacy).operandID;
+                    expected.axis=(*legacy).axis;expected.point=(*legacy).point;expected.radius=(*legacy).radius;
                     if(!retained_solid::Encode(expected,encoded)||encoded!=request.cut->bytes)return reject(OrdinaryEditResult::Invalid);
                 }
                 if(!geometryChanges&&(!source.rebuilding||source.original.retained.value->bytes!=request.cut->bytes))return reject(OrdinaryEditResult::Invalid);
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=source.rebuilding&&source.original.retained.value->bytes==request.cut->bytes;
+                }
             }
             if(sourceRebuild) {
                 if(!savedCutSourceChangeMatches(request,record.previous))return reject(OrdinaryEditResult::Invalid);
@@ -499,11 +524,22 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 // An occurrence edit never changes the original-local result,
                 // retained base or cylinder. No reserved-placement fallback.
                 OcctCylindricalCutSource cut;double originalRadius=0,candidateRadius=0;
+                OcctCylindricalCutProgramSource program;
+                const bool wholeProgram=std::holds_alternative<retained_boolean::Program>(record.previous.retained.value->envelope);
                 if(permit||changes.size()!=1||geometryChanges
                     ||(request.operation!=OrdinaryTransformOperation::Translate
                         &&request.operation!=OrdinaryTransformOperation::Rotate
-                        &&request.operation!=OrdinaryTransformOperation::Scale)
-                    ||!_document->CaptureCylindricalCutSource(request.label,cut)||!cut.rebuilding
+                        &&request.operation!=OrdinaryTransformOperation::Scale))
+                    return reject(OrdinaryEditResult::Invalid);
+                if(wholeProgram){
+                    // Every program operand's physical radius must stay inside
+                    // the supported domain before and after the occurrence edit.
+                    if(!_document->CaptureCylindricalCutProgramSource(request.label,program)
+                        ||!program.original.IsEqual(record.previous)
+                        ||!retained_boolean::OccurrenceRadiiMM(program.recipe,record.previous.transform)
+                        ||!retained_boolean::OccurrenceRadiiMM(program.recipe,request.transform))
+                        return reject(OrdinaryEditResult::Invalid);
+                }else if(!_document->CaptureCylindricalCutSource(request.label,cut)||!cut.rebuilding
                     ||!cut.original.IsEqual(record.previous)
                     ||!cylindrical_cut::OccurrenceRadius(cut.envelope,record.previous.transform,originalRadius)
                     ||!cylindrical_cut::OccurrenceRadius(cut.envelope,request.transform,candidateRadius))
@@ -1949,7 +1985,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
 #if DEBUG
                 if(_stageFailureIndex==2){_stageFailureIndex=-1;pairedFault=true;}
 #endif
-                cutStaged=_document->StageCylindricalCutReplacement(record.previous,record.requested.shape,record.requested.cut,pairedFault);
+                cutStaged=_document->StageCylindricalCutReplacement(record.previous,record.requested.shape,record.requested.cut,record.requested.cutProgramEdit,pairedFault);
 
 #if DEBUG // Cut475 phase diagnostics only
                 Cut475Trace("ordinary.stage-return",int(cutStaged));

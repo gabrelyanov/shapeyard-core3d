@@ -73,11 +73,12 @@ inline bool PrepareValues(const retained_solid::Payload& retained,const Patch& p
     out={};try {
         // Validate lengths and the original exact envelope before copying.
         if(stop.load()||retained.bytes.size()>retained_solid::MaximumEnvelopeBytes)return false;
+        const auto* legacy=std::get_if<retained_solid::Envelope>(&retained.envelope);if(!legacy)return false;
         std::vector<std::uint8_t> oldBytes;
-        if(!retained_solid::Encode(retained.envelope,oldBytes)||oldBytes!=retained.bytes)return false;
-        const auto applied=saved_cut_source_values::Apply(retained.envelope,patch);
+        if(!retained_boolean::Encode(retained.envelope,oldBytes)||oldBytes!=retained.bytes)return false;
+        const auto applied=saved_cut_source_values::Apply(*legacy,patch);
         if(stop.load()||!applied)return false;
-        Values v;v.oldEnvelope=retained.envelope;v.newEnvelope=applied->envelope;
+        Values v;v.oldEnvelope=*legacy;v.newEnvelope=applied->envelope;
         v.oldBytes=std::move(oldBytes);v.changed=applied->changed;
         if(!retained_solid::Encode(v.newEnvelope,v.newBytes))return false;
         // Exact fixed envelope check independent of any regenerated DTO.

@@ -27,9 +27,9 @@ struct Probe {
         TDataStd_AsciiString::Set(label,id,UUIDText(value).c_str());
     }
     static Handle(Attribute) Install(const Handle(TDocStd_Document)& doc,const TDF_Label& label,
-                                      const Envelope& envelope,const TopoDS_Shape& base){
+                                      const retained_boolean::Recipe& envelope,const TopoDS_Shape& base){
         if(doc.IsNull()||!doc->HasOpenCommand()||label.Data()!=doc->GetData())throw std::invalid_argument("probe command");
-        std::vector<std::uint8_t> bytes;if(!Encode(envelope,bytes))throw std::invalid_argument("probe envelope");
+        std::vector<std::uint8_t> bytes;if(!retained_boolean::Encode(envelope,bytes))throw std::invalid_argument("probe envelope");
         Handle(Attribute) attribute;
         if(!label.FindAttribute(AttributeID(),attribute)){attribute=new Attribute();label.AddAttribute(attribute);}
         auto value=std::make_shared<Payload>();value->envelope=envelope;value->bytes=std::move(bytes);value->base=base;
@@ -185,7 +185,7 @@ struct Probe {
                     auto changed=f.envelope;changed.radius*=1.5;doc->NewCommand();Install(doc,f.record,changed,f.base);
                     if(!doc->CommitCommand())throw std::invalid_argument("probe change");
                     checks[std::string(prefix)+"undo"]=doc->Undo()&&attribute->value()==original&&attribute->value()->bytes==f.bytes;
-                    checks[std::string(prefix)+"redo"]=doc->Redo()&&Bits(attribute->value()->envelope.radius)==Bits(changed.radius)
+                    checks[std::string(prefix)+"redo"]=doc->Redo()&&Bits(std::get<Envelope>(attribute->value()->envelope).radius)==Bits(changed.radius)
                         &&attribute->value()->base.IsEqual(f.base);
                     const auto beforeAbort=attribute->value();doc->NewCommand();Install(doc,f.record,f.envelope,f.base);doc->AbortCommand();
                     checks[std::string(prefix)+"abort"]=attribute->value()==beforeAbort;

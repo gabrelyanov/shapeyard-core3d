@@ -70,6 +70,7 @@ namespace core3d {
     struct SweepSolidGeometry;
     struct LoftSolidGeometry;
     struct CutSolidGeometry;
+    struct CutProgramGeometry;
     struct AssemblyPartDefinition {
         profile::Parameters parameters;
         TCollection_ExtendedString name;
@@ -78,9 +79,18 @@ namespace core3d {
     // Detached typed payload only; monostate is an invalid/unprepared request.
     using NativeSolidGeometryPayload = std::variant<std::monostate,
         std::shared_ptr<ProfileSolidGeometry>, std::shared_ptr<EnclosureSolidGeometry>,
-        std::shared_ptr<AssemblySolidGeometry>,std::shared_ptr<SweepSolidGeometry>,std::shared_ptr<LoftSolidGeometry>,std::shared_ptr<CutSolidGeometry>>;
+        std::shared_ptr<AssemblySolidGeometry>,std::shared_ptr<SweepSolidGeometry>,std::shared_ptr<LoftSolidGeometry>,std::shared_ptr<CutSolidGeometry>,std::shared_ptr<CutProgramGeometry>>;
     struct CylindricalCutSnapshot {
         OcctCylindricalCutSource source;
+        ObjectFrameIdentity identity;
+        authority::Stamp authorityStamp;
+        std::shared_ptr<const OcctSavedCutSceneState> guard;
+    };
+    //! Whole-program retained cut snapshot. The complete recipe, its exact
+    //! persisted bytes and the immutable original base ride together; bore
+    //! descriptors projected from it are values, never edit authority.
+    struct CylindricalCutProgramSnapshot {
+        OcctCylindricalCutProgramSource source;
         ObjectFrameIdentity identity;
         authority::Stamp authorityStamp;
         std::shared_ptr<const OcctSavedCutSceneState> guard;
@@ -223,6 +233,13 @@ namespace core3d {
 #endif
     std::shared_ptr<NativeSolidWork> prepareCylindricalCut(const CylindricalCutSnapshot&,
         const std::optional<cylindrical_cut::CreateEdit>&,const std::optional<cylindrical_cut::RadiusEdit>&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    // Public whole-program packet: append one separated same-axis bore or change
+    // one identified operand's radius. Same ordinary worker/ownership slot.
+    std::optional<CylindricalCutProgramSnapshot> cylindricalCutProgramSource(const ObjectFrameIdentity&,
+        std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    std::shared_ptr<NativeSolidWork> prepareCylindricalCutProgramEdit(const CylindricalCutProgramSnapshot&,
+        const retained_boolean::ProgramEdit&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
     // Separate native-only source-edit lease. Main-thread authority never goes
     // to the geometry worker; no Objective-C or provider route is activated.

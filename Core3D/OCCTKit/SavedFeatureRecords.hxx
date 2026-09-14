@@ -43,9 +43,10 @@ inline bool Validate(const Handle(TDocStd_Document)& document,
         std::vector<retained_solid::Record> retained;
         if(!retained_solid::ReadAll(document,retained))return clear();
         for(const auto& record:retained){
+            const auto identity=retained_boolean::Identities(record.value->envelope);
             if(identities.size()>profile::MaximumRecords-2
-                ||!identities.insert(retained_solid::UUIDText(record.value->envelope.sourceFeature)).second
-                ||!identities.insert(retained_solid::UUIDText(record.value->envelope.derivedFeature)).second)return clear();
+                ||!identities.insert(retained_solid::UUIDText(identity.sourceFeature)).second
+                ||!identities.insert(retained_solid::UUIDText(identity.derivedFeature)).second)return clear();
         }
         if(retainedOutput)*retainedOutput=std::move(retained);
         return true;

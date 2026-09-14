@@ -8,6 +8,7 @@
 #include "NativeModelingRequest.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
+#include "../OCCTKit/RetainedBooleanEditValues.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
 #include <map>
@@ -121,6 +122,10 @@ struct OrdinaryTransformChange {
     std::shared_ptr<const SweepRebuildGuard> sweepSource;
     std::shared_ptr<const retained_solid::Payload> cut;
     std::shared_ptr<const OcctSavedCutSceneState> cutSource;
+    // Whole-program typed append/identified-radius input. Set exactly when the
+    // cut carrier holds a v2 Program; the ordinary owner and the document stage
+    // independently recompute the legal transition from the captured original.
+    std::optional<retained_boolean::ProgramEdit> cutProgramEdit;
     // Separate native source/base/result path. No radius payload or AI permit.
     std::optional<saved_cut_source_edit::Patch> cutSourcePatch;
     std::shared_ptr<const SavedCutSourceDetachedResult> cutSourceRebuild;

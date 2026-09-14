@@ -10,6 +10,7 @@
 #include "../OCCTKit/SavedCutWholeResultCorrespondence.hxx"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
 #include "../OCCTKit/CutDisplayPreparation.hxx"
+#include "../OCCTKit/SavedBooleanProgramBuild.hxx"
 #include "../OCCTKit/SavedFeatureRecords.hxx"
 #include "../OCCTKit/PlanarSweepSolid.hxx"
 #include "../OCCTKit/RectangularLoftSolid.hxx"
@@ -1835,6 +1836,18 @@ struct CutSolidGeometry {
     analytic_boolean::Result result;
     bool built=false;
 };
+// Whole-program payload: detached deep base copy, the complete typed program
+// and the exact expected recipe bytes. No live label, material or AIS handle.
+struct CutProgramGeometry {
+    cut_display::Settings displaySettings;
+    TopoDS_Shape detachedBase;
+    retained_boolean::Program program;
+    std::vector<std::uint8_t> expectedBytes;
+    std::uint32_t selectedOperandID=0;
+    std::atomic_bool cancelled{false};
+    saved_boolean_build::Result result;
+    bool built=false;
+};
 struct LoftSolidGeometry {
     std::shared_ptr<const rectangular_loft::Prepared> prepared;
     std::atomic_bool cancelled{false};
@@ -1888,6 +1901,15 @@ std::optional<CompletedNativeSolid> CompletedNativeSolidFor(const NativeSolidGeo
     if(const auto p=std::get_if<std::shared_ptr<CutSolidGeometry>>(&payload)) {
         if(*p&&(*p)->built&&!(*p)->cancelled.load()&&!(*p)->result.solid.IsNull())
             return CompletedNativeSolid{(*p)->result.solid,(*p)->result.resultBounds};
+    }
+    if(const auto p=std::get_if<std::shared_ptr<CutProgramGeometry>>(&payload)) {
+        if(*p&&(*p)->built&&!(*p)->cancelled.load()&&!(*p)->result.solid.IsNull()){
+            std::array<double,6> bounds{};Bnd_Box box;
+            try{BRepBndLib::Add((*p)->result.solid,box);}catch(...){return {};}
+            if(box.IsVoid()||box.IsWhole())return {};
+            box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+            return CompletedNativeSolid{(*p)->result.solid,bounds};
+        }
     }
     if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
         if (*p && (*p)->built && !(*p)->cancelled.load() && !(*p)->result.solid.IsNull())
@@ -2701,7 +2723,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
             for(const auto& r:enclosures)if(r.identifier==newID)return {};
             for(const auto& r:sweeps)if(r.identifier==newID)return {};
             for(const auto& r:lofts)if(r.identifier==newID)return {};
-            for(const auto& r:retained)if(r.value->envelope.sourceFeature==envelope.derivedFeature||r.value->envelope.derivedFeature==envelope.derivedFeature)return {};
+            for(const auto& r:retained){const auto identity=retained_boolean::Identities(r.value->envelope);
+                if(identity.sourceFeature==envelope.derivedFeature||identity.derivedFeature==envelope.derivedFeature)return {};}
         }
         std::size_t envelopeBytes=carrier->bytes.size();
         for(const auto& r:retained){
@@ -2724,6 +2747,90 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         record.requested.label=record.previous.label;record.requested.presentation=selected;record.requested.shape=record.previous.shape;
         record.requested.transform=record.previous.transform;record.requested.operation=OrdinaryTransformOperation::CylindricalCut;
         record.requested.cut=carrier;record.requested.cutSource=original.guard;
+        work->rebuildAuthority.emplace();work->rebuildAuthority->records.push_back(std::move(record));
+        if(!admitTransform(*work->rebuildAuthority))return {};
+        const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(!after||!(*after==original.authorityStamp)||!myDoc->SavedCutSceneStateMatches(original.guard))return {};
+        work->geometry=geometry;work->cutStamp=original.authorityStamp;work->frameFirst=false;return work;
+    }catch(...){return {};}
+}
+
+std::optional<CylindricalCutProgramSnapshot> Core3DViewer::cylindricalCutProgramSource(
+    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
+    if(!NSThread.isMainThread||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||identity.entityIdentifier.empty()||!width||!height)return {};
+    try {
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());const auto snapshot=captureSceneSnapshot(width,height);
+        if(!stamp||!snapshot||snapshot->selectionMode!=scene::ElementKind::Object
+            ||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||snapshot->revisions.documentGeneration!=identity.documentGeneration||snapshot->revisions.model!=identity.modelRevision
+            ||snapshot->revisions.presentation!=presentation)return {};
+        myContext->InitSelected();if(!myContext->MoreSelected())return {};
+        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+        if(selected.IsNull()||myContext->MoreSelected())return {};
+        CylindricalCutProgramSnapshot result;const auto label=myDoc->ShapeLabel(selected);
+        if(!myDoc->CaptureCylindricalCutProgramSource(label,result.source)||result.source.original.entityIdentifier!=identity.entityIdentifier)return {};
+        result.guard=myDoc->CaptureSavedCutSceneState(label);const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(!result.guard||!after||!(*after==*stamp))return {};
+        result.identity=identity;result.authorityStamp=*stamp;return result;
+    }catch(...){return {};}
+}
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(const CylindricalCutProgramSnapshot& original,
+    const retained_boolean::ProgramEdit& edit,
+    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
+    if(!NSThread.isMainThread
+        ||identity.entityIdentifier!=original.identity.entityIdentifier||identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
+        ||identity.documentGeneration!=original.identity.documentGeneration||identity.modelRevision!=original.identity.modelRevision)return {};
+    try {
+        // Revalidate against a freshly captured original; stale input is never
+        // refreshed onto a different target.
+        const auto current=cylindricalCutProgramSource(identity,presentation,width,height);
+        if(!current||!(current->authorityStamp==original.authorityStamp)||!current->source.original.IsEqual(original.source.original)
+            ||!sweep_rebuild::SameRawScalars(current->source.original.scalars,original.source.original.scalars)
+            ||current->source.effectiveMM!=original.source.effectiveMM
+            ||current->source.recipeBytes!=original.source.recipeBytes
+            ||!myDoc->SavedCutSceneStateMatches(original.guard))return {};
+        const auto change=retained_boolean::Apply(original.source.recipe,edit,original.source.effectiveMM);
+        if(!change)return {};
+        const auto* program=std::get_if<retained_boolean::Program>(&change->recipe);
+        // This packet emits only v2 programs. A legacy one-bore radius keeps
+        // its exact legacy API; nothing is silently downgraded or reissued.
+        if(!program||!retained_boolean::Valid(*program))return {};
+        if(program->steps.size()==2){
+            // Explicit refusal of unsupported crossing-axis or touching bores
+            // before any detached geometry work is prepared.
+            if(program->steps[0].operand.axis!=program->steps[1].operand.axis
+                ||!saved_boolean_result::detail::SeparateDisks(*program))return {};
+        }
+        auto carrier=std::make_shared<retained_solid::Payload>();carrier->envelope=change->recipe;
+        carrier->bytes=change->newBytes;carrier->base=original.source.base;
+        // Append/radius keeps the retained source/derived UUIDs; no new feature
+        // identity is issued. Only the persisted high-water ID may advance.
+        std::vector<profile::Record> profiles;std::vector<enclosure::Record> enclosures;
+        std::vector<sweep_persistence::Record> sweeps;std::vector<loft_persistence::Record> lofts;
+        std::vector<retained_solid::Record> retained;
+        if(!saved_features::Validate(myDoc->Document(),profiles,enclosures,sweeps,lofts,&retained))return {};
+        std::size_t envelopeBytes=carrier->bytes.size();
+        for(const auto& r:retained){
+            if(r.owner.IsEqual(original.source.original.label))continue;
+            if(r.value->bytes.size()>retained_solid::MaximumAggregateEnvelopeBytes-envelopeBytes)return {};
+            envelopeBytes+=r.value->bytes.size();
+        }
+        std::atomic_bool stopped{false};if(!analytic_boolean::detail::Bounded(original.source.base,1024,stopped))return {};
+        // The main-only immutable carrier keeps the actual original. Only a
+        // deep geometry copy with no live labels/materials reaches the worker.
+        BRepBuilderAPI_Copy copy(original.source.base,Standard_True,Standard_False);if(!copy.IsDone())return {};
+        auto geometry=std::make_shared<CutProgramGeometry>();geometry->detachedBase=copy.Shape();
+        geometry->program=*program;geometry->expectedBytes=change->newBytes;geometry->selectedOperandID=change->selectedOperandID;
+        myContext->InitSelected();const auto displaySource=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        if(displaySource.IsNull()||!cut_display::Capture(displaySource->Attributes(),geometry->displaySettings))return {};
+        if(geometry->detachedBase.IsNull()||geometry->detachedBase.IsPartner(original.source.base))return {};
+        auto work=prepareNativeSolidWork(identity,presentation,width,height);
+        if(!work||retained_solid::Bits(work->metersPerUnit)!=retained_solid::Bits(program->source.metersPerUnit))return {};
+        myContext->InitSelected();const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());if(selected.IsNull())return {};
+        OrdinaryTransformRecord record;record.previous=original.source.original;
+        record.requested.label=record.previous.label;record.requested.presentation=selected;record.requested.shape=record.previous.shape;
+        record.requested.transform=record.previous.transform;record.requested.operation=OrdinaryTransformOperation::CylindricalCut;
+        record.requested.cut=carrier;record.requested.cutSource=original.guard;record.requested.cutProgramEdit=edit;
         work->rebuildAuthority.emplace();work->rebuildAuthority->records.push_back(std::move(record));
         if(!admitTransform(*work->rebuildAuthority))return {};
         const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
@@ -2788,6 +2895,15 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
             &&cut_display::Prepare((*p)->result.solid,(*p)->displaySettings,(*p)->cancelled);
         return (*p)->built;
     }
+    if(const auto p=std::get_if<std::shared_ptr<CutProgramGeometry>>(&payload)) {
+        if(!*p||(*p)->built||(*p)->cancelled.load())return false;
+        // Whole-program detached build with the existing complete-boundary
+        // proof; the worker output must encode to the prepared expected bytes.
+        (*p)->result=saved_boolean_build::Build((*p)->detachedBase,(*p)->program,(*p)->displaySettings,(*p)->cancelled);
+        (*p)->built=(*p)->result.status==saved_boolean_build::Status::Built
+            &&(*p)->result.exactProgram==(*p)->expectedBytes;
+        return (*p)->built;
+    }
     if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
         if (!*p || (*p)->built || (*p)->cancelled.load()) return false;
         (*p)->built=rectangular_loft::Build((*p)->prepared,(*p)->cancelled,(*p)->result)==rectangular_loft::BuildStatus::Built;
@@ -2812,6 +2928,9 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
 void Core3DViewer::cancelNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     if (!work) return;
     if(const auto p=std::get_if<std::shared_ptr<CutSolidGeometry>>(&work->geometry)) {
+        if(*p)(*p)->cancelled.store(true);return;
+    }
+    if(const auto p=std::get_if<std::shared_ptr<CutProgramGeometry>>(&work->geometry)) {
         if(*p)(*p)->cancelled.store(true);return;
     }
     if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry)) {
@@ -2937,6 +3056,12 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
             ||!work->loftIdentifier.empty()||!work->sweepIdentifier.empty()||!work->assemblyParts.empty()
             ||!work->rebuildAuthority||work->rebuildAuthority->records.size()!=1
             ||work->rebuildAuthority->records.front().requested.operation!=OrdinaryTransformOperation::CylindricalCut)return OrdinaryEditResult::Invalid;
+    }else if(const auto cutProgram=std::get_if<std::shared_ptr<CutProgramGeometry>>(&work->geometry)){
+        if(!*cutProgram||work->modelingPermit||!work->cutStamp||work->loftRebuildStamp||work->sweepRebuildStamp
+            ||!work->loftIdentifier.empty()||!work->sweepIdentifier.empty()||!work->assemblyParts.empty()
+            ||!work->rebuildAuthority||work->rebuildAuthority->records.size()!=1
+            ||work->rebuildAuthority->records.front().requested.operation!=OrdinaryTransformOperation::CylindricalCut
+            ||!work->rebuildAuthority->records.front().requested.cutProgramEdit)return OrdinaryEditResult::Invalid;
     }else if(work->cutStamp)return OrdinaryEditResult::Invalid;
     const auto loftPayload=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry);
     if(loftPayload) {
@@ -3047,6 +3172,12 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 if(!*cut||record.requested.presentation.IsNull()
                     ||!cut_display::Capture(record.requested.presentation->Attributes(),currentDisplay)
                     ||!(currentDisplay==(*cut)->displaySettings))return OrdinaryEditResult::Invalid;
+            }
+            if(const auto programCut=std::get_if<std::shared_ptr<CutProgramGeometry>>(&work->geometry)){
+                cut_display::Settings currentDisplay;
+                if(!*programCut||record.requested.presentation.IsNull()
+                    ||!cut_display::Capture(record.requested.presentation->Attributes(),currentDisplay)
+                    ||!(currentDisplay==(*programCut)->displaySettings))return OrdinaryEditResult::Invalid;
             }
             record.requested.shape = completed->solid;
             OrdinaryEditResult result = OrdinaryEditResult::Invalid;
