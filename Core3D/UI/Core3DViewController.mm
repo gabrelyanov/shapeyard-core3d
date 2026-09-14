@@ -68,6 +68,7 @@
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include <set>
 #include "../OCCTKit/NativeModelingRequest.hxx"
+#include "../OCCTKit/NativeModelingTombstone.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
@@ -78,7 +79,6 @@
 #endif
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include <XCAFDoc_ShapeMapTool.hxx>
-#include "../OCCTKit/NativeModelingTombstone.hxx"
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TDF_Tool.hxx>
 #include <thread>
