@@ -15,11 +15,11 @@ enum class Classification { Refused, Cancelled, MatchedOrientedBoundary };
 struct Inspection {Classification classification=Classification::Refused;const char* phase="input";std::size_t vertices=0,edges=0,faces=0,vertexLinks=0;double errorMM=0;};
 namespace detail {
 struct Graph {std::vector<od::Face> faces;std::vector<od::Edge> edges;Budget budget;std::map<std::pair<unsigned,unsigned>,std::vector<d::PCurve>> pcurves;};
-inline bool Collect(const TopoDS_Shape& result,const retained_solid::Envelope& newSource,const std::atomic_bool& stop,Graph& graph){
+inline bool Collect(const TopoDS_Shape& result,const retained_solid::Envelope& newSource,const std::atomic_bool& stop,Graph& graph,std::size_t maximumFaceWires=4){
     using namespace od;const double mm=newSource.metersPerUnit*1000;
     Budget budget;saved_cut_bore_result::Report report;const auto fail=[](){return false;};
         report.phase="collect";
-        if(result.IsNull()||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return fail();
+        if(maximumFaceWires==0||maximumFaceWires>6||result.IsNull()||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return fail();
         std::vector<TopoDS_Shape> shells,rawFaces;
         if(!d::Children(result,TopAbs_SHELL,1,shells,budget)||shells.size()!=1
             ||!d::Children(shells[0],TopAbs_FACE,130,rawFaces,budget)||rawFaces.empty())return fail();
@@ -29,7 +29,7 @@ inline bool Collect(const TopoDS_Shape& result,const retained_solid::Envelope& n
             if(faceMap.Contains(face.shape)||!d::SurfacePreflight(face.shape,budget)
                 ||!d::Tolerance(BRep_Tool::Tolerance(face.shape),face.shape,mm,budget)
                 ||!d::ReadSurface(face.shape,mm,budget,face.surface))return fail();faceMap.Add(face.shape);
-            std::vector<TopoDS_Shape> rawWires;if(!d::Children(face.shape,TopAbs_WIRE,4,rawWires,budget)||rawWires.empty())return fail();
+            std::vector<TopoDS_Shape> rawWires;if(!d::Children(face.shape,TopAbs_WIRE,maximumFaceWires,rawWires,budget)||rawWires.empty())return fail();
             for(const auto& rawWire:rawWires){
                 if(wireMap.Contains(rawWire))return fail();wireMap.Add(rawWire);
                 std::vector<TopoDS_Shape> rawEdges;if(!d::Children(rawWire,TopAbs_EDGE,128,rawEdges,budget)||rawEdges.empty())return fail();

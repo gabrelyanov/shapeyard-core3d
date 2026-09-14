@@ -107,11 +107,14 @@ inline bool Close2(const gp_Pnt2d& a,const gp_Pnt2d& b,double uScale,double vSca
 }
 }
 inline Report Inspect(const TopoDS_Shape& result,const retained_solid::Envelope& oldSource,
-    const retained_solid::Envelope& newSource,const std::atomic_bool& stop) noexcept {
+    const retained_solid::Envelope& newSource,const std::atomic_bool& stop,
+    std::size_t maximumFaceWires=4) noexcept {
     using namespace detail;Report report;Budget budget;
     const auto fail=[&](){report.status=stop.load()?Status::Cancelled:Status::Refused;return report;};
     try {
-        if(stop.load()||!FixedTool(oldSource,newSource))return fail();
+        // Legacy callers retain four wires. Programs may supply a recipe-derived
+        // bound of at most two source wires plus four retained openings.
+        if(maximumFaceWires==0||maximumFaceWires>6||stop.load()||!FixedTool(oldSource,newSource))return fail();
         const auto oldClear=saved_cut_bore_clearance::Inspect(oldSource),newClear=saved_cut_bore_clearance::Inspect(newSource);
         if(oldClear.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk||newClear.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk)return fail();
         std::optional<profile::ConstructionFrame> oldFrame,frame;int oldPlane=-1,plane=-1;double oldWall=0,wall=0;
@@ -141,7 +144,7 @@ inline Report Inspect(const TopoDS_Shape& result,const retained_solid::Envelope&
             if(faceMap.Contains(face.shape)||!d::SurfacePreflight(face.shape,budget)
                 ||!d::Tolerance(BRep_Tool::Tolerance(face.shape),face.shape,mm,budget)
                 ||!d::ReadSurface(face.shape,mm,budget,face.surface))return fail();faceMap.Add(face.shape);
-            std::vector<TopoDS_Shape> rawWires;if(!d::Children(face.shape,TopAbs_WIRE,4,rawWires,budget)||rawWires.empty())return fail();
+            std::vector<TopoDS_Shape> rawWires;if(!d::Children(face.shape,TopAbs_WIRE,maximumFaceWires,rawWires,budget)||rawWires.empty())return fail();
             for(const auto& rawWire:rawWires){
                 if(wireMap.Contains(rawWire))return fail();wireMap.Add(rawWire);
                 std::vector<TopoDS_Shape> rawEdges;if(!d::Children(rawWire,TopAbs_EDGE,128,rawEdges,budget)||rawEdges.empty())return fail();

@@ -107,16 +107,27 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
     Inspection report;const auto fail=[&](){report.classification=stop.load()?Classification::Cancelled:Classification::Refused;return report;};
     try {
         if(stop.load()||!detail::SeparateDisks(program))return fail();
-        std::vector<retained_solid::Envelope> views;
+        const auto newSource=detail::GeometryView(program,0);old::Expected expected;
+        if(!old::ExpectedSource(newSource,expected)||expected.caps[0]>=expected.faces.size()
+            ||expected.caps[1]>=expected.faces.size()||expected.caps[0]==expected.caps[1])return fail();
+        // Each pierced source cap gains exactly one loop per declared bore.
+        // Derive the collection allowance from the independent recipe, never
+        // from observed output; all exact face/loop matching below still applies.
+        std::size_t maximumFaceWires=1;
+        for(std::size_t f=0;f<expected.faces.size();++f){
+            const auto sourceWires=expected.faces[f].wires.size();
+            if(sourceWires==0||sourceWires>2)return fail();
+            const auto openingWires=(f==expected.caps[0]||f==expected.caps[1])?program.steps.size():0;
+            maximumFaceWires=std::max(maximumFaceWires,sourceWires+openingWires);
+        }
         for(std::size_t i=0;i<program.steps.size();++i){
-            views.push_back(detail::GeometryView(program,i));
-            const auto bore=saved_cut_bore_result::Inspect(result,views.back(),views.back(),stop);
+            const auto view=detail::GeometryView(program,i);
+            const auto bore=saved_cut_bore_result::Inspect(result,view,view,stop,maximumFaceWires);
             report.phase=bore.phase;
             if(bore.status!=saved_cut_bore_result::Status::BoreWallObservedExteriorUnproven)return fail();
         }
-        const auto& newSource=views.front();old::Expected expected;
-        if(!old::ExpectedSource(newSource,expected))return fail();detail::Graph graph;report.phase="program-collect";
-        if(!old::detail::Collect(result,newSource,stop,graph))return fail();
+        detail::Graph graph;report.phase="program-collect";
+        if(!old::detail::Collect(result,newSource,stop,graph,maximumFaceWires))return fail();
         const double mm=program.source.metersPerUnit*1000,pi=std::acos(-1.0);const auto n=program.steps.size();
         if(graph.faces.size()!=expected.faces.size()+n||graph.edges.size()!=expected.edges.size()+3*n)return fail();
         for(const auto& step:program.steps)for(double coordinate:step.operand.point)
