@@ -1908,6 +1908,9 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
 - (BOOL)debugConfigureSavedGroupOriginPostStageFault:(NSInteger)memberCount;
 - (NSArray<NSNumber *> *_Nullable)debugSavedGroupOrigin:(NSString *)identifier;
+//! Exact current attached manipulator location; nil when no gizmo is attached.
+//! Read-only DEBUG evidence for saved-group pivot attachment paths.
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count;

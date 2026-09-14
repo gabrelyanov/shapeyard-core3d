@@ -948,6 +948,13 @@ namespace core3d {
 			_manipulatorSourceLabels.emplace(
 				object.first.get(), object.second);
 		}
+		if (positionManipulatorAtExactSavedGroupOrigin()
+			== SavedGroupPivotResult::Failed) {
+			// Select All retains its exact selection, but malformed saved-group
+			// authority must never expose a gizmo at a guessed pivot.
+			_manipulator->Detach();
+			_manipulatorSourceLabels.clear();
+		}
 		myContext->UpdateCurrentViewer();
 	}
 
@@ -3001,6 +3008,14 @@ namespace core3d {
                 }
             }
             _manipulatorSourceLabels.swap(previousLabels);
+            if (!previousObjects.IsNull()
+                && positionManipulatorAtExactSavedGroupOrigin()
+                    == SavedGroupPivotResult::Failed) {
+                // Rollback restored the exact selection. Keep that authority,
+                // but do not leave a draggable gizmo at a guessed pivot.
+                _manipulator->Detach();
+                _manipulatorSourceLabels.clear();
+            }
             myContext->UpdateCurrentViewer();
         } catch (...) {
             // A failed presentation repair must not leave a gizmo capable of

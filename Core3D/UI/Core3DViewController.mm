@@ -5612,6 +5612,17 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return nil; }
 }
 
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr || !interactor->isManipulatorAttached()) { return nil; }
+    const gp_XYZ position = interactor->manipulatorPosition();
+    if (!std::isfinite(position.X()) || !std::isfinite(position.Y())
+        || !std::isfinite(position.Z())) { return nil; }
+    return @[@(position.X()), @(position.Y()), @(position.Z())];
+}
+
 - (void)debugSetSavedGroupPivotFailures:(NSInteger)count {
     if (![NSThread isMainThread] || count < 0 || count > 2 || GLController == nil || GLController.viewer == nullptr) return;
     GLController.viewer->debugSetSavedGroupPivotFailures(static_cast<int>(count));
