@@ -152,7 +152,7 @@ namespace core3d {
     struct QueuedAssetLoadWork;
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
-    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps };
+    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps, CenterGround };
 
     class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
     public:

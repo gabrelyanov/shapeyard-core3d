@@ -611,6 +611,9 @@ typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
     //! rejects insufficient space. Saved-group members remain separate parts.
     Core3DObjectAlignmentAnchorEqualCenters,
     Core3DObjectAlignmentAnchorEqualGaps,
+    //! Translate the selection as one assembly: aggregate X/Y center to the
+    //! world origin and aggregate minimum Z to the ground plane.
+    Core3DObjectAlignmentAnchorCenterGround,
 };
 typedef NS_ENUM(NSInteger, Core3DObjectAlignmentResult) {
     Core3DObjectAlignmentResultUnchanged = 0,

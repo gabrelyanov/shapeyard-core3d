@@ -3642,8 +3642,9 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
         || axis < 0 || axis > 2 || width == 0 || height == 0
         || (anchor != ObjectAlignmentAnchor::Minimum && anchor != ObjectAlignmentAnchor::Center
             && anchor != ObjectAlignmentAnchor::Maximum && anchor != ObjectAlignmentAnchor::Ground
-            && anchor != ObjectAlignmentAnchor::EqualCenters && anchor != ObjectAlignmentAnchor::EqualGaps)
-        || (anchor == ObjectAlignmentAnchor::Ground && axis != 2)) { return {}; }
+            && anchor != ObjectAlignmentAnchor::EqualCenters && anchor != ObjectAlignmentAnchor::EqualGaps
+            && anchor != ObjectAlignmentAnchor::CenterGround)
+        || ((anchor == ObjectAlignmentAnchor::Ground || anchor == ObjectAlignmentAnchor::CenterGround) && axis != 2)) { return {}; }
     try {
         OCC_CATCH_SIGNALS
         const auto snapshot = captureSceneSnapshot(width, height);
@@ -3653,7 +3654,8 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
             || snapshot->revisions.model != identity.modelRevision
             || snapshot->revisions.presentation != presentationRevision
             || snapshot->selection.selected.size() > 32
-            || snapshot->selection.selected.size() < (anchor == ObjectAlignmentAnchor::Ground ? 1
+            || snapshot->selection.selected.size() < ((anchor == ObjectAlignmentAnchor::Ground
+                || anchor == ObjectAlignmentAnchor::CenterGround) ? 1
                 : (anchor == ObjectAlignmentAnchor::EqualCenters || anchor == ObjectAlignmentAnchor::EqualGaps) ? 3 : 2)) { return {}; }
         auto work = std::make_shared<ObjectAlignmentWork>();
         work->identity = identity; work->presentationRevision = presentationRevision;
@@ -3801,7 +3803,8 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
         }
         const auto coordinate = [&](double lo, double hi) {
             switch (work->anchor) {
-                case ObjectAlignmentAnchor::Minimum: case ObjectAlignmentAnchor::Ground: return lo;
+                case ObjectAlignmentAnchor::Minimum: case ObjectAlignmentAnchor::Ground:
+                case ObjectAlignmentAnchor::CenterGround: return lo;
                 case ObjectAlignmentAnchor::Center:
                 case ObjectAlignmentAnchor::EqualCenters: return lo * 0.5 + hi * 0.5;
                 case ObjectAlignmentAnchor::EqualGaps: return lo;
@@ -3811,6 +3814,20 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
         };
         const double target = work->anchor == ObjectAlignmentAnchor::Ground ? 0 : coordinate(minimum, maximum);
         const auto& geometry = work->measurement->geometry;
+        std::array<double, 3> sharedTranslation{};
+        if (work->anchor == ObjectAlignmentAnchor::CenterGround) {
+            for (int dimension = 0; dimension < 3; ++dimension) {
+                double aggregateMinimum = geometry.front().bounds[dimension];
+                double aggregateMaximum = geometry.front().bounds[dimension + 3];
+                for (const auto& item : geometry) {
+                    aggregateMinimum = std::min(aggregateMinimum, item.bounds[dimension]);
+                    aggregateMaximum = std::max(aggregateMaximum, item.bounds[dimension + 3]);
+                }
+                sharedTranslation[dimension] = dimension == 2 ? -aggregateMinimum
+                    : -(aggregateMinimum * 0.5 + aggregateMaximum * 0.5);
+                if (!std::isfinite(sharedTranslation[dimension])) { return OrdinaryEditResult::Invalid; }
+            }
+        }
         std::vector<double> targets(geometry.size(), target);
         if (work->anchor == ObjectAlignmentAnchor::EqualCenters || work->anchor == ObjectAlignmentAnchor::EqualGaps) {
             if (geometry.size() < 3 || geometry.size() != work->authority.records.size()) { return OrdinaryEditResult::Invalid; }
@@ -3849,16 +3866,31 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
         for (std::size_t index = 0; index < geometry.size(); ++index) {
             auto change = work->authority.records[index].requested;
             const auto& b = work->measurement->geometry[index].bounds;
-            const double delta = targets[index] - coordinate(b[axis], b[axis + 3]);
-            if (!std::isfinite(delta)) { return OrdinaryEditResult::Invalid; }
             auto translation = change.transform.TranslationPart();
-            // Ignore kernel-bound rounding below modeling precision. This
-            // makes repeated alignment a true no-op without history noise.
-            if (std::abs(delta) > 1e-7) {
-                const double translated = translation.Coord(axis + 1) + delta;
-                if (!std::isfinite(translated)) { return OrdinaryEditResult::Invalid; }
-                translation.SetCoord(axis + 1, translated);
-                change.transform.SetTranslationPart(gp_Vec(translation));
+            if (work->anchor == ObjectAlignmentAnchor::CenterGround) {
+                bool changed = false;
+                for (int dimension = 0; dimension < 3; ++dimension) {
+                    const double delta = sharedTranslation[dimension];
+                    // Ignore kernel-bound rounding below modeling precision.
+                    // Repeating the command then remains a true no-op.
+                    if (std::abs(delta) <= 1e-7) { continue; }
+                    const double translated = translation.Coord(dimension + 1) + delta;
+                    if (!std::isfinite(translated)) { return OrdinaryEditResult::Invalid; }
+                    translation.SetCoord(dimension + 1, translated);
+                    changed = true;
+                }
+                if (changed) { change.transform.SetTranslationPart(gp_Vec(translation)); }
+            } else {
+                const double delta = targets[index] - coordinate(b[axis], b[axis + 3]);
+                if (!std::isfinite(delta)) { return OrdinaryEditResult::Invalid; }
+                // Ignore kernel-bound rounding below modeling precision. This
+                // makes repeated alignment a true no-op without history noise.
+                if (std::abs(delta) > 1e-7) {
+                    const double translated = translation.Coord(axis + 1) + delta;
+                    if (!std::isfinite(translated)) { return OrdinaryEditResult::Invalid; }
+                    translation.SetCoord(axis + 1, translated);
+                    change.transform.SetTranslationPart(gp_Vec(translation));
+                }
             }
             changes.push_back(std::move(change));
         }

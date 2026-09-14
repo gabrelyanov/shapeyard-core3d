@@ -14920,7 +14920,7 @@ struct NativeModelingPermitIssuer final {
         || expected.publicationSourceIdentifier.length == 0
         || expected.publicationSourceIdentifier.length > 128
         || axis < Core3DTransformInspectorAxisX || axis > Core3DTransformInspectorAxisZ
-        || anchor < Core3DObjectAlignmentAnchorMinimum || anchor > Core3DObjectAlignmentAnchorEqualGaps) {
+        || anchor < Core3DObjectAlignmentAnchorMinimum || anchor > Core3DObjectAlignmentAnchorCenterGround) {
         completion(Core3DObjectAlignmentResultRejected); return;
     }
     const auto viewer = GLController.viewer;
