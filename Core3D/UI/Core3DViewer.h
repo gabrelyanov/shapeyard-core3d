@@ -160,7 +160,7 @@ namespace core3d {
     struct QueuedAssetLoadWork;
     struct ObjectAlignmentWork;
     struct ObjectAlignmentMeasurement;
-    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps, CenterGround };
+    enum class ObjectAlignmentAnchor { Minimum, Center, Maximum, Ground, EqualCenters, EqualGaps, CenterGround, GroupBaseOrigin };
 
     class Core3DViewer: public OcctViewer, private OrdinaryEditPresentationHost {
     public:
@@ -377,7 +377,7 @@ namespace core3d {
             _debugOrdinaryVisibilityAfterRepairFailures = count > 0 ? count : 0;
         }
 #endif
-        //! Operations: 0 create, 1 rename, 2 ungroup, 3 hide, 4 show.
+        //! Operations: 0 create, 1 rename, 2 ungroup, 3 hide, 4 show, 5 reset authored origin.
         OrdinaryEditResult editSavedGroup(int operation, const std::string& groupIdentifier,
             const std::vector<std::string>& entities, const TCollection_ExtendedString& name,
             const ObjectFrameIdentity& expected, std::uint64_t presentationRevision,
@@ -414,6 +414,9 @@ namespace core3d {
             const TCollection_ExtendedString& name, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
 #ifdef DEBUG
+        void debugSetSavedGroupPivotFailures(int count) noexcept {
+            if (_objectInteractor) _objectInteractor->_debugSavedGroupPivotFailures = count < 0 ? 0 : count;
+        }
         void debugSetOrdinaryRepairFailures(int incremental, int redraw) noexcept {
             _debugOrdinaryRepairFailures = incremental;
             _debugOrdinaryRedrawFailures = redraw;

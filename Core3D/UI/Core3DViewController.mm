@@ -5555,6 +5555,8 @@ struct NativeModelingPermitIssuer final {
                 auto translation = change.transform.TranslationPart();
                 translation.SetX(translation.X() + 12.5);
                 change.transform.SetTranslationPart(translation);
+                gp_Trsf collective; collective.SetTranslation(gp_Vec(12.5, 0, 0));
+                change.collectiveWorldDelta = collective;
             } else if (mode == 1) {
                 change.operation = core3d::OrdinaryTransformOperation::Rotate;
                 change.transform.SetRotationPart(gp_Quaternion(gp_Vec(0, 0, 1), M_PI_2));
@@ -5588,6 +5590,30 @@ struct NativeModelingPermitIssuer final {
         auto lease = viewer->beginOrdinaryTransform(changes, &failure);
         return static_cast<NSInteger>(lease ? lease.stageAndCommit() : failure);
     } catch (...) { return 5; }
+}
+
+- (BOOL)debugConfigureSavedGroupOriginPostStageFault:(NSInteger)memberCount {
+    if (memberCount < 2 || memberCount > 32 || ![self debugConfigureOrdinaryGestureFault:0]) return NO;
+    GLController.viewer->debugOrdinaryEditController()->debugSetStageFailureIndex(static_cast<int>(memberCount));
+    return YES;
+}
+
+- (NSArray<NSNumber *> *_Nullable)debugSavedGroupOrigin:(NSString *)identifier {
+    if (![NSThread isMainThread] || identifier.length != 36 || GLController == nil || GLController.viewer == nullptr) return nil;
+    try {
+        const auto document=GLController.viewer->getDocument(); OcctSavedGroupState groups;
+        if (document.IsNull() || !document->CaptureSavedGroups(groups)) return nil;
+        const char *bytes=identifier.UTF8String;if(bytes==nullptr)return nil;
+        const std::string key(bytes,[identifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        const auto group=std::find_if(groups.groups.begin(),groups.groups.end(),[&](const auto& value){return value.identifier==key;});
+        if(group==groups.groups.end()||!group->originPresent||!OcctDocument::IsAdmittedSavedGroupOrigin(group->origin))return nil;
+        return @[@(group->origin.X()),@(group->origin.Y()),@(group->origin.Z())];
+    } catch (...) { return nil; }
+}
+
+- (void)debugSetSavedGroupPivotFailures:(NSInteger)count {
+    if (![NSThread isMainThread] || count < 0 || count > 2 || GLController == nil || GLController.viewer == nullptr) return;
+    GLController.viewer->debugSetSavedGroupPivotFailures(static_cast<int>(count));
 }
 
 - (void)debugSetViewerOrdinaryRepairFailures:(NSInteger)incremental redraw:(NSInteger)redraw {
@@ -10376,7 +10402,7 @@ struct NativeModelingPermitIssuer final {
 }
 
 - (NSData *_Nullable)debugSavedGroupBinXCAFFixture:(NSInteger)mode {
-    if (mode < 0 || mode > 12) { return nil; }
+    if (mode < 0 || mode > 17) { return nil; }
     return Core3DCreateDebugBinXCAFFixture(@"saved-group-schema", [mode](const Handle(TDocStd_Document)& document) {
         // Independent on-disk schema fixture, deliberately repeats persistent
         // GUIDs instead of asking production helpers to author a valid record.
@@ -10384,6 +10410,7 @@ struct NativeModelingPermitIssuer final {
         const Standard_GUID recordID("EC7B5F15-218F-47E4-BF6A-61BF42861402");
         const Standard_GUID nameID("EC7B5F15-218F-47E4-BF6A-61BF42861403");
         const Standard_GUID memberID("EC7B5F15-218F-47E4-BF6A-61BF42861404");
+        const Standard_GUID originID("EC7B5F15-218F-47E4-BF6A-61BF42861405");
         const Standard_GUID entityID("0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
         const Standard_GUID definitionID("3611F2B2-C694-4E12-AED8-A2A97A3D283B");
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
@@ -10396,6 +10423,14 @@ struct NativeModelingPermitIssuer final {
         TDataStd_AsciiString::Set(record, recordID, TCollection_AsciiString(mode == 4 ? "bad-identifier" : id.c_str()));
         if (mode != 5) {
             TDataStd_Name::Set(record, nameID, TCollection_ExtendedString(mode == 6 ? " bad name " : "Imported group"));
+        }
+        if (mode == 13) { TDataStd_Integer::Set(record, originID, 1); }
+        else if (mode >= 14 && mode <= 17) {
+            const auto origin = TDataStd_RealArray::Set(record, originID, 1, mode == 14 ? 2 : 3);
+            origin->SetValue(1, mode == 16 ? 1000001.0 : mode == 17 ? -1000001.0 : 1.0);
+            origin->SetValue(2, 2.0);
+            if (mode == 15) { origin->SetValue(3, std::numeric_limits<double>::quiet_NaN()); }
+            else if (mode != 14) { origin->SetValue(3, 3.0); }
         }
         if (mode == 7) {
             const auto duplicate = container.FindChild(2, Standard_True);
@@ -11989,6 +12024,9 @@ struct NativeModelingPermitIssuer final {
 }
 - (Core3DSavedGroupEditResult)setSavedGroupVisibility:(NSString *)identifier visible:(BOOL)visible expected:(Core3DSceneSnapshot *)expected {
     return [self editSavedGroupOperation:visible ? 4 : 3 identifier:identifier entities:@[] name:@"" expected:expected];
+}
+- (Core3DSavedGroupEditResult)resetSavedGroupOrigin:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected {
+    return [self editSavedGroupOperation:5 identifier:identifier entities:@[] name:@"" expected:expected];
 }
 
 - (BOOL)selectSavedGroup:(NSString *)entityIdentifier
@@ -14983,6 +15021,51 @@ struct NativeModelingPermitIssuer final {
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
+- (void)setSavedGroupBaseCenterOrigin:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DObjectAlignmentResult))completion {
+    if(!completion)return;
+    if(![NSThread isMainThread]){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DObjectAlignmentResultRejected);});return;}
+    if(_objectAlignmentWork||_isLoading.load()){completion(Core3DObjectAlignmentResultBusy);return;}
+    if(!_isSetuped||!GLController||!GLController.viewer||!expected||expected.selectionMode!=Core3DSceneElementKindObject
+        ||identifier.length!=36||!identifier.UTF8String||expected.publicationSourceIdentifier.length==0
+        ||expected.publicationSourceIdentifier.length>128){completion(Core3DObjectAlignmentResultRejected);return;}
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        ||size.width>std::numeric_limits<std::uint32_t>::max()||size.height>std::numeric_limits<std::uint32_t>::max()){
+        completion(Core3DObjectAlignmentResultRejected);return;
+    }
+    try {
+        core3d::ObjectFrameIdentity identity;identity.entityIdentifier.assign(identifier.UTF8String,[identifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(expected.publicationSourceIdentifier.UTF8String,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
+        const auto viewer=GLController.viewer;const auto work=viewer->prepareObjectAlignment(2,core3d::ObjectAlignmentAnchor::GroupBaseOrigin,
+            identity,expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        if(!work){completion(Core3DObjectAlignmentResultRejected);return;}
+        _objectAlignmentWork=work;_objectAlignmentCancelled=NO;const auto measurement=core3d::Core3DViewer::objectAlignmentMeasurement(work);
+        const std::weak_ptr<core3d::Core3DViewer> expectedViewer=viewer;__weak Core3DViewController* weakSelf=self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+            const bool measured=core3d::Core3DViewer::measureObjectAlignment(measurement);
+            dispatch_async(dispatch_get_main_queue(),^{Core3DViewController* controller=weakSelf;
+                if(!controller){completion(Core3DObjectAlignmentResultCancelled);return;}
+                const BOOL cancelled=controller->_objectAlignmentCancelled;const auto pending=std::move(controller->_objectAlignmentWork);const auto live=expectedViewer.lock();
+                if(cancelled){completion(Core3DObjectAlignmentResultCancelled);return;}
+                if(!pending||!live||controller->_isLoading.load()||!controller->_isSetuped||!((GLViewController*)controller.glController)
+                    ||((GLViewController*)controller.glController).viewer!=live){completion(Core3DObjectAlignmentResultRejected);return;}
+                if(!measured){completion(Core3DObjectAlignmentResultFailed);return;}
+                const auto native=live->commitObjectAlignment(pending);Core3DObjectAlignmentResult result=Core3DObjectAlignmentResultRejected;
+                switch(native){case core3d::OrdinaryEditResult::NoChange:result=Core3DObjectAlignmentResultUnchanged;break;
+                    case core3d::OrdinaryEditResult::Committed:result=Core3DObjectAlignmentResultCommitted;[controller viewDidChangeViewportPresentationState];[controller sendNotifyUIState:UIStateChangingHistory|UIStateChangingGizmo];break;
+                    case core3d::OrdinaryEditResult::Busy:result=Core3DObjectAlignmentResultBusy;break;
+                    case core3d::OrdinaryEditResult::OutcomeUnknown:result=Core3DObjectAlignmentResultRecoveryRequired;break;
+                    case core3d::OrdinaryEditResult::RetryableFailure:result=Core3DObjectAlignmentResultFailed;break;
+                    case core3d::OrdinaryEditResult::Invalid:break;}
+                completion(result);
+            });
+        });
+    } catch(...){completion(Core3DObjectAlignmentResultRejected);}
 }
 
 - (void)cancelObjectAlignment {

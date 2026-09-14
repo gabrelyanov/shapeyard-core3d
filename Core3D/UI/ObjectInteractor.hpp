@@ -437,9 +437,12 @@ namespace core3d {
     private:
 #ifdef DEBUG
         Standard_Integer _debugBrowserSelectionFailureMode = 0;
+        Standard_Integer _debugSavedGroupPivotFailures = 0;
 #endif
         void createManipulatorIfNeeded();
         void attachManipulator(Handle(AIS_InteractiveObject) toObject);
+        enum class SavedGroupPivotResult : std::uint8_t { NotApplicable, Positioned, Failed };
+        SavedGroupPivotResult positionManipulatorAtExactSavedGroupOrigin() noexcept;
 		void detachManipulator(Handle(AIS_InteractiveObject) fromObject);
 		enum class DuplicateDocumentState : std::uint8_t {
 			None = 0,

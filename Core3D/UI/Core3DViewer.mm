@@ -3633,6 +3633,7 @@ struct ObjectAlignmentWork {
     std::uint32_t width = 0, height = 0;
     Standard_Integer documentTime = 0;
     int axis = 0;
+    OcctSavedGroupState savedGroups;
     ObjectAlignmentAnchor anchor = ObjectAlignmentAnchor::Minimum;
     bool consumed = false;
 };
@@ -3645,8 +3646,8 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
         || (anchor != ObjectAlignmentAnchor::Minimum && anchor != ObjectAlignmentAnchor::Center
             && anchor != ObjectAlignmentAnchor::Maximum && anchor != ObjectAlignmentAnchor::Ground
             && anchor != ObjectAlignmentAnchor::EqualCenters && anchor != ObjectAlignmentAnchor::EqualGaps
-            && anchor != ObjectAlignmentAnchor::CenterGround)
-        || ((anchor == ObjectAlignmentAnchor::Ground || anchor == ObjectAlignmentAnchor::CenterGround) && axis != 2)) { return {}; }
+            && anchor != ObjectAlignmentAnchor::CenterGround && anchor != ObjectAlignmentAnchor::GroupBaseOrigin)
+        || ((anchor == ObjectAlignmentAnchor::Ground || anchor == ObjectAlignmentAnchor::CenterGround || anchor == ObjectAlignmentAnchor::GroupBaseOrigin) && axis != 2)) { return {}; }
     try {
         OCC_CATCH_SIGNALS
         const auto snapshot = captureSceneSnapshot(width, height);
@@ -3666,6 +3667,12 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
         std::unordered_set<std::string> selected;
         for (const auto& element : snapshot->selection.selected) {
             if (element.kind != scene::ElementKind::Object || !selected.insert(element.entityIdentifier).second) { return {}; }
+        }
+        if(anchor==ObjectAlignmentAnchor::GroupBaseOrigin) {
+            if(identity.entityIdentifier.size()!=36||!myDoc->CaptureSavedGroups(work->savedGroups))return {};
+            const auto group=std::find_if(work->savedGroups.groups.begin(),work->savedGroups.groups.end(),[&](const auto& g){return g.identifier==identity.entityIdentifier;});
+            if(group==work->savedGroups.groups.end()||group->members.size()!=selected.size())return {};
+            for(const auto& member:group->members)if(!selected.count(myDoc->EntityIdentifierForLabel(member)))return {};
         }
         for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
             const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
@@ -3797,6 +3804,18 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
             || authority.manipulatorType != work->authority.manipulatorType
             || authority.hadManipulator != work->authority.hadManipulator) { return OrdinaryEditResult::Invalid; }
         const int axis = work->axis;
+        if(work->anchor==ObjectAlignmentAnchor::GroupBaseOrigin) {
+            OcctSavedGroupState current;if(!myDoc->CaptureSavedGroups(current)||!current.IsEqual(work->savedGroups))return OrdinaryEditResult::Invalid;
+            const auto& measured=work->measurement->geometry;if(measured.empty())return OrdinaryEditResult::Invalid;
+            double lo[3]={measured[0].bounds[0],measured[0].bounds[1],measured[0].bounds[2]},hi[3]={measured[0].bounds[3],measured[0].bounds[4],measured[0].bounds[5]};
+            for(const auto& item:measured)for(int d=0;d<3;++d){lo[d]=std::min(lo[d],item.bounds[d]);hi[d]=std::max(hi[d],item.bounds[d+3]);}
+            gp_Pnt origin(lo[0]*.5+hi[0]*.5,lo[1]*.5+hi[1]*.5,lo[2]);
+            if(!OcctDocument::IsAdmittedSavedGroupOrigin(origin))return OrdinaryEditResult::Invalid;
+            auto requested=current.groups;const auto group=std::find_if(requested.begin(),requested.end(),[&](const auto& g){return g.identifier==work->identity.entityIdentifier;});
+            if(group==requested.end())return OrdinaryEditResult::Invalid;group->originPresent=Standard_True;group->origin=origin;
+            OrdinaryEditResult failure=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginGrouping(requested,&failure);
+            return lease?lease.stageAndCommit():failure;
+        }
         double minimum = work->measurement->geometry.front().bounds[axis];
         double maximum = work->measurement->geometry.front().bounds[axis + 3];
         for (const auto& geometry : work->measurement->geometry) {
@@ -3811,6 +3830,7 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
                 case ObjectAlignmentAnchor::EqualCenters: return lo * 0.5 + hi * 0.5;
                 case ObjectAlignmentAnchor::EqualGaps: return lo;
                 case ObjectAlignmentAnchor::Maximum: return hi;
+                case ObjectAlignmentAnchor::GroupBaseOrigin: return lo;
             }
             return lo;
         };
@@ -3881,7 +3901,11 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
                     translation.SetCoord(dimension + 1, translated);
                     changed = true;
                 }
-                if (changed) { change.transform.SetTranslationPart(gp_Vec(translation)); }
+                if (changed) {
+                    change.transform.SetTranslationPart(gp_Vec(translation));
+                    gp_Trsf collective;collective.SetTranslation(gp_Vec(sharedTranslation[0],sharedTranslation[1],sharedTranslation[2]));
+                    change.collectiveWorldDelta=collective;
+                }
             } else {
                 const double delta = targets[index] - coordinate(b[axis], b[axis + 3]);
                 if (!std::isfinite(delta)) { return OrdinaryEditResult::Invalid; }
@@ -4063,7 +4087,7 @@ OrdinaryEditResult Core3DViewer::editSavedGroup(int operation, const std::string
     if (blockedByLayer) { *blockedByLayer = false; }
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (!canBeginCommittedEdit() || !_ordinaryEditController) { return OrdinaryEditResult::Busy; }
-    if (operation < 0 || operation > 4 || width == 0 || height == 0
+    if (operation < 0 || operation > 5 || width == 0 || height == 0
         || !_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
         || (operation == 0 ? (entities.size() < 2 || entities.size() > 32 || !groupIdentifier.empty())
                             : (groupIdentifier.size() != 36 || !entities.empty()))
@@ -4111,6 +4135,7 @@ OrdinaryEditResult Core3DViewer::editSavedGroup(int operation, const std::string
             requested.push_back(std::move(group));
         } else if (operation == 1) { target->name = name; }
         else if (operation == 2) { requested.erase(target); }
+        else if (operation == 5) { target->originPresent=Standard_False;target->origin=gp_Pnt(); }
         else {
             std::vector<OrdinaryVisibilityChange> changes;
             for (const auto& label : target->members) {
@@ -4745,12 +4770,15 @@ bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept 
 #endif
     // Metadata leaves existing presentation and topology owners intact. A
     // mismatch retains recovery authority; never erase the user's selection.
-    return _ordinaryEditController && _ordinaryEditController->state() == OrdinaryEditState::RepairPending
+    const bool valid = _ordinaryEditController && _ordinaryEditController->state() == OrdinaryEditState::RepairPending
         && _objectInteractor && _shapeInteractor
         && !HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
         && _shapeInteractor->selectionModeAuthorityIsExact()
         && _shapeInteractor->getSelectionMode() == ledger.selectionMode
         && _objectInteractor->verifyOrdinaryNameAuthority(ledger);
+    if (!valid) return false;
+    return _objectInteractor->positionManipulatorAtExactSavedGroupOrigin()
+        != ObjectInteractor::SavedGroupPivotResult::Failed;
 }
 
 std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
@@ -4891,13 +4919,16 @@ bool Core3DViewer::repairTransform(const OrdinaryTransformLedger& ledger, bool c
 #ifdef DEBUG
     if (_debugOrdinaryRepairFailures > 0) { --_debugOrdinaryRepairFailures; return false; }
 #endif
-    return [NSThread isMainThread] && _ordinaryEditController
+    const bool valid = [NSThread isMainThread] && _ordinaryEditController
         && _ordinaryEditController->state() == OrdinaryEditState::RepairPending
         && _objectInteractor && _shapeInteractor
         && !HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
         && _shapeInteractor->selectionModeAuthorityIsExact()
         && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
         && _objectInteractor->repairOrdinaryTransformPresentation(ledger, committed);
+    if (!valid) return false;
+    return _objectInteractor->positionManipulatorAtExactSavedGroupOrigin()
+        != ObjectInteractor::SavedGroupPivotResult::Failed;
 }
 
 bool Core3DViewer::rebuildTransform(const OrdinaryTransformLedger& ledger, bool committed,
@@ -4975,6 +5006,10 @@ bool Core3DViewer::rebuildTransform(const OrdinaryTransformLedger& ledger, bool 
             throw Standard_Failure("Unable to restore ordinary redraw selection and tool");
         }
         for (const auto& record : repaired.records) { replacements.push_back(record.requested.presentation); }
+        if (_objectInteractor->positionManipulatorAtExactSavedGroupOrigin()
+            == ObjectInteractor::SavedGroupPivotResult::Failed) {
+            throw Standard_Failure("Unable to restore saved-group pivot");
+        }
         return true;
     } catch (...) {
         replacements.clear();

@@ -185,6 +185,8 @@ struct OcctSavedGroup {
     TDF_Label recordLabel;
     std::string identifier;
     TCollection_ExtendedString name;
+    Standard_Boolean originPresent = Standard_False;
+    gp_Pnt origin; //!< Finite document/world coordinates for the flat group.
     std::vector<TDF_Label> members;
 };
 struct OcctSavedGroupState {
@@ -676,6 +678,7 @@ public:
     Standard_EXPORT static std::string NewSavedGroupIdentifier() noexcept;
     //! Allocate a new feature identity without opening or mutating a document.
     Standard_EXPORT static std::string NewProfileIdentifier() noexcept;
+    Standard_EXPORT static Standard_Boolean IsAdmittedSavedGroupOrigin(const gp_Pnt& point) noexcept;
     Standard_EXPORT Standard_Boolean CaptureSavedGroups(OcctSavedGroupState& state) const noexcept;
     //! Replace the bounded catalog in an already owned command. Input record
     //! labels are ignored; stable group IDs retain their canonical record slots.

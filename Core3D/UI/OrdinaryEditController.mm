@@ -228,6 +228,60 @@ bool CandidateIsFinite(const gp_Trsf& transform) {
     }
     return std::abs(values[7]) > std::numeric_limits<Standard_Real>::epsilon();
 }
+bool TransformGroupsMatch(const Handle(OcctDocument)& owner,const OrdinaryTransformLedger& ledger,bool candidate) {
+    OcctSavedGroupState actual;
+    return !owner.IsNull() && owner->CaptureSavedGroups(actual)
+        && actual.IsEqual(candidate?ledger.groupsCandidate:ledger.groupsPrevious);
+}
+bool PrepareCollectiveGroupOrigin(const Handle(OcctDocument)& owner,OrdinaryTransformLedger& ledger) {
+    if(owner.IsNull()||!owner->CaptureSavedGroups(ledger.groupsPrevious))return false;
+    ledger.groupsRequested=ledger.groupsPrevious;ledger.groupsCandidate=ledger.groupsPrevious;
+    const bool any=std::any_of(ledger.records.begin(),ledger.records.end(),[](const auto& r){return bool(r.requested.collectiveWorldDelta);});
+    if(!any)return true;
+    const auto& delta=ledger.records.front().requested.collectiveWorldDelta;
+    if(!delta||!CandidateIsFinite(*delta))return false;
+    std::unordered_set<std::string> labels;
+    for(const auto& record:ledger.records){
+        if(!record.requested.collectiveWorldDelta||!MatricesEqual(*delta,*record.requested.collectiveWorldDelta)
+            ||(record.requested.operation!=OrdinaryTransformOperation::Translate
+                &&record.requested.operation!=OrdinaryTransformOperation::Rotate
+                &&record.requested.operation!=OrdinaryTransformOperation::Scale)
+            ||!labels.insert(CreationLabelKey(record.previous.label)).second)return false;
+        // The caller explicitly marks a collective operation. Bind it to the
+        // already admitted operation inputs; never infer collectivity from
+        // coincident independent numeric edits or inverse-roundtrip matrices.
+        if(record.requested.operation==OrdinaryTransformOperation::Rotate) {
+            if(!record.requested.rotationAroundPivot
+                ||!MatricesEqual(*delta,record.requested.rotationAroundPivot->delta))return false;
+        } else if(record.requested.operation==OrdinaryTransformOperation::Translate) {
+            for(int row=1;row<=3;++row)for(int column=1;column<=3;++column)
+                if(delta->Value(row,column)!=(row==column?1.0:0.0))return false;
+            for(int row=1;row<=3;++row) {
+                const double previous=record.previous.transform.Value(row,4),change=delta->Value(row,4);
+                if(!RotationArithmeticEqual(previous+change,record.requested.transform.Value(row,4),
+                    std::abs(previous)+std::abs(change)))return false;
+            }
+        } else {
+            const gp_Trsf expected=(*delta)*record.previous.transform;
+            for(int row=1;row<=3;++row)for(int column=1;column<=4;++column) {
+                double arithmeticScale=std::abs(delta->Value(row,4));
+                if(column!=4)arithmeticScale=0.0;
+                for(int term=1;term<=3;++term)arithmeticScale+=std::abs(delta->Value(row,term)*record.previous.transform.Value(term,column));
+                if(!RotationArithmeticEqual(expected.Value(row,column),record.requested.transform.Value(row,column),arithmeticScale))return false;
+            }
+        }
+    }
+    for(auto& group:ledger.groupsRequested){
+        if(!group.originPresent||group.members.size()!=labels.size())continue;
+        bool exact=true;for(const auto& member:group.members)exact=exact&&labels.count(CreationLabelKey(member));
+        if(!exact)continue;
+        const gp_Pnt before=group.origin;gp_Pnt moved=before.Transformed(*delta);
+        if(!OcctDocument::IsAdmittedSavedGroupOrigin(moved))return false;
+        group.origin=moved;ledger.groupOriginChanges=!moved.IsEqual(before,0.0);
+        return true;
+    }
+    return true; // partial or unrelated collective edits leave authored origins fixed.
+}
 }
 
 OrdinaryEditLease::OrdinaryEditLease(std::weak_ptr<OrdinaryEditController> controller,
@@ -688,6 +742,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             ledger.records.push_back(std::move(record));
         }
         if (!changed && !ledger.cutPrevious) { return reject(OrdinaryEditResult::NoChange); }
+        if (!PrepareCollectiveGroupOrigin(_document,ledger)) return reject(OrdinaryEditResult::Invalid);
         if (!_host.admitTransform(ledger)) { return reject(OrdinaryEditResult::Invalid); }
         // Admission is synchronous, but re-read all authority after the host
         // boundary rather than assuming that a successful callback kept it.
@@ -701,7 +756,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             &&!savedProgramSourceChangeMatches(record.requested,record.previous))return reject(OrdinaryEditResult::Invalid);
         if (permit && (!permit->current() || !rebuildReceiptMatches(ledger,false)))
             return reject(OrdinaryEditResult::Invalid);
-        if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false))) return reject(OrdinaryEditResult::Invalid);
+        if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false)||!TransformGroupsMatch(_document,ledger,false))) return reject(OrdinaryEditResult::Invalid);
         if (sweepNoChange) return reject(OrdinaryEditResult::NoChange);
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
@@ -1294,7 +1349,9 @@ OrdinaryEditLease OrdinaryEditController::beginGrouping(
             const auto match = std::find_if(groups.begin(), groups.end(), [&](const auto& value) { return value.identifier == group.identifier; });
             changed = changed || match == groups.end();
             if (match != groups.end()) {
-                changed = changed || !match->name.IsEqual(group.name) || match->members.size() != group.members.size();
+                changed = changed || !match->name.IsEqual(group.name) || match->originPresent!=group.originPresent
+                    || (group.originPresent&&!match->origin.IsEqual(group.origin,0.0))
+                    || match->members.size() != group.members.size();
                 for (const auto& label : group.members) {
                     changed = changed || std::none_of(match->members.begin(), match->members.end(), [&](const auto& l) { return l.IsEqual(label); });
                 }
@@ -2022,7 +2079,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;
         }
-        if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false))) throw Standard_Failure("Saved sweep source catalog changed");
+        if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false)||!TransformGroupsMatch(_document,ledger,false))) throw Standard_Failure("Transform source catalog changed");
         std::size_t index = 0;
         for (auto& record : ledger.records) {
 #ifdef DEBUG
@@ -2231,6 +2288,16 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if (!present) { throw Standard_Failure("Incomplete ordinary transform candidate"); }
             }
         }
+        if(ledger.groupOriginChanges) {
+            if(!_document->StageSavedGroups(ledger.groupsRequested.groups)
+                ||!_document->CaptureSavedGroups(ledger.groupsCandidate))
+                throw Standard_Failure("Collective group origin staging failed");
+        } else ledger.groupsCandidate=ledger.groupsPrevious;
+#ifdef DEBUG
+        if (ledger.groupOriginChanges && _stageFailureIndex == static_cast<int>(index)) {
+            _stageFailureIndex = -1; throw Standard_Failure("Collective group origin post-stage fault");
+        }
+#endif
 #if DEBUG
         if ((ledger.sweepGuard||ledger.cutPrevious) && _stageFailureIndex==3) {
             _stageFailureIndex=-1;throw Standard_Failure("Saved sweep pre-seal fault");
@@ -2295,7 +2362,7 @@ OrdinaryEditResult OrdinaryEditController::cancel(std::uint64_t token) noexcept 
 bool OrdinaryEditController::presentationMatches(
     const OrdinaryTransformLedger& ledger, bool committed) const noexcept {
     try {
-        if ((!SweepGuardMatches(_document,ledger,committed)||!CutGuardMatches(_document,ledger,committed))) return false;
+        if ((!SweepGuardMatches(_document,ledger,committed)||!CutGuardMatches(_document,ledger,committed)||!TransformGroupsMatch(_document,ledger,committed))) return false;
         for (const auto& record : ledger.records) {
             const auto& expected = committed ? record.candidate : record.previous;
             const auto& presentation = record.requested.presentation;
@@ -2376,7 +2443,7 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
 #if DEBUG // Cut475 phase diagnostics only
         if(ledger.cutPrevious)Cut475Trace("ordinary.before-repair-guard");
 #endif // Cut475 phase diagnostics only
-        if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
+        if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate)||!TransformGroupsMatch(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
 
 #if DEBUG // Cut475 phase diagnostics only
@@ -2405,7 +2472,7 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
 #if DEBUG // Cut475 phase diagnostics only
         if(ledger.cutPrevious)Cut475Trace("ordinary.after-repair-guard");
 #endif // Cut475 phase diagnostics only
-        if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
+        if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate)||!TransformGroupsMatch(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
 #if DEBUG
         if (candidate && ledger.modelingReceipt && ledger.modelingReceipt->permit->debugBeforeReleaseFailure_) {

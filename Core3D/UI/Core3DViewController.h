@@ -614,6 +614,8 @@ typedef NS_ENUM(NSInteger, Core3DObjectAlignmentAnchor) {
     //! Translate the selection as one assembly: aggregate X/Y center to the
     //! world origin and aggregate minimum Z to the ground plane.
     Core3DObjectAlignmentAnchorCenterGround,
+    //! Internal saved-group base-center measurement; normal Align UI never offers it.
+    Core3DObjectAlignmentAnchorGroupBaseOrigin,
 };
 typedef NS_ENUM(NSInteger, Core3DObjectAlignmentResult) {
     Core3DObjectAlignmentResultUnchanged = 0,
@@ -1324,6 +1326,11 @@ __attribute__((objc_subclassing_restricted))
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(ungroupSavedGroup(identifier:expected:));
 - (Core3DSavedGroupEditResult)setSavedGroupVisibility:(NSString *)identifier visible:(BOOL)visible
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(setSavedGroupVisibility(identifier:visible:expected:));
+- (void)setSavedGroupBaseCenterOrigin:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DObjectAlignmentResult))completion
+    NS_SWIFT_NAME(setSavedGroupBaseCenterOrigin(identifier:expected:completion:));
+- (Core3DSavedGroupEditResult)resetSavedGroupOrigin:(NSString *)identifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(resetSavedGroupOrigin(identifier:expected:));
 - (BOOL)selectSavedGroup:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(selectSavedGroup(identifier:expected:));
 //! Create an independent mesh at current tessellation; retain/hide source; one Undo.
@@ -1899,10 +1906,13 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugProbeMeshVertexStorageChange:(NSInteger)mode;
 - (BOOL)debugProbeMeshUVRepackStorageRefusal:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryGestureFault:(NSInteger)mode;
+- (BOOL)debugConfigureSavedGroupOriginPostStageFault:(NSInteger)memberCount;
+- (NSArray<NSNumber *> *_Nullable)debugSavedGroupOrigin:(NSString *)identifier;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count;
 - (void)debugSetViewerOrdinaryRepairFailures:(NSInteger)incremental redraw:(NSInteger)redraw;
+- (void)debugSetSavedGroupPivotFailures:(NSInteger)count;
 - (NSDictionary<NSString *, id> *)debugViewerOrdinaryState;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 //! Test-only direct mirror-plane seam. This bypasses pointer hit testing while

@@ -34,6 +34,7 @@ struct Cut475Scope {
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_GraphNode.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDataStd_RealArray.hxx>
 // Copyright (c) 2017 OPEN CASCADE SAS
 //
 // This file is part of the examples of the Open CASCADE Technology software library.
@@ -2907,6 +2908,9 @@ const Standard_GUID& SavedGroupNameID() {
 const Standard_GUID& SavedGroupMembershipID() {
     static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861404"); return id;
 }
+const Standard_GUID& SavedGroupOriginID() {
+    static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861405"); return id;
+}
 constexpr std::size_t kMaximumSavedGroups = 128;
 constexpr std::size_t kMaximumSavedGroupMembers = 32;
 bool IsCanonicalSavedGroupID(const std::string& id) {
@@ -2921,7 +2925,8 @@ bool HasSavedGroupAttribute(const TDF_Label& label) {
     return label.FindAttribute(SavedGroupContainerID(), attribute)
         || label.FindAttribute(SavedGroupRecordID(), attribute)
         || label.FindAttribute(SavedGroupNameID(), attribute)
-        || label.FindAttribute(SavedGroupMembershipID(), attribute);
+        || label.FindAttribute(SavedGroupMembershipID(), attribute)
+        || label.FindAttribute(SavedGroupOriginID(), attribute);
 }
 bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupState& output) noexcept {
     output = OcctSavedGroupState();
@@ -2938,27 +2943,29 @@ bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupSta
         for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
             if (++count > kMaximumGeometryDocumentLabels) { return false; }
             const TDF_Label label = it.Value();
-            Handle(TDF_Attribute) marker, record, name, member;
+            Handle(TDF_Attribute) marker, record, name, member, origin;
             const bool hasMarker = label.FindAttribute(SavedGroupContainerID(), marker);
             const bool hasRecord = label.FindAttribute(SavedGroupRecordID(), record);
             const bool hasName = label.FindAttribute(SavedGroupNameID(), name);
             const bool hasMember = label.FindAttribute(SavedGroupMembershipID(), member);
+            const bool hasOrigin = label.FindAttribute(SavedGroupOriginID(), origin);
             if (hasMarker) {
                 const auto typed = Handle(TDataStd_Integer)::DownCast(marker);
                 if (typed.IsNull() || typed->Get() != 1 || !label.Father().IsEqual(root)
                     || label.IsEqual(document->Main()) || !state.container.IsNull()
-                    || hasRecord || hasName || hasMember) { return false; }
+                    || hasRecord || hasName || hasMember || hasOrigin) { return false; }
                 state.container = label;
             }
-            if (hasRecord || hasName) {
+            if (hasRecord || hasName || hasOrigin) {
                 if (!hasRecord || !hasName || hasMember
                     || Handle(TDataStd_AsciiString)::DownCast(record).IsNull()
                     || Handle(TDataStd_Name)::DownCast(name).IsNull()
                     || records.size() >= kMaximumSavedGroups) { return false; }
                 records.push_back(label);
             }
+            if (hasOrigin && Handle(TDataStd_RealArray)::DownCast(origin).IsNull()) { return false; }
             if (hasMember) {
-                if (Handle(TDataStd_AsciiString)::DownCast(member).IsNull()
+                if (hasOrigin || Handle(TDataStd_AsciiString)::DownCast(member).IsNull()
                     || members.size() >= kMaximumSavedGroups * kMaximumSavedGroupMembers) { return false; }
                 members.push_back(label);
             }
@@ -2976,6 +2983,14 @@ bool ReadSavedGroups(const Handle(TDocStd_Document)& document, OcctSavedGroupSta
                 || !OcctObjectNameIsValid(name->Get())
                 || !indices.emplace(group.identifier, state.groups.size()).second) { return false; }
             group.name = name->Get();
+            Handle(TDataStd_RealArray) origin;
+            if (label.FindAttribute(SavedGroupOriginID(), origin)) {
+                if (origin.IsNull() || origin->Lower() != 1 || origin->Upper() != 3) { return false; }
+                const double x=origin->Value(1), y=origin->Value(2), z=origin->Value(3);
+                group.origin=gp_Pnt(x,y,z);
+                if (!OcctDocument::IsAdmittedSavedGroupOrigin(group.origin)) { return false; }
+                group.originPresent=Standard_True;
+            }
             state.groups.push_back(std::move(group));
         }
         const auto shapes = XCAFDoc_DocumentTool::CheckShapeTool(document->Main())
@@ -9220,7 +9235,9 @@ Standard_Boolean OcctSavedGroupState::IsEqual(const OcctSavedGroupState& other) 
         for (std::size_t i = 0; i < groups.size(); ++i) {
             const auto& a = groups[i]; const auto& b = other.groups[i];
             if (!a.recordLabel.IsEqual(b.recordLabel) || a.identifier != b.identifier
-                || !a.name.IsEqual(b.name) || a.members.size() != b.members.size()) { return Standard_False; }
+                || !a.name.IsEqual(b.name) || a.originPresent != b.originPresent
+                || (a.originPresent && !a.origin.IsEqual(b.origin,0.0))
+                || a.members.size() != b.members.size()) { return Standard_False; }
             for (std::size_t j = 0; j < a.members.size(); ++j) {
                 if (!a.members[j].IsEqual(b.members[j])) { return Standard_False; }
             }
@@ -9235,6 +9252,14 @@ std::string OcctDocument::NewSavedGroupIdentifier() noexcept {
 std::string OcctDocument::NewProfileIdentifier() noexcept {
     if (![NSThread isMainThread]) { return {}; }
     try { return NewIdentifier(); } catch (...) { return {}; }
+}
+Standard_Boolean OcctDocument::IsAdmittedSavedGroupOrigin(const gp_Pnt& point) noexcept {
+    try {
+        for (const double value : {point.X(), point.Y(), point.Z()}) {
+            if (!std::isfinite(value) || std::abs(value) > limits::kMaximumModelCoordinateMagnitude) return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
 }
 Standard_Boolean OcctDocument::CaptureSavedGroups(OcctSavedGroupState& state) const noexcept {
     state = OcctSavedGroupState();
@@ -9284,6 +9309,7 @@ Standard_Boolean OcctDocument::StageSavedGroups(const std::vector<OcctSavedGroup
             for (const auto& label : group.members) { label.ForgetAttribute(SavedGroupMembershipID()); }
             group.recordLabel.ForgetAttribute(SavedGroupRecordID());
             group.recordLabel.ForgetAttribute(SavedGroupNameID());
+            group.recordLabel.ForgetAttribute(SavedGroupOriginID());
         }
         Standard_Integer maximumTag = 0;
         for (TDF_ChildIterator it(container, Standard_False); it.More(); it.Next()) {
@@ -9303,6 +9329,11 @@ Standard_Boolean OcctDocument::StageSavedGroups(const std::vector<OcctSavedGroup
             }
             TDataStd_AsciiString::Set(label, SavedGroupRecordID(), TCollection_AsciiString(group.identifier.c_str()));
             TDataStd_Name::Set(label, SavedGroupNameID(), group.name);
+            if (group.originPresent) {
+                if (!IsAdmittedSavedGroupOrigin(group.origin)) return Standard_False;
+                const auto origin=TDataStd_RealArray::Set(label,SavedGroupOriginID(),1,3);
+                origin->SetValue(1,group.origin.X());origin->SetValue(2,group.origin.Y());origin->SetValue(3,group.origin.Z());
+            }
             for (const auto& member : group.members) {
                 TDataStd_AsciiString::Set(member, SavedGroupMembershipID(), TCollection_AsciiString(group.identifier.c_str()));
             }
@@ -9312,6 +9343,8 @@ Standard_Boolean OcctDocument::StageSavedGroups(const std::vector<OcctSavedGroup
         for (const auto& requested : groups) {
             const auto found = std::find_if(after.groups.begin(), after.groups.end(), [&](const auto& g) { return g.identifier == requested.identifier; });
             if (found == after.groups.end() || !found->name.IsEqual(requested.name)
+                || found->originPresent != requested.originPresent
+                || (requested.originPresent && !found->origin.IsEqual(requested.origin,0.0))
                 || found->members.size() != requested.members.size()) { return Standard_False; }
             for (const auto& member : requested.members) {
                 if (std::none_of(found->members.begin(), found->members.end(), [&](const auto& l) { return l.IsEqual(member); })) { return Standard_False; }

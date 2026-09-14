@@ -951,6 +951,45 @@ namespace core3d {
 		myContext->UpdateCurrentViewer();
 	}
 
+    ObjectInteractor::SavedGroupPivotResult ObjectInteractor::positionManipulatorAtExactSavedGroupOrigin() noexcept {
+        try {
+            if (_manipulator.IsNull() || !_manipulator->IsAttached() || _manipulatorSourceLabels.size()<2)
+                return SavedGroupPivotResult::NotApplicable;
+            std::unordered_set<std::string> selected;
+            for(const auto& pair:_manipulatorSourceLabels) {
+                const auto id=myDoc->EntityIdentifierForLabel(pair.second);
+                if(id.empty()||!selected.insert(id).second)return SavedGroupPivotResult::Failed;
+            }
+            OcctSavedGroupState groups;if(!myDoc->CaptureSavedGroups(groups))return SavedGroupPivotResult::Failed;
+            for(const auto& group:groups.groups) {
+                if(group.members.size()!=selected.size())continue;
+                bool exact=true;for(const auto& member:group.members)exact=exact&&selected.count(myDoc->EntityIdentifierForLabel(member));
+                if(!exact)continue;
+#ifdef DEBUG
+                if(_debugSavedGroupPivotFailures>0){--_debugSavedGroupPivotFailures;return SavedGroupPivotResult::Failed;}
+#endif
+                if(group.originPresent) {
+                    if(!OcctDocument::IsAdmittedSavedGroupOrigin(group.origin))return SavedGroupPivotResult::Failed;
+                    auto position=_manipulator->Position();position.SetLocation(group.origin);
+                    _manipulator->SetPosition(position);
+                    return _manipulator->Position().Location().IsEqual(group.origin,0.0)
+                        ?SavedGroupPivotResult::Positioned:SavedGroupPivotResult::Failed;
+                }
+                const auto attached=_manipulator->Objects();
+                if(attached.IsNull()||static_cast<std::size_t>(attached->Size())!=selected.size())return SavedGroupPivotResult::Failed;
+                Handle(Core3DManipulatorObjectSequence) copy=new Core3DManipulatorObjectSequence();
+                for(Core3DManipulatorObjectSequence::Iterator it(*attached);it.More();it.Next())copy->Append(it.Value());
+                _manipulator->Detach();_manipulator->Attach(copy);
+                const auto rebound=_manipulator->Objects();
+                return _manipulator->IsAttached()&&!rebound.IsNull()
+                    &&static_cast<std::size_t>(rebound->Size())==selected.size()
+                    &&OcctDocument::IsAdmittedSavedGroupOrigin(_manipulator->Position().Location())
+                    ?SavedGroupPivotResult::Positioned:SavedGroupPivotResult::Failed;
+            }
+            return SavedGroupPivotResult::NotApplicable;
+        } catch (...) { return SavedGroupPivotResult::Failed; }
+    }
+
 	Handle(TopLoc_Datum3D) ObjectInteractor::manipulatorTransform() {
 		if (!_manipulator.IsNull())
 			return _manipulator->Transform();
@@ -1479,6 +1518,14 @@ namespace core3d {
 				_manipulatorSourceLabels[duplicate.presentation.get()] =
 					duplicate.resultLabel;
 			}
+			if (positionManipulatorAtExactSavedGroupOrigin()
+				== SavedGroupPivotResult::Failed) {
+				// The document is committed, but its exact duplicate-group pivot
+				// is part of presentation repair. Retain the result ledger and let
+				// the existing retry path finish without duplicating again.
+				try { myDoc->NotifyChanges(); } catch (...) {}
+				return Standard_False;
+			}
 			myContext->HilightSelected(Standard_True);
 			myDoc->NotifyChanges();
 			_manipulator->Redisplay();
@@ -1605,6 +1652,12 @@ namespace core3d {
                 return std::any_of(sourceLabels.begin(), sourceLabels.end(), [&](const auto& source) { return source.IsEqual(label); });
             });
         };
+        const auto belongsToFullySelectedSavedGroup = [&](const TDF_Label& label) {
+            return std::any_of(groupBefore.groups.begin(), groupBefore.groups.end(), [&](const auto& group) {
+                return fullySelected(group) && std::any_of(group.members.begin(), group.members.end(),
+                    [&](const auto& member) { return member.IsEqual(label); });
+            });
+        };
         const auto activeGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), [](const auto& g) { return !g.members.empty(); });
         const auto copiedGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), fullySelected);
         if (activeGroups + copiedGroups > 128) { return; }
@@ -1677,9 +1730,14 @@ namespace core3d {
 					return;
 				}
 				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
-				copy->SetLocalTransformation(
-					source.presentation->LocalTransformation().Multiplied(
-						minAxisDisplacement));
+                const gp_Trsf sourceTransform = source.presentation->LocalTransformation();
+                // A complete saved group is one assembly operation: apply the
+                // admitted bounds displacement in document/world space so
+                // heterogeneous member transforms preserve their layout.
+                // Partial and ungrouped duplication retain existing behavior.
+                copy->SetLocalTransformation(belongsToFullySelectedSavedGroup(source.label)
+                    ? minAxisDisplacement.Multiplied(sourceTransform)
+                    : sourceTransform.Multiplied(minAxisDisplacement));
 				myDoc->LoadObjectMeterial(source.label, copy);
                 DuplicatePendingResult duplicate;
                 duplicate.presentation = copy;
@@ -1937,6 +1995,14 @@ namespace core3d {
                         const auto result = std::find_if(_pendingDuplicateResults.begin(), _pendingDuplicateResults.end(), [&](const auto& r) { return r.sourceLabel.IsEqual(label); });
                         if (result == _pendingDuplicateResults.end() || result->resultLabel.IsNull()) { retainRetryableOrUnknown(); return; }
                         copy.members.push_back(result->resultLabel);
+                    }
+                    // Complete saved-group duplication uses the same admitted
+                    // document-space translation for every member and its
+                    // optional authored point. Absence remains absence.
+                    if(original.originPresent){
+                        copy.origin=original.origin.Translated(aDisplacement);
+                        if(!OcctDocument::IsAdmittedSavedGroupOrigin(copy.origin)){retainRetryableOrUnknown();return;}
+                        copy.originPresent=Standard_True;
                     }
                     requested.push_back(std::move(copy));
                 }
@@ -2274,6 +2340,14 @@ namespace core3d {
                 _manipulator->Attach(selected);
                 for (const auto& source : sources)
                     _manipulatorSourceLabels.emplace(source.first.get(), source.second);
+                if (positionManipulatorAtExactSavedGroupOrigin()
+                    == SavedGroupPivotResult::Failed) {
+                    // This attachment path has no surrounding selection
+                    // transaction to roll back. Keep the authoritative
+                    // selection, but never expose a gizmo at the wrong pivot.
+                    _manipulator->Detach();
+                    _manipulatorSourceLabels.clear();
+                }
             }
         }
 
@@ -2620,6 +2694,7 @@ namespace core3d {
                     request.presentation = change.first;
                     request.shape = change.first->Shape();
                     request.operation = operation;
+                    request.collectiveWorldDelta = _manipulator->GestureTransformation();
                     request.transform = change.first->LocalTransformation();
                     if (operation == OrdinaryTransformOperation::Translate) {
                         // Preserve the exact persisted orientation/scale rather
@@ -2856,6 +2931,13 @@ namespace core3d {
                     _manipulatorSourceLabels.emplace(target.get(), myDoc->ShapeLabel(target));
                 }
                 _manipulator->Attach(objects);
+                if (positionManipulatorAtExactSavedGroupOrigin()
+                    == SavedGroupPivotResult::Failed) {
+                    // The catch path below restores the previous selection and
+                    // exact attachment. Do not report browser selection success
+                    // when an authored group pivot could not be installed.
+                    throw Standard_Failure("Browser group pivot mismatch");
+                }
             }
             if (isManipulatorAttached() != shouldAttach) {
                 throw Standard_Failure("Browser selection gizmo availability mismatch");

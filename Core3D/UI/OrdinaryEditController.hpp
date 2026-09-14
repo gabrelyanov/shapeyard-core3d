@@ -118,6 +118,9 @@ struct OrdinaryTransformChange {
     gp_Trsf transform;
     OrdinaryTransformOperation operation = OrdinaryTransformOperation::Translate;
     std::optional<OrdinaryRotationAroundPivot> rotationAroundPivot;
+    // Exact common world delta for a collective viewport/alignment edit.
+    // Native admission uses it only to carry an authored complete-group origin.
+    std::optional<gp_Trsf> collectiveWorldDelta;
     OcctMeshUVAtlasOptions meshUVAtlasOptions;
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
     std::optional<OrdinaryMeshRegionExtrude> meshRegionExtrude;
@@ -159,6 +162,8 @@ struct OrdinaryTransformLedger {
     std::shared_ptr<const retained_solid::Payload> cutSourcePayload;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::vector<OrdinaryTransformRecord> records;
+    OcctSavedGroupState groupsPrevious, groupsRequested, groupsCandidate;
+    bool groupOriginChanges = false;
     bool candidateSealed = false;
     std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
     PrimitiveManipulatorType manipulatorType = static_cast<PrimitiveManipulatorType>(0);
