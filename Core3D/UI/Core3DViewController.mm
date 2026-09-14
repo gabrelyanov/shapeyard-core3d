@@ -1372,10 +1372,15 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
 @implementation Core3DCylindricalCutBore
 - (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)effectiveMM {
     const double world=operand.radius*effectiveMM;
+    const double x=operand.point[0]*effectiveMM,y=operand.point[1]*effectiveMM,z=operand.point[2]*effectiveMM;
+    // Preserve the pre-existing native/manual admission exactly. Physical
+    // coordinate projection is additive descriptive data; the AI boundary
+    // rejects nonfinite or out-of-range projections before serialization.
     if(!operand.identifier||static_cast<unsigned>(operand.axis)>2||!std::isfinite(world)||world<.001||world>1e6)return nil;
     self=[super init];if(self){_operandIdentifier=operand.identifier;
         _axis=static_cast<Core3DCylindricalCutAxis>(operand.axis);
-        _localX=operand.point[0];_localY=operand.point[1];_localZ=operand.point[2];_worldRadiusMM=world;}return self;
+        _localX=operand.point[0];_localY=operand.point[1];_localZ=operand.point[2];
+        _physicalXMM=x;_physicalYMM=y;_physicalZMM=z;_worldRadiusMM=world;}return self;
 }
 @end
 @interface Core3DCylindricalCutProgramSnapshot ()
@@ -2037,6 +2042,7 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
     Core3DTransformInspectorSnapshot *_planningPlacementSnapshot;
     std::optional<core3d::placement::Evidence> _planningPlacementEvidence;
     Core3DCylindricalCutSnapshot *_planningSavedCutSource;
+    Core3DCylindricalCutProgramSnapshot *_planningSavedCutProgramSource;
     Core3DSavedCutSourceValues *_planningSavedCutValues;
     __weak Core3DSavedCutSourceJob *_planningSavedCutJob;
     BOOL _planningConsumed;
@@ -2066,6 +2072,7 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 }
 - (Core3DTransformInspectorSnapshot *)placementSnapshot { return _planningPlacementSnapshot; }
 - (Core3DCylindricalCutSnapshot *)selectedSavedCutSource { return _planningSavedCutSource; }
+- (Core3DCylindricalCutProgramSnapshot *)selectedSavedCutProgramSource { return _planningSavedCutProgramSource; }
 - (Core3DSavedCutSourceValues *)selectedSavedCutSourceRecipeMM { return _planningSavedCutValues; }
 @end
 
@@ -3140,6 +3147,10 @@ struct NativeModelingPermitIssuer final {
     requestID:(NSUUID *)requestID featureIDs:(const std::vector<core3d::request::UUID>&)featureIDs
     coverage:(Core3DModelingEvidenceCoverage)coverage;
 - (nullable Core3DSavedCutSourceOperation *)core3d_beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    planningContext:(nullable Core3DModelingPlanningContext *)planningContext
+    completion:(void(^)(Core3DProfileConstructionResult))completion;
+- (nullable Core3DSavedCutSourceOperation *)core3d_beginSavedProgramCutSourceEdit:(Core3DCylindricalCutProgramSnapshot *)original
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     planningContext:(nullable Core3DModelingPlanningContext *)planningContext
     completion:(void(^)(Core3DProfileConstructionResult))completion;
@@ -13528,17 +13539,27 @@ struct NativeModelingPermitIssuer final {
         Core3DSceneElementIdentifier *selected=context.scene.selection.selectedElements.firstObject;
         if(selected.kind!=Core3DSceneElementKindObject)return context;
         Core3DCylindricalCutSnapshot *source=[self cylindricalCutSourceWithEntityIdentifier:selected.entityIdentifier expected:context.scene];
-        Core3DSavedCutSourceValues *values=source.sourceRecipeMM;
-        if(!source||!source.rebuilding||!values)return context;
-        const auto original=[source nativeSnapshot];
-        if(core3d::saved_cut_bore_clearance::Inspect(original.source.envelope).status
-            !=core3d::saved_cut_bore_clearance::Status::ClearRecipeDisk)return context;
+        Core3DCylindricalCutProgramSnapshot *program=nil;
+        Core3DSavedCutSourceValues *values=nil;
+        if(source&&source.rebuilding&&(values=source.sourceRecipeMM)){
+            const auto original=[source nativeSnapshot];
+            if(core3d::saved_cut_bore_clearance::Inspect(original.source.envelope).status
+                !=core3d::saved_cut_bore_clearance::Status::ClearRecipeDisk)return context;
+        }else{
+            source=nil;
+            program=[self cylindricalCutProgramWithEntityIdentifier:selected.entityIdentifier expected:context.scene];
+            // A program context retains the complete native aggregate. Bounded
+            // descriptive bores are projected only after every-bore source
+            // support has been verified by sourceRecipeMM.
+            if(!program||program.bores.count<2||program.bores.count>4||(values=program.sourceRecipeMM)==nil)return context;
+        }
         // All added reads are enclosed by the original stamp and this exact
         // current-context check. No second snapshot replaces its authority.
         if(![self isModelingPlanningContextCurrent:context]){
             [self retireModelingPlanningContext:context];return nil;
         }
-        context->_planningSavedCutSource=source;context->_planningSavedCutValues=values;
+        context->_planningSavedCutSource=source;context->_planningSavedCutProgramSource=program;
+        context->_planningSavedCutValues=values;
         return context;
     }catch(...){[self retireModelingPlanningContext:context];return nil;}
 }
@@ -13547,7 +13568,15 @@ struct NativeModelingPermitIssuer final {
     context:(Core3DModelingPlanningContext *)context completion:(void(^)(Core3DProfileConstructionResult))completion {
     if(!completion)return nil;
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
-    if(![self isModelingPlanningContextCurrent:context]||!context.selectedSavedCutSource
+    // Preserve validation-before-dereference for wrong-class, foreign and
+    // stale contexts. Only this owner's current native context may expose its
+    // mutually exclusive opaque target properties below.
+    if(![self isModelingPlanningContextCurrent:context]){
+        completion(Core3DProfileConstructionResultRejected);return nil;
+    }
+    const BOOL legacy=context.selectedSavedCutSource!=nil;
+    const BOOL program=context.selectedSavedCutProgramSource!=nil;
+    if(legacy==program
         ||!context.selectedSavedCutSourceRecipeMM||context.selectedEnclosure||context.selectedProfile
         ||context.selectedProfileRecipe||context.selectedSweep||context.selectedLoft
         ||![patch isMemberOfClass:Core3DSavedCutSourcePatch.class]){
@@ -13555,12 +13584,16 @@ struct NativeModelingPermitIssuer final {
     }
     context->_planningConsumed=YES;
     __weak Core3DModelingPlanningContext *weakContext=context;
-    return [self core3d_beginSavedCutSourceEdit:context.selectedSavedCutSource patch:patch expected:context.scene
-        planningContext:context completion:^(Core3DProfileConstructionResult result){
+    void (^finished)(Core3DProfileConstructionResult)=^(Core3DProfileConstructionResult result){
             Core3DModelingPlanningContext *finished=weakContext;
             if(finished)finished->_planningRetired=YES;
             completion(result);
-        }];
+        };
+    return legacy
+        ?[self core3d_beginSavedCutSourceEdit:context.selectedSavedCutSource patch:patch expected:context.scene
+            planningContext:context completion:finished]
+        :[self core3d_beginSavedProgramCutSourceEdit:context.selectedSavedCutProgramSource patch:patch expected:context.scene
+            planningContext:context completion:finished];
 }
 
 - (Core3DModelingPlanningContext *)captureModelingPlacementContext {
@@ -14212,6 +14245,13 @@ struct NativeModelingPermitIssuer final {
 - (Core3DSavedCutSourceOperation *)beginSavedProgramCutSourceEdit:(Core3DCylindricalCutProgramSnapshot *)original
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_beginSavedProgramCutSourceEdit:original patch:patch expected:expected planningContext:nil completion:completion];
+}
+
+- (Core3DSavedCutSourceOperation *)core3d_beginSavedProgramCutSourceEdit:(Core3DCylindricalCutProgramSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    planningContext:(Core3DModelingPlanningContext *)planningContext
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
     if(!completion)return nil;
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
     if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
@@ -14252,6 +14292,12 @@ struct NativeModelingPermitIssuer final {
         completionToken=Core3DRegisterNativeSolidCompletion(completion);
         if(!completionToken){[job finish:Core3DProfileConstructionResultBusy];immediate(Core3DProfileConstructionResultBusy);return nil;}
         job->_completionToken=completionToken;
+        if(planningContext){
+            // Match the legacy modeling route: the consumed exact context and
+            // this job retain reciprocal weak cancellation ownership until the
+            // admitted numeric worker actually drains.
+            job->_planningContext=planningContext;planningContext->_planningSavedCutJob=job;
+        }
         _savedCutSourceJob=job; // Own main lease/token BEFORE synchronous preparation.
         Core3DSavedCutSourceOperation *operation=[[Core3DSavedCutSourceOperation alloc] initWithJob:job];
         const CGSize size=GLController.drawableSize;

@@ -305,6 +305,13 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) double localX;
 @property(nonatomic,readonly) double localY;
 @property(nonatomic,readonly) double localZ;
+//! Descriptive construction-frame position in physical millimetres from the
+//! same complete capture. It includes positive occurrence uniform scale and
+//! excludes occurrence rotation/translation. These values cannot recreate
+//! edit authority; consumers must validate their own descriptive bounds.
+@property(nonatomic,readonly) double physicalXMM;
+@property(nonatomic,readonly) double physicalYMM;
+@property(nonatomic,readonly) double physicalZMM;
 @property(nonatomic,readonly) double worldRadiusMM;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -499,8 +506,11 @@ __attribute__((objc_subclassing_restricted))
 //! Exact saved ruled rectangular loft, exclusive of every other selected feature.
 //! Descriptive prerequisite only: no AI command, reserved execution or receipt is enabled.
 @property(nonatomic,strong,readonly,nullable) Core3DStoredRectangularLoftSnapshot *selectedLoft;
-// Original opaque source and descriptive recipe-mm values from one stamped capture.
+//! Mutually exclusive original opaque source targets from one stamped capture.
+//! A complete program is never projected onto its first bore.
 @property(nonatomic,strong,readonly,nullable) Core3DCylindricalCutSnapshot *selectedSavedCutSource;
+@property(nonatomic,strong,readonly,nullable) Core3DCylindricalCutProgramSnapshot *selectedSavedCutProgramSource;
+//! Descriptive values shared by the selected legacy or program source target.
 @property(nonatomic,strong,readonly,nullable) Core3DSavedCutSourceValues *selectedSavedCutSourceRecipeMM;
 //! Original composite placement capture only; recipe contexts return nil.
 @property(nonatomic,strong,readonly,nullable) Core3DTransformInspectorSnapshot *placementSnapshot;
