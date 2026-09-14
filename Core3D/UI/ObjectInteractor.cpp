@@ -2296,6 +2296,14 @@ namespace core3d {
 					_manipulatorSourceLabels.emplace(
 						source.first.get(), source.second);
 				}
+				if (positionManipulatorAtExactSavedGroupOrigin()
+					== SavedGroupPivotResult::Failed) {
+					// Changing gizmo type has no surrounding transaction to
+					// restore an authored group pivot. Keep the selection, but
+					// never expose a gizmo at the attachment's default center.
+					_manipulator->Detach();
+					_manipulatorSourceLabels.clear();
+				}
             }
         } else if (((mirror && aPreviousType != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror)
                     || ((movRot || scale)
