@@ -1907,6 +1907,7 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 - (instancetype)initPrivate { return [super init]; }
 @end
 
+@class Core3DSavedCutSourceJob;
 @interface Core3DModelingPlanningContext () {
 @public
     __weak Core3DViewController *_planningOwner;
@@ -1915,6 +1916,9 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
     uint64_t _planningOverlayRevision;
     Core3DTransformInspectorSnapshot *_planningPlacementSnapshot;
     std::optional<core3d::placement::Evidence> _planningPlacementEvidence;
+    Core3DCylindricalCutSnapshot *_planningSavedCutSource;
+    Core3DSavedCutSourceValues *_planningSavedCutValues;
+    __weak Core3DSavedCutSourceJob *_planningSavedCutJob;
     BOOL _planningConsumed;
     BOOL _planningRetired;
 }
@@ -1941,6 +1945,8 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
     return self;
 }
 - (Core3DTransformInspectorSnapshot *)placementSnapshot { return _planningPlacementSnapshot; }
+- (Core3DCylindricalCutSnapshot *)selectedSavedCutSource { return _planningSavedCutSource; }
+- (Core3DSavedCutSourceValues *)selectedSavedCutSourceRecipeMM { return _planningSavedCutValues; }
 @end
 
 #if DEBUG
@@ -2883,6 +2889,7 @@ struct NativeModelingPermitIssuer final {
     std::shared_ptr<core3d::SavedCutSourceEditCancellation> _cancellation;
     std::weak_ptr<core3d::Core3DViewer> _viewer;
     NSUUID *_completionToken;
+    __weak Core3DModelingPlanningContext *_planningContext;
     BOOL _cancelled;
     BOOL _finished;
 }
@@ -2903,6 +2910,10 @@ struct NativeModelingPermitIssuer final {
     NSCAssert(NSThread.isMainThread,@"Saved-cut source delivery is main-owned");
     if(_finished)return;
     _finished=YES;
+    Core3DModelingPlanningContext *context=_planningContext;_planningContext=nil;
+    if(context&&context->_planningSavedCutJob==self){
+        context->_planningSavedCutJob=nil;context->_planningRetired=YES;
+    }
     const auto viewer=_viewer.lock();
     if(viewer&&_lease)(void)viewer->discardSavedCutSourceEdit(_lease);
     _lease.reset();_cancellation.reset();_viewer.reset();
@@ -2975,6 +2986,10 @@ struct NativeModelingPermitIssuer final {
     context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
     requestID:(NSUUID *)requestID featureIDs:(const std::vector<core3d::request::UUID>&)featureIDs
     coverage:(Core3DModelingEvidenceCoverage)coverage;
+- (nullable Core3DSavedCutSourceOperation *)core3d_beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    planningContext:(nullable Core3DModelingPlanningContext *)planningContext
+    completion:(void(^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
     matchesAllowingConsumed:(BOOL)allowConsumed;
 - (BOOL)core3d_canCaptureModelingContext;
@@ -13247,6 +13262,50 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return nil; }
 }
 
+- (Core3DModelingPlanningContext *)captureModelingPlanningContextIncludingSavedCutSource {
+    Core3DModelingPlanningContext *context=[self captureModelingPlanningContext];
+    if(!context||context.scene.selection.selectedElements.count!=1
+        ||context.selectedEnclosure||context.selectedProfile||context.selectedProfileRecipe
+        ||context.selectedSweep||context.selectedLoft)return context;
+    try {
+        Core3DSceneElementIdentifier *selected=context.scene.selection.selectedElements.firstObject;
+        if(selected.kind!=Core3DSceneElementKindObject)return context;
+        Core3DCylindricalCutSnapshot *source=[self cylindricalCutSourceWithEntityIdentifier:selected.entityIdentifier expected:context.scene];
+        Core3DSavedCutSourceValues *values=source.sourceRecipeMM;
+        if(!source||!source.rebuilding||!values)return context;
+        const auto original=[source nativeSnapshot];
+        if(core3d::saved_cut_bore_clearance::Inspect(original.source.envelope).status
+            !=core3d::saved_cut_bore_clearance::Status::ClearRecipeDisk)return context;
+        // All added reads are enclosed by the original stamp and this exact
+        // current-context check. No second snapshot replaces its authority.
+        if(![self isModelingPlanningContextCurrent:context]){
+            [self retireModelingPlanningContext:context];return nil;
+        }
+        context->_planningSavedCutSource=source;context->_planningSavedCutValues=values;
+        return context;
+    }catch(...){[self retireModelingPlanningContext:context];return nil;}
+}
+
+- (Core3DSavedCutSourceOperation *)beginModelingSavedCutSourceEdit:(Core3DSavedCutSourcePatch *)patch
+    context:(Core3DModelingPlanningContext *)context completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return nil;
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(![self isModelingPlanningContextCurrent:context]||!context.selectedSavedCutSource
+        ||!context.selectedSavedCutSourceRecipeMM||context.selectedEnclosure||context.selectedProfile
+        ||context.selectedProfileRecipe||context.selectedSweep||context.selectedLoft
+        ||![patch isMemberOfClass:Core3DSavedCutSourcePatch.class]){
+        completion(Core3DProfileConstructionResultRejected);return nil;
+    }
+    context->_planningConsumed=YES;
+    __weak Core3DModelingPlanningContext *weakContext=context;
+    return [self core3d_beginSavedCutSourceEdit:context.selectedSavedCutSource patch:patch expected:context.scene
+        planningContext:context completion:^(Core3DProfileConstructionResult result){
+            Core3DModelingPlanningContext *finished=weakContext;
+            if(finished)finished->_planningRetired=YES;
+            completion(result);
+        }];
+}
+
 - (Core3DModelingPlanningContext *)captureModelingPlacementContext {
     Core3DModelingPlanningContext *context=[self captureModelingPlanningContext];
     if(!context)return nil;
@@ -13373,6 +13432,8 @@ struct NativeModelingPermitIssuer final {
     if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
         || context->_planningOwner != self) return;
     [self core3d_retireReservationContext:context];
+    Core3DSavedCutSourceJob *sourceJob=context->_planningSavedCutJob;
+    if(sourceJob&&sourceJob->_planningContext==context)[sourceJob cancel];
     context->_planningRetired = YES;
     if (_modelingConstructionContext == context && _nativeSolidWork)
         [self cancelNativeConstruction];
@@ -13765,6 +13826,13 @@ struct NativeModelingPermitIssuer final {
 - (Core3DSavedCutSourceOperation *)beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_beginSavedCutSourceEdit:original patch:patch expected:expected planningContext:nil completion:completion];
+}
+
+- (Core3DSavedCutSourceOperation *)core3d_beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    planningContext:(Core3DModelingPlanningContext *)planningContext
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
     if(!completion)return nil;
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
     if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
@@ -13799,6 +13867,11 @@ struct NativeModelingPermitIssuer final {
         completionToken=Core3DRegisterNativeSolidCompletion(completion);
         if(!completionToken){[job finish:Core3DProfileConstructionResultBusy];immediate(Core3DProfileConstructionResultBusy);return nil;}
         job->_completionToken=completionToken;
+        if(planningContext){
+            // The sole internal caller already consumed this exact issued
+            // context. Install reciprocal weak ownership before preparation.
+            job->_planningContext=planningContext;planningContext->_planningSavedCutJob=job;
+        }
         _savedCutSourceJob=job; // Own main lease/token BEFORE synchronous preparation.
         Core3DSavedCutSourceOperation *operation=[[Core3DSavedCutSourceOperation alloc] initWithJob:job];
         const CGSize size=GLController.drawableSize;

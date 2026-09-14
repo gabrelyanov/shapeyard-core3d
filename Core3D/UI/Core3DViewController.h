@@ -470,6 +470,9 @@ __attribute__((objc_subclassing_restricted))
 //! Exact saved ruled rectangular loft, exclusive of every other selected feature.
 //! Descriptive prerequisite only: no AI command, reserved execution or receipt is enabled.
 @property(nonatomic,strong,readonly,nullable) Core3DStoredRectangularLoftSnapshot *selectedLoft;
+// Original opaque source and descriptive recipe-mm values from one stamped capture.
+@property(nonatomic,strong,readonly,nullable) Core3DCylindricalCutSnapshot *selectedSavedCutSource;
+@property(nonatomic,strong,readonly,nullable) Core3DSavedCutSourceValues *selectedSavedCutSourceRecipeMM;
 //! Original composite placement capture only; recipe contexts return nil.
 @property(nonatomic,strong,readonly,nullable) Core3DTransformInspectorSnapshot *placementSnapshot;
 - (instancetype)init NS_UNAVAILABLE;
@@ -1420,6 +1423,11 @@ __attribute__((objc_subclassing_restricted))
 //! valid; any observed semantic selection/tool or native edit/history boundary
 //! invalidates it, even if geometry or selection later returns to the same value.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContext;
+// Additive opt-in capture. Existing capture/advertised catalogs remain unchanged.
+- (nullable Core3DModelingPlanningContext *)captureModelingPlanningContextIncludingSavedCutSource;
+- (nullable Core3DSavedCutSourceOperation *)beginModelingSavedCutSourceEdit:(Core3DSavedCutSourcePatch *)patch
+    context:(Core3DModelingPlanningContext *)context completion:(void (^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginModelingSavedCutSourceEdit(patch:context:completion:));
 //! Composite original planning+inspector authority. No recapture after an await.
 //! Public async dispatch is intentionally unavailable for this operation.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlacementContext;
