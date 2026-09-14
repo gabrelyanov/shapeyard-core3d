@@ -108,6 +108,13 @@ struct OcctMeshUVAtlasOptions {
     Standard_Integer gutterPixels = 0;
 };
 
+//! Read-only resolved region. Ordinals are session-local and never persistent IDs.
+struct OcctMeshRegionExtrudePreview {
+    std::vector<std::uint32_t> triangleIndices;
+    std::vector<std::array<Standard_Real,3>> localBoundary;
+    std::array<Standard_Real,3> localUnitNormal = {};
+};
+
 //! Exact durable state for transform reconciliation. Attribute presence is
 //! significant: a missing legacy default and an authored zero are not the
 //! same OCAF state, even when their resulting matrices match. No AIS handles.
@@ -126,7 +133,7 @@ struct OcctObjectTransformState
     std::array<Standard_Boolean, 8> present = {};
     std::string entityIdentifier;
     std::string definitionIdentifier;
-    Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 triangle grid, 2 coherent planar atlas
+    Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 grid, 2 coherent atlas, 3 authored flat-corner UV layout
     std::array<Standard_Integer, 3> meshUVAtlasSettings = {}; // resolution, gutter, original-node prefix; v2 only
     Standard_Boolean authoredFramesPresent = Standard_False;
     std::array<Standard_Byte, 32> authoredFramesIdentity = {}; // validated immutable archive digest
@@ -804,6 +811,15 @@ public:
     Standard_EXPORT Standard_Boolean ValidateMeshVertexMove(const TDF_Label& label,
         const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
         const TopoDS_Shape& candidate) const noexcept;
+    //! Connected planar region topology construction; positive distance is world mm.
+    Standard_EXPORT Standard_Boolean CaptureMeshRegionExtrudePreview(const TDF_Label& label,
+        std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept;
+    Standard_EXPORT Standard_Boolean PrepareMeshRegionExtrude(const TDF_Label& label,
+        std::uint32_t seedTriangle, Standard_Real distanceMM, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshRegionExtrude(const TDF_Label& label,
+        std::uint32_t seedTriangle, Standard_Real distanceMM, const TopoDS_Shape& candidate) const noexcept;
+    //! Marks exact Shapeyard-authored triangle-major UV storage in an open command.
+    Standard_EXPORT Standard_Boolean MarkAuthoredMeshUVLayout(const TDF_Label& label) noexcept;
     Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;
     Standard_EXPORT Standard_Boolean MarkTriangleUVAtlas(const TDF_Label& label, const OcctMeshUVAtlasOptions& options = {}) noexcept;
     //! False for a read-only XCAF component occurrence.

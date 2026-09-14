@@ -21,6 +21,7 @@ struct Cut475Scope {
 #endif // Cut475 phase diagnostics only
 #include "NativeObservedApplication.hxx"
 #include "NativeMeshVertexMove.hxx"
+#include "NativeMeshRegionExtrude.hxx"
 #include "NativeMeshWindingCandidate.hxx"
 #if DEBUG
 #include "NativeLiveTransactionObserverProbe.hxx"
@@ -5285,9 +5286,13 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
             if (before.meshUVAtlasVersion != 0) {
                 TopoDS_Face face; Handle(Poly_Triangulation) mesh;
                 if (!TriangleAtlasFace(before.shape, face, mesh) || !mesh->HasUVNodes()) return Standard_False;
-                const int originals = mesh->NbNodes() - 3 * mesh->NbTriangles();
-                if (originals <= 0 || originals > 12288
-                    || (before.meshUVAtlasVersion == 2 && before.meshUVAtlasSettings[2] != originals)) return Standard_False;
+                const int originals = before.meshUVAtlasVersion == 3 ? 0
+                    : mesh->NbNodes() - 3 * mesh->NbTriangles();
+                if ((before.meshUVAtlasVersion == 3
+                        ? mesh->NbNodes() != 3 * mesh->NbTriangles()
+                        : originals <= 0 || originals > 12288)
+                    || (before.meshUVAtlasVersion == 2 && before.meshUVAtlasSettings[2] != originals)
+                    || (before.meshUVAtlasVersion == 3 && !mesh->HasNormals())) return Standard_False;
                 for (int t = 1; t <= mesh->NbTriangles(); ++t) {
                     int ids[3]; mesh->Triangle(t).Get(ids[0], ids[1], ids[2]);
                     for (int c = 0; c < 3; ++c) if (ids[c] != originals + (t - 1) * 3 + c + 1) return Standard_False;
@@ -5533,7 +5538,10 @@ bool CaptureEditableMeshSource(const OcctDocument& document,const TDF_Label& lab
         if(core3d::meshedit::CaptureNativeTopology(source.shape,captured,cancelled)
             !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
         prefix=0;
-        if(source.meshUVAtlasVersion!=0) {
+        if(source.meshUVAtlasVersion==3) {
+            if(!captured.sourceMesh->HasUVNodes()
+                || captured.sourceMesh->NbNodes()!=3*captured.sourceMesh->NbTriangles()) return Standard_False;
+        } else if(source.meshUVAtlasVersion!=0) {
             prefix=captured.sourceMesh->NbNodes()-3*captured.sourceMesh->NbTriangles();
             if(prefix<=0 || (source.meshUVAtlasVersion==2 && prefix!=source.meshUVAtlasSettings[2]))
                 return Standard_False;
@@ -5633,7 +5641,10 @@ bool CaptureWindingRepairSource(const OcctDocument& document, const TDF_Label& l
         std::atomic_bool cancelled{false};
         using namespace core3d::meshedit;
         if (CaptureNativeMeshStorage(source.shape,captured,cancelled)!=TopologyResult::Ready) return false;
-        if (source.meshUVAtlasVersion!=0) {
+        if (source.meshUVAtlasVersion==3) {
+            if(!captured.sourceMesh->HasUVNodes()
+                || captured.sourceMesh->NbNodes()!=3*captured.sourceMesh->NbTriangles()) return false;
+        } else if (source.meshUVAtlasVersion!=0) {
             if (source.meshUVAtlasVersion!=1 && source.meshUVAtlasVersion!=2) return false;
             prefix=captured.sourceMesh->NbNodes()-3*captured.sourceMesh->NbTriangles();
             if (prefix<=0 || (source.meshUVAtlasVersion==2 && prefix!=source.meshUVAtlasSettings[2])) return false;
@@ -5711,6 +5722,99 @@ Standard_Boolean OcctDocument::ValidateMeshWindingRepair(const TDF_Label& label,
             && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals && a.deflection==b.deflection
             && a.triangleNodeIDs==b.triangleNodeIDs;
     } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& label,
+    std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept {
+    preview={};
+    if(![NSThread isMainThread])return Standard_False;
+    try {
+        OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
+        int prefix=0;Standard_Size resident=0;
+        if(!CaptureEditableMeshSource(*this,label,source,captured,prefix,resident)
+            || source.meshUVAtlasVersion==0 || source.authoredFramesPresent
+            || captured.face.Orientation()!=TopAbs_FORWARD
+            || !core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc,label))return Standard_False;
+        const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
+        if(placed.IsNegative() || !std::isfinite(placed.ScaleFactor()) || placed.ScaleFactor()<=0)return Standard_False;
+        std::atomic_bool cancelled{false};core3d::meshedit::PlanarRegion region;
+        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        OcctMeshRegionExtrudePreview result;result.triangleIndices=region.triangles;
+        result.localUnitNormal=region.unitNormal;result.localBoundary.reserve(region.boundaryVertices.size());
+        for(auto vertex:region.boundaryVertices)result.localBoundary.push_back(captured.topology.vertices[vertex].point);
+        preview=std::move(result);return Standard_True;
+    } catch(...){preview={};return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::PrepareMeshRegionExtrude(const TDF_Label& label,
+    std::uint32_t seedTriangle, Standard_Real distanceMM, TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    if(![NSThread isMainThread] || !std::isfinite(distanceMM) || distanceMM<=1.e-6 || distanceMM>1.e5)
+        return Standard_False;
+    try {
+        OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
+        int prefix=0;Standard_Size resident=0;
+        if(!CaptureEditableMeshSource(*this,label,source,captured,prefix,resident)
+            || source.meshUVAtlasVersion==0 || source.authoredFramesPresent
+            || captured.face.Orientation()!=TopAbs_FORWARD
+            || !core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc,label))return Standard_False;
+        const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
+        const double scale=placed.ScaleFactor();
+        if(placed.IsNegative() || !std::isfinite(scale) || scale<=0)return Standard_False;
+        std::atomic_bool cancelled{false};core3d::meshedit::PlanarRegion region;
+        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        const auto recipe=Core3DNormalTextureRecipeForLabel(label);
+        XCAFDoc_VisMaterialPBR material;
+        const bool hasNormal=TryPBRMaterialForLabel(label,material) && !material.NormalTexture.IsNull();
+        if(recipe<0 || recipe>1 || hasNormal!=(recipe==1))return Standard_False;
+        TopoDS_Shape result;
+        if(core3d::meshedit::PrepareRegionExtrusion(captured,prefix,region,distanceMM/scale,
+            core3d::meshedit::RegionSideUVPolicy::BoundaryStripNormalized,result,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        if(recipe==1) {
+            Standard_Size bytes=0;
+            if(!ValidateNormalTextureShape(result,&bytes) || resident>64U*1024U*1024U
+                || bytes>64U*1024U*1024U-resident)return Standard_False;
+        }
+        candidate=result;return Standard_True;
+    } catch(...){candidate.Nullify();return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::ValidateMeshRegionExtrude(const TDF_Label& label,
+    std::uint32_t seedTriangle, Standard_Real distanceMM, const TopoDS_Shape& candidate) const noexcept {
+    try {
+        TopoDS_Shape expected;
+        if(!PrepareMeshRegionExtrude(label,seedTriangle,distanceMM,expected))return Standard_False;
+        std::atomic_bool cancelled{false};core3d::meshedit::NativeMeshStorageCapture a,b;
+        if(core3d::meshedit::CaptureNativeMeshStorage(expected,a,cancelled)!=core3d::meshedit::TopologyResult::Ready
+            || core3d::meshedit::CaptureNativeMeshStorage(candidate,b,cancelled)!=core3d::meshedit::TopologyResult::Ready)
+            return Standard_False;
+        return expected.ShapeType()==candidate.ShapeType() && expected.Orientation()==candidate.Orientation()
+            && expected.Location().IsEqual(candidate.Location()) && a.face.Orientation()==b.face.Orientation()
+            && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
+            && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals
+            && a.deflection==b.deflection && a.triangleNodeIDs==b.triangleNodeIDs;
+    } catch(...){return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::MarkAuthoredMeshUVLayout(const TDF_Label& label) noexcept {
+    try {
+        if(myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || GeometryRepresentationForLabel(label)!=OcctGeometryRepresentation::TriangleMesh)return Standard_False;
+        OcctAuthoredFrameRecord frames;
+        if(Core3DReadAuthoredFrameOwner(myOcafDoc,label,frames)!=OcctAuthoredFrameReadState::Absent)
+            return Standard_False;
+        std::atomic_bool cancelled{false};core3d::meshedit::NativeTopologyCapture captured;
+        if(core3d::meshedit::CaptureNativeTopology(XCAFDoc_ShapeTool::GetShape(label),captured,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready || !captured.sourceMesh->HasUVNodes()
+            || !core3d::meshedit::HasFlatCornerLayout(captured,0))return Standard_False;
+        TDataStd_Integer::Set(label,MeshUVAtlasAttributeID(),3);
+        for(int i=0;i<3;++i)label.ForgetAttribute(MeshUVAtlasSettingsAttributeID(i));
+        return Standard_True;
+    } catch(...){return Standard_False;}
 }
 
 Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(
@@ -8915,7 +9019,7 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         Handle(TDF_Attribute) atlasAttribute;
         if (label.FindAttribute(MeshUVAtlasAttributeID(), atlasAttribute)) {
             const auto version = Handle(TDataStd_Integer)::DownCast(atlasAttribute);
-            if (version.IsNull() || (version->Get() != 1 && version->Get() != 2)
+            if (version.IsNull() || (version->Get() != 1 && version->Get() != 2 && version->Get() != 3)
                 || captured.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh) { return Standard_False; }
             captured.meshUVAtlasVersion = version->Get();
         }

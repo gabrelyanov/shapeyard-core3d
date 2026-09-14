@@ -345,6 +345,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::Scale
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
+                && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -379,7 +380,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ||(sourceRebuild&&(permit||changes.size()!=1))
                 ||(programSourceRebuild&&(permit||changes.size()!=1)))
                 return reject(OrdinaryEditResult::Invalid);
-            if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
+            if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)
+                || request.meshRegionExtrude.has_value() != (request.operation == OrdinaryTransformOperation::MeshRegionExtrude)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.presentation.IsNull() || request.shape.IsNull()
@@ -465,6 +467,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
+                && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -635,6 +638,21 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !_document->ValidateMeshVertexMove(request.label,request.meshVertexMove->vertices,
                         request.meshVertexMove->worldDelta,request.shape))) {
                 return reject(OrdinaryEditResult::Invalid);
+            }
+            if (request.operation == OrdinaryTransformOperation::MeshRegionExtrude) {
+                OcctMeshRegionExtrudePreview region;
+                if(changes.size()!=1 || !geometryChanges || !request.meshRegionExtrude
+                    || request.meshRegionExtrude->sideUVPolicy!=1
+                    || representation!=OcctGeometryRepresentation::TriangleMesh
+                    || !MatricesEqual(record.previous.transform,request.transform)
+                    || request.rotationAroundPivot.has_value()
+                    || !_document->CaptureMeshRegionExtrudePreview(request.label,
+                        request.meshRegionExtrude->seedTriangle,region)
+                    || region.triangleIndices!=request.meshRegionExtrude->resolvedTriangles
+                    || !_document->ValidateMeshRegionExtrude(request.label,
+                        request.meshRegionExtrude->seedTriangle,request.meshRegionExtrude->distanceMM,request.shape)) {
+                    return reject(OrdinaryEditResult::Invalid);
+                }
             }
             if (request.operation == OrdinaryTransformOperation::MeshWindingRepair
                 && (changes.size() != 1 || !geometryChanges
@@ -2026,6 +2044,18 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                         record.requested.shape))) {
                 throw Standard_Failure("Stale mesh vertex candidate");
             }
+            if(record.requested.operation==OrdinaryTransformOperation::MeshRegionExtrude) {
+                OcctMeshRegionExtrudePreview region;
+                if(!record.requested.meshRegionExtrude
+                    || record.requested.meshRegionExtrude->sideUVPolicy!=1
+                    || !_document->CaptureMeshRegionExtrudePreview(record.previous.label,
+                        record.requested.meshRegionExtrude->seedTriangle,region)
+                    || region.triangleIndices!=record.requested.meshRegionExtrude->resolvedTriangles
+                    || !_document->ValidateMeshRegionExtrude(record.previous.label,
+                        record.requested.meshRegionExtrude->seedTriangle,
+                        record.requested.meshRegionExtrude->distanceMM,record.requested.shape))
+                    throw Standard_Failure("Stale mesh region extrusion candidate");
+            }
             if (record.requested.operation == OrdinaryTransformOperation::MeshWindingRepair
                 && !_document->ValidateMeshWindingRepair(
                     record.previous.label, record.requested.shape)) {
@@ -2093,6 +2123,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if ((!featureStaged && !record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
+                || (record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
+                    && !_document->MarkAuthoredMeshUVLayout(record.previous.label))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
                 || (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
@@ -2115,7 +2147,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
                 || (!loftStaged && !record.candidate.loft.IsEqual(record.previous.loft))
                 || (!cutStaged && !cutSourceStaged && !programSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
-                || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
+                || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
+                    ? record.requested.meshUVAtlasOptions.version
+                    : record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
+                    ? 3 : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
             if (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild) {
@@ -2148,12 +2183,17 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || record.candidate.meshUVAtlasSettings[1]!=options.gutterPixels)) {
                     throw Standard_Failure("Ordinary UV settings readback failed");
                 }
+            } else if (record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude) {
+                if(record.candidate.meshUVAtlasSettings!=std::array<Standard_Integer,3>{}
+                    || record.candidate.authoredFramesPresent)
+                    throw Standard_Failure("Mesh region extrusion metadata readback failed");
             } else if (record.candidate.meshUVAtlasSettings != record.previous.meshUVAtlasSettings
                 || record.candidate.authoredFramesPresent != record.previous.authoredFramesPresent
                 || record.candidate.authoredFramesIdentity != record.previous.authoredFramesIdentity) {
                 throw Standard_Failure("Ordinary transform changed geometry-owned metadata");
             }
             if (record.requested.operation == OrdinaryTransformOperation::MeshVertexMove
+                || record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
                 || record.requested.operation == OrdinaryTransformOperation::MeshWindingRepair) {
                 Standard_Size bytes=0;
                 if(!Core3DValidateOwnedFrameUsage(_document->Document(),bytes))

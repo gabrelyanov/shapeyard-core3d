@@ -1746,6 +1746,30 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
 - (core3d::StoredProfileSnapshot)nativeSnapshot { return _native; }
 @end
 
+@interface Core3DMeshRegionExtrudeSnapshot ()
+@property(nonatomic,copy,readonly) NSString *sessionIdentifier;
+- (instancetype)initWithNativeSnapshot:(const core3d::MeshRegionExtrudeSnapshot&)snapshot;
+@end
+@implementation Core3DMeshRegionExtrudeSnapshot
+- (instancetype)initWithNativeSnapshot:(const core3d::MeshRegionExtrudeSnapshot&)snapshot {
+    self=[super init];
+    if(self) {
+        _sessionIdentifier=[[NSString alloc] initWithBytes:snapshot.sessionIdentifier.data()
+            length:snapshot.sessionIdentifier.size() encoding:NSUTF8StringEncoding];
+        _entityIdentifier=[[NSString alloc] initWithBytes:snapshot.entityIdentifier.data()
+            length:snapshot.entityIdentifier.size() encoding:NSUTF8StringEncoding];
+        NSMutableArray *triangles=[NSMutableArray arrayWithCapacity:snapshot.triangleIndices.size()];
+        for(auto triangle:snapshot.triangleIndices)[triangles addObject:@(triangle)];
+        _triangleIndices=[triangles copy];
+        NSMutableArray *boundary=[NSMutableArray arrayWithCapacity:snapshot.worldBoundary.size()];
+        for(const auto& point:snapshot.worldBoundary)[boundary addObject:@[@(point[0]),@(point[1]),@(point[2])]];
+        _worldBoundary=[boundary copy];
+        _worldUnitNormal=@[@(snapshot.worldUnitNormal[0]),@(snapshot.worldUnitNormal[1]),@(snapshot.worldUnitNormal[2])];
+    }
+    return self;
+}
+@end
+
 @interface Core3DMeshVertexEditSnapshot ()
 @property(nonatomic,copy,readonly) NSString *sessionIdentifier;
 - (instancetype)initWithNativeSnapshot:(const core3d::MeshVertexEditSnapshot&)snapshot;
@@ -12092,6 +12116,61 @@ struct NativeModelingPermitIssuer final {
         }
     } catch(...) {}
     return Core3DMeshVertexEditResultRejected;
+}
+
+- (Core3DMeshRegionExtrudeSnapshot *)prepareMeshRegionExtrudeForEntityIdentifier:(NSString *)entityIdentifier
+    seedTriangle:(NSUInteger)seedTriangle expected:(Core3DSceneSnapshot *)expected {
+    if(![NSThread isMainThread] || !_isSetuped || GLController==nil || GLController.viewer==nullptr
+        || expected==nil || entityIdentifier.length==0 || entityIdentifier.length>128
+        || expected.publicationSourceIdentifier.length==0 || expected.publicationSourceIdentifier.length>128
+        || seedTriangle>4095)return nil;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        || size.width>std::numeric_limits<std::uint32_t>::max()
+        || size.height>std::numeric_limits<std::uint32_t>::max())return nil;
+    const char *entity=entityIdentifier.UTF8String,*publication=expected.publicationSourceIdentifier.UTF8String;
+    if(entity==nullptr||publication==nullptr)return nil;
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity,[entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration=expected.revisions.documentGeneration;
+        identity.modelRevision=expected.revisions.modelRevision;
+        const auto result=GLController.viewer->prepareMeshRegionExtrude(identity,
+            expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),static_cast<std::uint32_t>(seedTriangle));
+        return result?[[Core3DMeshRegionExtrudeSnapshot alloc] initWithNativeSnapshot:*result]:nil;
+    } catch(...){return nil;}
+}
+
+- (void)cancelMeshRegionExtrude:(Core3DMeshRegionExtrudeSnapshot *)expected {
+    if(![NSThread isMainThread]||!_isSetuped||GLController==nil||GLController.viewer==nullptr
+        || expected==nil||expected.sessionIdentifier.length==0||expected.sessionIdentifier.length>128)return;
+    const char *identifier=expected.sessionIdentifier.UTF8String;
+    if(identifier!=nullptr)GLController.viewer->cancelMeshRegionExtrude(identifier);
+}
+
+- (Core3DMeshRegionExtrudeResult)commitMeshRegionExtrude:(Core3DMeshRegionExtrudeSnapshot *)expected
+    distanceMM:(double)distanceMM {
+    if(![NSThread isMainThread]||!_isSetuped||GLController==nil||GLController.viewer==nullptr
+        || expected==nil||expected.sessionIdentifier.length==0||expected.sessionIdentifier.length>128)
+        return Core3DMeshRegionExtrudeResultRejected;
+    const char *identifier=expected.sessionIdentifier.UTF8String;
+    if(identifier==nullptr)return Core3DMeshRegionExtrudeResultRejected;
+    try {
+        switch(GLController.viewer->commitMeshRegionExtrude(identifier,distanceMM)) {
+            case core3d::OrdinaryEditResult::NoChange:return Core3DMeshRegionExtrudeResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];[GLController requestRender];[self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];return Core3DMeshRegionExtrudeResultCommitted;
+            case core3d::OrdinaryEditResult::Busy:return Core3DMeshRegionExtrudeResultBusy;
+            case core3d::OrdinaryEditResult::Invalid:return Core3DMeshRegionExtrudeResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown:return Core3DMeshRegionExtrudeResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure:return Core3DMeshRegionExtrudeResultFailed;
+        }
+    } catch(...) {}
+    return Core3DMeshRegionExtrudeResultRejected;
 }
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier

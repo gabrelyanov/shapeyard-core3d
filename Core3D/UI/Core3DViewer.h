@@ -148,6 +148,14 @@ namespace core3d {
         std::vector<std::array<std::uint32_t,2>> edgeVertices;
         std::vector<std::array<std::uint32_t,3>> triangleVertices;
     };
+    struct MeshRegionExtrudeWork;
+    struct MeshRegionExtrudeSnapshot {
+        std::string sessionIdentifier;
+        std::string entityIdentifier;
+        std::vector<std::uint32_t> triangleIndices;
+        std::vector<std::array<double,3>> worldBoundary;
+        std::array<double,3> worldUnitNormal={};
+    };
     struct DocumentReplacementWork;
     struct QueuedAssetLoadWork;
     struct ObjectAlignmentWork;
@@ -387,6 +395,12 @@ namespace core3d {
             meshedit::ElementKind kind,const std::vector<std::uint32_t>& elements,
             const gp_Vec& worldDelta) noexcept;
         void cancelMeshVertexEdit(const std::string& sessionIdentifier) noexcept;
+        std::optional<MeshRegionExtrudeSnapshot> prepareMeshRegionExtrude(
+            const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+            std::uint32_t width,std::uint32_t height,std::uint32_t seedTriangle) noexcept;
+        OrdinaryEditResult commitMeshRegionExtrude(const std::string& sessionIdentifier,
+            double distanceMM) noexcept;
+        void cancelMeshRegionExtrude(const std::string& sessionIdentifier) noexcept;
         OrdinaryEditResult createSourceRetainedMeshCopy(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height) noexcept;
         std::optional<OcctMeshUVAtlasPreview> previewCoherentUVAtlas(const ObjectFrameIdentity& identity,
@@ -690,6 +704,7 @@ namespace core3d {
         // each family's prepare refuses while the other family holds a lease.
         std::weak_ptr<SavedProgramSourceEditWork> _savedProgramSourceEditWork;
         std::shared_ptr<MeshVertexEditWork> _meshVertexEditWork;
+        std::shared_ptr<MeshRegionExtrudeWork> _meshRegionExtrudeWork;
         std::shared_ptr<DocumentReplacementWork> _documentReplacementWork;
         std::shared_ptr<QueuedAssetLoadWork> _queuedAssetLoadWork;
         bool hasUnresolvedOrdinaryEditExcludingQueuedLoad() const noexcept;

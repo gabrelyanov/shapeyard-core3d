@@ -26,7 +26,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -91,6 +91,12 @@ struct OrdinaryMeshVertexMove {
     std::vector<std::uint32_t> vertices;
     gp_Vec worldDelta;
 };
+struct OrdinaryMeshRegionExtrude {
+    std::uint32_t seedTriangle=0;
+    std::vector<std::uint32_t> resolvedTriangles;
+    double distanceMM=0;
+    std::uint8_t sideUVPolicy=1; // boundaryStripNormalized
+};
 
 // Minted only after the inspector validates its exact original lease and
 // computes the candidate through the shared touch calculation. Ordinary
@@ -114,6 +120,7 @@ struct OrdinaryTransformChange {
     std::optional<OrdinaryRotationAroundPivot> rotationAroundPivot;
     OcctMeshUVAtlasOptions meshUVAtlasOptions;
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
+    std::optional<OrdinaryMeshRegionExtrude> meshRegionExtrude;
     std::shared_ptr<const NativePlacementContinuation> placementContinuation;
     std::optional<profile::Parameters> profileRebuild;
     std::optional<enclosure::Parameters> enclosureRebuild;
