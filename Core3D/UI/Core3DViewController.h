@@ -317,6 +317,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSString *entityIdentifier;
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutBore *> *bores;
+//! Descriptive source values shared by every bore of the complete recipe, in
+//! source-recipe millimetres BEFORE construction-frame and occurrence scaling.
+//! Copied from THIS snapshot; they cannot recreate source/transaction authority.
+@property(nonatomic,strong,readonly,nullable) Core3DSavedCutSourceValues *sourceRecipeMM;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -1414,6 +1418,15 @@ __attribute__((objc_subclassing_restricted))
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginSavedCutSourceEdit(_:patch:expected:completion:));
+//! Explicit whole-program source edit of a retained multi-bore cut: the shared
+//! polygon/enclosure source dimensions change while every bore's stable ID,
+//! order, raw axis/center/radius, high-water ID, identity, units, placement,
+//! name and scalar material are preserved. Native lease only; no UI/touch/AI
+//! catalog route. Main callback may refuse synchronously; legacy API unchanged.
+- (nullable Core3DSavedCutSourceOperation *)beginSavedProgramCutSourceEdit:(Core3DCylindricalCutProgramSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginSavedProgramCutSourceEdit(_:patch:expected:completion:));
 #if DEBUG
 //! One-shot main delivery gate for real worker lifecycle qualification.
 - (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate

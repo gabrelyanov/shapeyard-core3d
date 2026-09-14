@@ -1,4 +1,5 @@
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
+#include "../OCCTKit/SavedProgramSourceDetachedWork.hxx"
 #include "../OCCTKit/ProfileDefinition.hxx"
 #include "../OCCTKit/PlanarSweepDefinition.hxx"
 #include "../OCCTKit/RectangularLoftDefinition.hxx"
@@ -63,6 +64,8 @@ namespace core3d {
     struct NativeSolidWork;
     class SavedCutSourceEditWork;
     class SavedCutSourceEditCancellation;
+    class SavedProgramSourceEditWork;
+    class SavedProgramSourceEditCancellation;
     class NativeModelingCommitPermit;
     struct ProfileSolidGeometry;
     struct EnclosureSolidGeometry;
@@ -265,6 +268,32 @@ namespace core3d {
     static std::shared_ptr<const SavedCutSourceDetachedResult> buildSavedCutSourceDetached(
         const std::shared_ptr<SavedCutSourceDetachedWork>&) noexcept;
     static void cancelSavedCutSourceDetached(const std::shared_ptr<SavedCutSourceDetachedWork>&) noexcept;
+    // Whole-program source-edit lease family: an additive program-specific
+    // path sharing the same helpers and one-lease slot discipline. It never
+    // widens the legacy one-bore capture or command authority above. The public
+    // native wrapper exposes it; touch and AI catalog routes remain separate.
+    static std::shared_ptr<SavedProgramSourceEditWork> makeSavedProgramSourceEditWork() noexcept;
+    bool prepareSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditWork>&,
+        const CylindricalCutProgramSnapshot&,const saved_cut_source_edit::Patch&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    static std::shared_ptr<SavedProgramSourceDetachedWork> savedProgramSourceEditGeometry(
+        const std::shared_ptr<SavedProgramSourceEditWork>&) noexcept;
+    // Obtain before synchronous prepare. Only this token may cross threads.
+    static std::shared_ptr<SavedProgramSourceEditCancellation> savedProgramSourceEditCancellation(
+        const std::shared_ptr<SavedProgramSourceEditWork>&) noexcept;
+    // Thread-safe signal: token owns no document, AIS or main lease handles.
+    static bool cancelSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditCancellation>&) noexcept;
+    bool discardSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditWork>&) noexcept;
+    OrdinaryEditResult commitSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditWork>&,
+        const std::shared_ptr<const SavedProgramSourceDetachedResult>&) noexcept;
+    // Detached-only whole-program source rebuild. Lifecycle owns work first.
+    static std::shared_ptr<SavedProgramSourceDetachedWork> makeSavedProgramSourceDetachedWork() noexcept;
+    bool prepareSavedProgramSourceDetached(const std::shared_ptr<SavedProgramSourceDetachedWork>&,
+        const CylindricalCutProgramSnapshot&,const saved_cut_source_edit::Patch&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    static std::shared_ptr<const SavedProgramSourceDetachedResult> buildSavedProgramSourceDetached(
+        const std::shared_ptr<SavedProgramSourceDetachedWork>&) noexcept;
+    static void cancelSavedProgramSourceDetached(const std::shared_ptr<SavedProgramSourceDetachedWork>&) noexcept;
     std::optional<StoredRectangularLoftSnapshot> storedRectangularLoftDefinition(
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
             std::uint32_t width,std::uint32_t height) noexcept;
@@ -657,6 +686,9 @@ namespace core3d {
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
         // Weak slot cannot keep a dropped main-thread lease or scene alive.
         std::weak_ptr<SavedCutSourceEditWork> _savedCutSourceEditWork;
+        // Same single-lease discipline for the whole-program source family;
+        // each family's prepare refuses while the other family holds a lease.
+        std::weak_ptr<SavedProgramSourceEditWork> _savedProgramSourceEditWork;
         std::shared_ptr<MeshVertexEditWork> _meshVertexEditWork;
         std::shared_ptr<DocumentReplacementWork> _documentReplacementWork;
         std::shared_ptr<QueuedAssetLoadWork> _queuedAssetLoadWork;

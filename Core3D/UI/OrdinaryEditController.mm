@@ -351,7 +351,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::SweepRebuild
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
                 && request.operation != OrdinaryTransformOperation::CylindricalCut
-                && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild) {
+                && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild
+                && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
@@ -368,11 +369,15 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 return reject(OrdinaryEditResult::Invalid);
             }
             const bool sourceRebuild=request.operation==OrdinaryTransformOperation::CylindricalCutSourceRebuild;
+            const bool programSourceRebuild=request.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild;
             if(bool(request.cut)!=(request.operation==OrdinaryTransformOperation::CylindricalCut)
-                ||bool(request.cutSource)!=(request.operation==OrdinaryTransformOperation::CylindricalCut||sourceRebuild)
+                ||bool(request.cutSource)!=(request.operation==OrdinaryTransformOperation::CylindricalCut||sourceRebuild||programSourceRebuild)
                 ||request.cutSourcePatch.has_value()!=sourceRebuild||bool(request.cutSourceRebuild)!=sourceRebuild
+                ||request.cutProgramSourcePatch.has_value()!=programSourceRebuild
+                ||bool(request.cutProgramSourceRebuild)!=programSourceRebuild
                 ||(request.cutProgramEdit.has_value()&&request.operation!=OrdinaryTransformOperation::CylindricalCut)
-                ||(sourceRebuild&&(permit||changes.size()!=1)))
+                ||(sourceRebuild&&(permit||changes.size()!=1))
+                ||(programSourceRebuild&&(permit||changes.size()!=1)))
                 return reject(OrdinaryEditResult::Invalid);
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)) {
                 return reject(OrdinaryEditResult::Invalid);
@@ -466,7 +471,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::SweepRebuild
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
                 && request.operation != OrdinaryTransformOperation::CylindricalCut
-                && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild) {
+                && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild
+                && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             const auto representation = record.previous.resolvedRepresentation;
@@ -519,8 +525,14 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=request.cutSourceRebuild->isNoChange();
             }
+            if(programSourceRebuild) {
+                if(!savedProgramSourceChangeMatches(request,record.previous))return reject(OrdinaryEditResult::Invalid);
+                ledger.cutPrevious=request.cutSource;
+                sweepNoChange=request.cutProgramSourceRebuild->isNoChange();
+            }
             if(record.previous.retained.value&&request.operation!=OrdinaryTransformOperation::CylindricalCut
-                &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild) {
+                &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild
+                &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
                 // An occurrence edit never changes the original-local result,
                 // retained base or cylinder. No reserved-placement fallback.
                 OcctCylindricalCutSource cut;double originalRadius=0,candidateRadius=0;
@@ -666,6 +678,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         // Rebind the exact opaque source result after the host boundary too.
         for(const auto& record:ledger.records)if(record.requested.operation==OrdinaryTransformOperation::CylindricalCutSourceRebuild
             &&!savedCutSourceChangeMatches(record.requested,record.previous))return reject(OrdinaryEditResult::Invalid);
+        for(const auto& record:ledger.records)if(record.requested.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+            &&!savedProgramSourceChangeMatches(record.requested,record.previous))return reject(OrdinaryEditResult::Invalid);
         if (permit && (!permit->current() || !rebuildReceiptMatches(ledger,false)))
             return reject(OrdinaryEditResult::Invalid);
         if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false))) return reject(OrdinaryEditResult::Invalid);
@@ -1753,6 +1767,65 @@ bool OrdinaryEditController::savedCutSourceChangeMatches(
     }catch(...){return false;}
 }
 
+// Whole-program counterpart: source/value/content admission over the COMPLETE
+// freshly captured recipe, not the original Viewer epoch proof. The native
+// wrapper revalidates its snapshot/stamp and Stop before beginTransform.
+bool OrdinaryEditController::savedProgramSourceChangeMatches(
+    const OrdinaryTransformChange& request,const OcctObjectTransformState& previous) const noexcept {
+    if(!NSThread.isMainThread||_document.IsNull()||!request.cutProgramSourceRebuild||!request.cutProgramSourcePatch
+        ||!request.cutSource||request.cut||request.cutSourcePatch||request.cutSourceRebuild||request.cutProgramEdit
+        ||request.rotationAroundPivot
+        ||request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+        ||previous.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+        ||!previous.retained.value||!request.label.IsEqual(previous.label)
+        ||!MatricesEqual(previous.transform,request.transform))return false;
+    try {
+        namespace e=saved_cut_source_edit;
+        namespace p=saved_program_source_edit;
+        OcctCylindricalCutProgramSource source;
+        if(!_document->CaptureCylindricalCutProgramSource(request.label,source)
+            ||!std::holds_alternative<retained_boolean::Program>(source.recipe)
+            ||!source.original.IsEqual(previous)
+            ||!sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)
+            ||!_document->SavedCutSceneStateMatches(request.cutSource))return false;
+        const auto& built=*request.cutProgramSourceRebuild;
+        const std::atomic_bool checking(false);p::Values expected;
+        if(!p::PrepareValues(source.recipe,*request.cutProgramSourcePatch,checking,expected)
+            ||expected.oldBytes!=source.recipeBytes
+            ||expected.oldBytes!=built.values.oldBytes||expected.newBytes!=built.values.newBytes
+            ||expected.changed!=built.values.changed||built.noChange==expected.changed)return false;
+        std::size_t aggregate=0;e::ShapeCommitment oldBase,oldResult;
+        if(!e::Commit(source.base,checking,aggregate,oldBase)
+            ||!e::Commit(source.original.shape,checking,aggregate,oldResult)
+            ||!(oldBase==built.sourceBase)||!(oldResult==built.sourceResult))return false;
+        if(built.noChange){
+            // No detached replacement exists for an unchanged patch. Keep the
+            // real original shape; admit host/scene currentness before NoChange.
+            if(!built.newBase.IsNull()||!built.newResult.IsNull()||!built.build.solid.IsNull()
+                ||built.build.status!=saved_boolean_build::Status::Refused
+                ||expected.oldBytes!=expected.newBytes||!request.shape.IsEqual(previous.shape)
+                ||!(built.generatedBase==oldBase)||!(built.generatedResult==oldResult))return false;
+        }else{
+            if(built.newBase.IsNull()||built.newResult.IsNull()
+                ||built.newBase.ShapeType()!=TopAbs_SOLID||built.newBase.Orientation()!=TopAbs_FORWARD
+                ||built.newResult.ShapeType()!=TopAbs_SOLID||built.newResult.Orientation()!=TopAbs_FORWARD
+                ||built.build.status!=saved_boolean_build::Status::Built
+                ||built.build.exactProgram!=expected.newBytes
+                ||built.build.correspondence.classification
+                    !=saved_boolean_result::Classification::MatchedOrientedBoundary
+                ||!request.shape.IsEqual(built.newResult)||!built.build.solid.IsEqual(built.newResult)
+                ||request.shape.IsEqual(previous.shape))return false;
+            e::ShapeCommitment base,result;
+            if(!e::Commit(built.newBase,checking,aggregate,base)
+                ||!e::Commit(built.newResult,checking,aggregate,result)
+                ||!(base==built.generatedBase)||!(result==built.generatedResult))return false;
+        }
+        // Complete unchanged scene, including shared live source contents,
+        // remains required after the synchronous content readers too.
+        return _document->SavedCutSceneStateMatches(request.cutSource);
+    }catch(...){return false;}
+}
+
 // Receipt coupling is opt-in for one exact stored rebuild. Ordinary touch,
 // arbitrary profiles and every other transform retain their existing path.
 bool OrdinaryEditController::bindPlacementReceipt(OrdinaryTransformLedger& ledger,
@@ -1960,7 +2033,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
-            bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false;
+            bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false;
             if (record.requested.operation==OrdinaryTransformOperation::SweepRebuild) {
                 bool pairedFault=false;
 #if DEBUG
@@ -2004,7 +2077,19 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     *record.requested.cutSourcePatch,record.requested.cutSourceRebuild,ledger.cutSourcePayload,pairedFault);
                 if(!cutSourceStaged)throw Standard_Failure("Saved cut source paired staging failed");
             }
-            const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged;
+            if(record.requested.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
+                bool pairedFault=false;
+#if DEBUG
+                if(_stageFailureIndex==2){_stageFailureIndex=-1;pairedFault=true;}
+#endif
+                if(ledger.modelingReceipt||ledger.records.size()!=1||!record.requested.cutProgramSourcePatch
+                    ||!record.requested.cutProgramSourceRebuild||ledger.cutSourcePayload)
+                    throw Standard_Failure("Saved program source staging admission changed");
+                programSourceStaged=_document->StageSavedProgramSourceReplacement(record.previous,
+                    *record.requested.cutProgramSourcePatch,record.requested.cutProgramSourceRebuild,ledger.cutSourcePayload,pairedFault);
+                if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
+            }
+            const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged;
             if ((!featureStaged && !record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
@@ -2029,7 +2114,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     : record.candidate.scalars != EncodedTransform(record.requested.transform))
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
                 || (!loftStaged && !record.candidate.loft.IsEqual(record.previous.loft))
-                || (!cutStaged && !cutSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
+                || (!cutStaged && !cutSourceStaged && !programSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas ? record.requested.meshUVAtlasOptions.version : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
@@ -2079,7 +2164,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     record.candidate.shape.Location(), referenceAxis)) {
                 throw Standard_Failure("Ordinary transform exceeds persisted reference-axis limits");
             }
-            if (!sweepStaged && !cutStaged && !cutSourceStaged) for (bool present : record.candidate.present) {
+            if (!sweepStaged && !cutStaged && !cutSourceStaged && !programSourceStaged) for (bool present : record.candidate.present) {
                 if (!present) { throw Standard_Failure("Incomplete ordinary transform candidate"); }
             }
         }
@@ -2094,6 +2179,9 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             const bool sealed=request.operation==OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 ?(request.cutSourcePatch&&_document->SealSavedCutSourceState(ledger.cutPrevious,*request.cutSourcePatch,
                     request.cutSourceRebuild,ledger.cutSourcePayload,ledger.cutCandidate))
+                :request.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+                ?(request.cutProgramSourcePatch&&_document->SealSavedProgramSourceState(ledger.cutPrevious,*request.cutProgramSourcePatch,
+                    request.cutProgramSourceRebuild,ledger.cutSourcePayload,ledger.cutCandidate))
                 :request.operation==OrdinaryTransformOperation::CylindricalCut
                 ?_document->SealSavedCutSceneState(ledger.cutPrevious,request.shape,request.cut,ledger.cutCandidate)
                 :_document->SealSavedCutPlacementState(ledger.cutPrevious,request.transform,ledger.cutCandidate);

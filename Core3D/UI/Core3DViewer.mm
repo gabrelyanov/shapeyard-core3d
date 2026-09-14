@@ -1168,6 +1168,7 @@ struct DocumentReplacementWork {
 void Core3DViewer::release() noexcept {
     // Retire pre-commit source authority on main before graphics teardown.
     (void)discardSavedCutSourceEdit(_savedCutSourceEditWork.lock());
+    (void)discardSavedProgramSourceEdit(_savedProgramSourceEditWork.lock());
     // Interactors retain the view, context, document, and manipulator graphics.
     // GLViewController calls this while the viewport EAGL context is current,
     // so release them before the base handles and before that context is
@@ -2044,6 +2045,38 @@ public:
     SavedCutSourceEditWork& operator=(const SavedCutSourceEditWork&)=delete;
 };
 
+// Thread-safe cancellation owns only private detached geometry and atomics.
+// Destroying the final token on a worker cannot release any AIS/document handle.
+class SavedProgramSourceEditCancellation final {
+    friend class Core3DViewer;
+    enum class Decision { Pending, Cancelled, Committing, Settled };
+    std::atomic<Decision> decision{Decision::Pending};
+    const std::shared_ptr<SavedProgramSourceDetachedWork> geometry;
+    explicit SavedProgramSourceEditCancellation(std::shared_ptr<SavedProgramSourceDetachedWork> work):geometry(std::move(work)){}
+public:
+    SavedProgramSourceEditCancellation(const SavedProgramSourceEditCancellation&)=delete;
+    SavedProgramSourceEditCancellation& operator=(const SavedProgramSourceEditCancellation&)=delete;
+};
+// Main-thread whole-program lease. Worker callers receive only detachedGeometry,
+// never this document/selection/presentation authority. Weak slot on Viewer.
+class SavedProgramSourceEditWork final {
+    friend class Core3DViewer;
+    enum class Phase { Fresh, Preparing, Prepared, Settled };
+    Phase phase=Phase::Fresh; // Main thread only.
+    const std::shared_ptr<SavedProgramSourceEditCancellation> cancellation;
+    const std::shared_ptr<SavedProgramSourceDetachedWork> detachedGeometry;
+    std::shared_ptr<NativeSolidWork> authority; // Main thread only.
+    std::weak_ptr<OrdinaryEditController> ordinaryOwner;
+    Handle(AIS_InteractiveContext) context;
+    SavedProgramSourceEditWork(std::shared_ptr<SavedProgramSourceDetachedWork> geometry,
+        std::shared_ptr<SavedProgramSourceEditCancellation> token)
+        :cancellation(std::move(token)),detachedGeometry(std::move(geometry)){}
+public:
+    ~SavedProgramSourceEditWork(){(void)Core3DViewer::cancelSavedProgramSourceEdit(cancellation);}
+    SavedProgramSourceEditWork(const SavedProgramSourceEditWork&)=delete;
+    SavedProgramSourceEditWork& operator=(const SavedProgramSourceEditWork&)=delete;
+};
+
 std::shared_ptr<SavedCutSourceEditWork> Core3DViewer::makeSavedCutSourceEditWork() noexcept {
     if(!NSThread.isMainThread)return {};
     try {
@@ -2092,6 +2125,12 @@ bool Core3DViewer::prepareSavedCutSourceEdit(const std::shared_ptr<SavedCutSourc
     };
     try {
         if(work->cancellation->decision.load()!=Decision::Pending||!canBeginCommittedEdit()||!_ordinaryEditController)return refuse();
+        // The whole-program family shares this one-lease discipline: a live
+        // program lease refuses here instead of stacking a second source job.
+        if(const auto foreign=_savedProgramSourceEditWork.lock()){
+            if(foreign->phase==SavedProgramSourceEditWork::Phase::Settled)_savedProgramSourceEditWork.reset();
+            else return refuse();
+        }
         // Context/document reset need not call release. A retained cancelled or
         // demonstrably stale old lease must not occupy the next source slot.
         if(const auto old=_savedCutSourceEditWork.lock()){
@@ -2199,6 +2238,340 @@ OrdinaryEditResult Core3DViewer::commitSavedCutSourceEdit(const std::shared_ptr<
         if(!stamp||!(*stamp==*a->cutStamp)||work->cancellation->decision.load()!=Decision::Pending
             ||work->detachedGeometry->stop->load())return finish(OrdinaryEditResult::Invalid);
         record.requested.cutSourceRebuild=built;
+        record.requested.shape=built->noChange?record.previous.shape:built->newResult;
+        // Stop and synchronous ordinary dispatch have one atomic decision. Stop
+        // that loses this race cannot change the actual ordinary result afterward.
+        auto pending=Decision::Pending;
+        if(!work->cancellation->decision.compare_exchange_strong(pending,Decision::Committing))return finish(OrdinaryEditResult::Invalid);
+        a->consumed=true;
+        OrdinaryEditResult result=OrdinaryEditResult::Invalid;
+        auto lease=_ordinaryEditController->beginTransform({record.requested},&result);
+        return finish(lease?lease.stageAndCommit():result);
+    }catch(...){return finish(OrdinaryEditResult::Invalid);}
+}
+
+std::shared_ptr<SavedProgramSourceDetachedWork> Core3DViewer::makeSavedProgramSourceDetachedWork() noexcept {
+    try {
+        auto work=std::shared_ptr<SavedProgramSourceDetachedWork>(new SavedProgramSourceDetachedWork());
+        work->profile=std::make_shared<ProfileSolidGeometry>();
+        work->stop=std::shared_ptr<std::atomic_bool>(work->profile,&work->profile->cancelled);
+        return work;
+    }catch(...){return {};}
+}
+void Core3DViewer::cancelSavedProgramSourceDetached(const std::shared_ptr<SavedProgramSourceDetachedWork>& work) noexcept {
+    if(work&&work->stop)work->stop->store(true);
+}
+bool Core3DViewer::prepareSavedProgramSourceDetached(
+    const std::shared_ptr<SavedProgramSourceDetachedWork>& work,const CylindricalCutProgramSnapshot& original,
+    const saved_cut_source_edit::Patch& patch,const ObjectFrameIdentity& identity,
+    std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept {
+    using Phase=SavedProgramSourceDetachedWork::Phase;
+    if(!work||!work->stop||!NSThread.isMainThread)return false;
+    auto fresh=Phase::Fresh;
+    if(!work->phase.compare_exchange_strong(fresh,Phase::Preparing))return false;
+    const auto refuse=[&](){work->phase.store(Phase::Refused);return false;};
+    try {
+        const auto& stop=*work->stop;
+        if(stop.load()||!original.source.original.retained.value
+            ||identity.entityIdentifier!=original.identity.entityIdentifier
+            ||identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
+            ||identity.documentGeneration!=original.identity.documentGeneration
+            ||identity.modelRevision!=original.identity.modelRevision)return refuse();
+        // Revalidate against a freshly captured original; stale input is never
+        // refreshed onto a different target, and no recapture happens later.
+        const auto current=cylindricalCutProgramSource(identity,presentation,width,height);
+        if(stop.load()||!current
+            ||!(current->authorityStamp==original.authorityStamp)
+            ||!current->source.original.IsEqual(original.source.original)
+            ||!sweep_rebuild::SameRawScalars(current->source.original.scalars,original.source.original.scalars)
+            ||current->source.effectiveMM!=original.source.effectiveMM
+            ||current->source.recipeBytes!=original.source.recipeBytes
+            ||!myDoc->SavedCutSceneStateMatches(original.guard))return refuse();
+        myContext->InitSelected();
+        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        if(selected.IsNull()||!cut_display::Capture(selected->Attributes(),work->displaySettings))return refuse();
+        work->displayCaptured=true;
+        const auto& retained=*original.source.original.retained.value;
+        std::vector<std::uint8_t> originalRecipe;
+        if(stop.load()||!retained_boolean::Encode(original.source.recipe,originalRecipe)
+            ||originalRecipe!=retained.bytes||!retained.base.IsEqual(original.source.base)
+            ||!saved_program_source_edit::PrepareValues(original.source.recipe,patch,stop,work->values)
+            ||stop.load())return refuse();
+        const auto& base=original.source.base;
+        const auto& result=original.source.original.shape;
+        // Source guard already binds exact live content. Perform classifiers'
+        // raw admission for EVERY operand before our cumulative traversal or
+        // stream/copy. Final full-scene check also covers these inspections.
+        for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
+            if(!saved_cut_source_edit::InspectBase(base,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
+        if(saved_boolean_result::Inspect(result,work->values.oldProgram,stop).classification
+            !=saved_boolean_result::Classification::MatchedOrientedBoundary||stop.load())return refuse();
+        // Re-charge occurrence and stream budgets into the ONE aggregate job
+        // budget before any geometry copy; the rebuild below shares it.
+        if(!analytic_boolean::detail::Bounded(base,1024,stop)
+            ||!analytic_boolean::detail::Bounded(result,32768,stop)
+            ||!saved_boolean_build::Charge(base,stop,work->budget)
+            ||!saved_boolean_build::Charge(result,stop,work->budget)
+            ||!saved_cut_source_edit::Commit(base,stop,work->budget.streamBytes,work->sourceBase)
+            ||!saved_cut_source_edit::Commit(result,stop,work->budget.streamBytes,work->sourceResult))return refuse();
+        // Copy only after complete admitted original geometry, preserving meshes
+        // for content evidence. No shared live labels/materials reach the worker.
+        BRepBuilderAPI_Copy baseCopy(base,Standard_True,Standard_True);
+        if(stop.load()||!baseCopy.IsDone()||baseCopy.Shape().IsNull()
+            ||baseCopy.Shape().IsPartner(base))return refuse();
+        BRepBuilderAPI_Copy resultCopy(result,Standard_True,Standard_True);
+        if(stop.load()||!resultCopy.IsDone()||resultCopy.Shape().IsNull()
+            ||resultCopy.Shape().IsPartner(result))return refuse();
+        work->oldBase=baseCopy.Shape();work->oldResult=resultCopy.Shape();
+        if(!saved_boolean_build::Charge(work->oldBase,stop,work->budget)
+            ||!saved_boolean_build::Charge(work->oldResult,stop,work->budget))return refuse();
+        for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
+            if(!saved_cut_source_edit::InspectBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
+        if(saved_boolean_result::Inspect(work->oldResult,work->values.oldProgram,stop).classification
+            !=saved_boolean_result::Classification::MatchedOrientedBoundary
+            ||!saved_cut_source_edit::Commit(work->oldBase,stop,work->budget.streamBytes,work->privateBase)
+            ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->budget.streamBytes,work->privateResult))return refuse();
+        saved_cut_source_edit::ShapeCommitment afterBase,afterResult;
+        if(!saved_cut_source_edit::Commit(base,stop,work->budget.streamBytes,afterBase)
+            ||!saved_cut_source_edit::Commit(result,stop,work->budget.streamBytes,afterResult)
+            ||!(afterBase==work->sourceBase)||!(afterResult==work->sourceResult))return refuse();
+        cut_display::Settings afterDisplay;
+        if(!cut_display::Capture(selected->Attributes(),afterDisplay)
+            ||!(afterDisplay==work->displaySettings))return refuse();
+        // No root, snapshot, currentness stamp or guard is retained by work.
+        // Future ordinary owner must preserve them and recheck before dispatch.
+        const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(stop.load()||!after||!(*after==original.authorityStamp)
+            ||!myDoc->SavedCutSceneStateMatches(original.guard))return refuse();
+        work->phase.store(Phase::Prepared,std::memory_order_release);return true;
+    }catch(...){return refuse();}
+}
+std::shared_ptr<const SavedProgramSourceDetachedResult> Core3DViewer::buildSavedProgramSourceDetached(
+    const std::shared_ptr<SavedProgramSourceDetachedWork>& work) noexcept {
+    using Phase=SavedProgramSourceDetachedWork::Phase;
+    if(!work||!work->stop)return {};
+    auto prepared=Phase::Prepared;
+    if(!work->phase.compare_exchange_strong(prepared,Phase::Building,std::memory_order_acquire))return {};
+    const auto refuse=[&]()->std::shared_ptr<const SavedProgramSourceDetachedResult>{
+        work->phase.store(Phase::Refused,std::memory_order_release);return {};
+    };
+    try {
+        const auto& stop=*work->stop;
+        saved_cut_source_edit::ShapeCommitment beforeBase,beforeResult;
+        if(stop.load()||!work->displayCaptured
+            ||!saved_cut_source_edit::Commit(work->oldBase,stop,work->budget.streamBytes,beforeBase)
+            ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->budget.streamBytes,beforeResult)
+            ||!(beforeBase==work->privateBase)||!(beforeResult==work->privateResult))return refuse();
+        for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
+            if(!saved_cut_source_edit::InspectBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
+        if(saved_boolean_result::Inspect(work->oldResult,work->values.oldProgram,stop).classification
+            !=saved_boolean_result::Classification::MatchedOrientedBoundary)return refuse();
+        auto output=std::shared_ptr<SavedProgramSourceDetachedResult>(new SavedProgramSourceDetachedResult());
+        output->values=work->values;output->sourceBase=work->sourceBase;output->sourceResult=work->sourceResult;
+        output->privateOldBase=work->privateBase;output->privateOldResult=work->privateResult;
+        output->noChange=!work->values.changed;
+        output->displaySettings=work->displaySettings;output->originatingWork=work;
+        if(work->values.changed){
+            // Regenerate the ORIGINAL source base from the new source values.
+            // The already-cut result is never a substitute base; the complete
+            // cut program replays on the regenerated base under the same
+            // aggregate budget, and the exact new recipe bytes must round-trip.
+            const auto& source=work->values.newProgram.source;
+            TopoDS_Shape base;
+            if(source.family==1){
+                profile::Parameters p;if(!profile::Decode(source.values,p))return refuse();
+                static_cast<ProfileDefinition&>(*work->profile)=p.definition;
+                work->profile->constructionFrame=p.constructionFrame;
+                if(stop.load()||!BuildProfileSolidGeometry(work->profile))return refuse();
+                base=work->profile->solid;
+            }else if(source.family==2){
+                enclosure::Parameters p;EnclosureSolidResult built;
+                if(!enclosure::Decode(int(source.schema),source.values,p)||stop.load()
+                    ||!BuildEnclosureSolidGeometry(p.definition,work->stop,built))return refuse();
+                base=built.solid;
+            }else return refuse();
+            output->build=saved_boolean_build::Build(base,work->values.newProgram,work->displaySettings,stop,work->budget);
+            if(stop.load()||output->build.status!=saved_boolean_build::Status::Built
+                ||output->build.exactProgram!=work->values.newBytes)return refuse();
+            output->generatedBase=output->build.retainedBase;output->generatedResult=output->build.finalResult;
+            output->newBase=base;output->newResult=output->build.solid;
+        }else{
+            // Informational exact no-op, not an OrdinaryEditResult or receipt.
+            // No replacement shape is exposed or fabricated.
+            output->generatedBase=output->sourceBase;output->generatedResult=output->sourceResult;
+        }
+        saved_cut_source_edit::ShapeCommitment finalOldBase,finalOldResult;
+        if(!saved_cut_source_edit::Commit(work->oldBase,stop,work->budget.streamBytes,finalOldBase)
+            ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->budget.streamBytes,finalOldResult)
+            ||!(finalOldBase==work->privateBase)||!(finalOldResult==work->privateResult)||stop.load())return refuse();
+        output->build.budget=work->budget;
+        work->phase.store(Phase::Finished,std::memory_order_release);return output;
+    }catch(...){return refuse();}
+}
+
+std::shared_ptr<SavedProgramSourceEditWork> Core3DViewer::makeSavedProgramSourceEditWork() noexcept {
+    if(!NSThread.isMainThread)return {};
+    try {
+        auto geometry=makeSavedProgramSourceDetachedWork();if(!geometry)return {};
+        auto token=std::shared_ptr<SavedProgramSourceEditCancellation>(new SavedProgramSourceEditCancellation(geometry));
+        return std::shared_ptr<SavedProgramSourceEditWork>(new SavedProgramSourceEditWork(std::move(geometry),std::move(token)));
+    }catch(...){return {};}
+}
+std::shared_ptr<SavedProgramSourceEditCancellation> Core3DViewer::savedProgramSourceEditCancellation(
+    const std::shared_ptr<SavedProgramSourceEditWork>& work) noexcept {
+    if(!NSThread.isMainThread||!work)return {};
+    return work->cancellation;
+}
+bool Core3DViewer::cancelSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditCancellation>& token) noexcept {
+    if(!token)return false;
+    using Decision=SavedProgramSourceEditCancellation::Decision;
+    auto pending=Decision::Pending;
+    if(!token->decision.compare_exchange_strong(pending,Decision::Cancelled))return pending==Decision::Cancelled;
+    cancelSavedProgramSourceDetached(token->geometry);return true;
+}
+bool Core3DViewer::discardSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditWork>& work) noexcept {
+    if(!NSThread.isMainThread||!work||_savedProgramSourceEditWork.lock()!=work
+        ||work->phase==SavedProgramSourceEditWork::Phase::Settled
+        ||!cancelSavedProgramSourceEdit(work->cancellation))return false;
+    work->authority.reset();work->ordinaryOwner.reset();work->context.Nullify();
+    work->phase=SavedProgramSourceEditWork::Phase::Settled;
+    work->cancellation->decision.store(SavedProgramSourceEditCancellation::Decision::Settled);
+    _savedProgramSourceEditWork.reset();return true;
+}
+std::shared_ptr<SavedProgramSourceDetachedWork> Core3DViewer::savedProgramSourceEditGeometry(
+    const std::shared_ptr<SavedProgramSourceEditWork>& work) noexcept {
+    if(!NSThread.isMainThread||!work||work->phase!=SavedProgramSourceEditWork::Phase::Prepared
+        ||work->cancellation->decision.load()!=SavedProgramSourceEditCancellation::Decision::Pending)return {};
+    return work->detachedGeometry;
+}
+bool Core3DViewer::prepareSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditWork>& work,
+    const CylindricalCutProgramSnapshot& original,const saved_cut_source_edit::Patch& patch,
+    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept {
+    using Phase=SavedProgramSourceEditWork::Phase;using Decision=SavedProgramSourceEditCancellation::Decision;
+    if(!NSThread.isMainThread||!work||work->phase!=Phase::Fresh)return false;
+    work->phase=Phase::Preparing;
+    const auto refuse=[&](){
+        (void)cancelSavedProgramSourceEdit(work->cancellation);work->authority.reset();work->ordinaryOwner.reset();work->context.Nullify();
+        work->phase=Phase::Settled;work->cancellation->decision.store(Decision::Settled);
+        if(_savedProgramSourceEditWork.lock()==work)_savedProgramSourceEditWork.reset();return false;
+    };
+    try {
+        if(work->cancellation->decision.load()!=Decision::Pending||!canBeginCommittedEdit()||!_ordinaryEditController)return refuse();
+        // Cross-family exclusion: a live legacy one-bore source lease refuses
+        // here; a settled one releases its slot without calling release().
+        if(const auto foreign=_savedCutSourceEditWork.lock()){
+            if(foreign->phase==SavedCutSourceEditWork::Phase::Settled)_savedCutSourceEditWork.reset();
+            else return refuse();
+        }
+        // Context/document reset need not call release. A retained cancelled or
+        // demonstrably stale old lease must not occupy the next source slot.
+        if(const auto old=_savedProgramSourceEditWork.lock()){
+            if(old->phase==Phase::Settled)_savedProgramSourceEditWork.reset();
+            else {
+                if(old->phase!=Phase::Prepared||old->cancellation->decision.load()==Decision::Committing)return refuse();
+                const auto a=old->authority;
+                bool stale=old->cancellation->decision.load()==Decision::Cancelled||!a||!a->cutStamp
+                    ||!a->rebuildAuthority||a->rebuildAuthority->records.size()!=1
+                    ||old->ordinaryOwner.lock()!=_ordinaryEditController||old->context!=myContext
+                    ||myDoc!=a->owner||myDoc.IsNull()||myDoc->Document()!=a->document
+                    ||a->document.IsNull()||a->document->GetData()->Time()!=a->documentTime;
+                if(!stale){
+                    const auto current=cylindricalCutProgramSource(a->identity,a->presentationRevision,a->width,a->height);
+                    const auto& record=a->rebuildAuthority->records.front();cut_display::Settings settings;
+                    auto admitted=*a->rebuildAuthority;
+                    stale=!current||!(current->authorityStamp==*a->cutStamp)
+                        ||!current->source.original.IsEqual(record.previous)
+                        ||!myDoc->SavedCutSceneStateMatches(record.requested.cutSource)
+                        ||!_objectInteractor||!_objectInteractor->verifyOrdinaryNameAuthority(a->authority)
+                        ||!admitTransform(admitted)||admitted.selectionOwners!=a->rebuildAuthority->selectionOwners
+                        ||admitted.manipulatorType!=a->rebuildAuthority->manipulatorType
+                        ||admitted.hadManipulator!=a->rebuildAuthority->hadManipulator
+                        ||record.requested.presentation.IsNull()
+                        ||!cut_display::Capture(record.requested.presentation->Attributes(),settings)
+                        ||!(settings==old->detachedGeometry->displaySettings);
+                }
+                if(!stale||!discardSavedProgramSourceEdit(old))return refuse();
+            }
+        }
+        _savedProgramSourceEditWork=work;work->ordinaryOwner=_ordinaryEditController;work->context=myContext;
+        if(!prepareSavedProgramSourceDetached(work->detachedGeometry,original,patch,identity,presentation,width,height)
+            ||work->cancellation->decision.load()!=Decision::Pending)return refuse();
+        auto authority=prepareNativeSolidWork(identity,presentation,width,height);
+        if(!authority||retained_solid::Bits(authority->metersPerUnit)
+                !=retained_solid::Bits(retained_boolean::Identities(original.source.recipe).metersPerUnit)
+            ||authority->modelingPermit||authority->rebuildAuthority)return refuse();
+        myContext->InitSelected();if(!myContext->MoreSelected())return refuse();
+        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+        if(selected.IsNull()||myContext->MoreSelected())return refuse();
+        OrdinaryTransformRecord record;record.previous=original.source.original;
+        record.requested.label=record.previous.label;record.requested.presentation=selected;
+        record.requested.shape=record.previous.shape;record.requested.transform=record.previous.transform;
+        record.requested.operation=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild;
+        record.requested.cutProgramSourcePatch=patch;record.requested.cutSource=original.guard;
+        authority->rebuildAuthority.emplace();authority->rebuildAuthority->records.push_back(std::move(record));
+        if(!admitTransform(*authority->rebuildAuthority))return refuse();
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        cut_display::Settings settings;
+        if(!stamp||!(*stamp==original.authorityStamp)||!myDoc->SavedCutSceneStateMatches(original.guard)
+            ||!cut_display::Capture(selected->Attributes(),settings)
+            ||!(settings==work->detachedGeometry->displaySettings)
+            ||work->ordinaryOwner.lock()!=_ordinaryEditController||work->context!=myContext
+            ||work->cancellation->decision.load()!=Decision::Pending)return refuse();
+        authority->cutStamp=original.authorityStamp;authority->frameFirst=false;
+        work->authority=std::move(authority);work->phase=Phase::Prepared;return true;
+    }catch(...){return refuse();}
+}
+OrdinaryEditResult Core3DViewer::commitSavedProgramSourceEdit(const std::shared_ptr<SavedProgramSourceEditWork>& work,
+    const std::shared_ptr<const SavedProgramSourceDetachedResult>& built) noexcept {
+    using Phase=SavedProgramSourceEditWork::Phase;using Decision=SavedProgramSourceEditCancellation::Decision;
+    if(!NSThread.isMainThread||!work||work->phase!=Phase::Prepared
+        ||_savedProgramSourceEditWork.lock()!=work)return OrdinaryEditResult::Invalid;
+    const auto finish=[&](OrdinaryEditResult result){
+        if(work->cancellation->decision.load()!=Decision::Committing)(void)cancelSavedProgramSourceEdit(work->cancellation);
+        work->authority.reset();work->ordinaryOwner.reset();work->context.Nullify();
+        work->phase=Phase::Settled;work->cancellation->decision.store(Decision::Settled);
+        if(_savedProgramSourceEditWork.lock()==work)_savedProgramSourceEditWork.reset();return result;
+    };
+    try {
+        const auto a=work->authority;
+        if(work->cancellation->decision.load()!=Decision::Pending||!built||!a||a->consumed||a->modelingPermit
+            ||!a->cutStamp||!a->rebuildAuthority||a->rebuildAuthority->records.size()!=1
+            ||built->originatingWork.lock()!=work->detachedGeometry
+            ||work->detachedGeometry->stop->load()
+            ||work->ordinaryOwner.lock()!=_ordinaryEditController||!_ordinaryEditController
+            ||work->context!=myContext||myDoc!=a->owner||myDoc.IsNull()
+            ||myDoc->Document()!=a->document||a->document.IsNull()
+            ||a->document->GetData()->Time()!=a->documentTime)return finish(OrdinaryEditResult::Invalid);
+        if(!canBeginCommittedEdit())return finish(OrdinaryEditResult::Busy);
+        const auto snapshot=captureSceneSnapshot(a->width,a->height);
+        if(!snapshot||snapshot->publicationSourceIdentifier!=a->identity.publicationSourceIdentifier
+            ||snapshot->selectionMode!=scene::ElementKind::Object
+            ||snapshot->revisions.documentGeneration!=a->identity.documentGeneration
+            ||snapshot->revisions.model!=a->identity.modelRevision
+            ||snapshot->revisions.presentation!=a->presentationRevision
+            ||!_shapeInteractor||!_objectInteractor||!_shapeInteractor->selectionModeAuthorityIsExact()
+            ||_shapeInteractor->getSelectionMode()!=a->authority.selectionMode
+            ||!_objectInteractor->verifyOrdinaryNameAuthority(a->authority))return finish(OrdinaryEditResult::Invalid);
+        auto authority=*a->rebuildAuthority;
+        if(!admitTransform(authority)||authority.selectionOwners!=a->rebuildAuthority->selectionOwners
+            ||authority.manipulatorType!=a->rebuildAuthority->manipulatorType
+            ||authority.hadManipulator!=a->rebuildAuthority->hadManipulator)return finish(OrdinaryEditResult::Invalid);
+        auto& record=authority.records.front();OcctObjectTransformState current;
+        cut_display::Settings settings;
+        if(record.requested.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+            ||!record.requested.cutProgramSourcePatch||!record.requested.cutSource||record.requested.cut
+            ||record.requested.cutSourcePatch||record.requested.cutSourceRebuild||record.requested.cutProgramEdit
+            ||!myDoc->CaptureObjectTransformStateForLabel(record.previous.label,current)
+            ||!current.IsEqual(record.previous)
+            ||!sweep_rebuild::SameRawScalars(current.scalars,record.previous.scalars)
+            ||record.requested.presentation.IsNull()
+            ||!cut_display::Capture(record.requested.presentation->Attributes(),settings)
+            ||!(settings==work->detachedGeometry->displaySettings)||!(settings==built->displaySettings)
+            ||!myDoc->SavedCutSceneStateMatches(record.requested.cutSource))return finish(OrdinaryEditResult::Invalid);
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(!stamp||!(*stamp==*a->cutStamp)||work->cancellation->decision.load()!=Decision::Pending
+            ||work->detachedGeometry->stop->load())return finish(OrdinaryEditResult::Invalid);
+        record.requested.cutProgramSourceRebuild=built;
         record.requested.shape=built->noChange?record.previous.shape:built->newResult;
         // Stop and synchronous ordinary dispatch have one atomic decision. Stop
         // that loses this race cannot change the actual ordinary result afterward.

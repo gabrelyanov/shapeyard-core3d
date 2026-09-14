@@ -1159,6 +1159,9 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
 @end
 @interface Core3DSavedCutSourcePatch ()
 - (std::optional<core3d::saved_cut_source_edit::Patch>)nativePatchFor:(const core3d::retained_solid::Envelope&)source;
+// Same one-time typed conversion against the COMPLETE original program's
+// shared source; validated across every operand view, never a permit.
+- (std::optional<core3d::saved_cut_source_edit::Patch>)nativePatchForProgram:(const core3d::retained_boolean::Program&)program;
 @end
 @implementation Core3DSavedCutSourcePatch {
     core3d::saved_cut_source_edit::Patch _millimetres;
@@ -1218,16 +1221,49 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
         return core3d::saved_cut_source_values::Apply(source,converted)?std::optional<core3d::saved_cut_source_edit::Patch>(std::move(converted)):std::nullopt;
     }catch(...){return {};}
 }
+- (std::optional<core3d::saved_cut_source_edit::Patch>)nativePatchForProgram:(const core3d::retained_boolean::Program&)program {
+    try {
+        if(!NSThread.isMainThread||!core3d::retained_boolean::Valid(program))return {};
+        const double factor=program.source.metersPerUnit*1000;
+        auto converted=_millimetres;
+        if(auto* p=std::get_if<core3d::saved_cut_source_values::PolygonPatch>(&converted)){
+            core3d::profile::Parameters decoded;
+            if(program.source.family!=1||!core3d::profile::Decode(program.source.values,decoded))return {};
+            if(p->depth&&!Core3DSourceMMToRecipe(*p->depth,decoded.definition.depth,factor,*p->depth))return {};
+            for(auto& v:p->coordinates){
+                if(v.ordinal>=decoded.definition.points.size())return {};
+                const auto& point=decoded.definition.points[v.ordinal];
+                const double original=v.component==core3d::saved_cut_source_values::Component::U?point.X():point.Y();
+                if(!Core3DSourceMMToRecipe(v.value,original,factor,v.value))return {};
+            }
+        }else{
+            auto& enclosurePatch=std::get<core3d::saved_cut_source_values::EnclosurePatch>(converted);
+            core3d::enclosure::Parameters decoded;
+            if(program.source.family!=2||!core3d::enclosure::Decode(int(program.source.schema),program.source.values,decoded))return {};
+            const auto& d=decoded.definition.dimensions;
+            const std::array<double,6> old={d.width,d.depth,d.height,d.wall,d.floor,d.cornerRadius};
+            for(std::size_t i=0;i<old.size();++i)if(enclosurePatch.dimensions[i]
+                &&!Core3DSourceMMToRecipe(*enclosurePatch.dimensions[i],old[i],factor,*enclosurePatch.dimensions[i]))return {};
+        }
+        // The complete typed transition is validated once against EVERY operand
+        // view of the original program; value-only, never a permit.
+        return core3d::saved_boolean_build::SourcePatch(program,converted)
+            ?std::optional<core3d::saved_cut_source_edit::Patch>(std::move(converted)):std::nullopt;
+    }catch(...){return {};}
+}
 @end
 @interface Core3DSavedCutSourceValues ()
 - (instancetype)initWithEnvelope:(const core3d::retained_solid::Envelope&)source;
+// Whole-program shared source view; verified by the caller against EVERY
+// operand of the complete recipe before this descriptive copy is built.
+- (instancetype)initWithProgramSource:(const core3d::retained_boolean::Source&)source;
+- (instancetype)initWithFamily:(std::uint8_t)family schema:(std::uint32_t)schema
+    metersPerUnit:(double)metersPerUnit values:(const std::vector<double>&)values;
 @end
 @implementation Core3DSavedCutSourceValues
 - (instancetype)initWithEnvelope:(const core3d::retained_solid::Envelope&)source {
     try {
         if(!NSThread.isMainThread||!core3d::retained_solid::Valid(source))return nil;
-        const double factor=source.metersPerUnit*1000;
-        if(!std::isfinite(factor)||factor<=0)return nil;
         // Empty patch verifies this exact descriptor belongs to a supported
         // source family; it does not confer retained-solid correspondence.
         core3d::saved_cut_source_edit::Patch empty;
@@ -1235,11 +1271,29 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
         else if(source.sourceFamily==2)empty=core3d::saved_cut_source_values::EnclosurePatch{};
         else return nil;
         if(!core3d::saved_cut_source_values::Apply(source,empty))return nil;
+        return [self initWithFamily:source.sourceFamily schema:source.sourceSchema
+            metersPerUnit:source.metersPerUnit values:source.sourceValues];
+    }catch(...){return nil;}
+}
+- (instancetype)initWithProgramSource:(const core3d::retained_boolean::Source&)source {
+    try {
+        if(!NSThread.isMainThread)return nil;
+        return [self initWithFamily:source.family schema:source.schema
+            metersPerUnit:source.metersPerUnit values:source.values];
+    }catch(...){return nil;}
+}
+- (instancetype)initWithFamily:(std::uint8_t)family schema:(std::uint32_t)schema
+    metersPerUnit:(double)metersPerUnit values:(const std::vector<double>&)values {
+    try {
+        if(!NSThread.isMainThread)return nil;
+        const double factor=metersPerUnit*1000;
+        if(!std::isfinite(factor)||factor<=0)return nil;
+        if(family!=1&&family!=2)return nil;
         self=[super init];if(!self)return nil;
-        _family=static_cast<Core3DSavedCutSourceFamily>(source.sourceFamily);_metersPerUnit=source.metersPerUnit;
+        _family=static_cast<Core3DSavedCutSourceFamily>(family);_metersPerUnit=metersPerUnit;
         _polygonPointsMM=@[];
-        if(source.sourceFamily==1){
-            core3d::profile::Parameters p;if(!core3d::profile::Decode(source.sourceValues,p))return nil;
+        if(family==1){
+            core3d::profile::Parameters p;if(!core3d::profile::Decode(values,p))return nil;
             _plane=static_cast<Core3DProfilePlane>(p.definition.plane);
             NSMutableArray<NSValue *> *points=[NSMutableArray arrayWithCapacity:p.definition.points.size()];
             for(const auto& point:p.definition.points){
@@ -1251,7 +1305,7 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
             double depth=0;if(!Core3DSourceRecipeToMM(p.definition.depth,factor,depth)||depth<=0||depth>1e6)return nil;
             _polygonPointsMM=[points copy];_depthMM=@(depth);
         }else{
-            core3d::enclosure::Parameters p;if(!core3d::enclosure::Decode(int(source.sourceSchema),source.sourceValues,p))return nil;
+            core3d::enclosure::Parameters p;if(!core3d::enclosure::Decode(int(schema),values,p))return nil;
             _plane=static_cast<Core3DProfilePlane>(p.definition.plane);const auto& d=p.definition.dimensions;
             const std::array<double,6> recipe={d.width,d.depth,d.height,d.wall,d.floor,d.cornerRadius};
             std::array<double,6> values{};
@@ -1356,6 +1410,22 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     _bores=bores;return self;
 }
 - (core3d::CylindricalCutProgramSnapshot)nativeSnapshot {return _native;}
+- (Core3DSavedCutSourceValues *)sourceRecipeMM {
+    if(!NSThread.isMainThread||!_native.source.original.retained.value)return nil;
+    try {
+        if(const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&_native.source.recipe))
+            return [[Core3DSavedCutSourceValues alloc] initWithEnvelope:*legacy];
+        const auto& program=std::get<core3d::retained_boolean::Program>(_native.source.recipe);
+        // Empty patch of the matching family verifies this exact shared source
+        // stays supported across EVERY operand of the complete recipe.
+        core3d::saved_cut_source_edit::Patch empty;
+        if(program.source.family==1)empty=core3d::saved_cut_source_values::PolygonPatch{};
+        else if(program.source.family==2)empty=core3d::saved_cut_source_values::EnclosurePatch{};
+        else return nil;
+        if(!core3d::saved_boolean_build::SourcePatch(program,empty))return nil;
+        return [[Core3DSavedCutSourceValues alloc] initWithProgramSource:program.source];
+    }catch(...){return nil;}
+}
 - (BOOL)matchesOwner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer {
     return NSThread.isMainThread&&owner&&_owner==owner&&viewer&&_viewer.lock()==viewer;
 }
@@ -2935,8 +3005,13 @@ struct NativeModelingPermitIssuer final {
 // utility dispatch boundary; only the native numeric job and UUID do.
 @interface Core3DSavedCutSourceJob : NSObject {
 @public
-    std::shared_ptr<core3d::SavedCutSourceEditWork> _lease;
-    std::shared_ptr<core3d::SavedCutSourceEditCancellation> _cancellation;
+    // Explicitly tagged legacy/whole-program representation: exactly one
+    // alternative is populated for the job's whole lifetime. The two native
+    // authorities stay separate while sharing this main-owned bookkeeping.
+    std::variant<std::monostate,std::shared_ptr<core3d::SavedCutSourceEditWork>,
+        std::shared_ptr<core3d::SavedProgramSourceEditWork>> _lease;
+    std::variant<std::monostate,std::shared_ptr<core3d::SavedCutSourceEditCancellation>,
+        std::shared_ptr<core3d::SavedProgramSourceEditCancellation>> _cancellation;
     std::weak_ptr<core3d::Core3DViewer> _viewer;
     NSUUID *_completionToken;
     __weak Core3DModelingPlanningContext *_planningContext;
@@ -2945,15 +3020,32 @@ struct NativeModelingPermitIssuer final {
 }
 - (BOOL)cancel;
 - (void)finish:(Core3DProfileConstructionResult)result;
+// Thread-safe token signal only; no main lease/scene mutation. Any thread.
+- (void)cancelToken;
 @end
 @implementation Core3DSavedCutSourceJob
+- (void)cancelToken {
+    if(const auto* token=std::get_if<std::shared_ptr<core3d::SavedCutSourceEditCancellation>>(&_cancellation))
+        (void)core3d::Core3DViewer::cancelSavedCutSourceEdit(*token);
+    else if(const auto* token=std::get_if<std::shared_ptr<core3d::SavedProgramSourceEditCancellation>>(&_cancellation))
+        (void)core3d::Core3DViewer::cancelSavedProgramSourceEdit(*token);
+}
 - (BOOL)cancel {
-    if(!NSThread.isMainThread||_finished||_cancelled
-        ||!core3d::Core3DViewer::cancelSavedCutSourceEdit(_cancellation))return NO;
+    if(!NSThread.isMainThread||_finished||_cancelled)return NO;
+    if(const auto* token=std::get_if<std::shared_ptr<core3d::SavedCutSourceEditCancellation>>(&_cancellation)){
+        if(!core3d::Core3DViewer::cancelSavedCutSourceEdit(*token))return NO;
+    }else if(const auto* token=std::get_if<std::shared_ptr<core3d::SavedProgramSourceEditCancellation>>(&_cancellation)){
+        if(!core3d::Core3DViewer::cancelSavedProgramSourceEdit(*token))return NO;
+    }else return NO;
     _cancelled=YES;
     const auto viewer=_viewer.lock();
-    if(viewer&&_lease)(void)viewer->discardSavedCutSourceEdit(_lease);
-    _lease.reset(); // Native scene authority releases on main; numeric work drains.
+    if(viewer){
+        if(const auto* lease=std::get_if<std::shared_ptr<core3d::SavedCutSourceEditWork>>(&_lease))
+            (void)viewer->discardSavedCutSourceEdit(*lease);
+        else if(const auto* lease=std::get_if<std::shared_ptr<core3d::SavedProgramSourceEditWork>>(&_lease))
+            (void)viewer->discardSavedProgramSourceEdit(*lease);
+    }
+    _lease=std::monostate(); // Native scene authority releases on main; numeric work drains.
     return YES;
 }
 - (void)finish:(Core3DProfileConstructionResult)result {
@@ -2965,19 +3057,30 @@ struct NativeModelingPermitIssuer final {
         context->_planningSavedCutJob=nil;context->_planningRetired=YES;
     }
     const auto viewer=_viewer.lock();
-    if(viewer&&_lease)(void)viewer->discardSavedCutSourceEdit(_lease);
-    _lease.reset();_cancellation.reset();_viewer.reset();
+    if(viewer){
+        if(const auto* lease=std::get_if<std::shared_ptr<core3d::SavedCutSourceEditWork>>(&_lease))
+            (void)viewer->discardSavedCutSourceEdit(*lease);
+        else if(const auto* lease=std::get_if<std::shared_ptr<core3d::SavedProgramSourceEditWork>>(&_lease))
+            (void)viewer->discardSavedProgramSourceEdit(*lease);
+    }
+    _lease=std::monostate();_cancellation=std::monostate();_viewer.reset();
     NSUUID *token=_completionToken;_completionToken=nil;
     if(token)Core3DDeliverNativeSolidCompletion(token,result); // Detaches before reentrant client code.
 }
 - (void)dealloc {
     // Defensive final-release routing: even an off-main controller teardown
     // must not destroy its native main lease on that thread.
-    (void)core3d::Core3DViewer::cancelSavedCutSourceEdit(_cancellation);
+    [self cancelToken];
     auto lease=std::move(_lease);const auto viewer=_viewer;NSUUID *token=_completionToken;
-    if(lease||token){
+    if(!std::holds_alternative<std::monostate>(lease)||token){
         dispatch_block_t retire=^{
-            const auto owner=viewer.lock();if(owner&&lease)(void)owner->discardSavedCutSourceEdit(lease);
+            const auto owner=viewer.lock();
+            if(owner){
+                if(const auto* held=std::get_if<std::shared_ptr<core3d::SavedCutSourceEditWork>>(&lease))
+                    (void)owner->discardSavedCutSourceEdit(*held);
+                else if(const auto* held=std::get_if<std::shared_ptr<core3d::SavedProgramSourceEditWork>>(&lease))
+                    (void)owner->discardSavedProgramSourceEdit(*held);
+            }
             if(token)Core3DDeliverNativeSolidCompletion(token,Core3DProfileConstructionResultRejected);
         };
         // Always queue: this block owns the moved lease until main releases it.
@@ -3123,7 +3226,7 @@ struct NativeModelingPermitIssuer final {
 - (void)dealloc {
     Core3DSavedCutSourceJob *sourceJob=_savedCutSourceJob;_savedCutSourceJob=nil;
     if(sourceJob){
-        (void)core3d::Core3DViewer::cancelSavedCutSourceEdit(sourceJob->_cancellation);
+        [sourceJob cancelToken];
         if(NSThread.isMainThread)[sourceJob finish:Core3DProfileConstructionResultRejected];
         else dispatch_async(dispatch_get_main_queue(),^{[sourceJob finish:Core3DProfileConstructionResultRejected];});
     }
@@ -14057,12 +14160,138 @@ struct NativeModelingPermitIssuer final {
                     Core3DProfileConstructionResult result=Core3DProfileConstructionResultRejected;
                     const auto currentViewer=pending->_viewer.lock();
                     if(pending->_cancelled)result=Core3DProfileConstructionResultCancelled;
-                    else if(currentViewer&&pending->_lease&&!controller->_nativeSolidWork&&!controller->_objectAlignmentWork
+                    else if(currentViewer
+                        &&std::holds_alternative<std::shared_ptr<core3d::SavedCutSourceEditWork>>(pending->_lease)
+                        &&!controller->_nativeSolidWork&&!controller->_objectAlignmentWork
                         &&!controller->_isLoading.load()&&controller->_isSetuped&&!controller->_isPreviewMode
                         &&controller.glController&&((GLViewController *)controller.glController).viewer==currentViewer){
                         if(!built)result=Core3DProfileConstructionResultFailed;
                         else {
-                            const auto actual=currentViewer->commitSavedCutSourceEdit(pending->_lease,built);
+                            const auto actual=currentViewer->commitSavedCutSourceEdit(
+                                std::get<std::shared_ptr<core3d::SavedCutSourceEditWork>>(pending->_lease),built);
+                            switch(actual){
+                                case core3d::OrdinaryEditResult::Committed:result=Core3DProfileConstructionResultCommitted;break;
+                                case core3d::OrdinaryEditResult::NoChange:result=Core3DProfileConstructionResultUnchanged;break;
+                                case core3d::OrdinaryEditResult::Busy:result=Core3DProfileConstructionResultBusy;break;
+                                case core3d::OrdinaryEditResult::Invalid:result=Core3DProfileConstructionResultRejected;break;
+                                case core3d::OrdinaryEditResult::OutcomeUnknown:result=Core3DProfileConstructionResultRecoveryRequired;break;
+                                case core3d::OrdinaryEditResult::RetryableFailure:result=Core3DProfileConstructionResultFailed;break;
+                            }
+                        }
+                    }
+                    controller->_savedCutSourceJob=nil; // Exact old job only; before callbacks/new admission.
+                    if(result==Core3DProfileConstructionResultCommitted){
+                        [((GLViewController *)controller.glController) refreshSelectionState];
+                        [controller viewDidChangeViewportPresentationState];
+                        [controller sendNotifyUIState:UIStateChangingSelection|UIStateChangingGizmo|UIStateChangingDelete
+                            |UIStateChangingDuplicate|UIStateChangingApply|UIStateChangingApplyMaterial|UIStateChangingHistory];
+                    }
+                    [pending finish:result];
+                };
+#if DEBUG
+                Core3DGateNativeSolidGeometryDelivery(completionToken,delivery);
+#else
+                delivery();
+#endif
+            });
+        });
+        return operation;
+    }catch(...){
+        if(job){
+            const BOOL registeredOrFinished=job->_completionToken!=nil||job->_finished;
+            if(_savedCutSourceJob==job)_savedCutSourceJob=nil;
+            [job finish:Core3DProfileConstructionResultRejected];
+            if(!registeredOrFinished)immediate(Core3DProfileConstructionResultRejected);
+        }
+        else if(completionToken)Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);
+        else immediate(Core3DProfileConstructionResultRejected);
+        return nil;
+    }
+}
+
+- (Core3DSavedCutSourceOperation *)beginSavedProgramCutSourceEdit:(Core3DCylindricalCutProgramSnapshot *)original
+    patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return nil;
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
+        completion(Core3DProfileConstructionResultBusy);return nil;
+    }
+    // Runtime ObjC class and exact owner/exclusivity validation BEFORE any
+    // snapshot or patch selector is read; wrong-class or foreign inputs reject
+    // here, never inside untrusted definition/patch selectors.
+    if(!_isSetuped||_isPreviewMode||!GLController||!GLController.viewer
+        ||![original isKindOfClass:Core3DCylindricalCutProgramSnapshot.class]
+        ||![patch isKindOfClass:Core3DSavedCutSourcePatch.class]
+        ||![original matchesOwner:self viewer:GLController.viewer]){
+        completion(Core3DProfileConstructionResultRejected);return nil;
+    }
+    // Live capture supplies only current admission identity, never a new edit target.
+    const auto live=[self cylindricalCutProgramWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if(!live){completion(Core3DProfileConstructionResultRejected);return nil;}
+    Core3DSavedCutSourceJob *job=nil;NSUUID *completionToken=nil;
+    bool immediateDelivered=false;
+    const auto immediate=[&](Core3DProfileConstructionResult result){
+        if(immediateDelivered)return;immediateDelivered=true;completion(result);
+    };
+    try {
+        const auto before=[original nativeSnapshot];
+        const auto* program=std::get_if<core3d::retained_boolean::Program>(&before.source.recipe);
+        // Whole-program source edits require the complete v2 program payload;
+        // a legacy one-bore payload keeps its exact existing legacy API.
+        if(!before.source.original.retained.value||!program){immediate(Core3DProfileConstructionResultRejected);return nil;}
+        // Convert this typed request once using the ORIGINAL complete source.
+        const auto converted=[patch nativePatchForProgram:*program];
+        if(!converted){immediate(Core3DProfileConstructionResultRejected);return nil;}
+        const auto viewer=GLController.viewer;
+        const auto lease=core3d::Core3DViewer::makeSavedProgramSourceEditWork();
+        const auto cancellation=core3d::Core3DViewer::savedProgramSourceEditCancellation(lease);
+        if(!lease||!cancellation){immediate(Core3DProfileConstructionResultRejected);return nil;}
+        job=[Core3DSavedCutSourceJob new];if(!job){immediate(Core3DProfileConstructionResultRejected);return nil;}
+        job->_lease=lease;job->_cancellation=cancellation;job->_viewer=viewer;
+        completionToken=Core3DRegisterNativeSolidCompletion(completion);
+        if(!completionToken){[job finish:Core3DProfileConstructionResultBusy];immediate(Core3DProfileConstructionResultBusy);return nil;}
+        job->_completionToken=completionToken;
+        _savedCutSourceJob=job; // Own main lease/token BEFORE synchronous preparation.
+        Core3DSavedCutSourceOperation *operation=[[Core3DSavedCutSourceOperation alloc] initWithJob:job];
+        const CGSize size=GLController.drawableSize;
+        if(!operation||!viewer->prepareSavedProgramSourceEdit(lease,before,*converted,[live nativeSnapshot].identity,
+            expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)))){
+            _savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;
+        }
+        const auto geometry=core3d::Core3DViewer::savedProgramSourceEditGeometry(lease);
+        if(!geometry){_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;}
+#if DEBUG
+        if(_debugSavedCutSourceDeliveryGate){
+            Core3DNativeSolidGeometryDeliveryGates()[completionToken]=[_debugSavedCutSourceDeliveryGate copy];
+            _debugSavedCutSourceDeliveryGate=nil;
+        }
+#endif
+        __weak Core3DViewController *weakSelf=self;
+        __weak Core3DSavedCutSourceJob *weakJob=job;
+        // No original snapshot, patch, job, lease, viewer or callback is strongly
+        // captured by utility work. Returned geometry likewise has no live scene.
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+            const auto built=core3d::Core3DViewer::buildSavedProgramSourceDetached(geometry);
+            dispatch_async(dispatch_get_main_queue(),^{
+                dispatch_block_t delivery=^{
+                    Core3DViewController *controller=weakSelf;
+                    Core3DSavedCutSourceJob *pending=weakJob;
+                    if(!controller||!pending){Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;}
+                    if(controller->_savedCutSourceJob!=pending){[pending finish:Core3DProfileConstructionResultRejected];return;}
+                    Core3DProfileConstructionResult result=Core3DProfileConstructionResultRejected;
+                    const auto currentViewer=pending->_viewer.lock();
+                    if(pending->_cancelled)result=Core3DProfileConstructionResultCancelled;
+                    else if(currentViewer
+                        &&std::holds_alternative<std::shared_ptr<core3d::SavedProgramSourceEditWork>>(pending->_lease)
+                        &&!controller->_nativeSolidWork&&!controller->_objectAlignmentWork
+                        &&!controller->_isLoading.load()&&controller->_isSetuped&&!controller->_isPreviewMode
+                        &&controller.glController&&((GLViewController *)controller.glController).viewer==currentViewer){
+                        if(!built)result=Core3DProfileConstructionResultFailed;
+                        else {
+                            const auto actual=currentViewer->commitSavedProgramSourceEdit(
+                                std::get<std::shared_ptr<core3d::SavedProgramSourceEditWork>>(pending->_lease),built);
                             switch(actual){
                                 case core3d::OrdinaryEditResult::Committed:result=Core3DProfileConstructionResultCommitted;break;
                                 case core3d::OrdinaryEditResult::NoChange:result=Core3DProfileConstructionResultUnchanged;break;

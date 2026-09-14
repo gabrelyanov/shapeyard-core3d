@@ -59,9 +59,13 @@ inline std::optional<retained_boolean::Change> SourcePatch(const Program& origin
         result.changed=result.oldBytes!=result.newBytes;return result;
     }catch(...){return {};}
 }
+// Aggregate-budget overload: the caller-owned budget accumulates occurrence
+// and stream work across old capture, private copies and this rebuild, so the
+// whole source-edit job shares one bounded allowance instead of a fresh
+// per-substep budget. The original 4-argument form keeps its own local budget.
 inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
-    const cut_display::Settings& display,const std::atomic_bool& stop) noexcept {
-    Result out;const auto refuse=[&](){Result empty;empty.status=stop.load()?Status::Cancelled:Status::Refused;empty.budget=out.budget;empty.phase=out.phase;empty.correspondence=out.correspondence;return empty;};
+    const cut_display::Settings& display,const std::atomic_bool& stop,Budget& budget) noexcept {
+    Result out;const auto refuse=[&](){Result empty;empty.status=stop.load()?Status::Cancelled:Status::Refused;empty.budget=budget;empty.phase=out.phase;empty.correspondence=out.correspondence;return empty;};
     try {
         if((display.type!=Aspect_TOD_RELATIVE&&display.type!=Aspect_TOD_ABSOLUTE)||!display.automatic)return refuse();
         for(double value:display.values)if(!std::isfinite(value))return refuse();
@@ -70,8 +74,8 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
             ||(display.ownAngle&&std::abs(display.values[1]-display.values[4])>Precision::Angular()))return refuse();
         out.phase="source-and-program";
         if(stop.load()||!saved_boolean_result::detail::SeparateDisks(program)
-            ||!retained_boolean::Encode(program,out.exactProgram)||!Charge(retainedBase,stop,out.budget)
-            ||!saved_cut_source_edit::Commit(retainedBase,stop,out.budget.streamBytes,out.retainedBase))return refuse();
+            ||!retained_boolean::Encode(program,out.exactProgram)||!Charge(retainedBase,stop,budget)
+            ||!saved_cut_source_edit::Commit(retainedBase,stop,budget.streamBytes,out.retainedBase))return refuse();
         for(std::size_t i=0;i<program.steps.size();++i){
             const auto view=saved_boolean_result::detail::GeometryView(program,i);
             if(stop.load()||!saved_cut_source_edit::InspectBase(retainedBase,view,stop)
@@ -81,12 +85,12 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
         // The original base is never replaced by the displayed/current result.
         TopoDS_Shape current=retainedBase;
         for(const auto& step:program.steps){
-            if(stop.load()||out.budget.booleanSteps>=Budget::MaximumSteps)return refuse();
-            ++out.budget.booleanSteps;out.phase="sequential-boolean";analytic_boolean::Recipe recipe;
+            if(stop.load()||budget.booleanSteps>=Budget::MaximumSteps)return refuse();
+            ++budget.booleanSteps;out.phase="sequential-boolean";analytic_boolean::Recipe recipe;
             recipe.metersPerUnit=program.source.metersPerUnit;recipe.operation=step.operation;recipe.tool=step.operand;
             analytic_boolean::Result built;
             if(analytic_boolean::Build(current,recipe,stop,built)!=analytic_boolean::Status::Built
-                ||!Charge(built.solid,stop,out.budget))return refuse();
+                ||!Charge(built.solid,stop,budget))return refuse();
             current=std::move(built.solid);
         }
         out.phase="display-preparation";
@@ -94,10 +98,14 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
         out.phase="complete-program-correspondence";out.correspondence=saved_boolean_result::Inspect(current,program,stop);
         if(out.correspondence.classification!=saved_boolean_result::Classification::MatchedOrientedBoundary)return refuse();
         out.phase="base-preservation-and-final-commitment";Commitment afterBase;
-        if(!saved_cut_source_edit::Commit(retainedBase,stop,out.budget.streamBytes,afterBase)
-            ||!(afterBase==out.retainedBase)||!saved_cut_source_edit::Commit(current,stop,out.budget.streamBytes,out.finalResult)
+        if(!saved_cut_source_edit::Commit(retainedBase,stop,budget.streamBytes,afterBase)
+            ||!(afterBase==out.retainedBase)||!saved_cut_source_edit::Commit(current,stop,budget.streamBytes,out.finalResult)
             ||stop.load())return refuse();
-        out.solid=std::move(current);out.status=Status::Built;out.phase="built";return out;
+        out.budget=budget;out.solid=std::move(current);out.status=Status::Built;out.phase="built";return out;
     }catch(...){return refuse();}
+}
+inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
+    const cut_display::Settings& display,const std::atomic_bool& stop) noexcept {
+    Budget budget;return Build(retainedBase,program,display,stop,budget);
 }
 } // namespace core3d::saved_boolean_build

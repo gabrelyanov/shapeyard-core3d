@@ -8,6 +8,7 @@
 #include "NativeModelingRequest.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
+#include "../OCCTKit/SavedProgramSourceDetachedWork.hxx"
 #include "../OCCTKit/RetainedBooleanEditValues.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
@@ -25,7 +26,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -129,6 +130,12 @@ struct OrdinaryTransformChange {
     // Separate native source/base/result path. No radius payload or AI permit.
     std::optional<saved_cut_source_edit::Patch> cutSourcePatch;
     std::shared_ptr<const SavedCutSourceDetachedResult> cutSourceRebuild;
+    // Explicit whole-program source path: the complete typed recipe transition
+    // with the paired native-constructed detached result. Set exactly for
+    // CylindricalCutProgramSourceRebuild; never combined with the legacy
+    // one-bore fields, a radius/append carrier or an AI permit above.
+    std::optional<saved_cut_source_edit::Patch> cutProgramSourcePatch;
+    std::shared_ptr<const SavedProgramSourceDetachedResult> cutProgramSourceRebuild;
 };
 
 struct OrdinaryTransformRecord {
@@ -417,6 +424,8 @@ private:
     bool captureMatches(const OcctObjectNameState& expected) const noexcept;
     bool captureMatches(const OcctObjectTransformState& expected) const noexcept;
     bool savedCutSourceChangeMatches(const OrdinaryTransformChange& request,
+        const OcctObjectTransformState& previous) const noexcept;
+    bool savedProgramSourceChangeMatches(const OrdinaryTransformChange& request,
         const OcctObjectTransformState& previous) const noexcept;
     bool presentationMatches(const OrdinaryTransformLedger& ledger, bool committed) const noexcept;
     void clearResolved() noexcept;

@@ -59,7 +59,7 @@
 class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
-namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; }
+namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
 
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
@@ -926,6 +926,20 @@ private:
   bool SealSavedCutSourceState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
       const core3d::saved_cut_source_edit::Patch& patch,
       const std::shared_ptr<const core3d::SavedCutSourceDetachedResult>& built,
+      const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
+      std::shared_ptr<const OcctSavedCutSceneState>& candidate) const noexcept;
+  // Explicit whole-program source semantics, additive beside the legacy pair.
+  // The actual patch is independently reapplied to the freshly captured
+  // complete original recipe; old/new bytes and all four content commitments
+  // must match the exact native-constructed detached result.
+  Standard_Boolean StageSavedProgramSourceReplacement(const OcctObjectTransformState& previous,
+      const core3d::saved_cut_source_edit::Patch& patch,
+      const std::shared_ptr<const core3d::SavedProgramSourceDetachedResult>& built,
+      std::shared_ptr<const core3d::retained_solid::Payload>& staged,
+      bool debugFailAfterShape=false) noexcept;
+  bool SealSavedProgramSourceState(const std::shared_ptr<const OcctSavedCutSceneState>& previous,
+      const core3d::saved_cut_source_edit::Patch& patch,
+      const std::shared_ptr<const core3d::SavedProgramSourceDetachedResult>& built,
       const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
       std::shared_ptr<const OcctSavedCutSceneState>& candidate) const noexcept;
   // Pure native eligibility for an exclusively owned document, including the
