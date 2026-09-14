@@ -2795,11 +2795,12 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         // This packet emits only v2 programs. A legacy one-bore radius keeps
         // its exact legacy API; nothing is silently downgraded or reissued.
         if(!program||!retained_boolean::Valid(*program))return {};
-        if(program->steps.size()==2){
+        if(program->steps.size()>=2){
             // Explicit refusal of unsupported crossing-axis or touching bores
-            // before any detached geometry work is prepared.
-            if(program->steps[0].operand.axis!=program->steps[1].operand.axis
-                ||!saved_boolean_result::detail::SeparateDisks(*program))return {};
+            // before any detached geometry work is prepared. EVERY unordered
+            // operand pair is revalidated here, so an identified radius edit
+            // re-proves all other holes, never a selected-first pair only.
+            if(!saved_boolean_result::detail::SeparateDisks(*program))return {};
         }
         auto carrier=std::make_shared<retained_solid::Payload>();carrier->envelope=change->recipe;
         carrier->bytes=change->newBytes;carrier->base=original.source.base;

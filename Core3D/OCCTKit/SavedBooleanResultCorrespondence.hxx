@@ -18,16 +18,29 @@ inline retained_solid::Envelope GeometryView(const retained_boolean::Program& p,
     e.sourceFamily=s.family;e.sourceSchema=s.schema;e.metersPerUnit=s.metersPerUnit;e.sourceValues=s.values;
     e.operandID=t.identifier;e.axis=std::uint8_t(t.axis);e.point=t.point;e.radius=t.radius;return e;
 }
+// Admission requires EVERY unordered operand pair to be a separated same-axis
+// disk pair. Checking only pair 0/1 (or only adjacent pairs) is unsound: with
+// three or more bores a nonadjacent pair can overlap while every checked pair
+// clears. ANY invalid, near-tangent, overlapping, coincident or different-axis
+// pair refuses the whole program. One-bore programs stay refused here; the
+// legacy one-hole path owns them. Interval arithmetic, rounding-mode gate,
+// kernel separation and numeric-uncertainty bounds are unchanged per pair.
 inline bool SeparateDisks(const retained_boolean::Program& p){
     namespace i=saved_cut_bore_clearance::detail;
-    if(!retained_boolean::Valid(p)||p.steps.size()!=2||std::fegetround()!=FE_TONEAREST)return false;
-    const auto& a=p.steps[0].operand;const auto& b=p.steps[1].operand;
-    if(a.axis!=b.axis)return false;const unsigned axis=unsigned(a.axis);
+    if(!retained_boolean::Valid(p)||p.steps.size()<2||std::fegetround()!=FE_TONEAREST)return false;
+    const unsigned axis=unsigned(p.steps[0].operand.axis);
     const unsigned u=(axis+1)%3,v=(axis+2)%3;
-    const auto distance=i::norm(i::sub(i::I(a.point[u]),i::I(b.point[u])),i::sub(i::I(a.point[v]),i::I(b.point[v])));
-    const auto gap=i::mul(i::sub(distance,i::add(i::I(a.radius),i::I(b.radius))),i::mul(i::I(p.source.metersPerUnit),i::I(1000)));
-    return i::good(gap)&&gap.lo>saved_cut_bore_clearance::KernelSeparationMM
-        &&i::up(gap.hi-gap.lo)<=saved_cut_bore_clearance::MaximumNumericUncertaintyMM;
+    for(std::size_t a=0;a<p.steps.size();++a){
+        const auto& x=p.steps[a].operand;
+        if(unsigned(x.axis)!=axis)return false;
+        for(std::size_t b=0;b<a;++b){
+            const auto& y=p.steps[b].operand;
+            const auto distance=i::norm(i::sub(i::I(x.point[u]),i::I(y.point[u])),i::sub(i::I(x.point[v]),i::I(y.point[v])));
+            const auto gap=i::mul(i::sub(distance,i::add(i::I(x.radius),i::I(y.radius))),i::mul(i::I(p.source.metersPerUnit),i::I(1000)));
+            if(!i::good(gap)||gap.lo<=saved_cut_bore_clearance::KernelSeparationMM
+                ||i::up(gap.hi-gap.lo)>saved_cut_bore_clearance::MaximumNumericUncertaintyMM)return false;
+        }
+    }return true;
 }
 struct Bore {unsigned face=0,seam=0,operand=0;std::vector<unsigned> openings;};
 inline bool RepresentationOwners(const Graph& g,const std::map<unsigned,unsigned>& seams,Budget& budget){

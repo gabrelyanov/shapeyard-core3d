@@ -85,8 +85,18 @@ inline Evidence Run(){
         evidence.checks[tag+"reserved-byte-corruption-refuses"]=!retained_boolean::Decode(badBytes,bad)&&bad.steps.empty();
         auto duplicate=program;duplicate.steps[1].operand.identifier=duplicate.steps[0].operand.identifier;
         auto exhausted=original;exhausted.operandID=UINT32_MAX;
+        // The value layer now admits third and fourth appends; only the FIFTH
+        // append hits the operand cap and refuses before any mutation. Value
+        // appends carry no geometry authority, so coincident positions are
+        // admitted here exactly as any out-of-clearance values would be.
+        const auto third=retained_boolean::Append(appended->recipe,create,mm);
+        const auto fourth=third?retained_boolean::Append(third->recipe,create,mm):std::optional<retained_boolean::Change>();
         evidence.checks[tag+"duplicate-highwater-limit-refusals"]=!retained_boolean::Valid(duplicate)
-            &&!retained_boolean::Append(appended->recipe,create,mm)&&!retained_boolean::Append(retained_boolean::Recipe(exhausted),create,mm)
+            &&third&&third->changed&&fourth&&fourth->changed
+            &&std::get<Program>(fourth->recipe).steps.size()==4
+            &&std::get<Program>(fourth->recipe).nextOperandID==5
+            &&!retained_boolean::Append(fourth->recipe,create,mm)
+            &&!retained_boolean::Append(retained_boolean::Recipe(exhausted),create,mm)
             &&!retained_boolean::Radius(appended->recipe,99,1,mm);
         bool baseMatches=false;const auto base=geometry::Base(original,stop,baseMatches);const auto before=geometry::Bytes(base);
         const auto built=Build(base,program,settings,*stop);evidence.phases[tag+"build"]=std::string(built.phase)+":"+built.correspondence.phase;

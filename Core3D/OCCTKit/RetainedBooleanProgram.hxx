@@ -10,7 +10,7 @@
 namespace core3d::retained_boolean {
 using Legacy=retained_solid::Envelope;
 using UUID=retained_solid::UUID;
-inline constexpr std::size_t MaximumOperands=2; // Initial complete correspondence scope; not a tuple wire format.
+inline constexpr std::size_t MaximumOperands=4; // Complete all-pairs correspondence scope for up to four separated same-axis bores; not a tuple wire format.
 struct Source {
     UUID document{},entity{},definition{},sourceFeature{},derivedFeature{};
     std::uint8_t family=0;
