@@ -127,6 +127,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include "TDataStd_Name.hxx"
 #include "TDataStd_Real.hxx"
+#include "TDataStd_RealArray.hxx"
 #include "TDF_LabelSequence.hxx"
 #include "Standard_GUID.hxx"
 #include "gp_Ax2.hxx"
