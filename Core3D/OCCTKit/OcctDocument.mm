@@ -9256,7 +9256,7 @@ std::string OcctDocument::NewProfileIdentifier() noexcept {
 Standard_Boolean OcctDocument::IsAdmittedSavedGroupOrigin(const gp_Pnt& point) noexcept {
     try {
         for (const double value : {point.X(), point.Y(), point.Z()}) {
-            if (!std::isfinite(value) || std::abs(value) > limits::kMaximumModelCoordinateMagnitude) return Standard_False;
+            if (!std::isfinite(value) || std::abs(value) > core3d::limits::kMaximumModelCoordinateMagnitude) return Standard_False;
         }
         return Standard_True;
     } catch (...) { return Standard_False; }
