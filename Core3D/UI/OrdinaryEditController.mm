@@ -731,10 +731,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     return reject(OrdinaryEditResult::Invalid);
                 }
             }
-            // This slice implements exact remapping only for region Inset and
-            // Extrude. Other local-geometry mutations must refuse a live
-            // partition before opening a command rather than invalidating it.
+            // Region mutations carry a validated replacement. Coherent UV
+            // repack proves the old partition against its exact candidate.
+            // Other geometry mutations must refuse live partition authority.
             if (!record.previous.meshRegionPartition.empty() && geometryChanges
+                && request.operation!=OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation!=OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation!=OrdinaryTransformOperation::MeshRegionInset) {
                 return reject(OrdinaryEditResult::Invalid);
@@ -2119,9 +2120,9 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             }
 #endif
             ++index;
-            // UV regeneration changes the exact local geometry digest. Clear
-            // its validated mapless frame owner in the same owned command so
-            // failed staging, cancellation and Undo restore both atomically.
+            // UV regeneration changes geometry-owned tangent-frame authority.
+            // Partition authority, when present, has already been proved exact
+            // for the candidate and remains byte-identical in this command.
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
                 if (!_document->ValidateTriangleUVAtlas(record.previous.label,
                         record.requested.shape, record.requested.meshUVAtlasOptions)) {

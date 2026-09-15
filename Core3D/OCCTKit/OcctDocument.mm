@@ -5191,6 +5191,35 @@ bool TriangleAtlasFace(const TopoDS_Shape& shape, TopoDS_Face& face,
         && mesh->NbTriangles() > 0 && mesh->NbTriangles() <= 4096
         && mesh->NbNodes() > 0 && mesh->NbNodes() <= 24576;
 }
+
+// A UV-only mutation may retain opaque partition bytes only when the old
+// record validates against both exact ordered placed-local topology captures.
+// Node identifiers and UV storage are deliberately outside that identity.
+bool PreservesMeshRegionPartition(const OcctObjectTransformState& source,
+                                  const TopoDS_Shape& candidate) noexcept {
+    if (source.meshRegionPartition.empty()) return true;
+    try {
+        core3d::meshedit::RegionPartition partition;
+        if (!core3d::meshedit::DecodeRegionPartition(
+                source.meshRegionPartition.data(),
+                source.meshRegionPartition.size(), partition)) return false;
+        std::atomic_bool cancelled{false};
+        core3d::meshedit::NativeTopologyCapture before, after;
+        if (core3d::meshedit::CaptureNativeTopology(source.shape, before, cancelled)
+                != core3d::meshedit::TopologyResult::Ready
+            || core3d::meshedit::CaptureNativeTopology(candidate, after, cancelled)
+                != core3d::meshedit::TopologyResult::Ready
+            || source.shape.ShapeType() != candidate.ShapeType()
+            || source.shape.Orientation() != candidate.Orientation()
+            || !source.shape.Location().IsEqual(candidate.Location())
+            || before.face.Orientation() != TopAbs_FORWARD
+            || after.face.Orientation() != before.face.Orientation()
+            || !after.face.Location().IsEqual(before.face.Location())
+            || !after.meshLocation.IsEqual(before.meshLocation)) return false;
+        return core3d::meshedit::ValidateRegionPartition(before, partition)
+            && core3d::meshedit::ValidateRegionPartition(after, partition);
+    } catch (...) { return false; }
+}
 }
 
 Standard_Integer Core3DNormalTextureRecipeForLabel(const TDF_Label& label) noexcept
@@ -5897,7 +5926,8 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
         if (result.IsNull() || result.IsSame(source.shape)
             || !TriangleAtlasFace(result, copiedFace, copiedMesh) || copiedFace.IsSame(face)) { return Standard_False; }
         BRep_Builder builder; builder.UpdateFace(copiedFace, atlas);
-        if (!GeometryClassMatchesRepresentation(ClassifyDefinitionGeometry(result, nullptr), OcctGeometryRepresentation::TriangleMesh)) { return Standard_False; }
+        if (!GeometryClassMatchesRepresentation(ClassifyDefinitionGeometry(result, nullptr), OcctGeometryRepresentation::TriangleMesh)
+            || !PreservesMeshRegionPartition(source, result)) { return Standard_False; }
         if (preview && options.version == 2) {
             OcctMeshUVAtlasPreview value;
             value.triangleUVs.reserve(coherent.corners.size()*6);
@@ -6350,7 +6380,9 @@ Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(
             int ix[3], iy[3]; x->Triangle(i).Get(ix[0], ix[1], ix[2]); y->Triangle(i).Get(iy[0], iy[1], iy[2]);
             for (int j = 0; j < 3; ++j) { if (ix[j] != iy[j]) { return Standard_False; } }
         }
-        return Standard_True;
+        OcctObjectTransformState source;
+        return CaptureObjectTransformStateForLabel(label, source)
+            && PreservesMeshRegionPartition(source, candidate);
     } catch (...) { return Standard_False; }
 }
 
