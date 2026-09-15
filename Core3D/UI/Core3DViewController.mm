@@ -29,6 +29,7 @@
 #include "../OCCTKit/NativeWindingPlanProbe.hxx"
 #include "../OCCTKit/NativeTriangleContacts.hpp"
 #include "../OCCTKit/NativeWindingCandidateProbe.hxx"
+#include "../OCCTKit/NativeMeshRegionInsetProbe.hxx"
 #endif
 #if DEBUG
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
@@ -16292,6 +16293,18 @@ struct NativeModelingPermitIssuer final {
         for (const bool value : plan) [planValues addObject:@(value)];
         for (const bool value : candidate) [candidateValues addObject:@(value)];
         return @{ @"plan": planValues, @"candidate": candidateValues };
+    } catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *, id> *)debugMeshRegionInsetKernelProbe {
+    if (![NSThread isMainThread]) return nil;
+    try {
+        const auto value=core3d::debug::RunMeshRegionInsetKernelProbe();
+        NSMutableArray<NSNumber*>* checks=[NSMutableArray arrayWithCapacity:value.checks.size()];
+        for(bool check:value.checks)[checks addObject:@(check)];
+        return @{ @"checks":checks,@"beforeVolume":@(value.beforeVolume),
+            @"insetVolume":@(value.insetVolume),@"extrudedVolume":@(value.extrudedVolume),
+            @"insetTriangles":@(value.insetTriangles),@"centerTriangles":@(value.centerTriangles) };
     } catch (...) { return nil; }
 }
 

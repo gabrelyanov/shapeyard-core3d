@@ -2,6 +2,7 @@
 // Private numeric/native geometry preparation. The document owner separately
 // binds definition identity, placement, UV provenance, material and OCAF history.
 #include "NativeMeshVertexMove.hxx"
+#include "NativeMeshRegionPartition.hxx"
 #include "NativeTriangleContacts.hpp"
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRep_Builder.hxx>
@@ -29,12 +30,34 @@ inline bool SameRegionStorage(const NativeMeshStorageCapture& a,
         && a.storedNormals==b.storedNormals && a.deflection==b.deflection
         && a.triangleNodeIDs==b.triangleNodeIDs && a.storedTriangles==b.storedTriangles;
 }
+inline bool SameRegionTopology(const NativeTopologyCapture& a,
+                               const NativeTopologyCapture& b) noexcept {
+    if(!SameRegionStorage(a,b) || a.vertexNodeIDs!=b.vertexNodeIDs
+        || a.topology.triangleVertices!=b.topology.triangleVertices
+        || a.topology.unitNormals!=b.topology.unitNormals
+        || a.topology.boundaryEdges!=b.topology.boundaryEdges
+        || a.topology.vertices.size()!=b.topology.vertices.size()
+        || a.topology.edges.size()!=b.topology.edges.size())return false;
+    for(std::size_t i=0;i<a.topology.vertices.size();++i)
+        if(a.topology.vertices[i].point!=b.topology.vertices[i].point
+            || a.topology.vertices[i].corners!=b.topology.vertices[i].corners)return false;
+    for(std::size_t i=0;i<a.topology.edges.size();++i) {
+        const auto& x=a.topology.edges[i];const auto& y=b.topology.edges[i];
+        if(x.vertices!=y.vertices || x.uses.size()!=y.uses.size())return false;
+        for(std::size_t u=0;u<x.uses.size();++u)
+            if(x.uses[u].triangle!=y.uses[u].triangle
+                || x.uses[u].forward!=y.uses[u].forward)return false;
+    }
+    return true;
+}
 inline TopologyResult ResolvePlanarRegion(const NativeTopologyCapture& source,
-    std::uint32_t seed, PlanarRegion& output, const std::atomic_bool& cancelled) noexcept {
+    std::uint32_t seed, PlanarRegion& output, const std::atomic_bool& cancelled,
+    const RegionPartition* partition) noexcept {
     output={};
     try {
         if(cancelled.load(std::memory_order_relaxed))return TopologyResult::Cancelled;
         const auto& topology=source.topology;
+        if(partition&&!ValidateRegionPartition(source,*partition))return TopologyResult::Invalid;
         if(seed>=topology.triangleVertices.size() || topology.triangleVertices.size()>4096
             || topology.unitNormals.size()!=topology.triangleVertices.size()
             || topology.boundaryEdges!=0)return TopologyResult::Invalid;
@@ -56,6 +79,7 @@ inline TopologyResult ResolvePlanarRegion(const NativeTopologyCapture& source,
         std::vector<std::vector<std::uint32_t>> neighbors(topology.triangleVertices.size());
         for(const auto& edge:topology.edges) {
             if(edge.uses.size()!=2)return TopologyResult::Invalid;
+            if(BarrierBetween(source,partition,edge))continue;
             neighbors[edge.uses[0].triangle].push_back(edge.uses[1].triangle);
             neighbors[edge.uses[1].triangle].push_back(edge.uses[0].triangle);
         }
@@ -101,24 +125,31 @@ inline TopologyResult ResolvePlanarRegion(const NativeTopologyCapture& source,
         output=std::move(region);return TopologyResult::Ready;
     } catch(...) {output={};return TopologyResult::Invalid;}
 }
+inline TopologyResult ResolvePlanarRegion(const NativeTopologyCapture& source,
+    std::uint32_t seed, PlanarRegion& output, const std::atomic_bool& cancelled) noexcept {
+    return ResolvePlanarRegion(source,seed,output,cancelled,nullptr);
+}
 inline TopologyResult PrepareRegionExtrusion(const NativeTopologyCapture& source,
     int sourcePrefix, const PlanarRegion& region, double localDistance,
     RegionSideUVPolicy policy, TopoDS_Shape& candidate,
-    const std::atomic_bool& cancelled) noexcept {
-    candidate.Nullify();
+    const std::atomic_bool& cancelled, const RegionPartition* partition=nullptr,
+    RegionPartition* candidatePartition=nullptr) noexcept {
+    candidate.Nullify();if(candidatePartition)*candidatePartition={};
+    if(partition&&!candidatePartition)return TopologyResult::Invalid;
     try {
         if(cancelled.load(std::memory_order_relaxed))return TopologyResult::Cancelled;
         if(policy!=RegionSideUVPolicy::BoundaryStripNormalized || !std::isfinite(localDistance)
             || localDistance<=0 || localDistance>1.e6 || region.triangles.empty()
             || region.triangles.size()>256 || region.boundaryVertices.size()<3
-            || !source.sourceMesh->HasUVNodes() || !HasFlatCornerLayout(source,sourcePrefix))
-            return TopologyResult::Invalid;
-        NativeMeshStorageCapture fresh;
-        auto status=CaptureNativeMeshStorage(source.shape,fresh,cancelled);
+            || source.sourceMesh.IsNull())return TopologyResult::Invalid;
+        NativeTopologyCapture fresh;
+        auto status=CaptureNativeTopology(source.shape,fresh,cancelled);
         if(status!=TopologyResult::Ready)return status;
-        if(!SameRegionStorage(source,fresh))return TopologyResult::Invalid;
+        if(!SameRegionTopology(source,fresh) || fresh.sourceMesh.IsNull()
+            || !fresh.sourceMesh->HasUVNodes() || !HasFlatCornerLayout(fresh,sourcePrefix))
+            return TopologyResult::Invalid;
         PlanarRegion resolved;
-        status=ResolvePlanarRegion(source,region.triangles.front(),resolved,cancelled);
+        status=ResolvePlanarRegion(source,region.triangles.front(),resolved,cancelled,partition);
         if(status!=TopologyResult::Ready)return status;
         if(!resolved.IsEqual(region))return TopologyResult::Invalid;
         const std::size_t sourceCount=source.storedTriangles.size();
@@ -201,10 +232,26 @@ inline TopologyResult PrepareRegionExtrusion(const NativeTopologyCapture& source
             if(verified.storedUVs[node]!=uvs[t][k] || verified.storedNormals[node]!=normals[t][k]
                 || verified.triangleNodeIDs[t][k]!=int(node)+1)return TopologyResult::Invalid;
         }
+        RegionPartition preparedPartition;
+        if(candidatePartition&&partition) {
+            std::set<std::array<Point,2>> retainedBarriers;
+            for(const auto& edge:source.topology.edges)if(BarrierBetween(source,partition,edge)) {
+                const bool first=selected[edge.uses[0].triangle],second=selected[edge.uses[1].triangle];
+                if(first!=second)continue; // cap-to-retained barrier becomes two noncoplanar creases
+                std::array<Point,2> points={source.topology.vertices[edge.vertices[0]].point,
+                    source.topology.vertices[edge.vertices[1]].point};
+                if(first){points[0]=shifted(points[0]);points[1]=shifted(points[1]);}
+                if(points[1]<points[0])std::swap(points[0],points[1]);retainedBarriers.insert(points);
+            }
+            if(!MakeRegionPartition(verified,retainedBarriers,preparedPartition))return TopologyResult::Invalid;
+        }
         NativeMeshStorageCapture untouched;status=CaptureNativeMeshStorage(source.shape,untouched,cancelled);
-        if(status!=TopologyResult::Ready || !SameRegionStorage(source,untouched))return TopologyResult::Invalid;
-        candidate=result;return TopologyResult::Ready;
-    } catch(const std::bad_alloc&){candidate.Nullify();return TopologyResult::TooLarge;}
-      catch(...){candidate.Nullify();return TopologyResult::Invalid;}
+        if(status!=TopologyResult::Ready)return status;
+        if(!SameRegionStorage(source,untouched))return TopologyResult::Invalid;
+        candidate=result;
+        if(candidatePartition&&partition)*candidatePartition=std::move(preparedPartition);
+        return TopologyResult::Ready;
+    } catch(const std::bad_alloc&){candidate.Nullify();if(candidatePartition)*candidatePartition={};return TopologyResult::TooLarge;}
+      catch(...){candidate.Nullify();if(candidatePartition)*candidatePartition={};return TopologyResult::Invalid;}
 }
 } // namespace core3d::meshedit

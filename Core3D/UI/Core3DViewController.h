@@ -1996,6 +1996,7 @@ __attribute__((objc_subclassing_restricted))
 
 //! Isolated native winding geometry probes; no live document writes.
 - (NSDictionary<NSString *, NSArray<NSNumber *> *> *_Nullable)debugWindingGeometryProbe;
+- (NSDictionary<NSString *, id> *_Nullable)debugMeshRegionInsetKernelProbe;
 //! Test-only exact-label cycle seam; empty begin and real detected-state transitions.
 - (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
     NS_SWIFT_NAME(debugBeginEmptyBoolean(gizmoType:));
