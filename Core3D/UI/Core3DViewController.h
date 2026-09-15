@@ -1522,6 +1522,13 @@ __attribute__((objc_subclassing_restricted))
 - (void)createRectangularLoftWithDefinition:(Core3DRectangularLoftDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createRectangularLoft(definition:expected:completion:));
+//! Same ordinary loft creation, with an exact-work cancellation handle. Nil
+//! means no asynchronous work was admitted; completion still reports the actual
+//! refusal. The handle can never execute, replace, retry or cancel a later job.
+- (nullable Core3DStoredLoftEditOperation *)beginRectangularLoftCreateWithDefinition:(Core3DRectangularLoftDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginRectangularLoftCreate(definition:expected:completion:));
 - (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createSweep(definition:expected:completion:));

@@ -14875,6 +14875,29 @@ struct NativeModelingPermitIssuer final {
         [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
+
+- (Core3DStoredLoftEditOperation *)beginRectangularLoftCreateWithDefinition:(Core3DRectangularLoftDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return nil;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
+        return nil;
+    }
+    // The existing entry performs all authority and validation and owns the
+    // work. Mark synchronous delivery before user code so a reentrant callback
+    // cannot make this method capture a different operation.
+    __block BOOL delivered = NO;
+    [self createRectangularLoftWithDefinition:definition expected:expected completion:^(Core3DProfileConstructionResult result) {
+        delivered = YES;
+        completion(result);
+    }];
+    // Main has not yielded; admitted work has synchronously occupied this slot
+    // and cannot deliver its queued main completion before the handle capture.
+    if (delivered || !_nativeSolidWork) return nil;
+    return [[Core3DStoredLoftEditOperation alloc] initWithOwner:self work:_nativeSolidWork];
+}
+
 - (void)createSweepWithDefinition:(Core3DSweepDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
