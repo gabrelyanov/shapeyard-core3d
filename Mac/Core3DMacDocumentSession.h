@@ -75,7 +75,7 @@ NS_SWIFT_UI_ACTOR
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithAttachedOpenGLView:(NSOpenGLView *)view
-    NS_DESIGNATED_INITIALIZER;
+    NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(attachedOpenGLView:));
 
 @property(nonatomic,strong,readonly) NSOpenGLView *engineView;
 @property(nonatomic,strong,readonly,nullable) Core3DMacScenePublication *publication;
@@ -90,24 +90,25 @@ NS_SWIFT_UI_ACTOR
 //! Captures the real committed scene plus the viewer's actual paired overlay.
 //! A missing/invalid overlay is a refusal; no empty overlay is manufactured.
 - (Core3DMacSessionActionResult)refreshPublicationWithWidth:(uint32_t)width
-    height:(uint32_t)height;
+    height:(uint32_t)height NS_SWIFT_NAME(refreshPublication(width:height:));
 
 //! Success requires a model-revision advance and exactly one additional
 //! visible/selectable committed model instance in the retained native snapshot.
 - (Core3DMacSessionActionResult)createCubeWithViewportWidth:(uint32_t)width
-    height:(uint32_t)height;
+    height:(uint32_t)height NS_SWIFT_NAME(createCube(width:height:));
 
 //! expectedPublication must be this session's exact current publication.
 //! The native identity also binds publication source and revision domains.
 - (Core3DMacSessionActionResult)selectEntityIdentifier:(NSString *)identifier
     expectedPublication:(Core3DMacScenePublication *)expectedPublication
-    viewportWidth:(uint32_t)width height:(uint32_t)height;
+    viewportWidth:(uint32_t)width height:(uint32_t)height
+    NS_SWIFT_NAME(select(entity:expectedPublication:width:height:));
 
 //! Immediate state is returned synchronously. Only Measuring may later deliver
 //! completion, at most once on main after the native capture transition returns.
 - (Core3DTransformInspectorSnapshot *)captureTransformMeasurementWithCompletion:
-    (Core3DTransformInspectorCompletion _Nullable)completion;
-- (void)cancelTransformMeasurement;
+    (Core3DTransformInspectorCompletion _Nullable)completion NS_SWIFT_NAME(captureMeasurement(completion:));
+- (void)cancelTransformMeasurement NS_SWIFT_NAME(cancelMeasurement());
 
 //! Commits one absolute raw document-model-unit scalar using the exact retained
 //! native measurement. expectedMeasurement must be the exact DTO returned by
@@ -115,20 +116,34 @@ NS_SWIFT_UI_ACTOR
 //! retained measurement; an admitted attempt consumes it before native entry.
 - (Core3DTransformInspectorPositionCommitResult)commitPositionValue:(double)value
     axis:(Core3DTransformInspectorAxis)axis
-    expectedMeasurement:(Core3DTransformInspectorSnapshot *)expectedMeasurement;
+    expectedMeasurement:(Core3DTransformInspectorSnapshot *)expectedMeasurement
+    NS_SWIFT_NAME(commitPosition(_:axis:expectedMeasurement:));
 
 //! Completes the native transition first, restores the caller's prior GL
 //! context, then emits effects in Boolean/selection/render/primary order.
-- (Core3DMacHistoryResult *)performHistory:(Core3DMacHistoryDirection)direction;
+- (Core3DMacHistoryResult *)performHistory:(Core3DMacHistoryDirection)direction NS_SWIFT_NAME(performHistory(_:));
 
 //! Runs only the shared ordinary-edit recovery ledger. A resolved result also
 //! requires a fresh paired scene publication; unresolved results remain retryable.
 - (Core3DMacOrdinaryEditRecoveryResult)reconcileOrdinaryEditWithViewportWidth:
-    (uint32_t)width height:(uint32_t)height;
+    (uint32_t)width height:(uint32_t)height NS_SWIFT_NAME(reconcile(width:height:));
+
+//! Returns an immutable physical copy of the existing native XBF/CBF document.
+//! Serialization is refused while a native operation owns active/recovery state.
+- (nullable NSData *)nativeDocumentDataWithError:(NSError **)error
+    NS_SWIFT_NAME(nativeDocumentData());
+
+//! Physically freezes and stages native XBF/CBF bytes before candidate adoption.
+//! Rejection preserves the current document; success publishes the replacement.
+- (Core3DMacSessionActionResult)loadNativeDocumentData:(NSData *)data
+    viewportWidth:(uint32_t)width height:(uint32_t)height
+    error:(NSError **)error
+    NS_SWIFT_NAME(loadNativeDocumentData(_:width:height:))
+    __attribute__((swift_error(nonnull_error)));
 
 //! Refuses while native recovery is unresolved. Successful close cancels
 //! measurement callbacks and releases OCCT GPU state with the owned context current.
-- (Core3DMacSessionActionResult)close;
+- (Core3DMacSessionActionResult)close NS_SWIFT_NAME(close());
 
 @end
 

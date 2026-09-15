@@ -4,17 +4,251 @@
 #import "Core3DTransformInspectorSnapshotFactory.hpp"
 #import "Core3DViewer.h"
 
+#include <array>
+#include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <optional>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
+#include <vector>
 
 #if !defined(TARGET_OS_OSX) || !TARGET_OS_OSX
 #error "Core3DMacDocumentSession is macOS-only."
 #endif
 
 namespace {
+
+constexpr NSUInteger kMaximumNativeDocumentBytes = 256ull * 1024ull * 1024ull;
+constexpr char kNativeDocumentMagic[] = "BINFILE";
+NSString *const kCore3DMacPersistenceErrorDomain =
+    @"com.shapeyard.Core3D.MacPersistence";
+
+enum class MacPersistenceError : NSInteger {
+    InvalidData = 1,
+    Busy,
+    TemporaryFile,
+    NativeFailure,
+};
+
+void SetPersistenceError(NSError **error, MacPersistenceError code,
+    NSString *description) noexcept {
+    if (error == nullptr) return;
+    @try {
+        *error = [NSError errorWithDomain:kCore3DMacPersistenceErrorDomain
+            code:static_cast<NSInteger>(code)
+            userInfo:@{NSLocalizedDescriptionKey: description}];
+    } @catch (__unused NSException *exception) {
+        *error = nil;
+    }
+}
+
+class OwnedPersistenceDirectory final {
+public:
+    OwnedPersistenceDirectory() {
+        @autoreleasepool {
+            @try {
+                ownedNames_.reserve(8);
+                NSString *root = NSTemporaryDirectory();
+                if (root.length == 0) return;
+                NSString *pattern = [root stringByAppendingPathComponent:
+                    @"shapeyard-native-document.XXXXXX"];
+                const char *fileSystemPattern = pattern.fileSystemRepresentation;
+                if (fileSystemPattern == nullptr) return;
+                pathTemplate_.assign(fileSystemPattern,
+                    fileSystemPattern + std::strlen(fileSystemPattern) + 1);
+                char *created = ::mkdtemp(pathTemplate_.data());
+                if (created == nullptr) return;
+                path_ = created;
+                struct stat createdStatus = {};
+                if (::lstat(path_.c_str(), &createdStatus) != 0
+                    || !S_ISDIR(createdStatus.st_mode)
+                    || createdStatus.st_uid != ::geteuid()
+                    || (createdStatus.st_mode & (S_IRWXG | S_IRWXO)) != 0) return;
+                device_ = createdStatus.st_dev;
+                inode_ = createdStatus.st_ino;
+                created_ = true;
+                descriptor_ = ::open(path_.c_str(),
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                struct stat status = {};
+                if (descriptor_ < 0 || ::fstat(descriptor_, &status) != 0
+                    || !S_ISDIR(status.st_mode) || status.st_uid != ::geteuid()
+                    || (status.st_mode & (S_IRWXG | S_IRWXO)) != 0
+                    || status.st_dev != device_ || status.st_ino != inode_) return;
+                valid_ = true;
+            } @catch (__unused NSException *exception) {
+            }
+        }
+    }
+
+    ~OwnedPersistenceDirectory() {
+        if (descriptor_ >= 0) {
+            for (const std::string& name : ownedNames_) {
+                if (!name.empty() && name.find('/') == std::string::npos)
+                    (void)::unlinkat(descriptor_, name.c_str(), 0);
+            }
+            ::close(descriptor_);
+        }
+        if (!created_ || path_.empty()) return;
+        struct stat status = {};
+        if (::lstat(path_.c_str(), &status) == 0 && S_ISDIR(status.st_mode)
+            && status.st_dev == device_ && status.st_ino == inode_
+            && status.st_uid == ::geteuid()) {
+            (void)::rmdir(path_.c_str());
+        }
+    }
+
+    OwnedPersistenceDirectory(const OwnedPersistenceDirectory&) = delete;
+    OwnedPersistenceDirectory& operator=(const OwnedPersistenceDirectory&) = delete;
+    bool valid() const noexcept { return valid_; }
+    int descriptor() const noexcept { return descriptor_; }
+    const std::string& path() const noexcept { return path_; }
+    void ownName(const std::string& name) {
+        if (!name.empty() && name.find('/') == std::string::npos)
+            ownedNames_.push_back(name);
+    }
+
+private:
+    std::vector<char> pathTemplate_;
+    std::string path_;
+    std::vector<std::string> ownedNames_;
+    int descriptor_ = -1;
+    dev_t device_ = 0;
+    ino_t inode_ = 0;
+    bool created_ = false;
+    bool valid_ = false;
+};
+
+class OwnedDescriptor final {
+public:
+    explicit OwnedDescriptor(int descriptor = -1) noexcept
+        : descriptor_(descriptor) {}
+    ~OwnedDescriptor() { if (descriptor_ >= 0) ::close(descriptor_); }
+    OwnedDescriptor(const OwnedDescriptor&) = delete;
+    OwnedDescriptor& operator=(const OwnedDescriptor&) = delete;
+    int get() const noexcept { return descriptor_; }
+    bool closeChecked() noexcept {
+        const int descriptor = descriptor_;
+        descriptor_ = -1;
+        return descriptor >= 0 && ::close(descriptor) == 0;
+    }
+private:
+    int descriptor_;
+};
+
+bool NativePersistenceIsBusy(
+    const std::shared_ptr<core3d::Core3DViewer>& viewer) noexcept {
+    if (!viewer) return true;
+    try {
+        const auto object = viewer->getObjectInteractor();
+        const auto shape = viewer->getShapeInteractor();
+        return object == nullptr || shape == nullptr || viewer->hasUnresolvedEdit()
+            || object->hasUnresolvedDuplicate() || object->isPickingMirrorPlane()
+            || object->hasActiveBoolean() || object->hasUnresolvedBoolean()
+            || object->hasActiveMirror() || object->hasUnresolvedMirrorObjects()
+            || object->hasActiveLinearArray() || object->hasUnresolvedLinearArray()
+            || object->hasActiveRadialArray() || object->hasUnresolvedRadialArray()
+            || shape->hasActiveBevel() || shape->hasActiveExtrusion()
+            || shape->hasActiveShell() || shape->hasUnresolvedShell();
+    } catch (...) {
+        return true;
+    }
+}
+
+bool HasNativeDocumentMagic(const unsigned char *bytes, NSUInteger length) noexcept {
+    constexpr NSUInteger magicLength = sizeof(kNativeDocumentMagic) - 1;
+    return bytes != nullptr && length >= magicLength
+        && std::memcmp(bytes, kNativeDocumentMagic, magicLength) == 0;
+}
+
+bool WriteFrozenData(NSData *data, OwnedPersistenceDirectory& directory,
+    const char *name) {
+    @try {
+        if (data == nil || name == nullptr || !directory.valid()) return false;
+        OwnedDescriptor output(::openat(directory.descriptor(), name,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR));
+        if (output.get() < 0) return false;
+        struct stat opened = {};
+        if (::fstat(output.get(), &opened) != 0 || !S_ISREG(opened.st_mode)
+            || opened.st_nlink != 1 || opened.st_uid != ::geteuid()
+            || (opened.st_mode & (S_IRWXG | S_IRWXO)) != 0) return false;
+        const unsigned char *bytes = static_cast<const unsigned char *>(data.bytes);
+        NSUInteger written = 0;
+        while (written < data.length) {
+            const size_t request = std::min<NSUInteger>(64 * 1024, data.length - written);
+            const ssize_t amount = ::write(output.get(), bytes + written, request);
+            if (amount < 0 && errno == EINTR) continue;
+            if (amount <= 0) return false;
+            written += static_cast<NSUInteger>(amount);
+        }
+        if (::fsync(output.get()) != 0) return false;
+        struct stat sealed = {}, pathStatus = {};
+        if (::fstat(output.get(), &sealed) != 0
+            || sealed.st_dev != opened.st_dev || sealed.st_ino != opened.st_ino
+            || sealed.st_size < 0
+            || static_cast<unsigned long long>(sealed.st_size) != data.length
+            || ::fstatat(directory.descriptor(), name, &pathStatus,
+                AT_SYMLINK_NOFOLLOW) != 0
+            || pathStatus.st_dev != sealed.st_dev || pathStatus.st_ino != sealed.st_ino)
+            return false;
+        return output.closeChecked();
+    } @catch (__unused NSException *exception) {
+        return false;
+    }
+}
+
+NSData *ReadOwnedNativeDocument(const std::string& savedPath,
+    OwnedPersistenceDirectory& directory) {
+    @try {
+        NSString *saved = [NSString stringWithUTF8String:savedPath.c_str()];
+        NSString *ownedRoot = [NSString stringWithUTF8String:directory.path().c_str()];
+        if (saved == nil || ownedRoot == nil
+            || ![[saved stringByDeletingLastPathComponent] isEqualToString:ownedRoot])
+            return nil;
+        NSString *leaf = saved.lastPathComponent;
+        const char *leafBytes = leaf.fileSystemRepresentation;
+        if (leafBytes == nullptr || std::strchr(leafBytes, '/') != nullptr) return nil;
+        directory.ownName(leafBytes);
+        OwnedDescriptor input(::openat(directory.descriptor(), leafBytes,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+        struct stat opened = {}, pathStatus = {};
+        if (input.get() < 0 || ::fstat(input.get(), &opened) != 0
+            || !S_ISREG(opened.st_mode) || opened.st_nlink != 1
+            || opened.st_uid != ::geteuid() || opened.st_size < 0
+            || static_cast<unsigned long long>(opened.st_size)
+                > kMaximumNativeDocumentBytes
+            || ::fstatat(directory.descriptor(), leafBytes, &pathStatus,
+                AT_SYMLINK_NOFOLLOW) != 0
+            || opened.st_dev != pathStatus.st_dev || opened.st_ino != pathStatus.st_ino)
+            return nil;
+        const NSUInteger length = static_cast<NSUInteger>(opened.st_size);
+        std::vector<unsigned char> bytes(length);
+        NSUInteger offset = 0;
+        while (offset < length) {
+            const ssize_t count = ::read(input.get(), bytes.data() + offset,
+                std::min<NSUInteger>(64 * 1024, length - offset));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return nil;
+            offset += static_cast<NSUInteger>(count);
+        }
+        unsigned char trailing = 0;
+        if (::read(input.get(), &trailing, 1) != 0) return nil;
+        struct stat after = {};
+        if (::fstat(input.get(), &after) != 0 || after.st_dev != opened.st_dev
+            || after.st_ino != opened.st_ino || after.st_size != opened.st_size
+            || !HasNativeDocumentMagic(bytes.data(), length)) return nil;
+        return [NSData dataWithBytes:bytes.data() length:length];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
 
 class ScopedCurrentOpenGLContext final {
 public:
@@ -151,6 +385,19 @@ std::size_t EditableModelCount(const core3d::scene::SceneSnapshot& scene) {
     return count;
 }
 
+bool ConfigureNativeMoveRotate(
+    const std::shared_ptr<core3d::Core3DViewer>& viewer) noexcept {
+    if (!viewer) return false;
+    try {
+        const auto object = viewer->getObjectInteractor();
+        if (!object) return false;
+        object->setManipulatorType(
+            core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate);
+        return object->getManipulatorType()
+            == core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate;
+    } catch (...) { return false; }
+}
+
 } // namespace
 
 @interface Core3DMacScenePublication ()
@@ -235,6 +482,12 @@ std::size_t EditableModelCount(const core3d::scene::SceneSnapshot& scene) {
             return nil;
         }
 
+        if (!ConfigureNativeMoveRotate(_viewer)) {
+            _viewer->release();
+            _viewer.reset();
+            return nil;
+        }
+
         __weak Core3DMacDocumentSession *weakSelf = self;
         const auto notePresentation = [weakSelf]() noexcept {
             Core3DMacDocumentSession *session = weakSelf;
@@ -275,6 +528,8 @@ std::size_t EditableModelCount(const core3d::scene::SceneSnapshot& scene) {
     _nativePresentationDirty = YES;
     if (width == 0 || height == 0 || _viewer == nullptr) return nil;
     try {
+        [_engineContext update];
+        _viewer->Resize();
         if (render && !_viewer->RenderFrame()) return nil;
         const auto scene = _viewer->captureSceneSnapshot(width, height);
         if (!scene) return nil;
@@ -729,6 +984,200 @@ std::size_t EditableModelCount(const core3d::scene::SceneSnapshot& scene) {
             return Core3DMacOrdinaryEditRecoveryResultInvalid;
     }
     return Core3DMacOrdinaryEditRecoveryResultUnavailable;
+}
+
+- (NSData *)nativeDocumentDataWithError:(NSError **)error {
+    if (error != nullptr) *error = nil;
+    if (![NSThread isMainThread]) {
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"Native document serialization requires the main thread.");
+        return nil;
+    }
+    ++_actionGeneration;
+    if (![self core3d_canEnterAttachedContext]) {
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"The native document context is unavailable.");
+        return nil;
+    }
+    ScopedCurrentOpenGLContext current(_engineView, _engineContext);
+    if (!current.valid()) {
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"The native document context could not be made current.");
+        return nil;
+    }
+    if (NativePersistenceIsBusy(_viewer)) {
+        SetPersistenceError(error, MacPersistenceError::Busy,
+            @"A native modeling operation must finish before saving.");
+        return nil;
+    }
+
+    @try {
+        try {
+            OwnedPersistenceDirectory directory;
+            if (!directory.valid()) {
+                SetPersistenceError(error, MacPersistenceError::TemporaryFile,
+                    @"A protected native save directory could not be created.");
+                return nil;
+            }
+            directory.ownName("document");
+            directory.ownName("document.cbf");
+            directory.ownName("document.xbf");
+            const std::string base = directory.path() + "/document";
+            const std::string saved = _viewer->getDocument()->save(base);
+            if (saved.empty()) {
+                SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                    @"The native document could not be serialized.");
+                return nil;
+            }
+            if (_viewer->ValidateCbf(saved)
+                != core3d::AssetImportResult::Success) {
+                SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                    @"The serialized native document did not pass validation.");
+                return nil;
+            }
+            NSData *data = ReadOwnedNativeDocument(saved, directory);
+            if (data == nil) {
+                SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                    @"The serialized native document could not be read safely.");
+                return nil;
+            }
+            return data;
+        } catch (...) {
+            SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                @"Native document serialization failed.");
+            return nil;
+        }
+    } @catch (__unused NSException *exception) {
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"Native document serialization failed.");
+        return nil;
+    }
+}
+
+- (Core3DMacSessionActionResult)loadNativeDocumentData:(NSData *)data
+    viewportWidth:(uint32_t)width height:(uint32_t)height
+    error:(NSError **)error {
+    if (error != nullptr) *error = nil;
+    if (![NSThread isMainThread]) {
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"Native document loading requires the main thread.");
+        return Core3DMacSessionActionResultUnavailable;
+    }
+    ++_actionGeneration;
+    if (![self core3d_canEnterAttachedContext]) {
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"The native document context is unavailable.");
+        return Core3DMacSessionActionResultContextUnavailable;
+    }
+    if (width == 0 || height == 0 || data == nil) {
+        SetPersistenceError(error, MacPersistenceError::InvalidData,
+            @"Native document data and a nonempty viewport are required.");
+        return Core3DMacSessionActionResultUnsupported;
+    }
+
+    @try {
+        try {
+            const NSUInteger sourceLength = data.length;
+            if (sourceLength == 0 || sourceLength > kMaximumNativeDocumentBytes
+                || data.bytes == nullptr) {
+                SetPersistenceError(error, MacPersistenceError::InvalidData,
+                    @"Native document data is empty or exceeds the size limit.");
+                return Core3DMacSessionActionResultUnsupported;
+            }
+            // initWithBytes:length: always owns a new physical byte copy. Do not
+            // rely on -copy, which may retain an immutable NSData subclass.
+            NSData *frozen = [[NSData alloc] initWithBytes:data.bytes
+                length:sourceLength];
+            if (frozen == nil || frozen.length != sourceLength
+                || !HasNativeDocumentMagic(
+                    static_cast<const unsigned char *>(frozen.bytes), frozen.length)) {
+                SetPersistenceError(error, MacPersistenceError::InvalidData,
+                    @"Native document data is not a supported XBF/CBF stream.");
+                return Core3DMacSessionActionResultUnsupported;
+            }
+
+            ScopedCurrentOpenGLContext current(_engineView, _engineContext);
+            if (!current.valid()) {
+                SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                    @"The native document context could not be made current.");
+                return Core3DMacSessionActionResultContextUnavailable;
+            }
+            if (NativePersistenceIsBusy(_viewer)) {
+                SetPersistenceError(error, MacPersistenceError::Busy,
+                    @"A native modeling operation must finish before loading.");
+                return Core3DMacSessionActionResultBusy;
+            }
+
+            OwnedPersistenceDirectory directory;
+            directory.ownName("candidate.cbf");
+            if (!directory.valid() || !WriteFrozenData(frozen, directory, "candidate.cbf")) {
+                SetPersistenceError(error, MacPersistenceError::TemporaryFile,
+                    @"Native document data could not be staged safely.");
+                return Core3DMacSessionActionResultUnavailable;
+            }
+            const std::string path = directory.path() + "/candidate.cbf";
+            // An isolated reader may report malformed/truncated bytes as an
+            // engine failure. Refuse here without invalidating live UI leases.
+            // ImportCbf retains its own authoritative validation at adoption.
+            if (_viewer->ValidateCbf(path) != core3d::AssetImportResult::Success) {
+                SetPersistenceError(error, MacPersistenceError::InvalidData,
+                    @"The native file could not be validated; the open document is unchanged.");
+                return Core3DMacSessionActionResultUnsupported;
+            }
+            const core3d::AssetImportResult imported = _viewer->ImportCbf(path);
+            switch (imported) {
+                case core3d::AssetImportResult::Success:
+                    break;
+                case core3d::AssetImportResult::Busy:
+                    SetPersistenceError(error, MacPersistenceError::Busy,
+                        @"A native modeling operation must finish before loading.");
+                    return Core3DMacSessionActionResultBusy;
+                case core3d::AssetImportResult::InvalidData:
+                case core3d::AssetImportResult::UnsupportedVersion:
+                    SetPersistenceError(error, MacPersistenceError::InvalidData,
+                        @"Native document data was rejected without replacing the document.");
+                    return Core3DMacSessionActionResultUnsupported;
+                case core3d::AssetImportResult::TemporaryFileFailure:
+                    SetPersistenceError(error, MacPersistenceError::TemporaryFile,
+                        @"The staged native document became unavailable.");
+                    return Core3DMacSessionActionResultUnavailable;
+                case core3d::AssetImportResult::InternalFailure:
+                    [self core3d_invalidateAuthority];
+                    _nativePresentationDirty = YES;
+                    SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                        @"Native document adoption failed. Recover the document before continuing.");
+                    return Core3DMacSessionActionResultInternalFailure;
+            }
+
+            // ImportCbf commits only after candidate validation, presentation,
+            // interactor recreation and native replacement authority succeed.
+            // Invalidate all old UI leases only after that exact boundary.
+            [self core3d_invalidateAuthority];
+            _nativePresentationDirty = YES;
+            // Fresh native import intentionally recreates the tool as None.
+            // Configure the host's real tool only after adoption has completed.
+            if (!ConfigureNativeMoveRotate(_viewer)) {
+                SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                    @"The document opened, but its modeling tool could not be configured.");
+                return Core3DMacSessionActionResultChangedPublicationUnavailable;
+            }
+            return [self core3d_capturePublicationLockedWidth:width height:height render:YES]
+                ? Core3DMacSessionActionResultChanged
+                : Core3DMacSessionActionResultChangedPublicationUnavailable;
+        } catch (...) {
+            [self core3d_invalidateAuthority];
+            _nativePresentationDirty = YES;
+            SetPersistenceError(error, MacPersistenceError::NativeFailure,
+                @"Native document loading failed.");
+            return Core3DMacSessionActionResultInternalFailure;
+        }
+    } @catch (__unused NSException *exception) {
+        [self core3d_invalidateAuthority];
+        _nativePresentationDirty = YES;
+        SetPersistenceError(error, MacPersistenceError::NativeFailure,
+            @"Native document loading failed.");
+        return Core3DMacSessionActionResultInternalFailure;
+    }
 }
 
 - (Core3DMacSessionActionResult)close {

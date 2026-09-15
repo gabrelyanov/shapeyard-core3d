@@ -249,6 +249,57 @@ targets:
       - path: "@CORE3D_SOURCE_ROOT@/../../MagicMessenger/Source Code/Modules/Model Editor/Viewport/Metal/ModelEditorMetalRenderer.swift"
       - path: "@CORE3D_SOURCE_ROOT@/../../MagicMessenger/Source Code/Modules/Model Editor/Models/ModelEditorTextureImporter.swift"
 
+  ShapeyardMac:
+    type: application
+    platform: macOS
+    productName: Shapeyard
+    info:
+      path: ShapeyardMac-Info.plist
+      properties:
+        CFBundleDisplayName: Shapeyard
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Shapeyard Native Model
+            CFBundleTypeRole: Editor
+            CFBundleTypeExtensions:
+              - xbf
+              - cbf
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - org.shapeyard.native-model
+            NSDocumentClass: ShapeyardMacDocument
+        UTExportedTypeDeclarations:
+          - UTTypeConformsTo:
+              - public.data
+            UTTypeDescription: Shapeyard Native Model
+            UTTypeIdentifier: org.shapeyard.native-model
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - xbf
+                - cbf
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_MODULE_NAME: ShapeyardMac
+        PRODUCT_BUNDLE_IDENTIFIER: org.shapeyard.mac.preview
+        SWIFT_VERSION: "5.0"
+        SKIP_INSTALL: NO
+        DEFINES_MODULE: NO
+        BUILD_LIBRARY_FOR_DISTRIBUTION: NO
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+        OTHER_LDFLAGS: ""
+    dependencies:
+      - target: Core3D
+        embed: true
+      - sdk: AppKit.framework
+      - sdk: MetalKit.framework
+    sources:
+      - path: "@CORE3D_SOURCE_ROOT@/../../MacEditor/ShapeyardMacApp.swift"
+      - path: "@CORE3D_SOURCE_ROOT@/../../MagicMessenger/Source Code/Modules/Model Editor/Viewport/Metal/ModelEditorMetalRenderer.swift"
+      - path: "@CORE3D_SOURCE_ROOT@/../../MagicMessenger/Source Code/Modules/Model Editor/Models/ModelEditorTextureImporter.swift"
+
 schemes:
   Core3D:
     build:
@@ -256,3 +307,4 @@ schemes:
         Core3D: all
         Core3DViewerProbe: all
         Core3DMetalRendererProbe: all
+        ShapeyardMac: all

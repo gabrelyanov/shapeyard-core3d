@@ -286,6 +286,40 @@ void requireMacSessionActions(NSOpenGLView *firstView, NSOpenGLView *secondView)
           "Mac session numeric edit did not change the native position");
   require(second.publication.scene.revisions.modelRevision == secondRevision,
           "first session edit changed second document authority");
+  NSError *saveError = nil;
+  NSData *saved = [first nativeDocumentDataWithError:&saveError];
+  require(saved.length > 7 && saveError == nil
+          && std::memcmp(saved.bytes, "BINFILE", 7) == 0,
+          "native Mac save did not return validated binary bytes");
+  require([NSOpenGLContext currentContext] == sentinel,
+          "native save changed caller context");
+  Core3DMacScenePublication *beforeRejectedLoad = second.publication;
+  NSError *loadError = nil;
+  require([second loadNativeDocumentData:[NSData data] viewportWidth:64 height:64 error:&loadError]
+          == Core3DMacSessionActionResultUnsupported && loadError != nil
+          && second.publication == beforeRejectedLoad,
+          "empty native load changed prior authority");
+  loadError = nil;
+  NSData *malformed = [NSData dataWithBytes:"BINFILEinvalid" length:14];
+  require([second loadNativeDocumentData:malformed viewportWidth:64 height:64 error:&loadError]
+          == Core3DMacSessionActionResultUnsupported && loadError != nil
+          && second.publication == beforeRejectedLoad,
+          "malformed native load changed prior authority");
+  require([second commitPositionValue:foreign.position.x + 3 axis:Core3DTransformInspectorAxisX
+          expectedMeasurement:foreign] == Core3DTransformInspectorPositionCommitResultCommitted,
+          "rejected native load consumed the previous measurement lease");
+  loadError = nil;
+  require([second loadNativeDocumentData:saved viewportWidth:64 height:64 error:&loadError]
+          == Core3DMacSessionActionResultChanged && loadError == nil,
+          "native Mac load did not adopt and publish saved bytes");
+  secondEntity = [sessionModel(second).entityIdentifier copy];
+  selectSessionModel(second, secondEntity, 64, 64);
+  require(std::abs(readySessionMeasurement(second).position.x - movedX) < 1e-9,
+          "native fresh load lost the saved object position");
+  require([second performHistory:Core3DMacHistoryDirectionUndo].outcome != Core3DMacHistoryOutcomeChanged,
+          "native replacement retained prior document history");
+  require([NSOpenGLContext currentContext] == sentinel,
+          "native load changed caller context");
   __block NSInteger effectOrder = 0;
   __block BOOL wrongContext = NO;
   first.selectionRefreshHandler = ^(Core3DMacScenePublication *) {
@@ -326,7 +360,7 @@ void requireMacSessionActions(NSOpenGLView *firstView, NSOpenGLView *secondView)
           "Mac session close did not release owned native state");
   require([NSOpenGLContext currentContext] == sentinel,
           "Mac session close changed the caller context");
-  std::puts("PASS: Mac sessions create/select/edit/history, reject stale authority and isolate contexts");
+  std::puts("PASS: Mac sessions create/select/edit/history/save/reopen, reject invalid bytes/stale authority and isolate contexts");
 }
 
 int runProbe()
