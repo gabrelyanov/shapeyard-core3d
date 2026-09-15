@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <OpenGL/gl3.h>
 #import <Core3D/Core3DSharedModelingValues.h>
+#import <Core3D/Core3DMacDocumentSession.h>
 
 #include "Core3DViewer.h"
 
@@ -205,6 +206,127 @@ void requireRealCubeScene(const core3d::scene::SceneSnapshot& theScene)
             "cube primitive range is invalid");
   }
   requireValidCamera(theScene.camera, "scene camera authority is invalid");
+}
+
+Core3DSceneRenderItemSnapshot *sessionModel(Core3DMacDocumentSession *session)
+{
+  for (Core3DSceneRenderItemSnapshot *item in session.publication.scene.renderItems)
+    if (item.renderRole == Core3DSceneRenderRoleModel && item.visible && item.selectable)
+      return item;
+  return nil;
+}
+
+Core3DTransformInspectorSnapshot *readySessionMeasurement(Core3DMacDocumentSession *session)
+{
+  __block Core3DTransformInspectorSnapshot *completed = nil;
+  Core3DTransformInspectorSnapshot *immediate =
+    [session captureTransformMeasurementWithCompletion:^(Core3DTransformInspectorSnapshot *value) {
+      completed = value;
+    }];
+  if (immediate.state != Core3DTransformInspectorStateMeasuring) completed = immediate;
+  const auto deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+  while (completed == nil && deadline.timeIntervalSinceNow > 0)
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
+  require(completed != nil && completed.state == Core3DTransformInspectorStateReady
+          && completed.canEditPosition, "Mac session did not deliver editable exact measurement");
+  return completed;
+}
+
+void selectSessionModel(Core3DMacDocumentSession *session, NSString *entity,
+                        uint32_t width, uint32_t height)
+{
+  const auto result = [session selectEntityIdentifier:entity
+    expectedPublication:session.publication viewportWidth:width height:height];
+  require(result == Core3DMacSessionActionResultChanged
+          || result == Core3DMacSessionActionResultUnchanged,
+          "Mac session could not select its displayed entity");
+}
+
+void requireMacSessionActions(NSOpenGLView *firstView, NSOpenGLView *secondView)
+{
+  NSOpenGLContext *sentinel = secondView.openGLContext;
+  [sentinel makeCurrentContext];
+  Core3DMacDocumentSession *first = [[Core3DMacDocumentSession alloc]
+    initWithAttachedOpenGLView:firstView];
+  Core3DMacDocumentSession *second = [[Core3DMacDocumentSession alloc]
+    initWithAttachedOpenGLView:secondView];
+  require(first != nil && second != nil, "Mac session initialization failed");
+  require([NSOpenGLContext currentContext] == sentinel,
+          "Mac session initialization changed the caller context");
+  require([first createCubeWithViewportWidth:640 height:480] == Core3DMacSessionActionResultChanged,
+          "first Mac session cube was not committed/published");
+  require([second createCubeWithViewportWidth:64 height:64] == Core3DMacSessionActionResultChanged,
+          "second Mac session cube was not committed/published");
+  require([NSOpenGLContext currentContext] == sentinel,
+          "interleaved creation did not restore caller context");
+  NSString *firstEntity = [sessionModel(first).entityIdentifier copy];
+  NSString *secondEntity = [sessionModel(second).entityIdentifier copy];
+  require(firstEntity != nil && secondEntity != nil, "session cube identity missing");
+  require([second selectEntityIdentifier:firstEntity expectedPublication:first.publication
+    viewportWidth:64 height:64] == Core3DMacSessionActionResultStale,
+    "Mac session admitted another document's publication");
+  selectSessionModel(first, firstEntity, 640, 480);
+  selectSessionModel(second, secondEntity, 64, 64);
+  Core3DTransformInspectorSnapshot *old = readySessionMeasurement(first);
+  Core3DTransformInspectorSnapshot *latest = readySessionMeasurement(first);
+  Core3DTransformInspectorSnapshot *foreign = readySessionMeasurement(second);
+  const double originalX = latest.position.x;
+  const double movedX = originalX + 25;
+  const auto secondRevision = second.publication.scene.revisions.modelRevision;
+  require([first commitPositionValue:movedX axis:Core3DTransformInspectorAxisX expectedMeasurement:old]
+            == Core3DTransformInspectorPositionCommitResultStale,
+          "old Mac text-field measurement was accepted");
+  require([first commitPositionValue:movedX axis:Core3DTransformInspectorAxisX expectedMeasurement:foreign]
+            == Core3DTransformInspectorPositionCommitResultStale,
+          "foreign measurement was accepted");
+  require([first commitPositionValue:movedX axis:Core3DTransformInspectorAxisX expectedMeasurement:latest]
+            == Core3DTransformInspectorPositionCommitResultCommitted,
+          "foreign refusal consumed the valid native measurement");
+  require(std::abs(readySessionMeasurement(first).position.x - movedX) < 1e-9,
+          "Mac session numeric edit did not change the native position");
+  require(second.publication.scene.revisions.modelRevision == secondRevision,
+          "first session edit changed second document authority");
+  __block NSInteger effectOrder = 0;
+  __block BOOL wrongContext = NO;
+  first.selectionRefreshHandler = ^(Core3DMacScenePublication *) {
+    if ([NSOpenGLContext currentContext] != sentinel) wrongContext = YES;
+    effectOrder = effectOrder * 10 + 1;
+  };
+  first.renderRequestHandler = ^(Core3DMacScenePublication *) {
+    if ([NSOpenGLContext currentContext] != sentinel) wrongContext = YES;
+    effectOrder = effectOrder * 10 + 2;
+  };
+  require([first performHistory:Core3DMacHistoryDirectionUndo].outcome == Core3DMacHistoryOutcomeChanged,
+          "Mac session Undo did not change native history");
+  require(effectOrder == 12 && !wrongContext, "Mac history effects/context were out of order");
+  selectSessionModel(first, firstEntity, 640, 480);
+  require(std::abs(readySessionMeasurement(first).position.x - originalX) < 1e-9,
+          "Mac session Undo did not restore the original position");
+  require([first performHistory:Core3DMacHistoryDirectionRedo].outcome == Core3DMacHistoryOutcomeChanged,
+          "Mac session Redo did not restore the move");
+  selectSessionModel(first, firstEntity, 640, 480);
+  require(std::abs(readySessionMeasurement(first).position.x - movedX) < 1e-9,
+          "Mac session Redo restored the wrong position");
+  Core3DMacScenePublication *oldPublication = second.publication;
+  require([second refreshPublicationWithWidth:0 height:64] != Core3DMacSessionActionResultUnchanged
+          && second.publication == nil, "failed publication retained a stale available pair");
+  require([second selectEntityIdentifier:secondEntity expectedPublication:oldPublication
+    viewportWidth:64 height:64] == Core3DMacSessionActionResultStale,
+    "failed refresh left an old selection lease usable");
+  require([second refreshPublicationWithWidth:64 height:64] == Core3DMacSessionActionResultUnchanged,
+          "valid publication could not recover after failed refresh");
+  __block BOOL renderAfterClose = NO;
+  __weak Core3DMacDocumentSession *weakFirst = first;
+  first.selectionRefreshHandler = ^(Core3DMacScenePublication *) { [weakFirst close]; };
+  first.renderRequestHandler = ^(Core3DMacScenePublication *) { renderAfterClose = YES; };
+  (void)[first performHistory:Core3DMacHistoryDirectionUndo];
+  require(first.closed && !renderAfterClose,
+          "reentrant close did not suppress stale history effects");
+  require([second close] == Core3DMacSessionActionResultChanged,
+          "Mac session close did not release owned native state");
+  require([NSOpenGLContext currentContext] == sentinel,
+          "Mac session close changed the caller context");
+  std::puts("PASS: Mac sessions create/select/edit/history, reject stale authority and isolate contexts");
 }
 
 int runProbe()
@@ -534,6 +656,8 @@ int runProbe()
             && aViewer.AisContext().IsNull(),
             "viewer teardown retained native graphics handles");
     aViewer.release(); // Repeated terminal teardown remains harmless.
+
+    requireMacSessionActions(aPrimaryView, anAlienView);
 
     aCleanup();
     std::printf("PASS: shared Core3DViewer lifecycle, cube render/snapshot, history and callback ownership; changed pixels: %zu\n",

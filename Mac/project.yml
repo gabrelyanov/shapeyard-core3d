@@ -140,6 +140,9 @@ targets:
         headerVisibility: public
       - path: @CORE3D_SOURCE_ROOT@/UI/Core3DSharedModelingValues.h
         headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/../Mac/Core3DMacDocumentSession.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/../Mac/Core3DMacDocumentSession.mm
       - path: @CORE3D_SOURCE_ROOT@/Viewport/Core3DSceneSnapshot.h
         headerVisibility: public
       - path: @CORE3D_SOURCE_ROOT@/Export/Core3DNativeExportOperation.h

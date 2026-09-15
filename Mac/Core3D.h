@@ -26,3 +26,5 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/AssetBundleItem.h>
 #import <Core3D/AssetBundle.h>
 
+
+#import <Core3D/Core3DMacDocumentSession.h>
