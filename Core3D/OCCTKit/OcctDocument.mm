@@ -5981,6 +5981,36 @@ bool CaptureEditableMeshSource(const OcctDocument& document,const TDF_Label& lab
 }
 } // namespace
 
+namespace {
+bool DecodeMeshRegionPartition(const OcctObjectTransformState& source,
+    core3d::meshedit::RegionPartition& partition,
+    const core3d::meshedit::RegionPartition*& authority) {
+    partition={}; authority=nullptr;
+    if(source.meshRegionPartition.empty())return true;
+    if(!core3d::meshedit::DecodeRegionPartition(source.meshRegionPartition.data(),
+        source.meshRegionPartition.size(),partition))return false;
+    authority=&partition;return true;
+}
+bool SameMeshRegionCandidate(const OcctMeshRegionMutationCandidate& expected,
+    const OcctMeshRegionMutationCandidate& candidate) {
+    if(expected.partition!=candidate.partition
+        || expected.centerSeedTriangle!=candidate.centerSeedTriangle
+        || expected.shape.IsNull()||candidate.shape.IsNull()
+        || expected.shape.ShapeType()!=candidate.shape.ShapeType()
+        || expected.shape.Orientation()!=candidate.shape.Orientation()
+        || !expected.shape.Location().IsEqual(candidate.shape.Location()))return false;
+    std::atomic_bool cancelled{false};core3d::meshedit::NativeMeshStorageCapture a,b;
+    if(core3d::meshedit::CaptureNativeMeshStorage(expected.shape,a,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready
+        || core3d::meshedit::CaptureNativeMeshStorage(candidate.shape,b,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return false;
+    return a.face.Orientation()==b.face.Orientation()
+        && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
+        && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals
+        && a.deflection==b.deflection && a.triangleNodeIDs==b.triangleNodeIDs;
+}
+}
+
 Standard_Boolean OcctDocument::CanEditMeshVertices(const TDF_Label& label) const noexcept {
     OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
     int prefix=0;Standard_Size resident=0;
@@ -5990,22 +6020,38 @@ Standard_Boolean OcctDocument::CanEditMeshVertices(const TDF_Label& label) const
 // All public entry points run on the native owner thread. No writes here.
 Standard_Boolean OcctDocument::PrepareMeshVertexMove(const TDF_Label& label,
     const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
-    TopoDS_Shape& candidate) const noexcept {
-    candidate.Nullify();
+    OcctMeshVertexMutationCandidate& candidate) const noexcept {
+    candidate={};
     if (![NSThread isMainThread]) return Standard_False;
     try {
         OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
         int prefix=0;Standard_Size resident=0;
         if(!CaptureEditableMeshSource(*this,label,source,captured,prefix,resident))return Standard_False;
+        core3d::meshedit::RegionPartition partition;
+        const core3d::meshedit::RegionPartition* authority=nullptr;
+        if(!DecodeMeshRegionPartition(source,partition,authority)
+            || (authority && source.meshUVAtlasVersion!=2 && source.meshUVAtlasVersion!=3))
+            return Standard_False;
         const auto recipe=Core3DNormalTextureRecipeForLabel(label);
         std::atomic_bool cancelled{false};
         const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
+        const double scale=placed.ScaleFactor();
+        if(authority && (placed.IsNegative() || !std::isfinite(scale) || scale<=0))return Standard_False;
         for(int a=1;a<=3;++a)
             if(!std::isfinite(worldDelta.Coord(a)) || std::abs(worldDelta.Coord(a))>1.e6)return Standard_False;
         const gp_Vec localDelta=worldDelta.Transformed(placed.Inverted());
-        TopoDS_Shape result;
-        if(core3d::meshedit::PrepareFlatVertexMove(captured,vertices,
-            {localDelta.X(),localDelta.Y(),localDelta.Z()},prefix,result,cancelled)
+        TopoDS_Shape result;std::vector<std::uint8_t> encoded;
+        if(authority) {
+            core3d::meshedit::PartitionedVertexMoveCandidate prepared;
+            if(core3d::meshedit::PreparePartitionedFlatVertexMove(captured,vertices,
+                    {localDelta.X(),localDelta.Y(),localDelta.Z()},prefix,*authority,prepared,cancelled)
+                !=core3d::meshedit::TopologyResult::Ready
+                || prepared.partition.empty()
+                || !core3d::meshedit::EncodeRegionPartition(prepared.partition,encoded))
+                return Standard_False;
+            result=prepared.shape;
+        } else if(core3d::meshedit::PrepareFlatVertexMove(captured,vertices,
+                {localDelta.X(),localDelta.Y(),localDelta.Z()},prefix,result,cancelled)
             !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
         core3d::meshedit::NativeTopologyCapture edited;
         if(core3d::meshedit::CaptureNativeTopology(result,edited,cancelled)
@@ -6023,27 +6069,53 @@ Standard_Boolean OcctDocument::PrepareMeshVertexMove(const TDF_Label& label,
             resident-=beforeBytes;
             if(!AddMultipliedWithinLimit(resident,afterBytes,1U,64U*1024U*1024U))return Standard_False;
         }
-        candidate=result;return Standard_True;
-    } catch(...) {candidate.Nullify();return Standard_False;}
+        OcctMeshVertexMutationCandidate value;
+        value.shape=result;value.partition.assign(encoded.begin(),encoded.end());
+        candidate=std::move(value);return Standard_True;
+    } catch(...) {candidate={};return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::PrepareMeshVertexMove(const TDF_Label& label,
+    const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
+    TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    std::vector<Standard_Byte> sourcePartition;
+    if(!CaptureMeshRegionPartition(label,sourcePartition) || !sourcePartition.empty())return Standard_False;
+    OcctMeshVertexMutationCandidate value;
+    if(!PrepareMeshVertexMove(label,vertices,worldDelta,value) || !value.partition.empty())return Standard_False;
+    candidate=value.shape;return Standard_True;
+}
+
+Standard_Boolean OcctDocument::ValidateMeshVertexMove(const TDF_Label& label,
+    const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta,
+    const OcctMeshVertexMutationCandidate& candidate) const noexcept {
+    try {
+        OcctMeshVertexMutationCandidate expected;
+        if(!PrepareMeshVertexMove(label,vertices,worldDelta,expected)
+            || expected.partition!=candidate.partition || expected.shape.IsNull() || candidate.shape.IsNull())
+            return Standard_False;
+        std::atomic_bool cancelled{false};
+        core3d::meshedit::NativeTopologyCapture a,b;
+        if(core3d::meshedit::CaptureNativeTopology(expected.shape,a,cancelled)!=core3d::meshedit::TopologyResult::Ready
+            || core3d::meshedit::CaptureNativeTopology(candidate.shape,b,cancelled)!=core3d::meshedit::TopologyResult::Ready)
+            return Standard_False;
+        return expected.shape.ShapeType()==candidate.shape.ShapeType()
+            && expected.shape.Orientation()==candidate.shape.Orientation()
+            && expected.shape.Location().IsEqual(candidate.shape.Location())
+            && a.face.Orientation()==b.face.Orientation()
+            && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
+            && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals && a.deflection==b.deflection
+            && a.triangleNodeIDs==b.triangleNodeIDs;
+    } catch(...) {return Standard_False;}
 }
 
 Standard_Boolean OcctDocument::ValidateMeshVertexMove(const TDF_Label& label,
     const std::vector<std::uint32_t>& vertices,const gp_Vec& worldDelta,
     const TopoDS_Shape& candidate) const noexcept {
-    try {
-        TopoDS_Shape expected;
-        if(!PrepareMeshVertexMove(label,vertices,worldDelta,expected))return Standard_False;
-        std::atomic_bool cancelled{false};
-        core3d::meshedit::NativeTopologyCapture a,b;
-        if(core3d::meshedit::CaptureNativeTopology(expected,a,cancelled)!=core3d::meshedit::TopologyResult::Ready
-            || core3d::meshedit::CaptureNativeTopology(candidate,b,cancelled)!=core3d::meshedit::TopologyResult::Ready)
-            return Standard_False;
-        return expected.ShapeType()==candidate.ShapeType() && expected.Orientation()==candidate.Orientation()
-            && expected.Location().IsEqual(candidate.Location()) && a.face.Orientation()==b.face.Orientation()
-            && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
-            && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals && a.deflection==b.deflection
-            && a.triangleNodeIDs==b.triangleNodeIDs;
-    } catch(...) {return Standard_False;}
+    std::vector<Standard_Byte> sourcePartition;
+    if(!CaptureMeshRegionPartition(label,sourcePartition) || !sourcePartition.empty())return Standard_False;
+    OcctMeshVertexMutationCandidate value;value.shape=candidate;
+    return ValidateMeshVertexMove(label,vertices,worldDelta,value);
 }
 
 // Capture exact owner state separately from strict selectable topology.
@@ -6151,35 +6223,7 @@ Standard_Boolean OcctDocument::ValidateMeshWindingRepair(const TDF_Label& label,
     } catch (...) { return Standard_False; }
 }
 
-namespace {
-bool DecodeMeshRegionPartition(const OcctObjectTransformState& source,
-    core3d::meshedit::RegionPartition& partition,
-    const core3d::meshedit::RegionPartition*& authority) {
-    partition={}; authority=nullptr;
-    if(source.meshRegionPartition.empty())return true;
-    if(!core3d::meshedit::DecodeRegionPartition(source.meshRegionPartition.data(),
-        source.meshRegionPartition.size(),partition))return false;
-    authority=&partition;return true;
-}
-bool SameMeshRegionCandidate(const OcctMeshRegionMutationCandidate& expected,
-    const OcctMeshRegionMutationCandidate& candidate) {
-    if(expected.partition!=candidate.partition
-        || expected.centerSeedTriangle!=candidate.centerSeedTriangle
-        || expected.shape.IsNull()||candidate.shape.IsNull()
-        || expected.shape.ShapeType()!=candidate.shape.ShapeType()
-        || expected.shape.Orientation()!=candidate.shape.Orientation()
-        || !expected.shape.Location().IsEqual(candidate.shape.Location()))return false;
-    std::atomic_bool cancelled{false};core3d::meshedit::NativeMeshStorageCapture a,b;
-    if(core3d::meshedit::CaptureNativeMeshStorage(expected.shape,a,cancelled)
-            !=core3d::meshedit::TopologyResult::Ready
-        || core3d::meshedit::CaptureNativeMeshStorage(candidate.shape,b,cancelled)
-            !=core3d::meshedit::TopologyResult::Ready)return false;
-    return a.face.Orientation()==b.face.Orientation()
-        && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
-        && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals
-        && a.deflection==b.deflection && a.triangleNodeIDs==b.triangleNodeIDs;
-}
-}
+
 
 Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& label,
     std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept {

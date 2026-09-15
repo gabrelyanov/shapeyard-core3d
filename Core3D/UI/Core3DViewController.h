@@ -2024,6 +2024,7 @@ __attribute__((objc_subclassing_restricted))
 //! Isolated native winding geometry probes; no live document writes.
 - (NSDictionary<NSString *, NSArray<NSNumber *> *> *_Nullable)debugWindingGeometryProbe;
 - (NSDictionary<NSString *, id> *_Nullable)debugMeshRegionInsetKernelProbe;
+- (NSDictionary<NSString *, id> *_Nullable)debugMeshPartitionVertexMoveKernelProbe;
 //! Passive partition-persistence qualification only. These DEBUG seams do not
 //! expose Inset or publish partition records in product operation paths.
 - (NSDictionary<NSString *, NSNumber *> *_Nullable)debugMeshRegionPartitionState:(NSString *)entityIdentifier;

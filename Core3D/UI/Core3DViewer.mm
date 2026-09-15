@@ -4382,11 +4382,11 @@ OrdinaryEditResult Core3DViewer::commitMeshElementEdit(const std::string& sessio
         std::vector<std::uint32_t> vertices;
         if(meshedit::ResolveElementVertices(work->geometry.topology,kind,elements,vertices,cancelled)
             !=meshedit::ElementSelectionResult::Ready)return OrdinaryEditResult::Invalid;
-        TopoDS_Shape candidate;
+        OcctMeshVertexMutationCandidate candidate;
         if(!myDoc->PrepareMeshVertexMove(previous.label,vertices,worldDelta,candidate))return OrdinaryEditResult::Invalid;
         OrdinaryTransformChange request=work->authority.records.front().requested;
-        request.shape=candidate;request.operation=OrdinaryTransformOperation::MeshVertexMove;
-        request.meshVertexMove=OrdinaryMeshVertexMove{vertices,worldDelta};
+        request.shape=candidate.shape;request.operation=OrdinaryTransformOperation::MeshVertexMove;
+        request.meshVertexMove=OrdinaryMeshVertexMove{vertices,worldDelta,candidate.partition};
         OrdinaryEditResult failure=OrdinaryEditResult::Invalid;
         auto lease=_ordinaryEditController->beginTransform({request},&failure);
         return lease?lease.stageAndCommit():failure;

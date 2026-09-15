@@ -3,6 +3,10 @@
 // Caller must validate native document ownership, atlas provenance and material
 // frame policy. In particular a supplied tangent archive may NOT be reused.
 #include "NativeMeshTopologyCapture.hxx"
+#include "NativeMeshRegionPartition.hxx"
+#include "NativeTriangleContacts.hpp"
+#include <chrono>
+#include <new>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRep_Builder.hxx>
 
@@ -146,5 +150,97 @@ inline TopologyResult PrepareFlatVertexMove(const NativeTopologyCapture& source,
         if(cancelled.load(std::memory_order_relaxed))return TopologyResult::Cancelled;
         candidate=result;return TopologyResult::Ready;
     } catch(...) {candidate.Nullify();return TopologyResult::Invalid;}
+}
+
+struct PartitionedVertexMoveCandidate {
+    TopoDS_Shape shape;
+    RegionPartition partition;
+};
+
+inline bool SameVertexMoveEdgeLineage(const NativeTopologyCapture& before,
+    const NativeTopologyCapture& after) noexcept {
+    if(before.triangleNodeIDs!=after.triangleNodeIDs
+        || before.vertexNodeIDs!=after.vertexNodeIDs
+        || before.topology.triangleVertices!=after.topology.triangleVertices
+        || before.topology.boundaryEdges!=after.topology.boundaryEdges
+        || before.topology.vertices.size()!=after.topology.vertices.size()
+        || before.topology.edges.size()!=after.topology.edges.size())return false;
+    for(std::size_t vertex=0;vertex<before.topology.vertices.size();++vertex)
+        if(before.topology.vertices[vertex].corners!=after.topology.vertices[vertex].corners)
+            return false;
+    for(std::size_t edge=0;edge<before.topology.edges.size();++edge) {
+        const auto& a=before.topology.edges[edge];const auto& b=after.topology.edges[edge];
+        if(a.vertices!=b.vertices || a.uses.size()!=b.uses.size())return false;
+        for(std::size_t use=0;use<a.uses.size();++use)
+            if(a.uses[use].triangle!=b.uses[use].triangle
+                || a.uses[use].forward!=b.uses[use].forward)return false;
+    }
+    return true;
+}
+
+inline bool SameUntouchedVertexMoveSource(const NativeTopologyCapture& before,
+    const NativeTopologyCapture& after) noexcept {
+    if(!before.shape.IsEqual(after.shape) || !before.face.IsEqual(after.face)
+        || before.sourceMesh!=after.sourceMesh
+        || !before.meshLocation.IsEqual(after.meshLocation)
+        || before.storedNodes!=after.storedNodes
+        || before.storedUVs!=after.storedUVs
+        || before.storedNormals!=after.storedNormals
+        || before.deflection!=after.deflection
+        || before.storedTriangles!=after.storedTriangles
+        || before.topology.unitNormals!=after.topology.unitNormals
+        || !SameVertexMoveEdgeLineage(before,after))return false;
+    for(std::size_t vertex=0;vertex<before.topology.vertices.size();++vertex)
+        if(before.topology.vertices[vertex].point!=after.topology.vertices[vertex].point)
+            return false;
+    return true;
+}
+
+// Partition-bearing coordinate edit. The existing shape-only entry remains the
+// compatibility path for sources with no durable partition authority.
+inline TopologyResult PreparePartitionedFlatVertexMove(
+    const NativeTopologyCapture& source,
+    const std::vector<std::uint32_t>& selectedVertices,
+    const Point& delta,
+    int originalPrefixCount,
+    const RegionPartition& sourcePartition,
+    PartitionedVertexMoveCandidate& candidate,
+    const std::atomic_bool& cancelled) noexcept {
+    candidate={};
+    try {
+        if(cancelled.load(std::memory_order_relaxed))return TopologyResult::Cancelled;
+        if(!ValidateRegionPartition(source,sourcePartition))return TopologyResult::Invalid;
+        TopoDS_Shape moved;
+        const auto prepared=PrepareFlatVertexMove(source,selectedVertices,delta,
+            originalPrefixCount,moved,cancelled);
+        if(prepared!=TopologyResult::Ready)return prepared;
+        NativeTopologyCapture after;
+        auto status=CaptureNativeTopology(moved,after,cancelled);
+        if(status!=TopologyResult::Ready)return status;
+        if(!SameVertexMoveEdgeLineage(source,after)
+            || !after.meshLocation.IsEqual(source.meshLocation)
+            || after.face.Orientation()!=source.face.Orientation())return TopologyResult::Invalid;
+        meshcheck::ContactReport contacts;
+        const std::vector<meshcheck::Triangle> triangles(
+            after.storedTriangles.begin(),after.storedTriangles.end());
+        const auto contact=meshcheck::AnalyzeTriangleContacts(triangles,contacts,cancelled,
+            {4096,2000000,1,std::chrono::milliseconds(100)});
+        if(contact!=meshcheck::ContactStatus::Ready || !contacts.unexpectedPairs.empty()) {
+            if(contact==meshcheck::ContactStatus::Cancelled)return TopologyResult::Cancelled;
+            if(contact==meshcheck::ContactStatus::TooLarge)return TopologyResult::TooLarge;
+            return TopologyResult::Invalid;
+        }
+        RegionPartition rebound=sourcePartition;
+        if(!OrderedTriangleGeometryDigest(after,rebound.geometry)
+            || !ValidateRegionPartition(after,rebound))return TopologyResult::Invalid;
+        NativeTopologyCapture untouched;
+        status=CaptureNativeTopology(source.shape,untouched,cancelled);
+        if(status!=TopologyResult::Ready)return status;
+        if(!SameUntouchedVertexMoveSource(source,untouched))return TopologyResult::Invalid;
+        PartitionedVertexMoveCandidate value;
+        value.shape=moved;value.partition=std::move(rebound);
+        candidate=std::move(value);return TopologyResult::Ready;
+    } catch(const std::bad_alloc&) {candidate={};return TopologyResult::TooLarge;}
+      catch(...) {candidate={};return TopologyResult::Invalid;}
 }
 } // namespace core3d::meshedit

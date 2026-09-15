@@ -694,7 +694,9 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || representation!=OcctGeometryRepresentation::TriangleMesh
                     || !MatricesEqual(record.previous.transform,request.transform)
                     || !_document->ValidateMeshVertexMove(request.label,request.meshVertexMove->vertices,
-                        request.meshVertexMove->worldDelta,request.shape))) {
+                        request.meshVertexMove->worldDelta,
+                        OcctMeshVertexMutationCandidate{request.shape,
+                            request.meshVertexMove->candidatePartition}))) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.operation == OrdinaryTransformOperation::MeshRegionExtrude) {
@@ -736,6 +738,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             // Other geometry mutations must refuse live partition authority.
             if (!record.previous.meshRegionPartition.empty() && geometryChanges
                 && request.operation!=OrdinaryTransformOperation::MeshUVAtlas
+                && request.operation!=OrdinaryTransformOperation::MeshVertexMove
                 && request.operation!=OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation!=OrdinaryTransformOperation::MeshRegionInset) {
                 return reject(OrdinaryEditResult::Invalid);
@@ -2136,7 +2139,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 && (!record.requested.meshVertexMove
                     || !_document->ValidateMeshVertexMove(record.previous.label,
                         record.requested.meshVertexMove->vertices,record.requested.meshVertexMove->worldDelta,
-                        record.requested.shape))) {
+                        OcctMeshVertexMutationCandidate{record.requested.shape,
+                            record.requested.meshVertexMove->candidatePartition}))) {
                 throw Standard_Failure("Stale mesh vertex candidate");
             }
             if(record.requested.operation==OrdinaryTransformOperation::MeshRegionExtrude) {
@@ -2231,17 +2235,21 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
             }
             const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged;
+            const bool vertexMove=record.requested.operation==OrdinaryTransformOperation::MeshVertexMove;
             const bool regionExtrude=record.requested.operation==OrdinaryTransformOperation::MeshRegionExtrude;
             const bool regionInset=record.requested.operation==OrdinaryTransformOperation::MeshRegionInset;
             const bool regionMutation=regionExtrude||regionInset;
-            const auto& regionPartition=regionExtrude
-                ?record.requested.meshRegionExtrude->candidatePartition
+            const bool partitionMutation=regionMutation
+                || (vertexMove && !record.previous.meshRegionPartition.empty());
+            const auto& regionPartition=vertexMove
+                ?record.requested.meshVertexMove->candidatePartition
+                :regionExtrude?record.requested.meshRegionExtrude->candidatePartition
                 :regionInset?record.requested.meshRegionInset->candidatePartition
                     :record.previous.meshRegionPartition;
             // The old record was validated by the preparation checks above.
             // Clear before replacing the shape so neither old nor new digest is
             // ever interpreted against the wrong geometry inside this command.
-            if(regionMutation && !record.previous.meshRegionPartition.empty()
+            if(partitionMutation && !record.previous.meshRegionPartition.empty()
                 && !_document->ClearMeshRegionPartition(record.previous.label))
                 throw Standard_Failure("Mesh region partition clear failed");
             if ((!featureStaged && !record.previous.shape.IsEqual(record.requested.shape)
@@ -2249,7 +2257,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
                 || (regionMutation
                     && !_document->MarkAuthoredMeshUVLayout(record.previous.label))
-                || (regionMutation && !regionPartition.empty()
+                || (partitionMutation && !regionPartition.empty()
                     && !_document->StageMeshRegionPartition(record.previous.label,regionPartition))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))

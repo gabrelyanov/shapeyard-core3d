@@ -30,6 +30,7 @@
 #include "../OCCTKit/NativeTriangleContacts.hpp"
 #include "../OCCTKit/NativeWindingCandidateProbe.hxx"
 #include "../OCCTKit/NativeMeshRegionInsetProbe.hxx"
+#include "../OCCTKit/NativeMeshPartitionVertexMoveProbe.hxx"
 #endif
 #if DEBUG
 #include "../OCCTKit/NativeLiveTransactionObserverProbe.hxx"
@@ -16385,6 +16386,17 @@ struct NativeModelingPermitIssuer final {
         return @{ @"checks":checks,@"beforeVolume":@(value.beforeVolume),
             @"insetVolume":@(value.insetVolume),@"extrudedVolume":@(value.extrudedVolume),
             @"insetTriangles":@(value.insetTriangles),@"centerTriangles":@(value.centerTriangles) };
+    } catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *, id> *)debugMeshPartitionVertexMoveKernelProbe {
+    if (![NSThread isMainThread]) return nil;
+    try {
+        const auto value=core3d::debug::RunMeshPartitionVertexMoveKernelProbe();
+        NSMutableArray<NSNumber*>* checks=[NSMutableArray arrayWithCapacity:value.checks.size()];
+        for(bool check:value.checks)[checks addObject:@(check)];
+        return @{ @"checks":checks,@"movedVolume":@(value.movedVolume),
+            @"extrudedVolume":@(value.extrudedVolume),@"centerSeed":@(value.centerSeed) };
     } catch (...) { return nil; }
 }
 

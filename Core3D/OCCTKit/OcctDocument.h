@@ -124,6 +124,12 @@ struct OcctMeshRegionMutationCandidate {
     std::uint32_t centerSeedTriangle = 0; // Inset only; session-local.
 };
 
+//! Vertex-coordinate mutation plus opaque rebound region authority.
+struct OcctMeshVertexMutationCandidate {
+    TopoDS_Shape shape;
+    std::vector<Standard_Byte> partition;
+};
+
 //! Exact durable state for transform reconciliation. Attribute presence is
 //! significant: a missing legacy default and an authored zero are not the
 //! same OCAF state, even when their resulting matrices match. No AIS handles.
@@ -841,7 +847,14 @@ public:
     Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
         const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
+        OcctMeshVertexMutationCandidate& candidate) const noexcept;
+    //! Compatibility path cannot discard live region-partition authority.
+    Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
+        const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
         TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshVertexMove(const TDF_Label& label,
+        const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
+        const OcctMeshVertexMutationCandidate& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateMeshVertexMove(const TDF_Label& label,
         const std::vector<std::uint32_t>& vertices, const gp_Vec& worldDelta,
         const TopoDS_Shape& candidate) const noexcept;

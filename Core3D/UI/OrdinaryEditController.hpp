@@ -90,6 +90,7 @@ struct OrdinaryRotationAroundPivot {
 struct OrdinaryMeshVertexMove {
     std::vector<std::uint32_t> vertices;
     gp_Vec worldDelta;
+    std::vector<Standard_Byte> candidatePartition;
 };
 struct OrdinaryMeshRegionExtrude {
     std::uint32_t seedTriangle=0;
