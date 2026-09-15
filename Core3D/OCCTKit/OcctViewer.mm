@@ -170,9 +170,8 @@ private:
 // purpose  :
 // =======================================================================
 OcctViewer::OcctViewer()
+    : myDoc(myDocumentSession.Document())
 {
-    myDoc = new OcctDocument();
-    myDoc->InitDoc();
 }
 
 // =======================================================================
@@ -191,21 +190,6 @@ OcctViewer::~OcctViewer()
 void OcctViewer::release() noexcept
 {
     myPreparedTangentArrays.clear();
-    if (!myDoc.IsNull() && !myDoc->Document().IsNull()) {
-        try {
-            const Handle(TDocStd_Document) document = myDoc->Document();
-            const Handle(TDocStd_Application) application =
-                Handle(TDocStd_Application)::DownCast(document->Application());
-            if (!application.IsNull()) {
-                application->Close(document);
-            }
-        } catch (const Standard_Failure& failure) {
-            NSLog(@"OCCT document teardown failed: %s", failure.GetMessageString());
-        } catch (...) {
-            NSLog(@"OCCT document teardown failed with an unknown error");
-        }
-    }
-
     myContext.Nullify();
     if (!myView.IsNull()) {
         if (EAGLContext.currentContext != nil) {
@@ -226,7 +210,7 @@ void OcctViewer::release() noexcept
     }
     myView.Nullify();
     myViewer.Nullify();
-    myDoc.Nullify();
+    myDocumentSession.Close();
 }
 
 // =======================================================================

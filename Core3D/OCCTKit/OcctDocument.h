@@ -496,6 +496,8 @@ Standard_EXPORT void Core3DDebugDefineFrameBinXCAFFormat(
 Standard_EXPORT void Core3DBeginSafeBinaryRead();
 Standard_EXPORT Standard_Boolean Core3DSafeBinaryReadWasRejected();
 
+namespace core3d { class NativeDocumentSession; }
+
 //! The document
 class OcctDocument : public Standard_Transient
 {
@@ -985,6 +987,9 @@ public:
     void NotifyChanges();
 
 private:
+  friend class core3d::NativeDocumentSession;
+  void CloseNativeSession() noexcept;
+  bool myNativeSessionClosed = false;
   friend class core3d::OrdinaryEditController;
   // Only the ordinary owner may pair geometry and an already-current record.
   Standard_Boolean StageSavedSweepReplacement(const OcctObjectTransformState& previous,

@@ -3125,6 +3125,7 @@ struct NativeModelingPermitIssuer final {
     NSUUID *token=_completionToken;_completionToken=nil;
     if(token)Core3DDeliverNativeSolidCompletion(token,result); // Detaches before reentrant client code.
 }
+
 - (void)dealloc {
     // Defensive final-release routing: even an off-main controller teardown
     // must not destroy its native main lease on that thread.
@@ -3284,6 +3285,59 @@ struct NativeModelingPermitIssuer final {
 
     __weak dispatch_cancelable_block_t _modifiedAssetBlock;
 }
+
+#if DEBUG
++ (NSDictionary<NSString *,NSNumber *> *)debugNativeDocumentSessionLifecycleProbe {
+    if (!NSThread.isMainThread) return @{};
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    try {
+        Handle(TDocStd_Application) firstApplication, secondApplication;
+        {
+            core3d::NativeDocumentSession first, second;
+            const auto firstOwner = first.Document(), secondOwner = second.Document();
+            const auto firstDocument = firstOwner->Document(), secondDocument = secondOwner->Document();
+            firstApplication = Handle(TDocStd_Application)::DownCast(firstDocument->Application());
+            secondApplication = Handle(TDocStd_Application)::DownCast(secondDocument->Application());
+            result[@"isolatedDocuments"] = @(firstOwner != secondOwner
+                && !firstOwner->DocumentIdentifier().empty()
+                && firstOwner->DocumentIdentifier() != secondOwner->DocumentIdentifier());
+            result[@"registered"] = @(!firstApplication.IsNull() && !secondApplication.IsNull()
+                && firstApplication->NbDocuments() == 1 && secondApplication->NbDocuments() == 1);
+            firstDocument->NewCommand();
+            const auto label = firstDocument->Main().FindChild(1000, Standard_True);
+            TDataStd_Name::Set(label, TCollection_ExtendedString("Session history"));
+            const bool committed = firstDocument->CommitCommand();
+            const bool undone = firstDocument->Undo();
+            Handle(TDataStd_Name) name;
+            const bool removed = !label.FindAttribute(TDataStd_Name::GetID(), name);
+            const bool redone = firstDocument->Redo();
+            result[@"history"] = @(committed && undone && removed && redone
+                && label.FindAttribute(TDataStd_Name::GetID(), name)
+                && name->Get().IsEqual(TCollection_ExtendedString("Session history")));
+            first.Close(); first.Close();
+            result[@"idempotentClose"] = @(first.Document().IsNull() && firstApplication->NbDocuments() == 0);
+            result[@"retainedOwnerClosed"] = @(firstOwner->Document().IsNull()
+                && !firstOwner->CaptureNativePlanningStamp(true)
+                && !firstOwner->BeginNativeQueuedLoad());
+            bool refusedReinitialization = false;
+            try { firstOwner->InitDoc(); } catch (...) { refusedReinitialization = true; }
+            result[@"terminalClose"] = @(refusedReinitialization && firstApplication->NbDocuments() == 0);
+            result[@"otherSessionUnchanged"] = @(!second.Document().IsNull()
+                && second.Document()->Document() == secondDocument
+                && secondApplication->NbDocuments() == 1 && secondDocument->GetAvailableUndos() == 0);
+            // Replacement uses the existing native adoption path. Session close
+            // must close the current document rather than a cached first handle.
+            secondOwner->InitDoc();
+            result[@"replacement"] = @(secondOwner->Document() != secondDocument
+                && secondApplication->NbDocuments() == 1);
+        }
+        result[@"destructorClose"] = @(secondApplication->NbDocuments() == 0);
+    } catch (...) {
+        result[@"unexpectedException"] = @YES;
+    }
+    return result;
+}
+#endif
 
 - (void)dealloc {
     Core3DSavedCutSourceJob *sourceJob=_savedCutSourceJob;_savedCutSourceJob=nil;

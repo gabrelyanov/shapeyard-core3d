@@ -23,6 +23,7 @@
 #define OcctViewer_H
 
 #include "OcctDocument.h"
+#include "NativeDocumentSession.hxx"
 #include "CafShapePrs.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 
@@ -56,6 +57,10 @@ public:
     
     //! Empty constructor.
     Standard_EXPORT OcctViewer();
+    OcctViewer(const OcctViewer&) = delete;
+    OcctViewer& operator=(const OcctViewer&) = delete;
+    OcctViewer(OcctViewer&&) = delete;
+    OcctViewer& operator=(OcctViewer&&) = delete;
     
     //! Destructor.
     Standard_EXPORT virtual ~OcctViewer();
@@ -149,7 +154,10 @@ protected:
     Handle(V3d_Viewer)              myViewer;  //!< main viewer
     Handle(Core3DView)              myView;    //!< main view
     Handle(Core3DContext)           myContext; //!< interactive context containing displayed objects
-    Handle(OcctDocument)            myDoc;
+    core3d::NativeDocumentSession   myDocumentSession;
+    // Read-only alias preserves existing document/authority identity throughout
+    // this extraction. Native operations still mutate the same OCAF document.
+    const Handle(OcctDocument)&     myDoc;
     Standard_Size                   myMaximumDisplayTraversalNodes = 32'768;
     Standard_Size                   myMaximumLeafPresentations =
         core3d::limits::kMaximumLeafPresentations;

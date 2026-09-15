@@ -1785,6 +1785,7 @@ __attribute__((objc_subclassing_restricted))
 //! No selection or edit authority is acquired or altered.
 - (nullable NSDictionary<NSString *,id> *)debugCylindricalCutHoleFaces:(NSString *)entity NS_SWIFT_NAME(debugCylindricalCutHoleFaces(_:));
 + (NSDictionary<NSString *,NSNumber *> *)debugCylindricalCutSimilarityProbe;
++ (NSDictionary<NSString *,NSNumber *> *)debugNativeDocumentSessionLifecycleProbe;
 - (NSDictionary<NSString *,NSNumber *> *)debugCutSceneGuardMutation:(NSInteger)mode target:(NSString *)target sibling:(NSString *)sibling;
 - (nullable NSDictionary *)debugRigidPlacementEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugRigidPlacementEvidence(_:));

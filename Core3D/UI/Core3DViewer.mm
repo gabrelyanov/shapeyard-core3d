@@ -1195,6 +1195,10 @@ void Core3DViewer::release() noexcept {
     }
     _shapeInteractor.reset();
     _objectInteractor.reset();
+    _ordinaryEditController.reset();
+    // Terminal teardown revokes adoption. It does not assert that detached
+    // file preparation completed; late completions no longer own this slot.
+    _queuedAssetLoadWork.reset();
     OcctViewer::release();
     // Graphics and interactors are gone. The failed candidate is never saved or
     // promoted; release its application ownership during final viewer teardown.

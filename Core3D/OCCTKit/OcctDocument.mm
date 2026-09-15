@@ -61,6 +61,8 @@ struct Cut475Scope {
 #import <CommonCrypto/CommonDigest.h>
 
 #include "OcctDocument.h"
+#include "NativeDocumentSession.hxx"
+#include <Standard_ProgramError.hxx>
 #include "SavedCutSourceDetachedWork.hxx"
 #include "SavedProgramSourceDetachedWork.hxx"
 #include "NativeModelingReceipt.hxx"
@@ -3548,9 +3550,57 @@ OcctDocument::OcctDocument()
 }
 
 // =======================================================================
-// function : ~OcctDocument
+// function : NativeDocumentSession
 // purpose  :
 // =======================================================================
+core3d::NativeDocumentSession::NativeDocumentSession()
+{
+    document_ = new OcctDocument();
+    try {
+        document_->InitDoc();
+    } catch (...) {
+        Close();
+        throw;
+    }
+}
+
+core3d::NativeDocumentSession::~NativeDocumentSession()
+{
+    Close();
+}
+
+void core3d::NativeDocumentSession::Close() noexcept
+{
+    if (document_.IsNull()) return;
+    document_->CloseNativeSession();
+    document_.Nullify();
+}
+
+void OcctDocument::CloseNativeSession() noexcept
+{
+    if (myNativeSessionClosed) return;
+    myNativeSessionClosed = true;
+    if (myNativeAuthority) myNativeAuthority->Detach();
+#if DEBUG
+    if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
+#endif
+    try {
+        const Handle(TDocStd_Document) document = myOcafDoc;
+        if (!document.IsNull()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            const Handle(TDocStd_Application) application =
+                Handle(TDocStd_Application)::DownCast(document->Application());
+            if (!application.IsNull()) application->Close(document);
+        }
+    } catch (const Standard_Failure& failure) {
+        NSLog(@"OCCT document teardown failed: %s", failure.GetMessageString());
+    } catch (...) {
+        NSLog(@"OCCT document teardown failed with an unknown error");
+    }
+    // Copied wrapper handles must observe terminal closure as well.
+    myOcafDoc.Nullify();
+}
+
 OcctDocument::~OcctDocument()
 {
     std::cout << "~OcctDocument" << std::endl;
@@ -3562,6 +3612,7 @@ OcctDocument::~OcctDocument()
 // =======================================================================
 void OcctDocument::InitDoc()
 {
+    if (myNativeSessionClosed) throw Standard_ProgramError("Native document session is closed");
     
     std::cout << "InitDoc()" << std::endl;
   if (myNativeAuthority) myNativeAuthority->Detach();
