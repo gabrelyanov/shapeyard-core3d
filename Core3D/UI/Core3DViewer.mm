@@ -93,7 +93,12 @@
 #include <utility>
 #include <vector>
 
+#if TARGET_OS_OSX
+#import <AppKit/NSOpenGL.h>
+#include "../OCCTKit/Core3DMacImageExport.hxx"
+#else
 #import <UIKit/UIKit.h>
+#endif
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreImage/CIFilter.h>
 
@@ -1254,13 +1259,17 @@ NSString* Core3DViewer::addTestPrimitives() {
     //    return stlFilename;
 }
 
-bool Core3DViewer::InitViewer (UIView* theWin) {
+bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
     bool result = OcctViewer::InitViewer(theWin);
     if(result) {
         if(_objectInteractor == nullptr) {
+#if TARGET_OS_OSX
+            const float device_independent_side = 96.0f; // OCCT logical view units.
+#else
             const float scale = [[UIScreen mainScreen] scale];
             const float ppm = scale * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163) / 25.4;
             const float device_independent_side = 15 * ppm;
+#endif
             _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, device_independent_side);
             _objectInteractor->setBooleanPreviewStateChangedCallback(
                 _booleanPreviewStateChangedCallback);
@@ -1309,11 +1318,15 @@ bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
             myContext, previousSelectionContext)) {
         return false;
     }
+#if TARGET_OS_OSX
+    const float manipulatorSide = 96.0f; // Same view units as initial attachment.
+#else
     const float scale = [[UIScreen mainScreen] scale];
     const float pointsPerMillimeter = scale
         * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163)
         / 25.4;
     const float manipulatorSide = 15 * pointsPerMillimeter;
+#endif
 
     std::shared_ptr<ObjectInteractor> objectInteractor =
         std::make_shared<ObjectInteractor>(
@@ -7579,7 +7592,11 @@ void Core3DViewer::Select(int theX, int theY) {
 
         // prepare viewer
         Handle(Aspect_DisplayConnection) displayConnection = new Aspect_DisplayConnection();
+#if TARGET_OS_OSX
+        Handle(OpenGl_GraphicDriver) graphicDriver = new OpenGl_GraphicDriver(displayConnection, Standard_False);
+#else
         Handle(OpenGl_GraphicDriver) graphicDriver = new OpenGl_GraphicDriver(displayConnection);
+#endif
         Handle(V3d_Viewer) viewer = new V3d_Viewer(graphicDriver);
         viewer->SetDefaultTypeOfView(V3d_PERSPECTIVE);
         Handle(V3d_DirectionalLight) lightDir = new V3d_DirectionalLight(V3d_Zneg, Quantity_Color(Quantity_NOC_WHITE), Standard_True);
@@ -7595,7 +7612,12 @@ void Core3DViewer::Select(int theX, int theY) {
         // prepare off-screen view
         Handle(V3d_View) view = viewer->CreateView();
         Handle(Aspect_NeutralWindow) wnd = new Aspect_NeutralWindow();
+#if TARGET_OS_OSX
+        NSOpenGLContext* aRendCtx = [NSOpenGLContext currentContext];
+        if (aRendCtx == nil) return false;
+#else
         EAGLContext* aRendCtx = [EAGLContext currentContext];
+#endif
         wnd->SetSize(width, height);
         wnd->SetVirtual(true);
         view->SetWindow(wnd, aRendCtx);
@@ -7650,6 +7672,9 @@ void Core3DViewer::Select(int theX, int theY) {
         if (!view->ToPixMap(img, width, height))
             return false;
 
+#if TARGET_OS_OSX
+        NSData* pngDataRep = Core3DMacPNGData(img, true);
+#else
         CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
         CGBitmapInfo bitmapInfo = kCGImageByteOrderDefault;
 
@@ -7674,6 +7699,8 @@ void Core3DViewer::Select(int theX, int theY) {
         CFRelease(provider);
         CFRelease(colorSpace);
         CFRelease(cgImageRef);
+
+#endif
 
         return [pngDataRep writeToFile:[NSString stringWithCString:fileName.ToCString() encoding:NSASCIIStringEncoding] atomically:YES];
     }
@@ -7707,7 +7734,11 @@ void Core3DViewer::Select(int theX, int theY) {
                                  const TCollection_AsciiString& fileName) {
         // prepare viewer
         Handle(Aspect_DisplayConnection) displayConnection = new Aspect_DisplayConnection();
+#if TARGET_OS_OSX
+        Handle(OpenGl_GraphicDriver) graphicDriver = new OpenGl_GraphicDriver(displayConnection, Standard_False);
+#else
         Handle(OpenGl_GraphicDriver) graphicDriver = new OpenGl_GraphicDriver(displayConnection);
+#endif
         Handle(V3d_Viewer) viewer = new V3d_Viewer(graphicDriver);
 		viewer->SetDefaultTypeOfView(V3d_PERSPECTIVE);
         Handle(V3d_DirectionalLight) lightDir = new V3d_DirectionalLight(V3d_Zneg, Quantity_Color(Quantity_NOC_WHITE), Standard_True);
@@ -7723,7 +7754,12 @@ void Core3DViewer::Select(int theX, int theY) {
         // prepare off-screen view
         Handle(V3d_View) view = viewer->CreateView();
         Handle(Aspect_NeutralWindow) wnd = new Aspect_NeutralWindow();
+#if TARGET_OS_OSX
+        NSOpenGLContext* aRendCtx = [NSOpenGLContext currentContext];
+        if (aRendCtx == nil) return false;
+#else
         EAGLContext* aRendCtx = [EAGLContext currentContext];
+#endif
         wnd->SetSize(width, height);
         wnd->SetVirtual(true);
         view->SetWindow(wnd, aRendCtx);
@@ -7742,6 +7778,9 @@ void Core3DViewer::Select(int theX, int theY) {
         if (!view->ToPixMap(img, width, height))
             return false;
 
+#if TARGET_OS_OSX
+        NSData* pngDataRep = Core3DMacPNGData(img, false);
+#else
         CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
         CGBitmapInfo bitmapInfo = kCGImageByteOrderDefault;
 
@@ -7760,6 +7799,8 @@ void Core3DViewer::Select(int theX, int theY) {
         CFRelease(provider);
         CFRelease(colorSpace);
         CFRelease(cgImageRef);
+
+#endif
 
         return [pngDataRep writeToFile:[NSString stringWithCString:fileName.ToCString() encoding:NSASCIIStringEncoding] atomically:YES];
 

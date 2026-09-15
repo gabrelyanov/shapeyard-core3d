@@ -1,0 +1,213 @@
+name: Core3D-macOS
+
+options:
+  bundleIdPrefix: org.shapeyard
+  deploymentTarget:
+    macOS: "14.2"
+  createIntermediateGroups: false
+  groupSortPosition: top
+  minimumXcodeGenVersion: "2.44.1"
+
+settings:
+  base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    SDKROOT: macosx
+    SUPPORTED_PLATFORMS: macosx
+    MACOSX_DEPLOYMENT_TARGET: "14.2"
+    CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+    CLANG_CXX_LIBRARY: libc++
+    GCC_C_LANGUAGE_STANDARD: gnu17
+    CLANG_ENABLE_MODULES: YES
+    CLANG_ENABLE_OBJC_ARC: YES
+    DEFINES_MODULE: YES
+    BUILD_LIBRARY_FOR_DISTRIBUTION: YES
+    GENERATE_INFOPLIST_FILE: YES
+    SKIP_INSTALL: YES
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    HEADER_SEARCH_PATHS:
+      - "$(SHAPEYARD_OCCT_MACOS_ROOT)/include"
+      - "@CORE3D_SOURCE_ROOT@"
+      - "@CORE3D_SOURCE_ROOT@/OCCTKit"
+      - "@CORE3D_SOURCE_ROOT@/UI"
+      - "@CORE3D_SOURCE_ROOT@/Scene"
+      - "@CORE3D_SOURCE_ROOT@/Viewport"
+      - "@CORE3D_SOURCE_ROOT@/Import"
+      - "@CORE3D_SOURCE_ROOT@/Export"
+      - "@CORE3D_SOURCE_ROOT@/Export/obj"
+      - "@CORE3D_SOURCE_ROOT@/MeshCheck"
+      - "@CORE3D_SOURCE_ROOT@/Bundle"
+      - "@CORE3D_SOURCE_ROOT@/Common"
+      - "@CORE3D_SOURCE_ROOT@/Primitives"
+      - "@CORE3D_SOURCE_ROOT@/ThirdParty/MikkTSpace"
+    LIBRARY_SEARCH_PATHS:
+      - "$(inherited)"
+      - "$(SHAPEYARD_OCCT_MACOS_ROOT)/lib"
+    OTHER_LDFLAGS:
+      - "$(inherited)"
+      - -lTKG2d
+      - -lTKOffset
+      - -lTKDESTL
+      - -lTKMath
+      - -lTKV3d
+      - -lTKXMesh
+      - -lTKDEOBJ
+      - -lTKDE
+      - -lTKDEIGES
+      - -lTKGeomBase
+      - -lTKTObj
+      - -lTKXmlTObj
+      - -lTKShHealing
+      - -lTKG3d
+      - -lTKExpress
+      - -lTKRWMesh
+      - -lTKPrim
+      - -lTKService
+      - -lTKBRep
+      - -lTKVCAF
+      - -lTKBinXCAF
+      - -lTKDEPLY
+      - -lTKHLR
+      - -lTKTopAlgo
+      - -lTKCDF
+      - -lTKLCAF
+      - -lTKDEVRML
+      - -lTKXmlXCAF
+      - -lTKCAF
+      - -lTKMeshVS
+      - -lTKOpenGl
+      - -lTKDECascade
+      - -lTKGeomAlgo
+      - -lTKStd
+      - -lTKDESTEP
+      - -lTKBin
+      - -lTKXCAF
+      - -lTKFeat
+      - -lTKMesh
+      - -lTKFillet
+      - -lTKXSBase
+      - -lTKXml
+      - -lTKStdL
+      - -lTKXmlL
+      - -lTKernel
+      - -lTKBinL
+      - -lTKBO
+      - -lTKBool
+      - -lTKDEGLTF
+      - -lTKBinTObj
+      - -lz
+
+targets:
+  Core3D:
+    type: framework
+    platform: macOS
+    productName: Core3D
+    settings:
+      base:
+        PRODUCT_MODULE_NAME: Core3D
+        PRODUCT_BUNDLE_IDENTIFIER: org.shapeyard.Core3D.macos
+        INSTALL_PATH: "$(LOCAL_LIBRARY_DIR)/Frameworks"
+        DYLIB_INSTALL_NAME_BASE: "@rpath"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@loader_path/Frameworks"
+          - "@executable_path/../Frameworks"
+    dependencies:
+      - sdk: AppKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: OpenGL.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreImage.framework
+      - sdk: ImageIO.framework
+    sources:
+      # Public, platform-neutral Objective-C surface.
+      - path: Core3D.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Primitives/PrimitiveType.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Primitives/PrimitiveSelectionType.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Primitives/PrimitiveGizmoType.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Export/ExportType.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/UI/OrthoProjectionType.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DModelCapability.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DTransformInspectorSnapshot.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Viewport/Core3DSceneSnapshot.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Export/Core3DNativeExportOperation.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Import/Core3DNativeImportOperation.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/MeshCheck/Core3DMeshContactOperation.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundleReaderInterface.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundleWriterInterface.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundleItem.h
+        headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundle.h
+        headerVisibility: public
+
+      # OCCT/OCAF document, desktop OpenGL viewer, and private queued inputs.
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/OcctDocument.mm
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/OcctViewer.mm
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/CafShapePrs.mm
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/Core3DCocoa_Window.mm
+        compilerFlags:
+          - -fno-objc-arc
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/NativeModelingTombstone.mm
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/Core3DQueuedAssetInput.mm
+      - path: @CORE3D_SOURCE_ROOT@/OCCTKit/Core3DQueuedAssetRequest.mm
+
+      # Shared viewer and native editing/interactor closure.
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DViewer.mm
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DView.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DContext.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DManipulator.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/ConstructorManipulator.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/Interactor.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/ObjectInteractor.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/ShapeInteractor.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/Snapping.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/GuidedObjectsMatcher.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/OrdinaryEditCommand.mm
+      - path: @CORE3D_SOURCE_ROOT@/UI/OrdinaryEditController.mm
+      - path: @CORE3D_SOURCE_ROOT@/UI/BooleanOperationController.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/BevelOperationController.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/LinearArrayOperationController.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/RadialArrayOperationController.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/ShellOperationController.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/TransformInspectorMeasurementController.cpp
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DTransformInspectorSnapshot.mm
+
+      # Native primitive, import/export, mesh, immutable scene, and bundle work.
+      - path: @CORE3D_SOURCE_ROOT@/Primitives/BaseDriver.cpp
+      - path: @CORE3D_SOURCE_ROOT@/Primitives/CylinderDriver.cpp
+      - path: @CORE3D_SOURCE_ROOT@/Import/Core3DGLBPreflight.mm
+      - path: @CORE3D_SOURCE_ROOT@/Import/Core3DGLBReader.mm
+      - path: @CORE3D_SOURCE_ROOT@/Import/Core3DNativeImportOperation.mm
+      - path: @CORE3D_SOURCE_ROOT@/Export/Core3DNativeExportOperation.mm
+      - path: @CORE3D_SOURCE_ROOT@/Export/obj/exportobj.cpp
+      - path: @CORE3D_SOURCE_ROOT@/Export/obj/importstl.cpp
+      - path: @CORE3D_SOURCE_ROOT@/MeshCheck/Core3DMeshContactOperation.mm
+      - path: @CORE3D_SOURCE_ROOT@/Scene/OcctSceneSnapshotBuilder.mm
+      - path: @CORE3D_SOURCE_ROOT@/Scene/MikkTangentSpace.cpp
+      - path: @CORE3D_SOURCE_ROOT@/Viewport/Core3DSceneSnapshot.mm
+      - path: @CORE3D_SOURCE_ROOT@/ThirdParty/MikkTSpace/mikktspace.c
+      - path: @CORE3D_SOURCE_ROOT@/Common/NSString+StdString.mm
+      - path: @CORE3D_SOURCE_ROOT@/Common/NSBundle+Path.m
+      - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundle.mm
+      - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundleItem.m
+
+schemes:
+  Core3D:
+    build:
+      targets:
+        Core3D: all

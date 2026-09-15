@@ -1,5 +1,10 @@
 #pragma once
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <OpenGL/gl3.h>
+#else
 #include <OpenGLES/ES2/gl.h>
+#endif
 #include "../Scene/MikkTangentSpace.hpp"
 #include "Core3DNativeTangentState.hxx"
 #include "NativeAuthoredFrameGeometry.hxx"

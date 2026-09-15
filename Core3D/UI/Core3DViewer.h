@@ -13,6 +13,7 @@
 #ifndef Core3DViewer_H
 #define Core3DViewer_H
 
+#import <Foundation/Foundation.h>
 #include "OcctViewer.h"
 #include "AIS_Manipulator.hxx"
 
@@ -173,7 +174,7 @@ namespace core3d {
         //! Release derived interactors before the base OCCT graphics handles.
         Standard_EXPORT void release() noexcept;
 
-        Standard_EXPORT bool InitViewer (UIView* theWin);
+        Standard_EXPORT bool InitViewer (Core3DPlatformView* theWin);
         
         Standard_EXPORT NSString* addTestPrimitives();
         void addPrimitive(PrimitiveType primitiveType);

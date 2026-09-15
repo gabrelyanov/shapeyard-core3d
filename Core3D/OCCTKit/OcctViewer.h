@@ -24,6 +24,7 @@
 
 #include "OcctDocument.h"
 #include "NativeDocumentSession.hxx"
+#include "Core3DPlatformView.hxx"
 #include "CafShapePrs.h"
 #include "../Common/Core3DMobileResourceLimits.h"
 
@@ -34,8 +35,6 @@
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFPrs_Style.hxx>
 #include <TDF_LabelSequence.hxx>
-
-#import <UIKit/UIKit.h>
 
 #include "Core3DView.hpp"
 #include "Core3DContext.hpp"
@@ -90,7 +89,7 @@ public:
 public:
     
     //! Perform OCCT Viewer (re)initialization.
-    Standard_EXPORT bool InitViewer (UIView* theWin);
+    Standard_EXPORT bool InitViewer (Core3DPlatformView* theWin);
 
     //! Resize the existing drawable without recreating the OCCT viewer.
     Standard_EXPORT void Resize();

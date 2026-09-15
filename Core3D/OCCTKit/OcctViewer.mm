@@ -24,7 +24,15 @@
 #include "Core3DSTEPExchangeLock.h"
 #include "Core3DNativeTangentBuffers.hxx"
 
+#import <TargetConditionals.h>
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+  #import <AppKit/NSOpenGL.h>
+#else
+  #import <UIKit/UIKit.h>
+#endif
+
 #include <OpenGl_GraphicDriver.hxx>
+#include <OpenGl_Context.hxx>
 #include <Graphic3d_CLight.hxx>
 #include <Standard_Failure.hxx>
 
@@ -73,6 +81,23 @@
 namespace {
 
 constexpr Standard_Size kMaximumDisplayTraversalDepth = 128;
+
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+bool HasCurrentNativeContext(const Handle(V3d_Viewer)& viewer) noexcept
+{
+    try {
+        if (viewer.IsNull()) return false;
+        const auto driver = Handle(OpenGl_GraphicDriver)::DownCast(viewer->Driver());
+        if (driver.IsNull()) return false;
+        const auto& context = driver->GetSharedContext();
+        NSOpenGLContext* current = [NSOpenGLContext currentContext];
+        return current != nil && !context.IsNull()
+            && context->RenderingContext() == current;
+    } catch (...) {
+        return false;
+    }
+}
+#endif
 
 Standard_Boolean IsLabelAndLayersVisible(
     const TDF_Label& theLabel,
@@ -192,7 +217,11 @@ void OcctViewer::release() noexcept
     myPreparedTangentArrays.clear();
     myContext.Nullify();
     if (!myView.IsNull()) {
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+        if (HasCurrentNativeContext(myViewer)) {
+#else
         if (EAGLContext.currentContext != nil) {
+#endif
             try {
                 myView->Remove();
             } catch (const Standard_Failure& failure) {
@@ -205,7 +234,11 @@ void OcctViewer::release() noexcept
             // rest of teardown. OCCT handles are still released below; explicit
             // GPU removal is omitted because issuing GL calls without a current
             // context is undefined.
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+            NSLog(@"Releasing OCCT view without explicit GPU removal: native context is not current");
+#else
             NSLog(@"Releasing OCCT view without explicit GPU removal: no EAGL context");
+#endif
         }
     }
     myView.Nullify();
@@ -217,22 +250,43 @@ void OcctViewer::release() noexcept
 // function : InitViewer
 // purpose  :
 // =======================================================================
-bool OcctViewer::InitViewer (UIView* theWin)
+bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
 {
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+    NSOpenGLContext* aRendCtx = [NSOpenGLContext currentContext];
+    if (theWin == NULL || aRendCtx == NULL || [aRendCtx view] != theWin)
+    {
+        NSLog(@"Error: The native view's NSOpenGL context must be current!");
+        return false;
+    }
+#else
     EAGLContext* aRendCtx = [EAGLContext currentContext];
     if (theWin == NULL || aRendCtx   == NULL)
     {
         NSLog(@"Error: No active EAGL context!");
         return false;
     }
+#endif
     if (!myView.IsNull())
     {
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+        const auto window = Handle(Core3DCocoa_Window)::DownCast(myView->Window());
+        if (window.IsNull() || window->HView() != theWin
+            || !HasCurrentNativeContext(myViewer)) return false;
+#endif
         Resize();
         return true;
     }
     
     Handle(Aspect_DisplayConnection) aDisplayConnection = new Aspect_DisplayConnection();
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+    // The AppKit host owns the current NSOpenGLContext. Prevent OCCT from
+    // creating an implicit driver context and bind that host context below.
+    Handle(OpenGl_GraphicDriver) aGraphicDriver =
+        new OpenGl_GraphicDriver (aDisplayConnection, Standard_False);
+#else
     Handle(OpenGl_GraphicDriver) aGraphicDriver = new OpenGl_GraphicDriver (aDisplayConnection);
+#endif
     // GLView owns drawable presentation and CADisplayLink pacing. OCCT only
     // renders into the framebuffer that GLView binds for the current frame.
     aGraphicDriver->ChangeOptions().buffersNoSwap = Standard_True;
@@ -313,6 +367,9 @@ bool OcctViewer::RenderFrame()
     if (myView.IsNull()) {
         return false;
     }
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+    if (!HasCurrentNativeContext(myViewer)) return false;
+#endif
     try {
         const auto driver = Handle(OpenGl_GraphicDriver)::DownCast(myViewer->Driver());
 #if DEBUG
