@@ -48,6 +48,7 @@ grep -Eq 'minos 14\.2$' "$root/validation/framework-platform.txt" || die "unexpe
 shasum -a 256 "$binary" > "$root/validation/framework.sha256"
 framework_dir="$root/DerivedData/Build/Products/Release"
 "$framework_dir/Core3DViewerProbe" | tee "$root/validation/shared-viewer-probe.txt"
+"$framework_dir/Core3DMetalRendererProbe" | tee "$root/validation/shared-metal-renderer-probe.txt"
 xcrun --sdk macosx clang++ -std=c++20 -fobjc-arc -arch arm64 \
   -mmacosx-version-min=14.2 -I "$package/include" -I "$core_root/Core3D/OCCTKit" \
   "$script_dir/macos_core3d_image_export_probe.mm" \

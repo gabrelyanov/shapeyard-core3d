@@ -226,9 +226,30 @@ targets:
     sources:
       - path: "@CORE3D_SOURCE_ROOT@/../Scripts/probes/macos_shared_core3d_viewer_probe.mm"
 
+  Core3DMetalRendererProbe:
+    type: tool
+    platform: macOS
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path"
+        OTHER_LDFLAGS: ""
+        DEFINES_MODULE: NO
+        BUILD_LIBRARY_FOR_DISTRIBUTION: NO
+    dependencies:
+      - target: Core3D
+        embed: false
+      - sdk: AppKit.framework
+      - sdk: MetalKit.framework
+    sources:
+      - path: "@CORE3D_SOURCE_ROOT@/../Scripts/probes/macos_shared_metal_renderer_probe.swift"
+      - path: "@CORE3D_SOURCE_ROOT@/../../MagicMessenger/Source Code/Modules/Model Editor/Viewport/Metal/ModelEditorMetalRenderer.swift"
+      - path: "@CORE3D_SOURCE_ROOT@/../../MagicMessenger/Source Code/Modules/Model Editor/Models/ModelEditorTextureImporter.swift"
+
 schemes:
   Core3D:
     build:
       targets:
         Core3D: all
         Core3DViewerProbe: all
+        Core3DMetalRendererProbe: all
