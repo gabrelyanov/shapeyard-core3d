@@ -135,6 +135,9 @@ struct OcctObjectTransformState
     std::string definitionIdentifier;
     Standard_Integer meshUVAtlasVersion = 0; // 0 absent, 1 grid, 2 coherent atlas, 3 authored flat-corner UV layout
     std::array<Standard_Integer, 3> meshUVAtlasSettings = {}; // resolution, gutter, original-node prefix; v2 only
+    // Canonical SYRP bytes. Empty is the only absent representation; any
+    // persisted malformed record makes state capture fail closed.
+    std::vector<Standard_Byte> meshRegionPartition;
     Standard_Boolean authoredFramesPresent = Standard_False;
     std::array<Standard_Byte, 32> authoredFramesIdentity = {}; // validated immutable archive digest
     OcctGeometryRepresentation storedRepresentation = OcctGeometryRepresentation::Invalid;
@@ -591,6 +594,25 @@ public:
   //! Appearance copying is separate because Boolean/mirror may replace geometry.
   Standard_EXPORT Standard_Boolean CopyGeometryOwnedMeshMetadata(
       const TDF_Label& source, const TDF_Label& destination);
+  //! Definition-owned planar-region selection authority. Standard OCAF
+  //! attributes only; the caller owns the already-open command.
+  //! A geometry replacement must capture/validate the old state, clear its
+  //! valid record, write the new shape, then stage already-prepared bytes and
+  //! verify exact readback, all in one abortable ordinary command. Stage never
+  //! repairs malformed authority and neither shape-first nor partition-first
+  //! replacement is admitted without that clear step.
+  Standard_EXPORT Standard_Boolean CaptureMeshRegionPartition(
+      const TDF_Label& label, std::vector<Standard_Byte>& encoded) const noexcept;
+  Standard_EXPORT Standard_Boolean StageMeshRegionPartition(
+      const TDF_Label& label, const std::vector<Standard_Byte>& encoded) noexcept;
+  Standard_EXPORT Standard_Boolean ClearMeshRegionPartition(
+      const TDF_Label& label) noexcept;
+#if DEBUG
+  Standard_EXPORT Standard_Boolean DebugStageFirstMeshRegionPartition(
+      const TDF_Label& label) noexcept;
+  Standard_EXPORT Standard_Boolean DebugCorruptMeshRegionPartition(
+      const TDF_Label& label, Standard_Integer mode) noexcept;
+#endif
   //! Stamp every unmarked analytic definition produced by a fresh STEP
   //! transfer. This isolated-import schema operation requires zero user
   //! history, creates no retained undo entry, and is never called for legacy

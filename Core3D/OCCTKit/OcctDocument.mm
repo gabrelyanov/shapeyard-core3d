@@ -2916,6 +2916,159 @@ const Standard_GUID& SavedGroupOriginYID() {
 const Standard_GUID& SavedGroupOriginZID() {
     static const Standard_GUID id("EC7B5F15-218F-47E4-BF6A-61BF42861407"); return id;
 }
+
+// Definition-owned mesh-region partition schema v1. Payload chunks use the
+// existing bounded TDataStd_AsciiString binary driver; no custom driver exists.
+const Standard_GUID& MeshRegionPartitionRecordID() {
+    static const Standard_GUID id("9D8D6BA0-A51C-4D0F-87A9-30A1C2D90101"); return id;
+}
+const Standard_GUID& MeshRegionPartitionVersionID() {
+    static const Standard_GUID id("9D8D6BA0-A51C-4D0F-87A9-30A1C2D90102"); return id;
+}
+const Standard_GUID& MeshRegionPartitionTriangleCountID() {
+    static const Standard_GUID id("9D8D6BA0-A51C-4D0F-87A9-30A1C2D90103"); return id;
+}
+const Standard_GUID& MeshRegionPartitionChunkCountID() {
+    static const Standard_GUID id("9D8D6BA0-A51C-4D0F-87A9-30A1C2D90104"); return id;
+}
+const Standard_GUID& MeshRegionPartitionDigestID() {
+    static const Standard_GUID id("9D8D6BA0-A51C-4D0F-87A9-30A1C2D90105"); return id;
+}
+constexpr Standard_Size kMeshRegionPartitionChunkCharacters = 256;
+constexpr Standard_Size kMaximumMeshRegionPartitionChunks = 13;
+constexpr Standard_Size kMaximumMeshRegionPartitionDocumentBytes = 8U * 1024U * 1024U;
+
+bool HasMeshRegionPartitionSchemaAttribute(const TDF_Label& label) {
+    Handle(TDF_Attribute) value;
+    return label.FindAttribute(MeshRegionPartitionRecordID(), value)
+        || label.FindAttribute(MeshRegionPartitionVersionID(), value)
+        || label.FindAttribute(MeshRegionPartitionTriangleCountID(), value)
+        || label.FindAttribute(MeshRegionPartitionChunkCountID(), value)
+        || label.FindAttribute(MeshRegionPartitionDigestID(), value);
+}
+
+bool HasLiveMeshRegionPartitionDescendant(const TDF_Label& label,
+                                          Standard_Size& visited) {
+    for (TDF_ChildIterator child(label, Standard_True); child.More(); child.Next()) {
+        if (++visited > kMaximumGeometryDocumentLabels) return true;
+        if (child.Value().HasAttribute()) return true;
+    }
+    return false;
+}
+
+enum class MeshRegionPartitionReadState { Absent, Valid, Malformed };
+
+std::string LowerHex(const Standard_Byte* bytes, const Standard_Size size) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(2 * size);
+    for (Standard_Size index = 0; index < size; ++index) {
+        output.push_back(digits[(bytes[index] >> 4) & 15]);
+        output.push_back(digits[bytes[index] & 15]);
+    }
+    return output;
+}
+
+MeshRegionPartitionReadState ReadMeshRegionPartitionRecord(
+    const Handle(TDocStd_Document)& document, const TDF_Label& definition,
+    std::vector<Standard_Byte>& encoded, TDF_Label* recordLabel = nullptr) noexcept {
+    encoded.clear();
+    if (recordLabel) *recordLabel = TDF_Label();
+    try {
+        OCC_CATCH_SIGNALS
+        if (document.IsNull() || document->GetData().IsNull() || definition.IsNull()
+            || definition.Data() != document->GetData()
+            || HasMeshRegionPartitionSchemaAttribute(definition))
+            return MeshRegionPartitionReadState::Malformed;
+        TDF_Label record;
+        // A definition owns at most one direct record. Schema fragments below
+        // any other descendant are malformed rather than silently absent.
+        Standard_Size descendants = 0;
+        for (TDF_ChildIterator child(definition, Standard_True); child.More(); child.Next()) {
+            if (++descendants > kMaximumGeometryDocumentLabels)
+                return MeshRegionPartitionReadState::Malformed;
+            if (!HasMeshRegionPartitionSchemaAttribute(child.Value())) continue;
+            Handle(TDF_Attribute) marker;
+            if (!child.Value().Father().IsEqual(definition)
+                || !child.Value().FindAttribute(MeshRegionPartitionRecordID(), marker)
+                || Handle(TDataStd_UAttribute)::DownCast(marker).IsNull()
+                || !record.IsNull()) return MeshRegionPartitionReadState::Malformed;
+            record = child.Value();
+        }
+        if (record.IsNull()) return MeshRegionPartitionReadState::Absent;
+        Handle(TDataStd_Integer) version, triangles, chunks;
+        Handle(TDataStd_AsciiString) digest;
+        if (!record.FindAttribute(MeshRegionPartitionVersionID(), version)
+            || !record.FindAttribute(MeshRegionPartitionTriangleCountID(), triangles)
+            || !record.FindAttribute(MeshRegionPartitionChunkCountID(), chunks)
+            || !record.FindAttribute(MeshRegionPartitionDigestID(), digest)
+            || version.IsNull() || triangles.IsNull() || chunks.IsNull() || digest.IsNull()
+            || version->Get() != 1 || triangles->Get() <= 0 || triangles->Get() > 4096
+            || chunks->Get() <= 0 || chunks->Get() > Standard_Integer(kMaximumMeshRegionPartitionChunks))
+            return MeshRegionPartitionReadState::Malformed;
+        Standard_Size recordAttributes = 0;
+        for (TDF_AttributeIterator attribute(record); attribute.More(); attribute.Next()) {
+            const auto& id = attribute.Value()->ID();
+            if (id != MeshRegionPartitionRecordID() && id != MeshRegionPartitionVersionID()
+                && id != MeshRegionPartitionTriangleCountID() && id != MeshRegionPartitionChunkCountID()
+                && id != MeshRegionPartitionDigestID()) return MeshRegionPartitionReadState::Malformed;
+            ++recordAttributes;
+        }
+        const std::string digestText = digest->Get().ToCString();
+        if (recordAttributes != 5 || digestText.size() != 64) return MeshRegionPartitionReadState::Malformed;
+        std::string hex;
+        for (Standard_Integer index = 1; index <= chunks->Get(); ++index) {
+            const TDF_Label chunk = record.FindChild(index, Standard_False);
+            Handle(TDataStd_AsciiString) text;
+            Standard_Size attributes = 0;
+            Standard_Size nested = 0;
+            if (chunk.IsNull() || HasLiveMeshRegionPartitionDescendant(chunk, nested)
+                || !chunk.FindAttribute(TDataStd_AsciiString::GetID(), text) || text.IsNull())
+                return MeshRegionPartitionReadState::Malformed;
+            for (TDF_AttributeIterator attribute(chunk); attribute.More(); attribute.Next()) {
+                if (attribute.Value()->ID() != TDataStd_AsciiString::GetID())
+                    return MeshRegionPartitionReadState::Malformed;
+                ++attributes;
+            }
+            const std::string value = text->Get().ToCString();
+            if (attributes != 1 || value.empty() || value.size() > kMeshRegionPartitionChunkCharacters
+                || (index < chunks->Get() && value.size() != kMeshRegionPartitionChunkCharacters))
+                return MeshRegionPartitionReadState::Malformed;
+            for (char c : value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                return MeshRegionPartitionReadState::Malformed;
+            hex += value;
+        }
+        Standard_Size directChildren = 0;
+        for (TDF_ChildIterator child(record, Standard_False); child.More(); child.Next()) {
+            if (++directChildren > kMaximumGeometryDocumentLabels)
+                return MeshRegionPartitionReadState::Malformed;
+            Standard_Size nested = 0;
+            if (child.Value().Tag() > chunks->Get()
+                && (child.Value().HasAttribute()
+                    || HasLiveMeshRegionPartitionDescendant(child.Value(), nested)))
+                return MeshRegionPartitionReadState::Malformed;
+        }
+        if (hex.size() & 1) return MeshRegionPartitionReadState::Malformed;
+        encoded.reserve(hex.size() / 2);
+        const auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+        for (Standard_Size index = 0; index < hex.size(); index += 2)
+            encoded.push_back(Standard_Byte((nibble(hex[index]) << 4) | nibble(hex[index + 1])));
+        core3d::meshedit::RegionPartition partition;
+        if (!core3d::meshedit::DecodeRegionPartition(encoded.data(), encoded.size(), partition)
+            || partition.barriers.size() != Standard_Size(triangles->Get())
+            || LowerHex(encoded.data() + 12, 32) != digestText) {
+            encoded.clear(); return MeshRegionPartitionReadState::Malformed;
+        }
+        std::atomic_bool cancelled{false}; core3d::meshedit::NativeTopologyCapture source;
+        if (core3d::meshedit::CaptureNativeTopology(XCAFDoc_ShapeTool::GetShape(definition), source, cancelled)
+                != core3d::meshedit::TopologyResult::Ready
+            || !core3d::meshedit::ValidateRegionPartition(source, partition)) {
+            encoded.clear(); return MeshRegionPartitionReadState::Malformed;
+        }
+        if (recordLabel) *recordLabel = record;
+        return MeshRegionPartitionReadState::Valid;
+    } catch (...) { encoded.clear(); if (recordLabel) *recordLabel = TDF_Label(); return MeshRegionPartitionReadState::Malformed; }
+}
 constexpr std::size_t kMaximumSavedGroups = 128;
 constexpr std::size_t kMaximumSavedGroupMembers = 32;
 bool IsCanonicalSavedGroupID(const std::string& id) {
@@ -3799,7 +3952,8 @@ Standard_Boolean ValidateGeometryDocument(
                 if (aLabel.Value().FindAttribute(
                         GeometryRepresentationAttributeID(), aMarker)
                     || aLabel.Value().FindAttribute(
-                        TNaming_NamedShape::GetID(), aNamedShape)) {
+                        TNaming_NamedShape::GetID(), aNamedShape)
+                    || HasMeshRegionPartitionSchemaAttribute(aLabel.Value())) {
                     return Standard_False;
                 }
             }
@@ -4100,6 +4254,7 @@ Standard_Boolean ValidateGeometryDocument(
         }
 
         Standard_Size aLabelCount = 0;
+        Standard_Size partitionBytes = 0;
         for (TDF_ChildIterator aLabel(aRoot, Standard_True);
              aLabel.More(); aLabel.Next()) {
             if (++aLabelCount > kMaximumGeometryDocumentLabels) {
@@ -4118,6 +4273,20 @@ Standard_Boolean ValidateGeometryDocument(
                 && !aValidatedSubshapeLabels.Contains(
                     aLabel.Value())) {
                 return Standard_False;
+            }
+            if (HasMeshRegionPartitionSchemaAttribute(aLabel.Value())) {
+                Handle(TDF_Attribute) marker;
+                std::vector<Standard_Byte> encoded;
+                const TDF_Label definition = aLabel.Value().Father();
+                if (!aLabel.Value().FindAttribute(MeshRegionPartitionRecordID(), marker)
+                    || Handle(TDataStd_UAttribute)::DownCast(marker).IsNull()
+                    || definition.IsNull() || !aDefinitionLabels.Contains(definition)
+                    || ReadMeshRegionPartitionRecord(document, definition, encoded)
+                        != MeshRegionPartitionReadState::Valid
+                    || encoded.size() > kMaximumMeshRegionPartitionDocumentBytes - partitionBytes) {
+                    return Standard_False;
+                }
+                partitionBytes += encoded.size();
             }
         }
         if (output != nullptr) {
@@ -5293,6 +5462,158 @@ bool SameStoredMeshCopyPayload(TopoDS_Shape source, TopoDS_Shape destination) {
 }
 }
 
+Standard_Boolean OcctDocument::CaptureMeshRegionPartition(
+    const TDF_Label& label, std::vector<Standard_Byte>& encoded) const noexcept {
+    encoded.clear();
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        return !myOcafDoc.IsNull() && IsEditableFreeSimpleDefinitionLabel(label)
+            && ReadMeshRegionPartitionRecord(myOcafDoc, label, encoded)
+                != MeshRegionPartitionReadState::Malformed;
+    } catch (...) { encoded.clear(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageMeshRegionPartition(
+    const TDF_Label& label, const std::vector<Standard_Byte>& encoded) noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand() || encoded.empty()
+            || encoded.size() > 1580 || !ValidateGeometryRepresentations()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh)
+            return Standard_False;
+        core3d::meshedit::RegionPartition partition;
+        std::atomic_bool cancelled{false}; core3d::meshedit::NativeTopologyCapture source;
+        if (!core3d::meshedit::DecodeRegionPartition(encoded.data(), encoded.size(), partition)
+            || core3d::meshedit::CaptureNativeTopology(XCAFDoc_ShapeTool::GetShape(label), source, cancelled)
+                != core3d::meshedit::TopologyResult::Ready
+            || !core3d::meshedit::ValidateRegionPartition(source, partition)) return Standard_False;
+        std::vector<Standard_Byte> previous; TDF_Label record;
+        const auto state = ReadMeshRegionPartitionRecord(myOcafDoc, label, previous, &record);
+        if (state == MeshRegionPartitionReadState::Malformed) return Standard_False;
+        if (state == MeshRegionPartitionReadState::Valid && previous == encoded) return Standard_True;
+        if (record.IsNull()) {
+            // Tags 1...8 are persisted transforms and 11/12 are legacy
+            // material/color even when their attributes were cleared. Never
+            // claim an attribute-free historical label from that namespace.
+            Standard_Integer tag = 12;
+            for (TDF_ChildIterator child(label, Standard_False); child.More(); child.Next())
+                tag = std::max(tag, child.Value().Tag());
+            if (tag == std::numeric_limits<Standard_Integer>::max()) return Standard_False;
+            record = label.FindChild(tag + 1, Standard_True);
+        } else record.ForgetAllAttributes(Standard_True);
+        const std::string hex = LowerHex(encoded.data(), encoded.size());
+        const Standard_Size chunkCount = (hex.size() + kMeshRegionPartitionChunkCharacters - 1)
+            / kMeshRegionPartitionChunkCharacters;
+        if (chunkCount == 0 || chunkCount > kMaximumMeshRegionPartitionChunks) return Standard_False;
+        TDataStd_UAttribute::Set(record, MeshRegionPartitionRecordID());
+        TDataStd_Integer::Set(record, MeshRegionPartitionVersionID(), 1);
+        TDataStd_Integer::Set(record, MeshRegionPartitionTriangleCountID(),
+            Standard_Integer(partition.barriers.size()));
+        TDataStd_Integer::Set(record, MeshRegionPartitionChunkCountID(), Standard_Integer(chunkCount));
+        TDataStd_AsciiString::Set(record, MeshRegionPartitionDigestID(),
+            TCollection_AsciiString(LowerHex(encoded.data() + 12, 32).c_str()));
+        for (Standard_Size index = 0; index < chunkCount; ++index) {
+            const std::string chunk = hex.substr(index * kMeshRegionPartitionChunkCharacters,
+                kMeshRegionPartitionChunkCharacters);
+            TDataStd_AsciiString::Set(record.FindChild(Standard_Integer(index + 1), Standard_True),
+                TCollection_AsciiString(chunk.c_str()));
+        }
+        std::vector<Standard_Byte> readback;
+        return ReadMeshRegionPartitionRecord(myOcafDoc, label, readback)
+                    == MeshRegionPartitionReadState::Valid
+            && readback == encoded && ValidateGeometryRepresentations();
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ClearMeshRegionPartition(const TDF_Label& label) noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || !ValidateGeometryRepresentations()
+            || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
+        std::vector<Standard_Byte> previous; TDF_Label record;
+        const auto state = ReadMeshRegionPartitionRecord(myOcafDoc, label, previous, &record);
+        if (state == MeshRegionPartitionReadState::Malformed) return Standard_False;
+        if (state == MeshRegionPartitionReadState::Absent) return Standard_True;
+        record.ForgetAllAttributes(Standard_True);
+        previous.clear();
+        return ReadMeshRegionPartitionRecord(myOcafDoc, label, previous)
+                == MeshRegionPartitionReadState::Absent
+            && ValidateGeometryRepresentations();
+    } catch (...) { return Standard_False; }
+}
+
+#if DEBUG
+Standard_Boolean OcctDocument::DebugStageFirstMeshRegionPartition(
+    const TDF_Label& label) noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand())
+            return Standard_False;
+        std::atomic_bool cancelled{false}; core3d::meshedit::NativeTopologyCapture source;
+        if (core3d::meshedit::CaptureNativeTopology(XCAFDoc_ShapeTool::GetShape(label), source, cancelled)
+            != core3d::meshedit::TopologyResult::Ready) return Standard_False;
+        std::set<std::array<core3d::meshedit::Point, 2>> requested;
+        for (const auto& edge : source.topology.edges) {
+            if (edge.uses.size() != 2) continue;
+            std::array<core3d::meshedit::Point, 2> points = {
+                source.topology.vertices[edge.vertices[0]].point,
+                source.topology.vertices[edge.vertices[1]].point};
+            if (points[1] < points[0]) std::swap(points[0], points[1]);
+            requested.insert(points); break;
+        }
+        core3d::meshedit::RegionPartition partition; std::vector<std::uint8_t> bytes;
+        if (requested.size() != 1 || !core3d::meshedit::MakeRegionPartition(source, requested, partition)
+            || !core3d::meshedit::EncodeRegionPartition(partition, bytes)) return Standard_False;
+        return StageMeshRegionPartition(label,
+            std::vector<Standard_Byte>(bytes.begin(), bytes.end()));
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::DebugCorruptMeshRegionPartition(
+    const TDF_Label& label, Standard_Integer mode) noexcept {
+    if (![NSThread isMainThread] || mode < 0 || mode > 9 || myOcafDoc.IsNull()
+        || !myOcafDoc->HasOpenCommand()) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        std::vector<Standard_Byte> encoded; TDF_Label record;
+        if (ReadMeshRegionPartitionRecord(myOcafDoc, label, encoded, &record)
+                != MeshRegionPartitionReadState::Valid || record.IsNull()) return Standard_False;
+        switch (mode) {
+            case 0: TDataStd_Integer::Set(record, MeshRegionPartitionVersionID(), 2); break;
+            case 1: TDataStd_Integer::Set(record, MeshRegionPartitionTriangleCountID(), 4097); break;
+            case 2: record.FindChild(1, Standard_False).ForgetAllAttributes(Standard_True); break;
+            case 3: TDataStd_AsciiString::Set(record.FindChild(14, Standard_True), TCollection_AsciiString("00")); break;
+            case 4: {
+                Handle(TDataStd_AsciiString) chunk;
+                if (!record.FindChild(1, Standard_False).FindAttribute(TDataStd_AsciiString::GetID(), chunk)
+                    || chunk.IsNull()) return Standard_False;
+                std::string value = chunk->Get().ToCString(); value[0] = 'G';
+                TDataStd_AsciiString::Set(record.FindChild(1, Standard_False), TCollection_AsciiString(value.c_str()));
+                break;
+            }
+            case 5: TDataStd_AsciiString::Set(record, MeshRegionPartitionDigestID(),
+                TCollection_AsciiString(std::string(64, '0').c_str())); break;
+            case 6: record.ForgetAttribute(MeshRegionPartitionRecordID()); break;
+            case 7:
+                record.ForgetAttribute(MeshRegionPartitionRecordID());
+                TDataStd_Integer::Set(record, MeshRegionPartitionRecordID(), 1);
+                break;
+            case 8: TDataStd_Integer::Set(label, MeshRegionPartitionVersionID(), 1); break;
+            case 9: TDataStd_UAttribute::Set(label, MeshRegionPartitionRecordID()); break;
+        }
+        std::vector<Standard_Byte> refused;
+        return ReadMeshRegionPartitionRecord(myOcafDoc, label, refused)
+                == MeshRegionPartitionReadState::Malformed
+            && refused.empty();
+    } catch (...) { return Standard_False; }
+}
+#endif
+
 Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
     const TDF_Label& source, const TDF_Label& destination) {
     if (![NSThread isMainThread]) return Standard_False;
@@ -5308,7 +5629,8 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
             || Core3DReadAuthoredFrameOwner(myOcafDoc, destination, previousFrame) == OcctAuthoredFrameReadState::Invalid)
             return Standard_False;
         if (before.meshUVAtlasVersion == 0 && target.meshUVAtlasVersion == 0
-            && frame.archive.empty() && previousFrame.archive.empty()) return Standard_True;
+            && frame.archive.empty() && previousFrame.archive.empty()
+            && before.meshRegionPartition.empty() && target.meshRegionPartition.empty()) return Standard_True;
         // Clearing a destination's metadata is still an exact-copy operation.
         // An unannotated but different source cannot erase another mesh's basis.
         if (!SameStoredMeshCopyPayload(before.shape, target.shape)) return Standard_False;
@@ -5373,7 +5695,13 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
             if (before.meshUVAtlasVersion == 2) TDataStd_Integer::Set(destination, MeshUVAtlasSettingsAttributeID(i), before.meshUVAtlasSettings[i]);
             else destination.ForgetAttribute(MeshUVAtlasSettingsAttributeID(i));
         }
-        return Standard_True;
+        if ((!before.meshRegionPartition.empty() || !target.meshRegionPartition.empty())
+            && (before.meshRegionPartition.empty()
+                ? !ClearMeshRegionPartition(destination)
+                : !StageMeshRegionPartition(destination, before.meshRegionPartition))) return Standard_False;
+        OcctObjectTransformState copied;
+        return CaptureObjectTransformStateForLabel(destination, copied)
+            && copied.meshRegionPartition == before.meshRegionPartition;
     } catch (...) { return Standard_False; }
 }
 
@@ -9070,6 +9398,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && resolvedRepresentation == other.resolvedRepresentation
             && meshUVAtlasVersion == other.meshUVAtlasVersion
             && meshUVAtlasSettings == other.meshUVAtlasSettings
+            && meshRegionPartition == other.meshRegionPartition
             && authoredFramesPresent == other.authoredFramesPresent
             && authoredFramesIdentity == other.authoredFramesIdentity
             && profile.IsEqual(other.profile)
@@ -9130,6 +9459,8 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         if (captured.meshUVAtlasVersion == 2
             && (!shapeyard::uv::Settings{captured.meshUVAtlasSettings[0],captured.meshUVAtlasSettings[1]}.valid()
                 || captured.meshUVAtlasSettings[2]<=0 || captured.meshUVAtlasSettings[2]>12288)) return Standard_False;
+        if (ReadMeshRegionPartitionRecord(myOcafDoc, label, captured.meshRegionPartition)
+                == MeshRegionPartitionReadState::Malformed) return Standard_False;
         if (captured.documentData.IsNull() || captured.shape.IsNull()
             || captured.entityIdentifier.empty() || captured.definitionIdentifier.empty()
             || captured.storedRepresentation == OcctGeometryRepresentation::Invalid

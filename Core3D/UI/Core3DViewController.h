@@ -1997,6 +1997,14 @@ __attribute__((objc_subclassing_restricted))
 //! Isolated native winding geometry probes; no live document writes.
 - (NSDictionary<NSString *, NSArray<NSNumber *> *> *_Nullable)debugWindingGeometryProbe;
 - (NSDictionary<NSString *, id> *_Nullable)debugMeshRegionInsetKernelProbe;
+//! Passive partition-persistence qualification only. These DEBUG seams do not
+//! expose Inset or publish partition records in product operation paths.
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugMeshRegionPartitionState:(NSString *)entityIdentifier;
+- (NSData *_Nullable)debugMeshRegionPartitionBytes:(NSString *)entityIdentifier;
+- (BOOL)debugStageFirstMeshRegionPartition:(NSString *)entityIdentifier;
+- (BOOL)debugClearMeshRegionPartition:(NSString *)entityIdentifier;
+- (BOOL)debugCorruptMeshRegionPartition:(NSString *)entityIdentifier mode:(NSInteger)mode;
+- (NSData *_Nullable)debugCorruptMeshRegionPartitionArchive:(NSString *)entityIdentifier mode:(NSInteger)mode;
 //! Test-only exact-label cycle seam; empty begin and real detected-state transitions.
 - (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType
     NS_SWIFT_NAME(debugBeginEmptyBoolean(gizmoType:));

@@ -16308,6 +16308,143 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return nil; }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)debugMeshRegionPartitionState:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr || GLController == nil || GLController.viewer == nullptr) return nil;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return nil;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); TDF_Label target;
+        for (int index = 1; index <= roots.Length(); ++index)
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == entityIdentifier.UTF8String) {
+                if (!target.IsNull()) return nil; target = roots.Value(index);
+            }
+        if (target.IsNull()) return nil;
+        std::vector<Standard_Byte> bytes; OcctObjectTransformState state;
+        const bool readable = owner->CaptureMeshRegionPartition(target, bytes);
+        const bool captured = owner->CaptureObjectTransformStateForLabel(target, state);
+        return @{ @"readable": @(readable), @"present": @(!bytes.empty()), @"bytes": @(bytes.size()),
+            @"stateCaptured": @(captured), @"stateBytes": @(state.meshRegionPartition.size()),
+            @"documentValid": @(owner->ValidateGeometryRepresentations()) };
+    } catch (...) { return nil; }
+}
+- (NSData *)debugMeshRegionPartitionBytes:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr || GLController == nil || GLController.viewer == nullptr) return nil;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return nil;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); TDF_Label target;
+        for (int index = 1; index <= roots.Length(); ++index)
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == entityIdentifier.UTF8String) {
+                if (!target.IsNull()) return nil; target = roots.Value(index);
+            }
+        std::vector<Standard_Byte> bytes;
+        if (target.IsNull() || !owner->CaptureMeshRegionPartition(target, bytes)) return nil;
+        return bytes.empty() ? [NSData data] : [NSData dataWithBytes:bytes.data() length:bytes.size()];
+    } catch (...) { return nil; }
+}
+
+- (BOOL)debugStageFirstMeshRegionPartition:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr || GLController == nil || GLController.viewer == nullptr) return NO;
+    const auto owner = GLController.viewer->getDocument();
+    if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand()) return NO;
+    try {
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); TDF_Label target;
+        for (int index = 1; index <= roots.Length(); ++index)
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == entityIdentifier.UTF8String) {
+                if (!target.IsNull()) return NO; target = roots.Value(index);
+            }
+        if (target.IsNull()) return NO;
+        owner->Document()->NewCommand();
+        const bool staged = owner->DebugStageFirstMeshRegionPartition(target)
+            && owner->ValidateGeometryRepresentations();
+        if (!staged || !owner->Document()->CommitCommand()) {
+            if (owner->Document()->HasOpenCommand()) owner->Document()->AbortCommand();
+            return NO;
+        }
+        return owner->ValidateGeometryRepresentations();
+    } catch (...) {
+        try { if (!owner.IsNull() && !owner->Document().IsNull()
+            && owner->Document()->HasOpenCommand()) owner->Document()->AbortCommand(); } catch (...) {}
+        return NO;
+    }
+}
+- (BOOL)debugClearMeshRegionPartition:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr || GLController == nil || GLController.viewer == nullptr) return NO;
+    const auto owner = GLController.viewer->getDocument();
+    if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand()) return NO;
+    try {
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); TDF_Label target;
+        for (int index = 1; index <= roots.Length(); ++index)
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == entityIdentifier.UTF8String) {
+                if (!target.IsNull()) return NO; target = roots.Value(index);
+            }
+        if (target.IsNull()) return NO;
+        owner->Document()->NewCommand();
+        const bool cleared = owner->ClearMeshRegionPartition(target);
+        if (!cleared || !owner->Document()->CommitCommand()) {
+            if (owner->Document()->HasOpenCommand()) owner->Document()->AbortCommand();
+            return NO;
+        }
+        return owner->ValidateGeometryRepresentations();
+    } catch (...) {
+        try { if (!owner.IsNull() && !owner->Document().IsNull()
+            && owner->Document()->HasOpenCommand()) owner->Document()->AbortCommand(); } catch (...) {}
+        return NO;
+    }
+}
+
+- (BOOL)debugCorruptMeshRegionPartition:(NSString *)entityIdentifier mode:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 9 || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || entityIdentifier.UTF8String == nullptr
+        || GLController == nil || GLController.viewer == nullptr) return NO;
+    const auto owner = GLController.viewer->getDocument();
+    if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand()) return NO;
+    try {
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); TDF_Label target;
+        for (int index = 1; index <= roots.Length(); ++index)
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == entityIdentifier.UTF8String) {
+                if (!target.IsNull()) return NO; target = roots.Value(index);
+            }
+        if (target.IsNull()) return NO;
+        owner->Document()->NewCommand();
+        if (!owner->DebugCorruptMeshRegionPartition(target, Standard_Integer(mode))
+            || !owner->Document()->CommitCommand()) {
+            if (owner->Document()->HasOpenCommand()) owner->Document()->AbortCommand();
+            return NO;
+        }
+        return !owner->ValidateGeometryRepresentations();
+    } catch (...) {
+        try { if (!owner.IsNull() && !owner->Document().IsNull()
+            && owner->Document()->HasOpenCommand()) owner->Document()->AbortCommand(); } catch (...) {}
+        return NO;
+    }
+}
+- (NSData *)debugCorruptMeshRegionPartitionArchive:(NSString *)entityIdentifier mode:(NSInteger)mode {
+    if (![self debugCorruptMeshRegionPartition:entityIdentifier mode:mode]
+        || GLController == nil || GLController.viewer == nullptr) return nil;
+    try {
+        const auto owner = GLController.viewer->getDocument();
+        const auto document = owner.IsNull() ? Handle(TDocStd_Document)() : owner->Document();
+        const auto application = document.IsNull() ? Handle(TDocStd_Application)()
+            : Handle(TDocStd_Application)::DownCast(document->Application());
+        if (document.IsNull() || application.IsNull() || document->HasOpenCommand()) return nil;
+        std::ostringstream stream(std::ios::out | std::ios::binary);
+        if (application->SaveAs(document, stream) != PCDM_SS_OK) return nil;
+        const std::string bytes = stream.str();
+        if (bytes.empty() || bytes.size() > 64U * 1024U * 1024U) return nil;
+        return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+    } catch (...) { return nil; }
+}
+
 - (BOOL)debugBeginEmptyBooleanWithGizmoType:(PrimitiveGizmoType)gizmoType {
     core3d::BooleanAction action = core3d::BooleanAction::BooleanSubtract;
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
