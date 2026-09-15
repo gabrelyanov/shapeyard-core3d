@@ -47,6 +47,7 @@ grep -Eq 'platform MACOS$' "$root/validation/framework-platform.txt" || die "fra
 grep -Eq 'minos 14\.2$' "$root/validation/framework-platform.txt" || die "unexpected deployment target"
 shasum -a 256 "$binary" > "$root/validation/framework.sha256"
 framework_dir="$root/DerivedData/Build/Products/Release"
+"$framework_dir/Core3DViewerProbe" | tee "$root/validation/shared-viewer-probe.txt"
 xcrun --sdk macosx clang++ -std=c++20 -fobjc-arc -arch arm64 \
   -mmacosx-version-min=14.2 -I "$package/include" -I "$core_root/Core3D/OCCTKit" \
   "$script_dir/macos_core3d_image_export_probe.mm" \
@@ -55,4 +56,4 @@ xcrun --sdk macosx clang++ -std=c++20 -fobjc-arc -arch arm64 \
   "-Wl,-rpath,$framework_dir" -o "$root/validation/image-export-probe"
 "$root/validation/image-export-probe" | tee "$root/validation/image-export-probe.txt"
 /usr/bin/python3 -I -B "$script_dir/verify_occt_macos_package.py" "$package" | tee "$root/validation/package-after.txt"
-printf 'Shared Core3D framework and native PNG probe passed for macOS arm64; editor UI qualification remains pending.\n'
+printf 'Shared Core3D framework, native viewer and PNG probes passed for macOS arm64; editor UI qualification remains pending.\n'

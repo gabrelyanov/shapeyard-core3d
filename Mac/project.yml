@@ -206,8 +206,26 @@ targets:
       - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundle.mm
       - path: @CORE3D_SOURCE_ROOT@/Bundle/AssetBundleItem.m
 
+  Core3DViewerProbe:
+    type: tool
+    platform: macOS
+    settings:
+      base:
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path"
+        OTHER_LDFLAGS: ""
+        DEFINES_MODULE: NO
+        BUILD_LIBRARY_FOR_DISTRIBUTION: NO
+    dependencies:
+      - target: Core3D
+        embed: false
+      - sdk: AppKit.framework
+      - sdk: OpenGL.framework
+    sources:
+      - path: "@CORE3D_SOURCE_ROOT@/../Scripts/probes/macos_shared_core3d_viewer_probe.mm"
+
 schemes:
   Core3D:
     build:
       targets:
         Core3D: all
+        Core3DViewerProbe: all
