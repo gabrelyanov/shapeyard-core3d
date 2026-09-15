@@ -16,6 +16,7 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/OrthoProjectionType.h>
 #import <Core3D/Core3DModelCapability.h>
 #import <Core3D/Core3DTransformInspectorSnapshot.h>
+#import <Core3D/Core3DSharedModelingValues.h>
 #import <Core3D/Core3DSceneSnapshot.h>
 #import <Core3D/Core3DNativeExportOperation.h>
 #import <Core3D/Core3DNativeImportOperation.h>

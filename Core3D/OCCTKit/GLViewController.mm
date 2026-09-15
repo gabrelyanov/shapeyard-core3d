@@ -959,6 +959,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 - (void)checkSelections;
+- (void)performNativeHistoryDirection:(NativeHistoryDirection)direction;
 - (void)addCube:(UIBarButtonItem *)sender;
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
 - (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type;
@@ -2135,173 +2136,32 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (void)undo {
-	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
-		return;
-	}
-	PrimitiveGizmoType currentType = [self getGizmoType];
-	const BOOL wasBoolean = IsBooleanGizmo(currentType);
-		const std::shared_ptr<ShapeInteractor> shapeInteractor =
-			_viewer->getShapeInteractor();
-		if (shapeInteractor != nullptr
-			&& shapeInteractor->hasActiveBevel()) {
-			const BOOL didCancel = shapeInteractor->cancelChamfer();
-			[self checkSelections];
-			[self requestRender];
-			if (didCancel && _delegate
-				&& [_delegate respondsToSelector:
-					@selector(viewer:didEndPrimaryInteractionCancelled:)]) {
-				[_delegate viewer:self
-					didEndPrimaryInteractionCancelled:YES];
-			}
-			return;
-		}
-		if (shapeInteractor != nullptr
-		&& (currentType == PrimitiveGizmoTypeExtrude
-			|| shapeInteractor->hasActiveExtrusion())) {
-		if (shapeInteractor->cancelExtrusion()) {
-			_viewer->getObjectInteractor()->setManipulatorType(
-				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
-		}
-		[self requestRender];
-		return;
-	}
-	if (shapeInteractor != nullptr
-		&& (currentType == PrimitiveGizmoTypeShell
-			|| shapeInteractor->hasActiveShell())) {
-		if (shapeInteractor->cancelShell()) {
-			_viewer->getObjectInteractor()->setManipulatorType(
-				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
-		}
-		[self checkSelections];
-		[self requestRender];
-		return;
-	}
-	if (IsBooleanGizmo(currentType)) {
-		if (![self retireBooleanActionForGizmoType:currentType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeMirror) {
-		if (!_viewer->getObjectInteractor()->cancelMirror()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
-		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-		[self checkSelections];
-		[self requestRender];
-		return;
-	} else if (currentType == PrimitiveGizmoTypeRadialArray) {
-		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-		[self checkSelections];
-		[self requestRender];
-		return;
-	}
-	_viewer->getObjectInteractor()->detachManipulator(false);
-	if (_viewer->getDocument()->canUndo()
-		&& _viewer->getDocument()->undo()) {
-		_viewer->redrawDocument();
-	}
-	if (wasBoolean) {
-		(void)[self restoreBooleanActionForRetainedGizmoType:currentType];
-	}
-	[self checkSelections];
-	[self requestRender];
+    [self performNativeHistoryDirection:NativeHistoryDirection::Undo];
 }
 
 - (void)redo {
-	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
-		return;
-	}
-	PrimitiveGizmoType currentType = [self getGizmoType];
-	const BOOL wasBoolean = IsBooleanGizmo(currentType);
-		const std::shared_ptr<ShapeInteractor> shapeInteractor =
-			_viewer->getShapeInteractor();
-		if (shapeInteractor != nullptr
-			&& shapeInteractor->hasActiveBevel()) {
-			const BOOL didCancel = shapeInteractor->cancelChamfer();
-			[self checkSelections];
-			[self requestRender];
-			if (didCancel && _delegate
-				&& [_delegate respondsToSelector:
-					@selector(viewer:didEndPrimaryInteractionCancelled:)]) {
-				[_delegate viewer:self
-					didEndPrimaryInteractionCancelled:YES];
-			}
-			return;
-		}
-		if (shapeInteractor != nullptr
-		&& (currentType == PrimitiveGizmoTypeExtrude
-			|| shapeInteractor->hasActiveExtrusion())) {
-		if (shapeInteractor->cancelExtrusion()) {
-			_viewer->getObjectInteractor()->setManipulatorType(
-				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
-		}
-		[self requestRender];
-		return;
-	}
-	if (shapeInteractor != nullptr
-		&& (currentType == PrimitiveGizmoTypeShell
-			|| shapeInteractor->hasActiveShell())) {
-		if (shapeInteractor->cancelShell()) {
-			_viewer->getObjectInteractor()->setManipulatorType(
-				PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
-		}
-		[self checkSelections];
-		[self requestRender];
-		return;
-	}
-	if (IsBooleanGizmo(currentType)) {
-		if (![self retireBooleanActionForGizmoType:currentType]) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeMirror) {
-		if (!_viewer->getObjectInteractor()->cancelMirror()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-	} else if (currentType == PrimitiveGizmoTypeLinearArray) {
-		if (!_viewer->getObjectInteractor()->cancelLinearArray()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-		[self checkSelections];
-		[self requestRender];
-		return;
-	} else if (currentType == PrimitiveGizmoTypeRadialArray) {
-		if (!_viewer->getObjectInteractor()->cancelRadialArray()) {
-			[self checkSelections];
-			[self requestRender];
-			return;
-		}
-		[self checkSelections];
-		[self requestRender];
-		return;
-	}
-	_viewer->getObjectInteractor()->detachManipulator(false);
-	if (_viewer->getDocument()->canRedo()
-		&& _viewer->getDocument()->redo()) {
-		_viewer->redrawDocument();
-	}
-	if (wasBoolean) {
-		(void)[self restoreBooleanActionForRetainedGizmoType:currentType];
-	}
-	[self checkSelections];
-	[self requestRender];
+    [self performNativeHistoryDirection:NativeHistoryDirection::Redo];
+}
+
+- (void)performNativeHistoryDirection:(NativeHistoryDirection)direction {
+    if (_viewer == nullptr) return;
+    const NativeHistoryTransition result = _viewer->performHistory(direction);
+    if (result.reconcileBooleanTool) {
+        if (_delegate != nil && [_delegate respondsToSelector:
+            @selector(viewerDidFailToRetainBooleanMode:)]) {
+            [_delegate viewerDidFailToRetainBooleanMode:self];
+        } else {
+            _viewer->getObjectInteractor()->setManipulatorType(
+                PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+        }
+    }
+    if (result.refreshSelection) [self checkSelections];
+    if (result.requestRender) [self requestRender];
+    if (result.primaryInteractionCancelled && _delegate != nil
+        && [_delegate respondsToSelector:
+            @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+        [_delegate viewer:self didEndPrimaryInteractionCancelled:YES];
+    }
 }
 
 - (Core3DSelectionTypeChangeResult)
@@ -3507,59 +3367,26 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type {
     BooleanAction action = BooleanAction::BooleanSubtract;
-    if (!TryBooleanActionForGizmo(type, action)) {
-        return YES;
-    }
-    if (_viewer == nullptr
-        || _viewer->getObjectInteractor() == nullptr) {
-        return NO;
-    }
-    if ([self getGizmoType] != type) {
-        // A document redraw deliberately recreates stateful tools as None.
-        // Starting only a Boolean controller from the stale enum would fabricate
-        // a hidden ledger whose native/public gizmo authority is None. No-history
-        // retention still passes because its original native enum remains exact.
-        return NO;
-    }
-    if (_viewer->getObjectInteractor()->hasActiveBoolean(action)) {
-        return YES;
-    }
-    if (_viewer->getObjectInteractor()->beginBoolean(action)) {
-        return YES;
-    }
-    if (_viewer->getObjectInteractor()->hasActiveBoolean(action)
-        || _viewer->getObjectInteractor()->hasUnresolvedBoolean()) {
-        // Cleanup is still retryable through the retained Boolean tool.
-        return NO;
-    }
-    // A retained Boolean manipulator with no matching controller action is an
-    // inert tool. Synchronize the public and native layers while exiting; do
-    // not mutate the native manipulator behind the owner's cached UI state.
-    if (_delegate != nil
-        && [_delegate respondsToSelector:
+    if (!TryBooleanActionForGizmo(type, action)) return YES;
+    if (_viewer == nullptr) return NO;
+    const NativeBooleanRetention result = _viewer->restoreBooleanAction(action);
+    if (result == NativeBooleanRetention::Retained) return YES;
+    if (result == NativeBooleanRetention::HostReconciliationRequired) {
+        if (_delegate != nil && [_delegate respondsToSelector:
             @selector(viewerDidFailToRetainBooleanMode:)]) {
-        [_delegate viewerDidFailToRetainBooleanMode:self];
-    } else {
-        _viewer->getObjectInteractor()->setManipulatorType(
-            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+            [_delegate viewerDidFailToRetainBooleanMode:self];
+        } else {
+            _viewer->getObjectInteractor()->setManipulatorType(
+                PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+        }
     }
     return NO;
 }
 
 - (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type {
     BooleanAction action = BooleanAction::BooleanSubtract;
-    if (!TryBooleanActionForGizmo(type, action)) {
-        return YES;
-    }
-    if (_viewer == nullptr
-        || _viewer->getObjectInteractor() == nullptr) {
-        return NO;
-    }
-    const std::shared_ptr<ObjectInteractor> anInteractor =
-        _viewer->getObjectInteractor();
-    anInteractor->cancelBoolean(action);
-    return !anInteractor->hasUnresolvedBoolean()
-        && !anInteractor->hasActiveBoolean(action);
+    if (!TryBooleanActionForGizmo(type, action)) return YES;
+    return _viewer != nullptr && _viewer->retireBooleanAction(action);
 }
 
 - (BOOL) hasTrialMirrorObjects {

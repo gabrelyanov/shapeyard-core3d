@@ -37,6 +37,25 @@
 namespace core3d {
     typedef unsigned char selection_t;
 
+    enum class NativeHistoryDirection { Undo, Redo };
+    enum class NativeHistoryOutcome {
+        Unavailable, PreviewCancelled, PreviewCancellationFailed,
+        NoHistory, HistoryChanged, HistoryFailed,
+    };
+    enum class NativeBooleanRetention {
+        Retained, Unavailable, HostReconciliationRequired,
+    };
+    //! Native transition facts, followed by ordered host presentation effects.
+    //! A changed document and a failed redraw remain distinguishable.
+    struct NativeHistoryTransition {
+        NativeHistoryOutcome outcome = NativeHistoryOutcome::Unavailable;
+        bool documentRedrawn = false;
+        bool refreshSelection = false;
+        bool requestRender = false;
+        bool primaryInteractionCancelled = false;
+        bool reconcileBooleanTool = false;
+    };
+
     enum class AssetImportResult {
         Success = 0,
         InvalidData,
@@ -357,6 +376,12 @@ namespace core3d {
         bool hasUnresolvedDuplicate() const noexcept;
         bool hasUnresolvedOrdinaryEdit() const noexcept;
         bool hasUnresolvedEdit() const noexcept;
+        //! Main-thread, preview-aware history shared by native platform hosts.
+        //! Host order: Boolean tool reconciliation, selection, render, then
+        //! primary-interaction cancellation notification when requested.
+        NativeHistoryTransition performHistory(NativeHistoryDirection direction);
+        bool retireBooleanAction(BooleanAction action);
+        NativeBooleanRetention restoreBooleanAction(BooleanAction action);
         OrdinaryEditLease beginOrdinaryTransform(const std::vector<OrdinaryTransformChange>& changes,
                                                  OrdinaryEditResult* failure = nullptr) noexcept;
         OrdinaryEditResult reconcileOrdinaryEdit() noexcept;

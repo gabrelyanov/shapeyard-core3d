@@ -138,6 +138,8 @@ targets:
         headerVisibility: public
       - path: @CORE3D_SOURCE_ROOT@/UI/Core3DTransformInspectorSnapshot.h
         headerVisibility: public
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DSharedModelingValues.h
+        headerVisibility: public
       - path: @CORE3D_SOURCE_ROOT@/Viewport/Core3DSceneSnapshot.h
         headerVisibility: public
       - path: @CORE3D_SOURCE_ROOT@/Export/Core3DNativeExportOperation.h
@@ -167,6 +169,7 @@ targets:
       - path: @CORE3D_SOURCE_ROOT@/OCCTKit/Core3DQueuedAssetRequest.mm
 
       # Shared viewer and native editing/interactor closure.
+      - path: @CORE3D_SOURCE_ROOT@/UI/Core3DModelingTypes.mm
       - path: @CORE3D_SOURCE_ROOT@/UI/Core3DViewer.mm
       - path: @CORE3D_SOURCE_ROOT@/UI/Core3DView.cpp
       - path: @CORE3D_SOURCE_ROOT@/UI/Core3DContext.cpp

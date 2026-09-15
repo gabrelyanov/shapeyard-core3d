@@ -1305,6 +1305,160 @@ bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
     return result;
 }
 
+namespace {
+std::optional<BooleanAction> HistoryBooleanAction(PrimitiveManipulatorType type)
+{
+    switch (type) {
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeSubtract:
+            return BooleanAction::BooleanSubtract;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeUnion:
+            return BooleanAction::BooleanUnion;
+        case PrimitiveManipulatorType::PrimitiveGizmoTypeIntersect:
+            return BooleanAction::BooleanIntersect;
+        default: return std::nullopt;
+    }
+}
+}
+
+bool Core3DViewer::retireBooleanAction(BooleanAction action)
+{
+    if (![NSThread isMainThread] || !_objectInteractor
+        || (action != BooleanAction::BooleanSubtract
+            && action != BooleanAction::BooleanUnion
+            && action != BooleanAction::BooleanIntersect)) return false;
+    const auto objectInteractor = _objectInteractor;
+    objectInteractor->cancelBoolean(action);
+    return _objectInteractor == objectInteractor
+        && !objectInteractor->hasUnresolvedBoolean()
+        && !objectInteractor->hasActiveBoolean(action);
+}
+
+NativeBooleanRetention Core3DViewer::restoreBooleanAction(BooleanAction action)
+{
+    if (![NSThread isMainThread] || !_objectInteractor)
+        return NativeBooleanRetention::Unavailable;
+    const auto objectInteractor = _objectInteractor;
+    const auto retained = HistoryBooleanAction(objectInteractor->getManipulatorType());
+    // Redraw recreates stateful tools as None. A stale host enum must not
+    // fabricate a hidden Boolean ledger after committed history changed.
+    if (!retained || *retained != action)
+        return NativeBooleanRetention::Unavailable;
+    const bool active = objectInteractor->hasActiveBoolean(action)
+        || objectInteractor->beginBoolean(action);
+    if (_objectInteractor != objectInteractor)
+        return NativeBooleanRetention::Unavailable;
+    if (active) {
+        return HistoryBooleanAction(objectInteractor->getManipulatorType()) == retained
+            && objectInteractor->hasActiveBoolean(action)
+            ? NativeBooleanRetention::Retained : NativeBooleanRetention::Unavailable;
+    }
+    if (objectInteractor->hasActiveBoolean(action)
+        || objectInteractor->hasUnresolvedBoolean())
+        return NativeBooleanRetention::Unavailable;
+    // The host owns its cached tool/UI state and must reconcile it before
+    // publishing selection/render notifications. Never silently change it here.
+    return NativeBooleanRetention::HostReconciliationRequired;
+}
+
+NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection direction)
+{
+    NativeHistoryTransition result;
+    if (![NSThread isMainThread] || !_objectInteractor || myDoc.IsNull()
+        || hasUnresolvedEdit()
+        || (direction != NativeHistoryDirection::Undo
+            && direction != NativeHistoryDirection::Redo)) return result;
+    // Preview notifications may synchronously replace the interactors. Keep the
+    // executing owners alive and stop before touching a replacement's state.
+    const auto objectInteractor = _objectInteractor;
+    const auto shapeInteractor = _shapeInteractor;
+    const Handle(OcctDocument) document = myDoc;
+    const auto ownsHistory = [&] {
+        return _objectInteractor == objectInteractor
+            && _shapeInteractor == shapeInteractor && myDoc == document;
+    };
+    const auto type = objectInteractor->getManipulatorType();
+    const auto booleanAction = HistoryBooleanAction(type);
+    const auto cancelledPreview = [&](bool cancelled, bool refreshSelection) {
+        result.outcome = cancelled ? NativeHistoryOutcome::PreviewCancelled
+                                  : NativeHistoryOutcome::PreviewCancellationFailed;
+        result.refreshSelection = refreshSelection;
+        result.requestRender = true;
+    };
+    if (shapeInteractor && shapeInteractor->hasActiveBevel()) {
+        const bool cancelled = shapeInteractor->cancelChamfer();
+        if (!ownsHistory()) return result;
+        cancelledPreview(cancelled, true);
+        result.primaryInteractionCancelled = cancelled;
+        return result;
+    }
+    if (shapeInteractor
+        && (type == PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude
+            || shapeInteractor->hasActiveExtrusion())) {
+        const bool cancelled = shapeInteractor->cancelExtrusion();
+        if (!ownsHistory()) return result;
+        if (cancelled) objectInteractor->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+        if (!ownsHistory()) return result;
+        cancelledPreview(cancelled, false);
+        return result;
+    }
+    if (shapeInteractor
+        && (type == PrimitiveManipulatorType::PrimitiveGizmoTypeShell
+            || shapeInteractor->hasActiveShell())) {
+        const bool cancelled = shapeInteractor->cancelShell();
+        if (!ownsHistory()) return result;
+        if (cancelled) objectInteractor->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+        if (!ownsHistory()) return result;
+        cancelledPreview(cancelled, true);
+        return result;
+    }
+    if (booleanAction) {
+        const bool cancelled = retireBooleanAction(*booleanAction);
+        if (!ownsHistory()) return result;
+        if (!cancelled) {
+            cancelledPreview(false, true);
+            return result;
+        }
+    } else if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror) {
+        const bool cancelled = objectInteractor->cancelMirror();
+        if (!ownsHistory()) return result;
+        if (!cancelled) {
+            cancelledPreview(false, true);
+            return result;
+        }
+    } else if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray) {
+        const bool cancelled = objectInteractor->cancelLinearArray();
+        if (!ownsHistory()) return result;
+        cancelledPreview(cancelled, true);
+        return result;
+    } else if (type == PrimitiveManipulatorType::PrimitiveGizmoTypeRadialArray) {
+        const bool cancelled = objectInteractor->cancelRadialArray();
+        if (!ownsHistory()) return result;
+        cancelledPreview(cancelled, true);
+        return result;
+    }
+    objectInteractor->detachManipulator(false);
+    if (!ownsHistory()) return result;
+    const bool canChange = direction == NativeHistoryDirection::Undo
+        ? document->canUndo() : document->canRedo();
+    result.outcome = NativeHistoryOutcome::NoHistory;
+    if (canChange) {
+        const bool changed = direction == NativeHistoryDirection::Undo
+            ? document->undo() : document->redo();
+        result.outcome = changed ? NativeHistoryOutcome::HistoryChanged
+                                 : NativeHistoryOutcome::HistoryFailed;
+        if (changed) result.documentRedrawn = redrawDocument();
+    }
+    if (booleanAction) {
+        result.reconcileBooleanTool = restoreBooleanAction(*booleanAction)
+            == NativeBooleanRetention::HostReconciliationRequired;
+    }
+    result.refreshSelection = true;
+    result.requestRender = true;
+    return result;
+}
+
 bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                        ShapeSelectionMode theSelectionMode) {
     if (!IsStatelessManipulatorType(theManipulatorType)) {

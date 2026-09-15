@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <OpenGL/gl3.h>
+#import <Core3D/Core3DSharedModelingValues.h>
 
 #include "Core3DViewer.h"
 
@@ -8,6 +9,7 @@
 #include <Standard_Failure.hxx>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
@@ -207,6 +209,43 @@ void requireRealCubeScene(const core3d::scene::SceneSnapshot& theScene)
 
 int runProbe()
 {
+  // These public values must link to real implementations on Mac without the
+  // UIKit controller. Exercise validated immutable editing through that header.
+  NSArray<Class> *sharedValueClasses = @[
+    [Core3DProfileCurveVertex class], [Core3DProfileCurveSegment class],
+    [Core3DProfileCurveLoop class], [Core3DSweepPathSegment class],
+    [Core3DSweepDefinition class], [Core3DRectangularLoftStation class],
+    [Core3DRectangularLoftStationEdit class], [Core3DRectangularLoftDefinition class],
+    [Core3DSavedCutSourceCoordinate class], [Core3DCylindricalCutDefinition class],
+    [Core3DProfileDefinition class], [Core3DEnclosureDefinition class]
+  ];
+  require(sharedValueClasses.count == 12, "shared value implementations missing");
+  Core3DEnclosureDefinition *enclosure = [[Core3DEnclosureDefinition alloc]
+    initWithWidth:80 depth:60 height:30 wall:2 floor:2 cornerRadius:4
+    plane:Core3DProfilePlaneXY metersPerUnit:0.001];
+  Core3DEnclosureDefinition *wider = [enclosure
+    definitionByUpdatingDimension:Core3DEnclosureDimensionWidth value:100];
+  require(enclosure != nil && wider != nil && enclosure.width == 80
+          && wider.width == 100 && wider.depth == enclosure.depth
+          && wider.metersPerUnit == enclosure.metersPerUnit,
+          "Mac shared recipe edit lost immutability, dimensions or units");
+  require([enclosure definitionByUpdatingDimension:Core3DEnclosureDimensionWall value:100] == nil,
+          "Mac shared recipe admitted an invalid wall");
+  CGPoint center = CGPointMake(2, 3);
+  NSValue *boxedCenter = [NSValue valueWithBytes:&center objCType:@encode(CGPoint)];
+  Core3DProfileDefinition *profile = [[Core3DProfileDefinition alloc]
+    initWithPoints:@[] circleCenter:boxedCenter outerRadius:10 innerRadius:2
+    holeCenters:@[] holeRadii:@[] plane:Core3DProfilePlaneXY
+    parameter:20 revolve:NO metersPerUnit:0.001];
+  require(profile != nil && profile.circleCenter != nil,
+          "Mac shared profile could not decode/encode Foundation CGPoint storage");
+  CGPoint roundTrip{};
+  [profile.circleCenter getValue:&roundTrip size:sizeof(roundTrip)];
+  require(roundTrip.x == center.x && roundTrip.y == center.y
+          && profile.outerRadius == 10 && profile.innerRadius == 2,
+          "Mac profile round-trip changed its center or radii");
+
+
   require([NSThread isMainThread],
           "shared viewer probe must run on the AppKit main thread");
   [NSApplication sharedApplication];
@@ -386,6 +425,93 @@ int runProbe()
             "camera frame is detached from the committed scene authority");
     requireValidCamera(aFrame->camera, "camera frame authority is invalid");
 
+    const auto undo = aViewer.performHistory(core3d::NativeHistoryDirection::Undo);
+    require(undo.outcome == core3d::NativeHistoryOutcome::HistoryChanged
+            && undo.documentRedrawn && undo.refreshSelection && undo.requestRender
+            && !undo.primaryInteractionCancelled && !undo.reconcileBooleanTool,
+            "shared native Undo did not report its committed transition");
+    const auto anUndoneScene = aViewer.captureSceneSnapshot(640, 480);
+    require(anUndoneScene != nullptr
+            && std::none_of(anUndoneScene->instances.begin(), anUndoneScene->instances.end(),
+                [](const auto& instance) { return instance.role == core3d::scene::RenderRole::Model; }),
+            "shared native Undo left the created cube in the scene");
+    const auto noHistory = aViewer.performHistory(core3d::NativeHistoryDirection::Undo);
+    require(noHistory.outcome == core3d::NativeHistoryOutcome::NoHistory
+            && !noHistory.documentRedrawn && noHistory.refreshSelection
+            && noHistory.requestRender, "empty native history reported a mutation");
+    const auto redo = aViewer.performHistory(core3d::NativeHistoryDirection::Redo);
+    require(redo.outcome == core3d::NativeHistoryOutcome::HistoryChanged
+            && redo.documentRedrawn && redo.refreshSelection && redo.requestRender,
+            "shared native Redo did not restore the committed creation");
+    const auto aRedoneScene = aViewer.captureSceneSnapshot(640, 480);
+    require(aRedoneScene != nullptr, "shared native Redo did not publish a scene");
+    requireRealCubeScene(*aRedoneScene);
+    require(aRedoneScene->instances.size() == aScene->instances.size()
+            && aRedoneScene->instances.front().entityIdentifier
+                == aScene->instances.front().entityIdentifier
+            && aRedoneScene->revisions.model > aScene->revisions.model,
+            "shared native history lost cube identity or model revision authority");
+
+    // Real synchronous tool notifications replace both interactors during
+    // cancellation. History must keep the executing owner alive, refuse the
+    // stale transition, and preserve the committed cube for a subsequent Undo.
+    const auto unionAction = core3d::BooleanAction::BooleanUnion;
+    const auto unionTool = core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeUnion;
+    for (const bool useHistory : {true, false}) {
+      aViewer.getObjectInteractor()->setManipulatorType(unionTool);
+      require(aViewer.getObjectInteractor()->beginBoolean(unionAction),
+              "could not begin Boolean callback replacement fixture");
+      const std::weak_ptr<core3d::ObjectInteractor> oldOwner = aViewer.getObjectInteractor();
+      bool notified = false, replaced = false, aliveInCallback = false;
+      aViewer.setBooleanPreviewStateChangedCallback([&] {
+        if (notified) return;
+        notified = true;
+        replaced = aViewer.redrawDocument();
+        aliveInCallback = !oldOwner.expired();
+      });
+      if (useHistory) {
+        const auto refused = aViewer.performHistory(core3d::NativeHistoryDirection::Undo);
+        require(refused.outcome == core3d::NativeHistoryOutcome::Unavailable
+                && !refused.documentRedrawn && !refused.refreshSelection
+                && !refused.requestRender && !refused.reconcileBooleanTool,
+                "history continued after a callback replaced its owners");
+      } else {
+        require(!aViewer.retireBooleanAction(unionAction),
+                "Boolean retirement claimed success for a replaced owner");
+      }
+      aViewer.setBooleanPreviewStateChangedCallback({});
+      require(notified && replaced && aliveInCallback && oldOwner.expired(),
+              "cancel callback did not preserve then release its executing owner");
+      const auto preserved = aViewer.captureSceneSnapshot(640, 480);
+      require(preserved != nullptr, "callback replacement lost scene authority");
+      requireRealCubeScene(*preserved);
+    }
+    {
+      aViewer.getObjectInteractor()->setManipulatorType(unionTool);
+      const std::weak_ptr<core3d::ObjectInteractor> oldOwner = aViewer.getObjectInteractor();
+      bool notified = false, replaced = false, aliveInCallback = false;
+      aViewer.setBooleanPreviewStateChangedCallback([&] {
+        if (notified) return;
+        notified = true;
+        // Retire the just-created ledger before requesting a permitted redraw.
+        aViewer.getObjectInteractor()->cancelBoolean(unionAction);
+        replaced = aViewer.redrawDocument();
+        aliveInCallback = !oldOwner.expired();
+      });
+      require(aViewer.restoreBooleanAction(unionAction)
+                == core3d::NativeBooleanRetention::Unavailable,
+              "Boolean restoration claimed retention after owner replacement");
+      aViewer.setBooleanPreviewStateChangedCallback({});
+      require(notified && replaced && aliveInCallback && oldOwner.expired(),
+              "begin callback did not preserve then release its executing owner");
+    }
+    require(aViewer.performHistory(core3d::NativeHistoryDirection::Undo).outcome
+              == core3d::NativeHistoryOutcome::HistoryChanged,
+            "callback refusal consumed the committed Undo entry");
+    require(aViewer.performHistory(core3d::NativeHistoryDirection::Redo).outcome
+              == core3d::NativeHistoryOutcome::HistoryChanged,
+            "callback refusal broke subsequent Redo");
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     [anAlienContext makeCurrentContext];
@@ -410,7 +536,7 @@ int runProbe()
     aViewer.release(); // Repeated terminal teardown remains harmless.
 
     aCleanup();
-    std::printf("PASS: shared Core3DViewer lifecycle, cube render/snapshot; changed pixels: %zu\n",
+    std::printf("PASS: shared Core3DViewer lifecycle, cube render/snapshot, history and callback ownership; changed pixels: %zu\n",
                 aChangedPixelCount);
     return 0;
   }
