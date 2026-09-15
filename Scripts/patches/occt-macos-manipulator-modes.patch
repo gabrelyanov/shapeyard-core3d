@@ -1,0 +1,16 @@
+--- a/src/AIS/AIS_ManipulatorMode.hxx
++++ b/src/AIS/AIS_ManipulatorMode.hxx
+@@ -23,7 +23,10 @@
+   AIS_MM_Translation = 1,
+   AIS_MM_Rotation,
+   AIS_MM_Scaling,
+-  AIS_MM_TranslationPlane
++  AIS_MM_ScalingUniform,
++  AIS_MM_TranslationPlane,
++  AIS_MM_MirroringPlaneNeg,
++  AIS_MM_MirroringPlanePos
+ };
+ 
+-#endif
+\ No newline at end of file
++#endif

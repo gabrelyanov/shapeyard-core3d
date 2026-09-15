@@ -194,15 +194,18 @@ Core3DCocoa_Window::Core3DCocoa_Window (const Standard_CString theTitle,
 Core3DCocoa_Window::Core3DCocoa_Window (UIView* theViewNS)
 : Cocoa_Window(theViewNS)
 #else
-Cocoa_Window::Cocoa_Window (NSView* theViewNS)
+Core3DCocoa_Window::Core3DCocoa_Window (NSView* theViewNS)
 : Cocoa_Window(theViewNS)
 #endif
 {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 #if defined(HAVE_OBJC_ARC)
     myHView = theViewNS;
 #else
     myHView = [theViewNS retain];
 #endif
+#endif
+    // On macOS the base constructor already owns the view's single retain.
     DoResize();
 }
 

@@ -8,11 +8,23 @@ readonly RAPIDJSON_REPOSITORY="https://github.com/Tencent/rapidjson.git"
 readonly RAPIDJSON_COMMIT="24b5e7a8b27f42fa16b96fc70aade9106cf7102f"
 readonly DEPLOYMENT_TARGET=14.2
 readonly ARCHITECTURE=arm64
+readonly PARALLEL_JOBS=2
 readonly CANONICAL_PREFIX=/shapeyard/occt-macos-build
 readonly OWNER_TOKEN=shapeyard-occt-macos-v1
+readonly MODE_ORIGINAL_SHA256=c2e1990ee11c2a6173374c85d68ee0cc363552c4da45cb336c7a69ebf5ca22d4
+readonly MODE_APP_SHA256=2c53a9ea911b6918ca641ef4965b9f8a4f032efab38db7f6d64be5fdc8161f27
+readonly MODE_PATCH_SHA256=776dec69a55c2d006b67cb175017b059f59633a8ab765ef2cda938fe47d9e4d6
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+graphics_profile=${SHAPEYARD_OCCT_MACOS_GRAPHICS:-0}
+[[ "$graphics_profile" == 0 || "$graphics_profile" == 1 ]] || die "invalid graphics profile"
+use_opengl=OFF
+graphics_driver=none
+if [[ "$graphics_profile" == 1 ]]; then
+  use_opengl=ON
+  graphics_driver=desktop-opengl
+fi
 
 (( $# == 1 )) || die "usage: $0 /private/tmp/shapeyard-occt-macos-UUID"
 root=$1
@@ -47,8 +59,10 @@ output_root="$root/install"
 validation_root="$root/validation"
 mkdir -p -m 700 "$output_root" "$validation_root"
 
+checksum() { shasum -a 256 "$1" | awk '{print $1}'; }
+
 checkout_pin() {
-  local label=$1 repository=$2 commit=$3 destination=$4 actual
+  local label=$1 repository=$2 commit=$3 destination=$4 actual status
   if [[ -z "${SHAPEYARD_OCCT_MACOS_RESUME_ID:-}" ]]; then
     git init -q "$destination"
     git -C "$destination" remote add origin "$repository"
@@ -59,12 +73,33 @@ checkout_pin() {
   [[ "$actual" == "$commit" ]] || die "$label resolved to $actual"
   [[ "$(git -C "$destination" remote get-url origin)" == "$repository" ]] \
     || die "$label origin changed"
-  [[ -z "$(git -C "$destination" status --porcelain --untracked-files=all)" ]] \
-    || die "$label checkout is dirty"
+  status=$(git -C "$destination" status --porcelain --untracked-files=all)
+  if [[ "$label" == OCCT && "$status" == ' M src/AIS/AIS_ManipulatorMode.hxx' ]]; then
+    [[ "$(checksum "$destination/src/AIS/AIS_ManipulatorMode.hxx")" == "$MODE_APP_SHA256" ]] \
+      || die "unrecognized OCCT mode patch"
+  else
+    [[ -z "$status" ]] || die "$label checkout is dirty"
+  fi
 }
 
 checkout_pin OCCT "$OCCT_REPOSITORY" "$OCCT_COMMIT" "$occt_source"
 checkout_pin RapidJSON "$RAPIDJSON_REPOSITORY" "$RAPIDJSON_COMMIT" "$rapidjson_source"
+mode_patch="$script_dir/patches/occt-macos-manipulator-modes.patch"
+[[ "$(checksum "$mode_patch")" == "$MODE_PATCH_SHA256" ]] || die "mode patch changed"
+[[ "$(checksum "$script_dir/../Core3D/occt/inc/AIS_ManipulatorMode.hxx")" == "$MODE_APP_SHA256" ]] \
+  || die "app manipulator contract changed; dependency review required"
+[[ "$(git -C "$occt_source" show "$OCCT_COMMIT:src/AIS/AIS_ManipulatorMode.hxx" | shasum -a 256 | awk '{print $1}')" == "$MODE_ORIGINAL_SHA256" ]] \
+  || die "original OCCT mode header changed"
+if [[ "$(checksum "$occt_source/src/AIS/AIS_ManipulatorMode.hxx")" == "$MODE_ORIGINAL_SHA256" ]]; then
+  git -C "$occt_source" apply --check "$mode_patch"
+  git -C "$occt_source" apply "$mode_patch"
+fi
+verify_occt_patch() {
+  [[ "$(git -C "$occt_source" status --porcelain --untracked-files=all)" == ' M src/AIS/AIS_ManipulatorMode.hxx' \
+    && "$(checksum "$occt_source/src/AIS/AIS_ManipulatorMode.hxx")" == "$MODE_APP_SHA256" ]] \
+    || die "OCCT source differs from the sole reviewed mode patch"
+}
+verify_occt_patch
 grep -Eq '^#define OCC_VERSION_COMPLETE +"7\.8\.0"$' \
   "$occt_source/src/Standard/Standard_Version.hxx" || die "OCCT is not 7.8.0"
 [[ -f "$rapidjson_source/include/rapidjson/document.h" ]] || die "RapidJSON headers missing"
@@ -80,6 +115,9 @@ toolkits=(
   TKStdL TKTObj TKTopAlgo TKV3d TKVCAF TKXCAF TKXMesh TKXSBase TKXml TKXmlL
   TKXmlTObj TKXmlXCAF TKernel
 )
+if [[ "$graphics_profile" == 1 ]]; then
+  toolkits+=(TKOpenGl)
+fi
 sdk_path=$(xcrun --sdk macosx --show-sdk-path)
 flags="-ffile-prefix-map=$root=$CANONICAL_PREFIX"
 flags+=" -fmacro-prefix-map=$root=$CANONICAL_PREFIX"
@@ -94,7 +132,7 @@ cmake -S "$occt_source" -B "$build_root" -G 'Unix Makefiles' \
   -DINSTALL_DIR:PATH="$output_root" \
   -DINSTALL_DIR_INCLUDE:PATH=include \
   -DINSTALL_DIR_LIB:PATH=lib \
-  -DUSE_OPENGL:BOOL=OFF -DUSE_GLES2:BOOL=OFF \
+  -DUSE_OPENGL:BOOL="$use_opengl" -DUSE_GLES2:BOOL=OFF \
   -DCMAKE_C_FLAGS:STRING="$flags" \
   -DCMAKE_CXX_FLAGS:STRING="$flags" \
   -DBUILD_LIBRARY_TYPE:STRING=Static -DBUILD_SHARED_LIBS:BOOL=OFF \
@@ -127,11 +165,11 @@ grep -Fxq 'USE_RAPIDJSON:BOOL=ON' "$cache" || die "RapidJSON disabled"
 grep -Fxq 'USE_FREETYPE:BOOL=OFF' "$cache" || die "FreeType unexpectedly enabled"
 grep -Fxq 'BUILD_RELEASE_DISABLE_EXCEPTIONS:BOOL=OFF' "$cache" \
   || die "release exceptions unexpectedly disabled"
-for setting in 'USE_OPENGL:BOOL=OFF' 'USE_GLES2:BOOL=OFF' \
+for setting in "USE_OPENGL:BOOL=$use_opengl" 'USE_GLES2:BOOL=OFF' \
   'BUILD_LIBRARY_TYPE:STRING=Static' 'BUILD_CPP_STANDARD:STRING=C++17'; do
   grep -Fxq "$setting" "$cache" || die "configuration drift: $setting"
 done
-cmake --build "$build_root" --parallel 4
+cmake --build "$build_root" --parallel "$PARALLEL_JOBS"
 cmake --install "$build_root" > "$root/install.log"
 
 /usr/bin/python3 -I -B - "$output_root" "${toolkits[@]}" <<'PY'
@@ -153,6 +191,8 @@ mkdir -p -m 700 "$output_root/licenses"
 cp "$occt_source/LICENSE_LGPL_21.txt" "$output_root/licenses/"
 cp "$occt_source/OCCT_LGPL_EXCEPTION.txt" "$output_root/licenses/"
 cp "$rapidjson_source/license.txt" "$output_root/licenses/RapidJSON-license.txt"
+mkdir -p -m 700 "$output_root/source-patches"
+cp "$mode_patch" "$output_root/source-patches/"
 
 for toolkit in "${toolkits[@]}"; do
   # CMake's install-time ranlib may rewrite archive metadata. Qualify the
@@ -184,13 +224,12 @@ print(archive + ": verified " + str(len(members)) + " macOS members")
 PY
 done
 
-for header in Standard_Version.hxx TDocStd_Document.hxx XCAFDoc_ShapeTool.hxx \
+for header in AIS_ManipulatorMode.hxx Standard_Version.hxx TDocStd_Document.hxx XCAFDoc_ShapeTool.hxx \
   Poly_Triangulation.hxx RWGltf_CafReader.hxx; do
   cmp "$script_dir/../Core3D/occt/inc/$header" "$output_root/include/$header"
 done
 
-[[ -z "$(git -C "$occt_source" status --porcelain --untracked-files=all)" ]] \
-  || die "build modified OCCT source"
+verify_occt_patch
 [[ -z "$(git -C "$rapidjson_source" status --porcelain --untracked-files=all)" ]] \
   || die "build modified RapidJSON source"
 # Installed public headers must be standalone, not generated build-tree forwarding headers.
@@ -225,6 +264,22 @@ if sum(scene["accessors"][p["indices"]]["count"] for p in primitives) != 36:
 print("PASS: independent GLB structure and twelve-triangle box check")
 PY
 
+if [[ "$graphics_profile" == 1 ]]; then
+  # The existing Cocoa adapter owns its Objective-C fields manually; the
+  # caller/probe is ARC in a separate translation unit.
+  xcrun --sdk macosx clang++ -std=c++17 -fno-objc-arc -arch "$ARCHITECTURE" \
+    -mmacosx-version-min="$DEPLOYMENT_TARGET" -isysroot "$sdk_path" \
+    -I "$output_root/include" -c "$script_dir/../Core3D/OCCTKit/Core3DCocoa_Window.mm" \
+    -o "$validation_root/Core3DCocoa_Window.o"
+  xcrun --sdk macosx clang++ -std=c++17 -fobjc-arc -arch "$ARCHITECTURE" \
+    -mmacosx-version-min="$DEPLOYMENT_TARGET" -isysroot "$sdk_path" \
+    -I "$output_root/include" "$script_dir/probes/macos_occt_graphics_probe.mm" \
+    "$validation_root/Core3DCocoa_Window.o" "$output_root"/lib/*.a -framework Cocoa -framework IOKit \
+    -framework CoreGraphics -framework ImageIO -framework OpenGL \
+    -o "$validation_root/graphics-probe"
+  "$validation_root/graphics-probe"
+fi
+
 manifest="$output_root/OCCT_MACOS_ARM64_BUILD_MANIFEST.txt"
 xcode_version=$(xcodebuild -version | tr '\n' ' ' | sed 's/ $//')
 cmake_version=$(cmake --version | awk 'NR==1 {print $3}')
@@ -232,9 +287,11 @@ sdk_version=$(xcrun --sdk macosx --show-sdk-version)
 {
   printf 'schema_version=1\ncomponent=OCCT_MACOS_STATIC\n'
   printf 'occt_commit=%s\nrapidjson_commit=%s\n' "$OCCT_COMMIT" "$RAPIDJSON_COMMIT"
+  printf 'manipulator_mode_patch_sha256=%s\nmanipulator_mode_original_sha256=%s\nmanipulator_mode_app_sha256=%s\n' \
+    "$MODE_PATCH_SHA256" "$MODE_ORIGINAL_SHA256" "$MODE_APP_SHA256"
   printf 'platform=MACOS\narchitectures=arm64\ndeployment_target=%s\n' "$DEPLOYMENT_TARGET"
-  printf 'cpp_standard=C++17\nrelease_exceptions=enabled\nparallel_jobs=4\n'
-  printf 'freetype=disabled\nocct_graphics_driver=none\n'
+  printf 'cpp_standard=C++17\nrelease_exceptions=enabled\nparallel_jobs=%s\n' "$PARALLEL_JOBS"
+  printf 'freetype=disabled\nocct_graphics_driver=%s\n' "$graphics_driver"
   printf 'xcode=%s\ncmake_version=%s\nmacosx_sdk_version=%s\n' \
     "$xcode_version" "$cmake_version" "$sdk_version"
   printf 'canonical_source_prefix=%s\n' "$CANONICAL_PREFIX"
