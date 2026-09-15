@@ -22,6 +22,7 @@ struct Cut475Scope {
 #include "NativeObservedApplication.hxx"
 #include "NativeMeshVertexMove.hxx"
 #include "NativeMeshRegionExtrude.hxx"
+#include "NativeMeshRegionInset.hxx"
 #include "NativeMeshWindingCandidate.hxx"
 #if DEBUG
 #include "NativeLiveTransactionObserverProbe.hxx"
@@ -6120,6 +6121,36 @@ Standard_Boolean OcctDocument::ValidateMeshWindingRepair(const TDF_Label& label,
     } catch (...) { return Standard_False; }
 }
 
+namespace {
+bool DecodeMeshRegionPartition(const OcctObjectTransformState& source,
+    core3d::meshedit::RegionPartition& partition,
+    const core3d::meshedit::RegionPartition*& authority) {
+    partition={}; authority=nullptr;
+    if(source.meshRegionPartition.empty())return true;
+    if(!core3d::meshedit::DecodeRegionPartition(source.meshRegionPartition.data(),
+        source.meshRegionPartition.size(),partition))return false;
+    authority=&partition;return true;
+}
+bool SameMeshRegionCandidate(const OcctMeshRegionMutationCandidate& expected,
+    const OcctMeshRegionMutationCandidate& candidate) {
+    if(expected.partition!=candidate.partition
+        || expected.centerSeedTriangle!=candidate.centerSeedTriangle
+        || expected.shape.IsNull()||candidate.shape.IsNull()
+        || expected.shape.ShapeType()!=candidate.shape.ShapeType()
+        || expected.shape.Orientation()!=candidate.shape.Orientation()
+        || !expected.shape.Location().IsEqual(candidate.shape.Location()))return false;
+    std::atomic_bool cancelled{false};core3d::meshedit::NativeMeshStorageCapture a,b;
+    if(core3d::meshedit::CaptureNativeMeshStorage(expected.shape,a,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready
+        || core3d::meshedit::CaptureNativeMeshStorage(candidate.shape,b,cancelled)
+            !=core3d::meshedit::TopologyResult::Ready)return false;
+    return a.face.Orientation()==b.face.Orientation()
+        && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
+        && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals
+        && a.deflection==b.deflection && a.triangleNodeIDs==b.triangleNodeIDs;
+}
+}
+
 Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& label,
     std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept {
     preview={};
@@ -6133,8 +6164,11 @@ Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& 
             || !core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc,label))return Standard_False;
         const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
         if(placed.IsNegative() || !std::isfinite(placed.ScaleFactor()) || placed.ScaleFactor()<=0)return Standard_False;
+        core3d::meshedit::RegionPartition partition;
+        const core3d::meshedit::RegionPartition* authority=nullptr;
+        if(!DecodeMeshRegionPartition(source,partition,authority))return Standard_False;
         std::atomic_bool cancelled{false};core3d::meshedit::PlanarRegion region;
-        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled)
+        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled,authority)
             !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
         OcctMeshRegionExtrudePreview result;result.triangleIndices=region.triangles;
         result.localUnitNormal=region.unitNormal;result.localBoundary.reserve(region.boundaryVertices.size());
@@ -6143,9 +6177,15 @@ Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& 
     } catch(...){preview={};return Standard_False;}
 }
 
+Standard_Boolean OcctDocument::CaptureMeshRegionInsetPreview(const TDF_Label& label,
+    std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept {
+    return CaptureMeshRegionExtrudePreview(label,seedTriangle,preview);
+}
+
 Standard_Boolean OcctDocument::PrepareMeshRegionExtrude(const TDF_Label& label,
-    std::uint32_t seedTriangle, Standard_Real distanceMM, TopoDS_Shape& candidate) const noexcept {
-    candidate.Nullify();
+    std::uint32_t seedTriangle, Standard_Real distanceMM,
+    OcctMeshRegionMutationCandidate& candidate) const noexcept {
+    candidate={};
     if(![NSThread isMainThread] || !std::isfinite(distanceMM) || distanceMM<=1.e-6 || distanceMM>1.e5)
         return Standard_False;
     try {
@@ -6158,8 +6198,11 @@ Standard_Boolean OcctDocument::PrepareMeshRegionExtrude(const TDF_Label& label,
         const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
         const double scale=placed.ScaleFactor();
         if(placed.IsNegative() || !std::isfinite(scale) || scale<=0)return Standard_False;
+        core3d::meshedit::RegionPartition partition,preparedPartition;
+        const core3d::meshedit::RegionPartition* authority=nullptr;
+        if(!DecodeMeshRegionPartition(source,partition,authority))return Standard_False;
         std::atomic_bool cancelled{false};core3d::meshedit::PlanarRegion region;
-        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled)
+        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled,authority)
             !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
         const auto recipe=Core3DNormalTextureRecipeForLabel(label);
         XCAFDoc_VisMaterialPBR material;
@@ -6167,31 +6210,106 @@ Standard_Boolean OcctDocument::PrepareMeshRegionExtrude(const TDF_Label& label,
         if(recipe<0 || recipe>1 || hasNormal!=(recipe==1))return Standard_False;
         TopoDS_Shape result;
         if(core3d::meshedit::PrepareRegionExtrusion(captured,prefix,region,distanceMM/scale,
-            core3d::meshedit::RegionSideUVPolicy::BoundaryStripNormalized,result,cancelled)
-            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+            core3d::meshedit::RegionSideUVPolicy::BoundaryStripNormalized,result,cancelled,
+            authority,authority?&preparedPartition:nullptr)!=core3d::meshedit::TopologyResult::Ready)
+            return Standard_False;
         if(recipe==1) {
             Standard_Size bytes=0;
             if(!ValidateNormalTextureShape(result,&bytes) || resident>64U*1024U*1024U
                 || bytes>64U*1024U*1024U-resident)return Standard_False;
         }
-        candidate=result;return Standard_True;
-    } catch(...){candidate.Nullify();return Standard_False;}
+        std::vector<std::uint8_t> encoded;
+        if(authority && !preparedPartition.empty()
+            && !core3d::meshedit::EncodeRegionPartition(preparedPartition,encoded))return Standard_False;
+        OcctMeshRegionMutationCandidate value;
+        value.shape=result;value.partition.assign(encoded.begin(),encoded.end());
+        candidate=std::move(value);return Standard_True;
+    } catch(...){candidate={};return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::PrepareMeshRegionExtrude(const TDF_Label& label,
+    std::uint32_t seedTriangle, Standard_Real distanceMM, TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    std::vector<Standard_Byte> sourcePartition;
+    if(!CaptureMeshRegionPartition(label,sourcePartition) || !sourcePartition.empty())
+        return Standard_False;
+    OcctMeshRegionMutationCandidate value;
+    if(!PrepareMeshRegionExtrude(label,seedTriangle,distanceMM,value)
+        || !value.partition.empty())return Standard_False;
+    candidate=value.shape;return Standard_True;
+}
+
+Standard_Boolean OcctDocument::ValidateMeshRegionExtrude(const TDF_Label& label,
+    std::uint32_t seedTriangle, Standard_Real distanceMM,
+    const OcctMeshRegionMutationCandidate& candidate) const noexcept {
+    try {
+        OcctMeshRegionMutationCandidate expected;
+        return PrepareMeshRegionExtrude(label,seedTriangle,distanceMM,expected)
+            && SameMeshRegionCandidate(expected,candidate);
+    } catch(...){return Standard_False;}
 }
 
 Standard_Boolean OcctDocument::ValidateMeshRegionExtrude(const TDF_Label& label,
     std::uint32_t seedTriangle, Standard_Real distanceMM, const TopoDS_Shape& candidate) const noexcept {
+    std::vector<Standard_Byte> sourcePartition;
+    if(!CaptureMeshRegionPartition(label,sourcePartition) || !sourcePartition.empty())
+        return Standard_False;
+    OcctMeshRegionMutationCandidate value;value.shape=candidate;
+    return ValidateMeshRegionExtrude(label,seedTriangle,distanceMM,value);
+}
+
+Standard_Boolean OcctDocument::PrepareMeshRegionInset(const TDF_Label& label,
+    std::uint32_t seedTriangle, Standard_Real distanceMM,
+    OcctMeshRegionMutationCandidate& candidate) const noexcept {
+    candidate={};
+    if(![NSThread isMainThread] || !std::isfinite(distanceMM) || distanceMM<=1.e-6 || distanceMM>1.e5)
+        return Standard_False;
     try {
-        TopoDS_Shape expected;
-        if(!PrepareMeshRegionExtrude(label,seedTriangle,distanceMM,expected))return Standard_False;
-        std::atomic_bool cancelled{false};core3d::meshedit::NativeMeshStorageCapture a,b;
-        if(core3d::meshedit::CaptureNativeMeshStorage(expected,a,cancelled)!=core3d::meshedit::TopologyResult::Ready
-            || core3d::meshedit::CaptureNativeMeshStorage(candidate,b,cancelled)!=core3d::meshedit::TopologyResult::Ready)
-            return Standard_False;
-        return expected.ShapeType()==candidate.ShapeType() && expected.Orientation()==candidate.Orientation()
-            && expected.Location().IsEqual(candidate.Location()) && a.face.Orientation()==b.face.Orientation()
-            && a.meshLocation.IsEqual(b.meshLocation) && a.storedNodes==b.storedNodes
-            && a.storedUVs==b.storedUVs && a.storedNormals==b.storedNormals
-            && a.deflection==b.deflection && a.triangleNodeIDs==b.triangleNodeIDs;
+        OcctObjectTransformState source;core3d::meshedit::NativeTopologyCapture captured;
+        int prefix=0;Standard_Size resident=0;
+        if(!CaptureEditableMeshSource(*this,label,source,captured,prefix,resident)
+            || source.meshUVAtlasVersion==0 || source.authoredFramesPresent
+            || captured.face.Orientation()!=TopAbs_FORWARD
+            || !core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc,label))return Standard_False;
+        const gp_Trsf placed=source.transform*captured.meshLocation.Transformation();
+        const double scale=placed.ScaleFactor();
+        if(placed.IsNegative() || !std::isfinite(scale) || scale<=0)return Standard_False;
+        core3d::meshedit::RegionPartition partition;
+        const core3d::meshedit::RegionPartition* authority=nullptr;
+        if(!DecodeMeshRegionPartition(source,partition,authority))return Standard_False;
+        std::atomic_bool cancelled{false};core3d::meshedit::PlanarRegion region;
+        if(core3d::meshedit::ResolvePlanarRegion(captured,seedTriangle,region,cancelled,authority)
+            !=core3d::meshedit::TopologyResult::Ready)return Standard_False;
+        const auto recipe=Core3DNormalTextureRecipeForLabel(label);
+        XCAFDoc_VisMaterialPBR material;
+        const bool hasNormal=TryPBRMaterialForLabel(label,material) && !material.NormalTexture.IsNull();
+        if(recipe<0 || recipe>1 || hasNormal!=(recipe==1))return Standard_False;
+        core3d::meshedit::RegionInsetCandidate inset;
+        if(core3d::meshedit::PrepareConvexRegionInset(captured,prefix,region,distanceMM/scale,
+            authority,inset,cancelled)!=core3d::meshedit::TopologyResult::Ready
+            || inset.shape.IsNull() || inset.partition.empty())return Standard_False;
+        if(recipe==1) {
+            Standard_Size bytes=0;
+            if(!ValidateNormalTextureShape(inset.shape,&bytes) || resident>64U*1024U*1024U
+                || bytes>64U*1024U*1024U-resident)return Standard_False;
+        }
+        std::vector<std::uint8_t> encoded;
+        if(!core3d::meshedit::EncodeRegionPartition(inset.partition,encoded))return Standard_False;
+        OcctMeshRegionMutationCandidate value;
+        value.shape=inset.shape;value.partition.assign(encoded.begin(),encoded.end());
+        value.centerSeedTriangle=inset.centerSeed;
+        candidate=std::move(value);return Standard_True;
+    } catch(...){candidate={};return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::ValidateMeshRegionInset(const TDF_Label& label,
+    std::uint32_t seedTriangle, Standard_Real distanceMM,
+    const OcctMeshRegionMutationCandidate& candidate) const noexcept {
+    try {
+        OcctMeshRegionMutationCandidate expected;
+        return PrepareMeshRegionInset(label,seedTriangle,distanceMM,expected)
+            && SameMeshRegionCandidate(expected,candidate)
+            && !candidate.partition.empty();
     } catch(...){return Standard_False;}
 }
 

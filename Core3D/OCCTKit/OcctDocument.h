@@ -115,6 +115,15 @@ struct OcctMeshRegionExtrudePreview {
     std::array<Standard_Real,3> localUnitNormal = {};
 };
 
+//! Prepared mesh mutation output. Partition bytes are canonical OCAF payload;
+//! empty is permitted only when no partition existed or extrusion proved that
+//! every former barrier became a natural noncoplanar boundary.
+struct OcctMeshRegionMutationCandidate {
+    TopoDS_Shape shape;
+    std::vector<Standard_Byte> partition;
+    std::uint32_t centerSeedTriangle = 0; // Inset only; session-local.
+};
+
 //! Exact durable state for transform reconciliation. Attribute presence is
 //! significant: a missing legacy default and an authored zero are not the
 //! same OCAF state, even when their resulting matrices match. No AIS handles.
@@ -840,9 +849,27 @@ public:
     Standard_EXPORT Standard_Boolean CaptureMeshRegionExtrudePreview(const TDF_Label& label,
         std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshRegionExtrude(const TDF_Label& label,
+        std::uint32_t seedTriangle, Standard_Real distanceMM,
+        OcctMeshRegionMutationCandidate& candidate) const noexcept;
+    //! Compatibility entry for the existing viewer. It succeeds only for a
+    //! legacy no-partition source, so no authority can be silently discarded.
+    Standard_EXPORT Standard_Boolean PrepareMeshRegionExtrude(const TDF_Label& label,
         std::uint32_t seedTriangle, Standard_Real distanceMM, TopoDS_Shape& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateMeshRegionExtrude(const TDF_Label& label,
+        std::uint32_t seedTriangle, Standard_Real distanceMM,
+        const OcctMeshRegionMutationCandidate& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshRegionExtrude(const TDF_Label& label,
         std::uint32_t seedTriangle, Standard_Real distanceMM, const TopoDS_Shape& candidate) const noexcept;
+    //! Convex connected planar inset. Resolution is partition-aware and the
+    //! shape plus nonempty replacement partition are prepared as one value.
+    Standard_EXPORT Standard_Boolean CaptureMeshRegionInsetPreview(const TDF_Label& label,
+        std::uint32_t seedTriangle, OcctMeshRegionExtrudePreview& preview) const noexcept;
+    Standard_EXPORT Standard_Boolean PrepareMeshRegionInset(const TDF_Label& label,
+        std::uint32_t seedTriangle, Standard_Real distanceMM,
+        OcctMeshRegionMutationCandidate& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshRegionInset(const TDF_Label& label,
+        std::uint32_t seedTriangle, Standard_Real distanceMM,
+        const OcctMeshRegionMutationCandidate& candidate) const noexcept;
     //! Marks exact Shapeyard-authored triangle-major UV storage in an open command.
     Standard_EXPORT Standard_Boolean MarkAuthoredMeshUVLayout(const TDF_Label& label) noexcept;
     Standard_EXPORT Standard_Boolean ValidateTriangleUVAtlas(const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}) const noexcept;

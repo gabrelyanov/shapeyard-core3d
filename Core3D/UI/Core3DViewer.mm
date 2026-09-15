@@ -1176,6 +1176,7 @@ void Core3DViewer::release() noexcept {
     // restored. Repeated calls are intentionally harmless.
     _meshVertexEditWork.reset();
     _meshRegionExtrudeWork.reset();
+    _meshRegionInsetWork.reset();
     _interactiveCallback = {};
     _booleanPreviewStateChangedCallback = {};
     _linearArrayPreviewStateChangedCallback = {};
@@ -4265,7 +4266,7 @@ std::optional<MeshVertexEditSnapshot> Core3DViewer::prepareMeshVertexEdit(
 std::optional<MeshVertexEditSnapshot> Core3DViewer::prepareMeshElementEdit(
     const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
     std::uint32_t width,std::uint32_t height,meshedit::ElementKind kind) noexcept {
-    if(![NSThread isMainThread] || !canBeginCommittedEdit() || _meshRegionExtrudeWork || myDoc.IsNull()
+    if(![NSThread isMainThread] || !canBeginCommittedEdit() || _meshRegionExtrudeWork || _meshRegionInsetWork || myDoc.IsNull()
         || myContext.IsNull() || width==0 || height==0)return std::nullopt;
     switch(kind) {
         case meshedit::ElementKind::Vertex:
@@ -4398,7 +4399,7 @@ struct MeshRegionExtrudeWork {
     Standard_Integer documentTime=0;
     OrdinaryTransformLedger authority;
     meshedit::NativeTopologyCapture geometry;
-    meshedit::PlanarRegion region;
+    OcctMeshRegionExtrudePreview preview;
     TDF_Label materialLabel;
     Handle(XCAFDoc_VisMaterial) material;
     Standard_Integer normalRecipe=0;
@@ -4413,7 +4414,7 @@ std::optional<MeshRegionExtrudeSnapshot> Core3DViewer::prepareMeshRegionExtrude(
     const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
     std::uint32_t width,std::uint32_t height,std::uint32_t seedTriangle) noexcept {
     if(![NSThread isMainThread] || !canBeginCommittedEdit() || _meshVertexEditWork
-        || _meshRegionExtrudeWork || myDoc.IsNull() || myContext.IsNull() || !width || !height)
+        || _meshRegionExtrudeWork || _meshRegionInsetWork || myDoc.IsNull() || myContext.IsNull() || !width || !height)
         return std::nullopt;
     try {
         const auto snapshot=captureSceneSnapshot(width,height);
@@ -4436,11 +4437,7 @@ std::optional<MeshRegionExtrudeSnapshot> Core3DViewer::prepareMeshRegionExtrude(
         auto work=std::make_shared<MeshRegionExtrudeWork>();std::atomic_bool cancelled{false};
         if(meshedit::CaptureNativeTopology(record.previous.shape,work->geometry,cancelled)
                 !=meshedit::TopologyResult::Ready
-            || meshedit::ResolvePlanarRegion(work->geometry,seedTriangle,work->region,cancelled)
-                !=meshedit::TopologyResult::Ready)return std::nullopt;
-        OcctMeshRegionExtrudePreview preview;
-        if(!myDoc->CaptureMeshRegionExtrudePreview(label,seedTriangle,preview)
-            || preview.triangleIndices!=work->region.triangles)return std::nullopt;
+            || !myDoc->CaptureMeshRegionExtrudePreview(label,seedTriangle,work->preview))return std::nullopt;
         const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(label,work->materialLabel);
         work->material=XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
         if(linked!=!work->material.IsNull() || linked!=!work->materialLabel.IsNull())return std::nullopt;
@@ -4453,12 +4450,11 @@ std::optional<MeshRegionExtrudeSnapshot> Core3DViewer::prepareMeshRegionExtrude(
         work->presentationRevision=presentationRevision;work->width=width;work->height=height;
         work->seedTriangle=seedTriangle;work->sessionIdentifier=[[NSUUID UUID].UUIDString UTF8String];
         MeshRegionExtrudeSnapshot result;result.sessionIdentifier=work->sessionIdentifier;
-        result.entityIdentifier=identity.entityIdentifier;result.triangleIndices=work->region.triangles;
+        result.entityIdentifier=identity.entityIdentifier;result.triangleIndices=work->preview.triangleIndices;
         const auto placed=record.previous.transform*work->geometry.meshLocation.Transformation();
-        const auto normal=gp_Dir(work->region.unitNormal[0],work->region.unitNormal[1],work->region.unitNormal[2]).Transformed(placed);
+        const auto normal=gp_Dir(work->preview.localUnitNormal[0],work->preview.localUnitNormal[1],work->preview.localUnitNormal[2]).Transformed(placed);
         result.worldUnitNormal={normal.X(),normal.Y(),normal.Z()};
-        for(auto vertex:work->region.boundaryVertices) {
-            const auto& local=work->geometry.topology.vertices[vertex].point;
+        for(const auto& local:work->preview.localBoundary) {
             const auto point=gp_Pnt(local[0],local[1],local[2]).Transformed(placed);
             result.worldBoundary.push_back({point.X(),point.Y(),point.Z()});
         }
@@ -4495,23 +4491,152 @@ OrdinaryEditResult Core3DViewer::commitMeshRegionExtrude(const std::string& sess
         if(!admitTransform(authority)||authority.selectionOwners!=work->authority.selectionOwners
             || authority.manipulatorType!=work->authority.manipulatorType
             || authority.hadManipulator!=work->authority.hadManipulator)return OrdinaryEditResult::Invalid;
-        std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture fresh;meshedit::PlanarRegion region;
-        if(meshedit::CaptureNativeTopology(actual.shape,fresh,cancelled)!=meshedit::TopologyResult::Ready
-            || !meshedit::SameRegionStorage(work->geometry,fresh)
-            || meshedit::ResolvePlanarRegion(fresh,work->seedTriangle,region,cancelled)!=meshedit::TopologyResult::Ready
-            || !region.IsEqual(work->region))return OrdinaryEditResult::Invalid;
+        std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture storage;
+        OcctMeshRegionExtrudePreview fresh;
+        if(meshedit::CaptureNativeTopology(actual.shape,storage,cancelled)!=meshedit::TopologyResult::Ready
+            || !meshedit::SameRegionStorage(work->geometry,storage)
+            || !myDoc->CaptureMeshRegionExtrudePreview(previous.label,work->seedTriangle,fresh)
+            || fresh.triangleIndices!=work->preview.triangleIndices
+            || fresh.localBoundary!=work->preview.localBoundary
+            || fresh.localUnitNormal!=work->preview.localUnitNormal)return OrdinaryEditResult::Invalid;
         TDF_Label materialLabel;const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(previous.label,materialLabel);
         const auto material=XCAFDoc_VisMaterialTool::GetShapeMaterial(previous.label);
         if(linked!=!material.IsNull() || linked!=!materialLabel.IsNull()
             || material!=work->material || (linked&&!materialLabel.IsEqual(work->materialLabel))
             || Core3DNormalTextureRecipeForLabel(previous.label)!=work->normalRecipe)return OrdinaryEditResult::Invalid;
-        TopoDS_Shape candidate;
+        OcctMeshRegionMutationCandidate candidate;
         if(!myDoc->PrepareMeshRegionExtrude(previous.label,work->seedTriangle,distanceMM,candidate))
             return OrdinaryEditResult::Invalid;
         OrdinaryTransformChange request=work->authority.records.front().requested;
-        request.shape=candidate;request.operation=OrdinaryTransformOperation::MeshRegionExtrude;
+        request.shape=candidate.shape;request.operation=OrdinaryTransformOperation::MeshRegionExtrude;
         request.meshRegionExtrude=OrdinaryMeshRegionExtrude{
-            work->seedTriangle,work->region.triangles,distanceMM,1};
+            work->seedTriangle,work->preview.triangleIndices,distanceMM,1,candidate.partition};
+        OrdinaryEditResult failure=OrdinaryEditResult::Invalid;
+        auto lease=_ordinaryEditController->beginTransform({request},&failure);
+        return lease?lease.stageAndCommit():failure;
+    } catch(...){return OrdinaryEditResult::Invalid;}
+}
+
+
+struct MeshRegionInsetWork {
+    Handle(OcctDocument) owner;
+    Handle(TDocStd_Document) document;
+    Standard_Integer documentTime=0;
+    OrdinaryTransformLedger authority;
+    meshedit::NativeTopologyCapture geometry;
+    OcctMeshRegionExtrudePreview preview;
+    TDF_Label materialLabel;
+    Handle(XCAFDoc_VisMaterial) material;
+    Standard_Integer normalRecipe=0;
+    ObjectFrameIdentity identity;
+    std::uint64_t presentationRevision=0;
+    std::uint32_t width=0,height=0,seedTriangle=0;
+    std::string sessionIdentifier;
+    bool consumed=false;
+};
+
+std::optional<MeshRegionInsetSnapshot> Core3DViewer::prepareMeshRegionInset(
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,std::uint32_t seedTriangle) noexcept {
+    if(![NSThread isMainThread] || !canBeginCommittedEdit() || _meshVertexEditWork
+        || _meshRegionExtrudeWork || _meshRegionInsetWork || myDoc.IsNull() || myContext.IsNull()
+        || !width || !height)return std::nullopt;
+    try {
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if(!snapshot || snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration!=identity.documentGeneration
+            || snapshot->revisions.model!=identity.modelRevision
+            || snapshot->revisions.presentation!=presentationRevision
+            || snapshot->selectionMode!=scene::ElementKind::Object
+            || snapshot->selection.selected.size()!=1
+            || snapshot->selection.selected[0].kind!=scene::ElementKind::Object
+            || snapshot->selection.selected[0].entityIdentifier!=identity.entityIdentifier)return std::nullopt;
+        myContext->InitSelected();if(!myContext->MoreSelected())return std::nullopt;
+        const auto presentation=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();if(myContext->MoreSelected()||presentation.IsNull())return std::nullopt;
+        const auto label=myDoc->ShapeLabel(presentation);OrdinaryTransformRecord record;
+        if(!myDoc->CaptureObjectTransformStateForLabel(label,record.previous)
+            || record.previous.entityIdentifier!=identity.entityIdentifier
+            || record.previous.resolvedRepresentation!=OcctGeometryRepresentation::TriangleMesh
+            || record.previous.authoredFramesPresent || record.previous.meshUVAtlasVersion==0)return std::nullopt;
+        auto work=std::make_shared<MeshRegionInsetWork>();std::atomic_bool cancelled{false};
+        if(meshedit::CaptureNativeTopology(record.previous.shape,work->geometry,cancelled)
+                !=meshedit::TopologyResult::Ready
+            || !myDoc->CaptureMeshRegionInsetPreview(label,seedTriangle,work->preview))return std::nullopt;
+        const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(label,work->materialLabel);
+        work->material=XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if(linked!=!work->material.IsNull() || linked!=!work->materialLabel.IsNull())return std::nullopt;
+        work->normalRecipe=Core3DNormalTextureRecipeForLabel(label);
+        record.requested.label=label;record.requested.presentation=presentation;
+        record.requested.shape=record.previous.shape;record.requested.transform=record.previous.transform;
+        work->authority.records.push_back(record);if(!admitTransform(work->authority))return std::nullopt;
+        work->owner=myDoc;work->document=myDoc->Document();if(work->document.IsNull())return std::nullopt;
+        work->documentTime=work->document->GetData()->Time();work->identity=identity;
+        work->presentationRevision=presentationRevision;work->width=width;work->height=height;
+        work->seedTriangle=seedTriangle;work->sessionIdentifier=[[NSUUID UUID].UUIDString UTF8String];
+        MeshRegionInsetSnapshot result;result.sessionIdentifier=work->sessionIdentifier;
+        result.entityIdentifier=identity.entityIdentifier;result.triangleIndices=work->preview.triangleIndices;
+        const auto placed=record.previous.transform*work->geometry.meshLocation.Transformation();
+        const auto normal=gp_Dir(work->preview.localUnitNormal[0],work->preview.localUnitNormal[1],
+            work->preview.localUnitNormal[2]).Transformed(placed);
+        result.worldUnitNormal={normal.X(),normal.Y(),normal.Z()};
+        for(const auto& local:work->preview.localBoundary) {
+            const auto point=gp_Pnt(local[0],local[1],local[2]).Transformed(placed);
+            result.worldBoundary.push_back({point.X(),point.Y(),point.Z()});
+        }
+        _meshRegionInsetWork=std::move(work);return result;
+    } catch(...){return std::nullopt;}
+}
+
+void Core3DViewer::cancelMeshRegionInset(const std::string& sessionIdentifier) noexcept {
+    if([NSThread isMainThread] && _meshRegionInsetWork
+        && _meshRegionInsetWork->sessionIdentifier==sessionIdentifier)_meshRegionInsetWork.reset();
+}
+
+OrdinaryEditResult Core3DViewer::commitMeshRegionInset(const std::string& sessionIdentifier,
+    double distanceMM) noexcept {
+    if(![NSThread isMainThread])return OrdinaryEditResult::Invalid;
+    const auto work=_meshRegionInsetWork;
+    if(!work || work->consumed || work->sessionIdentifier!=sessionIdentifier)return OrdinaryEditResult::Invalid;
+    work->consumed=true;_meshRegionInsetWork.reset();
+    if(!canBeginCommittedEdit())return OrdinaryEditResult::Busy;
+    try {
+        if(!std::isfinite(distanceMM)||distanceMM<=1.e-6||distanceMM>1.e5
+            || myDoc!=work->owner || myDoc->Document()!=work->document
+            || work->document->GetData()->Time()!=work->documentTime)return OrdinaryEditResult::Invalid;
+        const auto snapshot=captureSceneSnapshot(work->width,work->height);
+        if(!snapshot || snapshot->publicationSourceIdentifier!=work->identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration!=work->identity.documentGeneration
+            || snapshot->revisions.model!=work->identity.modelRevision
+            || snapshot->revisions.presentation!=work->presentationRevision
+            || snapshot->selectionMode!=scene::ElementKind::Object)return OrdinaryEditResult::Invalid;
+        const auto& previous=work->authority.records.front().previous;OcctObjectTransformState actual;
+        if(!myDoc->CaptureObjectTransformStateForLabel(previous.label,actual)||!previous.IsEqual(actual))
+            return OrdinaryEditResult::Invalid;
+        auto authority=work->authority;
+        if(!admitTransform(authority)||authority.selectionOwners!=work->authority.selectionOwners
+            || authority.manipulatorType!=work->authority.manipulatorType
+            || authority.hadManipulator!=work->authority.hadManipulator)return OrdinaryEditResult::Invalid;
+        std::atomic_bool cancelled{false};meshedit::NativeTopologyCapture storage;
+        OcctMeshRegionExtrudePreview fresh;
+        if(meshedit::CaptureNativeTopology(actual.shape,storage,cancelled)!=meshedit::TopologyResult::Ready
+            || !meshedit::SameRegionStorage(work->geometry,storage)
+            || !myDoc->CaptureMeshRegionInsetPreview(previous.label,work->seedTriangle,fresh)
+            || fresh.triangleIndices!=work->preview.triangleIndices
+            || fresh.localBoundary!=work->preview.localBoundary
+            || fresh.localUnitNormal!=work->preview.localUnitNormal)return OrdinaryEditResult::Invalid;
+        TDF_Label materialLabel;const bool linked=XCAFDoc_VisMaterialTool::GetShapeMaterial(previous.label,materialLabel);
+        const auto material=XCAFDoc_VisMaterialTool::GetShapeMaterial(previous.label);
+        if(linked!=!material.IsNull() || linked!=!materialLabel.IsNull()
+            || material!=work->material || (linked&&!materialLabel.IsEqual(work->materialLabel))
+            || Core3DNormalTextureRecipeForLabel(previous.label)!=work->normalRecipe)return OrdinaryEditResult::Invalid;
+        OcctMeshRegionMutationCandidate candidate;
+        if(!myDoc->PrepareMeshRegionInset(previous.label,work->seedTriangle,distanceMM,candidate))
+            return OrdinaryEditResult::Invalid;
+        OrdinaryTransformChange request=work->authority.records.front().requested;
+        request.shape=candidate.shape;request.operation=OrdinaryTransformOperation::MeshRegionInset;
+        request.meshRegionInset=OrdinaryMeshRegionInset{work->seedTriangle,work->preview.triangleIndices,
+            distanceMM,candidate.partition,candidate.centerSeedTriangle};
         OrdinaryEditResult failure=OrdinaryEditResult::Invalid;
         auto lease=_ordinaryEditController->beginTransform({request},&failure);
         return lease?lease.stageAndCommit():failure;
@@ -5766,6 +5891,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
         // fully traversed and displayed. Only the presentation is temporary.
         _meshVertexEditWork.reset();
         _meshRegionExtrudeWork.reset();
+        _meshRegionInsetWork.reset();
         clearContext();
         if (traverseDocument(candidate)) {
 			(void)restoreDocumentReplacement(true);
@@ -5801,6 +5927,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 
     _meshVertexEditWork.reset();
     _meshRegionExtrudeWork.reset();
+    _meshRegionInsetWork.reset();
     if (myDoc->EndNativeReplacement(*_documentReplacementWork->reservation, true, true)
         != authority::ReplacementEnd::Adopted) {
         (void)restoreDocumentReplacement(true);

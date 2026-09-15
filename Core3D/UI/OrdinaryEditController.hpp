@@ -26,7 +26,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset };
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.
@@ -96,6 +96,14 @@ struct OrdinaryMeshRegionExtrude {
     std::vector<std::uint32_t> resolvedTriangles;
     double distanceMM=0;
     std::uint8_t sideUVPolicy=1; // boundaryStripNormalized
+    std::vector<Standard_Byte> candidatePartition;
+};
+struct OrdinaryMeshRegionInset {
+    std::uint32_t seedTriangle=0;
+    std::vector<std::uint32_t> resolvedTriangles;
+    double distanceMM=0;
+    std::vector<Standard_Byte> candidatePartition;
+    std::uint32_t centerSeedTriangle=0;
 };
 
 // Minted only after the inspector validates its exact original lease and
@@ -124,6 +132,7 @@ struct OrdinaryTransformChange {
     OcctMeshUVAtlasOptions meshUVAtlasOptions;
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
     std::optional<OrdinaryMeshRegionExtrude> meshRegionExtrude;
+    std::optional<OrdinaryMeshRegionInset> meshRegionInset;
     std::shared_ptr<const NativePlacementContinuation> placementContinuation;
     std::optional<profile::Parameters> profileRebuild;
     std::optional<enclosure::Parameters> enclosureRebuild;

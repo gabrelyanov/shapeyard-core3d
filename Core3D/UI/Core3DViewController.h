@@ -672,8 +672,27 @@ typedef NS_ENUM(NSInteger, Core3DMeshRegionExtrudeResult) {
     Core3DMeshRegionExtrudeResultFailed,
 };
 
+
+typedef NS_ENUM(NSInteger, Core3DMeshRegionInsetResult) {
+    Core3DMeshRegionInsetResultUnchanged,
+    Core3DMeshRegionInsetResultCommitted,
+    Core3DMeshRegionInsetResultRejected,
+    Core3DMeshRegionInsetResultBusy,
+    Core3DMeshRegionInsetResultRecoveryRequired,
+    Core3DMeshRegionInsetResultFailed,
+};
+
 //! Native-resolved planar region; indices are valid only for this one-use session.
 @interface Core3DMeshRegionExtrudeSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *triangleIndices;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *worldBoundary;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *worldUnitNormal;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+@interface Core3DMeshRegionInsetSnapshot : NSObject
 @property(nonatomic,copy,readonly) NSString *entityIdentifier;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *triangleIndices;
 @property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *worldBoundary;
@@ -1354,6 +1373,14 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DMeshRegionExtrudeResult)commitMeshRegionExtrude:(Core3DMeshRegionExtrudeSnapshot *)expected
     distanceMM:(double)distanceMM NS_SWIFT_NAME(commitMeshRegionExtrude(_:distanceMM:));
 - (void)cancelMeshRegionExtrude:(Core3DMeshRegionExtrudeSnapshot *)expected;
+//! Inset the native-resolved convex planar region; preview is immutable and one-use.
+- (Core3DMeshRegionInsetSnapshot *_Nullable)prepareMeshRegionInsetForEntityIdentifier:(NSString *)entityIdentifier
+    seedTriangle:(NSUInteger)seedTriangle expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(prepareMeshRegionInset(entityIdentifier:seedTriangle:expected:));
+//! Positive world-millimetre distance; shape and replacement partition commit atomically.
+- (Core3DMeshRegionInsetResult)commitMeshRegionInset:(Core3DMeshRegionInsetSnapshot *)expected
+    distanceMM:(double)distanceMM NS_SWIFT_NAME(commitMeshRegionInset(_:distanceMM:));
+- (void)cancelMeshRegionInset:(Core3DMeshRegionInsetSnapshot *)expected;
 
 //! Read-only exact self-contact diagnostic for an explicit native mesh occurrence.
 //! Never changes selection or history. Completion is asynchronous on main.

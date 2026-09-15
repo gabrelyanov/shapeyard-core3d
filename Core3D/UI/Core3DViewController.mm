@@ -1772,6 +1772,30 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
 }
 @end
 
+@interface Core3DMeshRegionInsetSnapshot ()
+@property(nonatomic,copy,readonly) NSString *sessionIdentifier;
+- (instancetype)initWithNativeSnapshot:(const core3d::MeshRegionInsetSnapshot&)snapshot;
+@end
+@implementation Core3DMeshRegionInsetSnapshot
+- (instancetype)initWithNativeSnapshot:(const core3d::MeshRegionInsetSnapshot&)snapshot {
+    self=[super init];
+    if(self) {
+        _sessionIdentifier=[[NSString alloc] initWithBytes:snapshot.sessionIdentifier.data()
+            length:snapshot.sessionIdentifier.size() encoding:NSUTF8StringEncoding];
+        _entityIdentifier=[[NSString alloc] initWithBytes:snapshot.entityIdentifier.data()
+            length:snapshot.entityIdentifier.size() encoding:NSUTF8StringEncoding];
+        NSMutableArray *triangles=[NSMutableArray arrayWithCapacity:snapshot.triangleIndices.size()];
+        for(auto triangle:snapshot.triangleIndices)[triangles addObject:@(triangle)];
+        _triangleIndices=[triangles copy];
+        NSMutableArray *boundary=[NSMutableArray arrayWithCapacity:snapshot.worldBoundary.size()];
+        for(const auto& point:snapshot.worldBoundary)[boundary addObject:@[@(point[0]),@(point[1]),@(point[2])]];
+        _worldBoundary=[boundary copy];
+        _worldUnitNormal=@[@(snapshot.worldUnitNormal[0]),@(snapshot.worldUnitNormal[1]),@(snapshot.worldUnitNormal[2])];
+    }
+    return self;
+}
+@end
+
 @interface Core3DMeshVertexEditSnapshot ()
 @property(nonatomic,copy,readonly) NSString *sessionIdentifier;
 - (instancetype)initWithNativeSnapshot:(const core3d::MeshVertexEditSnapshot&)snapshot;
@@ -12244,6 +12268,62 @@ struct NativeModelingPermitIssuer final {
         }
     } catch(...) {}
     return Core3DMeshRegionExtrudeResultRejected;
+}
+
+
+- (Core3DMeshRegionInsetSnapshot *)prepareMeshRegionInsetForEntityIdentifier:(NSString *)entityIdentifier
+    seedTriangle:(NSUInteger)seedTriangle expected:(Core3DSceneSnapshot *)expected {
+    if(![NSThread isMainThread] || !_isSetuped || GLController==nil || GLController.viewer==nullptr
+        || expected==nil || entityIdentifier.length==0 || entityIdentifier.length>128
+        || expected.publicationSourceIdentifier.length==0 || expected.publicationSourceIdentifier.length>128
+        || seedTriangle>4095)return nil;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        || size.width>std::numeric_limits<std::uint32_t>::max()
+        || size.height>std::numeric_limits<std::uint32_t>::max())return nil;
+    const char *entity=entityIdentifier.UTF8String,*publication=expected.publicationSourceIdentifier.UTF8String;
+    if(entity==nullptr||publication==nullptr)return nil;
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity,[entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration=expected.revisions.documentGeneration;
+        identity.modelRevision=expected.revisions.modelRevision;
+        const auto result=GLController.viewer->prepareMeshRegionInset(identity,
+            expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)),static_cast<std::uint32_t>(seedTriangle));
+        return result?[[Core3DMeshRegionInsetSnapshot alloc] initWithNativeSnapshot:*result]:nil;
+    } catch(...){return nil;}
+}
+
+- (void)cancelMeshRegionInset:(Core3DMeshRegionInsetSnapshot *)expected {
+    if(![NSThread isMainThread]||!_isSetuped||GLController==nil||GLController.viewer==nullptr
+        || expected==nil||expected.sessionIdentifier.length==0||expected.sessionIdentifier.length>128)return;
+    const char *identifier=expected.sessionIdentifier.UTF8String;
+    if(identifier!=nullptr)GLController.viewer->cancelMeshRegionInset(identifier);
+}
+
+- (Core3DMeshRegionInsetResult)commitMeshRegionInset:(Core3DMeshRegionInsetSnapshot *)expected
+    distanceMM:(double)distanceMM {
+    if(![NSThread isMainThread]||!_isSetuped||GLController==nil||GLController.viewer==nullptr
+        || expected==nil||expected.sessionIdentifier.length==0||expected.sessionIdentifier.length>128)
+        return Core3DMeshRegionInsetResultRejected;
+    const char *identifier=expected.sessionIdentifier.UTF8String;
+    if(identifier==nullptr)return Core3DMeshRegionInsetResultRejected;
+    try {
+        switch(GLController.viewer->commitMeshRegionInset(identifier,distanceMM)) {
+            case core3d::OrdinaryEditResult::NoChange:return Core3DMeshRegionInsetResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];[GLController requestRender];[self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];return Core3DMeshRegionInsetResultCommitted;
+            case core3d::OrdinaryEditResult::Busy:return Core3DMeshRegionInsetResultBusy;
+            case core3d::OrdinaryEditResult::Invalid:return Core3DMeshRegionInsetResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown:return Core3DMeshRegionInsetResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure:return Core3DMeshRegionInsetResultFailed;
+        }
+    } catch(...) {}
+    return Core3DMeshRegionInsetResultRejected;
 }
 
 - (Core3DMeshCopyResult)createSourceRetainedMeshCopyForEntityIdentifier:(NSString *)entityIdentifier

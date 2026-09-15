@@ -401,6 +401,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
                 && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
+                && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -436,7 +437,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ||(programSourceRebuild&&(permit||changes.size()!=1)))
                 return reject(OrdinaryEditResult::Invalid);
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)
-                || request.meshRegionExtrude.has_value() != (request.operation == OrdinaryTransformOperation::MeshRegionExtrude)) {
+                || request.meshRegionExtrude.has_value() != (request.operation == OrdinaryTransformOperation::MeshRegionExtrude)
+                || request.meshRegionInset.has_value() != (request.operation == OrdinaryTransformOperation::MeshRegionInset)) {
                 return reject(OrdinaryEditResult::Invalid);
             }
             if (request.presentation.IsNull() || request.shape.IsNull()
@@ -523,6 +525,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
                 && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
+                && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -705,9 +708,36 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                         request.meshRegionExtrude->seedTriangle,region)
                     || region.triangleIndices!=request.meshRegionExtrude->resolvedTriangles
                     || !_document->ValidateMeshRegionExtrude(request.label,
-                        request.meshRegionExtrude->seedTriangle,request.meshRegionExtrude->distanceMM,request.shape)) {
+                        request.meshRegionExtrude->seedTriangle,request.meshRegionExtrude->distanceMM,
+                        OcctMeshRegionMutationCandidate{request.shape,
+                            request.meshRegionExtrude->candidatePartition,0})) {
                     return reject(OrdinaryEditResult::Invalid);
                 }
+            }
+            if (request.operation == OrdinaryTransformOperation::MeshRegionInset) {
+                OcctMeshRegionExtrudePreview region;
+                if(changes.size()!=1 || !geometryChanges || !request.meshRegionInset
+                    || representation!=OcctGeometryRepresentation::TriangleMesh
+                    || !MatricesEqual(record.previous.transform,request.transform)
+                    || request.rotationAroundPivot.has_value()
+                    || !_document->CaptureMeshRegionInsetPreview(request.label,
+                        request.meshRegionInset->seedTriangle,region)
+                    || region.triangleIndices!=request.meshRegionInset->resolvedTriangles
+                    || !_document->ValidateMeshRegionInset(request.label,
+                        request.meshRegionInset->seedTriangle,request.meshRegionInset->distanceMM,
+                        OcctMeshRegionMutationCandidate{request.shape,
+                            request.meshRegionInset->candidatePartition,
+                            request.meshRegionInset->centerSeedTriangle})) {
+                    return reject(OrdinaryEditResult::Invalid);
+                }
+            }
+            // This slice implements exact remapping only for region Inset and
+            // Extrude. Other local-geometry mutations must refuse a live
+            // partition before opening a command rather than invalidating it.
+            if (!record.previous.meshRegionPartition.empty() && geometryChanges
+                && request.operation!=OrdinaryTransformOperation::MeshRegionExtrude
+                && request.operation!=OrdinaryTransformOperation::MeshRegionInset) {
+                return reject(OrdinaryEditResult::Invalid);
             }
             if (request.operation == OrdinaryTransformOperation::MeshWindingRepair
                 && (changes.size() != 1 || !geometryChanges
@@ -2117,8 +2147,24 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || region.triangleIndices!=record.requested.meshRegionExtrude->resolvedTriangles
                     || !_document->ValidateMeshRegionExtrude(record.previous.label,
                         record.requested.meshRegionExtrude->seedTriangle,
-                        record.requested.meshRegionExtrude->distanceMM,record.requested.shape))
+                        record.requested.meshRegionExtrude->distanceMM,
+                        OcctMeshRegionMutationCandidate{record.requested.shape,
+                            record.requested.meshRegionExtrude->candidatePartition,0}))
                     throw Standard_Failure("Stale mesh region extrusion candidate");
+            }
+            if(record.requested.operation==OrdinaryTransformOperation::MeshRegionInset) {
+                OcctMeshRegionExtrudePreview region;
+                if(!record.requested.meshRegionInset
+                    || !_document->CaptureMeshRegionInsetPreview(record.previous.label,
+                        record.requested.meshRegionInset->seedTriangle,region)
+                    || region.triangleIndices!=record.requested.meshRegionInset->resolvedTriangles
+                    || !_document->ValidateMeshRegionInset(record.previous.label,
+                        record.requested.meshRegionInset->seedTriangle,
+                        record.requested.meshRegionInset->distanceMM,
+                        OcctMeshRegionMutationCandidate{record.requested.shape,
+                            record.requested.meshRegionInset->candidatePartition,
+                            record.requested.meshRegionInset->centerSeedTriangle}))
+                    throw Standard_Failure("Stale mesh region inset candidate");
             }
             if (record.requested.operation == OrdinaryTransformOperation::MeshWindingRepair
                 && !_document->ValidateMeshWindingRepair(
@@ -2184,11 +2230,26 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
             }
             const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged;
+            const bool regionExtrude=record.requested.operation==OrdinaryTransformOperation::MeshRegionExtrude;
+            const bool regionInset=record.requested.operation==OrdinaryTransformOperation::MeshRegionInset;
+            const bool regionMutation=regionExtrude||regionInset;
+            const auto& regionPartition=regionExtrude
+                ?record.requested.meshRegionExtrude->candidatePartition
+                :regionInset?record.requested.meshRegionInset->candidatePartition
+                    :record.previous.meshRegionPartition;
+            // The old record was validated by the preparation checks above.
+            // Clear before replacing the shape so neither old nor new digest is
+            // ever interpreted against the wrong geometry inside this command.
+            if(regionMutation && !record.previous.meshRegionPartition.empty()
+                && !_document->ClearMeshRegionPartition(record.previous.label))
+                throw Standard_Failure("Mesh region partition clear failed");
             if ((!featureStaged && !record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
-                || (record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
+                || (regionMutation
                     && !_document->MarkAuthoredMeshUVLayout(record.previous.label))
+                || (regionMutation && !regionPartition.empty()
+                    && !_document->StageMeshRegionPartition(record.previous.label,regionPartition))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
                 || (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
@@ -2211,9 +2272,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
                 || (!loftStaged && !record.candidate.loft.IsEqual(record.previous.loft))
                 || (!cutStaged && !cutSourceStaged && !programSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
+                || record.candidate.meshRegionPartition!=regionPartition
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     ? record.requested.meshUVAtlasOptions.version
-                    : record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
+                    : regionMutation
                     ? 3 : record.previous.meshUVAtlasVersion)) {
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
@@ -2262,7 +2324,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                         && record.candidate.meshUVAtlasSettings[2]!=record.previous.meshUVAtlasSettings[2]))) {
                     throw Standard_Failure("Ordinary UV settings readback failed");
                 }
-            } else if (record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude) {
+            } else if (regionMutation) {
                 if(record.candidate.meshUVAtlasSettings!=std::array<Standard_Integer,3>{}
                     || record.candidate.authoredFramesPresent)
                     throw Standard_Failure("Mesh region extrusion metadata readback failed");
@@ -2274,6 +2336,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                 || record.requested.operation == OrdinaryTransformOperation::MeshVertexMove
                 || record.requested.operation == OrdinaryTransformOperation::MeshRegionExtrude
+                || record.requested.operation == OrdinaryTransformOperation::MeshRegionInset
                 || record.requested.operation == OrdinaryTransformOperation::MeshWindingRepair) {
                 Standard_Size bytes=0;
                 if(!Core3DValidateOwnedFrameUsage(_document->Document(),bytes))
