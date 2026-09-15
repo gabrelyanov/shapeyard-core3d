@@ -37,6 +37,9 @@
 //! A Shell state change modified only its bounded transient overlay; committed
 //! scene geometry and the captured opening-face selection are unchanged.
 -(void)viewerDidChangeShellPresentationOverlay:(id)sender;
+//! A real native viewport draw completed and its renderbuffer was presented.
+//! This is additive to the owned one-shot presentation observer.
+-(void)didPresentNativeViewport:(id)sender;
 
 @required
 -(void)didSetupViewer:(id)sender;

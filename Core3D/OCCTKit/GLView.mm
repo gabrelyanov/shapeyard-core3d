@@ -424,6 +424,14 @@ private:
         ++_renderedFrameCount;
     }
     _isDrawing = NO;
+    if (didPresent) {
+        GLViewController *controller = myController;
+        id<GLViewControllerProtocol> delegate = controller.delegate;
+        if (delegate
+            && [delegate respondsToSelector:@selector(didPresentNativeViewport:)]) {
+            [delegate didPresentNativeViewport:controller];
+        }
+    }
     if (observation && [_presentationObservation isEqual:observation]) {
         if (didPresent && candidate) {
             _presentationDelivered = YES;

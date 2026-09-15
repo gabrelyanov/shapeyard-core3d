@@ -494,6 +494,11 @@ supportsNormalTextureEditing:supportsNormalTextureEditing];
     [self viewDidInvalidateSceneSnapshot];
 }
 
+- (void)didPresentNativeViewport:(id)sender {
+    (void)sender;
+    [self viewDidPresentNativeViewport];
+}
+
 - (void)didChangeStatusString:(NSString *)status {
     self->_coreInfoText = status;
     [self sendNotifyUIState:UIStateChangingCoreInfoText];

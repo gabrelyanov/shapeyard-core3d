@@ -2647,6 +2647,9 @@ __attribute__((objc_subclassing_restricted))
 //! Called after the native viewport has been invalidated. Subclasses should
 //! coalesce work and must not synchronously recapture full geometry per call.
 - (void)viewDidInvalidateSceneSnapshot;
+//! Called after a successful native draw and renderbuffer presentation. This
+//! does not consume or replace observeNativeViewportPresentation ownership.
+- (void)viewDidPresentNativeViewport;
 - (void)viewDidAssetModify;
 - (void)viewDidLoadFromBundle;
 - (void)viewDidFailToLoadFromBundle:(Core3DAssetLoadResult)result

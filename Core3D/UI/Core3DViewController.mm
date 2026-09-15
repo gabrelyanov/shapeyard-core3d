@@ -17058,6 +17058,11 @@ struct NativeModelingPermitIssuer final {
     // clients may coalesce immutable snapshot publication for another renderer.
 }
 
+- (void)viewDidPresentNativeViewport {
+    // Renderer-neutral post-presentation extension point. The optional native
+    // one-shot presentation observer remains independently owned.
+}
+
 - (void)viewDidChangeViewportPresentationState {
     // Renderer-neutral observation point. Core3D's editing state is already
     // authoritative, while the UI notification remains deliberately debounced.
