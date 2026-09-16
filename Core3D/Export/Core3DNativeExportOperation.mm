@@ -2557,6 +2557,43 @@ std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
     } catch (...) {return @{@"failureStage":stage};}
 }
 
+- (BOOL)debugUseAbsoluteChordMM:(double)chordMM
+                   angleDegrees:(double)angleDegrees {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr) {
+        return NO;
+    }
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (state->started || state->finished ||
+        state->cancelled.load(std::memory_order_acquire)) {
+        return NO;
+    }
+    if (state->exportType != ExportTypeGltf ||
+        state->meshQuality != Core3DExportMeshQualityStandard) {
+        return NO;
+    }
+    if (state->sourceScene == nullptr) {
+        return NO;
+    }
+    if (!std::isfinite(chordMM) || !std::isfinite(angleDegrees) ||
+        chordMM < 0.01 || chordMM > 10.0 ||
+        angleDegrees < 1.0 || angleDegrees > 45.0) {
+        return NO;
+    }
+    const double metersPerUnit = state->sourceScene->metersPerUnit;
+    if (!std::isfinite(metersPerUnit) || metersPerUnit <= 0.0) {
+        return NO;
+    }
+    const double chord = (chordMM / 1000.0) / metersPerUnit;
+    if (!std::isfinite(chord) || chord <= 0.0) {
+        return NO;
+    }
+    state->deflectionType = Aspect_TOD_ABSOLUTE;
+    state->maximalChordialDeviation = chord;
+    state->deviationAngle = angleDegrees * M_PI / 180.0;
+    return YES;
+}
+
 + (void)debugSetWorkerPaused:(BOOL)paused {
     {
         std::lock_guard<std::mutex> lock(gDebugWorkerPauseMutex);

@@ -83,6 +83,12 @@ NS_SWIFT_SENDABLE
 - (void)cancel;
 
 #ifdef DEBUG
+// DEBUG-only export calibration seam. Applies a local-definition absolute
+// chord tolerance to the private export copy only. This is NOT a certified
+// world-space global error bound under transforms.
+- (BOOL)debugUseAbsoluteChordMM:(double)chordMM
+                   angleDegrees:(double)angleDegrees
+    NS_SWIFT_NAME(debugUseAbsoluteChord(mm:angleDegrees:));
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit
     NS_SWIFT_NAME(debugParametricSTLRefinement(metersPerUnit:));
 //! Deterministic XCTest seam for proving that start/cancel never blocks the
