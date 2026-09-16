@@ -631,6 +631,16 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(debugRigidPlacementEvidence(_:));
 - (nullable NSDictionary *)debugRigidPlacementAdmissionProbe
     NS_SWIFT_NAME(debugRigidPlacementAdmissionProbe());
+//! Bounded DEBUG read-only kernel evidence for the ACTUAL retained BRep of one
+//! saved entity: BRepCheck validity, unique topology counts, exact analytic
+//! world bounds (AddOptimal, no triangulation, no shape tolerance) and
+//! analytic world volume, composed with the persisted transform exactly as
+//! production object-alignment measurement does. Ordinary capture only parses
+//! stored recipe records; it never checks recipe currency, so a stale recipe
+//! (e.g. a filleted seat) stays observable. Refuses off-main, busy, open or
+//! unresolved edit, invalid unit, non-BRep or excessive topology with nil.
+- (nullable NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity
+    NS_SWIFT_NAME(debugNativeSolidEvidence(_:));
 #endif
 
 //! Capture authoritative single-selection transform values. Main-thread only.

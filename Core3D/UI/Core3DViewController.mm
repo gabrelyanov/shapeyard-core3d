@@ -15157,6 +15157,92 @@ struct NativeModelingPermitIssuer final {
             @"stateBytes":[NSData dataWithBytes:e.stateBytes.data() length:e.stateBytes.size()]};
     }catch(...){return nil;}
 }
+// Bounded DEBUG read-only kernel evidence for the ACTUAL retained BRep of one
+// saved entity. Every reported value is measured from a private mesh-free
+// deep copy of the stored shape, never projected from any stored recipe;
+// ordinary name/transform capture strictly parses recipe records but never
+// checks their currency, so a filleted seat whose profile recipe is stale
+// remains observable and no current parametric recipe is required. No
+// selection, edit, command or geometry-generation authority is acquired.
+- (NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity {
+    if(![NSThread isMainThread]||!GLController||!GLController.viewer||!entity
+        ||entity.length>128||!entity.UTF8String)return nil;
+    try {
+        // canBeginCommittedEdit atomically refuses an open OCAF command, an
+        // unresolved ordinary edit and any active operation ledger (busy).
+        if(![self core3d_canBeginCommittedEdit])return nil;
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull())return nil;
+        TDF_Label label;
+        if(!core3d::placement::Find(owner,entity.UTF8String,label))return nil;
+        OcctObjectNameState named;
+        if(!owner->CaptureObjectNameStateForLabel(label,named))return nil;
+        const auto& state=named.object;
+        if(state.resolvedRepresentation!=OcctGeometryRepresentation::BRep)return nil;
+        double unit=0;
+        if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return nil;
+        double mm=0;
+        if(!core3d::placement::MillimetersPerUnit(unit,mm))return nil;
+        // Shared-aware unique-node admission with the same 8192 cap the
+        // transform-inspector BRep bounds path enforces, BEFORE any copy,
+        // checker or measurement. Above the cap observation refuses outright.
+        constexpr auto maxNodes=core3d::TransformInspectorMeasurementController::kMaximumBRepTopologyNodes;
+        std::size_t nodes=0;
+        {
+            std::vector<TopoDS_Shape> stack{state.shape};
+            TopTools_IndexedMapOfShape visited;
+            while(!stack.empty()){
+                const auto shape=stack.back();stack.pop_back();
+                if(visited.Contains(shape))continue;
+                visited.Add(shape);
+                if(++nodes>maxNodes)return nil;
+                for(TopoDS_Iterator child(shape,Standard_True,Standard_True);child.More();child.Next()){
+                    if(stack.size()>=maxNodes)return nil;
+                    if(!visited.Contains(child.Value()))stack.push_back(child.Value());
+                }
+            }
+            if(nodes==0)return nil;
+        }
+        // World composition matches production object-alignment measurement
+        // (Core3DViewer::measureObjectAlignment) exactly: the persisted
+        // gp_Trsf is applied ONCE by BRepBuilderAPI_Transform to the private
+        // copy, which already carries the stored XCAF location. The shape is
+        // never Moved by an extra location and the transform is never
+        // multiplied into an already-transformed duplicate.
+        BRepBuilderAPI_Copy copy(state.shape,Standard_True,Standard_False);
+        if(!copy.IsDone()||copy.Shape().IsNull())return nil;
+        BRepBuilderAPI_Transform transformed(copy.Shape(),state.transform,Standard_True);
+        if(!transformed.IsDone()||transformed.Shape().IsNull())return nil;
+        const auto world=transformed.Shape();
+        TopTools_IndexedMapOfShape solids,shells,faces,edges,vertices;
+        TopExp::MapShapes(world,TopAbs_SOLID,solids);TopExp::MapShapes(world,TopAbs_SHELL,shells);
+        TopExp::MapShapes(world,TopAbs_FACE,faces);TopExp::MapShapes(world,TopAbs_EDGE,edges);
+        TopExp::MapShapes(world,TopAbs_VERTEX,vertices);
+        Bnd_Box box;BRepBndLib::AddOptimal(world,box,Standard_False,Standard_False);
+        if(box.IsVoid()||box.IsOpen())return nil;
+        double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+        for(int i=0;i<3;++i)if(!std::isfinite(bounds[i])||!std::isfinite(bounds[i+3])||bounds[i]>bounds[i+3])return nil;
+        GProp_GProps props;
+        // Adaptive integration of analytic surfaces; no tessellated volume.
+        const double error=BRepGProp::VolumeProperties(world,props,1.0e-9,Standard_False,Standard_False);
+        const double volume=props.Mass()*mm*mm*mm;
+        if(!std::isfinite(volume)||!std::isfinite(error)||error<0)return nil;
+        for(double& value:bounds){value*=mm;if(!std::isfinite(value))return nil;}
+        NSMutableArray *nameUnits=[NSMutableArray array];
+        for(int i=1;i<=named.name.Length();++i)[nameUnits addObject:@(std::uint16_t(named.name.Value(i)))];
+        return @{@"entity":[NSString stringWithUTF8String:state.entityIdentifier.c_str()],
+            @"definition":[NSString stringWithUTF8String:state.definitionIdentifier.c_str()],
+            @"namePresent":@(named.namePresent),@"nameUTF16":nameUnits,
+            @"metersPerUnit":@(unit),
+            @"solids":@(solids.Extent()),@"shells":@(shells.Extent()),@"faces":@(faces.Extent()),
+            @"edges":@(edges.Extent()),@"vertices":@(vertices.Extent()),@"topologyNodes":@(nodes),
+            @"valid":@(BRepCheck_Analyzer(world,Standard_True).IsValid()?YES:NO),
+            @"volumeMM3":@(volume),@"volumeIntegrationRelativeError":@(error),
+            @"boundsMinMM":@[@(bounds[0]),@(bounds[1]),@(bounds[2])],
+            @"boundsMaxMM":@[@(bounds[3]),@(bounds[4]),@(bounds[5])]};
+    }catch(...){return nil;}
+}
+
 // Isolated real OCAF metadata probe; never changes the viewer document.
 - (NSDictionary *)debugRigidPlacementAdmissionProbe {
     if(!NSThread.isMainThread)return nil;
