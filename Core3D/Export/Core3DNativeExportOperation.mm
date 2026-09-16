@@ -122,6 +122,7 @@ struct NativeExportState {
     Standard_Real maximalChordialDeviation = 0.0001;
     std::atomic_bool cancelled{false};
 #ifdef DEBUG
+    bool debugInitialInteriorControl = false;
     std::atomic_bool debugOmitTextureReferences{false};
     std::atomic_bool debugCorruptSTLTriangleCount{false};
     std::atomic_bool debugCorruptSTEPTerminator{false};
@@ -1689,7 +1690,11 @@ void MeshPrivateExportSurfaces(
             mesher.ChangeParameters().Deflection = target;
             mesher.ChangeParameters().Angle = state->deviationAngle;
             mesher.ChangeParameters().InParallel = Standard_True;
-            if (attempt > 0) {
+            bool controlInterior = attempt > 0;
+#ifdef DEBUG
+            controlInterior = controlInterior || state->debugInitialInteriorControl;
+#endif
+            if (controlInterior) {
                 mesher.ChangeParameters().DeflectionInterior = target;
                 mesher.ChangeParameters().AngleInterior = state->deviationAngle;
                 mesher.ChangeParameters().EnableControlSurfaceDeflectionAllSurfaces = Standard_True;
@@ -1718,7 +1723,7 @@ void MeshPrivateExportSurfaces(
             }
             validMesh = mesher.IsDone() && BRepTools::Triangulation(meshingShape, deflection);
 #if DEBUG
-            if (!validMesh || attempt > 0) {
+            if (!validMesh || attempt > 0 || state->debugInitialInteriorControl) {
                 NSLog(@"[NativeExportMeshDiagnostic] attempt=%d valid=%d done=%d flags=%d target=%.17g requested=%.17g",
                     attempt, validMesh, mesher.IsDone(), mesher.GetStatusFlags(), target, deflection);
                 Standard_Integer diagnosticFace = 0;
@@ -2558,7 +2563,8 @@ std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
 }
 
 - (BOOL)debugUseAbsoluteChordMM:(double)chordMM
-                   angleDegrees:(double)angleDegrees {
+                   angleDegrees:(double)angleDegrees
+         initialInteriorControl:(BOOL)initialInteriorControl {
     const std::shared_ptr<NativeExportState> state = _state;
     if (state == nullptr) {
         return NO;
@@ -2591,6 +2597,7 @@ std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
     state->deflectionType = Aspect_TOD_ABSOLUTE;
     state->maximalChordialDeviation = chord;
     state->deviationAngle = angleDegrees * M_PI / 180.0;
+    state->debugInitialInteriorControl = initialInteriorControl;
     return YES;
 }
 

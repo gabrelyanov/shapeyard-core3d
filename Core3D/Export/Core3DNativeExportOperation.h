@@ -88,7 +88,8 @@ NS_SWIFT_SENDABLE
 // world-space global error bound under transforms.
 - (BOOL)debugUseAbsoluteChordMM:(double)chordMM
                    angleDegrees:(double)angleDegrees
-    NS_SWIFT_NAME(debugUseAbsoluteChord(mm:angleDegrees:));
+         initialInteriorControl:(BOOL)initialInteriorControl
+    NS_SWIFT_NAME(debugUseAbsoluteChord(mm:angleDegrees:initialInteriorControl:));
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit
     NS_SWIFT_NAME(debugParametricSTLRefinement(metersPerUnit:));
 //! Deterministic XCTest seam for proving that start/cancel never blocks the
