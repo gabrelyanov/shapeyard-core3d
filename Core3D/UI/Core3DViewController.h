@@ -345,6 +345,9 @@ NS_ASSUME_NONNULL_BEGIN
 //! One-shot main delivery gate for real worker lifecycle qualification.
 - (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
     NS_SWIFT_NAME(debugSetSavedCutSourceDeliveryGate(_:));
+//! Holds the next native solid's completed geometry at its main-thread delivery boundary.
+- (void)debugSetNextNativeSolidDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
+    NS_SWIFT_NAME(debugSetNextNativeSolidDeliveryGate(_:));
 + (NSDictionary<NSString *,NSNumber *> *)debugSavedCutSourceMMConversionProbe;
 #endif
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
@@ -1026,6 +1029,11 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutBoreClearanceProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutBoreClearanceProbe(_:));
 //! Read-only detached observer/whole-result native probes.
++ (NSDictionary<NSString *, NSNumber *> *)debugCircularHostProofProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugCircularHostProofProbe(_:));
+- (NSDictionary<NSString *,NSNumber *> *)debugCircularHostGeometry:(NSString *)entity
+    outerMM:(double)outerMM innerMM:(double)innerMM depthMM:(double)depthMM
+    NS_SWIFT_NAME(debugCircularHostGeometry(_:outerMM:innerMM:depthMM:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutResultCorrespondenceProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutResultCorrespondenceProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanProgramProbe

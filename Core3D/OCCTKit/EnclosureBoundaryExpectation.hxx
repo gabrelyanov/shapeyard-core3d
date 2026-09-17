@@ -9,7 +9,7 @@
 
 namespace core3d::enclosure_correspondence {
 struct EdgeUse { unsigned edge=0; bool forward=true; };
-struct ExpectedEdge { unsigned start=0,end=0; bool circle=false; gp_Pnt center; double radius=0; };
+struct ExpectedEdge { unsigned start=0,end=0; bool circle=false; gp_Pnt center; double radius=0; bool fullCircle=false; };
 struct ExpectedFace {
     bool cylinder=false;gp_Pnt origin;gp_Vec normalOrAxis;double radius=0;
     int radialSign=0;std::vector<std::vector<EdgeUse>> wires;

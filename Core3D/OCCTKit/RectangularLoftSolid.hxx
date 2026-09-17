@@ -4,7 +4,11 @@
 // reuse only its cancellation progress and actual OCCT self-interference checker.
 // This loft never calls the sweep builder or substitutes a swept shape.
 #include "PlanarSweepSolid.hxx"
-#include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <TopoDS_Shell.hxx>
+#include <gp_Pln.hxx>
 
 namespace core3d::rectangular_loft {
 using BuildStatus=planar_sweep::BuildStatus;
@@ -56,38 +60,78 @@ inline BuildStatus Build(const std::shared_ptr<const Prepared>& prepared,
     try {
         OCC_CATCH_SIGNALS
         const auto& d=prepared->definition;const auto& checked=prepared->inspection;
-        const double tolerance=std::max(Precision::Confusion(),1e-5/checked.millimetersPerUnit);
         Handle(Message_ProgressIndicator) indicator=new planar_sweep::detail::CancellationProgress(cancelled);
         Message_ProgressScope progress(indicator->Start(),"Ruled rectangular loft",2);
-        BRepOffsetAPI_ThruSections loft(Standard_True,Standard_True,tolerance);
-        loft.CheckCompatibility(Standard_False); // Never reorder/split authored corners.
-        loft.SetMutableInput(Standard_False);
-        for (const auto& station:d.stations) {
+        const auto count=d.stations.size();
+        Message_ProgressScope construction(progress.Next(),"Planar station faces",double(2*count+1));
+        // Each authored corner and station/longitudinal edge has one TShape.
+        // Reversed uses close adjacent faces without sewing or merging coplanar
+        // faces: even a constant rectangular section retains every station edge.
+        std::vector<std::array<gp_Pnt,4>> corners(count);
+        std::vector<std::array<TopoDS_Vertex,4>> vertices(count);
+        std::vector<std::array<TopoDS_Edge,4>> rings(count),rails(count-1);
+        for (std::size_t station=0;station<count;++station) {
             if (cancelled.load()) return BuildStatus::Cancelled;
-            const auto corners=detail::Corners(station);
-            std::array<TopoDS_Vertex,4> vertices;
+            corners[station]=detail::Corners(d.stations[station]);
             for (std::size_t i=0;i<4;++i) {
-                BRepBuilderAPI_MakeVertex maker(corners[i]);
+                BRepBuilderAPI_MakeVertex maker(corners[station][i]);
                 if (!maker.IsDone()) return BuildStatus::KernelFailure;
-                vertices[i]=maker.Vertex();
+                vertices[station][i]=maker.Vertex();
             }
-            BRepBuilderAPI_MakeWire wire;
             for (std::size_t i=0;i<4;++i) {
-                BRepBuilderAPI_MakeEdge edge(vertices[i],vertices[(i+1)%4]);
+                BRepBuilderAPI_MakeEdge edge(vertices[station][i],vertices[station][(i+1)%4]);
                 if (!edge.IsDone()) return BuildStatus::KernelFailure;
-                wire.Add(edge.Edge());
-                if (!wire.IsDone()) return BuildStatus::KernelFailure;
+                rings[station][i]=edge.Edge();
+                if (station) {
+                    BRepBuilderAPI_MakeEdge rail(vertices[station-1][i],vertices[station][i]);
+                    if (!rail.IsDone()) return BuildStatus::KernelFailure;
+                    rails[station-1][i]=rail.Edge();
+                }
             }
-            const auto section=wire.Wire();
-            if (section.IsNull() || !section.Closed() || !BRepCheck_Analyzer(section,Standard_True).IsValid())
-                return BuildStatus::InvalidSolid;
-            loft.AddWire(section);
+            construction.Next();
         }
-        loft.Build(progress.Next());
-        if (cancelled.load()) return BuildStatus::Cancelled;
-        if (!loft.IsDone() || loft.GetStatus()!=BRepFill_ThruSectionErrorStatus_Done) return BuildStatus::KernelFailure;
-        TopoDS_Shape candidate=loft.Shape();
-        if (candidate.IsNull() || candidate.ShapeType()!=TopAbs_SOLID) return BuildStatus::InvalidSolid;
+        BRep_Builder builder;TopoDS_Shell shell;builder.MakeShell(shell);
+        const auto reversed=[](const TopoDS_Edge& edge) {return TopoDS::Edge(edge.Reversed());};
+        const auto addFace=[&](const std::array<TopoDS_Edge,4>& edges,const gp_Pln& plane,bool reverse=false) {
+            BRepBuilderAPI_MakeWire wire;
+            for (const auto& edge:edges) {
+                wire.Add(edge);
+                if (!wire.IsDone()) return false;
+            }
+            if (!wire.Wire().Closed()) return false;
+            // Supplying the analytic plane avoids inferred spline supports and
+            // gives each face its own affine planar parameterization.
+            // Winding is authored above; preserve the explicit orientation.
+            BRepBuilderAPI_MakeFace maker(plane,wire.Wire(),Standard_False);
+            if (!maker.IsDone()) return false;
+            auto face=maker.Face();if(reverse)face.Reverse();
+            builder.Add(shell,face);return true;
+        };
+        for (std::size_t station=0;station+1<count;++station) {
+            for (std::size_t i=0;i<4;++i) {
+                if (cancelled.load()) return BuildStatus::Cancelled;
+                const auto j=(i+1)%4;
+                // Parallel ring edges and increasing Z guarantee a nonzero
+                // normal, including rectangles and equal-length parallelograms.
+                const gp_Vec along(corners[station][i],corners[station][j]);
+                const gp_Vec rise(corners[station][i],corners[station+1][i]);
+                const gp_Pln plane(corners[station][i],gp_Dir(along.Crossed(rise)));
+                if (!addFace({rings[station][i],rails[station][j],
+                              reversed(rings[station+1][i]),reversed(rails[station][i])},plane))
+                    return BuildStatus::KernelFailure;
+            }
+            construction.Next();
+        }
+        for (const auto station:{std::size_t(0),count-1}) {
+            if (cancelled.load()) return BuildStatus::Cancelled;
+            if (!addFace(rings[station],gp_Pln(corners[station][0],gp::DZ()),station==0))
+                return BuildStatus::KernelFailure;
+            construction.Next();
+        }
+        if (!BRep_Tool::IsClosed(shell)) return BuildStatus::InvalidSolid;
+        shell.Closed(Standard_True);
+        TopoDS_Solid solid;builder.MakeSolid(solid);builder.Add(solid,shell);
+        TopoDS_Shape candidate=solid;
         if (d.constructionFrame) {
             gp_Trsf transform;
             if (!d.constructionFrame->Transform(transform)) return BuildStatus::InvalidDefinition;

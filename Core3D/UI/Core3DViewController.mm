@@ -2649,6 +2649,7 @@ struct NativeModelingPermitIssuer final {
     Core3DSavedCutSourceJob *_savedCutSourceJob; // Main lease; retained through actual worker drain.
 #if DEBUG
     void (^_debugSavedCutSourceDeliveryGate)(void (^resume)(void));
+    void (^_debugNextNativeSolidDeliveryGate)(void (^resume)(void));
 #endif
     BOOL _nativeSolidCancelled;
     __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
@@ -3076,8 +3077,8 @@ struct NativeModelingPermitIssuer final {
 - (NSDictionary<NSString *,id> *)debugSavedCutSourceFixtureEdit:(NSInteger)fixture valueMM:(double)widthMM depthMM:(double)depthMM
     original:(Core3DCylindricalCutSnapshot *)original expected:(Core3DSceneSnapshot *)expected
     cancelPoint:(NSInteger)cancelPoint beforeCommit:(void (^)(void))beforeCommit {
-    if(!NSThread.isMainThread||!std::isfinite(widthMM)||widthMM<1||widthMM>140||!std::isfinite(depthMM)||depthMM<1||depthMM>20
-        ||fixture<0||fixture>1||cancelPoint<0||cancelPoint>2
+    if(!NSThread.isMainThread||!std::isfinite(widthMM)||widthMM<1||widthMM>(fixture==2?200:140)||!std::isfinite(depthMM)||depthMM<1||depthMM>(fixture==2?80:20)
+        ||fixture<0||fixture>2||cancelPoint<0||cancelPoint>2
         ||![original isKindOfClass:Core3DCylindricalCutSnapshot.class]||!GLController||!GLController.viewer
         ||![original matchesOwner:self viewer:GLController.viewer])return @{@"phase":@"owner",@"prepared":@NO};
     try {
@@ -3089,6 +3090,7 @@ struct NativeModelingPermitIssuer final {
         if(before.source.envelope.sourceFamily!=(fixture==0?2:1)||!std::isfinite(mm)||mm<=0)return @{@"phase":@"source-family",@"prepared":@NO};
         core3d::saved_cut_source_edit::Patch patch;
         if(fixture==0){core3d::saved_cut_source_values::EnclosurePatch value;value.dimensions[0]=widthMM/mm;patch=value;}
+        else if(fixture==2){core3d::saved_cut_source_values::CirclePatch value;value.outerRadius=widthMM/mm;value.depth=depthMM/mm;patch=value;}
         else {core3d::saved_cut_source_values::PolygonPatch value;value.depth=depthMM/mm;
             value.coordinates={{1,core3d::saved_cut_source_values::Component::U,widthMM/mm},
                 {2,core3d::saved_cut_source_values::Component::U,widthMM/mm}};patch=value;}
@@ -3136,6 +3138,7 @@ struct NativeModelingPermitIssuer final {
         out[@"typedPatchBytes"]=@(typed);out[@"fixedEnvelopeIDsOccurrence"]=@(stable);
         NSMutableDictionary *checks=[NSMutableDictionary dictionary];
         for(const auto& row:(fixture==0?core3d::saved_cut_source_changed_probe::Enclosure(current,widthMM)
+            :fixture==2?core3d::saved_cut_source_changed_probe::Circle(current,widthMM,0,depthMM)
             :core3d::saved_cut_source_changed_probe::Bracket(current,widthMM,depthMM)))
             checks[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
         out[@"geometryChecks"]=checks;return out;
@@ -3181,6 +3184,28 @@ struct NativeModelingPermitIssuer final {
         if(target.IsNull()||!owner->CaptureCylindricalCutSource(target,source))return @{};
         NSMutableDictionary *checks=[NSMutableDictionary dictionary];
         for(const auto& row:core3d::saved_cut_source_changed_probe::Bracket(source,lengthMM,depthMM))
+            checks[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+        return checks;
+    }catch(...){return @{};}
+}
+- (NSDictionary<NSString *,NSNumber *> *)debugCircularHostGeometry:(NSString *)entity outerMM:(double)outerMM innerMM:(double)innerMM depthMM:(double)depthMM {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity||entity.length==0||entity.length>128)return @{};
+    try {
+        // History redraw may clear selection. Observation uses the saved entity;
+        // it must neither acquire edit authority nor alter the user's selection.
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand()
+            ||GLController.viewer->hasUnresolvedOrdinaryEdit())return @{};
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
+        if(roots.Length()>50000)return @{};
+        TDF_Label target;
+        for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){
+            if(!target.IsNull())return @{};target=roots.Value(i);
+        }
+        OcctCylindricalCutSource source;
+        if(target.IsNull()||!owner->CaptureCylindricalCutSource(target,source))return @{};
+        NSMutableDictionary *checks=[NSMutableDictionary dictionary];
+        for(const auto& row:core3d::saved_cut_source_changed_probe::Circle(source,outerMM,innerMM,depthMM))
             checks[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
         return checks;
     }catch(...){return @{};}
@@ -6696,6 +6721,14 @@ struct NativeModelingPermitIssuer final {
         }
         return result;
     } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugCircularHostProofProbe:(NSInteger)scenario {
+    if(!NSThread.isMainThread||scenario<0||scenario>5)return @{@"invalidScenario":@NO};
+    const auto checks=Core3DDebugCircularHostProofProbe(static_cast<Standard_Integer>(scenario));
+    NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
+    for(const auto& row:checks)out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+    return out;
 }
 
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutResultCorrespondenceProbe:(NSInteger)scenario {
@@ -14560,10 +14593,19 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
+#if DEBUG
+- (void)debugSetNextNativeSolidDeliveryGate:(void (^)(void (^)(void)))gate {
+    if (!NSThread.isMainThread || _nativeSolidWork) return;
+    _debugNextNativeSolidDeliveryGate = [gate copy];
+}
+#endif
+
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion {
 #if DEBUG
-        [self runNativeSolidWork:work debugGeometryDeliveryGate:nil completion:completion];
+        auto gate = _debugNextNativeSolidDeliveryGate;
+        _debugNextNativeSolidDeliveryGate = nil;
+        [self runNativeSolidWork:work debugGeometryDeliveryGate:gate completion:completion];
 }
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
     debugGeometryDeliveryGate:(void (^)(void (^)(void)))gate
@@ -14578,6 +14620,14 @@ struct NativeModelingPermitIssuer final {
         __weak Core3DModelingPlanningContext *weakPlanningContext = _modelingConstructionContext;
         const auto geometry = core3d::Core3DViewer::nativeSolidGeometry(work);
         const std::weak_ptr<core3d::Core3DViewer> expectedViewer = GLController.viewer;
+        // UIKit may retain a detached controller past the client's release.
+        // Weak owner survival alone is therefore not permission to commit.
+        // Bind hosted work to its original view/window/root without retaining
+        // any of them in the geometry worker. Preserve unhosted native callers.
+        __weak UIView *expectedView = self.viewIfLoaded;
+        __weak UIWindow *expectedWindow = self.viewIfLoaded.window;
+        __weak UIViewController *expectedRoot = self.viewIfLoaded.window.rootViewController;
+        const BOOL wasHosted = self.viewIfLoaded.window != nil;
         __weak Core3DViewController* weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry);
@@ -14593,6 +14643,13 @@ struct NativeModelingPermitIssuer final {
                 // strong payload contains new private geometry and scalar values.
                 const auto pendingWork = std::move(controller->_nativeSolidWork);
                 const auto currentViewer = expectedViewer.lock();
+                UIView *hostedView = expectedView;
+                UIWindow *hostedWindow = expectedWindow;
+                if (wasHosted && (!hostedWindow || !hostedView
+                    || controller.viewIfLoaded != hostedView || hostedView.window != hostedWindow
+                    || hostedWindow.rootViewController != expectedRoot)) {
+                    Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
+                }
                 if (cancelled) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultCancelled); return; }
                 if (!pendingWork || !currentViewer || controller->_isLoading.load() || !controller->_isSetuped
                     || ((GLViewController *)controller.glController) == nil

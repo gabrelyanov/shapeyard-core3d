@@ -3,6 +3,7 @@
 #include "SavedCutSourceValuePatch.hxx"
 #include "SavedCutSourceBoreClearance.hxx"
 #include "SavedCutPrismExtractor.hxx"
+#include "CircularHostExtractor.hxx"
 #include "RetainedEnclosureCorrespondence.hxx"
 #include <BRepTools.hxx>
 #include <TopTools_FormatVersion.hxx>
@@ -100,6 +101,11 @@ inline bool InspectBase(const TopoDS_Shape& base,const retained_solid::Envelope&
     try {
         if(stop.load()||!retained_solid::Valid(e))return false;
         if(e.sourceFamily==1){
+            profile::Parameters circle;
+            if(!profile::Decode(e.sourceValues,circle))return false;
+            if(circle.definition.circle){saved_cut_circular_host::Inspection report;
+                return saved_cut_circular_host::InspectCylinder(base,circle.definition,circle.constructionFrame,
+                    e.metersPerUnit,stop,report)==saved_cut_circular_host::Classification::MatchedBoundary;}
             profile::Parameters p;saved_cut_prism_prototype::Inspection report;
             return profile::Decode(e.sourceValues,p)
                 &&saved_cut_prism_prototype::InspectPrism(base,p.definition,p.constructionFrame,

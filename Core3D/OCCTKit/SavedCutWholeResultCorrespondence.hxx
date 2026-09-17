@@ -88,6 +88,24 @@ inline bool OriginalCurve(const d::Curve& c,const enclosure_correspondence::Expe
     if(!d::Close(d::Evaluate(c,c.first),start,mm,error)||!d::Close(d::Evaluate(c,c.last),end,mm,error))return false;
     if(!c.circle)return true;
     const double a=d::Norm(c.a),b=d::Norm(c.b),pi=std::acos(-1.0);if(a<=0||b<=0)return false;
+    if(e.fullCircle){
+        if(e.start!=e.end||!d::Close(d::Evaluate(c,c.first),d::Evaluate(c,c.last),mm,error)
+            ||std::abs(c.last-c.first-2*pi)*e.radius*mm>error)return false;
+        // A closed rim has no endpoint chord normal. Derive its directed plane
+        // from its recipe cap coedge and its recipe cylinder's radial sign.
+        gp_Vec wanted;unsigned matches=0;
+        for(const auto& face:expected.faces)if(!face.cylinder)for(const auto& wire:face.wires)
+            if(wire.size()==1&&wire[0].edge<expected.edges.size()&& &expected.edges[wire[0].edge]==&e){
+                int radial=0;for(const auto& side:expected.faces)if(side.cylinder)
+                    for(const auto& loop:side.wires)for(const auto& use:loop)if(use.edge==wire[0].edge)radial=side.radialSign;
+                if(radial!=1&&radial!=-1)return false;
+                wanted=face.normalOrAxis*((wire[0].forward?1:-1)*radial*(forward?1:-1));++matches;}
+        const auto actual=c.a.Crossed(c.b);
+        if(matches!=1||d::Norm(wanted)<=0||d::Norm(actual)<=0)return false;
+        return d::Close(c.c,d::V(e.center),mm,error)&&std::abs(a-e.radius)*mm<=error&&std::abs(b-e.radius)*mm<=error
+            &&std::abs(c.a.Dot(c.b))/(a*b)*e.radius*mm<=error
+            &&d::Norm(actual/d::Norm(actual)-wanted/d::Norm(wanted))*e.radius*mm<=error;
+    }
     const auto wanted=(start-d::V(e.center)).Crossed(end-d::V(e.center)),actual=c.a.Crossed(c.b);
     if(d::Norm(wanted)<=0||d::Norm(actual)<=0)return false;
     return d::Close(c.c,d::V(e.center),mm,error)&&std::abs(a-e.radius)*mm<=error&&std::abs(b-e.radius)*mm<=error
@@ -96,7 +114,7 @@ inline bool OriginalCurve(const d::Curve& c,const enclosure_correspondence::Expe
 }
 }
 namespace detail {
-inline bool RepresentationOwners(const Graph& g,unsigned seam,unsigned bore,Budget& budget){
+inline bool RepresentationOwners(const Graph& g,unsigned seam,unsigned bore,Budget& budget,const std::map<unsigned,unsigned>& hostSeams={}){
     for(unsigned i=0;i<g.edges.size();++i){const auto& edge=g.edges[i];
         const std::set<unsigned> owners(edge.faceIDs.begin(),edge.faceIDs.end());
         std::map<unsigned,unsigned> pcCounts;unsigned curves=0;
@@ -109,8 +127,10 @@ inline bool RepresentationOwners(const Graph& g,unsigned seam,unsigned bore,Budg
                     const auto relative=surface.location.Predivided(edge.shape.Location());if(!d::Location(relative,budget))return false;
                     if(rep->IsCurveOnSurface(surface.handle,relative)){++found;owner=f;}}
                 if(found!=1||++pcCounts[owner]!=1)return false;
-                if(rep->IsCurveOnClosedSurface()&&(i!=seam||owner!=bore||owners.size()!=1))return false;
-                if(i==seam&&!rep->IsCurveOnClosedSurface())return false;
+                const auto host=hostSeams.find(i);const bool designated=i==seam||host!=hostSeams.end();
+                const unsigned seamOwner=i==seam?bore:host!=hostSeams.end()?host->second:0;
+                if(rep->IsCurveOnClosedSurface()&&(!designated||owner!=seamOwner||owners.size()!=1))return false;
+                if(designated&&!rep->IsCurveOnClosedSurface())return false;
             }else if(rep->IsRegularity()){
                 const auto& a=g.faces[edge.faceIDs[0]].surface;const auto& b=g.faces[edge.faceIDs[1]].surface;
                 if(!d::PairLocation(a.location,edge.shape.Location(),budget)||!d::PairLocation(b.location,edge.shape.Location(),budget))return false;
@@ -189,7 +209,71 @@ inline bool PointOwners(const Graph& g,double mm,const std::atomic_bool& stop,Bu
         }
     }return true;
 }
-inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertices,unsigned bore,unsigned seam,const std::vector<unsigned>& openings){
+// A periodic host side is selected exclusively from recipe cells and the
+// already bijective face/edge correspondence. Observed topology cannot grant
+// an exception to generic vertex-link or representation-ownership rules.
+struct HostWall {unsigned face=0,seam=0;std::array<unsigned,2> rims{};};
+inline bool HostWalls(const Graph& g,const Expected& expected,const std::vector<int>& originalEdge,
+    const std::vector<int>& originalFace,double mm,double error,std::vector<HostWall>& walls){
+    walls.clear();const double pi=std::acos(-1.0);
+    for(unsigned role=0;role<expected.faces.size();++role){const auto& wanted=expected.faces[role];
+        if(!wanted.cylinder)continue;
+        bool periodic=false;for(const auto& wire:wanted.wires)for(const auto& use:wire)
+            if(expected.edges.at(use.edge).fullCircle)periodic=true;
+        if(!periodic)continue;
+        if(wanted.wires.size()!=1||wanted.wires[0].size()!=4)return false;
+        HostWall wall;unsigned faceCount=0;
+        for(unsigned f=0;f<originalFace.size();++f)if(originalFace[f]==int(role)){wall.face=f;++faceCount;}
+        if(faceCount!=1)return false;
+        const auto& face=g.faces.at(wall.face);if(face.wires.size()!=1||face.wires[0].size()!=4)return false;
+        std::map<unsigned,unsigned> counts;for(const auto& use:wanted.wires[0])++counts[use.edge];
+        unsigned rims=0,seams=0;
+        for(const auto& row:counts){unsigned actual=0,matches=0;
+            for(unsigned e=0;e<originalEdge.size();++e)if(originalEdge[e]==int(row.first)){actual=e;++matches;}
+            if(matches!=1)return false;
+            if(expected.edges[row.first].fullCircle&&row.second==1){if(rims>=2)return false;wall.rims[rims++]=actual;}
+            else if(!expected.edges[row.first].circle&&row.second==2){wall.seam=actual;++seams;}else return false;
+        }
+        if(rims!=2||seams!=1)return false;
+        const auto& seam=g.edges.at(wall.seam);if(seam.vertices[0].IsSame(seam.vertices[1])
+            ||seam.faceIDs!=std::vector<unsigned>{wall.face,wall.face})return false;
+        const auto pcs=g.pcurves.find({wall.face,wall.seam});if(pcs==g.pcurves.end()||pcs->second.size()!=2)return false;
+        std::array<unsigned,2> shared{};
+        for(unsigned rim:wall.rims){const auto& edge=g.edges.at(rim);
+            if(!edge.vertices[0].IsSame(edge.vertices[1]))return false;
+            unsigned count=0,end=0;for(unsigned k=0;k<2;++k)if(edge.vertices[0].IsSame(seam.vertices[k])){++count;end=k;}
+            if(count!=1||++shared[end]!=1)return false;
+            const auto pc=g.pcurves.find({wall.face,rim});if(pc==g.pcurves.end()||pc->second.size()!=1)return false;
+        }
+        if(shared[0]!=1||shared[1]!=1)return false;
+        // Complete stored UV boundary: exactly one directed rectangle of one
+        // period and the recipe seam length, including both seam images.
+        const auto& surface=face.surface;const double uScale=wanted.radius*mm,vScale=d::Norm(surface.z)*mm;
+        double height=0;for(const auto& row:counts)if(row.second==2){const auto& e=expected.edges[row.first];height=expected.vertices[e.start].Distance(expected.vertices[e.end]);}
+        unsigned rectangles=0;
+        for(unsigned swap=0;swap<2;++swap){
+            std::array<gp_Pnt2d,4> a,b;unsigned occurrence=0;
+            for(unsigned k=0;k<4;++k){const auto use=face.wires[0][k];const auto& edge=g.edges[use.edge];
+                const auto& pc=g.pcurves.at({wall.face,use.edge}).at(use.edge==wall.seam?((occurrence++)^swap):0);
+                a[k]=od::At(pc,use.forward?edge.curve.first:edge.curve.last);b[k]=od::At(pc,use.forward?edge.curve.last:edge.curve.first);}
+            if(occurrence!=2)return false;
+            std::array<unsigned,4> next{};bool valid=true;
+            for(unsigned k=0;k<4;++k){unsigned count=0;for(unsigned j=0;j<4;++j)if(k!=j&&od::Close2(b[k],a[j],uScale,vScale,error)){next[k]=j;++count;}if(count!=1)valid=false;}
+            if(!valid)continue;std::array<bool,4> seen{};unsigned at=0;double area=0;
+            for(unsigned k=0;k<4;++k){if(seen[at]){valid=false;break;}seen[at]=true;
+                const auto x=a[at],y=b[at],origin=a[0];area+=(x.X()-origin.X())*(y.Y()-origin.Y())-(y.X()-origin.X())*(x.Y()-origin.Y());at=next[at];}
+            if(!valid||at!=0||!std::isfinite(area)||area==0||(area>0?1:-1)!=(face.shape.Orientation()==TopAbs_FORWARD?1:-1))continue;
+            double u0=a[0].X(),u1=u0,v0=a[0].Y(),v1=v0;
+            for(const auto& p:a){u0=std::min(u0,p.X());u1=std::max(u1,p.X());v0=std::min(v0,p.Y());v1=std::max(v1,p.Y());}
+            if(std::abs(u1-u0-2*pi)*uScale>error||std::abs((v1-v0)*d::Norm(surface.z)-height)*mm>error)continue;
+            unsigned corners=0;for(const auto& p:a){const bool u=std::abs(p.X()-u0)*uScale<=error||std::abs(p.X()-u1)*uScale<=error;
+                const bool v=std::abs(p.Y()-v0)*vScale<=error||std::abs(p.Y()-v1)*vScale<=error;if(u&&v)++corners;}
+            if(corners==4)++rectangles;
+        }
+        if(rectangles!=1)return false;walls.push_back(wall);
+    }return true;
+}
+inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertices,unsigned bore,unsigned seam,const std::vector<unsigned>& openings,const std::vector<HostWall>& hosts={}){
     using Adjacency=std::map<unsigned,std::set<unsigned>>;
     std::vector<Adjacency> links(vertices.Extent());std::vector<std::set<unsigned>> germs(vertices.Extent());
     const auto vertex=[&](const TopoDS_Vertex& v)->unsigned {return unsigned(vertices.FindIndex(v)-1);};
@@ -198,7 +282,7 @@ inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertice
         if(v>=links.size()||a==b||!germs[v].count(a)||!germs[v].count(b))return false;
         return links[v][a].insert(b).second&&links[v][b].insert(a).second;
     };
-    for(unsigned f=0;f<g.faces.size();++f){if(f==bore)continue;
+    for(unsigned f=0;f<g.faces.size();++f){if(f==bore||std::any_of(hosts.begin(),hosts.end(),[&](const HostWall& host){return host.face==f;}))continue;
         for(const auto& wire:g.faces[f].wires){std::map<unsigned,unsigned> incoming,outgoing;
             for(const auto& use:wire){const auto& e=g.edges[use.edge];const unsigned start=use.forward?0:1,end=1-start;
                 if(!outgoing.emplace(vertex(e.vertices[start]),2*use.edge+start).second
@@ -213,6 +297,11 @@ inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertice
         for(unsigned n=0;n<2;++n)if(e.vertices[0].IsSame(g.edges[seam].vertices[n])){++matched;index=n;}
         if(matched!=1||!arc(vertex(e.vertices[0]),2*opening,2*seam+index)
             ||!arc(vertex(e.vertices[0]),2*opening+1,2*seam+index))return false;
+    }
+    for(const auto& host:hosts)for(unsigned rim:host.rims){const auto& e=g.edges[rim];unsigned matched=0,index=0;
+        for(unsigned n=0;n<2;++n)if(e.vertices[0].IsSame(g.edges[host.seam].vertices[n])){++matched;index=n;}
+        if(matched!=1||!arc(vertex(e.vertices[0]),2*rim,2*host.seam+index)
+            ||!arc(vertex(e.vertices[0]),2*rim+1,2*host.seam+index))return false;
     }
     for(unsigned v=0;v<links.size();++v){
         if(germs[v].size()<3||links[v].size()!=germs[v].size())return false;
@@ -276,6 +365,7 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_solid::Envel
         for(unsigned i:newEdges)if(graph.edges[i].curve.circle)openings.push_back(i);else{seam=i;++seamCount;}
         if(openings.size()!=2||seamCount!=1)return fail();
         std::vector<bool> claimedFaces(expected.faces.size(),false);std::set<unsigned> piercedCaps;
+        std::vector<int> originalFace(graph.faces.size(),-1);
         for(unsigned f=0;f<graph.faces.size();++f){
             if(stop.load())return fail();const auto& face=graph.faces[f];std::vector<std::vector<std::pair<unsigned,bool>>> originalWires;unsigned extraOpenings=0,totalOriginal=0,totalNew=0;
             for(const auto& wire:face.wires){std::vector<std::pair<unsigned,bool>> w;unsigned newCount=0;
@@ -298,7 +388,7 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_solid::Envel
                 if(match){++count;role=r;}
             }
             d::Face surfaceView;surfaceView.face=face.shape;surfaceView.surface=face.surface;
-            if(count!=1||claimedFaces[role]||!d::MatchSurface(surfaceView,expected.faces[role],mm,error))return fail();claimedFaces[role]=true;
+            if(count!=1||claimedFaces[role]||!d::MatchSurface(surfaceView,expected.faces[role],mm,error))return fail();claimedFaces[role]=true;originalFace[f]=int(role);
             const bool cap=role==expected.caps[0]||role==expected.caps[1];
             if(extraOpenings!=(cap?1u:0u))return fail();if(cap&&!piercedCaps.insert(role).second)return fail();
         }
@@ -309,14 +399,18 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_solid::Envel
             for(const auto& pc:entry.second){const bool fullPlanar=!surface.cylinder&&c.circle&&c.last-c.first>pi;
                 if(fullPlanar?!detail::FullPlanarCircleIdentity(c,pc,surface,mm,error):!d::PCurveIdentity(c,pc,surface,mm,error))return fail();}
         }
-        if(!detail::RepresentationOwners(graph,seam,bore,graph.budget))return fail();
+        report.phase="whole-host-seams";std::vector<detail::HostWall> hosts;
+        if(!detail::HostWalls(graph,expected,originalEdge,originalFace,mm,error,hosts))return fail();
+        std::map<unsigned,unsigned> hostSeams;for(const auto& host:hosts)if(!hostSeams.emplace(host.seam,host.face).second)return fail();
+        report.phase="representation-owners";
+        if(!detail::RepresentationOwners(graph,seam,bore,graph.budget,hostSeams))return fail();
         // Ownership inspection may evaluate bounded location products, but it
         // may not increase the already fixed arithmetic allowance.
         if(graph.budget.arithmeticMagnitudeMM>fixedArithmetic||graph.budget.maximumLocationCompositionMagnitude>fixedComposition)return fail();
-        report.phase="whole-vertex-links";if(!detail::VertexLinks(graph,vertices,bore,seam,openings))return fail();
+        report.phase="whole-vertex-links";if(!detail::VertexLinks(graph,vertices,bore,seam,openings,hosts))return fail();
         long cellEuler=long(vertices.Extent())-long(graph.edges.size());
         for(const auto& face:graph.faces)cellEuler+=2-long(face.wires.size());
-        if(cellEuler!=0)return fail(); // supplementary to complete mapped cells/links
+        if(cellEuler!=2-2*long(expected.hostGenus+1))return fail(); // supplementary to complete mapped cells/links
         report.phase="kernel-validity";if(stop.load()||!BRepCheck_Analyzer(result,Standard_True).IsValid())return fail();
         if(stop.load())return fail();BRepClass3d_SolidClassifier outside(result);
         outside.PerformInfinitePoint(Precision::Confusion());

@@ -68,7 +68,7 @@ inline bool RepresentationOwners(const Graph& g,const std::map<unsigned,unsigned
         }if(curves!=1)return false;
     }return true;
 }
-inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertices,const std::vector<Bore>& bores){
+inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertices,const std::vector<Bore>& bores,const std::vector<old::detail::HostWall>& hosts={}){
     using Adjacency=std::map<unsigned,std::set<unsigned>>;
     std::vector<Adjacency> links(vertices.Extent());std::vector<std::set<unsigned>> germs(vertices.Extent());
     const auto vertex=[&](const TopoDS_Vertex& v)->unsigned {return unsigned(vertices.FindIndex(v)-1);};
@@ -77,7 +77,8 @@ inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertice
         if(v>=links.size()||a==b||!germs[v].count(a)||!germs[v].count(b))return false;
         return links[v][a].insert(b).second&&links[v][b].insert(a).second;
     };
-    for(unsigned f=0;f<g.faces.size();++f){if(std::any_of(bores.begin(),bores.end(),[&](const Bore& b){return f==b.face;}))continue;
+    for(unsigned f=0;f<g.faces.size();++f){if(std::any_of(bores.begin(),bores.end(),[&](const Bore& b){return f==b.face;})
+            ||std::any_of(hosts.begin(),hosts.end(),[&](const old::detail::HostWall& host){return f==host.face;}))continue;
         for(const auto& wire:g.faces[f].wires){std::map<unsigned,unsigned> incoming,outgoing;
             for(const auto& use:wire){const auto& e=g.edges[use.edge];const unsigned start=use.forward?0:1,end=1-start;
                 if(!outgoing.emplace(vertex(e.vertices[start]),2*use.edge+start).second
@@ -92,6 +93,11 @@ inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertice
         for(unsigned n=0;n<2;++n)if(e.vertices[0].IsSame(g.edges[seam].vertices[n])){++matched;index=n;}
         if(matched!=1||!arc(vertex(e.vertices[0]),2*opening,2*seam+index)
             ||!arc(vertex(e.vertices[0]),2*opening+1,2*seam+index))return false;
+    }
+    for(const auto& host:hosts)for(unsigned rim:host.rims){const auto& e=g.edges[rim];unsigned matched=0,index=0;
+        for(unsigned k=0;k<2;++k)if(e.vertices[0].IsSame(g.edges[host.seam].vertices[k])){++matched;index=k;}
+        if(matched!=1||!arc(vertex(e.vertices[0]),2*rim,2*host.seam+index)
+            ||!arc(vertex(e.vertices[0]),2*rim+1,2*host.seam+index))return false;
     }
     for(unsigned v=0;v<links.size();++v){
         if(germs[v].size()<3||links[v].size()!=germs[v].size())return false;
@@ -174,6 +180,7 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
         std::vector<bool> claimedOperands(n,false),claimedFaces(expected.faces.size(),false);
         std::set<unsigned> piercedCaps;std::map<unsigned,unsigned> seams;
         std::map<unsigned,unsigned> openingOperand;
+        std::vector<int> originalFace(graph.faces.size(),-1);
         for(unsigned f=0;f<graph.faces.size();++f){
             if(stop.load())return fail();const auto& face=graph.faces[f];std::vector<std::vector<std::pair<unsigned,bool>>> originalWires;unsigned extraOpenings=0,totalOriginal=0,totalNew=0;
             for(const auto& wire:face.wires){std::vector<std::pair<unsigned,bool>> w;unsigned newCount=0;
@@ -217,7 +224,7 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
                 if(match){++count;role=r;}
             }
             d::Face surfaceView;surfaceView.face=face.shape;surfaceView.surface=face.surface;
-            if(count!=1||claimedFaces[role]||!d::MatchSurface(surfaceView,expected.faces[role],mm,error))return fail();claimedFaces[role]=true;
+            if(count!=1||claimedFaces[role]||!d::MatchSurface(surfaceView,expected.faces[role],mm,error))return fail();claimedFaces[role]=true;originalFace[f]=int(role);
             const bool cap=role==expected.caps[0]||role==expected.caps[1];
             if(extraOpenings!=(cap?n:0u))return fail();if(cap&&!piercedCaps.insert(role).second)return fail();
         }
@@ -236,14 +243,18 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
             for(const auto& pc:entry.second){const bool fullPlanar=!surface.cylinder&&c.circle&&c.last-c.first>pi;
                 if(fullPlanar?!old::detail::FullPlanarCircleIdentity(c,pc,surface,mm,error):!d::PCurveIdentity(c,pc,surface,mm,error))return fail();}
         }
+        report.phase="whole-host-seams";std::vector<old::detail::HostWall> hosts;
+        if(!old::detail::HostWalls(graph,expected,originalEdge,originalFace,mm,error,hosts))return fail();
+        for(const auto& host:hosts)if(!seams.emplace(host.seam,host.face).second)return fail();
+        report.phase="representation-owners";
         if(!detail::RepresentationOwners(graph,seams,graph.budget))return fail();
         // Ownership inspection may evaluate bounded location products, but it
         // may not increase the already fixed arithmetic allowance.
         if(graph.budget.arithmeticMagnitudeMM>fixedArithmetic||graph.budget.maximumLocationCompositionMagnitude>fixedComposition)return fail();
-        report.phase="whole-vertex-links";if(!detail::VertexLinks(graph,vertices,bores))return fail();
+        report.phase="whole-vertex-links";if(!detail::VertexLinks(graph,vertices,bores,hosts))return fail();
         long cellEuler=long(vertices.Extent())-long(graph.edges.size());
         for(const auto& face:graph.faces)cellEuler+=2-long(face.wires.size());
-        if(cellEuler!=2-2*long(n))return fail(); // supplementary to complete mapped cells/links
+        if(cellEuler!=2-2*long(expected.hostGenus+n))return fail(); // supplementary to complete mapped cells/links
         report.phase="kernel-validity";if(stop.load()||!BRepCheck_Analyzer(result,Standard_True).IsValid())return fail();
         if(stop.load())return fail();BRepClass3d_SolidClassifier outside(result);
         outside.PerformInfinitePoint(Precision::Confusion());

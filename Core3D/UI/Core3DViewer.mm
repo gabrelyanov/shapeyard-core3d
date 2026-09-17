@@ -2007,6 +2007,7 @@ struct CutSolidGeometry {
     cut_display::Settings displaySettings;
     TopoDS_Shape detachedBase;
     analytic_boolean::Recipe recipe;
+    std::optional<retained_solid::Envelope> circularHost;
     std::atomic_bool cancelled{false};
     analytic_boolean::Result result;
     bool built=false;
@@ -3256,6 +3257,15 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         }else if(!cylindrical_cut::Rebuild(original.source.envelope,*radius,original.source.effectiveMM,envelope))return {};
         auto carrier=std::make_shared<retained_solid::Payload>();carrier->envelope=envelope;carrier->base=original.source.base;
         if(!retained_solid::Encode(envelope,carrier->bytes)||!analytic_boolean::Inspect(cylindrical_cut::Recipe(envelope)))return {};
+        // Circular hosts require a separated through-bore. Refuse unsupported
+        // recipe clearance at admission, before copying or building geometry;
+        // the legacy polygon/enclosure route also supports notches/side cuts.
+        bool circularHost=false;
+        if(envelope.sourceFamily==1){profile::Parameters source;
+            if(!profile::Decode(envelope.sourceValues,source))return {};
+            circularHost=bool(source.definition.circle);
+            if(circularHost&&saved_cut_bore_clearance::Inspect(envelope).status
+                !=saved_cut_bore_clearance::Status::ClearRecipeDisk)return {};}
         // Creation keeps the original source UUID and adds one derived UUID;
         // charge both in the existing global namespace before the geometry copy.
         std::vector<profile::Record> profiles;std::vector<enclosure::Record> enclosures;
@@ -3284,6 +3294,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         // deep geometry copy with no live labels/materials reaches the worker.
         BRepBuilderAPI_Copy copy(original.source.base,Standard_True,Standard_False);if(!copy.IsDone())return {};
         auto geometry=std::make_shared<CutSolidGeometry>();geometry->detachedBase=copy.Shape();geometry->recipe=cylindrical_cut::Recipe(envelope);
+        if(circularHost)geometry->circularHost=envelope;
         myContext->InitSelected();const auto displaySource=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
         if(displaySource.IsNull()||!cut_display::Capture(displaySource->Attributes(),geometry->displaySettings))return {};
         if(geometry->detachedBase.IsNull()||geometry->detachedBase.IsPartner(original.source.base))return {};
@@ -3441,6 +3452,10 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
         if(!*p||(*p)->built||(*p)->cancelled.load())return false;
         (*p)->built=analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,(*p)->result)==analytic_boolean::Status::Built
             &&cut_display::Prepare((*p)->result.solid,(*p)->displaySettings,(*p)->cancelled);
+        if((*p)->built&&(*p)->circularHost){const auto& source=*(*p)->circularHost;
+            (*p)->built=saved_cut_source_edit::InspectBase((*p)->detachedBase,source,(*p)->cancelled)
+                &&saved_cut_whole_result::Inspect((*p)->result.solid,source,source,(*p)->cancelled).classification
+                    ==saved_cut_whole_result::Classification::MatchedOrientedBoundary;}
         return (*p)->built;
     }
     if(const auto p=std::get_if<std::shared_ptr<CutProgramGeometry>>(&payload)) {

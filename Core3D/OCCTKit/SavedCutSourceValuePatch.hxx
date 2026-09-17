@@ -27,7 +27,13 @@ struct EnclosurePatch {
     // Width, depth, height, wall, floor, corner radius, in recipe units.
     std::array<std::optional<double>, 6> dimensions;
 };
-using Patch = std::variant<PolygonPatch, EnclosurePatch>;
+// The authored centre stays fixed; source edits replay every bore verbatim.
+struct CirclePatch {
+    std::optional<double> outerRadius;
+    std::optional<double> innerRadius;
+    std::optional<double> depth;
+};
+using Patch = std::variant<PolygonPatch, EnclosurePatch, CirclePatch>;
 struct Result {
     retained_solid::Envelope envelope;
     bool changed = false;
@@ -85,6 +91,17 @@ inline std::optional<Result> Apply(const retained_solid::Envelope& original,
             for (std::size_t field = 0; field < enclosurePatch->dimensions.size(); ++field)
                 if (enclosurePatch->dimensions[field]
                     && !assign(2 + field, *enclosurePatch->dimensions[field])) return {};
+        } else if (const auto* circlePatch = std::get_if<CirclePatch>(&patch)) {
+            profile::Parameters decoded;
+            if (original.sourceFamily != 1 || original.sourceSchema > 2
+                || !profile::Decode(original.sourceValues, decoded)
+                || !PositiveSourceFrame(decoded.constructionFrame)) return {};
+            const auto& definition = decoded.definition;
+            if (!definition.circle || definition.revolve || definition.curves
+                || !definition.points.empty() || !definition.holes.empty()) return {};
+            if (circlePatch->outerRadius && !assign(9, *circlePatch->outerRadius)) return {};
+            if (circlePatch->innerRadius && !assign(10, *circlePatch->innerRadius)) return {};
+            if (circlePatch->depth && !assign(1, *circlePatch->depth)) return {};
         } else return {};
 
         // Validate the complete multi-field result once. An intermediate width

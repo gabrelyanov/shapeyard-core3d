@@ -16,3 +16,16 @@ done
     -isystem "$tests_dir/../Core3D/occt/inc" \
     "$tests_dir/PlanarSweepTangentArcTests.cpp" -o "$output_dir/PlanarSweepTangentArcTests"
 "$output_dir/PlanarSweepTangentArcTests"
+# Optional retained host OCCT libraries enable the native planar-loft regression.
+# Explicit input avoids selecting iOS libraries or invoking Xcode/tool discovery.
+if [[ -n "${2:-}" ]]; then
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/RectangularLoftPlanarBuilderTests.cpp" -L "$2" \
+        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -o "$output_dir/RectangularLoftPlanarBuilderTests"
+    "$output_dir/RectangularLoftPlanarBuilderTests"
+else
+    echo "SKIP RectangularLoftPlanarBuilderTests: pass retained host OCCT library directory as argument 2"
+fi

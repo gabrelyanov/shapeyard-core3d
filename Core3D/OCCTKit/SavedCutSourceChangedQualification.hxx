@@ -72,6 +72,30 @@ inline std::map<std::string,bool> Enclosure(const OcctCylindricalCutSource& sour
     }
     return out;
 }
+inline std::map<std::string,bool> Circle(const OcctCylindricalCutSource& source,double outerMM,double innerMM,double depthMM) {
+    profile::Parameters p;std::map<std::string,bool> out;
+    if(!source.rebuilding||source.envelope.sourceFamily!=1||!profile::Decode(source.envelope.sourceValues,p)
+        ||!p.definition.circle)return {{"circle-fixture",false}};
+    const auto& d=p.definition;const auto& circle=*d.circle;const double mm=p.metersPerUnit*1000;
+    const auto near=[](double a,double b){return std::isfinite(a)&&std::isfinite(b)&&std::abs(a-b)<=1e-8;};
+    out["circle-fixture"]=!d.revolve&&!d.curves&&d.points.empty()&&d.holes.empty()
+        &&near(circle.center.X()*mm,0)&&near(circle.center.Y()*mm,0)
+        &&near(circle.outerRadius*mm,outerMM)&&near(circle.innerRadius*mm,innerMM)&&near(d.depth*mm,depthMM);
+    if(!out["circle-fixture"])return out;
+    const std::atomic_bool stop(false);
+    out["independent-source-boundary"]=saved_cut_source_edit::InspectBase(source.base,source.envelope,stop);
+    const auto proof=saved_cut_whole_result::Inspect(source.original.shape,source.envelope,source.envelope,stop);
+    out["complete-result-boundary"]=proof.classification==saved_cut_whole_result::Classification::MatchedOrientedBoundary;
+    out["all-vertex-links"]=proof.vertexLinks==proof.vertices&&proof.vertices==(innerMM>0?6u:4u);
+    gp_Trsf frame;if(p.constructionFrame&&!p.constructionFrame->Transform(frame))return {{"circle-frame",false}};
+    const double scale=frame.ScaleFactor(),pi=std::acos(-1.0);
+    const double expectedBase=pi*(outerMM*outerMM-innerMM*innerMM)*depthMM*scale*scale*scale;
+    const double bore=source.envelope.radius*mm,expectedCut=expectedBase-pi*bore*bore*depthMM*scale;
+    GProp_GProps base,result;BRepGProp::VolumeProperties(source.base,base);BRepGProp::VolumeProperties(source.original.shape,result);
+    out["analytic-base-volume"]=std::abs(base.Mass()*mm*mm*mm-expectedBase)<=expectedBase*1e-6;
+    out["analytic-cut-volume"]=std::abs(result.Mass()*mm*mm*mm-expectedCut)<=expectedCut*1e-6;
+    return out;
+}
 inline std::map<std::string,bool> Bracket(const OcctCylindricalCutSource& source,double lengthMM,double depthMM) {
     std::map<std::string,bool> out;profile::Parameters p;
     if(!source.rebuilding||source.envelope.sourceFamily!=1

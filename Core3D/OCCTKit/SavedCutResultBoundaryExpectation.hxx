@@ -1,12 +1,14 @@
 #pragma once
 #include "SavedCutBoreResultObservation.hxx" // requires vertex-sharing review2
 #include "PrismBoundaryExpectation.hxx"
+#include "CircularHostBoundaryExpectation.hxx"
 namespace core3d::saved_cut_whole_result {
 struct Expected {
     std::vector<gp_Pnt> vertices;
     std::vector<enclosure_correspondence::ExpectedEdge> edges;
     std::vector<enclosure_correspondence::ExpectedFace> faces;
     std::array<unsigned,2> caps{};
+    unsigned hostGenus=0;
 };
 // Full original boundary; the result matcher adds ONLY the explicit bore patch.
 inline bool ExpectedSource(const retained_solid::Envelope& e,Expected& out){
@@ -14,6 +16,12 @@ inline bool ExpectedSource(const retained_solid::Envelope& e,Expected& out){
     if(e.sourceFamily==2){enclosure::Parameters p;enclosure_correspondence::ExpectedBoundary x;
         if(!enclosure::Decode(int(e.sourceSchema),e.sourceValues,p)||!enclosure_correspondence::BuildExpectedBoundary(p.definition,x))return false;
         out.vertices.assign(x.vertices.begin(),x.vertices.end());out.edges.assign(x.edges.begin(),x.edges.end());out.faces.assign(x.faces.begin(),x.faces.end());out.caps={16,17};return true;}
+    if(e.sourceFamily==1){profile::Parameters circle;
+        if(!profile::Decode(e.sourceValues,circle))return false;
+        if(circle.definition.circle){saved_cut_circular_host::Expectation x;
+            if(!saved_cut_circular_host::BuildExpectedBoundary(circle.definition,circle.constructionFrame,x))return false;
+            out.vertices=std::move(x.vertices);out.edges=std::move(x.edges);out.faces=std::move(x.faces);
+            out.caps=x.caps;out.hostGenus=x.hostGenus;return true;}}
     profile::Parameters p;saved_cut_prism_prototype::Expectation x;
     if(e.sourceFamily!=1||!profile::Decode(e.sourceValues,p)||!saved_cut_prism_prototype::BuildExpectedBoundary(p.definition,x))return false;
     gp_Trsf frame;if(p.constructionFrame&&(!p.constructionFrame->IsValid()||p.constructionFrame->values[7]<=0||!p.constructionFrame->Transform(frame)))return false;

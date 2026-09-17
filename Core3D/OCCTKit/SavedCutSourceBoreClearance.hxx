@@ -111,7 +111,7 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
             profile::Parameters p;
             if(envelope.sourceSchema>2||!profile::Decode(envelope.sourceValues,p))return out;
             polygon=p.definition;frame=p.constructionFrame;plane=polygon.plane;thickness=polygon.depth;
-            if(polygon.revolve||polygon.circle||polygon.curves||!polygon.holes.empty()){
+            if(polygon.revolve||polygon.curves||!polygon.holes.empty()){
                 out.status=Status::UnsupportedFamily;return out;}
         }else if(envelope.sourceFamily==2){
             enclosure::Parameters p;
@@ -179,7 +179,15 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         I angular=add(mul(span,slope),maximum(I(0),sub(inflated,radius)));
         if(!good(radius)||!good(angular)||radius.lo<=0)return out;
         I distance;
-        if(envelope.sourceFamily==1){
+        if(envelope.sourceFamily==1&&polygon.circle){
+            const auto& c=*polygon.circle;
+            const I radial=norm(sub(p[chart[0]],I(c.center.X())),sub(p[chart[1]],I(c.center.Y())));
+            if(!good(radial))return out;
+            if(radial.hi>=c.outerRadius||(c.innerRadius>0&&radial.lo<=c.innerRadius)){
+                out.status=Status::OutsideOrInsufficientLigament;return out;}
+            distance=sub(I(c.outerRadius),radial);
+            if(c.innerRadius>0)distance=minimum(distance,sub(radial,I(c.innerRadius)));
+        }else if(envelope.sourceFamily==1){
             if(!inside(polygon.points,midpoint(p[chart[0]]),midpoint(p[chart[1]]))){out.status=Status::OutsideOrInsufficientLigament;return out;}
             distance=I(std::numeric_limits<double>::max());
             for(std::size_t n=0;n<polygon.points.size();++n){I d=segmentDistance(p[chart[0]],p[chart[1]],polygon.points[n],polygon.points[(n+1)%polygon.points.size()]);if(!good(d))return out;distance=minimum(distance,d);}

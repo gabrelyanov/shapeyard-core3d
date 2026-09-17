@@ -10883,6 +10883,12 @@ std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard
 std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe(){
     return SavedCutResultProbeChecks(core3d::saved_boolean_build::probe::Run(),"program",257);
 }
+#include "CircularHostProofProbe.hxx"
+std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario){
+    auto checks=core3d::saved_cut_circular_host::probe::Run(unsigned(scenario));
+    for(const auto& row:checks)if(!row.second)std::fprintf(stderr,"[circular-host] scenario=%d failed=%s\n",int(scenario),row.first.c_str());
+    return checks;
+}
 #include "SavedCutTrimDomainProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe(){
     auto checks=core3d::saved_cut_trim_domain::probe::Run();
