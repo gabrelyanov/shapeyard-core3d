@@ -2785,6 +2785,18 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         && _viewer->getShapeInteractor()->hasActiveShell();
 }
 
+- (BOOL)tryMirrorWorldPlaneWithNormalAxis:(Core3DMirrorAxis)axis offset:(double)offset {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeMirror
+        || axis < Core3DMirrorAxisX || axis > Core3DMirrorAxisZ) {
+        return NO;
+    }
+    const BOOL ready = _viewer->getObjectInteractor()->tryMirrorWorldPlane(
+        static_cast<Standard_Integer>(axis), static_cast<Standard_Real>(offset));
+    [self requestRender];
+    return ready;
+}
+
 - (BOOL) applyMirror {
 	if (_viewer == nullptr
 		|| _viewer->getObjectInteractor() == nullptr

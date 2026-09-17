@@ -359,6 +359,10 @@ namespace core3d {
 		Standard_Boolean tryMirror(
 			Standard_Integer axisIndex,
 			bool backward) noexcept;
+        //! Headless preview about a world-axis plane through normal * offset.
+        //! Offset is in model units; applyMirror() owns the single history step.
+        Standard_Boolean tryMirrorWorldPlane(
+            Standard_Integer normalAxis, Standard_Real offsetInModelUnits) noexcept;
 		//! Enter a one-tap, non-mutating planar-face detector for Mirror.
 		Standard_Boolean beginMirrorPlanePicking() noexcept;
 		//! Exit face picking and restore the exact selection modes captured on entry.

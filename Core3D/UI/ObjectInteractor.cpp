@@ -4384,6 +4384,43 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		}
 	}
 
+	Standard_Boolean ObjectInteractor::tryMirrorWorldPlane(
+		Standard_Integer normalAxis, Standard_Real offsetInModelUnits) noexcept {
+		if (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
+			|| _mirrorPreviewState == MirrorPreviewState::Committing
+			|| _mirrorPreviewState == MirrorPreviewState::OutcomeUnknown
+			|| normalAxis < 0 || normalAxis > 2
+			|| !std::isfinite(offsetInModelUnits)
+			|| std::abs(offsetInModelUnits) > limits::kMaximumModelCoordinateMagnitude
+				- 16.0 * Precision::Confusion()) {
+			return Standard_False;
+		}
+		if (_mirrorPlanePicking && !cancelMirrorPlanePicking()) {
+			return Standard_False;
+		}
+		++_mirrorPreviewGeneration;
+		try {
+			const gp_Dir aNormal = normalAxis == 0 ? gp_Dir(1, 0, 0)
+				: normalAxis == 1 ? gp_Dir(0, 1, 0) : gp_Dir(0, 0, 1);
+			const gp_Dir anXDirection = normalAxis == 0 ? gp_Dir(0, 1, 0)
+				: normalAxis == 1 ? gp_Dir(0, 0, 1) : gp_Dir(1, 0, 0);
+			const gp_Pnt anOrigin(aNormal.X() * offsetInModelUnits,
+				aNormal.Y() * offsetInModelUnits, aNormal.Z() * offsetInModelUnits);
+			if (!tryMirrorWorldPlaneImpl(gp_Ax2(anOrigin, aNormal, anXDirection))
+				|| !clearCustomMirrorPlaneState()) {
+				_mirrorPreviewState = MirrorPreviewState::Failed;
+				return Standard_False;
+			}
+			_trialMirrorUsesCustomPlane = false;
+			_mirrorPreviewState = MirrorPreviewState::Ready;
+			return Standard_True;
+		} catch (...) {
+			(void)clearTrialMirrorObjects();
+			_mirrorPreviewState = MirrorPreviewState::Failed;
+			return Standard_False;
+		}
+	}
+
 	Standard_Boolean ObjectInteractor::tryMirrorImpl(
 		Standard_Integer axisIndex,
 		bool backward) {

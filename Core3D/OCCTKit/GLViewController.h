@@ -114,6 +114,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)cancelMirrorPlanePicking;
 - (BOOL)isPickingMirrorPlane;
 - (BOOL)hasCustomMirrorPlane;
+//! Preview a world plane; offset is in document model units. Commit with tryApplyMirror.
+- (BOOL)tryMirrorWorldPlaneWithNormalAxis:(Core3DMirrorAxis)axis offset:(double)offset
+    NS_SWIFT_NAME(tryMirrorWorldPlane(normalAxis:offset:));
 - (BOOL)setMirrorPlaneOffset:(CGFloat)offset;
 - (Boundaries)getMirrorPlaneOffsetBoundaries;
 - (BOOL)resetMirrorPlane;

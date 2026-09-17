@@ -5077,6 +5077,45 @@ bool Core3DViewer::repairNames(const OrdinaryNameLedger& ledger, bool) noexcept 
         != ObjectInteractor::SavedGroupPivotResult::Failed;
 }
 
+namespace {
+// N2 deliberately has no associative source link. Resolve only exact retained
+// B-reps, including hidden originals. Never infer a source from names/bounds.
+bool ResolveCoherentAtlasOptions(const Handle(OcctDocument)& document,
+    const TDF_Label& copyLabel, OcctMeshUVAtlasOptions& options) {
+    options.curvedSource.Nullify();
+    if (options.version != 2) return true;
+    core3d::provenance::SourceFaceProvenanceRecord provenance;
+    if (document->TryCopySourceFaceProvenanceForLabel(copyLabel, provenance)
+        != core3d::provenance::CopySourceFaceProvenanceReadState::Present) return true;
+    TDF_LabelSequence labels;
+    XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main())->GetFreeShapes(labels);
+    if (labels.Length() > 50000) return false;
+    for (int i=1; i<=labels.Length(); ++i) {
+        const auto label=labels.Value(i);
+        if (label.IsEqual(copyLabel)) continue;
+        OcctObjectTransformState source;
+        if (!document->CaptureObjectTransformStateForLabel(label,source)
+            || source.resolvedRepresentation != OcctGeometryRepresentation::BRep) continue;
+        std::atomic_bool cancelled{false};
+        core3d::meshcopy::CurrentTessellationCopy copy;
+        if (core3d::meshcopy::PrepareCurrentTessellationCopy(source.shape,copy,cancelled)
+                != core3d::meshcopy::PreparationResult::Ready
+            || !core3d::provenance::SameSourceFaces(provenance.faces,copy.faces)) continue;
+        TopLoc_Location location;
+        const auto mesh=BRep_Tool::Triangulation(copy.face,location);
+        std::string digest;
+        if (location.IsIdentity() && core3d::provenance::CopyTriangulationDigest(mesh,digest)
+            && digest==provenance.digest) {
+            options.curvedSource=label;
+            return true;
+        }
+    }
+    // Present provenance with a removed/edited source cannot authorize live D5
+    // reads. Refuse without mutation rather than silently publish a planar atlas.
+    return false;
+}
+}
+
 std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
     const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height,
     const std::optional<OcctMeshUVAtlasOptions>& options) noexcept {
@@ -5102,17 +5141,20 @@ std::optional<OcctMeshUVAtlasPreview> Core3DViewer::previewCoherentUVAtlas(
         OcctObjectTransformState previous;
         if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return std::nullopt; }
         if (options && options->version != 2) return std::nullopt;
+        OcctMeshUVAtlasOptions resolved = options.value_or(OcctMeshUVAtlasOptions{});
+        if (options && !ResolveCoherentAtlasOptions(myDoc,label,resolved)) return std::nullopt;
         TopoDS_Shape candidate; OcctMeshUVAtlasPreview preview;
         if (!options) {
             // Discover the current settings without attempting replacement at
             // guessed defaults. This remains available under attached images.
             if (!myDoc->CaptureMeshUVAtlasPreview(label,preview)) return std::nullopt;
         } else if (previous.meshUVAtlasVersion==2 && previous.meshUVAtlasSettings[0]==options->resolution
-            && previous.meshUVAtlasSettings[1]==options->gutterPixels) {
+            && previous.meshUVAtlasSettings[1]==options->gutterPixels
+            && (resolved.curvedSource.IsNull() || myDoc->HasCurvedUVLayoutForLabel(label))) {
             // Match Generate's Unchanged semantics after later geometry edits.
             // Reading a stored atlas does not authorize replacement under images.
             if (!myDoc->CaptureMeshUVAtlasPreview(label,preview)) return std::nullopt;
-        } else if (!myDoc->PrepareTriangleUVAtlas(label,candidate,*options,&preview)) return std::nullopt;
+        } else if (!myDoc->PrepareTriangleUVAtlas(label,candidate,resolved,&preview)) return std::nullopt;
         preview.authoredResolution=previous.meshUVAtlasSettings[0];
         preview.authoredGutterPixels=previous.meshUVAtlasSettings[1];
         return preview;
@@ -5142,16 +5184,19 @@ OrdinaryEditResult Core3DViewer::generateTriangleUVAtlas(
             || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) { return OrdinaryEditResult::Invalid; }
         OcctObjectTransformState previous;
         if (!myDoc->CaptureObjectTransformStateForLabel(label, previous)) { return OrdinaryEditResult::Invalid; }
+        OcctMeshUVAtlasOptions resolved=options;
+        if (!ResolveCoherentAtlasOptions(myDoc,label,resolved)) return OrdinaryEditResult::Invalid;
         if ((options.version == 1 && options.resolution == 0 && options.gutterPixels == 0 && previous.meshUVAtlasVersion == 1)
             || (options.version == 2 && previous.meshUVAtlasVersion == 2
                 && previous.meshUVAtlasSettings[0] == options.resolution
-                && previous.meshUVAtlasSettings[1] == options.gutterPixels)) { return OrdinaryEditResult::NoChange; }
+                && previous.meshUVAtlasSettings[1] == options.gutterPixels
+                && (resolved.curvedSource.IsNull() || myDoc->HasCurvedUVLayoutForLabel(label)))) { return OrdinaryEditResult::NoChange; }
         TopoDS_Shape candidate;
-        if (!myDoc->PrepareTriangleUVAtlas(label, candidate, options)) { return OrdinaryEditResult::Invalid; }
+        if (!myDoc->PrepareTriangleUVAtlas(label, candidate, resolved)) { return OrdinaryEditResult::Invalid; }
         OrdinaryTransformChange request;
         request.label = label; request.presentation = presentation; request.shape = candidate;
         request.transform = previous.transform; request.operation = OrdinaryTransformOperation::MeshUVAtlas;
-        request.meshUVAtlasOptions = options;
+        request.meshUVAtlasOptions = resolved;
         OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
         auto lease = _ordinaryEditController->beginTransform({request}, &failure);
         return lease ? lease.stageAndCommit() : failure;
@@ -8022,3 +8067,99 @@ void Core3DViewer::Select(int theX, int theY) {
 //        return true;
     }
 }
+
+#if DEBUG
+// Runtime-only Objective-C surface keeps this diagnostic out of the public
+// framework module and release binary. Swift's DEBUG wrapper owns the URL.
+@interface Core3DCurvedUVDebugBridge : NSObject
+- (NSDictionary<NSString *, id> *)layoutAtURL:(NSURL *)url entityIdentifier:(NSString *)identifier;
+@end
+@implementation Core3DCurvedUVDebugBridge
+- (NSDictionary<NSString *, id> *)layoutAtURL:(NSURL *)url entityIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread] || !url.isFileURL || identifier.length==0 || identifier.length>256)
+        return @{@"error":@"Curved layout requires a file URL and entity on main thread"};
+    try {
+        struct Owner {
+            Handle(OcctDocument) document = new OcctDocument();
+            ~Owner() noexcept { try { document->ClosePrivateExportSnapshot(); } catch (...) {} }
+        } owner;
+        if (!owner.document->OpenPrivateExportSnapshot(url.fileSystemRepresentation,Message_ProgressRange()))
+            return @{@"error":@"Curved layout snapshot rejected"};
+        TDF_Label target; TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(owner.document->Document()->Main())->GetFreeShapes(labels);
+        for (int i=1;i<=labels.Length();++i)
+            if (owner.document->EntityIdentifierForLabel(labels.Value(i))==identifier.UTF8String) target=labels.Value(i);
+        if (target.IsNull()) return @{@"error":@"Curved layout entity not found"};
+        core3d::provenance::SourceFaceProvenanceRecord provenance;
+        const auto state=owner.document->TryCopySourceFaceProvenanceForLabel(target,provenance);
+        NSMutableDictionary* report=[@{@"provenanceState":@(int(state)),
+            @"hasLayout":@(owner.document->HasCurvedUVLayoutForLabel(target))} mutableCopy];
+        NSMutableArray* census=[NSMutableArray array];
+        for (const auto& face:provenance.faces) {
+            NSMutableArray* params=[NSMutableArray array]; for(double p:face.params) [params addObject:@(p)];
+            [census addObject:@{@"surfaceType":@(face.surfaceType),@"params":params,
+                @"firstTriangle":@(face.firstTriangle),@"triangleCount":@(face.triangleCount)}];
+        }
+        report[@"provenanceFaces"]=census;
+        report[@"geometryDigest"]=[NSString stringWithUTF8String:provenance.digest.c_str()];
+        if (![report[@"hasLayout"] boolValue]) return report;
+        shapeyard::uv::curved::CurvedUVLayoutRecord layout; curveduv::PackSummary coverage;
+        if (!owner.document->DebugCurvedUVLayoutForLabel(target,layout,coverage)) {
+            report[@"error"]=@"Persisted curved layout failed digest/settings validation"; return report;
+        }
+        OcctObjectTransformState stored;
+        if (!owner.document->CaptureObjectTransformStateForLabel(target,stored)) return @{@"error":@"Atlas state unavailable"};
+        OcctMeshUVAtlasOptions options{2,stored.meshUVAtlasSettings[0],stored.meshUVAtlasSettings[1]};
+        // Stored curved validation replays persisted authoring inputs. A private
+        // snapshot has no original B-rep display triangulations to resolve.
+        if(layout.regenerationFaces.empty()) core3d::ResolveCoherentAtlasOptions(owner.document,target,options);
+        report[@"atlasValidatorAccepted"]=@(owner.document->ValidateTriangleUVAtlas(target,stored.shape,options));
+        // Negative control: a private copy with one UV changed must fail the
+        // same node-for-node validator. The loaded document remains untouched.
+        report[@"atlasValidatorRejectsChangedUV"]=@NO;
+        {
+            BRepBuilderAPI_Copy copied(stored.shape,Standard_True,Standard_True);
+            const auto changed=copied.Shape();
+            TopExp_Explorer face(changed,TopAbs_FACE);
+            if (!changed.IsNull() && !changed.IsSame(stored.shape) && face.More()) {
+                TopLoc_Location location;
+                const auto mesh=BRep_Tool::Triangulation(TopoDS::Face(face.Current()),location);
+                if (!mesh.IsNull() && mesh->HasUVNodes() && mesh->NbTriangles()>0) {
+                    const bool unchangedCopyAccepted=owner.document->ValidateTriangleUVAtlas(target,changed,options);
+                    int a,b,c;mesh->Triangle(1).Get(a,b,c);
+                    auto uv=mesh->UVNode(a);
+                    uv.SetX(std::nextafter(uv.X(),1.0));mesh->SetUVNode(a,uv);
+                    report[@"atlasValidatorRejectsChangedUV"]=@(unchangedCopyAccepted
+                        && !owner.document->ValidateTriangleUVAtlas(target,changed,options));
+                }
+            }
+        }
+        report[@"version"]=@(layout.version); report[@"faceCount"]=@(layout.faceCount);
+        report[@"globalTexelsPerMM"]=@(layout.globalTexelsPerMM);
+        report[@"kernelSeamEdges"]=@(layout.kernelSeamEdges);
+        report[@"splitSeamEdges"]=@(layout.splitSeamEdges);
+        report[@"diagonalSeamEdges"]=@(layout.diagonalSeamEdges);
+        report[@"tornEdges"]=@(layout.tornEdges);
+        report[@"resolution"]=@(options.resolution); report[@"gutterPixels"]=@(options.gutterPixels);
+        NSArray* kernels=@[@"planar",@"cylinder",@"torus",@"fallback"];
+        NSMutableArray* faces=[NSMutableArray array];
+        for (const auto& f:layout.faces) [faces addObject:@{
+            @"kernel":kernels[int(f.kernel)],@"subChartCount":@(f.subChartCount),@"occupancy":@(f.occupancy),
+            @"metricStretch":@{@"min":@(f.metricStretchMin),@"max":@(f.metricStretchMax)},
+            @"seamCount":@(f.seamCount),@"uvDigest":[NSString stringWithUTF8String:f.uvDigest.c_str()],
+            @"fallbackReason":[NSString stringWithUTF8String:f.fallbackReason.c_str()]}];
+        report[@"faces"]=faces;
+        // These are retained native measurements, not inferred seam budgets.
+        // All seam categories count shared edges; splitLineCount counts cuts.
+        report[@"coverage"]=@{@"subChartCount":@(coverage.subChartCount),@"splitLineCount":@(coverage.splitLineCount),
+            @"occupancy":@(coverage.occupancy),@"coveredTexels":@(coverage.coveredTexels),
+            @"globalTexelsPerMM":@(coverage.globalTexelsPerMM),@"continuousEdges":@(coverage.seamCounts.continuous),
+            @"declaredSeams":@(coverage.seamCounts.declared),@"tornEdges":@(coverage.seamCounts.torn),
+            @"kernelSeamEdges":@(coverage.seamCounts.kernelSeamEdges),
+            @"splitSeamEdges":@(coverage.seamCounts.splitSeamEdges),
+            @"diagonalSeamEdges":@(coverage.seamCounts.diagonalSeamEdges)};
+        return report;
+    } catch (...) { return @{@"error":@"Curved layout observation failed"}; }
+}
+@end
+#endif

@@ -57,6 +57,7 @@
 #include <memory>
 #include <cmath>
 #include "SourceFaceProvenanceRecord.hxx"
+#include "CurvedFaceUVUnwrap.hpp"
 class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
@@ -107,6 +108,9 @@ struct OcctMeshUVAtlasOptions {
     Standard_Integer version = 1;
     Standard_Integer resolution = 0;
     Standard_Integer gutterPixels = 0;
+    // Explicit retained native source for live D5 reads. Null keeps planar behavior.
+    // Carried by OrdinaryTransformChange through validation and Mark in one Undo.
+    TDF_Label curvedSource = {};
 };
 
 //! Read-only resolved region. Ordinals are session-local and never persistent IDs.
@@ -869,7 +873,23 @@ public:
         OcctGeometryRepresentation representation);
     //! Read the stored v2 atlas without regenerating it; images remain readable.
     Standard_EXPORT Standard_Boolean CaptureMeshUVAtlasPreview(const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept;
-    //! Bounded single-face untextured mesh atlas; candidate owns copied geometry.
+    //! Additive curved-layout presence, used to distinguish a planar v2 atlas migration.
+    Standard_EXPORT Standard_Boolean HasCurvedUVLayoutForLabel(const TDF_Label& label) const noexcept;
+    //! Same v2/prefix payload and ordinary MeshUVAtlas transaction as planar.
+    //! options.curvedSource must resolve to the exact retained source B-rep.
+    Standard_EXPORT Standard_Boolean PrepareCurvedUVAtlas(const TDF_Label& label,
+        TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options,
+        OcctMeshUVAtlasPreview* preview = nullptr) const noexcept;
+    //! Read digest-bound diagnostics and optional deterministic replay inputs.
+    Standard_EXPORT Standard_Boolean ReadCurvedUVLayoutForLabel(const TDF_Label& label,
+        shapeyard::uv::curved::CurvedUVLayoutRecord& layout,
+        curveduv::PackSummary& coverage) const noexcept;
+#if DEBUG
+    Standard_EXPORT Standard_Boolean DebugCurvedUVLayoutForLabel(const TDF_Label& label,
+        shapeyard::uv::curved::CurvedUVLayoutRecord& layout,
+        curveduv::PackSummary& coverage) const noexcept;
+#endif
+    //! Bounded single-face mesh atlas; null curvedSource preserves the planar path.
     Standard_EXPORT Standard_Boolean PrepareTriangleUVAtlas(const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options = {}, OcctMeshUVAtlasPreview* preview = nullptr) const noexcept;
     //! Private consistent-winding candidate; source ownership and material contracts remain strict.
     Standard_EXPORT OcctMeshWindingRepairResult PrepareMeshWindingRepair(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;

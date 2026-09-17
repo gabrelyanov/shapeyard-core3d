@@ -780,6 +780,13 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
                              | UIStateChangingHistory];
 }
 
+- (BOOL)tryMirrorWorldPlaneWithNormalAxis:(Core3DMirrorAxis)axis offset:(double)offset {
+    if (![NSThread isMainThread] || _currentGizmoType != PrimitiveGizmoTypeMirror) {
+        return NO;
+    }
+    return [GLController tryMirrorWorldPlaneWithNormalAxis:axis offset:offset];
+}
+
 - (Core3DModelingOperationResult)tryApplyMirror {
     return [self core3d_tryApplyOperation:PrimitiveGizmoTypeMirror
         attempt:^BOOL {

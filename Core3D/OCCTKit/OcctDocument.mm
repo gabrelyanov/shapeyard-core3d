@@ -6180,6 +6180,266 @@ Standard_Boolean OcctDocument::CaptureMeshUVAtlasPreview(
     } catch(...) { preview={};return Standard_False; }
 }
 
+namespace {
+const Standard_GUID& CurvedUVLayoutMarkerID() {
+    static const Standard_GUID id("ad64e42b-71e9-490c-8610-f21e9aa87031"); return id;
+}
+const Standard_GUID& CurvedUVLayoutChunksID() {
+    static const Standard_GUID id("ad64e42b-71e9-490c-8610-f21e9aa87032"); return id;
+}
+// Optional diagnostics live on a sibling of the strict N2 record. Existing
+// document readers already admit UAttribute/Integer/AsciiString metadata.
+bool FindCurvedUVLayout(const TDF_Label& owner, TDF_Label& output) {
+    output=TDF_Label(); Standard_Size visited=0;
+    for(TDF_ChildIterator child(owner,Standard_True);child.More();child.Next()) {
+        if(++visited>kMaximumGeometryDocumentLabels) return false;
+        if(!child.Value().IsAttribute(CurvedUVLayoutMarkerID())) continue;
+        if(!output.IsNull() || !child.Value().Father().IsEqual(owner)) return false;
+        output=child.Value();
+    }
+    return true;
+}
+std::string CurvedCornerDigest(const Handle(Poly_Triangulation)& mesh,int first,int count) {
+    std::string bytes;
+    if(mesh.IsNull() || !mesh->HasUVNodes() || first<0 || count<=0 || first>mesh->NbTriangles()-count) return bytes;
+    for(int t=first+1;t<=first+count;++t) {
+        int ids[3];mesh->Triangle(t).Get(ids[0],ids[1],ids[2]);
+        for(int id:ids) {
+            if(id<1 || id>mesh->NbNodes()) return {};
+            const auto uv=mesh->UVNode(id);
+            if(!std::isfinite(uv.X()) || !std::isfinite(uv.Y())) return {};
+            // Exact floating-point values, independent of host byte order.
+            char text[128];int size=std::snprintf(text,sizeof text,"%a,%a;",uv.X(),uv.Y());
+            if(size<=0 || size>=int(sizeof text)) return {};
+            bytes.append(text,std::size_t(size));
+        }
+    }
+    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes.data(),static_cast<CC_LONG>(bytes.size()),hash);
+    static const char hex[]="0123456789abcdef";
+    std::string result;for(auto byte:hash){result.push_back(hex[byte>>4]);result.push_back(hex[byte&15]);}
+    return result;
+}
+
+// N1 does not persist a source link. The caller explicitly supplies the retained
+// source. Recreate its deterministic copy privately and require exact metadata
+// AND geometry digest equality before reading live face tolerances and Ax3s.
+// This refuses a source edited since the copy was made; it never guesses a match.
+bool BuildCurvedUV(const OcctDocument& document,const TDF_Label& label,
+    const Handle(Poly_Triangulation)& mesh,const OcctMeshUVAtlasOptions& options,
+    shapeyard::uv::curved::Result& output) {
+    output={};
+    if(options.version!=2 || options.curvedSource.IsNull() || options.curvedSource.IsEqual(label)
+        || document.Document().IsNull() || options.curvedSource.Data()!=document.Document()->GetData()) return false;
+    double lengthUnit=0;
+    if(!XCAFDoc_DocumentTool::GetLengthUnit(document.Document(),lengthUnit) || lengthUnit!=0.001) return false;
+    core3d::provenance::SourceFaceProvenanceRecord provenance;
+    if(document.TryCopySourceFaceProvenanceForLabel(label,provenance)
+        !=core3d::provenance::CopySourceFaceProvenanceReadState::Present) return false;
+    OcctObjectTransformState source;
+    if(!document.CaptureObjectTransformStateForLabel(options.curvedSource,source)
+        || source.resolvedRepresentation!=OcctGeometryRepresentation::BRep) return false;
+    std::atomic_bool cancelled{false}; core3d::meshcopy::CurrentTessellationCopy copy;
+    if(core3d::meshcopy::PrepareCurrentTessellationCopy(source.shape,copy,cancelled)
+            !=core3d::meshcopy::PreparationResult::Ready
+        || !core3d::provenance::SameSourceFaces(provenance.faces,copy.faces)) return false;
+    TopLoc_Location location; const auto sourceMesh=BRep_Tool::Triangulation(copy.face,location);
+    std::string digest;
+    if(!location.IsIdentity() || !core3d::provenance::CopyTriangulationDigest(sourceMesh,digest)
+        || digest!=provenance.digest || mesh.IsNull() || mesh->NbTriangles()!=provenance.triangleCount) return false;
+    std::vector<shapeyard::uv::curved::FaceInput> faces;
+    std::size_t index=0;
+    for(TopExp_Explorer explorer(source.shape,TopAbs_FACE);explorer.More();explorer.Next(),++index) {
+        if(index>=provenance.faces.size()) return false;
+        const auto face=TopoDS::Face(explorer.Current());const BRepAdaptor_Surface surface(face);
+        const auto& entry=provenance.faces[index];
+        shapeyard::uv::curved::FaceInput input;
+        input.surfaceType=entry.surfaceType;input.firstTriangle=entry.firstTriangle;
+        input.triangleCount=entry.triangleCount;input.reversed=entry.reversed;input.params=entry.params;
+        input.toleranceMM=BRep_Tool::Tolerance(face);
+        if(!std::isfinite(input.toleranceMM) || input.toleranceMM<=0) return false;
+        gp_Dir x;
+        switch(entry.surfaceType) {
+            case core3d::provenance::kSurfaceTypePlane: x=surface.Plane().Position().XDirection();break;
+            case core3d::provenance::kSurfaceTypeCylinder: x=surface.Cylinder().Position().XDirection();break;
+            case core3d::provenance::kSurfaceTypeTorus: x=surface.Torus().Position().XDirection();break;
+            default:break;
+        }
+        input.xDirection={x.X(),x.Y(),x.Z()};faces.push_back(std::move(input));
+    }
+    if(index!=provenance.faces.size()) return false;
+    std::vector<shapeyard::uv::Triangle> triangles(mesh->NbTriangles());
+    for(int t=1;t<=mesh->NbTriangles();++t) {
+        int ids[3];mesh->Triangle(t).Get(ids[0],ids[1],ids[2]);
+        for(int k=0;k<3;++k) {
+            if(ids[k]<1 || ids[k]>mesh->NbNodes()) return false;
+            const auto p=mesh->Node(ids[k]);triangles[t-1].points[k]={p.X(),p.Y(),p.Z()};
+        }
+    }
+    output=shapeyard::uv::curved::unwrap(triangles,faces,{options.resolution,options.gutterPixels});
+    return output.ok;
+}
+
+bool WriteCurvedUVLayout(const OcctDocument& document,const TDF_Label& label,
+    const Handle(Poly_Triangulation)& mesh,const OcctMeshUVAtlasOptions& options) {
+    shapeyard::uv::curved::Result value;
+    if(!BuildCurvedUV(document,label,mesh,options,value)) return false;
+    core3d::provenance::SourceFaceProvenanceRecord provenance;
+    if(document.TryCopySourceFaceProvenanceForLabel(label,provenance)
+        !=core3d::provenance::CopySourceFaceProvenanceReadState::Present) return false;
+    // Binding is exact, including corner order. Mark runs after shape staging
+    // inside the existing OrdinaryEditController command; any failure aborts it.
+    for(int t=1;t<=mesh->NbTriangles();++t) {
+        int ids[3];mesh->Triangle(t).Get(ids[0],ids[1],ids[2]);
+        for(int k=0;k<3;++k) {
+            const auto uv=mesh->UVNode(ids[k]);const auto expected=value.atlas.corners[t-1][k];
+            if(uv.X()!=expected[0] || uv.Y()!=expected[1]) return false;
+        }
+    }
+    const auto digest=CurvedCornerDigest(mesh,0,mesh->NbTriangles());if(digest.empty()) return false;
+    std::ostringstream text;text.imbue(std::locale::classic());text<<std::setprecision(17);
+    const auto& layout=value.layout;const auto& coverage=value.coverage;
+    text<<1<<' '<<layout.globalTexelsPerMM<<' '<<layout.faceCount<<' '
+        <<options.resolution<<' '<<options.gutterPixels<<' '<<provenance.digest<<' '<<digest<<' '
+        <<coverage.subChartCount<<' '<<coverage.splitLineCount<<' '<<coverage.coveredTexels<<' '
+        <<coverage.seamCounts.continuous<<' '<<coverage.seamCounts.declared<<' '<<coverage.seamCounts.torn<<'\n';
+    for(std::size_t i=0;i<layout.faces.size();++i) {
+        const auto& f=layout.faces[i];const auto& source=provenance.faces[i];
+        const auto faceDigest=CurvedCornerDigest(mesh,source.firstTriangle,source.triangleCount);
+        if(faceDigest.empty()) return false;
+        text<<int(f.kernel)<<' '<<f.subChartCount<<' '<<f.occupancy<<' '<<f.metricStretchMin<<' '
+            <<f.metricStretchMax<<' '<<f.seamCount<<' '<<faceDigest<<' '<<std::quoted(f.fallbackReason)<<'\n';
+    }
+    // Additive v1 extension: old records remain readable but have no census proof.
+    text<<"seamCensus1 "<<layout.kernelSeamEdges<<' '<<layout.splitSeamEdges<<' '
+        <<layout.diagonalSeamEdges<<' '<<layout.tornEdges<<'\n';
+    // The original source's display triangulation is not serialized in XCAF.
+    // Persist the remaining D5 inputs so a stored atlas can be independently
+    // regenerated from its own exact corner geometry on an unmeshed snapshot.
+    text<<"sourceFrames1 "<<layout.regenerationFaces.size()<<'\n';
+    for(const auto& f:layout.regenerationFaces)
+        text<<f.toleranceMM<<' '<<f.xDirection[0]<<' '<<f.xDirection[1]<<' '<<f.xDirection[2]<<'\n';
+    const auto payload=text.str();if(payload.empty() || payload.size()>128*1024) return false;
+    TDF_Label record;if(!FindCurvedUVLayout(label,record)) return false;
+    if(record.IsNull()) { bool overflow=false;record=FreshCopySourceFaceProvenanceLabel(label,overflow);if(overflow || record.IsNull()) return false; }
+    record.ForgetAllAttributes(Standard_True);
+    TDataStd_UAttribute::Set(record,CurvedUVLayoutMarkerID());
+    int chunks=int((payload.size()+255)/256);TDataStd_Integer::Set(record,CurvedUVLayoutChunksID(),chunks);
+    for(int i=0;i<chunks;++i) TDataStd_AsciiString::Set(record.FindChild(i+1,Standard_True),
+        TCollection_AsciiString(payload.substr(std::size_t(i)*256,256).c_str()));
+    return true;
+}
+} // namespace
+
+Standard_Boolean OcctDocument::HasCurvedUVLayoutForLabel(const TDF_Label& label) const noexcept {
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()) return Standard_False;
+        TDF_Label record;
+        return FindCurvedUVLayout(label,record) && !record.IsNull();
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::PrepareCurvedUVAtlas(const TDF_Label& label,
+    TopoDS_Shape& candidate,const OcctMeshUVAtlasOptions& options,OcctMeshUVAtlasPreview* preview) const noexcept {
+    candidate.Nullify();if(preview) *preview={};
+    if(options.curvedSource.IsNull() || options.version!=2) return Standard_False;
+    // One implementation owns original-node prefixes, material admission,
+    // private-copy construction and all existing atlas payload invariants.
+    return PrepareTriangleUVAtlas(label,candidate,options,preview);
+}
+
+Standard_Boolean OcctDocument::ReadCurvedUVLayoutForLabel(const TDF_Label& label,
+    shapeyard::uv::curved::CurvedUVLayoutRecord& layout,curveduv::PackSummary& coverage) const noexcept {
+    layout={};coverage={};if(![NSThread isMainThread]) return Standard_False;
+    try {
+        if(myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()) return Standard_False;
+        core3d::provenance::SourceFaceProvenanceRecord provenance;
+        if(TryCopySourceFaceProvenanceForLabel(label,provenance)
+            !=core3d::provenance::CopySourceFaceProvenanceReadState::Present) return Standard_False;
+        OcctObjectTransformState state;
+        if(!CaptureObjectTransformStateForLabel(label,state) || state.meshUVAtlasVersion!=2) return Standard_False;
+        TopoDS_Face face;Handle(Poly_Triangulation) mesh;
+        if(!TriangleAtlasFace(state.shape,face,mesh)) return Standard_False;
+        TDF_Label record;if(!FindCurvedUVLayout(label,record) || record.IsNull()) return Standard_False;
+        Handle(TDataStd_Integer) chunks;
+        if(!record.FindAttribute(CurvedUVLayoutChunksID(),chunks) || chunks->Get()<1 || chunks->Get()>512) return Standard_False;
+        std::string payload;
+        for(int i=1;i<=chunks->Get();++i) {
+            Handle(TDataStd_AsciiString) text;const auto child=record.FindChild(i,Standard_False);
+            if(child.IsNull() || !child.FindAttribute(TDataStd_AsciiString::GetID(),text)) return Standard_False;
+            std::string part=text->Get().ToCString();
+            if(part.empty() || part.size()>256 || (i<chunks->Get() && part.size()!=256)) return Standard_False;
+            payload+=part;
+        }
+        std::istringstream stream(payload);stream.imbue(std::locale::classic());
+        shapeyard::uv::curved::CurvedUVLayoutRecord value;curveduv::PackSummary stats;
+        int resolution=0,gutter=0;std::string geometryDigest,uvDigest;
+        if(!(stream>>value.version>>value.globalTexelsPerMM>>value.faceCount>>resolution>>gutter>>geometryDigest>>uvDigest
+            >>stats.subChartCount>>stats.splitLineCount>>stats.coveredTexels>>stats.seamCounts.continuous
+            >>stats.seamCounts.declared>>stats.seamCounts.torn)
+            || value.version!=1 || value.faceCount!=int(provenance.faces.size())
+            || !std::isfinite(value.globalTexelsPerMM) || value.globalTexelsPerMM<=0
+            || resolution!=state.meshUVAtlasSettings[0] || gutter!=state.meshUVAtlasSettings[1]
+            || geometryDigest!=provenance.digest || uvDigest!=CurvedCornerDigest(mesh,0,mesh->NbTriangles())
+            || stats.subChartCount<1 || stats.subChartCount>64 || stats.splitLineCount<0
+            || stats.coveredTexels<1 || stats.coveredTexels>long(resolution)*resolution
+            || stats.seamCounts.continuous<0 || stats.seamCounts.declared<0 || stats.seamCounts.torn<0) return Standard_False;
+        value.faces.resize(value.faceCount);
+        for(int i=0;i<value.faceCount;++i) {
+            auto& f=value.faces[i];int kernel=-1;const auto& source=provenance.faces[i];
+            if(!(stream>>kernel>>f.subChartCount>>f.occupancy>>f.metricStretchMin>>f.metricStretchMax
+                >>f.seamCount>>f.uvDigest>>std::quoted(f.fallbackReason))
+                || kernel<0 || kernel>3 || f.subChartCount<1 || f.subChartCount>64
+                || !std::isfinite(f.occupancy) || f.occupancy<0 || f.occupancy>1
+                || !std::isfinite(f.metricStretchMin) || !std::isfinite(f.metricStretchMax)
+                || f.metricStretchMin<=0 || f.metricStretchMax<f.metricStretchMin || f.seamCount<0
+                || f.uvDigest!=CurvedCornerDigest(mesh,source.firstTriangle,source.triangleCount)) return Standard_False;
+            f.kernel=static_cast<curveduv::KernelTag>(kernel);
+        }
+        stream>>std::ws;
+        if(stream.eof()) {
+            // Unknown is explicit; never invent zero diagonal/kernel counts for legacy v1.
+            value.kernelSeamEdges=value.splitSeamEdges=value.diagonalSeamEdges=-1;
+            value.tornEdges=stats.seamCounts.torn;
+        } else {
+            std::string tag;
+            if(!(stream>>tag>>value.kernelSeamEdges>>value.splitSeamEdges>>value.diagonalSeamEdges>>value.tornEdges)
+                || tag!="seamCensus1" || value.kernelSeamEdges<0 || value.splitSeamEdges<0
+                || value.diagonalSeamEdges<0 || value.tornEdges!=stats.seamCounts.torn
+                || value.kernelSeamEdges>stats.seamCounts.declared
+                || value.splitSeamEdges!=stats.seamCounts.declared-value.kernelSeamEdges
+                || value.diagonalSeamEdges>value.tornEdges) return Standard_False;
+            stream>>std::ws;
+            if(!stream.eof()) {
+                int count=0;
+                if(!(stream>>tag>>count) || tag!="sourceFrames1" || count!=value.faceCount) return Standard_False;
+                for(const auto& entry:provenance.faces) {
+                    shapeyard::uv::curved::FaceInput f;
+                    f.surfaceType=entry.surfaceType;f.firstTriangle=entry.firstTriangle;
+                    f.triangleCount=entry.triangleCount;f.reversed=entry.reversed;f.params=entry.params;
+                    if(!(stream>>f.toleranceMM>>f.xDirection[0]>>f.xDirection[1]>>f.xDirection[2])
+                        || !std::isfinite(f.toleranceMM) || f.toleranceMM<=0) return Standard_False;
+                    for(double d:f.xDirection) if(!std::isfinite(d)) return Standard_False;
+                    value.regenerationFaces.push_back(std::move(f));
+                }
+                stream>>std::ws;if(!stream.eof()) return Standard_False;
+            }
+        }
+        stats.seamCounts.kernelSeamEdges=value.kernelSeamEdges;
+        stats.seamCounts.splitSeamEdges=value.splitSeamEdges;
+        stats.seamCounts.diagonalSeamEdges=value.diagonalSeamEdges;
+        stats.globalTexelsPerMM=value.globalTexelsPerMM;
+        stats.occupancy=double(stats.coveredTexels)/(double(resolution)*resolution);
+        layout=std::move(value);coverage=stats;return Standard_True;
+    } catch(...) {layout={};coverage={};return Standard_False;}
+}
+#if DEBUG
+Standard_Boolean OcctDocument::DebugCurvedUVLayoutForLabel(const TDF_Label& label,
+    shapeyard::uv::curved::CurvedUVLayoutRecord& layout,curveduv::PackSummary& coverage) const noexcept {
+    return ReadCurvedUVLayoutForLabel(label,layout,coverage);
+}
+#endif
+
 Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
     const TDF_Label& label, TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options, OcctMeshUVAtlasPreview* preview) const noexcept {
     candidate.Nullify();
@@ -6187,7 +6447,8 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
     if (![NSThread isMainThread]) { return Standard_False; }
     try {
         const shapeyard::uv::Settings settings{options.resolution, options.gutterPixels};
-        if ((options.version != 1 && options.version != 2)
+        if ((!options.curvedSource.IsNull() && options.version != 2)
+            || (options.version != 1 && options.version != 2)
             || (options.version == 1 && (options.resolution != 0 || options.gutterPixels != 0))
             || (options.version == 2 && !settings.valid())) { return Standard_False; }
         OcctObjectTransformState source;
@@ -6274,7 +6535,11 @@ Standard_Boolean OcctDocument::PrepareTriangleUVAtlas(
                     triangles[i-1].points[k]={p.X(),p.Y(),p.Z()};
                 }
             }
-            if (!shapeyard::uv::generate(triangles, settings, coherent)) { return Standard_False; }
+            if (!options.curvedSource.IsNull()) {
+                shapeyard::uv::curved::Result curved;
+                if (!BuildCurvedUV(*this,label,mesh,options,curved)) return Standard_False;
+                coherent=std::move(curved.atlas);
+            } else if (!shapeyard::uv::generate(triangles, settings, coherent)) { return Standard_False; }
         }
         const int columns = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
         const double cell = 1.0 / columns, padding = cell * 0.04;
@@ -6807,8 +7072,102 @@ Standard_Boolean OcctDocument::MarkAuthoredMeshUVLayout(const TDF_Label& label) 
 Standard_Boolean OcctDocument::ValidateTriangleUVAtlas(
     const TDF_Label& label, const TopoDS_Shape& candidate, const OcctMeshUVAtlasOptions& options) const noexcept {
     try {
+        if (!options.curvedSource.IsNull()) {
+            OcctObjectTransformState stored;
+            if (!CaptureObjectTransformStateForLabel(label,stored)) return Standard_False;
+            if (stored.meshUVAtlasVersion==2 && HasCurvedUVLayoutForLabel(label)) {
+                if (options.version!=2
+                    || !shapeyard::uv::Settings{options.resolution,options.gutterPixels}.valid()) return Standard_False;
+                TopoDS_Face a,b; Handle(Poly_Triangulation) x,y;
+                if (!TriangleAtlasFace(stored.shape,a,x) || !TriangleAtlasFace(candidate,b,y)
+                    || candidate.ShapeType()!=stored.shape.ShapeType()
+                    || candidate.Orientation()!=stored.shape.Orientation()
+                    || !candidate.Location().IsEqual(stored.shape.Location())
+                    || a.Orientation()!=b.Orientation() || !a.Location().IsEqual(b.Location())
+                    || x->NbNodes()!=y->NbNodes() || x->NbTriangles()!=y->NbTriangles()
+                    || !x->HasUVNodes() || !y->HasUVNodes() || x->HasNormals()!=y->HasNormals()) return Standard_False;
+                const int prefix=stored.meshUVAtlasSettings[2];
+                if(prefix<=0 || prefix!=x->NbNodes()-3*x->NbTriangles()) return Standard_False;
+                shapeyard::uv::curved::Result regenerated;
+                if(!BuildCurvedUV(*this,label,x,options,regenerated)) return Standard_False;
+                for(int i=1;i<=x->NbNodes();++i) {
+                    if(!x->Node(i).IsEqual(y->Node(i),0.0)) return Standard_False;
+                    gp_Pnt2d expected(0,0);
+                    if(i>prefix) {
+                        const auto& uv=regenerated.atlas.corners[(i-prefix-1)/3][(i-prefix-1)%3];
+                        expected=gp_Pnt2d(uv[0],uv[1]);
+                    }
+                    if(!expected.IsEqual(y->UVNode(i),0.0)) return Standard_False;
+                    if(x->HasNormals()) {
+                        gp_Vec3f nx,ny;x->Normal(i,nx);y->Normal(i,ny);
+                        if(nx!=ny) return Standard_False;
+                    }
+                }
+                for(int t=1;t<=x->NbTriangles();++t) {
+                    int ix[3],iy[3];x->Triangle(t).Get(ix[0],ix[1],ix[2]);y->Triangle(t).Get(iy[0],iy[1],iy[2]);
+                    for(int k=0;k<3;++k)
+                        if(ix[k]!=prefix+3*(t-1)+1+k || iy[k]!=ix[k]) return Standard_False;
+                }
+                return PreservesMeshRegionPartition(stored,candidate);
+            }
+        }
+        // A committed curved atlas is a non-associative mesh snapshot. Its
+        // digest-bound provenance and persisted D5 inputs are authoritative for
+        // read-only replay, including when original display meshes are absent.
+        // Authoring still requires BuildCurvedUV's exact retained-source checks.
+        if (options.curvedSource.IsNull() && HasCurvedUVLayoutForLabel(label)) {
+            OcctObjectTransformState stored;
+            if (!CaptureObjectTransformStateForLabel(label,stored)
+                || stored.meshUVAtlasVersion!=2 || options.version!=2
+                || options.resolution!=stored.meshUVAtlasSettings[0]
+                || options.gutterPixels!=stored.meshUVAtlasSettings[1]) return Standard_False;
+            shapeyard::uv::curved::CurvedUVLayoutRecord layout;curveduv::PackSummary coverage;
+            if(!ReadCurvedUVLayoutForLabel(label,layout,coverage)) return Standard_False;
+            TopoDS_Face a,b; Handle(Poly_Triangulation) x,y;
+            if (!TriangleAtlasFace(stored.shape,a,x) || !TriangleAtlasFace(candidate,b,y)
+                || candidate.ShapeType()!=stored.shape.ShapeType()
+                || candidate.Orientation()!=stored.shape.Orientation()
+                || !candidate.Location().IsEqual(stored.shape.Location())
+                || a.Orientation()!=b.Orientation() || !a.Location().IsEqual(b.Location())
+                || x->NbNodes()!=y->NbNodes() || x->NbTriangles()!=y->NbTriangles()
+                || !x->HasUVNodes() || !y->HasUVNodes() || x->HasNormals()!=y->HasNormals()) return Standard_False;
+            const int prefix=stored.meshUVAtlasSettings[2];
+            if(prefix<=0 || prefix!=x->NbNodes()-3*x->NbTriangles()) return Standard_False;
+            std::vector<shapeyard::uv::Triangle> triangles(x->NbTriangles());
+            std::vector<std::array<shapeyard::uv::UV,3>> corners(x->NbTriangles());
+            for(int i=1;i<=x->NbNodes();++i) {
+                if(!x->Node(i).IsEqual(y->Node(i),0.0)) return Standard_False;
+                const auto uv=y->UVNode(i);
+                if(i<=prefix) {
+                    if(uv.X()!=0 || uv.Y()!=0) return Standard_False;
+                } else {
+                    const auto p=x->Node(i);const int t=(i-prefix-1)/3,k=(i-prefix-1)%3;
+                    triangles[t].points[k]={p.X(),p.Y(),p.Z()};corners[t][k]={uv.X(),uv.Y()};
+                }
+                if(x->HasNormals()) {
+                    gp_Vec3f nx,ny;x->Normal(i,nx);y->Normal(i,ny);
+                    if(nx!=ny) return Standard_False;
+                }
+            }
+            for(int t=1;t<=x->NbTriangles();++t) {
+                int ix[3],iy[3];x->Triangle(t).Get(ix[0],ix[1],ix[2]);y->Triangle(t).Get(iy[0],iy[1],iy[2]);
+                for(int k=0;k<3;++k)
+                    if(ix[k]!=prefix+3*(t-1)+1+k || iy[k]!=ix[k]) return Standard_False;
+            }
+            // Legacy records without replay inputs require the live-source
+            // branch above. Do not manufacture missing D5 admission values.
+            if(layout.regenerationFaces.empty()
+                || !shapeyard::uv::curved::validate(triangles,layout.regenerationFaces,
+                    {options.resolution,options.gutterPixels},corners)) return Standard_False;
+            return PreservesMeshRegionPartition(stored,candidate);
+        }
         TopoDS_Shape expected;
-        if (!PrepareTriangleUVAtlas(label, expected, options)) { return Standard_False; }
+        // The null-source (planar) path, including its edit admission checks,
+        // remains unchanged. New curved candidates use exactly their own options.
+        const bool prepared=options.curvedSource.IsNull()
+            ? PrepareTriangleUVAtlas(label,expected,options)
+            : PrepareCurvedUVAtlas(label,expected,options);
+        if (!prepared) { return Standard_False; }
         TopoDS_Face a, b; Handle(Poly_Triangulation) x, y;
         if (!TriangleAtlasFace(expected, a, x) || !TriangleAtlasFace(candidate, b, y)
             || candidate.ShapeType() != expected.ShapeType() || candidate.Orientation() != expected.Orientation()
@@ -6847,6 +7206,16 @@ Standard_Boolean OcctDocument::MarkTriangleUVAtlas(const TDF_Label& label, const
                    || label.IsAttribute(MeshUVAtlasSettingsAttributeID(0))
                    || label.IsAttribute(MeshUVAtlasSettingsAttributeID(1))
                    || label.IsAttribute(MeshUVAtlasSettingsAttributeID(2))) { return Standard_False; }
+        if (!options.curvedSource.IsNull()) {
+            TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+            if (options.version!=2 || !TriangleAtlasFace(XCAFDoc_ShapeTool::GetShape(label),face,mesh)
+                || !WriteCurvedUVLayout(*this,label,mesh,options)) return Standard_False;
+        } else {
+            // Optional diagnostics must not describe a later planar regeneration.
+            TDF_Label record;
+            if (!FindCurvedUVLayout(label,record)) return Standard_False;
+            if (!record.IsNull()) record.ForgetAllAttributes(Standard_True);
+        }
         TDataStd_Integer::Set(label, MeshUVAtlasAttributeID(), options.version);
         return Standard_True;
     } catch (...) { return Standard_False; }
