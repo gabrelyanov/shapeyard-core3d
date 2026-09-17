@@ -952,19 +952,14 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         const auto state = owner.document->TryCopySourceFaceProvenanceForLabel(target, record);
         NSMutableDictionary* result = [report(record, state) mutableCopy];
         if (mode == 1) {
-            // DEBUG-injected wrong digest length must read Malformed inside the
-            // fault command and return to Present after its abort.
-            if (state != CopySourceFaceProvenanceReadState::Present)
-                return @{@"error":@"Copy provenance corruption probe requires a Present record"};
-            const auto document = owner.document->Document();
-            document->NewCommand();
-            const bool corrupted = owner.document->DebugCorruptCopySourceFaceProvenance(target, 0);
-            core3d::provenance::SourceFaceProvenanceRecord rejected;
-            const auto corruptedState = owner.document->TryCopySourceFaceProvenanceForLabel(target, rejected);
-            if (document->HasOpenCommand()) document->AbortCommand();
+            // The helper observes the malformed digest and restores the
+            // original attribute directly on this private snapshot.
+            Standard_Integer corruptedState = -1;
+            const auto code = owner.document->DebugCorruptCopySourceFaceProvenance(target, corruptedState);
             core3d::provenance::SourceFaceProvenanceRecord restored;
             const auto restoredState = owner.document->TryCopySourceFaceProvenanceForLabel(target, restored);
-            result[@"corruptionAccepted"] = @(corrupted);
+            result[@"corruptionAccepted"] = @(code == 0);
+            result[@"corruptionCode"] = @(code);
             result[@"corruptedState"] = @(int(corruptedState));
             result[@"restored"] = report(restored, restoredState);
         }

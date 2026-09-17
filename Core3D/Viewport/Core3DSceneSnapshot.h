@@ -72,7 +72,9 @@ CORE3D_SCENE_FINAL_CLASS
 + (NSDictionary<NSString *, id> *)debugCurrentTessellationMeshCopy:(NSInteger)mode NS_SWIFT_NAME(debugCurrentTessellationMeshCopy(_:));
 // Reads the persisted copy source-face provenance from private document bytes
 // only; never attaches to a live project. Mode 1 also proves a DEBUG-injected
-// wrong-length digest reads Malformed and aborts cleanly.
+// wrong-length digest reads Malformed and is restored without a transaction.
+// Reports corruptionCode (0 on success), corruptionAccepted, corruptedState
+// (-1 if no mutated read occurred), and the restored record.
 + (NSDictionary<NSString *, id> *)debugCopySourceFaceProvenance:(NSData *)document
                                                entityIdentifier:(NSString *)identifier
                                                            mode:(NSInteger)mode

@@ -5961,29 +5961,47 @@ Standard_Boolean OcctDocument::StageCopySourceFaceProvenance(
 }
 
 #if DEBUG
-Standard_Boolean OcctDocument::DebugCorruptCopySourceFaceProvenance(
-    const TDF_Label& label, Standard_Integer mode) noexcept {
+Standard_Integer OcctDocument::DebugCorruptCopySourceFaceProvenance(
+    const TDF_Label& label, Standard_Integer& corruptedState) noexcept {
     using core3d::provenance::CopySourceFaceProvenanceReadState;
-    if (![NSThread isMainThread] || mode != 0 || myOcafDoc.IsNull()
-        || !myOcafDoc->HasOpenCommand()) return Standard_False;
+    corruptedState = -1;
+    if (![NSThread isMainThread]) return 1;
+    if (myOcafDoc.IsNull()) return 2;
     try {
         OCC_CATCH_SIGNALS
         core3d::provenance::SourceFaceProvenanceRecord record; TDF_Label recordLabel;
         if (ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, record, &recordLabel)
-                != CopySourceFaceProvenanceReadState::Present || recordLabel.IsNull())
-            return Standard_False;
+                != CopySourceFaceProvenanceReadState::Present) return 3;
+        if (recordLabel.IsNull()) return 4;
         // Mutate the existing custom-GUID attribute that the strict reader
-        // validates on the record child, preserving its identity for rollback.
+        // validates on the record child, then restore it without a transaction.
         Handle(TDataStd_AsciiString) digest;
         if (!recordLabel.FindAttribute(CopySourceFaceProvenanceDigestID(), digest)
-            || digest.IsNull()) return Standard_False;
-        // Mode 0: wrong digest length is a schema violation, never a stale read.
-        digest->Set(TCollection_AsciiString("00"));
-        core3d::provenance::SourceFaceProvenanceRecord refused;
-        return ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, refused)
-                == CopySourceFaceProvenanceReadState::Malformed
-            && refused.digest.empty();
-    } catch (...) { return Standard_False; }
+            || digest.IsNull()) return 5;
+        const TCollection_AsciiString originalDigest = digest->Get();
+        auto restore = [&]() noexcept -> bool {
+            try {
+                digest->Set(originalDigest);
+                core3d::provenance::SourceFaceProvenanceRecord restored;
+                return ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, restored)
+                        == CopySourceFaceProvenanceReadState::Present
+                    && restored.digest == originalDigest.ToCString();
+            } catch (...) { return false; }
+        };
+        Standard_Integer code = 8;
+        try {
+            // Wrong digest length is a schema violation, never a stale read.
+            digest->Set(TCollection_AsciiString("00"));
+            core3d::provenance::SourceFaceProvenanceRecord refused;
+            const auto state = ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, refused);
+            corruptedState = Standard_Integer(state);
+            code = state == CopySourceFaceProvenanceReadState::Malformed && refused.digest.empty()
+                ? 0 : 60 + corruptedState;
+        } catch (...) { code = 8; }
+        // Also restore after a failed mutation/read; restoration failure wins
+        // over the earlier diagnostic because the snapshot may be corrupted.
+        return restore() ? code : 7;
+    } catch (...) { return 8; }
 }
 #endif
 

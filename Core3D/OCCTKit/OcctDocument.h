@@ -650,10 +650,14 @@ public:
       const TDF_Label& label) noexcept;
   Standard_EXPORT Standard_Boolean DebugCorruptMeshRegionPartition(
       const TDF_Label& label, Standard_Integer mode) noexcept;
-  //! Fault injection for the provenance strict reader. Mode 0 stores a
-  //! wrong-length digest inside the caller's already-open command.
-  Standard_EXPORT Standard_Boolean DebugCorruptCopySourceFaceProvenance(
-      const TDF_Label& label, Standard_Integer mode) noexcept;
+  //! Transaction-free, self-restoring wrong-length digest probe on a private
+  //! snapshot. corruptedState is the mutated read state (-1 if not observed).
+  //! Codes: 0 success, 1 not main thread, 2 null document, 3 not Present,
+  //! 4 null record label, 5 missing digest, 60+state unexpected mutated read
+  //! (61 also covers Malformed with a nonempty digest), 7 restore failed,
+  //! 8 exception. No live project or undo command may depend on this probe.
+  Standard_EXPORT Standard_Integer DebugCorruptCopySourceFaceProvenance(
+      const TDF_Label& label, Standard_Integer& corruptedState) noexcept;
 #endif
   //! Stamp every unmarked analytic definition produced by a fresh STEP
   //! transfer. This isolated-import schema operation requires zero user
