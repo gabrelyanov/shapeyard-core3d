@@ -8602,9 +8602,13 @@ struct NativeModelingPermitIssuer final {
             if (record.label.IsNull()) return @{@"present":@NO};
             NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:record.values.size()];
             for (double value : record.values) [values addObject:@(value)];
+            const double mm = record.parameters.metersPerUnit / 0.001;
+            GProp_GProps properties;
+            BRepGProp::VolumeProperties(record.boundShape, properties);
             return @{@"present":@YES, @"current":@(record.IsCurrent(document, label)),
                 @"identifier":[NSString stringWithUTF8String:record.identifier.c_str()],
-                @"values":values, @"metersPerUnit":@(record.parameters.metersPerUnit)};
+                @"values":values, @"metersPerUnit":@(record.parameters.metersPerUnit),
+                @"volumeMM3":@(properties.Mass() * mm * mm * mm)};
         }
     } catch (...) {}
     return nil;
@@ -13695,6 +13699,50 @@ struct NativeModelingPermitIssuer final {
         Core3DSweepDefinition *frozen=definition;
         if(requested.radius*factor==original.definition.radius*factor){
             frozen=[context.selectedSweep.definition changingRadius:original.definition.radius];
+            if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
+        }
+        context->_planningConsumed=YES;_modelingConstructionContext=context;
+        __weak Core3DViewController *weakSelf=self;
+        __weak Core3DModelingPlanningContext *weakContext=context;
+        [self rebuildStoredSweep:context.selectedSweep definition:frozen expected:context.scene
+            completion:^(Core3DProfileConstructionResult result){
+                Core3DViewController *owner=weakSelf;Core3DModelingPlanningContext *finished=weakContext;
+                if(finished)finished->_planningRetired=YES;
+                if(owner&&owner->_modelingConstructionContext==finished)owner->_modelingConstructionContext=nil;
+                completion(result);
+            }];
+    }catch(...){completion(Core3DProfileConstructionResultRejected);}
+}
+
+- (void)rebuildSweepPathWithDefinition:(Core3DSweepDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)return;
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return;}
+    if(![self isModelingPlanningContextCurrent:context]||!context.selectedSweep||context.selectedEnclosure
+        ||context.selectedProfile||context.selectedProfileRecipe||![definition isMemberOfClass:Core3DSweepDefinition.class]){
+        completion(Core3DProfileConstructionResultRejected);return;
+    }
+    try {
+        const auto original=[context.selectedSweep nativeSnapshot];auto requested=[definition nativeDefinition];
+        if(!original.current||!Core3DModelingSweepSupported(original.definition,original.effectiveDimensionMetersPerUnit)
+            ||!Core3DModelingSweepSupported(requested,original.effectiveDimensionMetersPerUnit)){
+            completion(Core3DProfileConstructionResultRejected);return;
+        }
+        // Retain the saved feature's structure/authority while re-admitting
+        // every authored geometry scalar before the ordinary atomic rebuild.
+        core3d::planar_sweep::Inspection inspection;
+        if(!core3d::sweep_rebuild::FixedStructure(original.definition,requested)
+            ||core3d::planar_sweep::Inspect(requested,inspection)!=core3d::planar_sweep::Admission::Accepted){
+            completion(Core3DProfileConstructionResultRejected);return;
+        }
+        const double factor=original.effectiveDimensionMetersPerUnit*1000;
+        // If both raw radii advertise the exact same finite physical Double,
+        // retain original raw bits before ordinary semantic no-change admission.
+        Core3DSweepDefinition *frozen=definition;
+        if(requested.radius*factor==original.definition.radius*factor){
+            // Normalize only the section radius; keep the requested path geometry.
+            frozen=[definition changingRadius:original.definition.radius];
             if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
         }
         context->_planningConsumed=YES;_modelingConstructionContext=context;

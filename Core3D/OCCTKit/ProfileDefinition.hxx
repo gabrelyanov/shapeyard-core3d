@@ -194,6 +194,8 @@ inline bool ProfileDefinitionExpectedVolume(const ProfileDefinition& definition,
         // Authored U is radial in each existing work-plane mapping. A section
         // crossing the axis would sweep overlapping material and is refused.
         if (inspection.outerBounds[0]<0) return false;
+        for (const auto& bounds:inspection.innerBounds)
+            if (bounds[0]<0) return false;
         expected=inspection.firstMomentX*(definition.depth*std::acos(-1.0)/180.0);
     }
     if (!std::isfinite(expected) || expected<=1e-8) return false;

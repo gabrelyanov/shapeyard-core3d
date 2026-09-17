@@ -496,6 +496,11 @@ NS_ASSUME_NONNULL_BEGIN
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult result))completion
     NS_SWIFT_NAME(rebuildSweepRadius(definition:context:completion:));
+//! Fixed saved path structure with fully re-admitted geometry; one SweepRebuild.
+- (void)rebuildSweepPathWithDefinition:(Core3DSweepDefinition *)definition
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult result))completion
+    NS_SWIFT_NAME(rebuildSweepPath(definition:context:completion:));
 //! One original planning lease; only depth/angle may differ from its exact
 //! saved recipe. Delegates to the ordinary profile worker/history path.
 - (void)rebuildProfileRecipeWithDefinition:(Core3DProfileDefinition *)definition

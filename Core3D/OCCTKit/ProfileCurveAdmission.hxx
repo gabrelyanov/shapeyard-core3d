@@ -213,6 +213,7 @@ struct ProfileCurveSectionInspection {
     double area = 0;
     double firstMomentX = 0; // Absolute authored U coordinate, independent of winding.
     std::array<double,4> outerBounds{};
+    std::vector<std::array<double,4>> innerBounds;
 };
 inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
     ProfileCurveSectionInspection& output,
@@ -233,6 +234,7 @@ inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
             const double role=loops.empty()?1.0:-1.0;
             const double orientation=inspection.signedArea>0?1.0:-1.0;
             if (loops.empty()) measured.outerBounds=inspection.bounds;
+            else measured.innerBounds.push_back(inspection.bounds);
             measured.area+=role*std::abs(inspection.signedArea);
             relativeMoment+=role*orientation*inspection.signedFirstMomentX;
             loops.push_back(edges(loop));return true;
