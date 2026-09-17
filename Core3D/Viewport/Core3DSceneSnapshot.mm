@@ -26,6 +26,8 @@
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
 #include "../OCCTKit/NativeMeshElementSelectionTests.hxx"
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepTools.hxx>
@@ -725,13 +727,23 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                 BRepPrimAPI_MakeBox(gp_Pnt(-60,-40,0),120,80,40).Shape(),
                 BRepPrimAPI_MakeBox(gp_Pnt(-58,-38,2),116,76,38).Shape()).Shape();
         }
+        // Analytic provenance fixtures: curved solids with exact authored
+        // parameters, located/reflected exactly once below.
+        if (mode == 19 || mode == 20) source = BRepPrimAPI_MakeCylinder(17.5,44).Shape();
+        else if (mode == 21 || mode == 24)
+            source = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(1,0,0)),17.5,44).Shape();
+        else if (mode == 22) source = BRepPrimAPI_MakeTorus(41.5,11.25).Shape();
+        else if (mode == 23)
+            source = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(0,0,1)),17.5,44,3.9269908169872414).Shape();
         if (source.IsNull()) return @{@"error":@"Fixture construction failed"};
-        BRepMesh_IncrementalMesh mesher(source,0.1,false,0.5,false);
+        // Mode 22 torus (R=41.5,r=11.25) at 0.1mm yields ~9600 triangles, over the 4096 copy cap; 0.8mm keeps it near 1000.
+        const double fixtureDeflection = (mode == 22) ? 0.8 : 0.1;
+        BRepMesh_IncrementalMesh mesher(source,fixtureDeflection,false,0.5,false);
         if (!mesher.IsDone()) return @{@"error":@"Fixture tessellation failed"};
-        if (mode == 2) {
+        if (mode == 2 || mode == 20) {
             gp_Trsf tr; tr.SetTranslation(gp_Vec(71,-19,23));
             source.Location(TopLoc_Location(tr));
-        } else if (mode == 3) {
+        } else if (mode == 3 || mode == 21) {
             gp_Trsf tr; tr.SetMirror(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(1,0,0)));
             // Adversarial private fixture: default TopoDS setter forbids reflection.
             source.Location(TopLoc_Location(tr),Standard_False);
@@ -813,6 +825,44 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         }
         NSMutableDictionary* report=[@{@"result":@(int(result)),@"sourceUnchanged":@(unchanged),
             @"sourceKind":@(int(source.ShapeType())),@"outputEmpty":@(copy.face.IsNull()),@"sourceFaces":@(copy.sourceFaces),@"triangles":@(copy.triangles)} mutableCopy];
+        // Per-source-face analytic provenance in emission order; empty on
+        // every rejection because failure paths clear the output.
+        NSMutableArray* faceRecords=[NSMutableArray arrayWithCapacity:copy.faces.size()];
+        for (const auto& record:copy.faces) {
+            NSMutableDictionary* entry=[@{@"firstTriangle":@(record.firstTriangle),
+                @"triangleCount":@(record.triangleCount),@"reversed":@(record.reversed)} mutableCopy];
+            auto point=[](const gp_Pnt& p)->NSArray* {return @[@(p.X()),@(p.Y()),@(p.Z())];};
+            auto direction=[](const gp_Dir& d)->NSArray* {return @[@(d.X()),@(d.Y()),@(d.Z())];};
+            switch (record.surfaceType) {
+                case SourceFaceRecord::SurfaceType::Plane:
+                    entry[@"type"]=@"plane";
+                    if (const auto* plane=std::get_if<gp_Pln>(&record.params)) {
+                        entry[@"location"]=point(plane->Location());
+                        entry[@"direction"]=direction(plane->Axis().Direction());
+                    }
+                    break;
+                case SourceFaceRecord::SurfaceType::Cylinder:
+                    entry[@"type"]=@"cylinder";
+                    if (const auto* cylinder=std::get_if<gp_Cylinder>(&record.params)) {
+                        entry[@"location"]=point(cylinder->Axis().Location());
+                        entry[@"direction"]=direction(cylinder->Axis().Direction());
+                        entry[@"radius"]=@(cylinder->Radius());
+                    }
+                    break;
+                case SourceFaceRecord::SurfaceType::Torus:
+                    entry[@"type"]=@"torus";
+                    if (const auto* torus=std::get_if<gp_Torus>(&record.params)) {
+                        entry[@"location"]=point(torus->Axis().Location());
+                        entry[@"direction"]=direction(torus->Axis().Direction());
+                        entry[@"majorRadius"]=@(torus->MajorRadius());
+                        entry[@"minorRadius"]=@(torus->MinorRadius());
+                    }
+                    break;
+                case SourceFaceRecord::SurfaceType::Other: entry[@"type"]=@"other"; break;
+            }
+            [faceRecords addObject:entry];
+        }
+        report[@"faces"]=faceRecords;
         if (result!=PreparationResult::Ready) return report;
         TopLoc_Location location; const auto mesh=BRep_Tool::Triangulation(copy.face,location);
         if (mesh.IsNull()) return @{@"error":@"Ready output has no triangulation"};
@@ -842,6 +892,86 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
     } catch (const Standard_Failure& e) {
         return @{@"error":[NSString stringWithUTF8String:e.GetMessageString() ?: "Mesh copy probe failed"]};
     } catch (...) {return @{@"error":@"Mesh copy probe failed"};}
+}
+
++ (NSDictionary<NSString *, id> *)debugCopySourceFaceProvenance:(NSData *)data
+                                               entityIdentifier:(NSString *)identifier
+                                                           mode:(NSInteger)mode {
+    if (![NSThread isMainThread] || data.length == 0 || data.length > 64U*1024U*1024U
+        || identifier.length == 0 || identifier.length > 256 || mode < 0 || mode > 1)
+        return @{@"error":@"Private copy provenance probe requires 1byte–64MiB of document data, an entity identifier and mode 0/1 on the main thread"};
+    using core3d::provenance::CopySourceFaceProvenanceReadState;
+    try {
+        // The narrow private-snapshot reader resolves the format from the
+        // .xbf extension, so the bytes land in a uniquely named temporary
+        // handoff that only this probe removes (same pattern as thumbData).
+        NSString* directory = NSTemporaryDirectory();
+        if (directory.length == 0) return @{@"error":@"Private copy provenance probe storage unavailable"};
+        NSURL* fileURL = [NSURL fileURLWithPath:[directory stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"copy-provenance-%@.xbf", NSUUID.UUID.UUIDString]]];
+        if (![data writeToURL:fileURL options:NSDataWritingAtomic error:nil])
+            return @{@"error":@"Private copy provenance probe storage unavailable"};
+        struct Owner {
+            Handle(OcctDocument) document = new OcctDocument();
+            ~Owner() noexcept { try { document->ClosePrivateExportSnapshot(); } catch (...) {} }
+        } owner;
+        const bool opened = owner.document->OpenPrivateExportSnapshot(
+            fileURL.fileSystemRepresentation, Message_ProgressRange());
+        // The document is fully resident after Open; only this probe's unique
+        // handoff file is removed (same pattern as thumbData).
+        [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
+        if (!opened)
+            return @{@"error":@"Private copy provenance probe document rejected"};
+        TDF_Label target;
+        TDF_LabelSequence labels;
+        XCAFDoc_DocumentTool::ShapeTool(owner.document->Document()->Main())->GetFreeShapes(labels);
+        for (int i = 1; i <= labels.Length(); ++i)
+            if (owner.document->EntityIdentifierForLabel(labels.Value(i)) == identifier.UTF8String)
+                target = labels.Value(i);
+        if (target.IsNull()) return @{@"error":@"Copy provenance entity not found"};
+        auto report = ^NSDictionary<NSString *, id> *(const core3d::provenance::SourceFaceProvenanceRecord& record,
+                                                      CopySourceFaceProvenanceReadState state) {
+            NSMutableDictionary* result = [@{@"state":@(int(state))} mutableCopy];
+            if (state == CopySourceFaceProvenanceReadState::Present
+                || state == CopySourceFaceProvenanceReadState::Stale) {
+                result[@"digest"] = [NSString stringWithUTF8String:record.digest.c_str()];
+                result[@"triangleCount"] = @(record.triangleCount);
+                NSMutableArray* faces = [NSMutableArray arrayWithCapacity:record.faces.size()];
+                for (const auto& entry : record.faces) {
+                    NSMutableArray* params = [NSMutableArray arrayWithCapacity:entry.params.size()];
+                    for (double value : entry.params) [params addObject:@(value)];
+                    [faces addObject:@{@"surfaceType":@(entry.surfaceType),
+                        @"firstTriangle":@(entry.firstTriangle), @"triangleCount":@(entry.triangleCount),
+                        @"reversed":@(entry.reversed), @"params":params}];
+                }
+                result[@"faces"] = faces;
+            }
+            return result;
+        };
+        core3d::provenance::SourceFaceProvenanceRecord record;
+        const auto state = owner.document->TryCopySourceFaceProvenanceForLabel(target, record);
+        NSMutableDictionary* result = [report(record, state) mutableCopy];
+        if (mode == 1) {
+            // DEBUG-injected wrong digest length must read Malformed inside the
+            // fault command and return to Present after its abort.
+            if (state != CopySourceFaceProvenanceReadState::Present)
+                return @{@"error":@"Copy provenance corruption probe requires a Present record"};
+            const auto document = owner.document->Document();
+            document->NewCommand();
+            const bool corrupted = owner.document->DebugCorruptCopySourceFaceProvenance(target, 0);
+            core3d::provenance::SourceFaceProvenanceRecord rejected;
+            const auto corruptedState = owner.document->TryCopySourceFaceProvenanceForLabel(target, rejected);
+            if (document->HasOpenCommand()) document->AbortCommand();
+            core3d::provenance::SourceFaceProvenanceRecord restored;
+            const auto restoredState = owner.document->TryCopySourceFaceProvenanceForLabel(target, restored);
+            result[@"corruptionAccepted"] = @(corrupted);
+            result[@"corruptedState"] = @(int(corruptedState));
+            result[@"restored"] = report(restored, restoredState);
+        }
+        return result;
+    } catch (const Standard_Failure& e) {
+        return @{@"error":[NSString stringWithUTF8String:e.GetMessageString() ?: "Copy provenance probe failure"]};
+    } catch (...) { return @{@"error":@"Copy provenance probe failed"}; }
 }
 
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeIntentPolicy:(NSInteger)family {

@@ -3,6 +3,7 @@
 // capture/revalidate exact source metadata, transform and opening authority.
 // This only prepares private geometry. It never creates a live object, copies
 // appearance, hides a source, changes selection, or opens an OCAF transaction.
+#include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
@@ -15,16 +16,34 @@
 #include <atomic>
 #include <cmath>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace core3d::meshcopy {
 enum class PreparationResult { Ready, Cancelled, Unsupported, TooLarge, Invalid };
+struct SourceFaceRecord {
+    enum class SurfaceType { Plane, Cylinder, Torus, Other };
+    SurfaceType surfaceType=SurfaceType::Other;
+    // Zero-based offset of this source face's triangles in emission order.
+    int firstTriangle=0,triangleCount=0;
+    // True when stored winding was reversed for emission (face REVERSED xor a
+    // negative-determinant source location).
+    bool reversed=false;
+    // Exact analytic parameters from BRepAdaptor_Surface on the retained
+    // source face, never fitted from mesh nodes. The adaptor already applies
+    // the face location to Plane/Cylinder/Torus exactly once; the
+    // triangulation location must never be reapplied here. Empty for Other.
+    std::variant<std::monostate,gp_Pln,gp_Cylinder,gp_Torus> params;
+};
 struct CurrentTessellationCopy {
     TopoDS_Face face;
     int sourceFaces=0,triangles=0;
     // Recorded source mesh metadata, not an independently proven geometric
     // error bound. This path performs no analytic remeshing/refinement.
     double recordedDeflection=0;
+    // Exact per-source-face analytic provenance in emission order; empty
+    // unless Ready. Additive metadata only: not persisted, not UVs.
+    std::vector<SourceFaceRecord> faces;
 };
 inline PreparationResult PrepareCurrentTessellationCopy(
     const TopoDS_Shape& source, CurrentTessellationCopy& output,
@@ -36,6 +55,9 @@ inline PreparationResult PrepareCurrentTessellationCopy(
         return std::isfinite(p.X()) && std::isfinite(p.Y()) && std::isfinite(p.Z())
             && std::abs(p.X())<=coordinateLimit && std::abs(p.Y())<=coordinateLimit
             && std::abs(p.Z())<=coordinateLimit;
+    };
+    const auto finiteXYZ=[](const gp_XYZ& v) {
+        return std::isfinite(v.X()) && std::isfinite(v.Y()) && std::isfinite(v.Z());
     };
     struct FaceSource { Handle(Poly_Triangulation) mesh; gp_Trsf location; bool reverse=false; };
     try {
@@ -55,6 +77,7 @@ inline PreparationResult PrepareCurrentTessellationCopy(
         }
         if (solid.ShapeType()!=TopAbs_SOLID) return PreparationResult::Unsupported;
         std::vector<FaceSource> faces;faces.reserve(maxFaces);
+        std::vector<SourceFaceRecord> records;records.reserve(maxFaces);
         int triangles=0,nodes=0;double deflection=0;
         for (TopExp_Explorer it(solid,TopAbs_FACE);it.More();it.Next()) {
             if (cancelled.load(std::memory_order_relaxed)) return PreparationResult::Cancelled;
@@ -81,7 +104,45 @@ inline PreparationResult PrepareCurrentTessellationCopy(
                 const auto point=mesh->Node(n);
                 if (!finitePoint(point) || !finitePoint(point.Transformed(tr))) return PreparationResult::Invalid;
             }
-            faces.push_back({mesh,tr,(face.Orientation()==TopAbs_REVERSED)!=bool(tr.IsNegative())});
+            const bool reversed=(face.Orientation()==TopAbs_REVERSED)!=bool(tr.IsNegative());
+            faces.push_back({mesh,tr,reversed});
+            // Exact analytic provenance from the retained source face. The
+            // adaptor already applies the face location to Plane/Cylinder/
+            // Torus exactly once; never reapply the triangulation location.
+            SourceFaceRecord record;
+            record.firstTriangle=triangles-mesh->NbTriangles();
+            record.triangleCount=mesh->NbTriangles();
+            record.reversed=reversed;
+            const BRepAdaptor_Surface adaptor(face);
+            switch (adaptor.GetType()) {
+                case GeomAbs_Plane: {
+                    const auto plane=adaptor.Plane();
+                    if (!finiteXYZ(plane.Location().XYZ()) || !finiteXYZ(plane.Axis().Direction().XYZ()))
+                        return PreparationResult::Invalid;
+                    record.surfaceType=SourceFaceRecord::SurfaceType::Plane;
+                    record.params=plane;break;
+                }
+                case GeomAbs_Cylinder: {
+                    const auto cylinder=adaptor.Cylinder();
+                    if (!finiteXYZ(cylinder.Axis().Location().XYZ())
+                        || !finiteXYZ(cylinder.Axis().Direction().XYZ())
+                        || !std::isfinite(cylinder.Radius()))
+                        return PreparationResult::Invalid;
+                    record.surfaceType=SourceFaceRecord::SurfaceType::Cylinder;
+                    record.params=cylinder;break;
+                }
+                case GeomAbs_Torus: {
+                    const auto torus=adaptor.Torus();
+                    if (!finiteXYZ(torus.Axis().Location().XYZ())
+                        || !finiteXYZ(torus.Axis().Direction().XYZ())
+                        || !std::isfinite(torus.MajorRadius()) || !std::isfinite(torus.MinorRadius()))
+                        return PreparationResult::Invalid;
+                    record.surfaceType=SourceFaceRecord::SurfaceType::Torus;
+                    record.params=torus;break;
+                }
+                default: break;
+            }
+            records.push_back(std::move(record));
         }
         if (faces.empty() || triangles<=0) return PreparationResult::Unsupported;
         // One private, forward, mesh-only face with independent corner nodes.
@@ -108,7 +169,8 @@ inline PreparationResult PrepareCurrentTessellationCopy(
         if (triangle!=triangles || cancelled.load(std::memory_order_relaxed))
             return cancelled.load(std::memory_order_relaxed)?PreparationResult::Cancelled:PreparationResult::Invalid;
         result->Deflection(deflection);TopoDS_Face face;BRep_Builder().MakeFace(face,result);
-        output={face,int(faces.size()),triangles,deflection};return PreparationResult::Ready;
+        output={face,int(faces.size()),triangles,deflection};
+        output.faces=std::move(records);return PreparationResult::Ready;
     } catch (...) {output={};return PreparationResult::Invalid;}
 }
 } // namespace core3d::meshcopy

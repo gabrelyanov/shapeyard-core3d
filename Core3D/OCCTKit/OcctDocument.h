@@ -56,6 +56,7 @@
 #include <map>
 #include <memory>
 #include <cmath>
+#include "SourceFaceProvenanceRecord.hxx"
 class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
@@ -624,10 +625,34 @@ public:
       const TDF_Label& label, const std::vector<Standard_Byte>& encoded) noexcept;
   Standard_EXPORT Standard_Boolean ClearMeshRegionPartition(
       const TDF_Label& label) noexcept;
+  //! Definition-owned source-face provenance for a source-retained mesh copy
+  //! (schema v1, standard OCAF attribute types only; no new driver type). The
+  //! strict reader recomputes the copy triangulation digest on every read:
+  //! Absent (no record), Malformed (schema violation), Stale (a well-formed
+  //! record whose digest no longer matches the current triangulation, e.g.
+  //! after a mesh region edit, vertex move, or triangle-reordering rebuild)
+  //! or Present. Order-preserving atlas rebuilds keep the record Present;
+  //! consumers must only act on Present; there is no silent fallback.
+  //! Triangle ranges refer to the pre-atlas emission order; parameters are
+  //! part-local.
+  Standard_EXPORT core3d::provenance::CopySourceFaceProvenanceReadState
+      TryCopySourceFaceProvenanceForLabel(
+          const TDF_Label& label,
+          core3d::provenance::SourceFaceProvenanceRecord& record) const noexcept;
+  //! Persist the N1 in-memory provenance on the fresh copy label inside the
+  //! caller's already-open creation command, so one Undo removes it and Redo
+  //! restores it. Exact readback is required; malformed authority fails closed.
+  Standard_EXPORT Standard_Boolean StageCopySourceFaceProvenance(
+      const TDF_Label& label,
+      const std::vector<core3d::meshcopy::SourceFaceRecord>& faces) noexcept;
 #if DEBUG
   Standard_EXPORT Standard_Boolean DebugStageFirstMeshRegionPartition(
       const TDF_Label& label) noexcept;
   Standard_EXPORT Standard_Boolean DebugCorruptMeshRegionPartition(
+      const TDF_Label& label, Standard_Integer mode) noexcept;
+  //! Fault injection for the provenance strict reader. Mode 0 stores a
+  //! wrong-length digest inside the caller's already-open command.
+  Standard_EXPORT Standard_Boolean DebugCorruptCopySourceFaceProvenance(
       const TDF_Label& label, Standard_Integer mode) noexcept;
 #endif
   //! Stamp every unmarked analytic definition produced by a fresh STEP

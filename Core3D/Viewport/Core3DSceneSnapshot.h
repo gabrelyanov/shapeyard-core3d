@@ -70,6 +70,13 @@ CORE3D_SCENE_FINAL_CLASS
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeIntentPolicy:(NSInteger)family NS_SWIFT_NAME(debugNativeIntentPolicy(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugMeshElementSelectionPolicy NS_SWIFT_NAME(debugMeshElementSelectionPolicy());
 + (NSDictionary<NSString *, id> *)debugCurrentTessellationMeshCopy:(NSInteger)mode NS_SWIFT_NAME(debugCurrentTessellationMeshCopy(_:));
+// Reads the persisted copy source-face provenance from private document bytes
+// only; never attaches to a live project. Mode 1 also proves a DEBUG-injected
+// wrong-length digest reads Malformed and aborts cleanly.
++ (NSDictionary<NSString *, id> *)debugCopySourceFaceProvenance:(NSData *)document
+                                               entityIdentifier:(NSString *)identifier
+                                                           mode:(NSInteger)mode
+    NS_SWIFT_NAME(debugCopySourceFaceProvenance(_:entityIdentifier:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameUVEdit:(NSData *)archive mode:(NSInteger)mode
     NS_SWIFT_NAME(debugFrameUVEdit(_:mode:));
 + (NSDictionary<NSString *, id> *)debugFrameCopy:(NSData *)archive replacement:(NSData *)replacement mode:(NSInteger)mode

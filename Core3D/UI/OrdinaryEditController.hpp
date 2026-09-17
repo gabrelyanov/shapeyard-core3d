@@ -10,6 +10,7 @@
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include "../OCCTKit/SavedProgramSourceDetachedWork.hxx"
 #include "../OCCTKit/RetainedBooleanEditValues.hxx"
+#include "../OCCTKit/SourceFaceProvenanceRecord.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
 #include <map>
@@ -303,6 +304,10 @@ struct OrdinaryMeshCopySource {
     OcctReferenceAxisReadState axisState = OcctReferenceAxisReadState::Invalid;
     OcctReferenceAxis axis;
     TCollection_ExtendedString destinationName;
+    //! Exact per-source-face analytic provenance captured with the private
+    //! copy geometry (N1); persisted on the copy label in the same creation
+    //! command, so one Undo removes it and Redo restores it.
+    std::vector<core3d::meshcopy::SourceFaceRecord> faces;
 };
 
 struct OrdinaryCreationLedger {

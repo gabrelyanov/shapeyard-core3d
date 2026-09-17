@@ -5695,6 +5695,298 @@ Standard_Boolean OcctDocument::DebugCorruptMeshRegionPartition(
 }
 #endif
 
+// Definition-owned source-face provenance schema v1 for source-retained mesh
+// copies. Only attribute types already admitted by the narrow document reader
+// are used (UAttribute marker, Integer scalars, chunked AsciiString payload
+// and digest), so shipped builds keep opening these documents; no new driver.
+// These GUIDs are permanent serialized schema identifiers: never reuse them.
+const Standard_GUID& CopySourceFaceProvenanceRecordID() {
+    static const Standard_GUID id("4F7D2C1A-9B3E-4A5F-8C6D-7E8F9A0B1C01"); return id;
+}
+const Standard_GUID& CopySourceFaceProvenanceVersionID() {
+    static const Standard_GUID id("4F7D2C1A-9B3E-4A5F-8C6D-7E8F9A0B1C02"); return id;
+}
+const Standard_GUID& CopySourceFaceProvenanceFaceCountID() {
+    static const Standard_GUID id("4F7D2C1A-9B3E-4A5F-8C6D-7E8F9A0B1C03"); return id;
+}
+const Standard_GUID& CopySourceFaceProvenanceTriangleCountID() {
+    static const Standard_GUID id("4F7D2C1A-9B3E-4A5F-8C6D-7E8F9A0B1C04"); return id;
+}
+const Standard_GUID& CopySourceFaceProvenanceChunkCountID() {
+    static const Standard_GUID id("4F7D2C1A-9B3E-4A5F-8C6D-7E8F9A0B1C05"); return id;
+}
+const Standard_GUID& CopySourceFaceProvenanceDigestID() {
+    static const Standard_GUID id("4F7D2C1A-9B3E-4A5F-8C6D-7E8F9A0B1C06"); return id;
+}
+constexpr Standard_Size kCopySourceFaceProvenanceChunkCharacters = 256;
+constexpr Standard_Size kMaximumCopySourceFaceProvenanceChunks = 320;
+
+bool HasCopySourceFaceProvenanceSchemaAttribute(const TDF_Label& label) {
+    Handle(TDF_Attribute) value;
+    return label.FindAttribute(CopySourceFaceProvenanceRecordID(), value)
+        || label.FindAttribute(CopySourceFaceProvenanceVersionID(), value)
+        || label.FindAttribute(CopySourceFaceProvenanceFaceCountID(), value)
+        || label.FindAttribute(CopySourceFaceProvenanceTriangleCountID(), value)
+        || label.FindAttribute(CopySourceFaceProvenanceChunkCountID(), value)
+        || label.FindAttribute(CopySourceFaceProvenanceDigestID(), value);
+}
+
+// Strict reader. Absent: no record. Malformed: any schema violation (unknown
+// or missing attributes, bad counts, bad digest text, unparseable payload, or
+// non-contiguous ranges). Stale: structurally valid record whose stored
+// digest no longer matches the current triangulation, or whose definition no
+// longer carries a readable mesh-only face. Present: exact match.
+core3d::provenance::CopySourceFaceProvenanceReadState ReadCopySourceFaceProvenanceRecord(
+    const Handle(TDocStd_Document)& document, const TDF_Label& definition,
+    core3d::provenance::SourceFaceProvenanceRecord& output, TDF_Label* recordLabel = nullptr) noexcept {
+    using core3d::provenance::CopySourceFaceProvenanceReadState;
+    output = core3d::provenance::SourceFaceProvenanceRecord();
+    if (recordLabel) *recordLabel = TDF_Label();
+    try {
+        OCC_CATCH_SIGNALS
+        if (document.IsNull() || document->GetData().IsNull() || definition.IsNull()
+            || definition.Data() != document->GetData()
+            || HasCopySourceFaceProvenanceSchemaAttribute(definition))
+            return CopySourceFaceProvenanceReadState::Malformed;
+        TDF_Label record;
+        // A definition owns at most one direct record. Schema fragments below
+        // any other descendant are malformed rather than silently absent.
+        Standard_Size descendants = 0;
+        for (TDF_ChildIterator child(definition, Standard_True); child.More(); child.Next()) {
+            if (++descendants > kMaximumGeometryDocumentLabels)
+                return CopySourceFaceProvenanceReadState::Malformed;
+            if (!HasCopySourceFaceProvenanceSchemaAttribute(child.Value())) continue;
+            Handle(TDF_Attribute) marker;
+            if (!child.Value().Father().IsEqual(definition)
+                || !child.Value().FindAttribute(CopySourceFaceProvenanceRecordID(), marker)
+                || Handle(TDataStd_UAttribute)::DownCast(marker).IsNull()
+                || !record.IsNull()) return CopySourceFaceProvenanceReadState::Malformed;
+            record = child.Value();
+        }
+        if (record.IsNull()) return CopySourceFaceProvenanceReadState::Absent;
+        Handle(TDataStd_Integer) version, faceCount, triangles, chunks;
+        Handle(TDataStd_AsciiString) digest;
+        if (!record.FindAttribute(CopySourceFaceProvenanceVersionID(), version)
+            || !record.FindAttribute(CopySourceFaceProvenanceFaceCountID(), faceCount)
+            || !record.FindAttribute(CopySourceFaceProvenanceTriangleCountID(), triangles)
+            || !record.FindAttribute(CopySourceFaceProvenanceChunkCountID(), chunks)
+            || !record.FindAttribute(CopySourceFaceProvenanceDigestID(), digest)
+            || version.IsNull() || faceCount.IsNull() || triangles.IsNull() || chunks.IsNull() || digest.IsNull()
+            || version->Get() != 1
+            || faceCount->Get() <= 0 || faceCount->Get() > core3d::provenance::kMaximumProvenanceFaces
+            || triangles->Get() <= 0 || triangles->Get() > core3d::provenance::kMaximumProvenanceTriangles
+            || chunks->Get() <= 0 || chunks->Get() > Standard_Integer(kMaximumCopySourceFaceProvenanceChunks))
+            return CopySourceFaceProvenanceReadState::Malformed;
+        Standard_Size recordAttributes = 0;
+        for (TDF_AttributeIterator attribute(record); attribute.More(); attribute.Next()) {
+            const auto& id = attribute.Value()->ID();
+            if (id != CopySourceFaceProvenanceRecordID() && id != CopySourceFaceProvenanceVersionID()
+                && id != CopySourceFaceProvenanceFaceCountID() && id != CopySourceFaceProvenanceTriangleCountID()
+                && id != CopySourceFaceProvenanceChunkCountID() && id != CopySourceFaceProvenanceDigestID())
+                return CopySourceFaceProvenanceReadState::Malformed;
+            ++recordAttributes;
+        }
+        const std::string digestText = digest->Get().ToCString();
+        if (recordAttributes != 6 || digestText.size() != 64)
+            return CopySourceFaceProvenanceReadState::Malformed;
+        for (char c : digestText) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return CopySourceFaceProvenanceReadState::Malformed;
+        std::string payload;
+        for (Standard_Integer index = 1; index <= chunks->Get(); ++index) {
+            const TDF_Label chunk = record.FindChild(index, Standard_False);
+            Handle(TDataStd_AsciiString) text;
+            Standard_Size attributes = 0;
+            Standard_Size nested = 0;
+            if (chunk.IsNull() || HasLiveMeshRegionPartitionDescendant(chunk, nested)
+                || !chunk.FindAttribute(TDataStd_AsciiString::GetID(), text) || text.IsNull())
+                return CopySourceFaceProvenanceReadState::Malformed;
+            for (TDF_AttributeIterator attribute(chunk); attribute.More(); attribute.Next()) {
+                if (attribute.Value()->ID() != TDataStd_AsciiString::GetID())
+                    return CopySourceFaceProvenanceReadState::Malformed;
+                ++attributes;
+            }
+            const std::string value = text->Get().ToCString();
+            if (attributes != 1 || value.empty() || value.size() > kCopySourceFaceProvenanceChunkCharacters
+                || (index < chunks->Get() && value.size() != kCopySourceFaceProvenanceChunkCharacters))
+                return CopySourceFaceProvenanceReadState::Malformed;
+            for (char c : value) if (!core3d::provenance::IsProvenancePayloadCharacter(c))
+                return CopySourceFaceProvenanceReadState::Malformed;
+            payload += value;
+        }
+        Standard_Size directChildren = 0;
+        for (TDF_ChildIterator child(record, Standard_False); child.More(); child.Next()) {
+            if (++directChildren > kMaximumGeometryDocumentLabels)
+                return CopySourceFaceProvenanceReadState::Malformed;
+            Standard_Size nested = 0;
+            if (child.Value().Tag() > chunks->Get()
+                && (child.Value().HasAttribute()
+                    || HasLiveMeshRegionPartitionDescendant(child.Value(), nested)))
+                return CopySourceFaceProvenanceReadState::Malformed;
+        }
+        std::vector<core3d::provenance::SourceFaceProvenanceEntry> entries;
+        if (!core3d::provenance::DecodeEntries(payload, entries)
+            || entries.size() != Standard_Size(faceCount->Get()))
+            return CopySourceFaceProvenanceReadState::Malformed;
+        // Ranges are contiguous in the pre-atlas emission order and cover
+        // exactly the staged triangle count.
+        int expected = 0;
+        for (const auto& entry : entries) {
+            if (entry.firstTriangle != expected) return CopySourceFaceProvenanceReadState::Malformed;
+            expected += entry.triangleCount;
+        }
+        if (expected != triangles->Get()) return CopySourceFaceProvenanceReadState::Malformed;
+        output.digest = digestText;
+        output.triangleCount = triangles->Get();
+        output.faces = entries;
+        if (recordLabel) *recordLabel = record;
+        // A structurally valid record is only Present while the copy's current
+        // triangulation still matches the staged digest. Any geometry mutation
+        // (region extrude/inset, vertex move) or triangle reordering reads
+        // Stale; an order-preserving atlas rebuild keeps the digest exact.
+        TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+        if (!TriangleAtlasFace(XCAFDoc_ShapeTool::GetShape(definition), face, mesh)
+            || mesh->NbTriangles() != triangles->Get())
+            return CopySourceFaceProvenanceReadState::Stale;
+        std::string actual;
+        if (!core3d::provenance::CopyTriangulationDigest(mesh, actual))
+            return CopySourceFaceProvenanceReadState::Stale;
+        return actual == digestText
+            ? CopySourceFaceProvenanceReadState::Present : CopySourceFaceProvenanceReadState::Stale;
+    } catch (...) {
+        output = core3d::provenance::SourceFaceProvenanceRecord();
+        if (recordLabel) *recordLabel = TDF_Label();
+        return CopySourceFaceProvenanceReadState::Malformed;
+    }
+}
+
+// Write the schema attributes and payload chunks onto a fresh or cleared
+// record label. The caller owns validation, command scope and readback.
+bool WriteCopySourceFaceProvenanceChunks(const TDF_Label& record, const std::string& payload,
+    Standard_Integer faceCount, Standard_Integer triangleCount, const std::string& digest) {
+    const Standard_Size chunkCount = (payload.size() + kCopySourceFaceProvenanceChunkCharacters - 1)
+        / kCopySourceFaceProvenanceChunkCharacters;
+    if (payload.empty() || chunkCount == 0 || chunkCount > kMaximumCopySourceFaceProvenanceChunks
+        || digest.size() != 64) return false;
+    TDataStd_UAttribute::Set(record, CopySourceFaceProvenanceRecordID());
+    TDataStd_Integer::Set(record, CopySourceFaceProvenanceVersionID(), 1);
+    TDataStd_Integer::Set(record, CopySourceFaceProvenanceFaceCountID(), faceCount);
+    TDataStd_Integer::Set(record, CopySourceFaceProvenanceTriangleCountID(), triangleCount);
+    TDataStd_Integer::Set(record, CopySourceFaceProvenanceChunkCountID(), Standard_Integer(chunkCount));
+    TDataStd_AsciiString::Set(record, CopySourceFaceProvenanceDigestID(),
+        TCollection_AsciiString(digest.c_str()));
+    for (Standard_Size index = 0; index < chunkCount; ++index) {
+        const std::string chunk = payload.substr(index * kCopySourceFaceProvenanceChunkCharacters,
+            kCopySourceFaceProvenanceChunkCharacters);
+        TDataStd_AsciiString::Set(record.FindChild(Standard_Integer(index + 1), Standard_True),
+            TCollection_AsciiString(chunk.c_str()));
+    }
+    return true;
+}
+
+// Allocate the record child label. Tags 1...8 are persisted transforms and
+// 11/12 are legacy material/color even when their attributes were cleared;
+// never claim an attribute-free historical label from that namespace.
+TDF_Label FreshCopySourceFaceProvenanceLabel(const TDF_Label& definition, bool& overflow) {
+    overflow = false;
+    Standard_Integer tag = 12;
+    for (TDF_ChildIterator child(definition, Standard_False); child.More(); child.Next())
+        tag = std::max(tag, child.Value().Tag());
+    if (tag == std::numeric_limits<Standard_Integer>::max()) { overflow = true; return TDF_Label(); }
+    return definition.FindChild(tag + 1, Standard_True);
+}
+
+core3d::provenance::CopySourceFaceProvenanceReadState
+OcctDocument::TryCopySourceFaceProvenanceForLabel(
+    const TDF_Label& label, core3d::provenance::SourceFaceProvenanceRecord& record) const noexcept {
+    using core3d::provenance::CopySourceFaceProvenanceReadState;
+    record = core3d::provenance::SourceFaceProvenanceRecord();
+    if (![NSThread isMainThread]) return CopySourceFaceProvenanceReadState::Malformed;
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull()) return CopySourceFaceProvenanceReadState::Malformed;
+        return ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, record);
+    } catch (...) {
+        record = core3d::provenance::SourceFaceProvenanceRecord();
+        return CopySourceFaceProvenanceReadState::Malformed;
+    }
+}
+
+Standard_Boolean OcctDocument::StageCopySourceFaceProvenance(
+    const TDF_Label& label, const std::vector<core3d::meshcopy::SourceFaceRecord>& faces) noexcept {
+    using core3d::provenance::CopySourceFaceProvenanceReadState;
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand() || faces.empty()
+            || faces.size() > std::size_t(core3d::provenance::kMaximumProvenanceFaces)
+            || !ValidateGeometryRepresentations()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh)
+            return Standard_False;
+        std::vector<core3d::provenance::SourceFaceProvenanceEntry> entries;
+        if (!core3d::provenance::EntriesFromSourceFaces(faces, entries)) return Standard_False;
+        int triangles = 0;
+        for (const auto& entry : entries) {
+            if (entry.firstTriangle != triangles || entry.triangleCount <= 0) return Standard_False;
+            triangles += entry.triangleCount;
+        }
+        if (triangles <= 0 || triangles > core3d::provenance::kMaximumProvenanceTriangles)
+            return Standard_False;
+        TopoDS_Face face; Handle(Poly_Triangulation) mesh;
+        if (!TriangleAtlasFace(XCAFDoc_ShapeTool::GetShape(label), face, mesh)
+            || mesh->NbTriangles() != triangles) return Standard_False;
+        std::string digest, payload;
+        if (!core3d::provenance::CopyTriangulationDigest(mesh, digest)
+            || !core3d::provenance::EncodeEntries(entries, payload)) return Standard_False;
+        core3d::provenance::SourceFaceProvenanceRecord previous; TDF_Label record;
+        const auto state = ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, previous, &record);
+        if (state == CopySourceFaceProvenanceReadState::Malformed) return Standard_False;
+        if (state != CopySourceFaceProvenanceReadState::Absent
+            && previous.digest == digest
+            && core3d::provenance::SameEntries(previous.faces, entries)) return Standard_True;
+        if (record.IsNull()) {
+            bool overflow = false;
+            record = FreshCopySourceFaceProvenanceLabel(label, overflow);
+            if (overflow || record.IsNull()) return Standard_False;
+        } else record.ForgetAllAttributes(Standard_True);
+        if (!WriteCopySourceFaceProvenanceChunks(record, payload,
+                Standard_Integer(entries.size()), triangles, digest)) return Standard_False;
+        core3d::provenance::SourceFaceProvenanceRecord readback;
+        return TryCopySourceFaceProvenanceForLabel(label, readback)
+                    == CopySourceFaceProvenanceReadState::Present
+            && readback.digest == digest
+            && core3d::provenance::SameEntries(readback.faces, entries)
+            && ValidateGeometryRepresentations();
+    } catch (...) { return Standard_False; }
+}
+
+#if DEBUG
+Standard_Boolean OcctDocument::DebugCorruptCopySourceFaceProvenance(
+    const TDF_Label& label, Standard_Integer mode) noexcept {
+    using core3d::provenance::CopySourceFaceProvenanceReadState;
+    if (![NSThread isMainThread] || mode != 0 || myOcafDoc.IsNull()
+        || !myOcafDoc->HasOpenCommand()) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        core3d::provenance::SourceFaceProvenanceRecord record; TDF_Label recordLabel;
+        if (ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, record, &recordLabel)
+                != CopySourceFaceProvenanceReadState::Present || recordLabel.IsNull())
+            return Standard_False;
+        // Mutate the existing custom-GUID attribute that the strict reader
+        // validates on the record child, preserving its identity for rollback.
+        Handle(TDataStd_AsciiString) digest;
+        if (!recordLabel.FindAttribute(CopySourceFaceProvenanceDigestID(), digest)
+            || digest.IsNull()) return Standard_False;
+        // Mode 0: wrong digest length is a schema violation, never a stale read.
+        digest->Set(TCollection_AsciiString("00"));
+        core3d::provenance::SourceFaceProvenanceRecord refused;
+        return ReadCopySourceFaceProvenanceRecord(myOcafDoc, label, refused)
+                == CopySourceFaceProvenanceReadState::Malformed
+            && refused.digest.empty();
+    } catch (...) { return Standard_False; }
+}
+#endif
+
 Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
     const TDF_Label& source, const TDF_Label& destination) {
     if (![NSThread isMainThread]) return Standard_False;
@@ -5709,9 +6001,20 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
         if (Core3DReadAuthoredFrameOwner(myOcafDoc, source, frame) == OcctAuthoredFrameReadState::Invalid
             || Core3DReadAuthoredFrameOwner(myOcafDoc, destination, previousFrame) == OcctAuthoredFrameReadState::Invalid)
             return Standard_False;
+        using core3d::provenance::CopySourceFaceProvenanceReadState;
+        core3d::provenance::SourceFaceProvenanceRecord sourceProvenance, targetProvenance;
+        TDF_Label targetProvenanceLabel;
+        const auto sourceProvenanceState =
+            ReadCopySourceFaceProvenanceRecord(myOcafDoc, source, sourceProvenance);
+        const auto targetProvenanceState =
+            ReadCopySourceFaceProvenanceRecord(myOcafDoc, destination, targetProvenance, &targetProvenanceLabel);
+        if (sourceProvenanceState == CopySourceFaceProvenanceReadState::Malformed
+            || targetProvenanceState == CopySourceFaceProvenanceReadState::Malformed) return Standard_False;
         if (before.meshUVAtlasVersion == 0 && target.meshUVAtlasVersion == 0
             && frame.archive.empty() && previousFrame.archive.empty()
-            && before.meshRegionPartition.empty() && target.meshRegionPartition.empty()) return Standard_True;
+            && before.meshRegionPartition.empty() && target.meshRegionPartition.empty()
+            && sourceProvenanceState == CopySourceFaceProvenanceReadState::Absent
+            && targetProvenanceState == CopySourceFaceProvenanceReadState::Absent) return Standard_True;
         // Clearing a destination's metadata is still an exact-copy operation.
         // An unannotated but different source cannot erase another mesh's basis.
         if (!SameStoredMeshCopyPayload(before.shape, target.shape)) return Standard_False;
@@ -5780,6 +6083,33 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
             && (before.meshRegionPartition.empty()
                 ? !ClearMeshRegionPartition(destination)
                 : !StageMeshRegionPartition(destination, before.meshRegionPartition))) return Standard_False;
+        // Source-face provenance copies only when the destination triangulation
+        // still matches the staged digest; any mismatch omits the record rather
+        // than repairing it. A stale source record never matches by construction.
+        if (sourceProvenanceState == CopySourceFaceProvenanceReadState::Present) {
+            TopoDS_Face destinationFace; Handle(Poly_Triangulation) destinationMesh;
+            std::string destinationDigest;
+            if (TriangleAtlasFace(target.shape, destinationFace, destinationMesh)
+                && core3d::provenance::CopyTriangulationDigest(destinationMesh, destinationDigest)
+                && destinationDigest == sourceProvenance.digest) {
+                std::string payload;
+                if (!core3d::provenance::EncodeEntries(sourceProvenance.faces, payload)) return Standard_False;
+                if (targetProvenanceLabel.IsNull()) {
+                    bool overflow = false;
+                    targetProvenanceLabel = FreshCopySourceFaceProvenanceLabel(destination, overflow);
+                    if (overflow || targetProvenanceLabel.IsNull()) return Standard_False;
+                } else targetProvenanceLabel.ForgetAllAttributes(Standard_True);
+                core3d::provenance::SourceFaceProvenanceRecord copiedProvenance;
+                if (!WriteCopySourceFaceProvenanceChunks(targetProvenanceLabel, payload,
+                        Standard_Integer(sourceProvenance.faces.size()),
+                        sourceProvenance.triangleCount, sourceProvenance.digest)
+                    || ReadCopySourceFaceProvenanceRecord(myOcafDoc, destination, copiedProvenance)
+                        != CopySourceFaceProvenanceReadState::Present
+                    || copiedProvenance.digest != sourceProvenance.digest
+                    || !core3d::provenance::SameEntries(copiedProvenance.faces, sourceProvenance.faces))
+                    return Standard_False;
+            }
+        }
         OcctObjectTransformState copied;
         return CaptureObjectTransformStateForLabel(destination, copied)
             && copied.meshRegionPartition == before.meshRegionPartition;

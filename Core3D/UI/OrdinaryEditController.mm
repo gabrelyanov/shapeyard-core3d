@@ -849,6 +849,9 @@ OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
         meshcopy::CurrentTessellationCopy geometry;
         if (meshcopy::PrepareCurrentTessellationCopy(source->Shape(),geometry,cancelled)
             !=meshcopy::PreparationResult::Ready) return reject(OrdinaryEditResult::Invalid);
+        // Thread the N1 provenance with the ledger; it is persisted on the
+        // copy label in the same creation command (see stageCreationAndCommit).
+        copy.faces=std::move(geometry.faces);
         Handle(AIS_Shape) presentation=new AIS_Shape(geometry.face);
         presentation->SetLocalTransformation(copy.previous.object.object.transform);
         _document->LoadObjectMeterial(label,presentation);
@@ -1132,6 +1135,12 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
                 for (int i=1;i<=3;++i)
                     if (axis.pivot.Coord(i)!=source.axis.pivot.Coord(i)
                         || axis.direction.Coord(i)!=source.axis.direction.Coord(i)) return false;
+                // The persisted provenance record must read Present with the
+                // exact captured entries on every candidate readback.
+                core3d::provenance::SourceFaceProvenanceRecord provenance;
+                if (_document->TryCopySourceFaceProvenanceForLabel(expected.object.label,provenance)
+                        !=core3d::provenance::CopySourceFaceProvenanceReadState::Present
+                    || !core3d::provenance::SameSourceFaces(provenance.faces,source.faces)) return false;
             } else if (!CreationIntegerEquals(expected.object.label,11,record.requested.material)
                 || !CreationIntegerEquals(expected.object.label,12,record.requested.color)
                 || _document->ReadReferenceAxisForLabel(expected.object.label,axis)!=OcctReferenceAxisReadState::ImplicitDefault) return false;
@@ -1187,6 +1196,11 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
 #ifdef DEBUG
                 if (_stageFailureIndex==3) { _stageFailureIndex=-1;throw Standard_Failure("Mesh copy source-hide fault"); }
 #endif
+                // Persist the N1 source-face provenance on the copy label in
+                // this same open command: one Undo removes it, Redo restores it.
+                if (source.faces.empty()
+                    || !_document->StageCopySourceFaceProvenance(label,source.faces))
+                    throw Standard_Failure("Mesh copy provenance staging failed");
             } else {
                 _document->SaveObjectMaterial(label,record.requested.material);
                 _document->SaveObjectColor(label,record.requested.color);
