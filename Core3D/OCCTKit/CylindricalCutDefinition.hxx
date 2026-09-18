@@ -126,3 +126,22 @@ inline bool SameFixedEnvelope(const retained_solid::Envelope& a,const retained_s
     }catch(...){return false;}
 }
 }
+
+namespace core3d::wedge_cut {
+// Positions stay object-local. Dimensions are physical mm after the selected
+// occurrence's positive similarity, matching the cylindrical edit contract.
+struct CreateEdit {
+    analytic_boolean::Axis axis=analytic_boolean::Axis::Z;
+    std::array<double,3> localApex{};
+    double directionAngle=0,worldHalfWidthApexMM=0,worldHalfWidthMouthMM=0,worldLengthMM=0;
+};
+struct WidthsEdit {double worldHalfWidthApexMM=0,worldHalfWidthMouthMM=0;};
+struct LengthEdit {double worldLengthMM=0;};
+inline bool Dimension(double world,double factor,double minimum,double& local) noexcept {
+    if(!std::isfinite(world)||world<minimum||world>1e6||!std::isfinite(factor)||factor<=0)return false;
+    local=world/factor;return std::isfinite(local)&&local>0;
+}
+inline bool Widths(double apex,double mouth,double factor,double& a,double& b) noexcept {
+    return Dimension(apex,factor,.05,a)&&Dimension(mouth,factor,.05,b);
+}
+}

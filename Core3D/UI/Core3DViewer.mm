@@ -3368,7 +3368,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         if(!program||!retained_boolean::Valid(*program))CORE3D_CUT_REFUSE("program-prepare.program-validation", {});
         // Derived disk budget and all pair/source clearances are admission
         // obligations, before a work item or ordinary history lease exists.
-        if(retained_boolean::HasRing(*program)?!saved_boolean_result::detail::AdmitDisks(*program):
+        if(retained_boolean::HasWedge(*program)){
+            if(!saved_boolean_result::detail::AdmitSections(*program))CORE3D_CUT_REFUSE("program-clearance.convex-sections-or-host", {});
+        }else if(retained_boolean::HasRing(*program)?!saved_boolean_result::detail::AdmitDisks(*program):
             (program->steps.size()>=2&&!saved_boolean_result::detail::SeparateDisks(*program)))CORE3D_CUT_REFUSE("program-clearance.disk-budget-or-separation", {});
         auto carrier=std::make_shared<retained_solid::Payload>();carrier->envelope=change->recipe;
         carrier->bytes=change->newBytes;carrier->base=original.source.base;
@@ -3398,7 +3400,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         myContext->InitSelected();const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());if(selected.IsNull())CORE3D_CUT_REFUSE("program-prepare.selection", {});
         OrdinaryTransformRecord record;record.previous=original.source.original;
         record.requested.label=record.previous.label;record.requested.presentation=selected;record.requested.shape=record.previous.shape;
-        record.requested.transform=record.previous.transform;record.requested.operation=retained_boolean::RingEdit(edit)?OrdinaryTransformOperation::CylindricalCutRing:OrdinaryTransformOperation::CylindricalCut;
+        record.requested.transform=record.previous.transform;record.requested.operation=retained_boolean::WedgeEdit(edit)?OrdinaryTransformOperation::WedgeCut:
+            retained_boolean::RingEdit(edit)?OrdinaryTransformOperation::CylindricalCutRing:OrdinaryTransformOperation::CylindricalCut;
         record.requested.cut=carrier;record.requested.cutSource=original.guard;record.requested.cutProgramEdit=edit;
         work->rebuildAuthority.emplace();work->rebuildAuthority->records.push_back(std::move(record));
         if(!admitTransform(*work->rebuildAuthority))CORE3D_CUT_REFUSE("program-prepare.transform-authority", {});
@@ -3406,6 +3409,13 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         if(!after||!(*after==original.authorityStamp)||!myDoc->SavedCutSceneStateMatches(original.guard))CORE3D_CUT_REFUSE("program-prepare.final-scene-state", {});
         work->geometry=geometry;work->cutStamp=original.authorityStamp;work->frameFirst=false;return work;
     }catch(...){CORE3D_CUT_REFUSE("program-prepare.exception", {});}
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareWedgeCutProgramEdit(const CylindricalCutProgramSnapshot& original,
+    const retained_boolean::ProgramEdit& edit,const ObjectFrameIdentity& identity,std::uint64_t presentation,
+    std::uint32_t width,std::uint32_t height)noexcept {
+    if(!retained_boolean::WedgeEdit(edit))CORE3D_CUT_REFUSE("program-prepare.wedge-edit-kind", {});
+    return prepareCylindricalCutProgramEdit(original,edit,identity,presentation,width,height);
 }
 
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutRingEdit(const CylindricalCutProgramSnapshot& original,

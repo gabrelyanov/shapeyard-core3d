@@ -1,6 +1,7 @@
 #pragma once
 // Complete program geometry proof. Local bore observations NEVER grant authority.
 #include "RetainedBooleanProgram.hxx"
+#include "AnalyticBooleanWedgeOperand.hxx"
 #include "SavedCutWholeResultCorrespondence.hxx"
 namespace core3d::saved_boolean_result {
 namespace old=core3d::saved_cut_whole_result;
@@ -16,11 +17,14 @@ inline retained_solid::Envelope GeometryView(const retained_boolean::Program& p,
     const auto& s=p.source;retained_solid::Envelope e;
     e.document=s.document;e.entity=s.entity;e.definition=s.definition;e.sourceFeature=s.sourceFeature;e.derivedFeature=s.derivedFeature;
     e.sourceFamily=s.family;e.sourceSchema=s.schema;e.metersPerUnit=s.metersPerUnit;e.sourceValues=s.values;
-    e.operandID=t.identifier;e.axis=std::uint8_t(t.axis);e.point=t.point;e.radius=t.radius;return e;
+    // Wedge views carry only the source recipe into legacy source readers.
+    // The positive sentinel is never an expanded disk, persisted tool, Boolean
+    // input or correspondence witness; ProgramBoundary proves the real wedge.
+    e.operandID=t.identifier;e.axis=std::uint8_t(t.axis);e.point=t.point;e.radius=t.kind==analytic_boolean::OperandKind::Wedge?.001/(s.metersPerUnit*1000):t.radius;return e;
 }
 inline retained_solid::Envelope GeometryView(const retained_boolean::Program& p,std::size_t index){
     const auto& t=p.steps.at(index).operand;
-    if(t.kind==analytic_boolean::OperandKind::Cylinder)return GeometryView(p,t);
+    if(t.kind!=analytic_boolean::OperandKind::CylinderRing)return GeometryView(p,t);
     auto disk=analytic_boolean_ring::Expand(analytic_boolean_ring::FromOperand(t,p.source.metersPerUnit),0,p.source.metersPerUnit);
     disk.radius=t.radius;return GeometryView(p,disk);
 }
@@ -48,6 +52,39 @@ inline bool SeparateDisks(const retained_boolean::Program& p){
                 ||i::up(gap.hi-gap.lo)>saved_cut_bore_clearance::MaximumNumericUncertaintyMM)return false;
         }
     }return true;
+}
+inline bool SeparateConvexSections(const retained_boolean::Program& p){
+    namespace i=saved_cut_bore_clearance::detail;
+    if(!retained_boolean::HasWedge(p))return SeparateDisks(p);
+    std::vector<retained_boolean::Disk> sections;
+    if(!retained_boolean::ExpandedSections(p,sections)||std::fegetround()!=FE_TONEAREST)return false;
+    const unsigned axis=unsigned(sections[0].operand.axis),u=(axis+1)%3,v=(axis+2)%3;
+    const double mm=p.source.metersPerUnit*1000;
+    for(unsigned a=0;a<sections.size();++a){const auto& x=sections[a].operand;if(unsigned(x.axis)!=axis)return false;
+        for(unsigned b=0;b<a;++b){const auto& y=sections[b].operand;
+            const bool wx=x.kind==analytic_boolean::OperandKind::Wedge,wy=y.kind==analytic_boolean::OperandKind::Wedge;
+            if(wx&&wy){if(!analytic_boolean_wedge::detail::SeparatedPolygons(analytic_boolean_wedge::Expand(x),analytic_boolean_wedge::Expand(y),mm))return false;}
+            else if(wx||wy){const auto& wedge=wx?x:y;const auto& disk=wx?y:x;
+                if(!analytic_boolean_wedge::detail::SeparatedDisk(analytic_boolean_wedge::Expand(wedge),{disk.point[u],disk.point[v]},disk.radius,mm))return false;}
+            else {const auto distance=i::norm(i::sub(i::I(x.point[u]),i::I(y.point[u])),i::sub(i::I(x.point[v]),i::I(y.point[v])));
+                if(!analytic_boolean_wedge::detail::Clear(i::sub(distance,i::add(i::I(x.radius),i::I(y.radius))),mm))return false;}
+        }
+    }return true;
+}
+inline bool ProgramBoundary(const retained_boolean::Program& p,old::Expected& expected){
+    if(!SeparateConvexSections(p)||!old::ExpectedSource(GeometryView(p,0),expected))return false;
+    for(const auto& step:p.steps)if(step.operand.kind==analytic_boolean::OperandKind::Wedge){
+        const auto admitted=analytic_boolean_wedge::ExpectedBoundary(GeometryView(p,step.operand),step.operand,expected);
+        if(admitted.status!=analytic_boolean_wedge::Status::Clear){CORE3D_CUT_DETAIL("wedge.host-boundary",admitted.status);return false;}
+    }
+    return true;
+}
+inline bool AdmitSections(const retained_boolean::Program& p){
+    old::Expected expected;if(!ProgramBoundary(p,expected))return false;
+    std::vector<retained_boolean::Disk> sections;if(!retained_boolean::ExpandedSections(p,sections))return false;
+    for(const auto& s:sections)if(s.operand.kind==analytic_boolean::OperandKind::Cylinder
+        &&saved_cut_bore_clearance::Inspect(GeometryView(p,s.operand)).status!=saved_cut_bore_clearance::Status::ClearRecipeDisk)return false;
+    return true;
 }
 // Independent source-recipe radial extent, never inferred from a cut result.
 inline bool HostRadialExtent(const retained_boolean::Program& p,const analytic_boolean::Operand& t,double& extent){
@@ -154,17 +191,20 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
     Inspection report;const auto fail=[&](){report.classification=stop.load()?Classification::Cancelled:Classification::Refused;return report;};
     try {
         std::vector<retained_boolean::Disk> disks;
-        if(stop.load()||!retained_boolean::ExpandedDisks(program,disks)||!detail::SeparateDisks(program))return fail();
+        if(stop.load()||!retained_boolean::ExpandedSections(program,disks)||!detail::SeparateConvexSections(program))return fail();
+        disks.erase(std::remove_if(disks.begin(),disks.end(),[](const retained_boolean::Disk& s){return s.operand.kind==analytic_boolean::OperandKind::Wedge;}),disks.end());
         const auto newSource=detail::GeometryView(program,0);old::Expected expected;
-        if(!old::ExpectedSource(newSource,expected)||expected.caps[0]>=expected.faces.size()
+        if(!detail::ProgramBoundary(program,expected)||expected.caps[0]>=expected.faces.size()
             ||expected.caps[1]>=expected.faces.size()||expected.caps[0]==expected.caps[1])return fail();
         // Each pierced source cap gains one loop per validated expanded disk.
         // Derive the collection allowance from the independent recipe, never
         // from observed output; all exact face/loop matching below still applies.
+        const std::size_t wedgeCount=std::count_if(program.steps.begin(),program.steps.end(),[](const retained_boolean::Step& s){
+            return s.operand.kind==analytic_boolean::OperandKind::Wedge;});
         std::size_t maximumFaceWires=1;
         for(std::size_t f=0;f<expected.faces.size();++f){
             const auto sourceWires=expected.faces[f].wires.size();
-            if(sourceWires==0||sourceWires>2)return fail();
+            if(sourceWires==0||sourceWires>2+wedgeCount)return fail();
             const auto openingWires=(f==expected.caps[0]||f==expected.caps[1])?disks.size():0;
             maximumFaceWires=std::max(maximumFaceWires,sourceWires+openingWires);
         }
@@ -180,6 +220,11 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
         if(graph.faces.size()!=expected.faces.size()+n||graph.edges.size()!=expected.edges.size()+3*n)return fail();
         for(const auto& disk:disks)for(double coordinate:disk.operand.point)
             if(!d::Track(std::abs(coordinate),mm,graph.budget))return fail();
+        for(const auto& step:program.steps)if(step.operand.kind==analytic_boolean::OperandKind::Wedge){
+            for(double coordinate:step.operand.point)if(!d::Track(std::abs(coordinate),mm,graph.budget))return fail();
+            for(double value:{step.operand.halfWidthApex,step.operand.halfWidthMouth,step.operand.length})
+                if(!d::Track(std::abs(value),mm,graph.budget))return fail();
+        }
         for(const auto& p:expected.vertices)if(!d::Track(std::abs(p.X())+std::abs(p.Y())+std::abs(p.Z()),mm,graph.budget))return fail();
         // Finish ALL planar pcurve/trim magnitudes before geometric matching.
         for(unsigned f=0;f<graph.faces.size();++f)if(!graph.faces[f].surface.cylinder)

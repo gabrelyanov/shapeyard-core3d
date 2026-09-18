@@ -7535,7 +7535,8 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
             +unsigned(!state.sweep.label.IsNull())+unsigned(!state.loft.label.IsNull())+unsigned(bool(state.retained.value));
         if(families!=1||!state.retained.value)CORE3D_CUT_REFUSE("document-program-capture.family-census", Standard_False);
         // Encode the complete versioned operand record, including ring count,
-        // bolt radius and anchor ratio; a ring is never captured as one bore.
+        // bolt radius, anchor ratio and all four wedge scalars. Capture never
+        // projects a non-cylinder operand into a persisted bore.
         result.recipe=state.retained.value->envelope;result.base=state.retained.value->base;
         if(!core3d::retained_boolean::Encode(result.recipe,result.recipeBytes)
             ||result.recipeBytes!=state.retained.value->bytes
@@ -10906,6 +10907,10 @@ std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard
 }
 std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe(){
     return SavedCutResultProbeChecks(core3d::saved_boolean_build::probe::Run(),"program",257);
+}
+#include "SavedBooleanWedgeProbe.hxx"
+std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario){
+    return core3d::saved_boolean_wedge_probe::Run(unsigned(scenario));
 }
 #include "SavedBooleanRingProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario){

@@ -2,6 +2,10 @@
 // Detached geometry only. No OCAF command, owner, catalog, material, receipt or
 // public UI/AI API is provided. Caller supplies an already detached base shape.
 #include "AnalyticBooleanRingOperand.hxx"
+#include "AnalyticBooleanWedgeOperand.hxx"
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 // Deliberate dependency on existing cancellation and exact self-interference
 // helpers. No duplicated feature authority or alternate geometry engine.
 #include "PlanarSweepSolid.hxx"
@@ -105,7 +109,7 @@ inline bool SingleResult(const TopoDS_Shape& raw, TopoDS_Shape& solid) {
 }
 }
 inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
-    const std::atomic_bool& stop, Result& output) noexcept {
+    const std::atomic_bool& stop, Result& output, double expectedWedgeVolume=0) noexcept {
     output={};
     if (stop.load()) return Status::Cancelled;
     if (!Inspect(recipe)) return Status::InvalidRecipe;
@@ -129,7 +133,7 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         const unsigned axis=static_cast<unsigned>(recipe.tool.axis);
         const double tolerance=std::max(Precision::Confusion()*32,1e-5/mm);
         const double margin=std::max(tolerance*4,.001/mm);
-        if (!std::isfinite(tolerance) || !std::isfinite(margin) || recipe.tool.radius<=tolerance)
+        if (!std::isfinite(tolerance) || !std::isfinite(margin) || (recipe.tool.kind!=OperandKind::Wedge&&recipe.tool.radius<=tolerance))
             return Status::InvalidRecipe;
         result.toolStart=result.sourceBounds[axis]-margin;
         result.toolEnd=result.sourceBounds[axis+3]+margin;
@@ -142,7 +146,18 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
             return Status::InvalidRecipe;
         const unsigned diskCount=ring?recipe.tool.count:1;
         TopTools_ListOfShape arguments,tools;arguments.Append(base);
-        for(unsigned k=0;k<diskCount;++k){
+        const bool wedge=recipe.tool.kind==OperandKind::Wedge;
+        if(wedge){
+            if(!std::isfinite(expectedWedgeVolume)||expectedWedgeVolume<=0)return Status::InvalidRecipe;
+            BRepBuilderAPI_MakePolygon polygon;const auto section=analytic_boolean_wedge::Expand(recipe.tool);
+            for(const auto& point:section){gp_Pnt p;p.SetCoord(axis+1,result.toolStart);
+                p.SetCoord((axis+1)%3+1,point[0]);p.SetCoord((axis+2)%3+1,point[1]);polygon.Add(p);}
+            polygon.Close();if(!polygon.IsDone())return Status::KernelFailure;
+            BRepBuilderAPI_MakeFace face(polygon.Wire());if(!face.IsDone())return Status::KernelFailure;
+            gp_Vec direction;direction.SetCoord(axis+1,length);BRepPrimAPI_MakePrism prism(face.Face(),direction);
+            prism.Build();if(!prism.IsDone()||stop.load())return stop.load()?Status::Cancelled:Status::KernelFailure;
+            tools.Append(prism.Shape());
+        }else for(unsigned k=0;k<diskCount;++k){
             auto disk=ring?analytic_boolean_ring::Expand(ringValue,k,recipe.metersPerUnit):recipe.tool;
             if(!disk.identifier)return Status::InvalidRecipe;
             auto origin=disk.point;origin[axis]=result.toolStart;
@@ -169,6 +184,8 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         // This is an admission precision bound, not a geometric oracle tolerance.
         const double minRemoved=std::max(tolerance*tolerance*tolerance,result.sourceVolume*1e-12);
         if (!std::isfinite(result.removedVolume) || result.removedVolume<=minRemoved) return Status::NoRemovedVolume;
+        if(wedge&&std::abs(result.removedVolume-expectedWedgeVolume)>std::max(1e-9*expectedWedgeVolume,tolerance*tolerance*tolerance))
+            return Status::VerificationFailed;
         if(ring){
             const double required=diskCount*std::acos(-1.0)*recipe.tool.radius*recipe.tool.radius
                 *(result.sourceBounds[axis+3]-result.sourceBounds[axis]);

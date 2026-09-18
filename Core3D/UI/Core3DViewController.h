@@ -327,6 +327,19 @@ NS_ASSUME_NONNULL_BEGIN
     operandIdentifier:(uint32_t)operandIdentifier worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutBoreRadius(_:operandIdentifier:worldRadiusMM:expected:completion:));
+//! Append or edit one retained wedge, one ordinary history step.
+- (nullable Core3DCylindricalCutOperation *)beginWedgeCutAppend:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DWedgeCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginWedgeCutAppend(_:definition:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginWedgeCutWidths:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldHalfWidthApexMM:(double)apex worldHalfWidthMouthMM:(double)mouth
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginWedgeCutWidths(_:operandIdentifier:worldHalfWidthApexMM:worldHalfWidthMouthMM:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginWedgeCutLength:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldLengthMM:(double)length expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginWedgeCutLength(_:operandIdentifier:worldLengthMM:expected:completion:));
 //! One ring operand or one addressed ring edit, one ordinary history step.
 - (nullable Core3DCylindricalCutOperation *)beginCylindricalCutAppendRing:(Core3DCylindricalCutProgramSnapshot *)original
     definition:(Core3DCylindricalCutRingDefinition *)definition expected:(Core3DSceneSnapshot *)expected
@@ -1055,6 +1068,10 @@ NS_ASSUME_NONNULL_BEGIN
 //! Last cut create/edit refusal gate; empty after a successful operation.
 - (NSString *)debugLastCylindricalCutRefusalReason NS_SWIFT_NAME(debugLastCylindricalCutRefusalReason());
 + (NSDictionary<NSString *, NSNumber *> *)debugLoftCutProofProbe NS_SWIFT_NAME(debugLoftCutProofProbe());
+- (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeGeometry:(NSString *)entity
+    NS_SWIFT_NAME(debugSavedBooleanWedgeGeometry(_:));
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugSavedBooleanWedgeProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedBooleanRingProbe(_:));
 - (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingGeometry:(NSString *)entity

@@ -62,8 +62,8 @@ inline std::optional<retained_boolean::Change> SourcePatch(const Program& origin
                 ||!saved_boolean_result::detail::HostRadialExtent(changed,t,after))return {};
             if(before!=after)t.boltCircleRadius=t.hostRadiusRatio*after;
         }
-        if(retained_boolean::HasRing(changed)&&(!saved_boolean_result::detail::AdmitDisks(original)
-            ||!saved_boolean_result::detail::AdmitDisks(changed)))return {};
+        if((retained_boolean::HasRing(changed)||retained_boolean::HasWedge(changed))&&(!saved_boolean_result::detail::AdmitSections(original)
+            ||!saved_boolean_result::detail::AdmitSections(changed)))return {};
         if(!retained_boolean::Encode(result.recipe,result.newBytes))return {};
         result.changed=result.oldBytes!=result.newBytes;return result;
     }catch(...){return {};}
@@ -75,7 +75,7 @@ template<class Values> inline bool PrepareRingSourceValues(const retained_boolea
     const saved_cut_source_values::Patch& patch,const std::atomic_bool& stop,Values& out) noexcept {
     out={};try {
         const auto* p=std::get_if<Program>(&original);
-        if(stop.load()||!p||!retained_boolean::HasRing(*p))return false;
+        if(stop.load()||!p||(!retained_boolean::HasRing(*p)&&!retained_boolean::HasWedge(*p)))return false;
         const auto change=SourcePatch(*p,patch);if(!change||stop.load())return false;
         Values v;v.oldProgram=*p;v.newProgram=std::get<Program>(change->recipe);
         v.oldBytes=change->oldBytes;v.newBytes=change->newBytes;v.changed=change->changed;
@@ -97,7 +97,7 @@ template<class Values> inline bool PrepareRingSourceValues(const retained_boolea
 template<class Values,class LegacyPrepare> inline bool PrepareSourceValues(const retained_boolean::Recipe& original,
     const saved_cut_source_values::Patch& patch,const std::atomic_bool& stop,Values& out,LegacyPrepare legacy) noexcept {
     const auto* p=std::get_if<Program>(&original);
-    return p&&retained_boolean::HasRing(*p)?PrepareRingSourceValues(original,patch,stop,out):legacy(original,patch,stop,out);
+    return p&&(retained_boolean::HasRing(*p)||retained_boolean::HasWedge(*p))?PrepareRingSourceValues(original,patch,stop,out):legacy(original,patch,stop,out);
 }
 // Aggregate-budget overload: the caller-owned budget accumulates occurrence
 // and stream work across old capture, private copies and this rebuild, so the
@@ -113,14 +113,14 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
             ||(display.ownCoefficient&&std::abs(display.values[0]-display.values[3])>Precision::Confusion())
             ||(display.ownAngle&&std::abs(display.values[1]-display.values[4])>Precision::Angular()))return refuse();
         out.phase="source-and-program";
-        if(stop.load()||!saved_boolean_result::detail::SeparateDisks(program)
+        if(stop.load()||!saved_boolean_result::detail::AdmitSections(program)
             ||!retained_boolean::Encode(program,out.exactProgram)||!Charge(retainedBase,stop,budget)
             ||!saved_cut_source_edit::Commit(retainedBase,stop,budget.streamBytes,out.retainedBase))return refuse();
-        std::vector<retained_boolean::Disk> disks;if(!retained_boolean::ExpandedDisks(program,disks))return refuse();
+        std::vector<retained_boolean::Disk> disks;if(!retained_boolean::ExpandedSections(program,disks))return refuse();
         for(const auto& disk:disks){
             const auto view=saved_boolean_result::detail::GeometryView(program,disk.operand);
             if(stop.load()||!saved_cut_source_edit::InspectBase(retainedBase,view,stop)
-                ||saved_cut_bore_clearance::Inspect(view).status!=saved_cut_bore_clearance::Status::ClearRecipeDisk)return refuse();
+                ||(disk.operand.kind!=analytic_boolean::OperandKind::Wedge&&saved_cut_bore_clearance::Inspect(view).status!=saved_cut_bore_clearance::Status::ClearRecipeDisk))return refuse();
         }
         // Each existing primitive makes an independent deep geometry copy.
         // The original base is never replaced by the displayed/current result.
@@ -129,8 +129,14 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
             if(stop.load()||budget.booleanSteps>=Budget::MaximumSteps)return refuse();
             ++budget.booleanSteps;out.phase="sequential-boolean";analytic_boolean::Recipe recipe;
             recipe.metersPerUnit=program.source.metersPerUnit;recipe.operation=step.operation;recipe.tool=step.operand;
-            analytic_boolean::Result built;
-            if(analytic_boolean::Build(current,recipe,stop,built)!=analytic_boolean::Status::Built
+            analytic_boolean::Result built;double wedgeVolume=0;
+            if(step.operand.kind==analytic_boolean::OperandKind::Wedge){
+                saved_cut_whole_result::Expected expected;const auto view=saved_boolean_result::detail::GeometryView(program,step.operand);
+                if(!saved_cut_whole_result::ExpectedSource(view,expected))return refuse();
+                const auto admitted=analytic_boolean_wedge::ExpectedBoundary(view,step.operand,expected);
+                if(admitted.status!=analytic_boolean_wedge::Status::Clear)return refuse();wedgeVolume=admitted.removedVolume;
+            }
+            if(analytic_boolean::Build(current,recipe,stop,built,wedgeVolume)!=analytic_boolean::Status::Built
                 ||!Charge(built.solid,stop,budget))return refuse();
             current=std::move(built.solid);
         }

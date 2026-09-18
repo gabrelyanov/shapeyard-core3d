@@ -58,7 +58,12 @@ struct SetBoreRadius { std::uint32_t operandID=0; double worldRadiusMM=0; };
 struct AppendRing {cylindrical_cut::RingCreateEdit edit;};
 struct SetRingRadius {std::uint32_t operandID=0;double worldHoleRadiusMM=0;};
 struct SetRingCount {std::uint32_t operandID=0;std::uint32_t count=0;};
-using ProgramEdit=std::variant<AppendBore,SetBoreRadius,AppendRing,SetRingRadius,SetRingCount>;
+struct AppendWedge {wedge_cut::CreateEdit edit;};
+struct SetWedgeWidths {std::uint32_t operandID=0;double worldHalfWidthApexMM=0,worldHalfWidthMouthMM=0;};
+struct SetWedgeLength {std::uint32_t operandID=0;double worldLengthMM=0;};
+using ProgramEdit=std::variant<AppendBore,SetBoreRadius,AppendRing,SetRingRadius,SetRingCount,AppendWedge,SetWedgeWidths,SetWedgeLength>;
+inline bool WedgeEdit(const ProgramEdit& edit){return std::holds_alternative<AppendWedge>(edit)
+    ||std::holds_alternative<SetWedgeWidths>(edit)||std::holds_alternative<SetWedgeLength>(edit);}
 inline bool RingEdit(const ProgramEdit& edit){return std::holds_alternative<AppendRing>(edit)
     ||std::holds_alternative<SetRingRadius>(edit)||std::holds_alternative<SetRingCount>(edit);}
 inline bool HasRing(const Program& p){return std::any_of(p.steps.begin(),p.steps.end(),[](const auto& s){
@@ -70,6 +75,34 @@ inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edi
         Change result;if(!Encode(original,result.oldBytes))return {};
         Program p;if(const auto* legacy=std::get_if<Legacy>(&original)){if(!Promote(*legacy,p))return {};}
         else p=std::get<Program>(original);
+        if(WedgeEdit(edit)){
+            if(const auto* append=std::get_if<AppendWedge>(&edit)){
+                if(p.steps.size()>=MaximumOperands||p.nextOperandID>UINT32_MAX)return {};
+                const auto& w=append->edit;Step step;auto& t=step.operand;t.identifier=std::uint32_t(p.nextOperandID);
+                t.kind=analytic_boolean::OperandKind::Wedge;t.axis=w.axis;t.point=w.localApex;
+                if(!std::isfinite(w.directionAngle))CORE3D_CUT_REFUSE("wedge.invalid-angle", {});
+                t.directionAngle=std::fmod(w.directionAngle,2*std::acos(-1.));if(t.directionAngle<0)t.directionAngle+=2*std::acos(-1.);
+                if(t.directionAngle==0)t.directionAngle=0; // canonical positive zero at capture
+                if(!wedge_cut::Widths(w.worldHalfWidthApexMM,w.worldHalfWidthMouthMM,effectiveMM,t.halfWidthApex,t.halfWidthMouth)
+                    ||!wedge_cut::Dimension(w.worldLengthMM,effectiveMM,.1,t.length))CORE3D_CUT_REFUSE("wedge.invalid-dimensions", {});
+                p.codecMinor=3;result.selectedOperandID=t.identifier;p.steps.push_back(step);++p.nextOperandID;
+            }else{
+                const auto* widths=std::get_if<SetWedgeWidths>(&edit);const auto* length=std::get_if<SetWedgeLength>(&edit);
+                if(!widths&&!length)return {};const auto id=widths?widths->operandID:length->operandID;
+                auto it=std::find_if(p.steps.begin(),p.steps.end(),[&](const Step& s){return s.operand.identifier==id;});
+                if(it==p.steps.end()||it->operand.kind!=analytic_boolean::OperandKind::Wedge)CORE3D_CUT_REFUSE("wedge.operand-id-or-kind", {});
+                auto& t=it->operand;
+                if(widths){double a=0,b=0;if(!wedge_cut::Widths(widths->worldHalfWidthApexMM,widths->worldHalfWidthMouthMM,effectiveMM,a,b))return {};
+                    if(widths->worldHalfWidthApexMM!=t.halfWidthApex*effectiveMM)t.halfWidthApex=a;
+                    if(widths->worldHalfWidthMouthMM!=t.halfWidthMouth*effectiveMM)t.halfWidthMouth=b;
+                }else{double local=0;if(!wedge_cut::Dimension(length->worldLengthMM,effectiveMM,.1,local))return {};
+                    if(length->worldLengthMM!=t.length*effectiveMM)t.length=local;}
+                result.selectedOperandID=id;
+            }
+            if(!saved_boolean_result::detail::AdmitSections(p))CORE3D_CUT_REFUSE("wedge.section-or-host-admission", {});
+            result.recipe=std::move(p);if(!Encode(result.recipe,result.newBytes))return {};
+            result.changed=result.oldBytes!=result.newBytes;return result;
+        }
         if(const auto* append=std::get_if<AppendRing>(&edit)){
             if(p.steps.size()>=MaximumOperands||p.nextOperandID>UINT32_MAX)return {};
             const auto& r=append->edit;Step step;auto& t=step.operand;
@@ -78,7 +111,7 @@ inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edi
             // Extent validation uses a plain value-only view of the host.
             double extent=0;if(!saved_boolean_result::detail::HostRadialExtent(p,t,extent))return {};
             t.kind=analytic_boolean::OperandKind::CylinderRing;t.boltCircleRadius=r.boltCircleRadius;
-            t.hostRadiusRatio=r.boltCircleRadius/extent;t.count=r.count;p.codecMinor=2;
+            t.hostRadiusRatio=r.boltCircleRadius/extent;t.count=r.count;p.codecMinor=std::max<std::uint8_t>(2,p.codecMinor);
             result.selectedOperandID=t.identifier;p.steps.push_back(step);++p.nextOperandID;
         }else{
             const auto* radius=std::get_if<SetRingRadius>(&edit);const auto* count=std::get_if<SetRingCount>(&edit);
@@ -90,7 +123,7 @@ inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edi
             else it->operand.count=count->count;
             result.selectedOperandID=id;
         }
-        if(!saved_boolean_result::detail::AdmitDisks(p))return {};
+        if(!saved_boolean_result::detail::AdmitSections(p))return {};
         result.recipe=std::move(p);if(!Encode(result.recipe,result.newBytes))return {};
         result.changed=result.oldBytes!=result.newBytes;return result;
     }catch(...){return {};}
@@ -105,7 +138,12 @@ inline bool OccurrenceRadiiMM(const Recipe& recipe,const gp_Trsf& transform) noe
         const auto supported=[&](double radius){const double world=radius*factor;
             return std::isfinite(world)&&world>=.001&&world<=1e6;};
         if(const auto* legacy=std::get_if<Legacy>(&recipe))return supported(legacy->radius);
-        for(const auto& step:std::get<Program>(recipe).steps)if(!supported(step.operand.radius))return false;
+        for(const auto& step:std::get<Program>(recipe).steps){const auto& t=step.operand;
+            if(t.kind==analytic_boolean::OperandKind::Wedge){double local=0;
+                if(!wedge_cut::Dimension(t.halfWidthApex*factor,1,.05,local)||!wedge_cut::Dimension(t.halfWidthMouth*factor,1,.05,local)
+                    ||!wedge_cut::Dimension(t.length*factor,1,.1,local))return false;
+            }else if(!supported(t.radius))return false;
+        }
         return true;
     }catch(...){return false;}
 }

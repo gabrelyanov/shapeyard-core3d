@@ -399,6 +399,17 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 @end
 
+@implementation Core3DWedgeCutDefinition
+- (instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z
+    directionAngle:(double)angle worldHalfWidthApexMM:(double)apex worldHalfWidthMouthMM:(double)mouth worldLengthMM:(double)length {
+    if(axis<Core3DCylindricalCutAxisX||axis>Core3DCylindricalCutAxisZ||!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z)
+        ||!std::isfinite(angle)||!std::isfinite(apex)||!std::isfinite(mouth)||!std::isfinite(length)
+        ||apex<.05||mouth<.05||length<.1||apex>1e6||mouth>1e6||length>1e6)return nil;
+    self=[super init];if(self){_axis=axis;_localX=x;_localY=y;_localZ=z;_directionAngle=angle;
+        _worldHalfWidthApexMM=apex;_worldHalfWidthMouthMM=mouth;_worldLengthMM=length;}return self;
+}
+@end
+
 @interface Core3DProfileDefinition ()
 - (instancetype)initWithNativeParameters:(const core3d::profile::Parameters&)parameters;
 - (core3d::profile::Parameters)nativeParameters;

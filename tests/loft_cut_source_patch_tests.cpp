@@ -1,3 +1,4 @@
+#include "SavedBooleanWedgeProbe.hxx"
 #include "../Core3D/OCCTKit/DetachedLoftCutProbe.hxx"
 #include "../Core3D/OCCTKit/SavedBooleanProgramBuild.hxx"
 #include <cassert>
@@ -95,4 +96,4 @@ static void ConstructionFrames(){
     assert(saved_cut_source_edit::RebuildLoftBase(e,stop,empty)==saved_cut_source_edit::LoftBaseStatus::BoundaryMismatch&&empty.IsNull());
     assert(saved_cut_bore_clearance::Inspect(e).status==saved_cut_bore_clearance::Status::UnsupportedFrame);
 }
-int main(){for(const auto& row:detached_loft_cut_probe::Run()){if(!row.second)std::cerr<<row.first<<std::endl;assert(row.second);}LoftPatchAppliesOnlyAddressedStationScalars();LoftPatchRejectsForeignBitsAndOutOfDomainWidths();Geometry();ConstructionFrames();std::cout<<"Loft cut patch and native boundary tests passed\n";}
+int main(){std::size_t wedgeChecks=0;for(unsigned scenario=0;scenario<4;++scenario)for(const auto& row:core3d::saved_boolean_wedge_probe::Run(scenario)){++wedgeChecks;if(!row.second)std::cerr<<"wedge "<<scenario<<" "<<row.first<<std::endl;assert(row.second);}std::cout<<"Wedge native checks passed: "<<wedgeChecks<<"\n";for(const auto& row:detached_loft_cut_probe::Run()){if(!row.second)std::cerr<<row.first<<std::endl;assert(row.second);}LoftPatchAppliesOnlyAddressedStationScalars();LoftPatchRejectsForeignBitsAndOutOfDomainWidths();Geometry();ConstructionFrames();std::cout<<"Loft cut patch and native boundary tests passed\n";}

@@ -144,6 +144,21 @@ __attribute__((objc_subclassing_restricted))
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
+//! Descriptive wedge scalars from the native-issued complete program.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DWedgeCutOperand : NSObject
+@property(nonatomic,readonly) uint32_t operandIdentifier;
+@property(nonatomic,readonly) Core3DCylindricalCutAxis axis;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double directionAngle;
+@property(nonatomic,readonly) double worldHalfWidthApexMM;
+@property(nonatomic,readonly) double worldHalfWidthMouthMM;
+@property(nonatomic,readonly) double worldLengthMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 //! Native-issued whole-program snapshot of a retained cut: the complete recipe
 //! and every stable operand ride one opaque aggregate. No one-bore local view
 //! is exposed as native authority, and wire fields cannot recreate it.
@@ -153,6 +168,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutBore *> *bores;
 @property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutRing *> *rings;
+@property(nonatomic,copy,readonly) NSArray<Core3DWedgeCutOperand *> *wedges;
 //! Descriptive source values shared by every bore of the complete recipe, in
 //! source-recipe millimetres BEFORE construction-frame and occurrence scaling.
 //! Copied from THIS snapshot; they cannot recreate source/transaction authority.

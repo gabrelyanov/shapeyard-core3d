@@ -219,6 +219,24 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(init(axis:localX:localY:localZ:boltCircleRadius:worldHoleRadiusMM:count:));
 @end
 
+//! Trapezoid through-cut values; the native program admits source and tool clearances.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DWedgeCutDefinition : NSObject
+@property(nonatomic,readonly) Core3DCylindricalCutAxis axis;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double directionAngle;
+@property(nonatomic,readonly) double worldHalfWidthApexMM;
+@property(nonatomic,readonly) double worldHalfWidthMouthMM;
+@property(nonatomic,readonly) double worldLengthMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z
+    directionAngle:(double)angle worldHalfWidthApexMM:(double)apex worldHalfWidthMouthMM:(double)mouth worldLengthMM:(double)length
+    NS_SWIFT_NAME(init(axis:localX:localY:localZ:directionAngle:worldHalfWidthApexMM:worldHalfWidthMouthMM:worldLengthMM:));
+@end
+
 //! Immutable validated construction values. Lengths use the declared document
 //! unit; revolution parameters are degrees. No geometry or document handles.
 @interface Core3DProfileDefinition : NSObject

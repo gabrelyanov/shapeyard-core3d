@@ -1097,6 +1097,17 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
         _worldHoleRadiusMM=operand.radius*mm;_hostRadiusRatio=operand.hostRadiusRatio;_count=operand.count;}return self;
 }
 @end
+@interface Core3DWedgeCutOperand ()
+- (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)mm;
+@end
+@implementation Core3DWedgeCutOperand
+- (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)mm {
+    if(operand.kind!=core3d::analytic_boolean::OperandKind::Wedge||!std::isfinite(mm)||mm<=0)return nil;
+    self=[super init];if(self){_operandIdentifier=operand.identifier;_axis=static_cast<Core3DCylindricalCutAxis>(operand.axis);
+        _localX=operand.point[0];_localY=operand.point[1];_localZ=operand.point[2];_directionAngle=operand.directionAngle;
+        _worldHalfWidthApexMM=operand.halfWidthApex*mm;_worldHalfWidthMouthMM=operand.halfWidthMouth*mm;_worldLengthMM=operand.length*mm;}return self;
+}
+@end
 @interface Core3DCylindricalCutProgramSnapshot ()
 - (instancetype)initWithNative:(const core3d::CylindricalCutProgramSnapshot&)native owner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer;
 - (core3d::CylindricalCutProgramSnapshot)nativeSnapshot;
@@ -1112,6 +1123,7 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     // Descriptive bore values projected from the complete captured recipe.
     NSMutableArray<Core3DCylindricalCutBore *> *bores=[NSMutableArray array];
     NSMutableArray<Core3DCylindricalCutRing *> *rings=[NSMutableArray array];
+    NSMutableArray<Core3DWedgeCutOperand *> *wedges=[NSMutableArray array];
     if(const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&native.source.recipe)){
         core3d::analytic_boolean::Operand operand;operand.identifier=legacy->operandID;
         operand.axis=static_cast<core3d::analytic_boolean::Axis>(legacy->axis);
@@ -1124,6 +1136,10 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
                 Core3DCylindricalCutRing *ring=[[Core3DCylindricalCutRing alloc] initWithOperand:step.operand effectiveMM:native.source.effectiveMM];
                 if(!ring)return nil;[rings addObject:ring];continue;
             }
+            if(step.operand.kind==core3d::analytic_boolean::OperandKind::Wedge){
+                Core3DWedgeCutOperand *wedge=[[Core3DWedgeCutOperand alloc] initWithOperand:step.operand effectiveMM:native.source.effectiveMM];
+                if(!wedge)return nil;[wedges addObject:wedge];continue;
+            }
             Core3DCylindricalCutBore *bore=[[Core3DCylindricalCutBore alloc] initWithOperand:step.operand effectiveMM:native.source.effectiveMM];
             if(!bore)return nil;[bores addObject:bore];
         }
@@ -1131,7 +1147,7 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     _native=native;_owner=owner;_viewer=viewer;
     _entityIdentifier=[NSString stringWithUTF8String:native.source.original.entityIdentifier.c_str()];
     _definitionIdentifier=[NSString stringWithUTF8String:native.source.original.definitionIdentifier.c_str()];
-    _bores=bores;_rings=rings;return self;
+    _bores=bores;_rings=rings;_wedges=wedges;return self;
 }
 - (core3d::CylindricalCutProgramSnapshot)nativeSnapshot {return _native;}
 - (Core3DSavedCutSourceValues *)sourceRecipeMM {
@@ -6793,6 +6809,31 @@ struct NativeModelingPermitIssuer final {
     for(const auto& row:core3d::detached_loft_cut_probe::Run())
         result[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
     return result;
+}
+- (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeGeometry:(NSString *)entity {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||![entity isKindOfClass:NSString.class]||entity.length>128)return @{};
+    try {
+        const Handle(OcctDocument) owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand()||GLController.viewer->hasUnresolvedOrdinaryEdit())return @{};
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return @{};
+        for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){
+            OcctCylindricalCutProgramSource source;if(!owner->CaptureCylindricalCutProgramSource(roots.Value(i),source))return @{};
+            const core3d::retained_boolean::Program* program=std::get_if<core3d::retained_boolean::Program>(&source.recipe);if(!program)return @{};
+            const std::atomic_bool stop(false);const core3d::saved_boolean_result::Inspection proof=core3d::saved_boolean_result::Inspect(source.original.shape,*program,stop);
+            TopTools_IndexedMapOfShape faces,edges,vertices,baseFaces,baseEdges,baseVertices;
+            TopExp::MapShapes(source.original.shape,TopAbs_FACE,faces);TopExp::MapShapes(source.original.shape,TopAbs_EDGE,edges);TopExp::MapShapes(source.original.shape,TopAbs_VERTEX,vertices);
+            TopExp::MapShapes(source.base,TopAbs_FACE,baseFaces);TopExp::MapShapes(source.base,TopAbs_EDGE,baseEdges);TopExp::MapShapes(source.base,TopAbs_VERTEX,baseVertices);
+            return @{@"MatchedOrientedBoundary":@(proof.classification==core3d::saved_boolean_result::Classification::MatchedOrientedBoundary),
+                @"faces":@(faces.Extent()),@"edges":@(edges.Extent()),@"vertices":@(vertices.Extent()),
+                @"baseFaces":@(baseFaces.Extent()),@"baseEdges":@(baseEdges.Extent()),@"baseVertices":@(baseVertices.Extent())};
+        }
+    }catch(...){return @{};}return @{};
+}
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario {
+    NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
+    for(const std::pair<const std::string,bool>& row:Core3DDebugSavedBooleanWedgeProbe(static_cast<Standard_Integer>(scenario)))
+        out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+    return out;
 }
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario {
     NSMutableDictionary *out=[NSMutableDictionary dictionary];
@@ -14618,7 +14659,8 @@ struct NativeModelingPermitIssuer final {
             core3d::cylindrical_cut::CreateEdit{static_cast<core3d::analytic_boolean::Axis>(definition.axis),
                 {definition.localX,definition.localY,definition.localZ},definition.worldRadiusMM}};
         const CGSize size=GLController.drawableSize;
-        const auto prepare=core3d::retained_boolean::RingEdit(edit)?&core3d::Core3DViewer::prepareCylindricalCutRingEdit:
+        const auto prepare=core3d::retained_boolean::WedgeEdit(edit)?&core3d::Core3DViewer::prepareWedgeCutProgramEdit:
+            core3d::retained_boolean::RingEdit(edit)?&core3d::Core3DViewer::prepareCylindricalCutRingEdit:
             &core3d::Core3DViewer::prepareCylindricalCutProgramEdit;
         const auto work=(GLController.viewer.get()->*prepare)(before,edit,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
@@ -14662,6 +14704,31 @@ struct NativeModelingPermitIssuer final {
     return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil
         ringEdit:core3d::retained_boolean::ProgramEdit(core3d::retained_boolean::SetRingCount{identifier,count})
         expected:expected completion:completion];
+}
+
+- (Core3DCylindricalCutOperation *)beginWedgeCutAppend:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DWedgeCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if(!completion)CORE3D_CUT_REFUSE("bridge.completion-missing", nil);
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(![definition isKindOfClass:Core3DWedgeCutDefinition.class])
+        return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil ringEdit:std::nullopt expected:expected completion:completion];
+    const core3d::retained_boolean::ProgramEdit edit=core3d::retained_boolean::AppendWedge{{
+        static_cast<core3d::analytic_boolean::Axis>(definition.axis),{definition.localX,definition.localY,definition.localZ},
+        definition.directionAngle,definition.worldHalfWidthApexMM,definition.worldHalfWidthMouthMM,definition.worldLengthMM}};
+    return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil ringEdit:edit expected:expected completion:completion];
+}
+- (Core3DCylindricalCutOperation *)beginWedgeCutWidths:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldHalfWidthApexMM:(double)apex worldHalfWidthMouthMM:(double)mouth
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion {
+    const core3d::retained_boolean::ProgramEdit edit=core3d::retained_boolean::SetWedgeWidths{identifier,apex,mouth};
+    return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil ringEdit:edit expected:expected completion:completion];
+}
+- (Core3DCylindricalCutOperation *)beginWedgeCutLength:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldLengthMM:(double)length expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    const core3d::retained_boolean::ProgramEdit edit=core3d::retained_boolean::SetWedgeLength{identifier,length};
+    return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil ringEdit:edit expected:expected completion:completion];
 }
 
 - (Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier

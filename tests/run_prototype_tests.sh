@@ -31,7 +31,7 @@ if [[ -n "${2:-}" ]]; then
         "$tests_dir/loft_cut_source_patch_tests.cpp" -L "$2" \
         -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
-        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -o "$output_dir/loft_cut_source_patch_tests"
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/loft_cut_source_patch_tests"
     "$output_dir/loft_cut_source_patch_tests"
 else
     echo "SKIP RectangularLoftPlanarBuilderTests and loft_cut_source_patch_tests: pass retained host OCCT library directory as argument 2"

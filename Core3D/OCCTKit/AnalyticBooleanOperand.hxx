@@ -7,7 +7,7 @@ namespace core3d::analytic_boolean {
 // Closed typed recipe fragment, NOT a native permission/owner binding. The
 // future saved feature envelope owns its feature UUID and original base recipe.
 enum class Operation : std::uint8_t { Difference = 1 };
-enum class OperandKind : std::uint8_t { Cylinder = 1, CylinderRing = 2 };
+enum class OperandKind : std::uint8_t { Cylinder = 1, CylinderRing = 2, Wedge = 3 };
 enum class Extent : std::uint8_t { ThroughAll = 1 };
 enum class Axis : std::uint8_t { X = 0, Y = 1, Z = 2 };
 struct Operand {
@@ -23,6 +23,7 @@ struct Operand {
     double boltCircleRadius = 0;
     std::uint32_t count = 0;
     double hostRadiusRatio = 0;
+    double directionAngle = 0, halfWidthApex = 0, halfWidthMouth = 0, length = 0;
 };
 struct Recipe {
     std::uint32_t schema = 1;
@@ -32,14 +33,15 @@ struct Recipe {
 };
 inline bool Inspect(const Recipe& r) noexcept {
     if (r.schema != 1 || r.operation != Operation::Difference || r.tool.identifier == 0
-        || (r.tool.kind != OperandKind::Cylinder && r.tool.kind != OperandKind::CylinderRing)
+        || (r.tool.kind != OperandKind::Cylinder && r.tool.kind != OperandKind::CylinderRing && r.tool.kind != OperandKind::Wedge)
         || r.tool.extent != Extent::ThroughAll
         || static_cast<unsigned>(r.tool.axis) > 2 || !std::isfinite(r.metersPerUnit)
         || r.metersPerUnit <= 0) return false;
     const double mm = r.metersPerUnit * 1000;
-    if (!std::isfinite(mm) || mm <= 0 || !std::isfinite(r.tool.radius)
+    if (!std::isfinite(mm) || mm <= 0) return false;
+    if (r.tool.kind != OperandKind::Wedge && (!std::isfinite(r.tool.radius)
         || !std::isfinite(r.tool.radius * mm) || r.tool.radius * mm < .001
-        || r.tool.radius * mm > 1e6) return false;
+        || r.tool.radius * mm > 1e6)) return false;
     for (double p : r.tool.point)
         if (!std::isfinite(p) || !std::isfinite(p * mm) || std::abs(p * mm) > 1e6) return false;
     if(r.tool.kind==OperandKind::CylinderRing){
@@ -48,6 +50,15 @@ inline bool Inspect(const Recipe& r) noexcept {
             ||r.tool.count<3||r.tool.count>16)return false;
     }else if(r.tool.boltCircleRadius!=0||std::signbit(r.tool.boltCircleRadius)
         ||r.tool.count!=0||r.tool.hostRadiusRatio!=0||std::signbit(r.tool.hostRadiusRatio))return false;
+    if(r.tool.kind==OperandKind::Wedge){
+        if(r.tool.radius!=0||std::signbit(r.tool.radius)||!std::isfinite(r.tool.directionAngle)
+            ||r.tool.directionAngle<0||r.tool.directionAngle>=2*std::acos(-1.0))return false;
+        for(double width:{r.tool.halfWidthApex,r.tool.halfWidthMouth})
+            if(!std::isfinite(width)||!std::isfinite(width*mm)||width*mm<.05||width*mm>1e6)return false;
+        if(!std::isfinite(r.tool.length)||!std::isfinite(r.tool.length*mm)
+            ||r.tool.length*mm<.1||r.tool.length*mm>1e6)return false;
+    }else for(double value:{r.tool.directionAngle,r.tool.halfWidthApex,r.tool.halfWidthMouth,r.tool.length})
+        if(value!=0||std::signbit(value))return false;
     return true;
 }
 } // namespace core3d::analytic_boolean
