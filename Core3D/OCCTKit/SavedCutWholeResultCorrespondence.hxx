@@ -1,4 +1,5 @@
 #pragma once
+#include "AnalyticBooleanRingOperand.hxx"
 #include "SavedCutResultBoundaryExpectation.hxx"
 #include <queue>
 #include <BRepCheck_Analyzer.hxx>
@@ -19,7 +20,7 @@ inline bool Collect(const TopoDS_Shape& result,const retained_solid::Envelope& n
     using namespace od;const double mm=newSource.metersPerUnit*1000;
     Budget budget;saved_cut_bore_result::Report report;const auto fail=[](){return false;};
         report.phase="collect";
-        if(maximumFaceWires==0||maximumFaceWires>6||result.IsNull()||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return fail();
+        if(maximumFaceWires==0||maximumFaceWires>2+analytic_boolean_ring::kMaximumExpandedDisks||result.IsNull()||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return fail();
         std::vector<TopoDS_Shape> shells,rawFaces;
         if(!d::Children(result,TopAbs_SHELL,1,shells,budget)||shells.size()!=1
             ||!d::Children(shells[0],TopAbs_FACE,130,rawFaces,budget)||rawFaces.empty())return fail();

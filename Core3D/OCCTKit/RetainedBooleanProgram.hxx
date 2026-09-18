@@ -2,7 +2,7 @@
 // Versioned values only. No owner, command, geometry or prepared AI authority.
 // Legacy Encode/Decode remain the sole v1 codec and are not rewritten here.
 #include "RetainedSolidEnvelope.hxx"
-#include "AnalyticBooleanOperand.hxx"
+#include "AnalyticBooleanRingOperand.hxx"
 #include <variant>
 #include <optional>
 #include <limits>
@@ -10,7 +10,7 @@
 namespace core3d::retained_boolean {
 using Legacy=retained_solid::Envelope;
 using UUID=retained_solid::UUID;
-inline constexpr std::size_t MaximumOperands=4; // Complete all-pairs correspondence scope for up to four separated same-axis bores; not a tuple wire format.
+inline constexpr std::size_t MaximumOperands=4; // Retained operands; expanded disks have their own independent bound.
 struct Source {
     UUID document{},entity{},definition{},sourceFeature{},derivedFeature{};
     std::uint8_t family=0;
@@ -24,6 +24,7 @@ struct Step {
 };
 struct Program {
     Source source;
+    std::uint8_t codecMinor=1; // Preserve v1 program bytes until a ring is appended.
     // One-past high-water; UINT32_MAX+1 represents exhausted issuance, not wrap.
     std::uint64_t nextOperandID=1;
     std::vector<Step> steps;
@@ -46,31 +47,56 @@ inline bool ValidSource(const Source& s) noexcept {
             enclosure::Parameters p;return s.schema>=1&&s.schema<=2&&enclosure::Decode(int(s.schema),s.values,p)
                 &&Bits(p.metersPerUnit)==Bits(s.metersPerUnit);
         }
+        if(s.family==3){
+            rectangular_loft::Definition d;
+            return s.schema==loft_persistence::Schema&&loft_persistence::Decode(s.values,d)
+                &&Bits(d.dimensionMetersPerUnit)==Bits(s.metersPerUnit);
+        }
         return false;
     }catch(...){return false;}
 }
 inline bool Valid(const Program& p) noexcept {
     try {
-        if(!ValidSource(p.source)||p.steps.empty()||p.steps.size()>MaximumOperands
+        if((p.codecMinor!=1&&p.codecMinor!=2)||!ValidSource(p.source)||p.steps.empty()||p.steps.size()>MaximumOperands
             ||p.nextOperandID<2||p.nextOperandID>std::uint64_t(UINT32_MAX)+1)return false;
+        std::size_t disks=0;
         for(std::size_t i=0;i<p.steps.size();++i){
             const auto& step=p.steps[i];analytic_boolean::Recipe r;
             r.metersPerUnit=p.source.metersPerUnit;r.operation=step.operation;r.tool=step.operand;
             if(!analytic_boolean::Inspect(r)||step.operand.identifier>=p.nextOperandID)return false;
+            if(step.operand.kind==analytic_boolean::OperandKind::CylinderRing){
+                if(p.codecMinor!=2||analytic_boolean_ring::Inspect(analytic_boolean_ring::FromOperand(step.operand,p.source.metersPerUnit),
+                    p.source.metersPerUnit)!=analytic_boolean_ring::Status::Clear)return false;
+                disks+=step.operand.count;
+            }else ++disks;
+            if(disks>analytic_boolean_ring::kMaximumExpandedDisks)return false;
             for(std::size_t j=0;j<i;++j)if(p.steps[j].operand.identifier==step.operand.identifier)return false;
         }
         // Checked complete size before Encode allocates, including digest.
-        constexpr std::size_t fixed=10+80+5*8+32,stepBytes=4+8+4*8;
+        constexpr std::size_t fixed=10+80+5*8+32;const std::size_t stepBytes=p.codecMinor==1?44:64;
         return fixed<=retained_solid::MaximumEnvelopeBytes
             &&p.source.values.size()<=(retained_solid::MaximumEnvelopeBytes-fixed)/8
             &&p.steps.size()<=(retained_solid::MaximumEnvelopeBytes-fixed-p.source.values.size()*8)/stepBytes;
     }catch(...){return false;}
 }
+struct Disk {analytic_boolean::Operand operand;std::size_t step=0;std::uint32_t ordinal=0;};
+inline bool ExpandedDisks(const Program& p,std::vector<Disk>& out) noexcept {
+    out.clear();try {
+        if(!Valid(p))return false;
+        for(std::size_t i=0;i<p.steps.size();++i){const auto& t=p.steps[i].operand;
+            if(t.kind==analytic_boolean::OperandKind::Cylinder){out.push_back({t,i,0});continue;}
+            const auto ring=analytic_boolean_ring::FromOperand(t,p.source.metersPerUnit);
+            for(std::uint32_t k=0;k<t.count;++k){auto disk=analytic_boolean_ring::Expand(ring,k,p.source.metersPerUnit);
+                if(!disk.identifier){out.clear();return false;}disk.radius=t.radius;out.push_back({disk,i,k});}
+        }
+        return !out.empty()&&out.size()<=analytic_boolean_ring::kMaximumExpandedDisks;
+    }catch(...){out.clear();return false;}
+}
 inline bool Encode(const Program& p,std::vector<std::uint8_t>& out) noexcept {
     out.clear();try {
         if(!Valid(p))return false;
-        std::vector<std::uint8_t> bytes{'S','Y','R','S',2,1,1,1,p.source.family,0};
-        bytes.reserve(10+80+5*8+p.source.values.size()*8+p.steps.size()*44+32);
+        std::vector<std::uint8_t> bytes{'S','Y','R','S',2,1,1,p.codecMinor,p.source.family,0};
+        bytes.reserve(10+80+5*8+p.source.values.size()*8+p.steps.size()*(p.codecMinor==1?44:64)+32);
         for(const auto& id:{p.source.document,p.source.entity,p.source.definition,p.source.sourceFeature,p.source.derivedFeature})
             bytes.insert(bytes.end(),id.begin(),id.end());
         using retained_solid::U64;using retained_solid::Bits;
@@ -82,6 +108,9 @@ inline bool Encode(const Program& p,std::vector<std::uint8_t>& out) noexcept {
             bytes.push_back(std::uint8_t(step.operand.extent));bytes.push_back(std::uint8_t(step.operand.axis));
             U64(bytes,step.operand.identifier);for(double value:step.operand.point)U64(bytes,Bits(value));
             U64(bytes,Bits(step.operand.radius));
+            if(p.codecMinor==2){U64(bytes,Bits(step.operand.boltCircleRadius));
+                for(unsigned k=0;k<4;++k)bytes.push_back(std::uint8_t(step.operand.count>>(8*k)));
+                U64(bytes,Bits(step.operand.hostRadiusRatio));}
         }
         retained_solid::Digest digest;if(!retained_solid::Hash(bytes,digest))return false;
         bytes.insert(bytes.end(),digest.begin(),digest.end());out=std::move(bytes);return true;
@@ -89,10 +118,10 @@ inline bool Encode(const Program& p,std::vector<std::uint8_t>& out) noexcept {
 }
 inline bool Decode(const std::vector<std::uint8_t>& bytes,Program& out) noexcept {
     out={};try {
-        constexpr std::size_t fixed=10+80+5*8,stepBytes=44;
+        constexpr std::size_t fixed=10+80+5*8;const std::size_t stepBytes=bytes.size()>7&&bytes[7]==2?64:44;
         if(bytes.size()<fixed+8+stepBytes+32||bytes.size()>retained_solid::MaximumEnvelopeBytes
-            ||std::memcmp(bytes.data(),"SYRS\2\1\1\1",8)!=0||bytes[9]!=0)return false;
-        Program p;p.source.family=bytes[8];std::size_t at=10;
+            ||std::memcmp(bytes.data(),"SYRS\2\1\1",7)!=0||(bytes[7]!=1&&bytes[7]!=2)||bytes[9]!=0)return false;
+        Program p;p.codecMinor=bytes[7];p.source.family=bytes[8];std::size_t at=10;
         for(auto* id:{&p.source.document,&p.source.entity,&p.source.definition,&p.source.sourceFeature,&p.source.derivedFeature}){
             std::copy_n(bytes.begin()+at,16,id->begin());at+=16;
         }
@@ -109,7 +138,11 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes,Program& out) noexcept
             Step step;step.operation=analytic_boolean::Operation(bytes[at++]);step.operand.kind=analytic_boolean::OperandKind(bytes[at++]);
             step.operand.extent=analytic_boolean::Extent(bytes[at++]);step.operand.axis=analytic_boolean::Axis(bytes[at++]);
             const auto id=integer();if(id>UINT32_MAX)return false;step.operand.identifier=std::uint32_t(id);
-            for(double& value:step.operand.point)value=scalar();step.operand.radius=scalar();p.steps.push_back(step);
+            for(double& value:step.operand.point)value=scalar();step.operand.radius=scalar();
+            if(p.codecMinor==2){step.operand.boltCircleRadius=scalar();
+                for(unsigned k=0;k<4;++k)step.operand.count|=std::uint32_t(bytes[at++])<<(8*k);
+                step.operand.hostRadiusRatio=scalar();}
+            p.steps.push_back(step);
         }
         std::vector<std::uint8_t> exact;if(!Encode(p,exact)||exact!=bytes)return false;
         out=std::move(p);return true;

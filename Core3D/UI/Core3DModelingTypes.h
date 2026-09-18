@@ -52,6 +52,10 @@ __attribute__((objc_subclassing_restricted))
 typedef NS_ENUM(NSInteger, Core3DSavedCutSourceFamily) { Core3DSavedCutSourceFamilyPolygon NS_SWIFT_NAME(polygon)=1, Core3DSavedCutSourceFamilyEnclosure NS_SWIFT_NAME(enclosure)=2 };
 __attribute__((objc_subclassing_restricted))
 @interface Core3DSavedCutSourcePatch : NSObject
+- (nullable instancetype)initWithCircleOuterRadiusMM:(nullable NSNumber *)outer innerRadiusMM:(nullable NSNumber *)inner depthMM:(nullable NSNumber *)depth
+    NS_SWIFT_NAME(init(circleOuterRadiusMM:innerRadiusMM:depthMM:));
+- (nullable instancetype)initWithLoftStationIdentifier:(uint32_t)identifier widthMM:(nullable NSNumber *)width depthMM:(nullable NSNumber *)depth
+    NS_SWIFT_NAME(init(loftStationIdentifier:widthMM:depthMM:));
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithPolygonCoordinates:(NSArray<Core3DSavedCutSourceCoordinate *> *)coordinates depthMM:(nullable NSNumber *)depth
@@ -125,6 +129,21 @@ __attribute__((objc_subclassing_restricted))
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
+//! Descriptive ring record; one stable ID represents all expanded disks.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutRing : NSObject
+@property(nonatomic,readonly) uint32_t operandIdentifier;
+@property(nonatomic,readonly) Core3DCylindricalCutAxis axis;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double boltCircleRadius;
+@property(nonatomic,readonly) double worldHoleRadiusMM;
+@property(nonatomic,readonly) double hostRadiusRatio;
+@property(nonatomic,readonly) NSUInteger count;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 //! Native-issued whole-program snapshot of a retained cut: the complete recipe
 //! and every stable operand ride one opaque aggregate. No one-bore local view
 //! is exposed as native authority, and wire fields cannot recreate it.
@@ -133,6 +152,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSString *entityIdentifier;
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutBore *> *bores;
+@property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutRing *> *rings;
 //! Descriptive source values shared by every bore of the complete recipe, in
 //! source-recipe millimetres BEFORE construction-frame and occurrence scaling.
 //! Copied from THIS snapshot; they cannot recreate source/transaction authority.

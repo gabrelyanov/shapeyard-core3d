@@ -159,8 +159,17 @@ inline Checks RunProgram(){Checks checks;auto e=Wheel();retained_boolean::Progra
     const std::atomic_bool stop(false);const auto proof=saved_boolean_result::Inspect(cut,p,stop);
     checks["two-bores-whole-boundary"]=proof.classification==whole::Classification::MatchedOrientedBoundary&&proof.vertices==6&&proof.edges==9&&proof.faces==5;
     checks["two-bores-exact-volume"]=Volume(cut,880000);
-    whole::detail::Graph overBudget;
-    checks["legacy-wire-budget-unchanged"]=!whole::detail::Collect(cut,e,stop,overBudget,7);
+    whole::detail::Graph overBudget,atBudget;
+    checks["wire-budget-gate-34"]=!whole::detail::Collect(cut,e,stop,overBudget,35)
+        &&whole::detail::Collect(cut,e,stop,atBudget,34);
+    // Three separated bores give four cap wires; a fourth exceeds the legacy default.
+    auto extra=e;extra.radius=10;extra.point=fixture::point(0,-95,0);
+    auto threeBores=Cut(cut,extra);extra.point=fixture::point(0,0,95);
+    auto fourBores=Cut(threeBores,extra);
+    whole::detail::Graph legacyAtBudget,legacyOverBudget,explicitBudget;
+    checks["legacy-default-wire-budget-unchanged"]=whole::detail::Collect(threeBores,e,stop,legacyAtBudget)
+        &&!whole::detail::Collect(fourBores,e,stop,legacyOverBudget)
+        &&whole::detail::Collect(fourBores,e,stop,explicitBudget,5);
     return checks;
 }
 inline Checks Run(unsigned scenario){try{switch(scenario){

@@ -4,6 +4,41 @@
 #include <limits>
 #include <gp_Trsf.hxx>
 
+#if DEBUG
+#include <atomic>
+#include <memory>
+// One record per bridge operation, carried explicitly across the detached
+// worker/delivery boundary. The TLS binding never owns document or UI state.
+namespace core3d::cylindrical_cut {
+struct DebugRefusalRecord {
+    std::atomic<const char*> reason{nullptr};
+    std::atomic<int> detail{-1};
+};
+inline thread_local std::shared_ptr<DebugRefusalRecord> debugRefusalRecord;
+struct DebugRefusalScope {
+    std::shared_ptr<DebugRefusalRecord> previous;
+    explicit DebugRefusalScope(const std::shared_ptr<DebugRefusalRecord>& record)
+        :previous(debugRefusalRecord) { debugRefusalRecord=record; }
+    ~DebugRefusalScope() { debugRefusalRecord=previous; }
+};
+inline void DebugRefuse(const char* reason,int detail=-1) noexcept {
+    if(debugRefusalRecord){
+        const char* empty=nullptr;
+        if(debugRefusalRecord->reason.compare_exchange_strong(empty,reason))
+            debugRefusalRecord->detail.store(detail);
+    }
+}
+}
+#define CORE3D_CUT_NOTE(reason) ::core3d::cylindrical_cut::DebugRefuse(reason)
+#define CORE3D_CUT_DETAIL(reason, detail) ::core3d::cylindrical_cut::DebugRefuse(reason, int(detail))
+#else
+#define CORE3D_CUT_DETAIL(reason, detail) ((void)0)
+#define CORE3D_CUT_NOTE(reason) ((void)0)
+#endif
+#define CORE3D_CUT_STRINGIFY_IMPL(value) #value
+#define CORE3D_CUT_STRINGIFY(value) CORE3D_CUT_STRINGIFY_IMPL(value)
+#define CORE3D_CUT_REFUSE(reason, ...) do { CORE3D_CUT_NOTE(reason); return __VA_ARGS__; } while(false)
+
 namespace core3d::cylindrical_cut {
 // Native value input; identity/ownership is issued separately by the viewer.
 // Center is explicitly in ORIGINAL object-local document units. Radius is a
@@ -14,6 +49,13 @@ struct CreateEdit {
     double worldRadiusMM=0;
 };
 struct RadiusEdit { double worldRadiusMM=0; };
+struct RingCreateEdit {
+    analytic_boolean::Axis axis=analytic_boolean::Axis::Z;
+    std::array<double,3> localCenter{};
+    double boltCircleRadius=0,worldHoleRadiusMM=0;
+    std::uint32_t count=0;
+};
+struct RingRadiusEdit {std::uint32_t identifier=0;double worldHoleRadiusMM=0;};
 inline bool PositiveUniformSimilarity(const std::array<double,12>& matrix,double& scale)noexcept{
     scale=0;
     for(double value:matrix)if(!std::isfinite(value))return false;

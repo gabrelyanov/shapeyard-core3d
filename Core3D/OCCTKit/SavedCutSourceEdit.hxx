@@ -1,6 +1,7 @@
 #pragma once
 // Detached source-rebuild values and content proof only. No document authority.
 #include "SavedCutSourceValuePatch.hxx"
+#include "RectangularLoftSolid.hxx"
 #include "SavedCutSourceBoreClearance.hxx"
 #include "SavedCutPrismExtractor.hxx"
 #include "CircularHostExtractor.hxx"
@@ -111,6 +112,11 @@ inline bool InspectBase(const TopoDS_Shape& base,const retained_solid::Envelope&
                 &&saved_cut_prism_prototype::InspectPrism(base,p.definition,p.constructionFrame,
                     e.metersPerUnit,stop,report)==saved_cut_prism_prototype::Classification::MatchedBoundary;
         }
+        if(e.sourceFamily==3){
+            rectangular_loft::Definition d;saved_cut_prism_prototype::Inspection report;
+            return loft_persistence::Decode(e.sourceValues,d)
+                &&saved_cut_prism_prototype::InspectLoft(base,d,stop,report)==saved_cut_prism_prototype::Classification::MatchedBoundary;
+        }
         if(e.sourceFamily==2){
             enclosure::Parameters p;enclosure_correspondence::Inspection report;
             return enclosure::Decode(int(e.sourceSchema),e.sourceValues,p)
@@ -119,5 +125,28 @@ inline bool InspectBase(const TopoDS_Shape& base,const retained_solid::Envelope&
         }
         return false;
     }catch(...){return false;}
+}
+// Distinct detached conversion failures; no document writes occur here.
+enum class LoftBaseStatus { Built, InvalidRecipe, PlanarRebuildFailed, BoundaryMismatch, Cancelled };
+inline LoftBaseStatus RebuildLoftBase(const retained_solid::Envelope& e,const std::atomic_bool& stop,TopoDS_Shape& out) noexcept {
+    out.Nullify();try {
+        if(stop.load())return LoftBaseStatus::Cancelled;
+        rectangular_loft::Definition d;rectangular_loft::Admission admission;
+        if(e.sourceFamily!=3||!retained_solid::Valid(e)||!loft_persistence::Decode(e.sourceValues,d))return LoftBaseStatus::InvalidRecipe;
+        const auto prepared=rectangular_loft::Prepare(d,admission);rectangular_loft::SolidResult built;
+        if(!prepared)return LoftBaseStatus::InvalidRecipe;
+        if(rectangular_loft::Build(prepared,stop,built)!=rectangular_loft::BuildStatus::Built)
+            return stop.load()?LoftBaseStatus::Cancelled:LoftBaseStatus::PlanarRebuildFailed;
+        if(!InspectBase(built.solid,e,stop))return stop.load()?LoftBaseStatus::Cancelled:LoftBaseStatus::BoundaryMismatch;
+        out=built.solid;return LoftBaseStatus::Built;
+    }catch(...){return LoftBaseStatus::PlanarRebuildFailed;}
+}
+// Only the first loft cut may replace its original (possibly legacy spline)
+// base. Its exact source bytes and live owner are checked by each caller before
+// staging. All subsequent edits retain the existing base identity requirement.
+inline bool FirstCutBaseMatches(const TopoDS_Shape& original,const TopoDS_Shape& candidate,
+    bool rebuilding,const retained_solid::Envelope& e) noexcept {
+    if(e.sourceFamily!=3||rebuilding)return candidate.IsEqual(original);
+    const std::atomic_bool stop(false);return InspectBase(candidate,e,stop);
 }
 } // namespace core3d::saved_cut_source_edit

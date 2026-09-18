@@ -2,6 +2,7 @@
 // External, uncompiled prototype. A read-only analytic classifier, not native
 // ownership/commit authority. Numeric policy and reopened fixtures unqualified.
 #include "PrismBoundaryExpectation.hxx"
+#include "LoftBoundaryExpectation.hxx"
 #include "PrismLocationPreflight.hxx"
 #include "ProfileConstructionFrame.hxx"
 #include <BRep_Tool.hxx>
@@ -139,14 +140,14 @@ inline bool Children(const TopoDS_Shape& parent,TopAbs_ShapeEnum kind,std::size_
     }return true;
 }
 }
-inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDefinition& recipe,
+inline Classification InspectPolyhedron(const TopoDS_Shape& retained,Expectation expected,double minimumBoundarySeparation,
     const std::optional<profile::ConstructionFrame>& sourceFrame,double metersPerUnit,
     const std::atomic_bool& stop,Inspection& output) noexcept {
     using namespace extraction;output={};Inspection report;
     try {
         if(stop.load())return Classification::Cancelled;
-        Expectation expected;if(!BuildExpectedBoundary(recipe,expected))return Classification::Refused;
-        const auto n=recipe.points.size();const double factor=metersPerUnit*1000;
+        std::size_t maximumWire=0;for(const auto& f:expected.faces)maximumWire=std::max(maximumWire,f.vertices.size());
+        const double factor=metersPerUnit*1000;
         if(!std::isfinite(metersPerUnit)||metersPerUnit<=0||!std::isfinite(factor)||factor<=0)return Classification::Refused;
         gp_Trsf frame;
         if(sourceFrame&&(!sourceFrame->IsValid()||sourceFrame->values[7]<=0||!sourceFrame->Transform(frame)))return Classification::Refused;
@@ -158,25 +159,13 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
         for(std::size_t i=0;i<expected.vertices.size();++i)for(std::size_t j=0;j<i;++j)
             report.minimumVertexSeparationMM=std::min(report.minimumVertexSeparationMM,expected.vertices[i].Distance(expected.vertices[j])*factor);
         if(!std::isfinite(report.minimumVertexSeparationMM)||report.minimumVertexSeparationMM<=2*report.algebraicErrorMM)return Classification::Refused;
-        // Nonincident polygon boundaries also need separated uncertainty
-        // neighborhoods; unique vertices alone cannot protect a very thin notch.
-        const double sourceScale=sourceFrame?sourceFrame->values[7]:1;
-        report.minimumBoundarySeparationMM=recipe.depth*sourceScale*factor;
-        for(std::size_t v=0;v<n;++v)for(std::size_t e=0;e<n;++e){
-            const auto next=(e+1)%n;if(v==e||v==next)continue;
-            const auto p=recipe.points[v],a=recipe.points[e],b=recipe.points[next];
-            const double dx=b.X()-a.X(),dy=b.Y()-a.Y(),length2=dx*dx+dy*dy;
-            if(!std::isfinite(length2)||length2<=0)return Classification::Refused;
-            const double t=std::max(0.0,std::min(1.0,((p.X()-a.X())*dx+(p.Y()-a.Y())*dy)/length2));
-            const double clearance=std::hypot(p.X()-a.X()-t*dx,p.Y()-a.Y()-t*dy)*sourceScale*factor;
-            if(!std::isfinite(clearance))return Classification::Refused;
-            report.minimumBoundarySeparationMM=std::min(report.minimumBoundarySeparationMM,clearance);
-        }
+        report.minimumBoundarySeparationMM=minimumBoundarySeparation*(sourceFrame?sourceFrame->values[7]:1)*factor;
+        if(!std::isfinite(report.minimumBoundarySeparationMM)||report.minimumBoundarySeparationMM<=0)return Classification::Refused;
         if(retained.IsNull()||retained.ShapeType()!=TopAbs_SOLID||retained.Orientation()!=TopAbs_FORWARD)return Classification::Refused;
         if(!locations::RawShape(retained,stop))return stop.load()?Classification::Cancelled:Classification::Refused;
         std::vector<TopoDS_Shape> shells,faces;
         if(!Children(retained,TopAbs_SHELL,1,shells)||shells.size()!=1
-            ||!Children(shells[0],TopAbs_FACE,n+2,faces)||faces.size()!=n+2)return Classification::Refused;
+            ||!Children(shells[0],TopAbs_FACE,expected.faces.size(),faces)||faces.size()!=expected.faces.size())return Classification::Refused;
         // Preflight ALL bounded affine representations before any vertex match.
         // The comparison allowance must not depend on face/edge iteration order.
         for(const auto& rawFace:faces){
@@ -186,7 +175,7 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
             if(plane.IsNull()||surfaceLocation.Transformation().ScaleFactor()<=0)return Classification::Refused;
             std::vector<TopoDS_Shape> wires,uses;
             if(!Children(face,TopAbs_WIRE,1,wires)||wires.size()!=1
-                ||!Children(wires[0],TopAbs_EDGE,std::max(n,std::size_t(4)),uses)||uses.size()<3)return Classification::Refused;
+                ||!Children(wires[0],TopAbs_EDGE,maximumWire,uses)||uses.size()<3)return Classification::Refused;
             for(const auto& rawEdge:uses){
                 if(stop.load())return Classification::Cancelled;
                 const auto edge=TopoDS::Edge(rawEdge.Oriented(TopAbs_FORWARD));
@@ -214,13 +203,13 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
         const double comparisonErrorMM=report.algebraicErrorMM;
         TopTools_IndexedMapOfShape vertexMap,edgeMap,faceMap,wireMap;
         std::vector<std::size_t> vertexExpected;std::vector<Edge> edges;
-        std::vector<bool> expectedFaces(n+2,false),expectedVertices(2*n,false);
+        std::vector<bool> expectedFaces(expected.faces.size(),false),expectedVertices(expected.vertices.size(),false);
         auto vertexIndex=[&](const TopoDS_Vertex& vertex,std::size_t& index)->bool{
             if(vertex.IsNull()||!Oriented(vertex)||TopoDS_Iterator(vertex).More()
                 ||!Tolerance(BRep_Tool::Tolerance(vertex),factor,vertex,report))return false;
             const int found=vertexMap.FindIndex(vertex);
             if(found){index=vertexExpected[found-1];return true;}
-            if(vertexMap.Extent()>=int(2*n))return false;
+            if(vertexMap.Extent()>=int(expected.vertices.size()))return false;
             const gp_Pnt actual=BRep_Tool::Pnt(vertex);std::size_t match=0,count=0;
             for(std::size_t j=0;j<expected.vertices.size();++j)
                 if(Close(actual,expected.vertices[j],factor,comparisonErrorMM)){match=j;++count;}
@@ -238,7 +227,7 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
             if(plane.IsNull()||surfaceLocation.Transformation().ScaleFactor()<=0)return Classification::Refused;
             std::vector<TopoDS_Shape> wires,uses;
             if(!Children(face,TopAbs_WIRE,1,wires)||wires.size()!=1||wireMap.Contains(wires[0])
-                ||!Children(wires[0],TopAbs_EDGE,std::max(n,std::size_t(4)),uses)||uses.size()<3)return Classification::Refused;
+                ||!Children(wires[0],TopAbs_EDGE,maximumWire,uses)||uses.size()<3)return Classification::Refused;
             wireMap.Add(wires[0]);std::set<std::pair<std::size_t,std::size_t>> directed;
             for(const auto& rawEdge:uses){
                 if(stop.load())return Classification::Cancelled;
@@ -256,7 +245,7 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
                 if(!directed.emplace(useForward?ia:ib,useForward?ib:ia).second)return Classification::Refused;
                 int index=edgeMap.FindIndex(edge);
                 if(!index){
-                    if(edgeMap.Extent()>=int(3*n))return Classification::Refused;
+                    if(edgeMap.Extent()>=int(expected.edges.size()))return Classification::Refused;
                     Edge e;e.shape=forward;e.start=ia;e.end=ib;
                     e.curve=BRep_Tool::Curve(forward,e.location,e.first,e.last);
                     if(e.location.Transformation().ScaleFactor()<=0||!IsLine(e.curve,e.first,e.last)||!std::isfinite(e.first)||!std::isfinite(e.last)||e.first>=e.last)return Classification::Refused;
@@ -305,7 +294,7 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
             const double sign=expectedNormal.Dot(actualNormal);
             if(!std::isfinite(sign)||sign<=0)return Classification::Refused;
         }
-        if(vertexMap.Extent()!=int(2*n)||edgeMap.Extent()!=int(3*n)||faceMap.Extent()!=int(n+2))return Classification::Refused;
+        if(vertexMap.Extent()!=int(expected.vertices.size())||edgeMap.Extent()!=int(expected.edges.size())||faceMap.Extent()!=int(expected.faces.size()))return Classification::Refused;
         for(const auto& e:edges){
             if(stop.load())return Classification::Cancelled;
             if(e.forwardUses!=1||e.reverseUses!=1||e.faces.size()!=2)return Classification::Refused;
@@ -331,5 +320,39 @@ inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDef
         report.vertices=vertexMap.Extent();report.edges=edgeMap.Extent();report.faces=faceMap.Extent();
         output=report;return Classification::MatchedBoundary;
     }catch(...){return stop.load()?Classification::Cancelled:Classification::Refused;}
+}
+inline Classification InspectPrism(const TopoDS_Shape& retained,const ProfileDefinition& recipe,
+    const std::optional<profile::ConstructionFrame>& frame,double metersPerUnit,
+    const std::atomic_bool& stop,Inspection& output) noexcept {
+    output={};try {
+        Expectation expected;if(!BuildExpectedBoundary(recipe,expected))return Classification::Refused;
+        double separation=recipe.depth;const auto n=recipe.points.size();
+        for(std::size_t v=0;v<n;++v)for(std::size_t e=0;e<n;++e){
+            const auto next=(e+1)%n;if(v==e||v==next)continue;
+            const auto p=recipe.points[v],a=recipe.points[e],b=recipe.points[next];
+            const double dx=b.X()-a.X(),dy=b.Y()-a.Y(),length2=dx*dx+dy*dy;
+            if(!std::isfinite(length2)||length2<=0)return Classification::Refused;
+            const double t=std::max(0.0,std::min(1.0,((p.X()-a.X())*dx+(p.Y()-a.Y())*dy)/length2));
+            const double clearance=std::hypot(p.X()-a.X()-t*dx,p.Y()-a.Y()-t*dy);
+            if(!std::isfinite(clearance))return Classification::Refused;separation=std::min(separation,clearance);
+        }
+        return InspectPolyhedron(retained,std::move(expected),separation,frame,metersPerUnit,stop,output);
+    }catch(...){return Classification::Refused;}
+}
+inline Classification InspectLoft(const TopoDS_Shape& retained,const rectangular_loft::Definition& recipe,
+    const std::atomic_bool& stop,Inspection& output) noexcept {
+    output={};try {
+        saved_cut_loft::Expectation expected;if(!saved_cut_loft::BuildExpectedBoundary(recipe,expected))return Classification::Refused;
+        // Every section is a rectangle with affine sides. Bound the minimum
+        // transverse size and station spacing, including slanted side distance.
+        double separation=std::numeric_limits<double>::infinity();
+        for(std::size_t i=0;i<recipe.stations.size();++i){const auto& s=recipe.stations[i];
+            separation=std::min({separation,s.width,s.depth});
+            if(i){const auto& p=recipe.stations[i-1];const double dz=s.z-p.z;
+                const double slope=std::max(std::abs(s.centerX-p.centerX)+std::abs(s.width-p.width)/2,
+                    std::abs(s.centerY-p.centerY)+std::abs(s.depth-p.depth)/2)/dz;
+                separation=std::min({separation,dz,std::min({s.width,s.depth,p.width,p.depth})/std::hypot(1.0,slope)});}}
+        return InspectPolyhedron(retained,std::move(expected.polyhedron),separation,recipe.constructionFrame,recipe.dimensionMetersPerUnit,stop,output);
+    }catch(...){return Classification::Refused;}
 }
 } // namespace core3d::saved_cut_prism_prototype

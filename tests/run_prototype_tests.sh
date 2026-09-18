@@ -26,6 +26,13 @@ if [[ -n "${2:-}" ]]; then
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
         -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -o "$output_dir/RectangularLoftPlanarBuilderTests"
     "$output_dir/RectangularLoftPlanarBuilderTests"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/loft_cut_source_patch_tests.cpp" -L "$2" \
+        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -o "$output_dir/loft_cut_source_patch_tests"
+    "$output_dir/loft_cut_source_patch_tests"
 else
-    echo "SKIP RectangularLoftPlanarBuilderTests: pass retained host OCCT library directory as argument 2"
+    echo "SKIP RectangularLoftPlanarBuilderTests and loft_cut_source_patch_tests: pass retained host OCCT library directory as argument 2"
 fi

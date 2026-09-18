@@ -31,7 +31,7 @@ inline bool Nonzero(const UUID& id){return std::any_of(id.begin(),id.end(),[](au
 inline std::uint64_t Bits(double value){std::uint64_t result;std::memcpy(&result,&value,8);return result;}
 struct Envelope {
     UUID document{},entity{},definition{},sourceFeature{},derivedFeature{};
-    // First schema retains a profile/enclosure base and one cylindrical
+    // First schema retains a profile/enclosure/loft base and one cylindrical
     // through-all Difference operand, expressed on object-local X/Y/Z.
     std::uint8_t sourceFamily=0,axis=2;
     std::uint32_t sourceSchema=0,operandID=1;
@@ -58,6 +58,11 @@ inline bool Valid(const Envelope& e){
         if(e.sourceSchema<1||e.sourceSchema>2)return false;
         enclosure::Parameters p;
         return enclosure::Decode(int(e.sourceSchema),e.sourceValues,p)&&Bits(p.metersPerUnit)==Bits(e.metersPerUnit);
+    }
+    if(e.sourceFamily==3){
+        rectangular_loft::Definition d;
+        return e.sourceSchema==loft_persistence::Schema&&loft_persistence::Decode(e.sourceValues,d)
+            &&Bits(d.dimensionMetersPerUnit)==Bits(e.metersPerUnit);
     }
     return false;
 }

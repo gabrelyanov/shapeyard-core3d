@@ -27,7 +27,11 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing };
+inline bool IsCylindricalCutOperation(OrdinaryTransformOperation op) noexcept {
+    return op==OrdinaryTransformOperation::CylindricalCut||op==OrdinaryTransformOperation::CylindricalCutRing;
+}
+
 
 // Main-only proof lifetime. No callbacks, app objects or worker-captured handles.
 // Only the ordinary controller can seal this result; an unresolved ledger retains it.

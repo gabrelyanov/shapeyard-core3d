@@ -106,7 +106,8 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         if(!retained_solid::Valid(envelope))return out;
         if(std::fegetround()!=FE_TONEAREST){out.status=Status::NumericUncertain;return out;}
         std::optional<profile::ConstructionFrame> frame;ProfileDefinition polygon;EnclosureDefinition enclosureDefinition;
-        double thickness=0;int plane=-1;
+        rectangular_loft::Definition loft;
+        double bottom=0,thickness=0;int plane=-1;
         if(envelope.sourceFamily==1){
             profile::Parameters p;
             if(envelope.sourceSchema>2||!profile::Decode(envelope.sourceValues,p))return out;
@@ -117,6 +118,9 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
             enclosure::Parameters p;
             if(!enclosure::Decode(int(envelope.sourceSchema),envelope.sourceValues,p))return out;
             enclosureDefinition=p.definition;frame=enclosureDefinition.constructionFrame;plane=enclosureDefinition.plane;thickness=enclosureDefinition.dimensions.floor;
+        }else if(envelope.sourceFamily==3){
+            if(!loft_persistence::Decode(envelope.sourceValues,loft))return out;
+            frame=loft.constructionFrame;plane=0;bottom=loft.stations.front().z;thickness=loft.stations.back().z;
         }else {out.status=Status::UnsupportedFamily;return out;}
         out.status=Status::UnsupportedFrame;
         gp_Trsf forward;
@@ -164,7 +168,7 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         // Numerically parallel rotations (e.g. a quaternion quarter-turn) have
         // a bounded nonzero slope. Cover the complete source-normal interval,
         // not just the tool point. Also cover the projected ellipse radius.
-        I span=maximum(abs(p[chart[2]]),abs(sub(I(thickness),p[chart[2]])));
+        I span=maximum(abs(sub(I(bottom),p[chart[2]])),abs(sub(I(thickness),p[chart[2]])));
         I radius=div(I(envelope.radius),I(scale));
         // Rounded gp_Trsf coefficients need not be algebraically orthogonal.
         // Bound the largest true inverse stretch using the Gram residual and
@@ -191,6 +195,13 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
             if(!inside(polygon.points,midpoint(p[chart[0]]),midpoint(p[chart[1]]))){out.status=Status::OutsideOrInsufficientLigament;return out;}
             distance=I(std::numeric_limits<double>::max());
             for(std::size_t n=0;n<polygon.points.size();++n){I d=segmentDistance(p[chart[0]],p[chart[1]],polygon.points[n],polygon.points[(n+1)%polygon.points.size()]);if(!good(d))return out;distance=minimum(distance,d);}
+        }else if(envelope.sourceFamily==3){
+            distance=I(std::numeric_limits<double>::max());
+            for(const auto& s:loft.stations){
+                const I dx=sub(div(I(s.width),I(2)),abs(sub(p[0],I(s.centerX))));
+                const I dy=sub(div(I(s.depth),I(2)),abs(sub(p[1],I(s.centerY))));
+                distance=minimum(distance,minimum(dx,dy));
+            }
         }else distance=roundedCavityDistance(p[chart[0]],p[chart[1]],enclosureDefinition.dimensions);
         I physicalDistance=mul(distance,factor),physicalRadius=mul(I(envelope.radius),mul(I(envelope.metersPerUnit),I(1000)));
         I angularMM=mul(angular,factor),ligament=sub(sub(physicalDistance,physicalRadius),angularMM);
@@ -198,7 +209,7 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         I uncertaintyBound=add(add(sub(I(physicalDistance.hi),I(physicalDistance.lo)),sub(I(physicalRadius.hi),I(physicalRadius.lo))),I(angularMM.hi));
         if(!good(uncertaintyBound))return out;const double uncertainty=uncertaintyBound.hi;
         out.sourcePlane=plane;out.recipeUnitToOriginalMM=midpoint(factor);out.radiusOriginalMM=midpoint(physicalRadius);
-        out.centerRecipe={midpoint(p[chart[0]]),midpoint(p[chart[1]])};out.wallIntervalRecipe={0,thickness};
+        out.centerRecipe={midpoint(p[chart[0]]),midpoint(p[chart[1]])};out.wallIntervalRecipe={bottom,thickness};
         out.boundaryDistanceLowerMM=physicalDistance.lo;out.boundaryDistanceUpperMM=physicalDistance.hi;
         out.ligamentLowerMM=ligament.lo;out.numericUncertaintyMM=uncertainty;out.angularSweepAllowanceMM=angularMM.hi;
         if(!std::isfinite(uncertainty)||uncertainty>MaximumNumericUncertaintyMM)return out;

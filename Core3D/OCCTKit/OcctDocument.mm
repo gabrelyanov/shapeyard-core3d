@@ -1,3 +1,4 @@
+#include "SavedCutSourceEdit.hxx"
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -7459,7 +7460,7 @@ Standard_Boolean OcctDocument::ReplaceShape(
 
 Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
     const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept {
-    output={};if(!NSThread.isMainThread)return Standard_False;
+    output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-capture.thread", Standard_False);
     try {
         OcctCylindricalCutSource result;OcctScalarAppearanceState appearance;
         if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
@@ -7467,51 +7468,55 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
             ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
             ||result.original.authoredFramesPresent||result.original.meshUVAtlasVersion
             ||result.original.shape.ShapeType()!=TopAbs_SOLID
-            ||result.original.shape.Orientation()!=TopAbs_FORWARD
-            ||!CaptureScalarAppearanceForSavedCut(label,appearance))return Standard_False;
+            ||result.original.shape.Orientation()!=TopAbs_FORWARD)CORE3D_CUT_REFUSE("document-capture.geometry", Standard_False);
+        if(!CaptureScalarAppearanceForSavedCut(label,appearance))CORE3D_CUT_REFUSE("document-capture.appearance", Standard_False);
         const auto& state=result.original;double unit=0,scale=0;
         if(!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc,unit)
-            ||!core3d::cylindrical_cut::EffectiveMM(state.transform,unit,scale,result.effectiveMM))return Standard_False;
+            ||!core3d::cylindrical_cut::EffectiveMM(state.transform,unit,scale,result.effectiveMM))CORE3D_CUT_REFUSE("document-capture.units", Standard_False);
         auto& e=result.envelope;
         const unsigned families=unsigned(!state.profile.label.IsNull())+unsigned(!state.enclosure.label.IsNull())
             +unsigned(!state.sweep.label.IsNull())+unsigned(!state.loft.label.IsNull())+unsigned(bool(state.retained.value));
-        if(families!=1)return Standard_False;
+        if(families!=1)CORE3D_CUT_REFUSE("document-capture.family-census", Standard_False);
         TDF_Label metadata;
         if(state.retained.value){
             const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&state.retained.value->envelope);
-            if(!legacy)return Standard_False;
+            if(!legacy)CORE3D_CUT_REFUSE("document-capture.retained-version", Standard_False);
             e=*legacy;result.base=state.retained.value->base;
             result.rebuilding=true;metadata=state.retained.label;
         }else{
             e.metersPerUnit=unit;
             if(!core3d::retained_solid::ReadUUID(myOcafDoc->Main(),DocumentIdentifierAttributeID(),e.document)
                 ||!core3d::retained_solid::ReadUUID(label,EntityIdentifierAttributeID(),e.entity)
-                ||!core3d::retained_solid::ReadUUID(label,DefinitionIdentifierAttributeID(),e.definition))return Standard_False;
+                ||!core3d::retained_solid::ReadUUID(label,DefinitionIdentifierAttributeID(),e.definition))CORE3D_CUT_REFUSE("document-capture.identities", Standard_False);
             std::string identifier;
             if(!state.profile.label.IsNull()){
-                if(!state.profile.IsCurrent(myOcafDoc,label))return Standard_False;
+                if(!state.profile.IsCurrent(myOcafDoc,label))CORE3D_CUT_REFUSE("document-capture.profile-current", Standard_False);
                 e.sourceFamily=1;e.sourceSchema=core3d::profile::SchemaFor(state.profile.parameters);
                 e.sourceValues=state.profile.values;metadata=state.profile.label;identifier=state.profile.identifier;
             }else if(!state.enclosure.label.IsNull()){
-                if(!state.enclosure.IsCurrent(myOcafDoc,label))return Standard_False;
+                if(!state.enclosure.IsCurrent(myOcafDoc,label))CORE3D_CUT_REFUSE("document-capture.enclosure-current", Standard_False);
                 e.sourceFamily=2;e.sourceSchema=state.enclosure.parameters.definition.constructionFrame?2:1;
                 e.sourceValues=state.enclosure.values;metadata=state.enclosure.label;identifier=state.enclosure.identifier;
-            }else return Standard_False;
-            if(!core3d::receipt::ParseUUID(identifier,e.sourceFeature))return Standard_False;
+            }else if(!state.loft.label.IsNull()){
+                if(!state.loft.IsCurrent(myOcafDoc,label))CORE3D_CUT_REFUSE("document-capture.loft-current", Standard_False);
+                e.sourceFamily=3;e.sourceSchema=core3d::loft_persistence::Schema;
+                e.sourceValues=state.loft.values;metadata=state.loft.label;identifier=state.loft.identifier;
+            }else CORE3D_CUT_REFUSE("document-capture.unsupported-family", Standard_False);
+            if(!core3d::receipt::ParseUUID(identifier,e.sourceFeature))CORE3D_CUT_REFUSE("document-capture.source-uuid", Standard_False);
             result.base=state.shape;
         }
         if(core3d::retained_solid::Bits(e.metersPerUnit)!=core3d::retained_solid::Bits(unit)
-            ||result.base.IsNull()||result.base.ShapeType()!=TopAbs_SOLID)return Standard_False;
+            ||result.base.IsNull()||result.base.ShapeType()!=TopAbs_SOLID)CORE3D_CUT_REFUSE("document-capture.base-or-units", Standard_False);
         TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
-        if(children.Length()>core3d::profile::MaximumLabels)return Standard_False;
-        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(metadata))return Standard_False;
+        if(children.Length()>core3d::profile::MaximumLabels)CORE3D_CUT_REFUSE("document-capture.subshape-budget", Standard_False);
+        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(metadata))CORE3D_CUT_REFUSE("document-capture.foreign-subshape", Standard_False);
         output=std::move(result);return Standard_True;
-    }catch(...){output={};return Standard_False;}
+    }catch(...){output={};CORE3D_CUT_REFUSE("document-capture.exception", Standard_False);}
 }
 
 Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
     const TDF_Label& label,OcctCylindricalCutProgramSource& output)const noexcept {
-    output={};if(!NSThread.isMainThread)return Standard_False;
+    output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-program-capture.thread", Standard_False);
     try {
         OcctCylindricalCutProgramSource result;OcctScalarAppearanceState appearance;
         if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
@@ -7519,27 +7524,29 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
             ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
             ||result.original.authoredFramesPresent||result.original.meshUVAtlasVersion
             ||result.original.shape.ShapeType()!=TopAbs_SOLID
-            ||result.original.shape.Orientation()!=TopAbs_FORWARD
-            ||!CaptureScalarAppearanceForSavedCut(label,appearance))return Standard_False;
+            ||result.original.shape.Orientation()!=TopAbs_FORWARD)CORE3D_CUT_REFUSE("document-program-capture.geometry", Standard_False);
+        if(!CaptureScalarAppearanceForSavedCut(label,appearance))CORE3D_CUT_REFUSE("document-program-capture.appearance", Standard_False);
         const auto& state=result.original;double unit=0,scale=0;
         if(!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc,unit)
-            ||!core3d::cylindrical_cut::EffectiveMM(state.transform,unit,scale,result.effectiveMM))return Standard_False;
+            ||!core3d::cylindrical_cut::EffectiveMM(state.transform,unit,scale,result.effectiveMM))CORE3D_CUT_REFUSE("document-program-capture.units", Standard_False);
         // Whole-program capture requires an existing retained carrier. A bare
-        // profile/enclosure source has no program; first cuts stay legacy.
+        // profile/enclosure/loft source has no program; first cuts stay legacy.
         const unsigned families=unsigned(!state.profile.label.IsNull())+unsigned(!state.enclosure.label.IsNull())
             +unsigned(!state.sweep.label.IsNull())+unsigned(!state.loft.label.IsNull())+unsigned(bool(state.retained.value));
-        if(families!=1||!state.retained.value)return Standard_False;
+        if(families!=1||!state.retained.value)CORE3D_CUT_REFUSE("document-program-capture.family-census", Standard_False);
+        // Encode the complete versioned operand record, including ring count,
+        // bolt radius and anchor ratio; a ring is never captured as one bore.
         result.recipe=state.retained.value->envelope;result.base=state.retained.value->base;
         if(!core3d::retained_boolean::Encode(result.recipe,result.recipeBytes)
             ||result.recipeBytes!=state.retained.value->bytes
             ||core3d::retained_solid::Bits(core3d::retained_boolean::Identities(result.recipe).metersPerUnit)
                 !=core3d::retained_solid::Bits(unit)
-            ||result.base.IsNull()||result.base.ShapeType()!=TopAbs_SOLID)return Standard_False;
+            ||result.base.IsNull()||result.base.ShapeType()!=TopAbs_SOLID)CORE3D_CUT_REFUSE("document-program-capture.recipe-or-base", Standard_False);
         TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
-        if(children.Length()>core3d::profile::MaximumLabels)return Standard_False;
-        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(state.retained.label))return Standard_False;
+        if(children.Length()>core3d::profile::MaximumLabels)CORE3D_CUT_REFUSE("document-program-capture.subshape-budget", Standard_False);
+        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(state.retained.label))CORE3D_CUT_REFUSE("document-program-capture.foreign-subshape", Standard_False);
         output=std::move(result);return Standard_True;
-    }catch(...){output={};return Standard_False;}
+    }catch(...){output={};CORE3D_CUT_REFUSE("document-program-capture.exception", Standard_False);}
 }
 
 Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
@@ -7550,13 +7557,13 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
 #if DEBUG // Cut475 phase diagnostics only
     Cut475Scope cut475{"stage.preflight"};
 #endif // Cut475 phase diagnostics only
-    if(!NSThread.isMainThread)return Standard_False;
+    if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("staging.thread", Standard_False);
     try {
         namespace r=core3d::retained_solid;OcctCylindricalCutSource source;std::vector<std::uint8_t> bytes;
         OcctCylindricalCutProgramSource program;const bool wholeProgram=edit.has_value();
         if(myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()||!payload
             ||candidate.IsNull()||candidate.ShapeType()!=TopAbs_SOLID||candidate.Orientation()!=TopAbs_FORWARD
-            ||ClassifyDefinitionGeometry(candidate,nullptr)!=DefinitionGeometryClass::BRep)return Standard_False;
+            ||ClassifyDefinitionGeometry(candidate,nullptr)!=DefinitionGeometryClass::BRep)CORE3D_CUT_REFUSE("staging.preflight", Standard_False);
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="stage.envelope-transition";
@@ -7565,41 +7572,43 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             // The exact typed transition is recomputed from the freshly
             // captured original full recipe: append preserves all original
             // source/tool/order bytes plus exactly one newly issued step and
-            // the next-ID advance; radius changes only the addressed operand
-            // radius. A candidate shape or encoded payload alone is no permit.
+            // the next-ID advance; a ring radius/count edit changes only its
+            // addressed field. A candidate shape or encoded payload is no permit.
             if(!std::holds_alternative<core3d::retained_boolean::Program>(payload->envelope)
                 ||!CaptureCylindricalCutProgramSource(previous.label,program)
                 ||!program.original.IsEqual(previous)
                 ||!core3d::sweep_rebuild::SameRawScalars(program.original.scalars,previous.scalars)
                 ||!payload->base.IsEqual(program.base)
-                ||!core3d::retained_boolean::Encode(payload->envelope,bytes)||bytes!=payload->bytes)return Standard_False;
+                ||!core3d::retained_boolean::Encode(payload->envelope,bytes)||bytes!=payload->bytes)CORE3D_CUT_REFUSE("staging.program-capture-or-envelope", Standard_False);
             const auto expected=core3d::retained_boolean::Apply(program.recipe,*edit,program.effectiveMM);
             if(!expected||!expected->changed||expected->oldBytes!=program.recipeBytes
-                ||expected->newBytes!=payload->bytes||!expected->selectedOperandID)return Standard_False;
+                ||expected->newBytes!=payload->bytes||!expected->selectedOperandID)CORE3D_CUT_REFUSE("staging.program-transition", Standard_False);
         }else{
             if(!CaptureCylindricalCutSource(previous.label,source)||!source.original.IsEqual(previous)
                 ||!core3d::sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)
-                ||!payload->base.IsEqual(source.base)||!core3d::retained_boolean::Encode(payload->envelope,bytes)||bytes!=payload->bytes)return Standard_False;
-            const auto* legacy=std::get_if<r::Envelope>(&payload->envelope);if(!legacy)return Standard_False;
+                ||!core3d::retained_boolean::Encode(payload->envelope,bytes)||bytes!=payload->bytes)CORE3D_CUT_REFUSE("staging.source-capture-or-envelope", Standard_False);
+            const auto* legacy=std::get_if<r::Envelope>(&payload->envelope);if(!legacy
+                ||!core3d::saved_cut_source_edit::FirstCutBaseMatches(source.base,payload->base,source.rebuilding,*legacy))CORE3D_CUT_REFUSE("staging.base-proof", Standard_False);
             auto expected=source.envelope;
             if(source.rebuilding){
-                if(!core3d::cylindrical_cut::SameFixedEnvelope(expected,*legacy))return Standard_False;
+                if(!core3d::cylindrical_cut::SameFixedEnvelope(expected,*legacy))CORE3D_CUT_REFUSE("staging.fixed-envelope", Standard_False);
             }else{
                 expected.derivedFeature=legacy->derivedFeature;expected.operandID=legacy->operandID;
                 expected.axis=legacy->axis;expected.point=legacy->point;expected.radius=legacy->radius;
-                std::vector<std::uint8_t> actual;if(!r::Encode(expected,actual)||actual!=payload->bytes)return Standard_False;
+                std::vector<std::uint8_t> actual;if(!r::Encode(expected,actual)||actual!=payload->bytes)CORE3D_CUT_REFUSE("staging.first-cut-envelope", Standard_False);
             }
         }
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="stage.appearance-before";
 #endif // Cut475 phase diagnostics only
-        OcctScalarAppearanceState appearance;if(!CaptureScalarAppearanceForSavedCut(previous.label,appearance))return Standard_False;
-        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());if(shapes.IsNull())return Standard_False;
+        OcctScalarAppearanceState appearance;if(!CaptureScalarAppearanceForSavedCut(previous.label,appearance))CORE3D_CUT_REFUSE("staging.appearance-before", Standard_False);
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());if(shapes.IsNull())CORE3D_CUT_REFUSE("staging.shape-tool", Standard_False);
         const auto rebuilding=wholeProgram||source.rebuilding;
         const auto metadata=rebuilding?previous.retained.label:
-            !previous.profile.label.IsNull()?previous.profile.label:previous.enclosure.label;
-        if(metadata.IsNull()||metadata.Tag()<r::MinimumRecordTag)return Standard_False;
+            !previous.profile.label.IsNull()?previous.profile.label:
+            !previous.enclosure.label.IsNull()?previous.enclosure.label:previous.loft.label;
+        if(metadata.IsNull()||metadata.Tag()<r::MinimumRecordTag)CORE3D_CUT_REFUSE("staging.metadata", Standard_False);
         // Single ordinary-owned command: preserve original occurrence scalars,
         // material/name/identity labels and pair owner result with the carrier.
 
@@ -7628,18 +7637,18 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
         OcctObjectTransformState stored;OcctScalarAppearanceState after;
         if(!CaptureObjectTransformStateForLabel(previous.label,stored)||!stored.shape.IsEqual(candidate)
             ||!stored.retained.value||stored.retained.value->bytes!=payload->bytes
-            ||!stored.retained.value->base.IsEqual(payload->base)||!stored.profile.label.IsNull()||!stored.enclosure.label.IsNull()
+            ||!stored.retained.value->base.IsEqual(payload->base)||!stored.profile.label.IsNull()||!stored.enclosure.label.IsNull()||!stored.loft.label.IsNull()
             ||stored.entityIdentifier!=previous.entityIdentifier||stored.definitionIdentifier!=previous.definitionIdentifier
             ||stored.present!=previous.present||!core3d::sweep_rebuild::SameRawScalars(stored.scalars,previous.scalars)
             ||!CaptureScalarAppearanceForSavedCut(previous.label,after)||!appearance.IsEqual(after)
             ||!core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues)
-            ||!ValidateGeometryRepresentations())return Standard_False;
+            ||!ValidateGeometryRepresentations())CORE3D_CUT_REFUSE("staging.readback", Standard_False);
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase=nullptr;Cut475Trace("stage.success");
 #endif // Cut475 phase diagnostics only
         return Standard_True;
-    }catch(...){return Standard_False;}
+    }catch(...){CORE3D_CUT_REFUSE("staging.exception", Standard_False);}
 }
 
 Standard_Boolean OcctDocument::StageSavedSweepReplacement(
@@ -7705,7 +7714,7 @@ Standard_Boolean OcctDocument::StageSavedLoftReplacement(
         if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
             || !CaptureObjectTransformStateForLabel(previous.label,current) || !current.IsEqual(previous)
             || !core3d::sweep_rebuild::SameRawScalars(current.scalars,previous.scalars)
-            || current.loft.label.IsNull() || !current.loft.IsCurrent(myOcafDoc,previous.label)
+            || current.retained.value || current.loft.label.IsNull() || !current.loft.IsCurrent(myOcafDoc,previous.label)
             || !core3d::loft_rebuild::HasOnlyMetadataSubshapes(myOcafDoc,previous.label)
             || !core3d::loft_rebuild::Matches(current.loft.definition,edit,definition)
             || !p::Encode(definition,values) || candidate.IsNull() || candidate.ShapeType()!=TopAbs_SOLID
@@ -8234,12 +8243,18 @@ struct CutRootEvidence {
 };
 // Only the selected result shape and its old/new feature slots may differ.
 // Raw scalars/axis, appearance, frame/atlas, presence, name and visibility stay exact.
-bool CutStableRootEqual(const PBRRootEntry& a,const PBRRootEntry& b) {
+bool CutStableRootEqual(const PBRRootEntry& a,const PBRRootEntry& b,bool firstLoftCut=false) {
     auto left=a.object,right=b.object;
     auto& x=left.object.object;auto& y=right.object.object;
     x.shape=y.shape;x.profile=y.profile;x.enclosure=y.enclosure;x.retained=y.retained;
+    if(firstLoftCut){
+        // Only the sealing caller may admit this checked source-to-carrier
+        // transition; source edits still require exact loft-slot equality.
+        if(x.loft.label.IsNull()||!y.loft.label.IsNull())return false;
+        x.loft=y.loft;
+    }
     return left.IsEqual(right)&&a.object.object.object.sweep.IsEqual(b.object.object.object.sweep)
-        &&a.object.object.object.loft.IsEqual(b.object.object.object.loft);
+        &&(firstLoftCut||a.object.object.object.loft.IsEqual(b.object.object.object.loft));
 }
 }
 struct OcctSavedCutSceneState {
@@ -8403,14 +8418,14 @@ bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedC
 #if DEBUG // Cut475 phase diagnostics only
     Cut475Scope cut475{"seal.preflight"};
 #endif // Cut475 phase diagnostics only
-    candidate.reset();if(!previous||!previous->scene||!payload||result.IsNull())return false;
+    candidate.reset();if(!previous||!previous->scene||!payload||result.IsNull())CORE3D_CUT_REFUSE("seal.preflight", false);
     try {
-        const auto& before=*previous->scene;const auto selected=before.roots.find(before.target);if(selected==before.roots.end())return false;
+        const auto& before=*previous->scene;const auto selected=before.roots.find(before.target);if(selected==before.roots.end())CORE3D_CUT_REFUSE("seal.target", false);
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="seal.capture";
 #endif // Cut475 phase diagnostics only
-        const auto after=CaptureSavedCutSceneState(selected->second.object.object.object.label);if(!after||!after->scene)return false;const auto& now=*after->scene;
+        const auto after=CaptureSavedCutSceneState(selected->second.object.object.object.label);if(!after||!after->scene)CORE3D_CUT_REFUSE("seal.capture", false);const auto& now=*after->scene;
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="seal.global-stable";
@@ -8418,27 +8433,36 @@ bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedC
         if(before.data!=now.data||before.target!=now.target||std::memcmp(&before.metersPerUnit,&now.metersPerUnit,8)
             ||before.materials!=now.materials||before.links!=now.links||before.objectMaterialAttributes!=now.objectMaterialAttributes
             ||!before.groups.IsEqual(now.groups)||!before.receipts.matches(now.receipts)||before.roots.size()!=now.roots.size()
-            ||previous->layers!=after->layers||previous->layerGraph!=after->layerGraph)return false;
+            ||previous->layers!=after->layers||previous->layerGraph!=after->layerGraph)CORE3D_CUT_REFUSE("seal.global-stable", false);
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="seal.root-membership";
 #endif // Cut475 phase diagnostics only
         for(const auto& [key,old]:before.roots){auto at=now.roots.find(key);auto extra=after->roots.find(key);auto prior=previous->roots.find(key);
-            if(at==now.roots.end()||extra==after->roots.end()||prior==previous->roots.end())return false;
+            if(at==now.roots.end()||extra==after->roots.end()||prior==previous->roots.end())CORE3D_CUT_REFUSE("seal.root-membership", false);
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="seal.unrelated-root";
 #endif // Cut475 phase diagnostics only
-            if(key!=before.target){if(!old.equals(at->second)||!prior->second.equals(extra->second))return false;continue;}
+            if(key!=before.target){if(!old.equals(at->second)||!prior->second.equals(extra->second))CORE3D_CUT_REFUSE("seal.unrelated-root", false);continue;}
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase="seal.selected-stable";
 #endif // Cut475 phase diagnostics only
             const auto& source=old.object.object.object;const auto& actual=at->second.object.object.object;
+            const bool firstLoftCut=!source.loft.label.IsNull();
+            if(firstLoftCut){
+                const auto* envelope=std::get_if<core3d::retained_solid::Envelope>(&payload->envelope);
+                if(source.retained.value||!envelope||envelope->sourceFamily!=3
+                    ||envelope->sourceSchema!=core3d::loft_persistence::Schema
+                    ||!core3d::loft_persistence::SameBits(source.loft.values,envelope->sourceValues)
+                    ||core3d::retained_solid::UUIDText(envelope->sourceFeature)!=source.loft.identifier)
+                    CORE3D_CUT_REFUSE("seal.loft-source-transition", false);
+            }
             if(!actual.shape.IsEqual(result)||!actual.retained.value||actual.retained.value->bytes!=payload->bytes
                 ||!actual.retained.value->base.IsEqual(payload->base)||!actual.profile.label.IsNull()||!actual.enclosure.label.IsNull()
-                ||!CutStableRootEqual(old,at->second)||prior->second.stableRaw!=extra->second.stableRaw
-                ||prior->second.frameState!=extra->second.frameState||prior->second.frames.archive!=extra->second.frames.archive)return false;
+                ||!CutStableRootEqual(old,at->second,firstLoftCut)||prior->second.stableRaw!=extra->second.stableRaw
+                ||prior->second.frameState!=extra->second.frameState||prior->second.frames.archive!=extra->second.frames.archive)CORE3D_CUT_REFUSE("seal.selected-stable", false);
             // StageCylindricalCutReplacement owns the exact recipe transition.
             // This independently binds the archived source geometry, including
             // mutable shared-TShape contents which handle equality cannot prove.
@@ -8447,14 +8471,14 @@ bool OcctDocument::SealSavedCutSceneState(const std::shared_ptr<const OcctSavedC
         cut475.phase="seal.retained-base-content";
 #endif // Cut475 phase diagnostics only
             const auto expectedBase=source.retained.value?prior->second.retainedBase:old.geometry;
-            if(extra->second.retainedBase!=expectedBase||extra->second.retainedEnvelope!=payload->bytes)return false;
+            if(extra->second.retainedBase!=expectedBase||extra->second.retainedEnvelope!=payload->bytes)CORE3D_CUT_REFUSE("seal.retained-base-content", false);
         }
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase=nullptr;Cut475Trace("seal.success");
 #endif // Cut475 phase diagnostics only
         candidate=after;return true;
-    }catch(...){return false;}
+    }catch(...){CORE3D_CUT_REFUSE("seal.exception", false);}
 }
 
 // External candidate only. Requires SavedCutSourceDetachedWork.hxx and private
@@ -8641,7 +8665,7 @@ Standard_Boolean OcctDocument::StageSavedProgramSourceReplacement(
         // recipe. Only native worker construction can issue built; a matching
         // digest alone is never used to classify a caller-supplied shape.
         const std::atomic_bool checking(false);p::Values expected;
-        if(!p::PrepareValues(source.recipe,patch,checking,expected)||!expected.changed
+        if(!core3d::saved_boolean_build::PrepareSourceValues(source.recipe,patch,checking,expected,p::PrepareValues)||!expected.changed
             ||expected.oldBytes!=source.recipeBytes
             ||expected.oldBytes!=built->values.oldBytes
             ||expected.newBytes!=built->values.newBytes)return Standard_False;
@@ -8719,7 +8743,7 @@ bool OcctDocument::SealSavedProgramSourceState(
         if(!original.retained.value||original.retained.value->bytes!=built->values.oldBytes
             ||!std::holds_alternative<core3d::retained_boolean::Program>(original.retained.value->envelope))return false;
         const std::atomic_bool checking(false);p::Values expected;
-        if(!p::PrepareValues(original.retained.value->envelope,patch,checking,expected)||!expected.changed
+        if(!core3d::saved_boolean_build::PrepareSourceValues(original.retained.value->envelope,patch,checking,expected,p::PrepareValues)||!expected.changed
             ||expected.oldBytes!=built->values.oldBytes||expected.newBytes!=built->values.newBytes
             ||payload->bytes!=expected.newBytes||!payload->base.IsEqual(built->newBase)
             ||!std::holds_alternative<core3d::retained_boolean::Program>(payload->envelope))return false;
@@ -10882,6 +10906,10 @@ std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard
 }
 std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe(){
     return SavedCutResultProbeChecks(core3d::saved_boolean_build::probe::Run(),"program",257);
+}
+#include "SavedBooleanRingProbe.hxx"
+std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario){
+    return core3d::saved_boolean_ring_probe::Run(unsigned(scenario));
 }
 #include "CircularHostProofProbe.hxx"
 std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario){

@@ -1,6 +1,7 @@
 #pragma once
 #include "RetainedBooleanProgram.hxx"
 #include "CylindricalCutDefinition.hxx"
+#include "SavedBooleanResultCorrespondence.hxx"
 namespace core3d::retained_boolean {
 struct Change {
     Recipe recipe;
@@ -38,7 +39,7 @@ inline std::optional<Change> Radius(const Recipe& original,std::uint32_t operand
             auto& program=std::get<Program>(result.recipe);double local=0;
             if(!cylindrical_cut::Radius(worldMM,effectiveMM,local))return {};
             auto found=std::find_if(program.steps.begin(),program.steps.end(),[&](const auto& step){return step.operand.identifier==operandID;});
-            if(found==program.steps.end())return {};
+            if(found==program.steps.end()||found->operand.kind!=analytic_boolean::OperandKind::Cylinder)return {};
             const double current=found->operand.radius*effectiveMM;
             if(!std::isfinite(current)||current<.001||current>1e6)return {};
             if(worldMM!=current)found->operand.radius=local;
@@ -54,12 +55,44 @@ inline std::optional<Change> Radius(const Recipe& original,std::uint32_t operand
 // Neither variant carries owner, command, geometry or prepared AI authority.
 struct AppendBore { cylindrical_cut::CreateEdit edit; };
 struct SetBoreRadius { std::uint32_t operandID=0; double worldRadiusMM=0; };
-using ProgramEdit=std::variant<AppendBore,SetBoreRadius>;
+struct AppendRing {cylindrical_cut::RingCreateEdit edit;};
+struct SetRingRadius {std::uint32_t operandID=0;double worldHoleRadiusMM=0;};
+struct SetRingCount {std::uint32_t operandID=0;std::uint32_t count=0;};
+using ProgramEdit=std::variant<AppendBore,SetBoreRadius,AppendRing,SetRingRadius,SetRingCount>;
+inline bool RingEdit(const ProgramEdit& edit){return std::holds_alternative<AppendRing>(edit)
+    ||std::holds_alternative<SetRingRadius>(edit)||std::holds_alternative<SetRingCount>(edit);}
+inline bool HasRing(const Program& p){return std::any_of(p.steps.begin(),p.steps.end(),[](const auto& s){
+    return s.operand.kind==analytic_boolean::OperandKind::CylinderRing;});}
 inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edit,double effectiveMM) noexcept {
     try {
         if(const auto* append=std::get_if<AppendBore>(&edit))return Append(original,append->edit,effectiveMM);
-        const auto& radius=std::get<SetBoreRadius>(edit);
-        return Radius(original,radius.operandID,radius.worldRadiusMM,effectiveMM);
+        if(const auto* radius=std::get_if<SetBoreRadius>(&edit))return Radius(original,radius->operandID,radius->worldRadiusMM,effectiveMM);
+        Change result;if(!Encode(original,result.oldBytes))return {};
+        Program p;if(const auto* legacy=std::get_if<Legacy>(&original)){if(!Promote(*legacy,p))return {};}
+        else p=std::get<Program>(original);
+        if(const auto* append=std::get_if<AppendRing>(&edit)){
+            if(p.steps.size()>=MaximumOperands||p.nextOperandID>UINT32_MAX)return {};
+            const auto& r=append->edit;Step step;auto& t=step.operand;
+            t.identifier=std::uint32_t(p.nextOperandID);t.axis=r.axis;t.point=r.localCenter;
+            if(!cylindrical_cut::Radius(r.worldHoleRadiusMM,effectiveMM,t.radius))return {};
+            // Extent validation uses a plain value-only view of the host.
+            double extent=0;if(!saved_boolean_result::detail::HostRadialExtent(p,t,extent))return {};
+            t.kind=analytic_boolean::OperandKind::CylinderRing;t.boltCircleRadius=r.boltCircleRadius;
+            t.hostRadiusRatio=r.boltCircleRadius/extent;t.count=r.count;p.codecMinor=2;
+            result.selectedOperandID=t.identifier;p.steps.push_back(step);++p.nextOperandID;
+        }else{
+            const auto* radius=std::get_if<SetRingRadius>(&edit);const auto* count=std::get_if<SetRingCount>(&edit);
+            const auto id=radius?radius->operandID:count->operandID;
+            auto it=std::find_if(p.steps.begin(),p.steps.end(),[&](const auto& s){return s.operand.identifier==id;});
+            if(it==p.steps.end()||it->operand.kind!=analytic_boolean::OperandKind::CylinderRing)return {};
+            if(radius){double local=0;if(!cylindrical_cut::Radius(radius->worldHoleRadiusMM,effectiveMM,local))return {};
+                if(radius->worldHoleRadiusMM!=it->operand.radius*effectiveMM)it->operand.radius=local;}
+            else it->operand.count=count->count;
+            result.selectedOperandID=id;
+        }
+        if(!saved_boolean_result::detail::AdmitDisks(p))return {};
+        result.recipe=std::move(p);if(!Encode(result.recipe,result.newBytes))return {};
+        result.changed=result.oldBytes!=result.newBytes;return result;
     }catch(...){return {};}
 }
 // Occurrence-only placement scales every operand with the part; it never

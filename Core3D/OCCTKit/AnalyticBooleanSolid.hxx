@@ -1,7 +1,7 @@
 #pragma once
 // Detached geometry only. No OCAF command, owner, catalog, material, receipt or
 // public UI/AI API is provided. Caller supplies an already detached base shape.
-#include "AnalyticBooleanOperand.hxx"
+#include "AnalyticBooleanRingOperand.hxx"
 // Deliberate dependency on existing cancellation and exact self-interference
 // helpers. No duplicated feature authority or alternate geometry engine.
 #include "PlanarSweepSolid.hxx"
@@ -11,6 +11,8 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -44,7 +46,32 @@ inline bool Bounded(const TopoDS_Shape& shape, std::size_t limit,
     return true; // Counts occurrences as well as shared unique subshapes.
 }
 inline bool Bounds(const TopoDS_Shape& shape, double mm, std::array<double,6>& out) {
-    Bnd_Box box; BRepBndLib::AddOptimal(shape,box,Standard_False,Standard_False);
+    Bnd_Box box;
+    // A trimmed planar polygon attains its extrema at its vertices. Measure
+    // those stored points directly: evaluating the plane at UV limits can
+    // move an extremum by one ULP when binary reload renormalizes its axes.
+    // Curved faces/edges retain the kernel's analytic extrema calculation.
+    // This uses actual topology, never the source recipe or rounded values.
+    if (shape.IsNull() || shape.ShapeType()!=TopAbs_SOLID) return false;
+    for (TopExp_Explorer faces(shape,TopAbs_FACE);faces.More();faces.Next()) {
+        const auto face=TopoDS::Face(faces.Current());
+        bool polygon=BRepAdaptor_Surface(face).GetType()==GeomAbs_Plane;
+        unsigned edges=0;
+        for (TopExp_Explorer it(face,TopAbs_EDGE);polygon&&it.More();it.Next()) {
+            ++edges;
+            polygon=BRepAdaptor_Curve(TopoDS::Edge(it.Current())).GetType()==GeomAbs_Line;
+        }
+        if (!polygon || edges<3) {
+            BRepBndLib::AddOptimal(face,box,Standard_False,Standard_False);
+            continue;
+        }
+        unsigned vertices=0;
+        for (TopExp_Explorer it(face,TopAbs_VERTEX);it.More();it.Next()) {
+            box.Add(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+            ++vertices;
+        }
+        if (vertices<3) return false;
+    }
     if (box.IsVoid() || box.IsWhole() || box.IsOpen()) return false;
     box.Get(out[0],out[1],out[2],out[3],out[4],out[5]);
     for (double x : out) if (!std::isfinite(x) || !std::isfinite(x*mm) || std::abs(x*mm)>1e6) return false;
@@ -109,13 +136,21 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         const double length=result.toolEnd-result.toolStart;
         if (!std::isfinite(length) || length<=0 || !std::isfinite(length*mm) || length*mm>2e6+1)
             return Status::InvalidRecipe;
-        auto origin=recipe.tool.point;origin[axis]=result.toolStart;
-        const gp_Dir direction=axis==0?gp::DX():axis==1?gp::DY():gp::DZ();
-        BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(gp_Pnt(origin[0],origin[1],origin[2]),direction),recipe.tool.radius,length);
-        cylinder.Build();
-        if (!cylinder.IsDone()) return Status::KernelFailure;
-        if (stop.load()) return Status::Cancelled;
-        TopTools_ListOfShape arguments,tools;arguments.Append(base);tools.Append(cylinder.Shape());
+        const bool ring=recipe.tool.kind==OperandKind::CylinderRing;
+        const auto ringValue=analytic_boolean_ring::FromOperand(recipe.tool,recipe.metersPerUnit);
+        if(ring&&analytic_boolean_ring::Inspect(ringValue,recipe.metersPerUnit)!=analytic_boolean_ring::Status::Clear)
+            return Status::InvalidRecipe;
+        const unsigned diskCount=ring?recipe.tool.count:1;
+        TopTools_ListOfShape arguments,tools;arguments.Append(base);
+        for(unsigned k=0;k<diskCount;++k){
+            auto disk=ring?analytic_boolean_ring::Expand(ringValue,k,recipe.metersPerUnit):recipe.tool;
+            if(!disk.identifier)return Status::InvalidRecipe;
+            auto origin=disk.point;origin[axis]=result.toolStart;
+            const gp_Dir direction=axis==0?gp::DX():axis==1?gp::DY():gp::DZ();
+            BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(gp_Pnt(origin[0],origin[1],origin[2]),direction),recipe.tool.radius,length);
+            cylinder.Build();if(!cylinder.IsDone())return Status::KernelFailure;
+            if(stop.load())return Status::Cancelled;tools.Append(cylinder.Shape());
+        }
         BRepAlgoAPI_Cut cut;
         cut.SetArguments(arguments);cut.SetTools(tools);
         cut.SetRunParallel(Standard_False);cut.SetNonDestructive(Standard_True);
@@ -134,6 +169,12 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         // This is an admission precision bound, not a geometric oracle tolerance.
         const double minRemoved=std::max(tolerance*tolerance*tolerance,result.sourceVolume*1e-12);
         if (!std::isfinite(result.removedVolume) || result.removedVolume<=minRemoved) return Status::NoRemovedVolume;
+        if(ring){
+            const double required=diskCount*std::acos(-1.0)*recipe.tool.radius*recipe.tool.radius
+                *(result.sourceBounds[axis+3]-result.sourceBounds[axis]);
+            if(!std::isfinite(required)||result.removedVolume+std::max(minRemoved,required*1e-9)<required)
+                return Status::NoRemovedVolume;
+        }
         for (unsigned i=0;i<3;++i)
             if (result.resultBounds[i]<result.sourceBounds[i]-tolerance
                 || result.resultBounds[i+3]>result.sourceBounds[i+3]+tolerance) return Status::VerificationFailed;

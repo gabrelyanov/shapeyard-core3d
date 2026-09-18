@@ -389,6 +389,16 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 @end
 
+@implementation Core3DCylindricalCutRingDefinition
+- (instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z
+    boltCircleRadius:(double)boltRadius worldHoleRadiusMM:(double)holeRadius count:(uint32_t)count {
+    if(axis<Core3DCylindricalCutAxisX||axis>Core3DCylindricalCutAxisZ||!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z)
+        ||!std::isfinite(boltRadius)||boltRadius<=0||boltRadius>1e6||!std::isfinite(holeRadius)||holeRadius<.001||holeRadius>1e6)return nil;
+    self=[super init];if(self){_axis=axis;_localX=x;_localY=y;_localZ=z;
+        _boltCircleRadius=boltRadius;_worldHoleRadiusMM=holeRadius;_count=count;}return self;
+}
+@end
+
 @interface Core3DProfileDefinition ()
 - (instancetype)initWithNativeParameters:(const core3d::profile::Parameters&)parameters;
 - (core3d::profile::Parameters)nativeParameters;

@@ -202,6 +202,23 @@ __attribute__((objc_subclassing_restricted))
 - (nullable instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z worldRadiusMM:(double)radius;
 @end
 
+//! Ring values; count, chord and host clearances are admitted by the native edit.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DCylindricalCutRingDefinition : NSObject
+@property(nonatomic,readonly) Core3DCylindricalCutAxis axis;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double boltCircleRadius;
+@property(nonatomic,readonly) double worldHoleRadiusMM;
+@property(nonatomic,readonly) NSUInteger count;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z
+    boltCircleRadius:(double)boltRadius worldHoleRadiusMM:(double)holeRadius count:(uint32_t)count
+    NS_SWIFT_NAME(init(axis:localX:localY:localZ:boltCircleRadius:worldHoleRadiusMM:count:));
+@end
+
 //! Immutable validated construction values. Lengths use the declared document
 //! unit; revolution parameters are degrees. No geometry or document handles.
 @interface Core3DProfileDefinition : NSObject

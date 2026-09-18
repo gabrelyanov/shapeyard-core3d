@@ -1,3 +1,4 @@
+#include "../OCCTKit/SavedCutSourceEdit.hxx"
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -374,11 +375,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         if (failure) { *failure = reason; }
         return OrdinaryEditLease();
     };
-    if (![NSThread isMainThread]) { return reject(OrdinaryEditResult::Invalid); }
-    if (blocksNormalWork()) { return reject(OrdinaryEditResult::Busy); }
+    if (![NSThread isMainThread]) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid)); }
+    if (blocksNormalWork()) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Busy)); }
     if (_document.IsNull() || changes.empty() || changes.size() > 1024
         || _nextToken == std::numeric_limits<std::uint64_t>::max()) {
-        return reject(OrdinaryEditResult::Invalid);
+        CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
     }
     _entering = true;
     struct EnterReset { bool& flag; ~EnterReset() { flag = false; } } reset{_entering};
@@ -386,10 +387,10 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         const auto self = shared_from_this();
         const auto lifetime = std::make_shared<const std::uint8_t>(0);
         const auto document = _document->Document();
-        if (document.IsNull() || document->HasOpenCommand()) { return reject(OrdinaryEditResult::Busy); }
+        if (document.IsNull() || document->HasOpenCommand()) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Busy)); }
         OrdinaryTransformLedger ledger;
         ledger.records.reserve(changes.size());
-        if (permit && changes.size()!=1) return reject(OrdinaryEditResult::Invalid);
+        if (permit && changes.size()!=1) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
         std::unordered_set<std::string> entities;
         std::unordered_set<const AIS_Shape*> presentations;
         bool changed = false, sweepNoChange = false;
@@ -407,87 +408,89 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
                 && request.operation != OrdinaryTransformOperation::SweepRebuild
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
-                && request.operation != OrdinaryTransformOperation::CylindricalCut
+                && !IsCylindricalCutOperation(request.operation)
                 && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.sweepRebuild.has_value() != (request.operation == OrdinaryTransformOperation::SweepRebuild)
                 || bool(request.sweepSource)!=(request.operation==OrdinaryTransformOperation::SweepRebuild
                     || request.operation==OrdinaryTransformOperation::LoftStationRebuild)
                 || request.loftRebuild.has_value()!=(request.operation==OrdinaryTransformOperation::LoftStationRebuild)
                 || request.loftStationEdit.has_value()!=(request.operation==OrdinaryTransformOperation::LoftStationRebuild)) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
+            if((request.operation==OrdinaryTransformOperation::CylindricalCutRing)
+                !=(request.cutProgramEdit&&retained_boolean::RingEdit(*request.cutProgramEdit)))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             const bool sourceRebuild=request.operation==OrdinaryTransformOperation::CylindricalCutSourceRebuild;
             const bool programSourceRebuild=request.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild;
-            if(bool(request.cut)!=(request.operation==OrdinaryTransformOperation::CylindricalCut)
-                ||bool(request.cutSource)!=(request.operation==OrdinaryTransformOperation::CylindricalCut||sourceRebuild||programSourceRebuild)
+            if(bool(request.cut)!=(IsCylindricalCutOperation(request.operation))
+                ||bool(request.cutSource)!=(IsCylindricalCutOperation(request.operation)||sourceRebuild||programSourceRebuild)
                 ||request.cutSourcePatch.has_value()!=sourceRebuild||bool(request.cutSourceRebuild)!=sourceRebuild
                 ||request.cutProgramSourcePatch.has_value()!=programSourceRebuild
                 ||bool(request.cutProgramSourceRebuild)!=programSourceRebuild
-                ||(request.cutProgramEdit.has_value()&&request.operation!=OrdinaryTransformOperation::CylindricalCut)
+                ||(request.cutProgramEdit.has_value()&&!IsCylindricalCutOperation(request.operation))
                 ||(sourceRebuild&&(permit||changes.size()!=1))
                 ||(programSourceRebuild&&(permit||changes.size()!=1)))
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if (request.meshVertexMove.has_value() != (request.operation == OrdinaryTransformOperation::MeshVertexMove)
                 || request.meshRegionExtrude.has_value() != (request.operation == OrdinaryTransformOperation::MeshRegionExtrude)
                 || request.meshRegionInset.has_value() != (request.operation == OrdinaryTransformOperation::MeshRegionInset)) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.presentation.IsNull() || request.shape.IsNull()
                 || !CandidateIsFinite(request.transform)
                 || !_document->CaptureObjectTransformStateForLabel(request.label, record.previous)
                 || !entities.insert(record.previous.entityIdentifier).second
                 || !presentations.insert(request.presentation.get()).second) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if(bool(request.placementContinuation)!=(permit&&permit->operation_==receipt::Operation::SetPlacement))
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if (permit && !(permit->operation_==receipt::Operation::SetPlacement
                 ?bindPlacementReceipt(ledger,request,record.previous,permit)
                 :bindRebuildReceipt(ledger, request, record.previous, permit)))
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             const auto unchanged = [&]() {
                 if (permit) {
                     record.requested=request;
                     ledger.records.push_back(record);
                     if (!permit->current() || document->HasOpenCommand()
                         || !captureMatches(record.previous) || !rebuildReceiptMatches(ledger,false))
-                        return reject(OrdinaryEditResult::Invalid);
+                        CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                     // No command was opened: no receipt-only Undo or durable
                     // commit claim. The permanent reservation still forbids replay.
                     permit->resolution_->state_=NativeModelingReceiptResolution::State::Unchanged;
                 }
-                return reject(OrdinaryEditResult::NoChange);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::NoChange));
             };
             if (request.rotationAroundPivot.has_value() != changes.front().rotationAroundPivot.has_value()) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.rotationAroundPivot) {
                 const auto& rotation = *request.rotationAroundPivot;
                 const auto& common = *changes.front().rotationAroundPivot;
                 if (request.operation != OrdinaryTransformOperation::Rotate || !IsRotationAroundPivot(rotation)
                     || !rotation.pivot.IsEqual(common.pivot, 0.0)
-                    || !MatricesEqual(rotation.delta, common.delta)) { return reject(OrdinaryEditResult::Invalid); }
+                    || !MatricesEqual(rotation.delta, common.delta)) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid)); }
             }
             if (request.operation == OrdinaryTransformOperation::Translate) {
                 for (int row = 1; row <= 3; ++row) {
                     for (int column = 1; column <= 3; ++column) {
                         if (record.previous.transform.Value(row, column) != request.transform.Value(row, column)) {
-                            return reject(OrdinaryEditResult::Invalid);
+                            CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                         }
                     }
                 }
             } else if (request.operation == OrdinaryTransformOperation::Rotate) {
                 if (record.previous.transform.ScaleFactor() != request.transform.ScaleFactor()) {
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
                 if (request.rotationAroundPivot) {
                     const gp_Trsf expected = request.rotationAroundPivot->delta * record.previous.transform;
@@ -503,24 +506,27 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                             }
                             if (!RotationArithmeticEqual(expected.Value(row, column),
                                                          request.transform.Value(row, column), arithmeticScale)) {
-                                return reject(OrdinaryEditResult::Invalid);
+                                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                             }
                         }
                     }
                 } else {
                     for (int row = 1; row <= 3; ++row) {
                         if (record.previous.transform.Value(row, 4) != request.transform.Value(row, 4)) {
-                            return reject(OrdinaryEditResult::Invalid);
+                            CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                         }
                     }
                 }
             }
             const bool geometryChanges = !record.previous.shape.IsEqual(request.shape);
+            // A first cylindrical cut consumes the loft source record below;
+            // its typed cut admission and paired staging still prove the change.
             if (!record.previous.loft.label.IsNull() && geometryChanges
-                && request.operation!=OrdinaryTransformOperation::LoftStationRebuild) return reject(OrdinaryEditResult::Invalid);
+                && request.operation!=OrdinaryTransformOperation::LoftStationRebuild
+                && !IsCylindricalCutOperation(request.operation)) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if (!record.previous.sweep.label.IsNull() && geometryChanges
                 && request.operation!=OrdinaryTransformOperation::SweepRebuild)
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if (geometryChanges && request.operation != OrdinaryTransformOperation::Scale
                 && request.operation != OrdinaryTransformOperation::MeshUVAtlas
                 && request.operation != OrdinaryTransformOperation::MeshVertexMove
@@ -531,15 +537,15 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
                 && request.operation != OrdinaryTransformOperation::SweepRebuild
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
-                && request.operation != OrdinaryTransformOperation::CylindricalCut
+                && !IsCylindricalCutOperation(request.operation)
                 && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             const auto representation = record.previous.resolvedRepresentation;
-            if(request.operation==OrdinaryTransformOperation::CylindricalCut) {
+            if(IsCylindricalCutOperation(request.operation)) {
                 OcctCylindricalCutSource source;std::vector<std::uint8_t> encoded;
-                if(!request.cut)return reject(OrdinaryEditResult::Invalid);
+                if(!request.cut)CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 const auto* legacy=std::get_if<retained_solid::Envelope>(&request.cut->envelope);
                 if(!legacy){
                     // Whole-program append/identified-radius admission: the exact
@@ -553,11 +559,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                         ||!program.original.IsEqual(record.previous)
                         ||!request.cut->base.IsEqual(program.base)
                         ||!retained_boolean::Encode(request.cut->envelope,encoded)||encoded!=request.cut->bytes
-                        ||!_document->SavedCutSceneStateMatches(request.cutSource))return reject(OrdinaryEditResult::Invalid);
+                        ||!_document->SavedCutSceneStateMatches(request.cutSource))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                     const auto expected=retained_boolean::Apply(program.recipe,*request.cutProgramEdit,program.effectiveMM);
                     if(!expected||expected->oldBytes!=program.recipeBytes||expected->newBytes!=request.cut->bytes
-                        ||!std::holds_alternative<retained_boolean::Program>(expected->recipe))return reject(OrdinaryEditResult::Invalid);
-                    if(!geometryChanges&&program.recipeBytes!=request.cut->bytes)return reject(OrdinaryEditResult::Invalid);
+                        ||!std::holds_alternative<retained_boolean::Program>(expected->recipe))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+                    if(!geometryChanges&&program.recipeBytes!=request.cut->bytes)CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                     ledger.cutPrevious=request.cutSource;
                     sweepNoChange=program.recipeBytes==request.cut->bytes;
                 }else{
@@ -565,33 +571,33 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     ||permit||changes.size()!=1||representation!=OcctGeometryRepresentation::BRep||request.rotationAroundPivot
                     ||!MatricesEqual(record.previous.transform,request.transform)
                     ||!_document->CaptureCylindricalCutSource(request.label,source)||!source.original.IsEqual(record.previous)
-                    ||!request.cut->base.IsEqual(source.base)
+                    ||!saved_cut_source_edit::FirstCutBaseMatches(source.base,request.cut->base,source.rebuilding,*legacy)
                     ||!retained_solid::Encode((*legacy),encoded)||encoded!=request.cut->bytes
-                    ||!_document->SavedCutSceneStateMatches(request.cutSource))return reject(OrdinaryEditResult::Invalid);
+                    ||!_document->SavedCutSceneStateMatches(request.cutSource))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 auto expected=source.envelope;
                 if(source.rebuilding){
-                    if(!cylindrical_cut::SameFixedEnvelope(expected,(*legacy)))return reject(OrdinaryEditResult::Invalid);
+                    if(!cylindrical_cut::SameFixedEnvelope(expected,(*legacy)))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }else{
                     expected.derivedFeature=(*legacy).derivedFeature;expected.operandID=(*legacy).operandID;
                     expected.axis=(*legacy).axis;expected.point=(*legacy).point;expected.radius=(*legacy).radius;
-                    if(!retained_solid::Encode(expected,encoded)||encoded!=request.cut->bytes)return reject(OrdinaryEditResult::Invalid);
+                    if(!retained_solid::Encode(expected,encoded)||encoded!=request.cut->bytes)CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
-                if(!geometryChanges&&(!source.rebuilding||source.original.retained.value->bytes!=request.cut->bytes))return reject(OrdinaryEditResult::Invalid);
+                if(!geometryChanges&&(!source.rebuilding||source.original.retained.value->bytes!=request.cut->bytes))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=source.rebuilding&&source.original.retained.value->bytes==request.cut->bytes;
                 }
             }
             if(sourceRebuild) {
-                if(!savedCutSourceChangeMatches(request,record.previous))return reject(OrdinaryEditResult::Invalid);
+                if(!savedCutSourceChangeMatches(request,record.previous))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=request.cutSourceRebuild->isNoChange();
             }
             if(programSourceRebuild) {
-                if(!savedProgramSourceChangeMatches(request,record.previous))return reject(OrdinaryEditResult::Invalid);
+                if(!savedProgramSourceChangeMatches(request,record.previous))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=request.cutProgramSourceRebuild->isNoChange();
             }
-            if(record.previous.retained.value&&request.operation!=OrdinaryTransformOperation::CylindricalCut
+            if(record.previous.retained.value&&!IsCylindricalCutOperation(request.operation)
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
                 // An occurrence edit never changes the original-local result,
@@ -603,7 +609,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     ||(request.operation!=OrdinaryTransformOperation::Translate
                         &&request.operation!=OrdinaryTransformOperation::Rotate
                         &&request.operation!=OrdinaryTransformOperation::Scale))
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 if(wholeProgram){
                     // Every program operand's physical radius must stay inside
                     // the supported domain before and after the occurrence edit.
@@ -611,19 +617,19 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                         ||!program.original.IsEqual(record.previous)
                         ||!retained_boolean::OccurrenceRadiiMM(program.recipe,record.previous.transform)
                         ||!retained_boolean::OccurrenceRadiiMM(program.recipe,request.transform))
-                        return reject(OrdinaryEditResult::Invalid);
+                        CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }else if(!_document->CaptureCylindricalCutSource(request.label,cut)||!cut.rebuilding
                     ||!cut.original.IsEqual(record.previous)
                     ||!cylindrical_cut::OccurrenceRadius(cut.envelope,record.previous.transform,originalRadius)
                     ||!cylindrical_cut::OccurrenceRadius(cut.envelope,request.transform,candidateRadius))
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 if(request.operation==OrdinaryTransformOperation::Scale) {
                     auto expected=record.previous.transform;
                     expected.SetScaleFactor(request.transform.ScaleFactor());
-                    if(!MatricesEqual(expected,request.transform))return reject(OrdinaryEditResult::Invalid);
+                    if(!MatricesEqual(expected,request.transform))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
                 ledger.cutPrevious=_document->CaptureSavedCutSceneState(request.label);
-                if(!ledger.cutPrevious)return reject(OrdinaryEditResult::Invalid);
+                if(!ledger.cutPrevious)CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 sweepNoChange=MatricesEqual(record.previous.transform,request.transform);
             }
             if (request.operation==OrdinaryTransformOperation::SweepRebuild) {
@@ -633,8 +639,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !MatricesEqual(record.previous.transform,request.transform) || request.rotationAroundPivot
                     || !geometryChanges || !sweep_rebuild::HasOnlyMetadataSubshapes(document,request.label)
                     || !sweep_rebuild::FixedStructure(record.previous.sweep.definition,*request.sweepRebuild)
-                    || !sweep_persistence::Encode(*request.sweepRebuild,values)) return reject(OrdinaryEditResult::Invalid);
-                if (!savedSweepRebuildSourceIsCurrent(request.sweepSource)) return reject(OrdinaryEditResult::Invalid);
+                    || !sweep_persistence::Encode(*request.sweepRebuild,values)) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+                if (!savedSweepRebuildSourceIsCurrent(request.sweepSource)) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 ledger.sweepGuard=std::make_shared<SweepRebuildGuard>(*request.sweepSource);
                 // All numeric values are finite and fixed fields bit-equal. Only
                 // mutable geometric signed-zero aliases compare numerically here.
@@ -648,7 +654,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !geometryChanges || !loft_rebuild::HasOnlyMetadataSubshapes(document,request.label)
                     || !loft_rebuild::Matches(record.previous.loft.definition,*request.loftStationEdit,*request.loftRebuild)
                     || !loft_persistence::Encode(*request.loftRebuild,values)
-                    || !savedSweepRebuildSourceIsCurrent(request.sweepSource)) return reject(OrdinaryEditResult::Invalid);
+                    || !savedSweepRebuildSourceIsCurrent(request.sweepSource)) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 ledger.sweepGuard=std::make_shared<SweepRebuildGuard>(*request.sweepSource);
                 sweepNoChange=loft_persistence::SameBits(values,record.previous.loft.values);
                 if(sweepNoChange&&permit)return unchanged();
@@ -663,7 +669,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !profile::Encode(*request.profileRebuild, values)
                     || request.profileRebuild->metersPerUnit != record.previous.profile.parameters.metersPerUnit
                     || request.profileRebuild->constructionFrame != record.previous.profile.parameters.constructionFrame) {
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
                 if (values == record.previous.profile.values) return unchanged();
             }
@@ -678,7 +684,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || request.enclosureRebuild->metersPerUnit != record.previous.enclosure.parameters.metersPerUnit
                     || request.enclosureRebuild->definition.constructionFrame
                         != record.previous.enclosure.parameters.definition.constructionFrame) {
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
                 if (values == record.previous.enclosure.values) return unchanged();
             }
@@ -687,7 +693,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || representation != OcctGeometryRepresentation::TriangleMesh
                     || !MatricesEqual(record.previous.transform, request.transform)
                     || !_document->ValidateTriangleUVAtlas(request.label, request.shape, request.meshUVAtlasOptions))) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.operation == OrdinaryTransformOperation::MeshVertexMove
                 && (changes.size()!=1 || !geometryChanges
@@ -697,7 +703,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                         request.meshVertexMove->worldDelta,
                         OcctMeshVertexMutationCandidate{request.shape,
                             request.meshVertexMove->candidatePartition}))) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.operation == OrdinaryTransformOperation::MeshRegionExtrude) {
                 OcctMeshRegionExtrudePreview region;
@@ -713,7 +719,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                         request.meshRegionExtrude->seedTriangle,request.meshRegionExtrude->distanceMM,
                         OcctMeshRegionMutationCandidate{request.shape,
                             request.meshRegionExtrude->candidatePartition,0})) {
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
             }
             if (request.operation == OrdinaryTransformOperation::MeshRegionInset) {
@@ -730,7 +736,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                         OcctMeshRegionMutationCandidate{request.shape,
                             request.meshRegionInset->candidatePartition,
                             request.meshRegionInset->centerSeedTriangle})) {
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
             }
             // Region mutations carry a validated replacement. Coherent UV
@@ -741,7 +747,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation!=OrdinaryTransformOperation::MeshVertexMove
                 && request.operation!=OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation!=OrdinaryTransformOperation::MeshRegionInset) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.operation == OrdinaryTransformOperation::MeshWindingRepair
                 && (changes.size() != 1 || !geometryChanges
@@ -750,23 +756,23 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || request.rotationAroundPivot.has_value()
                     || request.meshVertexMove.has_value()
                     || !_document->ValidateMeshWindingRepair(request.label, request.shape))) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if ((representation != OcctGeometryRepresentation::BRep
                     && representation != OcctGeometryRepresentation::LegacyUnknown
                     && representation != OcctGeometryRepresentation::TriangleMesh)) {
-                return reject(OrdinaryEditResult::Invalid);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.operation == OrdinaryTransformOperation::Scale
                 && representation == OcctGeometryRepresentation::TriangleMesh) {
                 // Mesh scaling changes only the persisted dimensionless factor.
                 // A Scale request cannot replace topology, move its origin or
                 // rotate it; those edits require their own admitted operation.
-                if (geometryChanges) { return reject(OrdinaryEditResult::Invalid); }
+                if (geometryChanges) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid)); }
                 gp_Trsf expected = record.previous.transform;
                 expected.SetScaleFactor(request.transform.ScaleFactor());
                 if (!MatricesEqual(expected, request.transform)) {
-                    return reject(OrdinaryEditResult::Invalid);
+                    CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
             }
             if(permit&&permit->operation_==receipt::Operation::SetPlacement
@@ -775,23 +781,23 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             record.requested = request;
             ledger.records.push_back(std::move(record));
         }
-        if (!changed && !ledger.cutPrevious) { return reject(OrdinaryEditResult::NoChange); }
-        if (!PrepareCollectiveGroupOrigin(_document,ledger)) return reject(OrdinaryEditResult::Invalid);
-        if (!_host.admitTransform(ledger)) { return reject(OrdinaryEditResult::Invalid); }
+        if (!changed && !ledger.cutPrevious) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::NoChange)); }
+        if (!PrepareCollectiveGroupOrigin(_document,ledger)) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+        if (!_host.admitTransform(ledger)) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid)); }
         // Admission is synchronous, but re-read all authority after the host
         // boundary rather than assuming that a successful callback kept it.
         for (const auto& record : ledger.records) {
-            if (!captureMatches(record.previous)) { return reject(OrdinaryEditResult::Invalid); }
+            if (!captureMatches(record.previous)) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid)); }
         }
         // Rebind the exact opaque source result after the host boundary too.
         for(const auto& record:ledger.records)if(record.requested.operation==OrdinaryTransformOperation::CylindricalCutSourceRebuild
-            &&!savedCutSourceChangeMatches(record.requested,record.previous))return reject(OrdinaryEditResult::Invalid);
+            &&!savedCutSourceChangeMatches(record.requested,record.previous))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
         for(const auto& record:ledger.records)if(record.requested.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
-            &&!savedProgramSourceChangeMatches(record.requested,record.previous))return reject(OrdinaryEditResult::Invalid);
+            &&!savedProgramSourceChangeMatches(record.requested,record.previous))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
         if (permit && (!permit->current() || !rebuildReceiptMatches(ledger,false)))
-            return reject(OrdinaryEditResult::Invalid);
-        if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false)||!TransformGroupsMatch(_document,ledger,false))) return reject(OrdinaryEditResult::Invalid);
-        if (sweepNoChange) return reject(OrdinaryEditResult::NoChange);
+            CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+        if ((!SweepGuardMatches(_document,ledger,false)||!CutGuardMatches(_document,ledger,false)||!TransformGroupsMatch(_document,ledger,false))) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+        if (sweepNoChange) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::NoChange));
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
         _activeToken = ++_nextToken;
@@ -799,7 +805,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         if (began != OrdinaryCommandBeginResult::Started) {
             if (began == OrdinaryCommandBeginResult::OutcomeUnknown) {
                 _state = OrdinaryEditState::OutcomeUnknown;
-                return reject(OrdinaryEditResult::OutcomeUnknown);
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::OutcomeUnknown));
             }
             _pending.reset();
             _activeToken = 0;
@@ -812,11 +818,11 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
     } catch (...) {
         if (_command.isRetained()) {
             _state = OrdinaryEditState::OutcomeUnknown;
-            return reject(OrdinaryEditResult::OutcomeUnknown);
+            CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::OutcomeUnknown));
         }
         _pending.reset();
         _activeToken = 0;
-        return reject(OrdinaryEditResult::Invalid);
+        CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
     }
 }
 
@@ -1914,7 +1920,7 @@ bool OrdinaryEditController::savedProgramSourceChangeMatches(
             ||!_document->SavedCutSceneStateMatches(request.cutSource))return false;
         const auto& built=*request.cutProgramSourceRebuild;
         const std::atomic_bool checking(false);p::Values expected;
-        if(!p::PrepareValues(source.recipe,*request.cutProgramSourcePatch,checking,expected)
+        if(!saved_boolean_build::PrepareSourceValues(source.recipe,*request.cutProgramSourcePatch,checking,expected,p::PrepareValues)
             ||expected.oldBytes!=source.recipeBytes
             ||expected.oldBytes!=built.values.oldBytes||expected.newBytes!=built.values.newBytes
             ||expected.changed!=built.values.changed||built.noChange==expected.changed)return false;
@@ -2212,7 +2218,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                         *record.requested.loftRebuild,*record.requested.loftStationEdit,pairedFault);
                 if(!loftStaged)throw Standard_Failure("Saved loft paired staging failed");
             }
-            if(record.requested.operation==OrdinaryTransformOperation::CylindricalCut) {
+            if(IsCylindricalCutOperation(record.requested.operation)) {
                 bool pairedFault=false;
 #if DEBUG
                 if(_stageFailureIndex==2){_stageFailureIndex=-1;pairedFault=true;}
@@ -2293,13 +2299,14 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || !sweep_rebuild::SameRawScalars(record.candidate.scalars,record.previous.scalars))
                     : record.candidate.scalars != EncodedTransform(record.requested.transform))
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
-                || (!loftStaged && !record.candidate.loft.IsEqual(record.previous.loft))
+                || (!loftStaged && !cutStaged && !record.candidate.loft.IsEqual(record.previous.loft))
                 || (!cutStaged && !cutSourceStaged && !programSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
                 || record.candidate.meshRegionPartition!=regionPartition
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     ? record.requested.meshUVAtlasOptions.version
                     : regionMutation
                     ? 3 : record.previous.meshUVAtlasVersion)) {
+                CORE3D_CUT_NOTE("staging.ordinary-candidate-readback");
                 throw Standard_Failure("Ordinary transform candidate readback failed");
             }
             if (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild) {
@@ -2398,7 +2405,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 :request.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
                 ?(request.cutProgramSourcePatch&&_document->SealSavedProgramSourceState(ledger.cutPrevious,*request.cutProgramSourcePatch,
                     request.cutProgramSourceRebuild,ledger.cutSourcePayload,ledger.cutCandidate))
-                :request.operation==OrdinaryTransformOperation::CylindricalCut
+                :IsCylindricalCutOperation(request.operation)
                 ?_document->SealSavedCutSceneState(ledger.cutPrevious,request.shape,request.cut,ledger.cutCandidate)
                 :_document->SealSavedCutPlacementState(ledger.cutPrevious,request.transform,ledger.cutCandidate);
 

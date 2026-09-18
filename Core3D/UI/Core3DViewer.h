@@ -274,6 +274,9 @@ namespace core3d {
     std::shared_ptr<NativeSolidWork> prepareCylindricalCutProgramEdit(const CylindricalCutProgramSnapshot&,
         const retained_boolean::ProgramEdit&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    std::shared_ptr<NativeSolidWork> prepareCylindricalCutRingEdit(const CylindricalCutProgramSnapshot&,
+        const retained_boolean::ProgramEdit&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
     // Separate native-only source-edit lease. Main-thread authority never goes
     // to the geometry worker; no Objective-C or provider route is activated.
     static std::shared_ptr<SavedCutSourceEditWork> makeSavedCutSourceEditWork() noexcept;

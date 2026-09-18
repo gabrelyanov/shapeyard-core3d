@@ -327,6 +327,19 @@ NS_ASSUME_NONNULL_BEGIN
     operandIdentifier:(uint32_t)operandIdentifier worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutBoreRadius(_:operandIdentifier:worldRadiusMM:expected:completion:));
+//! One ring operand or one addressed ring edit, one ordinary history step.
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutAppendRing:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DCylindricalCutRingDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutAppendRing(_:definition:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutRingRadius:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldHoleRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutRingRadius(_:operandIdentifier:worldHoleRadiusMM:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutRingCount:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier count:(uint32_t)count expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutRingCount(_:operandIdentifier:count:expected:completion:));
 //! Native source edit; no UI/AI activation. Main callback may refuse synchronously.
 - (nullable Core3DSavedCutSourceOperation *)beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
@@ -499,6 +512,16 @@ NS_ASSUME_NONNULL_BEGIN
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult result))completion
     NS_SWIFT_NAME(rebuildSweepRadius(definition:context:completion:));
+//! Detached numeric helpers only; neither acquires document or history authority.
+//! Result order: trimA x/y, trimB x/y, center x/y, radius, start/sweep degrees.
++ (nullable NSArray<NSNumber *> *)sweepTangentArcFrom:(CGPoint)a corner:(CGPoint)corner
+    to:(CGPoint)b radius:(double)radius NS_SWIFT_NAME(sweepTangentArc(from:corner:to:radius:));
+//! Returns the native admission name for the complete candidate, including invalid paths.
++ (NSString *)sweepAdmissionWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame
+    NS_SWIFT_NAME(sweepAdmission(pathIdentifier:vertices:segments:plane:radius:metersPerUnit:constructionFrameValues:));
 //! Fixed saved path structure with fully re-admitted geometry; one SweepRebuild.
 - (void)rebuildSweepPathWithDefinition:(Core3DSweepDefinition *)definition
     context:(Core3DModelingPlanningContext *)context
@@ -1029,6 +1052,13 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutBoreClearanceProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedCutBoreClearanceProbe(_:));
 //! Read-only detached observer/whole-result native probes.
+//! Last cut create/edit refusal gate; empty after a successful operation.
+- (NSString *)debugLastCylindricalCutRefusalReason NS_SWIFT_NAME(debugLastCylindricalCutRefusalReason());
++ (NSDictionary<NSString *, NSNumber *> *)debugLoftCutProofProbe NS_SWIFT_NAME(debugLoftCutProofProbe());
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugSavedBooleanRingProbe(_:));
+- (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingGeometry:(NSString *)entity
+    NS_SWIFT_NAME(debugSavedBooleanRingGeometry(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugCircularHostProofProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugCircularHostProofProbe(_:));
 - (NSDictionary<NSString *,NSNumber *> *)debugCircularHostGeometry:(NSString *)entity

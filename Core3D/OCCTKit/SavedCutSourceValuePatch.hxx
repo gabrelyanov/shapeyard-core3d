@@ -4,6 +4,7 @@
 // This transforms already captured recipe VALUES only. It does not inspect a
 // retained solid, prove correspondence, bind an owner, or authorize a command.
 #include "RetainedSolidAttribute.hxx"
+#include "LoftCutSourcePatch.hxx"
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -33,7 +34,7 @@ struct CirclePatch {
     std::optional<double> innerRadius;
     std::optional<double> depth;
 };
-using Patch = std::variant<PolygonPatch, EnclosurePatch, CirclePatch>;
+using Patch = std::variant<PolygonPatch, EnclosurePatch, CirclePatch, LoftPatch>;
 struct Result {
     retained_solid::Envelope envelope;
     bool changed = false;
@@ -102,6 +103,11 @@ inline std::optional<Result> Apply(const retained_solid::Envelope& original,
             if (circlePatch->outerRadius && !assign(9, *circlePatch->outerRadius)) return {};
             if (circlePatch->innerRadius && !assign(10, *circlePatch->innerRadius)) return {};
             if (circlePatch->depth && !assign(1, *circlePatch->depth)) return {};
+        } else if (const auto* loftPatch = std::get_if<LoftPatch>(&patch)) {
+            std::vector<double> values;
+            if(original.sourceFamily!=3||!Apply(original.sourceValues,*loftPatch,values))return {};
+            for(std::size_t i=0;i<values.size();++i)
+                if(retained_solid::Bits(values[i])!=retained_solid::Bits(original.sourceValues[i])&&!assign(i,values[i]))return {};
         } else return {};
 
         // Validate the complete multi-field result once. An intermediate width

@@ -2,6 +2,7 @@
 #include "SavedCutBoreResultObservation.hxx" // requires vertex-sharing review2
 #include "PrismBoundaryExpectation.hxx"
 #include "CircularHostBoundaryExpectation.hxx"
+#include "LoftBoundaryExpectation.hxx"
 namespace core3d::saved_cut_whole_result {
 struct Expected {
     std::vector<gp_Pnt> vertices;
@@ -13,6 +14,9 @@ struct Expected {
 // Full original boundary; the result matcher adds ONLY the explicit bore patch.
 inline bool ExpectedSource(const retained_solid::Envelope& e,Expected& out){
     out={};if(!retained_solid::Valid(e))return false;
+    if(e.sourceFamily==3){rectangular_loft::Definition d;saved_cut_loft::Expectation x;
+        if(!loft_persistence::Decode(e.sourceValues,d)||!saved_cut_loft::BuildExpectedBoundary(d,x))return false;
+        out.vertices=std::move(x.vertices);out.edges=std::move(x.edges);out.faces=std::move(x.faces);out.caps=x.caps;return true;}
     if(e.sourceFamily==2){enclosure::Parameters p;enclosure_correspondence::ExpectedBoundary x;
         if(!enclosure::Decode(int(e.sourceSchema),e.sourceValues,p)||!enclosure_correspondence::BuildExpectedBoundary(p.definition,x))return false;
         out.vertices.assign(x.vertices.begin(),x.vertices.end());out.edges.assign(x.edges.begin(),x.edges.end());out.faces.assign(x.faces.begin(),x.faces.end());out.caps={16,17};return true;}

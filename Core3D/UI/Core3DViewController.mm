@@ -1,3 +1,5 @@
+#include "../OCCTKit/PlanarSweepTangentArc.hxx"
+#include "../OCCTKit/DetachedLoftCutProbe.hxx"
 #if DEBUG
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
 #include <thread>
@@ -836,6 +838,16 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
 @implementation Core3DSavedCutSourcePatch {
     core3d::saved_cut_source_edit::Patch _millimetres;
 }
+- (instancetype)initWithCircleOuterRadiusMM:(NSNumber *)outer innerRadiusMM:(NSNumber *)inner depthMM:(NSNumber *)depth {
+    core3d::saved_cut_source_values::CirclePatch p;
+    if(!Core3DSourceMMNumber(outer,p.outerRadius)||!Core3DSourceMMNumber(inner,p.innerRadius)||!Core3DSourceMMNumber(depth,p.depth))return nil;
+    self=[super init];if(self)_millimetres=p;return self;
+}
+- (instancetype)initWithLoftStationIdentifier:(uint32_t)identifier widthMM:(NSNumber *)width depthMM:(NSNumber *)depth {
+    core3d::saved_cut_source_values::LoftPatch p;p.stationIdentifier=identifier;
+    if(!Core3DSourceMMNumber(width,p.width)||!Core3DSourceMMNumber(depth,p.depth)||!core3d::saved_cut_source_values::Valid(p))return nil;
+    self=[super init];if(self)_millimetres=p;return self;
+}
 - (instancetype)initWithPolygonCoordinates:(NSArray<Core3DSavedCutSourceCoordinate *> *)coordinates depthMM:(NSNumber *)depth {
     try {
         if(![coordinates isKindOfClass:NSArray.class]||coordinates.count>core3d::profile::MaximumScalars)return nil;
@@ -877,6 +889,20 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
                 const double original=v.component==core3d::saved_cut_source_values::Component::U?point.X():point.Y();
                 if(!Core3DSourceMMToRecipe(v.value,original,factor,v.value))return {};
             }
+        }else if(auto* p=std::get_if<core3d::saved_cut_source_values::CirclePatch>(&converted)){
+            core3d::profile::Parameters decoded;
+            if(source.sourceFamily!=1||!core3d::profile::Decode(source.sourceValues,decoded)||!decoded.definition.circle)return {};
+            const auto& circle=*decoded.definition.circle;
+            if(p->outerRadius&&!Core3DSourceMMToRecipe(*p->outerRadius,circle.outerRadius,factor,*p->outerRadius))return {};
+            if(p->innerRadius&&!Core3DSourceMMToRecipe(*p->innerRadius,circle.innerRadius,factor,*p->innerRadius))return {};
+            if(p->depth&&!Core3DSourceMMToRecipe(*p->depth,decoded.definition.depth,factor,*p->depth))return {};
+        }else if(auto* p=std::get_if<core3d::saved_cut_source_values::LoftPatch>(&converted)){
+            core3d::rectangular_loft::Definition d;
+            if(source.sourceFamily!=3||!core3d::loft_persistence::Decode(source.sourceValues,d))return {};
+            const auto station=std::find_if(d.stations.begin(),d.stations.end(),[&](const auto& x){return x.identifier==p->stationIdentifier;});
+            if(station==d.stations.end())return {};
+            if(p->width&&!Core3DSourceMMToRecipe(*p->width,station->width,factor,*p->width))return {};
+            if(p->depth&&!Core3DSourceMMToRecipe(*p->depth,station->depth,factor,*p->depth))return {};
         }else{
             auto& enclosurePatch=std::get<core3d::saved_cut_source_values::EnclosurePatch>(converted);
             core3d::enclosure::Parameters decoded;
@@ -906,6 +932,20 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
                 const double original=v.component==core3d::saved_cut_source_values::Component::U?point.X():point.Y();
                 if(!Core3DSourceMMToRecipe(v.value,original,factor,v.value))return {};
             }
+        }else if(auto* p=std::get_if<core3d::saved_cut_source_values::CirclePatch>(&converted)){
+            core3d::profile::Parameters decoded;
+            if(program.source.family!=1||!core3d::profile::Decode(program.source.values,decoded)||!decoded.definition.circle)return {};
+            const auto& circle=*decoded.definition.circle;
+            if(p->outerRadius&&!Core3DSourceMMToRecipe(*p->outerRadius,circle.outerRadius,factor,*p->outerRadius))return {};
+            if(p->innerRadius&&!Core3DSourceMMToRecipe(*p->innerRadius,circle.innerRadius,factor,*p->innerRadius))return {};
+            if(p->depth&&!Core3DSourceMMToRecipe(*p->depth,decoded.definition.depth,factor,*p->depth))return {};
+        }else if(auto* p=std::get_if<core3d::saved_cut_source_values::LoftPatch>(&converted)){
+            core3d::rectangular_loft::Definition d;
+            if(program.source.family!=3||!core3d::loft_persistence::Decode(program.source.values,d))return {};
+            const auto station=std::find_if(d.stations.begin(),d.stations.end(),[&](const auto& x){return x.identifier==p->stationIdentifier;});
+            if(station==d.stations.end())return {};
+            if(p->width&&!Core3DSourceMMToRecipe(*p->width,station->width,factor,*p->width))return {};
+            if(p->depth&&!Core3DSourceMMToRecipe(*p->depth,station->depth,factor,*p->depth))return {};
         }else{
             auto& enclosurePatch=std::get<core3d::saved_cut_source_values::EnclosurePatch>(converted);
             core3d::enclosure::Parameters decoded;
@@ -1046,6 +1086,17 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
         _physicalXMM=x;_physicalYMM=y;_physicalZMM=z;_worldRadiusMM=world;}return self;
 }
 @end
+@interface Core3DCylindricalCutRing ()
+- (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)mm;
+@end
+@implementation Core3DCylindricalCutRing
+- (instancetype)initWithOperand:(const core3d::analytic_boolean::Operand&)operand effectiveMM:(double)mm {
+    if(operand.kind!=core3d::analytic_boolean::OperandKind::CylinderRing||!std::isfinite(mm)||mm<=0)return nil;
+    self=[super init];if(self){_operandIdentifier=operand.identifier;_axis=static_cast<Core3DCylindricalCutAxis>(operand.axis);
+        _localX=operand.point[0];_localY=operand.point[1];_localZ=operand.point[2];_boltCircleRadius=operand.boltCircleRadius;
+        _worldHoleRadiusMM=operand.radius*mm;_hostRadiusRatio=operand.hostRadiusRatio;_count=operand.count;}return self;
+}
+@end
 @interface Core3DCylindricalCutProgramSnapshot ()
 - (instancetype)initWithNative:(const core3d::CylindricalCutProgramSnapshot&)native owner:(Core3DViewController *)owner viewer:(const std::shared_ptr<core3d::Core3DViewer>&)viewer;
 - (core3d::CylindricalCutProgramSnapshot)nativeSnapshot;
@@ -1060,6 +1111,7 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     self=[super init];if(!self)return nil;
     // Descriptive bore values projected from the complete captured recipe.
     NSMutableArray<Core3DCylindricalCutBore *> *bores=[NSMutableArray array];
+    NSMutableArray<Core3DCylindricalCutRing *> *rings=[NSMutableArray array];
     if(const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&native.source.recipe)){
         core3d::analytic_boolean::Operand operand;operand.identifier=legacy->operandID;
         operand.axis=static_cast<core3d::analytic_boolean::Axis>(legacy->axis);
@@ -1068,6 +1120,10 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
         if(!bore)return nil;[bores addObject:bore];
     }else{
         for(const auto& step:std::get<core3d::retained_boolean::Program>(native.source.recipe).steps){
+            if(step.operand.kind==core3d::analytic_boolean::OperandKind::CylinderRing){
+                Core3DCylindricalCutRing *ring=[[Core3DCylindricalCutRing alloc] initWithOperand:step.operand effectiveMM:native.source.effectiveMM];
+                if(!ring)return nil;[rings addObject:ring];continue;
+            }
             Core3DCylindricalCutBore *bore=[[Core3DCylindricalCutBore alloc] initWithOperand:step.operand effectiveMM:native.source.effectiveMM];
             if(!bore)return nil;[bores addObject:bore];
         }
@@ -1075,7 +1131,7 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     _native=native;_owner=owner;_viewer=viewer;
     _entityIdentifier=[NSString stringWithUTF8String:native.source.original.entityIdentifier.c_str()];
     _definitionIdentifier=[NSString stringWithUTF8String:native.source.original.definitionIdentifier.c_str()];
-    _bores=bores;return self;
+    _bores=bores;_rings=rings;return self;
 }
 - (core3d::CylindricalCutProgramSnapshot)nativeSnapshot {return _native;}
 - (Core3DSavedCutSourceValues *)sourceRecipeMM {
@@ -2649,6 +2705,7 @@ struct NativeModelingPermitIssuer final {
     Core3DSavedCutSourceJob *_savedCutSourceJob; // Main lease; retained through actual worker drain.
 #if DEBUG
     void (^_debugSavedCutSourceDeliveryGate)(void (^resume)(void));
+    std::shared_ptr<core3d::cylindrical_cut::DebugRefusalRecord> _debugLastCutRefusal;
     void (^_debugNextNativeSolidDeliveryGate)(void (^resume)(void));
 #endif
     BOOL _nativeSolidCancelled;
@@ -3220,8 +3277,8 @@ struct NativeModelingPermitIssuer final {
         const auto& state=source.original;GProp_GProps actual,base;
         BRepGProp::VolumeProperties(state.shape,actual);BRepGProp::VolumeProperties(source.base,base);
         double unit=0;if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return nil;
-        const double mm=unit*1000;Bnd_Box box;BRepBndLib::AddOptimal(state.shape,box,Standard_False,Standard_False);
-        if(box.IsVoid()||box.IsOpen())return nil;double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+        const double mm=unit*1000;std::array<double,6> bounds{};
+        if(!core3d::analytic_boolean::detail::Bounds(state.shape,mm,bounds))return nil;
         NSMutableArray *boxMM=[NSMutableArray array],*bits=[NSMutableArray array],*matrix=[NSMutableArray array],*present=[NSMutableArray array],*recipe=[NSMutableArray array];
         for(double x:bounds)[boxMM addObject:@(x*mm)];for(double x:state.scalars)[bits addObject:@(core3d::retained_solid::Bits(x))];
         for(bool x:state.present)[present addObject:@(x)];for(int i=1;i<=3;++i)for(int j=1;j<=4;++j)[matrix addObject:@(state.transform.Value(i,j))];
@@ -3260,8 +3317,8 @@ struct NativeModelingPermitIssuer final {
         const auto& state=source.original;GProp_GProps actual,base;
         BRepGProp::VolumeProperties(state.shape,actual);BRepGProp::VolumeProperties(source.base,base);
         double unit=0;if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return nil;
-        const double mm=unit*1000;Bnd_Box box;BRepBndLib::AddOptimal(state.shape,box,Standard_False,Standard_False);
-        if(box.IsVoid()||box.IsOpen())return nil;double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+        const double mm=unit*1000;std::array<double,6> bounds{};
+        if(!core3d::analytic_boolean::detail::Bounds(state.shape,mm,bounds))return nil;
         NSMutableArray *boxMM=[NSMutableArray array],*bits=[NSMutableArray array],*matrix=[NSMutableArray array],*present=[NSMutableArray array],*recipe=[NSMutableArray array];
         for(double x:bounds)[boxMM addObject:@(x*mm)];for(double x:state.scalars)[bits addObject:@(core3d::retained_solid::Bits(x))];
         for(bool x:state.present)[present addObject:@(x)];for(int i=1;i<=3;++i)for(int j=1;j<=4;++j)[matrix addObject:@(state.transform.Value(i,j))];
@@ -6723,6 +6780,50 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return @{ @"setupException": @NO }; }
 }
 
+- (NSString *)debugLastCylindricalCutRefusalReason {
+    if(!NSThread.isMainThread||!_debugLastCutRefusal)return @"";
+    const char* reason=_debugLastCutRefusal->reason.load();
+    if(!reason)return @"";
+    const int detail=_debugLastCutRefusal->detail.load();
+    return detail<0?[NSString stringWithUTF8String:reason]:[NSString stringWithFormat:@"%s status=%d",reason,detail];
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugLoftCutProofProbe {
+    NSMutableDictionary *result=[NSMutableDictionary dictionary];
+    for(const auto& row:core3d::detached_loft_cut_probe::Run())
+        result[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+    return result;
+}
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario {
+    NSMutableDictionary *out=[NSMutableDictionary dictionary];
+    for(const auto& row:Core3DDebugSavedBooleanRingProbe(static_cast<Standard_Integer>(scenario)))
+        out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+    return out;
+}
+- (NSDictionary<NSString *,NSNumber *> *)debugSavedBooleanRingGeometry:(NSString *)entity {
+    NSMutableDictionary *out=[NSMutableDictionary dictionary];
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer)return out;
+    try {
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull()||owner->Document()->HasOpenCommand()
+            ||GLController.viewer->hasUnresolvedOrdinaryEdit())return out;
+        TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);
+        if(roots.Length()>50000)return out;
+        for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){
+            OcctCylindricalCutProgramSource source;if(!owner->CaptureCylindricalCutProgramSource(roots.Value(i),source))return out;
+            const auto* p=std::get_if<core3d::retained_boolean::Program>(&source.recipe);if(!p)return out;
+            const std::atomic_bool stop(false);const auto proof=core3d::saved_boolean_result::Inspect(source.original.shape,*p,stop);
+            out[@"MatchedOrientedBoundary"]=@(proof.classification==core3d::saved_boolean_result::Classification::MatchedOrientedBoundary);
+            std::vector<core3d::retained_boolean::Disk> disks;if(!core3d::retained_boolean::ExpandedDisks(*p,disks))return out;
+            out[@"expandedDisks"]=@(disks.size());
+            core3d::saved_cut_whole_result::detail::Graph graph;
+            if(!core3d::saved_cut_whole_result::detail::Collect(source.original.shape,core3d::saved_boolean_result::detail::GeometryView(*p,0),stop,graph,2+disks.size()))return out;
+            std::size_t maxWires=0;long euler=long(proof.vertices)-long(proof.edges);
+            for(const auto& f:graph.faces){maxWires=std::max(maxWires,f.wires.size());euler+=2-long(f.wires.size());}
+            out[@"maximumCapWires"]=@(maxWires);out[@"cellEuler"]=@(euler);return out;
+        }
+    }catch(...){return @{};}return out;
+}
 + (NSDictionary<NSString *, NSNumber *> *)debugCircularHostProofProbe:(NSInteger)scenario {
     if(!NSThread.isMainThread||scenario<0||scenario>5)return @{@"invalidScenario":@NO};
     const auto checks=Core3DDebugCircularHostProofProbe(static_cast<Standard_Integer>(scenario));
@@ -13747,6 +13848,62 @@ struct NativeModelingPermitIssuer final {
     }catch(...){completion(Core3DProfileConstructionResultRejected);}
 }
 
++ (NSArray<NSNumber *> *)sweepTangentArcFrom:(CGPoint)a corner:(CGPoint)corner
+    to:(CGPoint)b radius:(double)radius {
+    const auto arc=core3d::planar_sweep::TangentArcBetween(
+        gp_Pnt2d(a.x,a.y),gp_Pnt2d(corner.x,corner.y),gp_Pnt2d(b.x,b.y),radius);
+    if(!arc)return nil;
+    return @[@(arc->trimA.X()),@(arc->trimA.Y()),@(arc->trimB.X()),@(arc->trimB.Y()),
+        @(arc->center.X()),@(arc->center.Y()),@(arc->radius),@(arc->startDegrees),@(arc->sweepDegrees)];
+}
+
++ (NSString *)sweepAdmissionWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame {
+    if(![vertices isKindOfClass:NSArray.class]||![segments isKindOfClass:NSArray.class]
+        ||vertices.count<2||vertices.count>33||segments.count<1||segments.count>32
+        ||vertices.count!=segments.count+1)return @"InvalidCount";
+    if(![frame isKindOfClass:NSArray.class]||(frame.count!=0&&frame.count!=8))return @"InvalidFrame";
+    try {
+        core3d::planar_sweep::Definition d;
+        d.pathIdentifier=identifier;d.plane=int(plane);d.radius=radius;d.dimensionMetersPerUnit=metersPerUnit;
+        for(Core3DProfileCurveVertex *v in vertices){
+            if(![v isKindOfClass:Core3DProfileCurveVertex.class])return @"InvalidNumber";
+            d.vertices.push_back({v.identifier,gp_Pnt2d(v.point.x,v.point.y)});
+        }
+        for(Core3DSweepPathSegment *s in segments){
+            if(![s isKindOfClass:Core3DSweepPathSegment.class])return @"InvalidNumber";
+            d.segments.push_back({s.identifier,s.startVertex,s.endVertex,static_cast<core3d::ProfileCurveKind>(s.kind),
+                gp_Pnt2d(s.center.x,s.center.y),s.radius,s.startDegrees,s.sweepDegrees});
+        }
+        if(frame.count==8){
+            core3d::profile::ConstructionFrame f;
+            for(NSUInteger i=0;i<8;++i){
+                if(![frame[i] isKindOfClass:NSNumber.class]||CFGetTypeID((__bridge CFTypeRef)frame[i])==CFBooleanGetTypeID())return @"InvalidFrame";
+                f.values[i]=frame[i].doubleValue;
+            }
+            d.constructionFrame=f;
+        }
+        core3d::planar_sweep::Inspection inspection;
+        using Admission=core3d::planar_sweep::Admission;
+        switch(core3d::planar_sweep::Inspect(d,inspection)){
+            case Admission::Accepted:return @"Accepted";
+            case Admission::NonTangent:return @"NonTangent";
+            case Admission::TightBend:return @"TightBend";
+            case Admission::NonlocalContact:return @"NonlocalContact";
+            case Admission::InvalidCount:return @"InvalidCount";
+            case Admission::InvalidIdentifier:return @"InvalidIdentifier";
+            case Admission::InvalidNumber:return @"InvalidNumber";
+            case Admission::InvalidFrame:return @"InvalidFrame";
+            case Admission::InvalidConnectivity:return @"InvalidConnectivity";
+            case Admission::Degenerate:return @"Degenerate";
+            case Admission::InvalidArc:return @"InvalidArc";
+        }
+    }catch(...){return @"InvalidNumber";}
+    return @"InvalidNumber";
+}
+
 - (void)rebuildSweepPathWithDefinition:(Core3DSweepDefinition *)definition
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion {
@@ -13939,13 +14096,13 @@ struct NativeModelingPermitIssuer final {
         || GLController == nil || GLController.viewer == nullptr
         || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
         || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
-        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) CORE3D_CUT_REFUSE("bridge.capture.context", nil);
     const CGSize size = GLController.drawableSize;
     if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
         || size.width > std::numeric_limits<std::uint32_t>::max()
-        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+        || size.height > std::numeric_limits<std::uint32_t>::max()) CORE3D_CUT_REFUSE("bridge.capture.drawable-size", nil);
     try {
-        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) CORE3D_CUT_REFUSE("bridge.capture.utf8-identity", nil);
         core3d::ObjectFrameIdentity identity;
         identity.entityIdentifier.assign(entityIdentifier.UTF8String,
             [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
@@ -13956,7 +14113,7 @@ struct NativeModelingPermitIssuer final {
         const auto result = GLController.viewer->cylindricalCutSource(identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         return result ? [[Core3DCylindricalCutSnapshot alloc] initWithNative:*result owner:self viewer:GLController.viewer] : nil;
-    } catch (...) { return nil; }
+    } catch (...) { CORE3D_CUT_REFUSE("bridge.capture.exception", nil); }
 }
 
 - (Core3DSavedCutSourceOperation *)beginSavedCutSourceEdit:(Core3DCylindricalCutSnapshot *)original
@@ -13969,7 +14126,31 @@ struct NativeModelingPermitIssuer final {
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     planningContext:(Core3DModelingPlanningContext *)planningContext
     completion:(void(^)(Core3DProfileConstructionResult))completion {
-    if(!completion)return nil;
+#if DEBUG
+    const auto diagnostic=std::make_shared<core3d::cylindrical_cut::DebugRefusalRecord>();
+    const BOOL diagnosticOnMain=NSThread.isMainThread;
+    if(diagnosticOnMain)_debugLastCutRefusal=diagnostic;
+    core3d::cylindrical_cut::DebugRefusalScope diagnosticScope(diagnostic);
+#endif
+    if(!completion)CORE3D_CUT_REFUSE("bridge.completion-missing", nil);
+#if DEBUG
+    void (^const diagnosticCompletion)(Core3DProfileConstructionResult)=[completion copy];
+    __weak Core3DViewController *diagnosticOwner=self;
+    completion=^(Core3DProfileConstructionResult result){
+        core3d::cylindrical_cut::DebugRefusalScope scope(diagnostic);
+        if(!diagnosticOnMain){
+            CORE3D_CUT_NOTE("bridge.context.main-thread");
+            Core3DViewController *owner=diagnosticOwner;
+            if(owner)owner->_debugLastCutRefusal=diagnostic;
+        }
+        if(result==Core3DProfileConstructionResultCommitted)diagnostic->reason.store(nullptr);
+        else if(result==Core3DProfileConstructionResultCancelled)CORE3D_CUT_NOTE("bridge.cancelled");
+        else if(result==Core3DProfileConstructionResultBusy)CORE3D_CUT_NOTE("bridge.busy");
+        else if(result==Core3DProfileConstructionResultUnchanged)CORE3D_CUT_NOTE("bridge.unchanged");
+        else CORE3D_CUT_NOTE("bridge.completion-without-commit");
+        diagnosticCompletion(result);
+    };
+#endif
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
     if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
         completion(Core3DProfileConstructionResultBusy);return nil;
@@ -13985,7 +14166,8 @@ struct NativeModelingPermitIssuer final {
     Core3DSavedCutSourceJob *job=nil;NSUUID *completionToken=nil;
     bool immediateDelivered=false;
     const auto immediate=[&](Core3DProfileConstructionResult result){
-        if(immediateDelivered)return;immediateDelivered=true;completion(result);
+        if(immediateDelivered)return;immediateDelivered=true;
+        CORE3D_CUT_NOTE("bridge.source-edit.admission");completion(result);
     };
     try {
         const auto before=[original nativeSnapshot];
@@ -14014,10 +14196,10 @@ struct NativeModelingPermitIssuer final {
         if(!operation||!viewer->prepareSavedCutSourceEdit(lease,before,*converted,[live nativeSnapshot].identity,
             expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)))){
-            _savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;
+            CORE3D_CUT_NOTE("source-edit.prepare");_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;
         }
         const auto geometry=core3d::Core3DViewer::savedCutSourceEditGeometry(lease);
-        if(!geometry){_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;}
+        if(!geometry){CORE3D_CUT_NOTE("source-edit.prepare");_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;}
 #if DEBUG
         if(_debugSavedCutSourceDeliveryGate){
             Core3DNativeSolidGeometryDeliveryGates()[completionToken]=[_debugSavedCutSourceDeliveryGate copy];
@@ -14029,9 +14211,15 @@ struct NativeModelingPermitIssuer final {
         // No original snapshot, patch, job, lease, viewer or callback is strongly
         // captured by utility work. Returned geometry likewise has no live scene.
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+#if DEBUG
+            core3d::cylindrical_cut::DebugRefusalScope workerScope(diagnostic);
+#endif
             const auto built=core3d::Core3DViewer::buildSavedCutSourceDetached(geometry);
             dispatch_async(dispatch_get_main_queue(),^{
                 dispatch_block_t delivery=^{
+#if DEBUG
+                    core3d::cylindrical_cut::DebugRefusalScope deliveryScope(diagnostic);
+#endif
                     Core3DViewController *controller=weakSelf;
                     Core3DSavedCutSourceJob *pending=weakJob;
                     if(!controller||!pending){Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;}
@@ -14044,7 +14232,7 @@ struct NativeModelingPermitIssuer final {
                         &&!controller->_nativeSolidWork&&!controller->_objectAlignmentWork
                         &&!controller->_isLoading.load()&&controller->_isSetuped&&!controller->_isPreviewMode
                         &&controller.glController&&((GLViewController *)controller.glController).viewer==currentViewer){
-                        if(!built)result=Core3DProfileConstructionResultFailed;
+                        if(!built){CORE3D_CUT_NOTE("source-edit.build");result=Core3DProfileConstructionResultFailed;}
                         else {
                             const auto actual=currentViewer->commitSavedCutSourceEdit(
                                 std::get<std::shared_ptr<core3d::SavedCutSourceEditWork>>(pending->_lease),built);
@@ -14065,6 +14253,7 @@ struct NativeModelingPermitIssuer final {
                         [controller sendNotifyUIState:UIStateChangingSelection|UIStateChangingGizmo|UIStateChangingDelete
                             |UIStateChangingDuplicate|UIStateChangingApply|UIStateChangingApplyMaterial|UIStateChangingHistory];
                     }
+                    if(result!=Core3DProfileConstructionResultCommitted)CORE3D_CUT_NOTE("source-edit.commit-or-context");
                     [pending finish:result];
                 };
 #if DEBUG
@@ -14098,7 +14287,31 @@ struct NativeModelingPermitIssuer final {
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     planningContext:(Core3DModelingPlanningContext *)planningContext
     completion:(void(^)(Core3DProfileConstructionResult))completion {
-    if(!completion)return nil;
+#if DEBUG
+    const auto diagnostic=std::make_shared<core3d::cylindrical_cut::DebugRefusalRecord>();
+    const BOOL diagnosticOnMain=NSThread.isMainThread;
+    if(diagnosticOnMain)_debugLastCutRefusal=diagnostic;
+    core3d::cylindrical_cut::DebugRefusalScope diagnosticScope(diagnostic);
+#endif
+    if(!completion)CORE3D_CUT_REFUSE("bridge.completion-missing", nil);
+#if DEBUG
+    void (^const diagnosticCompletion)(Core3DProfileConstructionResult)=[completion copy];
+    __weak Core3DViewController *diagnosticOwner=self;
+    completion=^(Core3DProfileConstructionResult result){
+        core3d::cylindrical_cut::DebugRefusalScope scope(diagnostic);
+        if(!diagnosticOnMain){
+            CORE3D_CUT_NOTE("bridge.context.main-thread");
+            Core3DViewController *owner=diagnosticOwner;
+            if(owner)owner->_debugLastCutRefusal=diagnostic;
+        }
+        if(result==Core3DProfileConstructionResultCommitted)diagnostic->reason.store(nullptr);
+        else if(result==Core3DProfileConstructionResultCancelled)CORE3D_CUT_NOTE("bridge.cancelled");
+        else if(result==Core3DProfileConstructionResultBusy)CORE3D_CUT_NOTE("bridge.busy");
+        else if(result==Core3DProfileConstructionResultUnchanged)CORE3D_CUT_NOTE("bridge.unchanged");
+        else CORE3D_CUT_NOTE("bridge.completion-without-commit");
+        diagnosticCompletion(result);
+    };
+#endif
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
     if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
         completion(Core3DProfileConstructionResultBusy);return nil;
@@ -14118,7 +14331,8 @@ struct NativeModelingPermitIssuer final {
     Core3DSavedCutSourceJob *job=nil;NSUUID *completionToken=nil;
     bool immediateDelivered=false;
     const auto immediate=[&](Core3DProfileConstructionResult result){
-        if(immediateDelivered)return;immediateDelivered=true;completion(result);
+        if(immediateDelivered)return;immediateDelivered=true;
+        CORE3D_CUT_NOTE("bridge.source-edit.admission");completion(result);
     };
     try {
         const auto before=[original nativeSnapshot];
@@ -14150,10 +14364,10 @@ struct NativeModelingPermitIssuer final {
         if(!operation||!viewer->prepareSavedProgramSourceEdit(lease,before,*converted,[live nativeSnapshot].identity,
             expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)))){
-            _savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;
+            CORE3D_CUT_NOTE("source-edit.prepare");_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;
         }
         const auto geometry=core3d::Core3DViewer::savedProgramSourceEditGeometry(lease);
-        if(!geometry){_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;}
+        if(!geometry){CORE3D_CUT_NOTE("source-edit.prepare");_savedCutSourceJob=nil;[job finish:Core3DProfileConstructionResultRejected];return nil;}
 #if DEBUG
         if(_debugSavedCutSourceDeliveryGate){
             Core3DNativeSolidGeometryDeliveryGates()[completionToken]=[_debugSavedCutSourceDeliveryGate copy];
@@ -14165,9 +14379,15 @@ struct NativeModelingPermitIssuer final {
         // No original snapshot, patch, job, lease, viewer or callback is strongly
         // captured by utility work. Returned geometry likewise has no live scene.
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+#if DEBUG
+            core3d::cylindrical_cut::DebugRefusalScope workerScope(diagnostic);
+#endif
             const auto built=core3d::Core3DViewer::buildSavedProgramSourceDetached(geometry);
             dispatch_async(dispatch_get_main_queue(),^{
                 dispatch_block_t delivery=^{
+#if DEBUG
+                    core3d::cylindrical_cut::DebugRefusalScope deliveryScope(diagnostic);
+#endif
                     Core3DViewController *controller=weakSelf;
                     Core3DSavedCutSourceJob *pending=weakJob;
                     if(!controller||!pending){Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;}
@@ -14180,7 +14400,7 @@ struct NativeModelingPermitIssuer final {
                         &&!controller->_nativeSolidWork&&!controller->_objectAlignmentWork
                         &&!controller->_isLoading.load()&&controller->_isSetuped&&!controller->_isPreviewMode
                         &&controller.glController&&((GLViewController *)controller.glController).viewer==currentViewer){
-                        if(!built)result=Core3DProfileConstructionResultFailed;
+                        if(!built){CORE3D_CUT_NOTE("source-edit.build");result=Core3DProfileConstructionResultFailed;}
                         else {
                             const auto actual=currentViewer->commitSavedProgramSourceEdit(
                                 std::get<std::shared_ptr<core3d::SavedProgramSourceEditWork>>(pending->_lease),built);
@@ -14201,6 +14421,7 @@ struct NativeModelingPermitIssuer final {
                         [controller sendNotifyUIState:UIStateChangingSelection|UIStateChangingGizmo|UIStateChangingDelete
                             |UIStateChangingDuplicate|UIStateChangingApply|UIStateChangingApplyMaterial|UIStateChangingHistory];
                     }
+                    if(result!=Core3DProfileConstructionResultCommitted)CORE3D_CUT_NOTE("source-edit.commit-or-context");
                     [pending finish:result];
                 };
 #if DEBUG
@@ -14255,16 +14476,40 @@ struct NativeModelingPermitIssuer final {
 - (Core3DCylindricalCutOperation *)core3d_beginCut:(Core3DCylindricalCutSnapshot *)original
     definition:(Core3DCylindricalCutDefinition *)definition radius:(std::optional<double>)radius
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion {
-    if(!completion)return nil;
-    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
-    if(_nativeSolidWork||_isLoading.load()){completion(Core3DProfileConstructionResultBusy);return nil;}
+#if DEBUG
+    const auto diagnostic=std::make_shared<core3d::cylindrical_cut::DebugRefusalRecord>();
+    const BOOL diagnosticOnMain=NSThread.isMainThread;
+    if(diagnosticOnMain)_debugLastCutRefusal=diagnostic;
+    core3d::cylindrical_cut::DebugRefusalScope diagnosticScope(diagnostic);
+#endif
+    if(!completion)CORE3D_CUT_REFUSE("bridge.completion-missing", nil);
+#if DEBUG
+    void (^const diagnosticCompletion)(Core3DProfileConstructionResult)=[completion copy];
+    __weak Core3DViewController *diagnosticOwner=self;
+    completion=^(Core3DProfileConstructionResult result){
+        core3d::cylindrical_cut::DebugRefusalScope scope(diagnostic);
+        if(!diagnosticOnMain){
+            CORE3D_CUT_NOTE("bridge.context.main-thread");
+            Core3DViewController *owner=diagnosticOwner;
+            if(owner)owner->_debugLastCutRefusal=diagnostic;
+        }
+        if(result==Core3DProfileConstructionResultCommitted)diagnostic->reason.store(nullptr);
+        else if(result==Core3DProfileConstructionResultCancelled)CORE3D_CUT_NOTE("bridge.cancelled");
+        else if(result==Core3DProfileConstructionResultBusy)CORE3D_CUT_NOTE("bridge.busy");
+        else if(result==Core3DProfileConstructionResultUnchanged)CORE3D_CUT_NOTE("bridge.unchanged");
+        else CORE3D_CUT_NOTE("bridge.completion-without-commit");
+        diagnosticCompletion(result);
+    };
+#endif
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{CORE3D_CUT_NOTE("bridge.cut.main-thread");completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(_nativeSolidWork||_isLoading.load()){CORE3D_CUT_NOTE("bridge.cut.busy");completion(Core3DProfileConstructionResultBusy);return nil;}
     if(![original isKindOfClass:Core3DCylindricalCutSnapshot.class]||!GLController||!GLController.viewer
         ||![original matchesOwner:self viewer:GLController.viewer]
         ||bool(radius)==bool(definition)||(definition&&![definition isKindOfClass:Core3DCylindricalCutDefinition.class])){
-        completion(Core3DProfileConstructionResultRejected);return nil;
+        CORE3D_CUT_NOTE("bridge.cut.input-or-owner");completion(Core3DProfileConstructionResultRejected);return nil;
     }
     const auto live=[self cylindricalCutSourceWithEntityIdentifier:original.entityIdentifier expected:expected];
-    if(!live){completion(Core3DProfileConstructionResultRejected);return nil;}
+    if(!live){CORE3D_CUT_NOTE("bridge.cut.live-capture");completion(Core3DProfileConstructionResultRejected);return nil;}
     try {
         const auto before=[original nativeSnapshot];const auto identity=[live nativeSnapshot].identity;
         std::optional<core3d::cylindrical_cut::CreateEdit> create;std::optional<core3d::cylindrical_cut::RadiusEdit> rebuild;
@@ -14274,19 +14519,17 @@ struct NativeModelingPermitIssuer final {
         const CGSize size=GLController.drawableSize;
         const auto work=GLController.viewer->prepareCylindricalCut(before,create,rebuild,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
-        if(!work){completion(Core3DProfileConstructionResultRejected);return nil;}
+        if(!work){CORE3D_CUT_NOTE("bridge.cut.prepare");completion(Core3DProfileConstructionResultRejected);return nil;}
         __block BOOL delivered=NO;
         [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){delivered=YES;completion(result);}];
         // No yield: only this exact admitted work receives cancellation rights.
         if(delivered||_nativeSolidWork!=work)return nil;
         return [[Core3DCylindricalCutOperation alloc] initWithOwner:self work:work];
-    }catch(...){completion(Core3DProfileConstructionResultRejected);return nil;}
+    }catch(...){CORE3D_CUT_NOTE("bridge.cut.exception");completion(Core3DProfileConstructionResultRejected);return nil;}
 }
 - (Core3DCylindricalCutOperation *)beginCylindricalCut:(Core3DCylindricalCutSnapshot *)original
     definition:(Core3DCylindricalCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
-    if(!definition){if(completion){if(NSThread.isMainThread)completion(Core3DProfileConstructionResultRejected);
-        else dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});}return nil;}
     return [self core3d_beginCut:original definition:definition radius:std::nullopt expected:expected completion:completion];
 }
 - (Core3DCylindricalCutOperation *)beginCylindricalCutRadius:(Core3DCylindricalCutSnapshot *)original
@@ -14300,13 +14543,13 @@ struct NativeModelingPermitIssuer final {
         || GLController == nil || GLController.viewer == nullptr
         || ![entityIdentifier isKindOfClass:[NSString class]] || entityIdentifier.length == 0 || entityIdentifier.length > 128
         || ![expected isKindOfClass:[Core3DSceneSnapshot class]] || expected.selectionMode != Core3DSceneElementKindObject
-        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) return nil;
+        || expected.publicationSourceIdentifier.length == 0 || expected.publicationSourceIdentifier.length > 128) CORE3D_CUT_REFUSE("bridge.capture.context", nil);
     const CGSize size = GLController.drawableSize;
     if (!std::isfinite(size.width) || !std::isfinite(size.height) || size.width < 1 || size.height < 1
         || size.width > std::numeric_limits<std::uint32_t>::max()
-        || size.height > std::numeric_limits<std::uint32_t>::max()) return nil;
+        || size.height > std::numeric_limits<std::uint32_t>::max()) CORE3D_CUT_REFUSE("bridge.capture.drawable-size", nil);
     try {
-        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) return nil;
+        if (!entityIdentifier.UTF8String || !expected.publicationSourceIdentifier.UTF8String) CORE3D_CUT_REFUSE("bridge.capture.utf8-identity", nil);
         core3d::ObjectFrameIdentity identity;
         identity.entityIdentifier.assign(entityIdentifier.UTF8String,
             [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
@@ -14317,56 +14560,107 @@ struct NativeModelingPermitIssuer final {
         const auto result = GLController.viewer->cylindricalCutProgramSource(identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         return result ? [[Core3DCylindricalCutProgramSnapshot alloc] initWithNative:*result owner:self viewer:GLController.viewer] : nil;
-    } catch (...) { return nil; }
+    } catch (...) { CORE3D_CUT_REFUSE("bridge.capture.exception", nil); }
 }
 - (Core3DCylindricalCutOperation *)core3d_beginProgramEdit:(Core3DCylindricalCutProgramSnapshot *)original
     definition:(Core3DCylindricalCutDefinition *)definition
     radius:(std::optional<core3d::retained_boolean::SetBoreRadius>)radius
+    ring:(Core3DCylindricalCutRingDefinition *)ring ringEdit:(std::optional<core3d::retained_boolean::ProgramEdit>)ringEdit
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion {
-    if(!completion)return nil;
-    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
-    if(_nativeSolidWork||_isLoading.load()){completion(Core3DProfileConstructionResultBusy);return nil;}
+#if DEBUG
+    const auto diagnostic=std::make_shared<core3d::cylindrical_cut::DebugRefusalRecord>();
+    const BOOL diagnosticOnMain=NSThread.isMainThread;
+    if(diagnosticOnMain)_debugLastCutRefusal=diagnostic;
+    core3d::cylindrical_cut::DebugRefusalScope diagnosticScope(diagnostic);
+#endif
+    if(!completion)CORE3D_CUT_REFUSE("bridge.completion-missing", nil);
+#if DEBUG
+    void (^const diagnosticCompletion)(Core3DProfileConstructionResult)=[completion copy];
+    __weak Core3DViewController *diagnosticOwner=self;
+    completion=^(Core3DProfileConstructionResult result){
+        core3d::cylindrical_cut::DebugRefusalScope scope(diagnostic);
+        if(!diagnosticOnMain){
+            CORE3D_CUT_NOTE("bridge.context.main-thread");
+            Core3DViewController *owner=diagnosticOwner;
+            if(owner)owner->_debugLastCutRefusal=diagnostic;
+        }
+        if(result==Core3DProfileConstructionResultCommitted)diagnostic->reason.store(nullptr);
+        else if(result==Core3DProfileConstructionResultCancelled)CORE3D_CUT_NOTE("bridge.cancelled");
+        else if(result==Core3DProfileConstructionResultBusy)CORE3D_CUT_NOTE("bridge.busy");
+        else if(result==Core3DProfileConstructionResultUnchanged)CORE3D_CUT_NOTE("bridge.unchanged");
+        else CORE3D_CUT_NOTE("bridge.completion-without-commit");
+        diagnosticCompletion(result);
+    };
+#endif
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{CORE3D_CUT_NOTE("bridge.program.main-thread");completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(_nativeSolidWork||_isLoading.load()){CORE3D_CUT_NOTE("bridge.program.busy");completion(Core3DProfileConstructionResultBusy);return nil;}
     // Runtime class and exclusivity validation on the correct main-thread
     // completion path BEFORE any definition selector is read, exactly like
     // core3d_beginCut; a wrong-class input rejects here, never at the callers.
     if(![original isKindOfClass:Core3DCylindricalCutProgramSnapshot.class]||!GLController||!GLController.viewer
         ||![original matchesOwner:self viewer:GLController.viewer]
-        ||bool(radius)==bool(definition)||(definition&&![definition isKindOfClass:Core3DCylindricalCutDefinition.class])){
-        completion(Core3DProfileConstructionResultRejected);return nil;
+        ||unsigned(bool(radius))+unsigned(bool(definition))+unsigned(bool(ring))+unsigned(bool(ringEdit))!=1
+        ||(definition&&![definition isKindOfClass:Core3DCylindricalCutDefinition.class])
+        ||(ring&&![ring isKindOfClass:Core3DCylindricalCutRingDefinition.class])){
+        CORE3D_CUT_NOTE("bridge.program.input-or-owner");completion(Core3DProfileConstructionResultRejected);return nil;
     }
     // Live capture supplies only current admission identity, never a new edit target.
     const auto live=[self cylindricalCutProgramWithEntityIdentifier:original.entityIdentifier expected:expected];
-    if(!live){completion(Core3DProfileConstructionResultRejected);return nil;}
+    if(!live){CORE3D_CUT_NOTE("bridge.program.live-capture");completion(Core3DProfileConstructionResultRejected);return nil;}
     try {
         const auto before=[original nativeSnapshot];const auto identity=[live nativeSnapshot].identity;
         core3d::retained_boolean::ProgramEdit edit;
-        if(radius)edit=*radius;
+        if(ring)edit=core3d::retained_boolean::AppendRing{{static_cast<core3d::analytic_boolean::Axis>(ring.axis),
+            {ring.localX,ring.localY,ring.localZ},ring.boltCircleRadius,ring.worldHoleRadiusMM,static_cast<std::uint32_t>(ring.count)}};
+        else if(ringEdit)edit=*ringEdit;
+        else if(radius)edit=*radius;
         else edit=core3d::retained_boolean::AppendBore{
             core3d::cylindrical_cut::CreateEdit{static_cast<core3d::analytic_boolean::Axis>(definition.axis),
                 {definition.localX,definition.localY,definition.localZ},definition.worldRadiusMM}};
         const CGSize size=GLController.drawableSize;
-        const auto work=GLController.viewer->prepareCylindricalCutProgramEdit(before,edit,identity,expected.revisions.presentationRevision,
+        const auto prepare=core3d::retained_boolean::RingEdit(edit)?&core3d::Core3DViewer::prepareCylindricalCutRingEdit:
+            &core3d::Core3DViewer::prepareCylindricalCutProgramEdit;
+        const auto work=(GLController.viewer.get()->*prepare)(before,edit,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
-        if(!work){completion(Core3DProfileConstructionResultRejected);return nil;}
+        if(!work){CORE3D_CUT_NOTE("bridge.program.prepare");completion(Core3DProfileConstructionResultRejected);return nil;}
         __block BOOL delivered=NO;
         [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){delivered=YES;completion(result);}];
         // No yield: only this exact admitted work receives cancellation rights.
         if(delivered||_nativeSolidWork!=work)return nil;
         return [[Core3DCylindricalCutOperation alloc] initWithOwner:self work:work];
-    }catch(...){completion(Core3DProfileConstructionResultRejected);return nil;}
+    }catch(...){CORE3D_CUT_NOTE("bridge.program.exception");completion(Core3DProfileConstructionResultRejected);return nil;}
 }
 - (Core3DCylindricalCutOperation *)beginCylindricalCutAppendBore:(Core3DCylindricalCutProgramSnapshot *)original
     definition:(Core3DCylindricalCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
-    if(!definition){if(completion){if(NSThread.isMainThread)completion(Core3DProfileConstructionResultRejected);
-        else dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});}return nil;}
-    return [self core3d_beginProgramEdit:original definition:definition radius:std::nullopt expected:expected completion:completion];
+    return [self core3d_beginProgramEdit:original definition:definition radius:std::nullopt ring:nil ringEdit:std::nullopt expected:expected completion:completion];
 }
 - (Core3DCylindricalCutOperation *)beginCylindricalCutBoreRadius:(Core3DCylindricalCutProgramSnapshot *)original
     operandIdentifier:(uint32_t)operandIdentifier worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
     return [self core3d_beginProgramEdit:original definition:nil
         radius:std::optional<core3d::retained_boolean::SetBoreRadius>(core3d::retained_boolean::SetBoreRadius{operandIdentifier,radius})
+        ring:nil ringEdit:std::nullopt expected:expected completion:completion];
+}
+
+- (Core3DCylindricalCutOperation *)beginCylindricalCutAppendRing:(Core3DCylindricalCutProgramSnapshot *)original
+    definition:(Core3DCylindricalCutRingDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:definition ringEdit:std::nullopt
+        expected:expected completion:completion];
+}
+- (Core3DCylindricalCutOperation *)beginCylindricalCutRingRadius:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldHoleRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil
+        ringEdit:core3d::retained_boolean::ProgramEdit(core3d::retained_boolean::SetRingRadius{identifier,radius})
+        expected:expected completion:completion];
+}
+- (Core3DCylindricalCutOperation *)beginCylindricalCutRingCount:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier count:(uint32_t)count expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    return [self core3d_beginProgramEdit:original definition:nil radius:std::nullopt ring:nil
+        ringEdit:core3d::retained_boolean::ProgramEdit(core3d::retained_boolean::SetRingCount{identifier,count})
         expected:expected completion:completion];
 }
 
@@ -14611,6 +14905,9 @@ struct NativeModelingPermitIssuer final {
     debugGeometryDeliveryGate:(void (^)(void (^)(void)))gate
     completion:(void(^)(Core3DProfileConstructionResult))completion {
 #endif
+#if DEBUG
+        const auto diagnostic=core3d::cylindrical_cut::debugRefusalRecord;
+#endif
         NSUUID *completionToken = Core3DRegisterNativeSolidCompletion(completion);
         if (!completionToken) { completion(Core3DProfileConstructionResultBusy); return; }
 #if DEBUG
@@ -14630,13 +14927,17 @@ struct NativeModelingPermitIssuer final {
         const BOOL wasHosted = self.viewIfLoaded.window != nil;
         __weak Core3DViewController* weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+#if DEBUG
+            core3d::cylindrical_cut::DebugRefusalScope workerScope(diagnostic);
+#endif
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry);
             dispatch_async(dispatch_get_main_queue(), ^{
 #if DEBUG
                 dispatch_block_t delivery=^{
+                core3d::cylindrical_cut::DebugRefusalScope deliveryScope(diagnostic);
 #endif
                 Core3DViewController* controller = weakSelf;
-                if (!controller) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return; }
+                if (!controller) { CORE3D_CUT_NOTE("delivery.owner-released"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return; }
                 Core3DModelingPlanningContext *planningContext = weakPlanningContext;
                 const BOOL cancelled = controller->_nativeSolidCancelled;
                 // Main-thread work owns live scene authority. The worker's only
@@ -14648,13 +14949,13 @@ struct NativeModelingPermitIssuer final {
                 if (wasHosted && (!hostedWindow || !hostedView
                     || controller.viewIfLoaded != hostedView || hostedView.window != hostedWindow
                     || hostedWindow.rootViewController != expectedRoot)) {
-                    Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
+                    CORE3D_CUT_NOTE("delivery.host-context"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
                 }
                 if (cancelled) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultCancelled); return; }
                 if (!pendingWork || !currentViewer || controller->_isLoading.load() || !controller->_isSetuped
                     || ((GLViewController *)controller.glController) == nil
                     || ((GLViewController *)controller.glController).viewer != currentViewer) {
-                    Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
+                    CORE3D_CUT_NOTE("delivery.viewer-context"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
                 }
                 // Recheck the originally issued lease after private geometry
                 // work, before opening the single ordinary OCAF transaction.
@@ -14662,14 +14963,14 @@ struct NativeModelingPermitIssuer final {
                 // mistaken for competing native work by readiness admission.
                 if (planningContext && ![controller core3d_modelingContext:planningContext
                         matchesAllowingConsumed:YES]) {
-                    Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
+                    CORE3D_CUT_NOTE("delivery.planning-context"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return;
                 }
                 Core3DModelingPreparedRequest *reserved=controller->_pendingModelingReservation;
                 if(reserved&&reserved->_requestContext==planningContext&&reserved->_requestCommitPermit
                     &&(![controller core3d_reservationMatches:reserved]||!reserved->_requestCommitPermit->current())){
-                    Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;
+                    CORE3D_CUT_NOTE("delivery.reservation-context"); Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;
                 }
-                if (!built) { Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultFailed); return; }
+                if (!built) { CORE3D_CUT_NOTE("build.failed"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultFailed); return; }
                 const auto native = currentViewer->commitNativeSolid(pendingWork);
                 Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
                 switch (native) {
@@ -14687,6 +14988,7 @@ struct NativeModelingPermitIssuer final {
                     case core3d::OrdinaryEditResult::OutcomeUnknown: result = Core3DProfileConstructionResultRecoveryRequired; break;
                     case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
                 }
+                if(result!=Core3DProfileConstructionResultCommitted)CORE3D_CUT_NOTE("commit.ordinary-result");
                 Core3DDeliverNativeSolidCompletion(completionToken, result);
 #if DEBUG
                 };

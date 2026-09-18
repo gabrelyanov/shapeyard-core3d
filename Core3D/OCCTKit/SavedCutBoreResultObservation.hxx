@@ -1,4 +1,7 @@
 #pragma once
+#include "AnalyticBooleanRingOperand.hxx"
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 // Detached engineering observation only. There is deliberately NO MatchedResult
 // status or permission bit. Exterior cap/face correspondence remains unproved.
 #include "SavedCutEnclosureExtractor.hxx" // exact frozen dependency, not modified
@@ -33,6 +36,8 @@ inline bool Frame(const retained_solid::Envelope& e,std::optional<profile::Const
         frame=p.constructionFrame;plane=p.definition.plane;wall=p.definition.depth;return true;}
     if(e.sourceFamily==2){enclosure::Parameters p;if(!enclosure::Decode(int(e.sourceSchema),e.sourceValues,p))return false;
         frame=p.definition.constructionFrame;plane=p.definition.plane;wall=p.definition.dimensions.floor;return true;}
+    if(e.sourceFamily==3){rectangular_loft::Definition p;if(!loft_persistence::Decode(e.sourceValues,p))return false;
+        frame=p.constructionFrame;plane=0;wall=p.stations.back().z-p.stations.front().z;return true;}
     return false;
 }
 inline bool SameFrame(const std::optional<profile::ConstructionFrame>& a,const std::optional<profile::ConstructionFrame>& b){
@@ -113,8 +118,8 @@ inline Report Inspect(const TopoDS_Shape& result,const retained_solid::Envelope&
     const auto fail=[&](){report.status=stop.load()?Status::Cancelled:Status::Refused;return report;};
     try {
         // Legacy callers retain four wires. Programs may supply a recipe-derived
-        // bound of at most two source wires plus four retained openings.
-        if(maximumFaceWires==0||maximumFaceWires>6||stop.load()||!FixedTool(oldSource,newSource))return fail();
+        // bound of at most two source wires plus 32 validated expanded disks.
+        if(maximumFaceWires==0||maximumFaceWires>2+analytic_boolean_ring::kMaximumExpandedDisks||stop.load()||!FixedTool(oldSource,newSource))return fail();
         const auto oldClear=saved_cut_bore_clearance::Inspect(oldSource),newClear=saved_cut_bore_clearance::Inspect(newSource);
         if(oldClear.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk||newClear.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk)return fail();
         std::optional<profile::ConstructionFrame> oldFrame,frame;int oldPlane=-1,plane=-1;double oldWall=0,wall=0;
@@ -122,15 +127,16 @@ inline Report Inspect(const TopoDS_Shape& result,const retained_solid::Envelope&
         const double mm=newSource.metersPerUnit*1000,pi=std::acos(-1.0);gp_Trsf transform;
         if(frame&&!frame->Transform(transform))return fail();
         const auto sourceVector=enclosure_correspondence::PlaneVector(0,0,1,plane).Transformed(transform);
-        const auto p0=enclosure_correspondence::PlanePoint(0,0,0,plane).Transformed(transform);
-        const auto p1=enclosure_correspondence::PlanePoint(0,0,wall,plane).Transformed(transform);
+        const auto p0=enclosure_correspondence::PlanePoint(0,0,newClear.wallIntervalRecipe[0],plane).Transformed(transform);
+        const auto p1=enclosure_correspondence::PlanePoint(0,0,newClear.wallIntervalRecipe[1],plane).Transformed(transform);
         const gp_Vec axis=newSource.axis==0?gp_Vec(1,0,0):newSource.axis==1?gp_Vec(0,1,0):gp_Vec(0,0,1);
         const gp_Vec tool(newSource.point[0],newSource.point[1],newSource.point[2]);
         const double denominator=sourceVector.Dot(axis);if(!std::isfinite(denominator)||denominator==0)return fail();
         const double t0=(d::V(p0)-tool).Dot(sourceVector)/denominator,t1=(d::V(p1)-tool).Dot(sourceVector)/denominator;
         const double low=std::min(t0,t1),high=std::max(t0,t1);
         if(!std::isfinite(low)||!std::isfinite(high)||low>=high||!d::Matrix(transform))return fail();
-        std::array<double,3> frameMagnitude{std::abs(wall),std::abs(wall),std::abs(wall)};
+        const double extent=std::max(std::abs(newClear.wallIntervalRecipe[0]),std::abs(newClear.wallIntervalRecipe[1]));
+        std::array<double,3> frameMagnitude{extent,extent,extent};
         if(!d::AffineMagnitude(frameMagnitude,transform,false,mm,budget)
             ||!d::Track(d::Norm(tool)+std::abs(low)+std::abs(high)+newSource.radius,mm,budget))return fail();
         report.phase="collect";

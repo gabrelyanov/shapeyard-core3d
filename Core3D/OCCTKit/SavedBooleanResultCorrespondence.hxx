@@ -12,35 +12,76 @@ using Graph=old::detail::Graph;
 // A value-only view for one EXPLICIT operand's existing analytic predicates.
 // This does not leave this geometry layer as a snapshot, payload or permission;
 // final success below requires EVERY program operand and the entire boundary.
-inline retained_solid::Envelope GeometryView(const retained_boolean::Program& p,std::size_t index){
-    const auto& s=p.source;const auto& t=p.steps.at(index).operand;retained_solid::Envelope e;
+inline retained_solid::Envelope GeometryView(const retained_boolean::Program& p,const analytic_boolean::Operand& t){
+    const auto& s=p.source;retained_solid::Envelope e;
     e.document=s.document;e.entity=s.entity;e.definition=s.definition;e.sourceFeature=s.sourceFeature;e.derivedFeature=s.derivedFeature;
     e.sourceFamily=s.family;e.sourceSchema=s.schema;e.metersPerUnit=s.metersPerUnit;e.sourceValues=s.values;
     e.operandID=t.identifier;e.axis=std::uint8_t(t.axis);e.point=t.point;e.radius=t.radius;return e;
 }
-// Admission requires EVERY unordered operand pair to be a separated same-axis
+inline retained_solid::Envelope GeometryView(const retained_boolean::Program& p,std::size_t index){
+    const auto& t=p.steps.at(index).operand;
+    if(t.kind==analytic_boolean::OperandKind::Cylinder)return GeometryView(p,t);
+    auto disk=analytic_boolean_ring::Expand(analytic_boolean_ring::FromOperand(t,p.source.metersPerUnit),0,p.source.metersPerUnit);
+    disk.radius=t.radius;return GeometryView(p,disk);
+}
+// Admission requires EVERY unordered expanded-disk pair to be a separated same-axis
 // disk pair. Checking only pair 0/1 (or only adjacent pairs) is unsound: with
 // three or more bores a nonadjacent pair can overlap while every checked pair
 // clears. ANY invalid, near-tangent, overlapping, coincident or different-axis
-// pair refuses the whole program. One-bore programs stay refused here; the
+// pair refuses the whole program. One-disk programs stay refused here; the
 // legacy one-hole path owns them. Interval arithmetic, rounding-mode gate,
 // kernel separation and numeric-uncertainty bounds are unchanged per pair.
 inline bool SeparateDisks(const retained_boolean::Program& p){
     namespace i=saved_cut_bore_clearance::detail;
-    if(!retained_boolean::Valid(p)||p.steps.size()<2||std::fegetround()!=FE_TONEAREST)return false;
+    std::vector<retained_boolean::Disk> disks;
+    if(!retained_boolean::ExpandedDisks(p,disks)||disks.size()<2||std::fegetround()!=FE_TONEAREST)return false;
     const unsigned axis=unsigned(p.steps[0].operand.axis);
     const unsigned u=(axis+1)%3,v=(axis+2)%3;
-    for(std::size_t a=0;a<p.steps.size();++a){
-        const auto& x=p.steps[a].operand;
+    for(std::size_t a=0;a<disks.size();++a){
+        const auto& x=disks[a].operand;
         if(unsigned(x.axis)!=axis)return false;
         for(std::size_t b=0;b<a;++b){
-            const auto& y=p.steps[b].operand;
+            const auto& y=disks[b].operand;
             const auto distance=i::norm(i::sub(i::I(x.point[u]),i::I(y.point[u])),i::sub(i::I(x.point[v]),i::I(y.point[v])));
             const auto gap=i::mul(i::sub(distance,i::add(i::I(x.radius),i::I(y.radius))),i::mul(i::I(p.source.metersPerUnit),i::I(1000)));
             if(!i::good(gap)||gap.lo<=saved_cut_bore_clearance::KernelSeparationMM
                 ||i::up(gap.hi-gap.lo)>saved_cut_bore_clearance::MaximumNumericUncertaintyMM)return false;
         }
     }return true;
+}
+// Independent source-recipe radial extent, never inferred from a cut result.
+inline bool HostRadialExtent(const retained_boolean::Program& p,const analytic_boolean::Operand& t,double& extent){
+    extent=0;old::Expected expected;
+    if(!old::ExpectedSource(GeometryView(p,t),expected)||unsigned(t.axis)>2)return false;
+    const unsigned axis=unsigned(t.axis),u=(axis+1)%3,v=(axis+2)%3;
+    if(p.source.family==1){profile::Parameters source;if(!profile::Decode(p.source.values,source))return false;
+        if(source.definition.circle){
+            for(const auto& face:expected.faces)if(face.cylinder&&face.radialSign==1){
+                gp_Vec direction(0,0,0);direction.SetCoord(axis+1,1);
+                const gp_Vec delta(gp_Pnt(t.point[0],t.point[1],t.point[2]),face.origin);
+                if(face.normalOrAxis.Crossed(direction).Magnitude()>Precision::Angular()
+                    ||(delta-direction*delta.Dot(direction)).Magnitude()*p.source.metersPerUnit*1000>1e-9)return false;
+                extent=face.radius;return std::isfinite(extent)&&extent>0;
+            }return false;
+        }
+    }
+    // Polygon/loft bounds are determined by their authored vertices. Curved
+    // enclosure bounds are conservatively extended by each expected circle.
+    std::array<double,3> low{{INFINITY,INFINITY,INFINITY}},high{{-INFINITY,-INFINITY,-INFINITY}};
+    const auto add=[&](const gp_Pnt& point,double radius){for(unsigned j=0;j<3;++j){
+        low[j]=std::min(low[j],point.Coord(j+1)-radius);high[j]=std::max(high[j],point.Coord(j+1)+radius);}};
+    for(const auto& point:expected.vertices)add(point,0);
+    for(const auto& edge:expected.edges)if(edge.circle)add(edge.center,edge.radius);
+    const double du=std::max(std::abs(low[u]-t.point[u]),std::abs(high[u]-t.point[u]));
+    const double dv=std::max(std::abs(low[v]-t.point[v]),std::abs(high[v]-t.point[v]));
+    extent=std::hypot(du,dv);return std::isfinite(extent)&&extent>0;
+}
+inline bool AdmitDisks(const retained_boolean::Program& p){
+    std::vector<retained_boolean::Disk> disks;
+    if(!SeparateDisks(p)||!retained_boolean::ExpandedDisks(p,disks))return false;
+    for(const auto& disk:disks)if(saved_cut_bore_clearance::Inspect(GeometryView(p,disk.operand)).status
+        !=saved_cut_bore_clearance::Status::ClearRecipeDisk)return false;
+    return true;
 }
 struct Bore {unsigned face=0,seam=0,operand=0;std::vector<unsigned> openings;};
 inline bool RepresentationOwners(const Graph& g,const std::map<unsigned,unsigned>& seams,Budget& budget){
@@ -112,31 +153,32 @@ inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertice
 inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Program& program,const std::atomic_bool& stop) noexcept {
     Inspection report;const auto fail=[&](){report.classification=stop.load()?Classification::Cancelled:Classification::Refused;return report;};
     try {
-        if(stop.load()||!detail::SeparateDisks(program))return fail();
+        std::vector<retained_boolean::Disk> disks;
+        if(stop.load()||!retained_boolean::ExpandedDisks(program,disks)||!detail::SeparateDisks(program))return fail();
         const auto newSource=detail::GeometryView(program,0);old::Expected expected;
         if(!old::ExpectedSource(newSource,expected)||expected.caps[0]>=expected.faces.size()
             ||expected.caps[1]>=expected.faces.size()||expected.caps[0]==expected.caps[1])return fail();
-        // Each pierced source cap gains exactly one loop per declared bore.
+        // Each pierced source cap gains one loop per validated expanded disk.
         // Derive the collection allowance from the independent recipe, never
         // from observed output; all exact face/loop matching below still applies.
         std::size_t maximumFaceWires=1;
         for(std::size_t f=0;f<expected.faces.size();++f){
             const auto sourceWires=expected.faces[f].wires.size();
             if(sourceWires==0||sourceWires>2)return fail();
-            const auto openingWires=(f==expected.caps[0]||f==expected.caps[1])?program.steps.size():0;
+            const auto openingWires=(f==expected.caps[0]||f==expected.caps[1])?disks.size():0;
             maximumFaceWires=std::max(maximumFaceWires,sourceWires+openingWires);
         }
-        for(std::size_t i=0;i<program.steps.size();++i){
-            const auto view=detail::GeometryView(program,i);
+        for(const auto& disk:disks){
+            const auto view=detail::GeometryView(program,disk.operand);
             const auto bore=saved_cut_bore_result::Inspect(result,view,view,stop,maximumFaceWires);
             report.phase=bore.phase;
             if(bore.status!=saved_cut_bore_result::Status::BoreWallObservedExteriorUnproven)return fail();
         }
         detail::Graph graph;report.phase="program-collect";
         if(!old::detail::Collect(result,newSource,stop,graph,maximumFaceWires))return fail();
-        const double mm=program.source.metersPerUnit*1000,pi=std::acos(-1.0);const auto n=program.steps.size();
+        const double mm=program.source.metersPerUnit*1000,pi=std::acos(-1.0);const auto n=disks.size();
         if(graph.faces.size()!=expected.faces.size()+n||graph.edges.size()!=expected.edges.size()+3*n)return fail();
-        for(const auto& step:program.steps)for(double coordinate:step.operand.point)
+        for(const auto& disk:disks)for(double coordinate:disk.operand.point)
             if(!d::Track(std::abs(coordinate),mm,graph.budget))return fail();
         for(const auto& p:expected.vertices)if(!d::Track(std::abs(p.X())+std::abs(p.Y())+std::abs(p.Z()),mm,graph.budget))return fail();
         // Finish ALL planar pcurve/trim magnitudes before geometric matching.
@@ -198,7 +240,7 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
                 unsigned matches=0,operand=0;const auto& surface=face.surface;
                 const double radius=d::Norm(surface.x),yr=d::Norm(surface.y),z=d::Norm(surface.z);
                 if(radius<=0||yr<=0||z<=0)return fail();
-                for(unsigned k=0;k<n;++k){const auto& tool=program.steps[k].operand;
+                for(unsigned k=0;k<n;++k){const auto& tool=disks[k].operand;
                     gp_Vec axis(0,0,0);axis.SetCoord(unsigned(tool.axis)+1,1);
                     const gp_Vec center(tool.point[0],tool.point[1],tool.point[2]);const auto delta=surface.c-center;
                     if(std::abs(radius-tool.radius)*mm<=error&&std::abs(yr-tool.radius)*mm<=error

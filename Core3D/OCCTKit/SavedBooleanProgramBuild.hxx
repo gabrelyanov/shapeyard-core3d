@@ -35,7 +35,7 @@ inline bool Charge(const TopoDS_Shape& shape,const std::atomic_bool& stop,Budget
         }
     }return true;
 }
-// All tool values/order/high-water remain exact while source fields are edited.
+// IDs/order/high-water and plain bores stay exact. Rings alone re-anchor their bolt radius.
 // Existing value-only patch validation is applied to EVERY operand view; none
 // is returned or accepted as a one-bore owner/command.
 inline std::optional<retained_boolean::Change> SourcePatch(const Program& original,
@@ -55,9 +55,49 @@ inline std::optional<retained_boolean::Change> SourcePatch(const Program& origin
             sourceValues=applied->envelope.sourceValues;
         }
         if(!sourceValues)return {};changed.source.values=std::move(*sourceValues);
+        for(std::size_t i=0;i<changed.steps.size();++i){auto& t=changed.steps[i].operand;
+            if(t.kind!=analytic_boolean::OperandKind::CylinderRing)continue;
+            double before=0,after=0;
+            if(!saved_boolean_result::detail::HostRadialExtent(original,t,before)
+                ||!saved_boolean_result::detail::HostRadialExtent(changed,t,after))return {};
+            if(before!=after)t.boltCircleRadius=t.hostRadiusRatio*after;
+        }
+        if(retained_boolean::HasRing(changed)&&(!saved_boolean_result::detail::AdmitDisks(original)
+            ||!saved_boolean_result::detail::AdmitDisks(changed)))return {};
         if(!retained_boolean::Encode(result.recipe,result.newBytes))return {};
         result.changed=result.oldBytes!=result.newBytes;return result;
     }catch(...){return {};}
+}
+// Ring-specific preparation is shared by viewer, ordinary admission and OCAF
+// stage/seal. The legacy source helper remains unchanged. Values is the existing
+// saved_program_source_edit::Values DTO, instantiated only after its definition.
+template<class Values> inline bool PrepareRingSourceValues(const retained_boolean::Recipe& original,
+    const saved_cut_source_values::Patch& patch,const std::atomic_bool& stop,Values& out) noexcept {
+    out={};try {
+        const auto* p=std::get_if<Program>(&original);
+        if(stop.load()||!p||!retained_boolean::HasRing(*p))return false;
+        const auto change=SourcePatch(*p,patch);if(!change||stop.load())return false;
+        Values v;v.oldProgram=*p;v.newProgram=std::get<Program>(change->recipe);
+        v.oldBytes=change->oldBytes;v.newBytes=change->newBytes;v.changed=change->changed;
+        auto fixed=v.newProgram;fixed.source.values=p->source.values;
+        if(fixed.steps.size()!=p->steps.size())return false;
+        for(std::size_t i=0;i<p->steps.size();++i)if(p->steps[i].operand.kind==analytic_boolean::OperandKind::CylinderRing){
+            double before=0,after=0;const auto& old=p->steps[i].operand;
+            if(!saved_boolean_result::detail::HostRadialExtent(*p,old,before)
+                ||!saved_boolean_result::detail::HostRadialExtent(v.newProgram,old,after))return false;
+            const double expected=before==after?old.boltCircleRadius:old.hostRadiusRatio*after;
+            if(retained_solid::Bits(v.newProgram.steps[i].operand.boltCircleRadius)!=retained_solid::Bits(expected))return false;
+            fixed.steps[i].operand.boltCircleRadius=old.boltCircleRadius;
+        }
+        std::vector<std::uint8_t> bytes;
+        if(!retained_boolean::Encode(fixed,bytes)||bytes!=v.oldBytes||stop.load())return false;
+        out=std::move(v);return true;
+    }catch(...){out={};return false;}
+}
+template<class Values,class LegacyPrepare> inline bool PrepareSourceValues(const retained_boolean::Recipe& original,
+    const saved_cut_source_values::Patch& patch,const std::atomic_bool& stop,Values& out,LegacyPrepare legacy) noexcept {
+    const auto* p=std::get_if<Program>(&original);
+    return p&&retained_boolean::HasRing(*p)?PrepareRingSourceValues(original,patch,stop,out):legacy(original,patch,stop,out);
 }
 // Aggregate-budget overload: the caller-owned budget accumulates occurrence
 // and stream work across old capture, private copies and this rebuild, so the
@@ -76,8 +116,9 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
         if(stop.load()||!saved_boolean_result::detail::SeparateDisks(program)
             ||!retained_boolean::Encode(program,out.exactProgram)||!Charge(retainedBase,stop,budget)
             ||!saved_cut_source_edit::Commit(retainedBase,stop,budget.streamBytes,out.retainedBase))return refuse();
-        for(std::size_t i=0;i<program.steps.size();++i){
-            const auto view=saved_boolean_result::detail::GeometryView(program,i);
+        std::vector<retained_boolean::Disk> disks;if(!retained_boolean::ExpandedDisks(program,disks))return refuse();
+        for(const auto& disk:disks){
+            const auto view=saved_boolean_result::detail::GeometryView(program,disk.operand);
             if(stop.load()||!saved_cut_source_edit::InspectBase(retainedBase,view,stop)
                 ||saved_cut_bore_clearance::Inspect(view).status!=saved_cut_bore_clearance::Status::ClearRecipeDisk)return refuse();
         }
