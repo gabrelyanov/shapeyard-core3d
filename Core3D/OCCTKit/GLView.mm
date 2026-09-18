@@ -30,6 +30,11 @@
 
 namespace {
 
+#ifdef DEBUG
+// Covers iPad Pro 13-inch (M4) and iPad Air 13-inch (M2) viewport backings.
+constexpr NSUInteger kDebugCapturePixelBudget = 8 * 1024 * 1024;
+#endif
+
 class EAGLContextRestorer final {
 public:
     explicit EAGLContextRestorer(EAGLContext *thePreviousContext)
@@ -458,7 +463,7 @@ private:
     if (!_hasDrawable || _isDrawing || myController == nil
         || width == 0 || height == 0
         || width > 4096 || height > 4096
-        || width * height > 4 * 1024 * 1024
+        || width * height > kDebugCapturePixelBudget
         || width > static_cast<NSUInteger>(myBackingWidth)
         || height > static_cast<NSUInteger>(myBackingHeight)) {
         return nil;
