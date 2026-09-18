@@ -2,6 +2,7 @@
 // Versioned values only. No owner, command, geometry or prepared AI authority.
 // Legacy Encode/Decode remain the sole v1 codec and are not rewritten here.
 #include "RetainedSolidEnvelope.hxx"
+#include "RetainedFilletProgram.hxx"
 #include "AnalyticBooleanRingOperand.hxx"
 #include <variant>
 #include <optional>
@@ -22,7 +23,7 @@ struct Step {
     analytic_boolean::Operation operation=analytic_boolean::Operation::Difference;
     analytic_boolean::Operand operand;
 };
-struct Program {
+struct Program : retained_fillet::Program {
     Source source;
     std::uint8_t codecMinor=1; // Preserve v1 program bytes until a ring is appended.
     // One-past high-water; UINT32_MAX+1 represents exhausted issuance, not wrap.
@@ -57,7 +58,7 @@ inline bool ValidSource(const Source& s) noexcept {
 }
 inline bool Valid(const Program& p) noexcept {
     try {
-        if((p.codecMinor<1||p.codecMinor>3)||!ValidSource(p.source)||p.steps.empty()||p.steps.size()>MaximumOperands
+        if((p.codecMinor<1||p.codecMinor>4)||!ValidSource(p.source)||p.steps.empty()||p.steps.size()>MaximumOperands
             ||p.nextOperandID<2||p.nextOperandID>std::uint64_t(UINT32_MAX)+1)return false;
         std::size_t disks=0;
         for(std::size_t i=0;i<p.steps.size();++i){
@@ -68,12 +69,14 @@ inline bool Valid(const Program& p) noexcept {
                 if(p.codecMinor<2||analytic_boolean_ring::Inspect(analytic_boolean_ring::FromOperand(step.operand,p.source.metersPerUnit),
                     p.source.metersPerUnit)!=analytic_boolean_ring::Status::Clear)return false;
                 disks+=step.operand.count;
-            }else {if(step.operand.kind==analytic_boolean::OperandKind::Wedge&&p.codecMinor!=3)return false;++disks;}
+            }else {if(step.operand.kind==analytic_boolean::OperandKind::Wedge&&p.codecMinor<3)return false;++disks;}
             if(disks>analytic_boolean_ring::kMaximumExpandedDisks)return false;
             for(std::size_t j=0;j<i;++j)if(p.steps[j].operand.identifier==step.operand.identifier)return false;
         }
+        if(!retained_fillet::Valid(p,p.source.metersPerUnit*1000)
+            ||(p.codecMinor<4&&(!p.filletSteps.empty()||p.nextFilletStepID!=1||p.nextFilletEdgeID!=1)))return false;
         // Checked complete size before Encode allocates, including digest.
-        constexpr std::size_t fixed=10+80+5*8+32;const std::size_t stepBytes=p.codecMinor==1?44:p.codecMinor==2?64:96;
+        const std::size_t fixed=10+80+5*8+32+(p.codecMinor==4?retained_fillet::EncodedSize(p):0);const std::size_t stepBytes=p.codecMinor==1?44:p.codecMinor==2?64:96;
         return fixed<=retained_solid::MaximumEnvelopeBytes
             &&p.source.values.size()<=(retained_solid::MaximumEnvelopeBytes-fixed)/8
             &&p.steps.size()<=(retained_solid::MaximumEnvelopeBytes-fixed-p.source.values.size()*8)/stepBytes;
@@ -126,18 +129,21 @@ inline bool Encode(const Program& p,std::vector<std::uint8_t>& out) noexcept {
             if(p.codecMinor>=2){U64(bytes,Bits(step.operand.boltCircleRadius));
                 for(unsigned k=0;k<4;++k)bytes.push_back(std::uint8_t(step.operand.count>>(8*k)));
                 U64(bytes,Bits(step.operand.hostRadiusRatio));}
-            if(p.codecMinor==3)for(double value:{step.operand.directionAngle,step.operand.halfWidthApex,
+            if(p.codecMinor>=3)for(double value:{step.operand.directionAngle,step.operand.halfWidthApex,
                 step.operand.halfWidthMouth,step.operand.length})U64(bytes,Bits(value));
         }
+        if(p.codecMinor==4){std::vector<std::uint8_t> tail;
+            if(!retained_fillet::Encode(p,p.source.metersPerUnit*1000,tail))return false;
+            bytes.insert(bytes.end(),tail.begin(),tail.end());}
         retained_solid::Digest digest;if(!retained_solid::Hash(bytes,digest))return false;
         bytes.insert(bytes.end(),digest.begin(),digest.end());out=std::move(bytes);return true;
     }catch(...){out.clear();return false;}
 }
 inline bool Decode(const std::vector<std::uint8_t>& bytes,Program& out) noexcept {
     out={};try {
-        constexpr std::size_t fixed=10+80+5*8;const std::size_t stepBytes=bytes.size()>7&&bytes[7]==3?96:bytes.size()>7&&bytes[7]==2?64:44;
+        constexpr std::size_t fixed=10+80+5*8;const std::size_t stepBytes=bytes.size()>7&&bytes[7]>=3?96:bytes.size()>7&&bytes[7]==2?64:44;
         if(bytes.size()<fixed+8+stepBytes+32||bytes.size()>retained_solid::MaximumEnvelopeBytes
-            ||std::memcmp(bytes.data(),"SYRS\2\1\1",7)!=0||(bytes[7]<1||bytes[7]>3)||bytes[9]!=0)return false;
+            ||std::memcmp(bytes.data(),"SYRS\2\1\1",7)!=0||(bytes[7]<1||bytes[7]>4)||bytes[9]!=0)return false;
         Program p;p.codecMinor=bytes[7];p.source.family=bytes[8];std::size_t at=10;
         for(auto* id:{&p.source.document,&p.source.entity,&p.source.definition,&p.source.sourceFeature,&p.source.derivedFeature}){
             std::copy_n(bytes.begin()+at,16,id->begin());at+=16;
@@ -149,7 +155,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes,Program& out) noexcept
         if(!count||count>std::size_t(profile::MaximumScalars)||!steps||steps>MaximumOperands
             ||count>(bytes.size()-at-32)/8)return false;
         const std::size_t afterValues=at+std::size_t(count)*8;
-        if(steps>(bytes.size()-afterValues-32)/stepBytes||bytes.size()!=afterValues+std::size_t(steps)*stepBytes+32)return false;
+        if(steps>(bytes.size()-afterValues-32)/stepBytes||(p.codecMinor<4&&bytes.size()!=afterValues+std::size_t(steps)*stepBytes+32))return false;
         p.source.values.reserve(std::size_t(count));for(std::uint64_t i=0;i<count;++i)p.source.values.push_back(scalar());
         p.steps.reserve(std::size_t(steps));for(std::uint64_t i=0;i<steps;++i){
             Step step;step.operation=analytic_boolean::Operation(bytes[at++]);step.operand.kind=analytic_boolean::OperandKind(bytes[at++]);
@@ -159,10 +165,13 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes,Program& out) noexcept
             if(p.codecMinor>=2){step.operand.boltCircleRadius=scalar();
                 for(unsigned k=0;k<4;++k)step.operand.count|=std::uint32_t(bytes[at++])<<(8*k);
                 step.operand.hostRadiusRatio=scalar();}
-            if(p.codecMinor==3){step.operand.directionAngle=scalar();step.operand.halfWidthApex=scalar();
+            if(p.codecMinor>=3){step.operand.directionAngle=scalar();step.operand.halfWidthApex=scalar();
                 step.operand.halfWidthMouth=scalar();step.operand.length=scalar();}
             p.steps.push_back(step);
         }
+        if(p.codecMinor==4){retained_fillet::Program tail;
+            if(!retained_fillet::Decode(std::vector<std::uint8_t>(bytes.begin()+at,bytes.end()-32),p.source.metersPerUnit*1000,tail))return false;
+            static_cast<retained_fillet::Program&>(p)=std::move(tail);}
         std::vector<std::uint8_t> exact;if(!Encode(p,exact)||exact!=bytes)return false;
         out=std::move(p);return true;
     }catch(...){out={};return false;}

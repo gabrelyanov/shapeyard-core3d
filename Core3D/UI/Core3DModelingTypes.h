@@ -49,7 +49,7 @@ __attribute__((objc_subclassing_restricted))
 
 //! Values use source-recipe millimetres, BEFORE construction-frame and occurrence
 //! scaling. They do not change the bore, source plane, construction frame or IDs.
-typedef NS_ENUM(NSInteger, Core3DSavedCutSourceFamily) { Core3DSavedCutSourceFamilyPolygon NS_SWIFT_NAME(polygon)=1, Core3DSavedCutSourceFamilyEnclosure NS_SWIFT_NAME(enclosure)=2 };
+typedef NS_ENUM(NSInteger, Core3DSavedCutSourceFamily) { Core3DSavedCutSourceFamilyPolygon NS_SWIFT_NAME(polygon)=1, Core3DSavedCutSourceFamilyEnclosure NS_SWIFT_NAME(enclosure)=2, Core3DSavedCutSourceFamilyCircle NS_SWIFT_NAME(circle)=3, Core3DSavedCutSourceFamilyLoft NS_SWIFT_NAME(loft)=4 };
 __attribute__((objc_subclassing_restricted))
 @interface Core3DSavedCutSourcePatch : NSObject
 - (nullable instancetype)initWithCircleOuterRadiusMM:(nullable NSNumber *)outer innerRadiusMM:(nullable NSNumber *)inner depthMM:(nullable NSNumber *)depth
@@ -65,11 +65,23 @@ __attribute__((objc_subclassing_restricted))
     cornerRadiusMM:(nullable NSNumber *)corner
     NS_SWIFT_NAME(init(enclosureWidthMM:depthMM:heightMM:wallMM:floorMM:cornerRadiusMM:));
 @end
+//! Immutable station dimensions in source-recipe millimetres.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSavedCutSourceLoftStation : NSObject
+@property(nonatomic,readonly) uint32_t stationIdentifier;
+@property(nonatomic,readonly) double widthMM;
+@property(nonatomic,readonly) double depthMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 //! Native-issued descriptive values copied from the SAME cut snapshot. No new
 //! capture occurs and these fields cannot recreate source/transaction authority.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DSavedCutSourceValues : NSObject
 @property(nonatomic,readonly) Core3DSavedCutSourceFamily family;
+@property(nonatomic,copy,readonly,nullable) NSNumber *circleOuterRadiusMM;
+@property(nonatomic,copy,readonly,nullable) NSNumber *circleInnerRadiusMM;
+@property(nonatomic,copy,readonly) NSArray<Core3DSavedCutSourceLoftStation *> *loftStationsMM;
 @property(nonatomic,readonly) Core3DProfilePlane plane;
 @property(nonatomic,readonly) double metersPerUnit;
 @property(nonatomic,copy,readonly) NSArray<NSValue *> *polygonPointsMM; // CGPoint U/V in original order; empty for enclosure.
@@ -138,6 +150,8 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) double localY;
 @property(nonatomic,readonly) double localZ;
 @property(nonatomic,readonly) double boltCircleRadius;
+//! Finished bolt-circle radius, including positive occurrence scale.
+@property(nonatomic,readonly) double worldBoltRadiusMM;
 @property(nonatomic,readonly) double worldHoleRadiusMM;
 @property(nonatomic,readonly) double hostRadiusRatio;
 @property(nonatomic,readonly) NSUInteger count;
@@ -159,16 +173,28 @@ __attribute__((objc_subclassing_restricted))
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
+//! Read-only saved step values. Stable identifiers survive source replay.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRetainedFilletStep : NSObject
+@property(nonatomic,readonly) uint64_t stepIdentifier;
+@property(nonatomic,readonly) double radiusMM;
+@property(nonatomic,copy,readonly) NSArray<Core3DRetainedFilletAnchor *> *anchors;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 //! Native-issued whole-program snapshot of a retained cut: the complete recipe
 //! and every stable operand ride one opaque aggregate. No one-bore local view
 //! is exposed as native authority, and wire fields cannot recreate it.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DCylindricalCutProgramSnapshot : NSObject
+//! Loft dimension scale from this capture, including construction and occurrence scale; zero for other families.
+@property(nonatomic,readonly) double effectiveDimensionMetersPerUnit;
 @property(nonatomic,copy,readonly) NSString *entityIdentifier;
 @property(nonatomic,copy,readonly) NSString *definitionIdentifier;
 @property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutBore *> *bores;
 @property(nonatomic,copy,readonly) NSArray<Core3DCylindricalCutRing *> *rings;
 @property(nonatomic,copy,readonly) NSArray<Core3DWedgeCutOperand *> *wedges;
+@property(nonatomic,copy,readonly) NSArray<Core3DRetainedFilletStep *> *filletSteps;
 //! Descriptive source values shared by every bore of the complete recipe, in
 //! source-recipe millimetres BEFORE construction-frame and occurrence scaling.
 //! Copied from THIS snapshot; they cannot recreate source/transaction authority.

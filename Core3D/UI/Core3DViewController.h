@@ -328,6 +328,15 @@ NS_ASSUME_NONNULL_BEGIN
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutBoreRadius(_:operandIdentifier:worldRadiusMM:expected:completion:));
 //! Append or edit one retained wedge, one ordinary history step.
+- (nullable Core3DCylindricalCutOperation *)beginFilletStepAppend:(Core3DCylindricalCutProgramSnapshot *)original
+    anchors:(NSArray<Core3DRetainedFilletAnchor *> *)anchors radiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion NS_SWIFT_NAME(beginFilletStepAppend(_:anchors:radiusMM:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginFilletStepRadius:(Core3DCylindricalCutProgramSnapshot *)original
+    stepIdentifier:(uint64_t)identifier radiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion NS_SWIFT_NAME(beginFilletStepRadius(_:stepIdentifier:radiusMM:expected:completion:));
+- (nullable Core3DCylindricalCutOperation *)beginFilletStepRemoval:(Core3DCylindricalCutProgramSnapshot *)original
+    stepIdentifier:(uint64_t)identifier expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion NS_SWIFT_NAME(beginFilletStepRemoval(_:stepIdentifier:expected:completion:));
 - (nullable Core3DCylindricalCutOperation *)beginWedgeCutAppend:(Core3DCylindricalCutProgramSnapshot *)original
     definition:(Core3DWedgeCutDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
@@ -349,6 +358,13 @@ NS_ASSUME_NONNULL_BEGIN
     operandIdentifier:(uint32_t)identifier worldHoleRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutRingRadius(_:operandIdentifier:worldHoleRadiusMM:expected:completion:));
+//! Descriptive admission category for the last synchronous ring/wedge refusal.
+//! Never an edit permit; absent for stale authority or an unclassified failure.
+@property(nonatomic,copy,readonly,nullable) NSString *lastCylindricalCutAdmissionReason;
+- (nullable Core3DCylindricalCutOperation *)beginCylindricalCutRingBoltRadius:(Core3DCylindricalCutProgramSnapshot *)original
+    operandIdentifier:(uint32_t)identifier worldBoltRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
+    completion:(void (^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(beginCylindricalCutRingBoltRadius(_:operandIdentifier:worldBoltRadiusMM:expected:completion:));
 - (nullable Core3DCylindricalCutOperation *)beginCylindricalCutRingCount:(Core3DCylindricalCutProgramSnapshot *)original
     operandIdentifier:(uint32_t)identifier count:(uint32_t)count expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
@@ -1070,6 +1086,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSDictionary<NSString *, NSNumber *> *)debugLoftCutProofProbe NS_SWIFT_NAME(debugLoftCutProofProbe());
 - (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeGeometry:(NSString *)entity
     NS_SWIFT_NAME(debugSavedBooleanWedgeGeometry(_:));
++ (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanFilletProbe:(NSInteger)scenario NS_SWIFT_NAME(debugSavedBooleanFilletProbe(_:));
++ (void)debugSetRetainedFilletFailureCount:(NSInteger)count NS_SWIFT_NAME(debugSetRetainedFilletFailureCount(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedBooleanWedgeProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario

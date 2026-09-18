@@ -237,6 +237,25 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(init(axis:localX:localY:localZ:directionAngle:worldHalfWidthApexMM:worldHalfWidthMouthMM:worldLengthMM:));
 @end
 
+//! Edge anchors use the original object's document-local coordinates.
+typedef NS_ENUM(NSInteger, Core3DRetainedFilletCurveKind) { Core3DRetainedFilletCurveKindLine=1, Core3DRetainedFilletCurveKindCircle=2 };
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRetainedFilletAnchor : NSObject
+@property(nonatomic,readonly) Core3DRetainedFilletCurveKind curveKind;
+@property(nonatomic,readonly) double localX;
+@property(nonatomic,readonly) double localY;
+@property(nonatomic,readonly) double localZ;
+@property(nonatomic,readonly) double axisX;
+@property(nonatomic,readonly) double axisY;
+@property(nonatomic,readonly) double axisZ;
+@property(nonatomic,readonly) double circleRadius;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithCurveKind:(Core3DRetainedFilletCurveKind)kind
+    localX:(double)x localY:(double)y localZ:(double)z axisX:(double)ax axisY:(double)ay axisZ:(double)az circleRadius:(double)radius
+    NS_SWIFT_NAME(init(curveKind:localX:localY:localZ:axisX:axisY:axisZ:circleRadius:));
+@end
+
 //! Immutable validated construction values. Lengths use the declared document
 //! unit; revolution parameters are degrees. No geometry or document handles.
 @interface Core3DProfileDefinition : NSObject

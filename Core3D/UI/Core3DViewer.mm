@@ -2483,8 +2483,7 @@ bool Core3DViewer::prepareSavedProgramSourceDetached(
         // stream/copy. Final full-scene check also covers these inspections.
         for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
             if(!saved_cut_source_edit::InspectBase(base,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
-        if(saved_boolean_result::Inspect(result,work->values.oldProgram,stop).classification
-            !=saved_boolean_result::Classification::MatchedOrientedBoundary||stop.load())return refuse();
+        if(!saved_boolean_build::VerifyCurrent(base,result,work->values.oldProgram,work->displaySettings,stop,work->budget)||stop.load())return refuse();
         // Re-charge occurrence and stream budgets into the ONE aggregate job
         // budget before any geometry copy; the rebuild below shares it.
         if(!analytic_boolean::detail::Bounded(base,1024,stop)
@@ -2506,8 +2505,8 @@ bool Core3DViewer::prepareSavedProgramSourceDetached(
             ||!saved_boolean_build::Charge(work->oldResult,stop,work->budget))return refuse();
         for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
             if(!saved_cut_source_edit::InspectBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
-        if(saved_boolean_result::Inspect(work->oldResult,work->values.oldProgram,stop).classification
-            !=saved_boolean_result::Classification::MatchedOrientedBoundary
+        if((work->values.oldProgram.filletSteps.empty()&&saved_boolean_build::PreFilletInspection(work->oldResult,work->values.oldProgram,stop).classification
+            !=saved_boolean_result::Classification::MatchedOrientedBoundary)
             ||!saved_cut_source_edit::Commit(work->oldBase,stop,work->budget.streamBytes,work->privateBase)
             ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->budget.streamBytes,work->privateResult))return refuse();
         saved_cut_source_edit::ShapeCommitment afterBase,afterResult;
@@ -2526,7 +2525,8 @@ bool Core3DViewer::prepareSavedProgramSourceDetached(
     }catch(...){return refuse();}
 }
 std::shared_ptr<const SavedProgramSourceDetachedResult> Core3DViewer::buildSavedProgramSourceDetached(
-    const std::shared_ptr<SavedProgramSourceDetachedWork>& work) noexcept {
+    const std::shared_ptr<SavedProgramSourceDetachedWork>& work,retained_fillet::Outcome* filletOutcome) noexcept {
+    if(filletOutcome)*filletOutcome=retained_fillet::Outcome::Built;
     using Phase=SavedProgramSourceDetachedWork::Phase;
     if(!work||!work->stop)return {};
     auto prepared=Phase::Prepared;
@@ -2543,8 +2543,8 @@ std::shared_ptr<const SavedProgramSourceDetachedResult> Core3DViewer::buildSaved
             ||!(beforeBase==work->privateBase)||!(beforeResult==work->privateResult))return refuse();
         for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
             if(!saved_cut_source_edit::InspectBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
-        if(saved_boolean_result::Inspect(work->oldResult,work->values.oldProgram,stop).classification
-            !=saved_boolean_result::Classification::MatchedOrientedBoundary)return refuse();
+        if((work->values.oldProgram.filletSteps.empty()&&saved_boolean_build::PreFilletInspection(work->oldResult,work->values.oldProgram,stop).classification
+            !=saved_boolean_result::Classification::MatchedOrientedBoundary))return refuse();
         auto output=std::shared_ptr<SavedProgramSourceDetachedResult>(new SavedProgramSourceDetachedResult());
         output->values=work->values;output->sourceBase=work->sourceBase;output->sourceResult=work->sourceResult;
         output->privateOldBase=work->privateBase;output->privateOldResult=work->privateResult;
@@ -2573,6 +2573,7 @@ std::shared_ptr<const SavedProgramSourceDetachedResult> Core3DViewer::buildSaved
                 if(saved_cut_source_edit::RebuildLoftBase(view,stop,base)!=saved_cut_source_edit::LoftBaseStatus::Built)return refuse();
             }else return refuse();
             output->build=saved_boolean_build::Build(base,work->values.newProgram,work->displaySettings,stop,work->budget);
+            if(filletOutcome)*filletOutcome=output->build.filletOutcome;
             if(stop.load()||output->build.status!=saved_boolean_build::Status::Built
                 ||output->build.exactProgram!=work->values.newBytes)return refuse();
             output->generatedBase=output->build.retainedBase;output->generatedResult=output->build.finalResult;
@@ -3360,6 +3361,10 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
             ||current->source.effectiveMM!=original.source.effectiveMM
             ||current->source.recipeBytes!=original.source.recipeBytes
             ||!myDoc->SavedCutSceneStateMatches(original.guard))CORE3D_CUT_REFUSE("program-prepare.stale-source", {});
+        if(const auto* append=std::get_if<retained_boolean::AppendFilletStep>(&edit)){
+            std::vector<retained_fillet::EdgeAnchor> captured;
+            if(!myDoc->CaptureRetainedFilletAnchors(original.source.original.label,append->anchors,captured))return {};
+        }
         const auto change=retained_boolean::Apply(original.source.recipe,edit,original.source.effectiveMM);
         if(!change)CORE3D_CUT_REFUSE("program-prepare.apply-edit", {});
         const auto* program=std::get_if<retained_boolean::Program>(&change->recipe);
@@ -3372,6 +3377,18 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
             if(!saved_boolean_result::detail::AdmitSections(*program))CORE3D_CUT_REFUSE("program-clearance.convex-sections-or-host", {});
         }else if(retained_boolean::HasRing(*program)?!saved_boolean_result::detail::AdmitDisks(*program):
             (program->steps.size()>=2&&!saved_boolean_result::detail::SeparateDisks(*program)))CORE3D_CUT_REFUSE("program-clearance.disk-budget-or-separation", {});
+        // Pair separation alone says nothing about containment by the host.
+        // Check every plain bore against the unchanged source at admission,
+        // including an append to an already retained loft/circle program.
+        if(!retained_boolean::HasRing(*program)&&!retained_boolean::HasWedge(*program)){
+            for(const auto& step:program->steps){
+                const auto clearance=saved_cut_bore_clearance::Inspect(
+                    saved_boolean_result::detail::GeometryView(*program,step.operand));
+                if(clearance.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk){
+                    CORE3D_CUT_DETAIL("program-clearance.source-disk",clearance.status);return {};
+                }
+            }
+        }
         auto carrier=std::make_shared<retained_solid::Payload>();carrier->envelope=change->recipe;
         carrier->bytes=change->newBytes;carrier->base=original.source.base;
         // Append/radius keeps the retained source/derived UUIDs; no new feature
@@ -3400,7 +3417,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         myContext->InitSelected();const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());if(selected.IsNull())CORE3D_CUT_REFUSE("program-prepare.selection", {});
         OrdinaryTransformRecord record;record.previous=original.source.original;
         record.requested.label=record.previous.label;record.requested.presentation=selected;record.requested.shape=record.previous.shape;
-        record.requested.transform=record.previous.transform;record.requested.operation=retained_boolean::WedgeEdit(edit)?OrdinaryTransformOperation::WedgeCut:
+        record.requested.transform=record.previous.transform;record.requested.operation=retained_boolean::FilletEdit(edit)?OrdinaryTransformOperation::RetainedFillet:
+            retained_boolean::WedgeEdit(edit)?OrdinaryTransformOperation::WedgeCut:
             retained_boolean::RingEdit(edit)?OrdinaryTransformOperation::CylindricalCutRing:OrdinaryTransformOperation::CylindricalCut;
         record.requested.cut=carrier;record.requested.cutSource=original.guard;record.requested.cutProgramEdit=edit;
         work->rebuildAuthority.emplace();work->rebuildAuthority->records.push_back(std::move(record));
@@ -3415,6 +3433,13 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareWedgeCutProgramEdit(const 
     const retained_boolean::ProgramEdit& edit,const ObjectFrameIdentity& identity,std::uint64_t presentation,
     std::uint32_t width,std::uint32_t height)noexcept {
     if(!retained_boolean::WedgeEdit(edit))CORE3D_CUT_REFUSE("program-prepare.wedge-edit-kind", {});
+    return prepareCylindricalCutProgramEdit(original,edit,identity,presentation,width,height);
+}
+
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareRetainedFilletEdit(const CylindricalCutProgramSnapshot& original,
+    const retained_boolean::ProgramEdit& edit,const ObjectFrameIdentity& identity,std::uint64_t presentation,
+    std::uint32_t width,std::uint32_t height)noexcept {
+    if(!retained_boolean::FilletEdit(edit))CORE3D_CUT_REFUSE("program-prepare.fillet-edit-kind", {});
     return prepareCylindricalCutProgramEdit(original,edit,identity,presentation,width,height);
 }
 
@@ -3474,7 +3499,9 @@ bool Core3DViewer::buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidG
 NativeSolidGeometryPayload Core3DViewer::nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept {
     return work ? work->geometry : NativeSolidGeometryPayload{};
 }
-bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept {
+bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload,
+    retained_fillet::Outcome* filletOutcome) noexcept {
+    if(filletOutcome)*filletOutcome=retained_fillet::Outcome::Built;
     if(const auto p=std::get_if<std::shared_ptr<CutSolidGeometry>>(&payload)) {
         if(!*p||(*p)->built||(*p)->cancelled.load())CORE3D_CUT_REFUSE("build.state-or-cancelled", false);
         if((*p)->rebuildLoftBase){
@@ -3511,6 +3538,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
         if(!*p||(*p)->built||(*p)->cancelled.load())CORE3D_CUT_REFUSE("program-build.state-or-cancelled", false);
         // Whole-program detached build retains the complete boundary proof.
         (*p)->result=saved_boolean_build::Build((*p)->detachedBase,(*p)->program,(*p)->displaySettings,(*p)->cancelled);
+        if(filletOutcome)*filletOutcome=(*p)->result.filletOutcome;
         if((*p)->result.status!=saved_boolean_build::Status::Built){
             CORE3D_CUT_DETAIL("program-build.status",(*p)->result.status);return false;
         }

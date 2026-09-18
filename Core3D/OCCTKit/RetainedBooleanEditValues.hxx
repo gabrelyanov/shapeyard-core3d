@@ -57,15 +57,22 @@ struct AppendBore { cylindrical_cut::CreateEdit edit; };
 struct SetBoreRadius { std::uint32_t operandID=0; double worldRadiusMM=0; };
 struct AppendRing {cylindrical_cut::RingCreateEdit edit;};
 struct SetRingRadius {std::uint32_t operandID=0;double worldHoleRadiusMM=0;};
+// Physical bolt radius is converted using the current occurrence scale.
+struct SetRingBoltRadius {std::uint32_t operandID=0;double worldBoltRadiusMM=0;};
 struct SetRingCount {std::uint32_t operandID=0;std::uint32_t count=0;};
 struct AppendWedge {wedge_cut::CreateEdit edit;};
 struct SetWedgeWidths {std::uint32_t operandID=0;double worldHalfWidthApexMM=0,worldHalfWidthMouthMM=0;};
 struct SetWedgeLength {std::uint32_t operandID=0;double worldLengthMM=0;};
-using ProgramEdit=std::variant<AppendBore,SetBoreRadius,AppendRing,SetRingRadius,SetRingCount,AppendWedge,SetWedgeWidths,SetWedgeLength>;
+struct AppendFilletStep {double radiusMM=0;std::vector<retained_fillet::EdgeAnchor> anchors;};
+struct SetFilletRadius {std::uint64_t stepIdentifier=0;double radiusMM=0;};
+struct RemoveFilletStep {std::uint64_t stepIdentifier=0;};
+using ProgramEdit=std::variant<AppendBore,SetBoreRadius,AppendRing,SetRingRadius,SetRingCount,SetRingBoltRadius,AppendWedge,SetWedgeWidths,SetWedgeLength,AppendFilletStep,SetFilletRadius,RemoveFilletStep>;
+inline bool FilletEdit(const ProgramEdit& e){return std::holds_alternative<AppendFilletStep>(e)||std::holds_alternative<SetFilletRadius>(e)||std::holds_alternative<RemoveFilletStep>(e);}
 inline bool WedgeEdit(const ProgramEdit& edit){return std::holds_alternative<AppendWedge>(edit)
     ||std::holds_alternative<SetWedgeWidths>(edit)||std::holds_alternative<SetWedgeLength>(edit);}
 inline bool RingEdit(const ProgramEdit& edit){return std::holds_alternative<AppendRing>(edit)
-    ||std::holds_alternative<SetRingRadius>(edit)||std::holds_alternative<SetRingCount>(edit);}
+    ||std::holds_alternative<SetRingRadius>(edit)||std::holds_alternative<SetRingCount>(edit)
+    ||std::holds_alternative<SetRingBoltRadius>(edit);}
 inline bool HasRing(const Program& p){return std::any_of(p.steps.begin(),p.steps.end(),[](const auto& s){
     return s.operand.kind==analytic_boolean::OperandKind::CylinderRing;});}
 inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edit,double effectiveMM) noexcept {
@@ -75,6 +82,27 @@ inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edi
         Change result;if(!Encode(original,result.oldBytes))return {};
         Program p;if(const auto* legacy=std::get_if<Legacy>(&original)){if(!Promote(*legacy,p))return {};}
         else p=std::get<Program>(original);
+        if(FilletEdit(edit)){
+            if(const auto* a=std::get_if<AppendFilletStep>(&edit)){
+                if(p.nextFilletStepID==UINT64_MAX||p.nextFilletEdgeID>UINT64_MAX-a->anchors.size()
+                    ||a->anchors.empty()||a->anchors.size()>retained_fillet::MaximumAnchors)return {};
+                retained_fillet::Step step;step.stepIdentifier=p.nextFilletStepID++;
+                if(!cylindrical_cut::Radius(a->radiusMM,effectiveMM,step.radiusLocal))return {};
+                step.anchors=a->anchors;for(auto& anchor:step.anchors)anchor.identifier=p.nextFilletEdgeID++;
+                p.filletSteps.push_back(std::move(step));p.codecMinor=4;
+            }else{
+                const auto* radius=std::get_if<SetFilletRadius>(&edit);const auto* remove=std::get_if<RemoveFilletStep>(&edit);
+                const auto id=radius?radius->stepIdentifier:remove->stepIdentifier;
+                auto it=std::find_if(p.filletSteps.begin(),p.filletSteps.end(),[&](const retained_fillet::Step& step){return step.stepIdentifier==id;});
+                if(it==p.filletSteps.end())return {};
+                if(radius){double local=0;if(!cylindrical_cut::Radius(radius->radiusMM,effectiveMM,local))return {};
+                    if(radius->radiusMM!=it->radiusLocal*effectiveMM)it->radiusLocal=local;}
+                else p.filletSteps.erase(it);
+            }
+            result.selectedOperandID=p.steps.front().operand.identifier;
+            result.recipe=std::move(p);if(!Encode(result.recipe,result.newBytes))return {};
+            result.changed=result.oldBytes!=result.newBytes;return result;
+        }
         if(WedgeEdit(edit)){
             if(const auto* append=std::get_if<AppendWedge>(&edit)){
                 if(p.steps.size()>=MaximumOperands||p.nextOperandID>UINT32_MAX)return {};
@@ -85,7 +113,7 @@ inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edi
                 if(t.directionAngle==0)t.directionAngle=0; // canonical positive zero at capture
                 if(!wedge_cut::Widths(w.worldHalfWidthApexMM,w.worldHalfWidthMouthMM,effectiveMM,t.halfWidthApex,t.halfWidthMouth)
                     ||!wedge_cut::Dimension(w.worldLengthMM,effectiveMM,.1,t.length))CORE3D_CUT_REFUSE("wedge.invalid-dimensions", {});
-                p.codecMinor=3;result.selectedOperandID=t.identifier;p.steps.push_back(step);++p.nextOperandID;
+                p.codecMinor=std::max<std::uint8_t>(3,p.codecMinor);result.selectedOperandID=t.identifier;p.steps.push_back(step);++p.nextOperandID;
             }else{
                 const auto* widths=std::get_if<SetWedgeWidths>(&edit);const auto* length=std::get_if<SetWedgeLength>(&edit);
                 if(!widths&&!length)return {};const auto id=widths?widths->operandID:length->operandID;
@@ -115,12 +143,24 @@ inline std::optional<Change> Apply(const Recipe& original,const ProgramEdit& edi
             result.selectedOperandID=t.identifier;p.steps.push_back(step);++p.nextOperandID;
         }else{
             const auto* radius=std::get_if<SetRingRadius>(&edit);const auto* count=std::get_if<SetRingCount>(&edit);
-            const auto id=radius?radius->operandID:count->operandID;
+            const auto* bolt=std::get_if<SetRingBoltRadius>(&edit);
+            if(!radius&&!count&&!bolt)return {};
+            const auto id=radius?radius->operandID:count?count->operandID:bolt->operandID;
             auto it=std::find_if(p.steps.begin(),p.steps.end(),[&](const auto& s){return s.operand.identifier==id;});
             if(it==p.steps.end()||it->operand.kind!=analytic_boolean::OperandKind::CylinderRing)return {};
             if(radius){double local=0;if(!cylindrical_cut::Radius(radius->worldHoleRadiusMM,effectiveMM,local))return {};
                 if(radius->worldHoleRadiusMM!=it->operand.radius*effectiveMM)it->operand.radius=local;}
-            else it->operand.count=count->count;
+            else if(count)it->operand.count=count->count;
+            else {
+                double local=0,extent=0;
+                if(!cylindrical_cut::Radius(bolt->worldBoltRadiusMM,effectiveMM,local)
+                    ||!saved_boolean_result::detail::HostRadialExtent(p,it->operand,extent))return {};
+                // Preserve exact bytes on no-op; on change anchor to TODAY'S
+                // authored host extent, so later source edits retain the ratio.
+                if(bolt->worldBoltRadiusMM!=it->operand.boltCircleRadius*effectiveMM){
+                    it->operand.boltCircleRadius=local;it->operand.hostRadiusRatio=local/extent;
+                }
+            }
             result.selectedOperandID=id;
         }
         if(!saved_boolean_result::detail::AdmitSections(p))return {};
@@ -144,6 +184,7 @@ inline bool OccurrenceRadiiMM(const Recipe& recipe,const gp_Trsf& transform) noe
                     ||!wedge_cut::Dimension(t.length*factor,1,.1,local))return false;
             }else if(!supported(t.radius))return false;
         }
+        for(const auto& step:std::get<Program>(recipe).filletSteps)if(!supported(step.radiusLocal))return false;
         return true;
     }catch(...){return false;}
 }

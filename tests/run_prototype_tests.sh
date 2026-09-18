@@ -22,17 +22,32 @@ if [[ -n "${2:-}" ]]; then
     /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
         -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
         "$tests_dir/RectangularLoftPlanarBuilderTests.cpp" -L "$2" \
-        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
         -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -o "$output_dir/RectangularLoftPlanarBuilderTests"
     "$output_dir/RectangularLoftPlanarBuilderTests"
     /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
         -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
         "$tests_dir/loft_cut_source_patch_tests.cpp" -L "$2" \
-        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
         -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/loft_cut_source_patch_tests"
     "$output_dir/loft_cut_source_patch_tests"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/RingBoltRadiusEditTests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/RingBoltRadiusEditTests"
+    "$output_dir/RingBoltRadiusEditTests"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/retained_fillet_anchor_tests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/retained_fillet_anchor_tests"
+    "$output_dir/retained_fillet_anchor_tests"
+
 else
-    echo "SKIP RectangularLoftPlanarBuilderTests and loft_cut_source_patch_tests: pass retained host OCCT library directory as argument 2"
+    echo "SKIP RectangularLoftPlanarBuilderTests, loft_cut_source_patch_tests RingBoltRadiusEditTests and retained_fillet_anchor_tests: pass retained host OCCT library directory as argument 2"
 fi

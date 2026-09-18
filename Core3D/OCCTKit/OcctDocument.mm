@@ -7550,6 +7550,26 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
     }catch(...){output={};CORE3D_CUT_REFUSE("document-program-capture.exception", Standard_False);}
 }
 
+Standard_Boolean OcctDocument::CaptureRetainedFilletAnchors(const TDF_Label& label,
+    const std::vector<core3d::retained_fillet::EdgeAnchor>& requested,
+    std::vector<core3d::retained_fillet::EdgeAnchor>& captured) const noexcept {
+    captured.clear();try {
+        namespace f=core3d::retained_fillet;OcctCylindricalCutProgramSource source;
+        if(requested.empty()||requested.size()>f::MaximumAnchors||!CaptureCylindricalCutProgramSource(label,source))return Standard_False;
+        const double mm=core3d::retained_boolean::Identities(source.recipe).metersPerUnit*1000;
+        TopTools_IndexedMapOfShape unique;
+        for(const auto& anchor:requested){TopoDS_Edge edge;const auto status=f::Resolve(source.original.shape,anchor,mm,edge);
+            if(status!=f::Outcome::Built){CORE3D_CUT_NOTE(f::Reason(status));return Standard_False;}
+            if(unique.Contains(edge)){CORE3D_CUT_NOTE(f::Reason(f::Outcome::DeclinedAnchorAmbiguous));return Standard_False;}unique.Add(edge);
+            if(anchor.curveKind==f::CurveKind::Line){BRepAdaptor_Curve curve(edge);
+                if(f::Point(anchor).Distance(curve.Value(curve.FirstParameter()))<=1e-4/mm
+                    ||f::Point(anchor).Distance(curve.Value(curve.LastParameter()))<=1e-4/mm){
+                    CORE3D_CUT_NOTE("fillet.capture-anchor-at-vertex");return Standard_False;}}
+        }
+        captured=requested;return Standard_True;
+    }catch(...){captured.clear();return Standard_False;}
+}
+
 Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
     const OcctObjectTransformState& previous,const TopoDS_Shape& candidate,
     const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
@@ -10908,6 +10928,11 @@ std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard
 std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe(){
     return SavedCutResultProbeChecks(core3d::saved_boolean_build::probe::Run(),"program",257);
 }
+#include "SavedBooleanFilletProbe.hxx"
+std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario){
+    return core3d::saved_boolean_fillet_probe::Run(static_cast<unsigned>(scenario));
+}
+void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count){core3d::retained_fillet::FailureCount.store(std::max(0,count));}
 #include "SavedBooleanWedgeProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario){
     return core3d::saved_boolean_wedge_probe::Run(unsigned(scenario));

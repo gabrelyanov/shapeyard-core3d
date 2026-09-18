@@ -430,6 +430,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 !=(request.cutProgramEdit&&retained_boolean::RingEdit(*request.cutProgramEdit)))CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if((request.operation==OrdinaryTransformOperation::WedgeCut)
                 !=(request.cutProgramEdit&&retained_boolean::WedgeEdit(*request.cutProgramEdit)))CORE3D_CUT_REFUSE("ordinary.wedge-edit-kind", reject(OrdinaryEditResult::Invalid));
+            if((request.operation==OrdinaryTransformOperation::RetainedFillet)
+                !=(request.cutProgramEdit&&retained_boolean::FilletEdit(*request.cutProgramEdit)))CORE3D_CUT_REFUSE("ordinary.fillet-edit-kind", reject(OrdinaryEditResult::Invalid));
             const bool sourceRebuild=request.operation==OrdinaryTransformOperation::CylindricalCutSourceRebuild;
             const bool programSourceRebuild=request.operation==OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild;
             if(bool(request.cut)!=(IsCylindricalCutOperation(request.operation))

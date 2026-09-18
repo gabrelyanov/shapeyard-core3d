@@ -26,13 +26,16 @@ constexpr std::uint16_t AnalyticZeroPolicy1=1;
 constexpr std::uint16_t ExactLoftPolicy4097=4097;
 // Placement state v1 + exact OCCT V3. Separate from both prior policies.
 constexpr std::uint16_t ExactPlacementPolicy8193=8193;
+// Exact independently reconstructed initial/native-readback V3 fillet geometry.
+// No observed-shape rounding, no retargeting of an older policy.
+constexpr std::uint16_t ExactRetainedFilletPolicy12289=12289;
 inline const Standard_GUID& VersionedSchemaID(){static const Standard_GUID id("42AB4BB7-6421-445F-A2B0-2DC682AB3001");return id;}
 inline const Standard_GUID& VersionedCountID(){static const Standard_GUID id("42AB4BB7-6421-445F-A2B0-2DC682AB3002");return id;}
 enum class EffectEvidenceStatus { Current, Mismatch, LegacyUnversioned, UnsupportedPolicy, Unavailable };
-enum class Operation:std::uint8_t { CreateEnclosure=1, RebuildEnclosure=2, CreateAssembly=3, RebuildProfile=4, RebuildLoftStation=6, SetPlacement=7 };
-enum class Feature:std::uint8_t { Profile=1, Enclosure=2, RectangularLoft=3, PlacementObject=4, PlacementBareSolid=5 };
+enum class Operation:std::uint8_t { CreateEnclosure=1, RebuildEnclosure=2, CreateAssembly=3, RebuildProfile=4, RebuildLoftStation=6, SetPlacement=7, RebuildRetainedFillet=8 };
+enum class Feature:std::uint8_t { Profile=1, Enclosure=2, RectangularLoft=3, PlacementObject=4, PlacementBareSolid=5, RetainedSolid=6 };
 inline bool SupportedPolicy(Operation operation,std::uint16_t policy)noexcept {
-    return operation==Operation::SetPlacement?policy==ExactPlacementPolicy8193:operation==Operation::RebuildLoftStation?policy==ExactLoftPolicy4097:policy==AnalyticZeroPolicy1;
+    return operation==Operation::RebuildRetainedFillet?policy==ExactRetainedFilletPolicy12289:operation==Operation::SetPlacement?policy==ExactPlacementPolicy8193:operation==Operation::RebuildLoftStation?policy==ExactLoftPolicy4097:policy==AnalyticZeroPolicy1;
 }
 enum class ReadStatus { Absent, Valid, Unsupported, Malformed, Unavailable };
 enum class DocumentPresence { Absent, Present, Conflict, Unavailable };
@@ -67,9 +70,11 @@ inline bool Valid(const Record& r){
     if(!Nonzero(r.key.accountScope)||!Nonzero(r.key.command)||!Nonzero(r.key.execution)||!Nonzero(r.key.document)||!Nonzero(r.key.request)
         ||r.effects.empty()||r.effects.size()>MaximumEffects)return false;
     const bool placement=r.operation==Operation::SetPlacement;
+    const bool fillet=r.operation==Operation::RebuildRetainedFillet;
     const bool loft=r.operation==Operation::RebuildLoftStation;
-    if((!loft&&!placement&&(r.operation<Operation::CreateEnclosure||r.operation>Operation::RebuildProfile))
+    if((!loft&&!placement&&!fillet&&(r.operation<Operation::CreateEnclosure||r.operation>Operation::RebuildProfile))
         ||(r.operation!=Operation::CreateAssembly&&r.effects.size()!=1)
+        ||(fillet&&(r.policy==0||r.policy==AnalyticZeroPolicy1||r.policy==ExactLoftPolicy4097||r.policy==ExactPlacementPolicy8193))
         ||(loft&&(r.policy==0||r.policy==AnalyticZeroPolicy1))
         ||(placement&&(r.policy==0||r.policy==AnalyticZeroPolicy1||r.policy==ExactLoftPolicy4097)))return false;
     // An assigned loft policy cannot retroactively invalidate unknown-policy
@@ -77,7 +82,7 @@ inline bool Valid(const Record& r){
     // nonappendable without changing their structural bytes.
     std::set<UUID> entities,definitions,features;
     for(const auto& e:r.effects){
-        const auto expected=(r.operation==Operation::CreateEnclosure||r.operation==Operation::RebuildEnclosure)?Feature::Enclosure:(loft?Feature::RectangularLoft:Feature::Profile);
+        const auto expected=(r.operation==Operation::CreateEnclosure||r.operation==Operation::RebuildEnclosure)?Feature::Enclosure:(fillet?Feature::RetainedSolid:loft?Feature::RectangularLoft:Feature::Profile);
         const bool bare=placement&&e.feature==Feature::PlacementBareSolid;
         if(e.policy!=r.policy||(placement?(e.feature!=Feature::PlacementObject&&!bare):e.feature!=expected)
             ||!Nonzero(e.entity)||!Nonzero(e.definition)||(bare?Nonzero(e.featureID):!Nonzero(e.featureID))||!Nonzero(e.geometry)||!Nonzero(e.state)

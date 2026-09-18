@@ -399,6 +399,17 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 }
 @end
 
+@implementation Core3DRetainedFilletAnchor
+- (instancetype)initWithCurveKind:(Core3DRetainedFilletCurveKind)kind
+    localX:(double)x localY:(double)y localZ:(double)z axisX:(double)ax axisY:(double)ay axisZ:(double)az circleRadius:(double)radius {
+    if((kind!=Core3DRetainedFilletCurveKindLine&&kind!=Core3DRetainedFilletCurveKindCircle)
+        ||!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z)||!std::isfinite(ax)||!std::isfinite(ay)||!std::isfinite(az)
+        ||!std::isfinite(radius)||std::abs(ax*ax+ay*ay+az*az-1)>1e-12
+        ||(kind==Core3DRetainedFilletCurveKindLine?(radius!=0||std::signbit(radius)):radius<=0))return nil;
+    self=[super init];if(self){_curveKind=kind;_localX=x;_localY=y;_localZ=z;_axisX=ax;_axisY=ay;_axisZ=az;_circleRadius=radius;}return self;
+}
+@end
+
 @implementation Core3DWedgeCutDefinition
 - (instancetype)initWithAxis:(Core3DCylindricalCutAxis)axis localX:(double)x localY:(double)y localZ:(double)z
     directionAngle:(double)angle worldHalfWidthApexMM:(double)apex worldHalfWidthMouthMM:(double)mouth worldLengthMM:(double)length {

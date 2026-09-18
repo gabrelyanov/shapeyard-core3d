@@ -484,6 +484,8 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe();
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario);
+Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario);
+Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
 //! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
@@ -855,6 +857,10 @@ public:
         const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept;
     Standard_EXPORT Standard_Boolean CaptureCylindricalCutProgramSource(
         const TDF_Label& label,OcctCylindricalCutProgramSource& output)const noexcept;
+    Standard_EXPORT Standard_Boolean CaptureRetainedFilletAnchors(const TDF_Label& label,
+        const std::vector<core3d::retained_fillet::EdgeAnchor>& requested,
+        std::vector<core3d::retained_fillet::EdgeAnchor>& captured) const noexcept;
+
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForSavedSweepRebuild(
         const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForMeshCopy(

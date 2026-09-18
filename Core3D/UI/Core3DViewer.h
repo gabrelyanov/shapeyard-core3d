@@ -280,6 +280,9 @@ namespace core3d {
     std::shared_ptr<NativeSolidWork> prepareWedgeCutProgramEdit(const CylindricalCutProgramSnapshot&,
         const retained_boolean::ProgramEdit&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    std::shared_ptr<NativeSolidWork> prepareRetainedFilletEdit(const CylindricalCutProgramSnapshot&,
+        const retained_boolean::ProgramEdit&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
     // Separate native-only source-edit lease. Main-thread authority never goes
     // to the geometry worker; no Objective-C or provider route is activated.
     static std::shared_ptr<SavedCutSourceEditWork> makeSavedCutSourceEditWork() noexcept;
@@ -328,7 +331,8 @@ namespace core3d {
         const CylindricalCutProgramSnapshot&,const saved_cut_source_edit::Patch&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
     static std::shared_ptr<const SavedProgramSourceDetachedResult> buildSavedProgramSourceDetached(
-        const std::shared_ptr<SavedProgramSourceDetachedWork>&) noexcept;
+        const std::shared_ptr<SavedProgramSourceDetachedWork>&,
+        retained_fillet::Outcome* filletOutcome=nullptr) noexcept;
     static void cancelSavedProgramSourceDetached(const std::shared_ptr<SavedProgramSourceDetachedWork>&) noexcept;
     std::optional<StoredRectangularLoftSnapshot> storedRectangularLoftDefinition(
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
@@ -338,7 +342,8 @@ namespace core3d {
             const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
             std::uint32_t width,std::uint32_t height) noexcept;
         static NativeSolidGeometryPayload nativeSolidGeometry(const std::shared_ptr<NativeSolidWork>& work) noexcept;
-        static bool buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload) noexcept;
+        static bool buildNativeSolidGeometry(const NativeSolidGeometryPayload& payload,
+            retained_fillet::Outcome* filletOutcome=nullptr) noexcept;
         static std::shared_ptr<ProfileSolidGeometry> profileSolidGeometry(
             const std::shared_ptr<NativeSolidWork>& work) noexcept;
         static bool buildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geometry) noexcept;
