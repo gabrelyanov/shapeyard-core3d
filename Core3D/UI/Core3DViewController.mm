@@ -3013,6 +3013,10 @@ struct NativeModelingPermitIssuer final {
 @end
 
 @interface Core3DViewController (ProfileConstructionPrivate)
+- (void)core3d_createProfileWithDefinition:(Core3DProfileDefinition *)definition name:(NSString *)name
+    context:(Core3DModelingPlanningContext *)context completion:(void(^)(Core3DProfileConstructionResult))completion;
+- (void)core3d_createProfileWithDefinition:(Core3DProfileDefinition *)definition name:(NSString *)name
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DProfileConstructionResult))completion;
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
                 completion:(void(^)(Core3DProfileConstructionResult))completion;
 #if DEBUG
@@ -14073,6 +14077,18 @@ struct NativeModelingPermitIssuer final {
 - (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self core3d_createProfileWithDefinition:definition name:nil context:context completion:completion];
+}
+
+- (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition name:(NSString *)name
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self core3d_createProfileWithDefinition:definition name:name context:context completion:completion];
+}
+
+- (void)core3d_createProfileWithDefinition:(Core3DProfileDefinition *)definition name:(NSString *)name
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
     if (!completion) return;
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{completion(Core3DProfileConstructionResultRejected);});
@@ -14090,7 +14106,7 @@ struct NativeModelingPermitIssuer final {
     _modelingConstructionContext = context;
     __weak Core3DViewController *weakSelf = self;
     __weak Core3DModelingPlanningContext *weakContext = context;
-    [self createProfileWithDefinition:definition expected:context.scene
+    [self core3d_createProfileWithDefinition:definition name:name expected:context.scene
         completion:^(Core3DProfileConstructionResult result) {
             Core3DViewController *owner = weakSelf;
             Core3DModelingPlanningContext *finished = weakContext;
@@ -15374,6 +15390,12 @@ struct NativeModelingPermitIssuer final {
 - (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
+    [self core3d_createProfileWithDefinition:definition name:nil expected:expected completion:completion];
+}
+
+- (void)core3d_createProfileWithDefinition:(Core3DProfileDefinition *)definition name:(NSString *)name
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
     if (!completion) return;
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); });
@@ -15404,9 +15426,27 @@ struct NativeModelingPermitIssuer final {
             [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
-        const auto parameters = [definition nativeParameters];
-        const auto work = viewer->prepareProfileSolid(parameters,identity,expected.revisions.presentationRevision,
-            static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        auto parameters = [definition nativeParameters];
+        std::shared_ptr<core3d::NativeSolidWork> work;
+        if (name) {
+            if (![name isKindOfClass:NSString.class] || name.length == 0 || name.length > 64
+                || parameters.constructionFrame) { completion(Core3DProfileConstructionResultRejected); return; }
+            // Reuse the existing ordinary batch creator for a single named
+            // profile. It stages the exact contour, recipe and name atomically.
+            // The internal identity frame preserves the ordinary plane origin;
+            // callers still cannot supply a construction transform.
+            parameters.constructionFrame = core3d::profile::ConstructionFrame{};
+            core3d::AssemblyPartDefinition part;
+            part.parameters = parameters;
+            part.identifier = NSUUID.UUID.UUIDString.UTF8String;
+            for (NSUInteger i = 0; i < name.length; ++i)
+                part.name += static_cast<Standard_ExtCharacter>([name characterAtIndex:i]);
+            work = viewer->prepareAssemblySolid({part},identity,expected.revisions.presentationRevision,
+                static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        } else {
+            work = viewer->prepareProfileSolid(parameters,identity,expected.revisions.presentationRevision,
+                static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
+        }
         if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
         [self runNativeSolidWork:work completion:completion];
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }

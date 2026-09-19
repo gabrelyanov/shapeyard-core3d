@@ -521,6 +521,12 @@ NS_ASSUME_NONNULL_BEGIN
     context:(Core3DModelingPlanningContext *)context
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(createProfile(definition:context:completion:));
+//! Stage a profile and its authored name in one ordinary creation command.
+//! Geometry and placement are identical to the unnamed profile creator.
+- (void)createProfileWithDefinition:(Core3DProfileDefinition *)definition name:(NSString *)name
+    context:(Core3DModelingPlanningContext *)context
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(createProfile(definition:name:context:completion:));
 //! Target is exclusively the selected enclosure captured by this exact lease.
 //! Definition must preserve its construction frame and declared native unit.
 - (void)rebuildEnclosureWithDefinition:(Core3DEnclosureDefinition *)definition
