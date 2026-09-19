@@ -6,6 +6,41 @@ set -euo pipefail
 mkdir -p "$1"
 output_dir=$(cd "$1" && pwd)
 tests_dir=$(cd "$(dirname "$0")" && pwd)
+# B04 diagnostic: distinguishes unsupported revolved-host proof from clearance.
+if [[ "${3:-}" == "RingCutAdmissionTests" ]]; then
+    : "${2:?focused ring admission tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/RingCutAdmissionTests.cpp" -L "$2" \
+        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/RingCutAdmissionTests"
+    "$output_dir/RingCutAdmissionTests"
+    exit
+fi
+# Focused transverse loft bore admission, exact kernel and replay regression.
+if [[ "${3:-}" == "TransverseLoftBoreTests" ]]; then
+    : "${2:?focused transverse tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/TransverseLoftBoreTests.cpp" -L "$2" \
+        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/TransverseLoftBoreTests"
+    "$output_dir/TransverseLoftBoreTests"
+    exit
+fi
+# Focused production Shell geometry/admission regression, with no Xcode invocation.
+if [[ "${3:-}" == "ShellOperationTests" ]]; then
+    : "${2:?focused shell tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-ignored-qualifiers -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/ShellOperationTests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel -o "$output_dir/ShellOperationTests"
+    "$output_dir/ShellOperationTests"
+    exit
+fi
 # Standalone production angle helper; no simulator or OCCT libraries required.
 if [[ -z "${3:-}" || "${3:-}" == "manipulator_angle_wrap_tests" ]]; then
     /usr/bin/clang++ -std=c++17 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-overloaded-virtual -O2 \

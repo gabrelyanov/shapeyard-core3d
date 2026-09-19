@@ -513,13 +513,61 @@ namespace core3d {
 		}
 	}
 
+    Standard_Boolean ShapeInteractor::tryCaptureSelectedShellFaces(
+        FaceOperationSourceProof& proof) const noexcept {
+        proof = FaceOperationSourceProof();
+        if (myContext.IsNull() || getSelectionMode() != ShapeSelectionMode::Face
+            || _topAbsSelMode != TopAbs_FACE || !selectionModeAuthorityIsExact())
+            return Standard_False;
+        try {
+            Handle(AIS_Shape) presentation;
+            std::vector<TopoDS_Face> faces;
+            for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+                if (faces.size() >= ShellOperationController::kMaximumOpeningFaces)
+                    return Standard_False;
+                const auto interactive = myContext->SelectedInteractive();
+                const auto owner = Handle(StdSelect_BRepOwner)::DownCast(myContext->SelectedOwner());
+                const auto selected = Handle(AIS_Shape)::DownCast(interactive);
+                if (owner.IsNull() || !owner->HasSelectable() || !owner->IsSelected()
+                    || !owner->HasShape() || owner->Shape().ShapeType() != TopAbs_FACE
+                    || selected.IsNull() || owner->Selectable() != interactive
+                    || !myContext->IsDisplayed(selected)
+                    || (!presentation.IsNull() && presentation != selected))
+                    return Standard_False;
+                presentation = selected;
+                faces.push_back(TopoDS::Face(owner->Shape()));
+            }
+            return TryPrepareShellOperationSource(myContext, myDoc, presentation, faces, proof);
+        } catch (...) {
+            return Standard_False;
+        }
+    }
+
+    Standard_Boolean ShapeInteractor::toggleDetectedShellOpening() noexcept {
+        if (myContext.IsNull() || _shellController == nullptr
+            || _shellController->previewState() != ShellPreviewState::Selecting
+            || !selectionModeAuthorityIsExact()) return Standard_False;
+        try {
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(myContext->DetectedOwner());
+            if (owner.IsNull() || !owner->HasSelectable() || !owner->HasShape()
+                || owner->Shape().ShapeType() != TopAbs_FACE) return Standard_False;
+            const auto presentation = Handle(AIS_Shape)::DownCast(owner->Selectable());
+            if (!_shellController->toggleOpening(presentation, TopoDS::Face(owner->Shape())))
+                return Standard_False;
+            myContext->AddOrRemoveSelected(owner, Standard_False);
+            return Standard_True;
+        } catch (...) {
+            return Standard_False;
+        }
+    }
+
 	Standard_Boolean ShapeInteractor::canBeginShellSelection() const noexcept {
 		if (_shellController == nullptr
 			|| _shellController->hasActiveOperation()) {
 			return Standard_False;
 		}
 		FaceOperationSourceProof aProof;
-		if (!tryCaptureExactlyOneSelectedPlanarFace(aProof)) {
+		if (!tryCaptureSelectedShellFaces(aProof)) {
 			return Standard_False;
 		}
 		try {
@@ -540,12 +588,13 @@ namespace core3d {
 		theCanBeginExtrusion = Standard_False;
 		theCanBeginShell = Standard_False;
 		FaceOperationSourceProof aProof;
-		if (!tryCaptureExactlyOneSelectedPlanarFace(aProof)) {
-			return Standard_False;
-		}
+		const Standard_Boolean hasSingle = tryCaptureExactlyOneSelectedPlanarFace(aProof);
+        if (!hasSingle && !tryCaptureSelectedShellFaces(aProof)) {
+            return Standard_False;
+        }
 		try {
 			OCC_CATCH_SIGNALS
-			if (!hasActiveExtrusion()) {
+			if (!hasActiveExtrusion() && aProof.openingFaces.size() == 1) {
 				TDF_Label aLabel;
 				Standard_Size aSourceSubshapeCount = 0;
 				Standard_Size aProfileEdgeCount = 0;
@@ -579,7 +628,7 @@ namespace core3d {
 		try {
 			OCC_CATCH_SIGNALS
 			FaceOperationSourceProof proof;
-			if (!tryCaptureExactlyOneSelectedPlanarFace(proof)) {
+			if (!tryCaptureSelectedShellFaces(proof)) {
 				(void)cancelShell();
 				return Standard_False;
 			}
@@ -1319,6 +1368,40 @@ namespace core3d {
 			proof)
 			&& beginShellSelectionImpl(proof);
 	}
+
+    Standard_Boolean ShapeInteractor::debugBeginShellSelection(
+        const std::string& entityIdentifier,
+        const std::vector<Standard_Size>& indices) noexcept {
+        if (myContext.IsNull() || myDoc.IsNull() || entityIdentifier.empty()
+            || indices.empty() || indices.size() > ShellOperationController::kMaximumOpeningFaces)
+            return Standard_False;
+        try {
+            if (hasActiveShell() && !cancelShell()) return Standard_False;
+            Handle(AIS_Shape) presentation;
+            AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            for (AIS_ListIteratorOfListOfInteractive object(displayed); object.More(); object.Next()) {
+                const TDF_Label label = myDoc->ShapeLabel(object.Value());
+                if (label.IsNull() || myDoc->EntityIdentifierForLabel(label) != entityIdentifier) continue;
+                const auto candidate = Handle(AIS_Shape)::DownCast(object.Value());
+                if (!presentation.IsNull() || candidate.IsNull()) return Standard_False;
+                presentation = candidate;
+            }
+            if (presentation.IsNull()) return Standard_False;
+            std::vector<TopoDS_Face> faces;
+            for (const auto index : indices) {
+                TopoDS_Face face;
+                if (!TryResolveCanonicalFaceTopologyIndexBounded(presentation->Shape(), index,
+                        ShellOperationController::kMaximumSourceTopologyNodes, face)) return Standard_False;
+                faces.push_back(face);
+            }
+            FaceOperationSourceProof proof;
+            return TryPrepareShellOperationSource(myContext, myDoc, presentation, faces, proof)
+                && beginShellSelectionImpl(proof);
+        } catch (...) {
+            return Standard_False;
+        }
+    }
 
 	ShellPreviewDebugState ShapeInteractor::debugShellState() const noexcept {
 		return _shellController == nullptr

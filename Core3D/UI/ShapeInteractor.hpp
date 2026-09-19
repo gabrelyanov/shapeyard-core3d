@@ -241,7 +241,10 @@ namespace core3d {
 				Standard_Boolean resetWireframeTemplateShape() noexcept;
 			Standard_Boolean cancelChamfer() noexcept;
 
-        //! Capture exactly one selected planar face for transient hollowing.
+        //! Capture a bounded set of non-adjacent planar faces on one solid.
+        Standard_Boolean tryCaptureSelectedShellFaces(
+            FaceOperationSourceProof& proof) const noexcept;
+        Standard_Boolean toggleDetectedShellOpening() noexcept;
         Standard_Boolean canBeginShellSelection() const noexcept;
         Standard_Boolean beginShellSelection() noexcept;
         Standard_Boolean setShellThickness(
@@ -297,6 +300,9 @@ namespace core3d {
         Standard_Boolean debugBeginShellSelection(
             const Handle(AIS_Shape)& presentation,
             const TopoDS_Face& face) noexcept;
+        Standard_Boolean debugBeginShellSelection(
+            const std::string& entityIdentifier,
+            const std::vector<Standard_Size>& faceTopologyIndices) noexcept;
         ShellPreviewDebugState debugShellState() const noexcept;
         void debugSetShellWorkerBlocked(
             Standard_Boolean blocked) noexcept;

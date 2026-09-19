@@ -10,6 +10,11 @@
 #include "OcctDocument.h"
 
 #include <AIS_Shape.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -18,8 +23,78 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace core3d {
+
+inline constexpr Standard_Size kMaximumShellOpeningFaces = 8;
+
+inline Standard_Boolean ShellFaceIsSinglePlanarOpening(
+    const TopoDS_Face& theFace) noexcept
+{
+    if (theFace.IsNull()) {
+        return Standard_False;
+    }
+    try {
+        BRepAdaptor_Surface aSurface(theFace, Standard_True);
+        if (aSurface.GetType() != GeomAbs_Plane) {
+            return Standard_False;
+        }
+        TopTools_IndexedMapOfShape aWires;
+        TopExp::MapShapes(theFace, TopAbs_WIRE, aWires);
+        return aWires.Extent() == 1;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+// Called only after bounded source capture; indices are canonical and sorted.
+inline Standard_Boolean ShellOpeningSetIsValid(
+    const TopoDS_Shape& shape,
+    const std::vector<TopoDS_Face>& faces,
+    const std::vector<Standard_Size>& indices) noexcept
+{
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+        || faces.empty() || faces.size() > kMaximumShellOpeningFaces
+        || faces.size() != indices.size()) return Standard_False;
+    try {
+        TopTools_IndexedMapOfShape canonicalFaces;
+        TopExp::MapShapes(shape, TopAbs_FACE, canonicalFaces);
+        TopTools_IndexedMapOfShape usedEdges;
+        for (std::size_t i = 0; i < faces.size(); ++i) {
+            if ((i > 0 && indices[i - 1] >= indices[i])
+                || indices[i] >= static_cast<Standard_Size>(canonicalFaces.Extent())
+                || !canonicalFaces.FindKey(static_cast<Standard_Integer>(indices[i] + 1)).IsEqual(faces[i])
+                || (faces[i].Orientation() != TopAbs_FORWARD
+                    && faces[i].Orientation() != TopAbs_REVERSED)
+                || !ShellFaceIsSinglePlanarOpening(faces[i])) return Standard_False;
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(faces[i], TopAbs_EDGE, edges);
+            for (Standard_Integer j = 1; j <= edges.Extent(); ++j) {
+                if (usedEdges.Contains(edges(j))) return Standard_False;
+                usedEdges.Add(edges(j));
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+//! Shared kernel boundary; single-opening flags and insertion order are unchanged.
+inline void MakeInwardShell(
+    BRepOffsetAPI_MakeThickSolid& builder,
+    const TopoDS_Shape& source,
+    const std::vector<TopoDS_Face>& faces,
+    Standard_Real thickness, Standard_Real tolerance,
+    const Message_ProgressRange& progress = Message_ProgressRange())
+{
+    TopTools_ListOfShape openings;
+    for (const auto& face : faces) openings.Append(face);
+    builder.MakeThickSolidByJoin(source, openings, -thickness, tolerance,
+        BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
+        Standard_False, progress);
+}
 
 enum class ShellApplyResult : std::uint8_t {
     NoChange = 0,
@@ -45,7 +120,10 @@ struct FaceOperationSourceProof {
     Handle(AIS_Shape) original;
     TDF_Label documentLabel;
     TopoDS_Shape shape;
+    // Single-face compatibility for Extrude; Shell consumes the ordered set below.
     TopoDS_Face openingFace;
+    std::vector<TopoDS_Face> openingFaces;
+    std::vector<Standard_Size> openingFaceTopologyIndices;
     gp_Trsf transform;
     Standard_Size faceTopologyIndex = 0;
     Standard_Size topologyNodeCount = 0;
@@ -66,8 +144,16 @@ Standard_Boolean TryPrepareFaceOperationSource(
     Standard_Size maximumStyledSubshapeLabels,
     FaceOperationSourceProof& proof) noexcept;
 
-//! Cheap exact revalidation for an already bounded proof. No topology map or
-//! kernel-wide validity traversal is repeated.
+//! Shell-only set capture; shares the bounded per-face admission with Extrude.
+Standard_Boolean TryPrepareShellOperationSource(
+    const Handle(AIS_InteractiveContext)& context,
+    const Handle(OcctDocument)& document,
+    const Handle(AIS_Shape)& presentation,
+    const std::vector<TopoDS_Face>& selectedFaces,
+    FaceOperationSourceProof& proof) noexcept;
+
+//! Exact revalidation for an already bounded proof. Shell sets recheck their
+//! canonical membership and shared edges; no kernel-wide validity traversal.
 Standard_Boolean FaceOperationSourceProofIsCurrent(
     const Handle(AIS_InteractiveContext)& context,
     const Handle(OcctDocument)& document,
@@ -85,8 +171,8 @@ Standard_Boolean TryResolveCanonicalFaceTopologyIndexBounded(
     Standard_Size maximumFaceOccurrences,
     TopoDS_Face& face) noexcept;
 
-//! One immutable planar-face selection captured on the main thread. The
-//! controller deep-copies both the source and opening before dispatching any
+//! An ordered planar-opening set captured on the main thread. The controller
+//! deep-copies the source and all openings before dispatching any
 //! offset work.
 struct ShellSourceSelection {
     FaceOperationSourceProof proof;
@@ -125,6 +211,7 @@ struct ShellPreviewDebugState {
     Standard_Real maximumThickness = 0.0;
     Standard_Real metersPerUnit = 0.0;
     Standard_Integer capturedFaceTopologyIndex = -1;
+    std::vector<Standard_Size> capturedFaceTopologyIndices;
     Standard_Size sourceTopologyNodeCount = 0;
     Standard_Size candidateTopologyNodeCount = 0;
     Standard_Size candidateSolidCount = 0;
@@ -143,6 +230,7 @@ struct ShellPreviewWorkerResult;
 class ShellOperationController
     : public std::enable_shared_from_this<ShellOperationController> {
 public:
+    static constexpr Standard_Size kMaximumOpeningFaces = kMaximumShellOpeningFaces;
     static constexpr Standard_Size kMaximumSourceTopologyNodes = 1'024;
     static constexpr Standard_Size kMaximumStyledSubshapeLabels = 1'024;
     static constexpr Standard_Size kMaximumResultTopologyNodes = 32'768;
@@ -165,6 +253,8 @@ public:
         const ShellSourceSelection& selection) const noexcept;
     Standard_Boolean begin(const ShellSourceSelection& selection) noexcept;
     Standard_Boolean setThickness(Standard_Real thickness) noexcept;
+    Standard_Boolean toggleOpening(const Handle(AIS_Shape)& presentation,
+                                   const TopoDS_Face& face) noexcept;
     ShellApplyResult apply() noexcept;
     Standard_Boolean cancel() noexcept;
 
@@ -205,11 +295,11 @@ private:
         Handle(AIS_Shape) original;
         TDF_Label label;
         TopoDS_Shape shape;
-        TopoDS_Face openingFace;
+        std::vector<TopoDS_Face> openingFaces;
         gp_Trsf transform;
         Standard_Integer selectionMode =
             AIS_Shape::SelectionMode(TopAbs_SHAPE);
-        Standard_Size faceTopologyIndex = 0;
+        std::vector<Standard_Size> openingFaceTopologyIndices;
         Standard_Size topologyNodeCount = 0;
         Standard_Real documentMetersPerUnit = 0.0;
         // Physical metres per local BRep thickness unit, including the

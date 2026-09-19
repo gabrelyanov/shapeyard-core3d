@@ -1,8 +1,14 @@
 #pragma once
-// External read-only recipe gate. No retained shape, owner, Boolean result,
-// occurrence, command, history, or permission is inspected or issued here.
+// Read-only recipe clearance and detached transverse-result verification.
+// No occurrence, document owner, command, history, or permission is issued here.
 #include "CylindricalCutDefinition.hxx"
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <BRepTools.hxx>
+#include <sstream>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cfenv>
@@ -19,10 +25,11 @@ inline constexpr double KernelToleranceCapMM=.001;
 inline constexpr double KernelSeparationMM=2*KernelToleranceCapMM;
 inline constexpr double MaximumNumericUncertaintyMM=1e-6;
 enum class Status { RefusedValues, UnsupportedFamily, UnsupportedFrame,
-    Nonparallel, NumericUncertain, OutsideOrInsufficientLigament, ClearRecipeDisk };
+    Nonparallel, NumericUncertain, OutsideOrInsufficientLigament, ClearRecipeDisk, ClearRecipeTransverse };
 struct Report {
     Status status=Status::RefusedValues;
     int sourcePlane=-1;
+    int transverseAxis=-1; // Recipe X/Y; -1 retains the existing disk path.
     // Original object-local physical mm, BEFORE occurrence scale. The owner
     // layer may convert lengths once using its validated occurrence scale.
     double sourceScale=0, recipeUnitToOriginalMM=0;
@@ -158,13 +165,36 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         for(int i=0;i<3;++i){delta[i]=sub(I(envelope.point[i]),I(A[i*4+3]));maxDelta=std::max(maxDelta,mag(delta[i]));}
         const I pointError=mul(I(inverseError.hi),I(maxDelta));if(!good(pointError))return out;
         I p[3];for(int i=0;i<3;++i){p[i]=I(0);for(int j=0;j<3;++j)p[i]=add(p[i],mul(I(B[i][j]),delta[j]));p[i]=widen(p[i],pointError.hi);if(!good(p[i]))return out;}
-        const std::array<int,3> chart=plane==0?std::array<int,3>{0,1,2}:plane==1?std::array<int,3>{0,2,1}:std::array<int,3>{1,2,0};
+        std::array<int,3> chart=plane==0?std::array<int,3>{0,1,2}:plane==1?std::array<int,3>{0,2,1}:std::array<int,3>{1,2,0};
         I direction[3];for(int i=0;i<3;++i)direction[i]=widen(I(B[i][envelope.axis]),inverseError.hi);
+        const double parallelLimit=up(512*std::numeric_limits<double>::epsilon()*std::max(1.0,up(anorm*bnorm)));
+        // A transverse tool exits the two faces along its axis. Its strip must
+        // retain material on the other station sides and both loft end caps.
+        // Classify in the RECIPE frame, never using occurrence placement.
+        if(envelope.sourceFamily==3)for(int axis=0;axis<2;++axis){
+            const I along=abs(direction[axis]);
+            const I across=norm(direction[1-axis],direction[2]);
+            if(good(along)&&good(across)&&along.lo>0){
+                const I ratio=div(across,along);
+                if(good(ratio)&&ratio.hi<=parallelLimit){
+                    out.transverseAxis=axis;chart={1-axis,2,axis};break;
+                }
+            }
+        }
         I axial=abs(direction[chart[2]]),perp=norm(direction[chart[0]],direction[chart[1]]);
         if(!good(axial)||!good(perp)||axial.lo<=0){out.status=Status::Nonparallel;return out;}
         I slope=div(perp,axial);
-        const double parallelLimit=up(512*std::numeric_limits<double>::epsilon()*std::max(1.0,up(anorm*bnorm)));
         if(!good(slope)||slope.hi>parallelLimit){out.status=Status::Nonparallel;return out;}
+        if(out.transverseAxis>=0){
+            bottom=std::numeric_limits<double>::max();thickness=-bottom;
+            for(const auto& station:loft.stations){
+                const double center=out.transverseAxis==0?station.centerX:station.centerY;
+                const double width=out.transverseAxis==0?station.width:station.depth;
+                const I ends=add(I(center),mul(I(-.5,.5),I(width)));
+                if(!good(ends))return out;
+                bottom=std::min(bottom,ends.lo);thickness=std::max(thickness,ends.hi);
+            }
+        }
         // Numerically parallel rotations (e.g. a quaternion quarter-turn) have
         // a bounded nonzero slope. Cover the complete source-normal interval,
         // not just the tool point. Also cover the projected ellipse radius.
@@ -183,7 +213,29 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         I angular=add(mul(span,slope),maximum(I(0),sub(inflated,radius)));
         if(!good(radius)||!good(angular)||radius.lo<=0)return out;
         I distance;
-        if(envelope.sourceFamily==1&&polygon.circle){
+        if(out.transverseAxis>=0){
+            // Conservative full-width strip over the entire circle's Z span,
+            // including interpolated section boundaries BETWEEN stations.
+            // Checking only authored stations misses a bore between stations.
+            const I reach=add(radius,angular);
+            const I low=sub(p[2],reach),high=add(p[2],reach);
+            if(!good(low)||!good(high))return out;
+            distance=minimum(sub(p[2],I(loft.stations.front().z)),sub(I(loft.stations.back().z),p[2]));
+            for(std::size_t n=1;n<loft.stations.size();++n){
+                const auto& a=loft.stations[n-1];const auto& b=loft.stations[n];
+                const double lo=std::max(a.z,low.lo),hi=std::min(b.z,high.hi);
+                if(lo>hi)continue;
+                const int lateral=1-out.transverseAxis;
+                const double ca=lateral==0?a.centerX:a.centerY,cb=lateral==0?b.centerX:b.centerY;
+                const double wa=lateral==0?a.width:a.depth,wb=lateral==0?b.width:b.depth;
+                for(double z:{lo,hi}){
+                    const I t=div(sub(I(z),I(a.z)),sub(I(b.z),I(a.z)));
+                    const I center=add(I(ca),mul(t,sub(I(cb),I(ca))));
+                    const I half=div(add(I(wa),mul(t,sub(I(wb),I(wa)))),I(2));
+                    distance=minimum(distance,sub(half,abs(sub(p[lateral],center))));
+                }
+            }
+        }else if(envelope.sourceFamily==1&&polygon.circle){
             const auto& c=*polygon.circle;
             const I radial=norm(sub(p[chart[0]],I(c.center.X())),sub(p[chart[1]],I(c.center.Y())));
             if(!good(radial))return out;
@@ -213,8 +265,69 @@ inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
         out.boundaryDistanceLowerMM=physicalDistance.lo;out.boundaryDistanceUpperMM=physicalDistance.hi;
         out.ligamentLowerMM=ligament.lo;out.numericUncertaintyMM=uncertainty;out.angularSweepAllowanceMM=angularMM.hi;
         if(!std::isfinite(uncertainty)||uncertainty>MaximumNumericUncertaintyMM)return out;
-        out.status=ligament.lo>KernelSeparationMM?Status::ClearRecipeDisk:Status::OutsideOrInsufficientLigament;
+        out.status=ligament.lo>KernelSeparationMM
+            ?(out.transverseAxis>=0?Status::ClearRecipeTransverse:Status::ClearRecipeDisk)
+            :Status::OutsideOrInsufficientLigament;
         return out;
     }catch(...){return Report{};}
 }
+// Independent integral of the removed material. At each Z the circle has a
+// chord 2*sqrt(r*r-(z-cz)^2) and the ruled loft's axial width is affine.
+// Admission above proves that the full chord is inside the other two walls.
+inline bool TransverseRemovedVolume(const retained_solid::Envelope& envelope,double& volume) noexcept {
+    volume=0;
+    try {
+        const auto clearance=Inspect(envelope);
+        if(clearance.status!=Status::ClearRecipeTransverse)return false;
+        rectangular_loft::Definition loft;
+        if(!loft_persistence::Decode(envelope.sourceValues,loft))return false;
+        gp_Trsf transform;
+        if(loft.constructionFrame&&!loft.constructionFrame->Transform(transform))return false;
+        const gp_Pnt center=gp_Pnt(envelope.point[0],envelope.point[1],envelope.point[2]).Transformed(transform.Inverted());
+        const double scale=transform.ScaleFactor(),r=envelope.radius/scale,cz=center.Z();
+        const auto area=[&](double t){
+            t=std::clamp(t,-r,r);
+            return t*std::sqrt(std::max(0.,r*r-t*t))+r*r*std::asin(t/r);
+        };
+        const auto moment=[&](double t){return -2./3.*std::pow(std::max(0.,r*r-t*t),1.5);};
+        for(std::size_t n=1;n<loft.stations.size();++n){
+            const auto& a=loft.stations[n-1];const auto& b=loft.stations[n];
+            const double low=std::max(a.z,cz-r),high=std::min(b.z,cz+r);
+            if(low>=high)continue;
+            const double wa=clearance.transverseAxis==0?a.width:a.depth;
+            const double wb=clearance.transverseAxis==0?b.width:b.depth;
+            const double slope=(wb-wa)/(b.z-a.z),atCenter=wa+slope*(cz-a.z);
+            volume+=atCenter*(area(high-cz)-area(low-cz))+slope*(moment(high-cz)-moment(low-cz));
+        }
+        volume*=scale*scale*scale;
+        return std::isfinite(volume)&&volume>0;
+    }catch(...){volume=0;return false;}
+}
+// Transverse openings intersect sloped station faces, so the disk observer's
+// two circular cap loops are not applicable. Verify an exact detached replay
+// from the retained base/tool, plus the independent ruled-width integral.
+// Mesh caches are omitted from the byte comparison; geometry, topology,
+// orientations, tolerances and all analytic representations remain included.
+inline bool VerifyTransverseResult(const TopoDS_Shape& base,const TopoDS_Shape& result,
+    const retained_solid::Envelope& envelope,const std::atomic_bool& stop,
+    const TopoDS_Shape& replay) noexcept {
+    try {
+        double removed=0;
+        if(stop.load()||!TransverseRemovedVolume(envelope,removed)
+            ||base.IsNull()||result.IsNull()||replay.IsNull()
+            ||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD
+            ||!BRepCheck_Analyzer(result,Standard_True).IsValid())return false;
+        GProp_GProps before,after;
+        BRepGProp::VolumeProperties(base,before,1e-12,Standard_True);
+        BRepGProp::VolumeProperties(result,after,1e-12,Standard_True);
+        if(!std::isfinite(before.Mass())||!std::isfinite(after.Mass())
+            ||std::abs((before.Mass()-after.Mass())-removed)>removed*1e-9)return false;
+        std::ostringstream actual,expected;
+        actual.imbue(std::locale::classic());expected.imbue(std::locale::classic());
+        BRepTools::Write(result,actual,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
+        BRepTools::Write(replay,expected,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
+        return !stop.load()&&actual.good()&&expected.good()&&actual.str()==expected.str();
+    }catch(...){return false;}
+}
+
 }

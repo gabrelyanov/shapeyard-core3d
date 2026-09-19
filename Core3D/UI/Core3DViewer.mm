@@ -3275,7 +3275,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         }
         if(circularHost||envelope.sourceFamily==3){
             const auto clearance=saved_cut_bore_clearance::Inspect(envelope);
-            if(clearance.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk){
+            if(clearance.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk
+                &&clearance.status!=saved_cut_bore_clearance::Status::ClearRecipeTransverse){
                 CORE3D_CUT_DETAIL("clearance.source-disk",clearance.status);return {};
             }
         }
@@ -3565,9 +3566,16 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
         if((*p)->provenHost){const auto& source=*(*p)->provenHost;
             if(!saved_cut_source_edit::InspectBase((*p)->detachedBase,source,(*p)->cancelled))
                 CORE3D_CUT_REFUSE("proof.base", false);
-            const auto proof=saved_cut_whole_result::Inspect((*p)->result.solid,source,source,(*p)->cancelled);
-            if(proof.classification!=saved_cut_whole_result::Classification::MatchedOrientedBoundary){
-                CORE3D_CUT_DETAIL("proof.whole-result",proof.classification);return false;
+            if(saved_cut_bore_clearance::Inspect(source).status==saved_cut_bore_clearance::Status::ClearRecipeTransverse){
+                analytic_boolean::Result replay;
+                if(analytic_boolean::Build((*p)->detachedBase,cylindrical_cut::Recipe(source),(*p)->cancelled,replay)!=analytic_boolean::Status::Built
+                    ||!saved_cut_bore_clearance::VerifyTransverseResult((*p)->detachedBase,(*p)->result.solid,source,(*p)->cancelled,replay.solid))
+                    CORE3D_CUT_REFUSE("proof.transverse-replay", false);
+            }else{
+                const auto proof=saved_cut_whole_result::Inspect((*p)->result.solid,source,source,(*p)->cancelled);
+                if(proof.classification!=saved_cut_whole_result::Classification::MatchedOrientedBoundary){
+                    CORE3D_CUT_DETAIL("proof.whole-result",proof.classification);return false;
+                }
             }
         }
         (*p)->built=true;return true;
@@ -7460,56 +7468,11 @@ Standard_Boolean Core3DViewer::debugBeginShellSelection(
     const std::string& theEntityIdentifier,
     const Standard_Size theFaceTopologyIndex) noexcept
 {
-    if (_shapeInteractor == nullptr || myContext.IsNull() || myDoc.IsNull()
-        || theEntityIdentifier.empty()
-        || theFaceTopologyIndex
-            > static_cast<Standard_Size>(
-                std::numeric_limits<Standard_Integer>::max() - 1)) {
-        return Standard_False;
-    }
     try {
-        OCC_CATCH_SIGNALS
-        if (_shapeInteractor->hasActiveShell()
-            && !_shapeInteractor->cancelShell()) {
-            return Standard_False;
-        }
-
-        Handle(AIS_Shape) aPresentation;
-        AIS_ListOfInteractive aDisplayed;
-        myContext->DisplayedObjects(AIS_KOI_Shape, -1, aDisplayed);
-        for (AIS_ListIteratorOfListOfInteractive anObject(aDisplayed);
-             anObject.More(); anObject.Next()) {
-            const Handle(AIS_InteractiveObject)& anInteractive =
-                anObject.Value();
-            const TDF_Label aLabel = myDoc->ShapeLabel(anInteractive);
-            if (aLabel.IsNull()
-                || myDoc->EntityIdentifierForLabel(aLabel)
-                    != theEntityIdentifier) {
-                continue;
-            }
-            const Handle(AIS_Shape) aCandidate =
-                Handle(AIS_Shape)::DownCast(anInteractive);
-            if (!aPresentation.IsNull() || aCandidate.IsNull()
-                || aCandidate->Shape().IsNull()
-                || !myDoc->IsPresentationEditable(aCandidate)) {
-                return Standard_False;
-            }
-            aPresentation = aCandidate;
-        }
-        if (aPresentation.IsNull()) {
-            return Standard_False;
-        }
-
-        TopoDS_Face aFace;
-        return TryResolveCanonicalFaceTopologyIndexBounded(
-                aPresentation->Shape(),
-                theFaceTopologyIndex,
-                ShellOperationController::kMaximumSourceTopologyNodes,
-                aFace)
+        return _shapeInteractor != nullptr
             && _shapeInteractor->debugBeginShellSelection(
-                aPresentation, aFace);
+                theEntityIdentifier, std::vector<Standard_Size>{theFaceTopologyIndex});
     } catch (...) {
-        (void)_shapeInteractor->cancelShell();
         return Standard_False;
     }
 }
@@ -7833,6 +7796,16 @@ void Core3DViewer::Select(int theX, int theY) {
         return;
     }
     if (_shapeInteractor->isBevelSelectionFrozen()) {
+        return;
+    }
+
+    if (_shapeInteractor->hasActiveShell()) {
+        if (_objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeShell
+            && _shapeInteractor->shellPreviewState() == ShellPreviewState::Selecting
+            && hitTest(theX, theY)) {
+            (void)_shapeInteractor->toggleDetectedShellOpening();
+            redraw();
+        }
         return;
     }
 

@@ -1867,7 +1867,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         _viewer == nullptr ? nullptr : _viewer->getShapeInteractor();
     if (shapeInteractor != nullptr
         && shapeInteractor->isShellSelectionFrozen()) {
-        // Shell owns exactly one source and opening face. Camera gestures stay
+        // Shell owns one source and an opening set. Camera gestures stay
         // available, but a tap cannot retarget the immutable preview lease.
         return;
     }
@@ -4934,6 +4934,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         @"minimumThickness": @(state.minimumThickness),
         @"maximumThickness": @(state.maximumThickness),
         @"metersPerUnit": @(state.metersPerUnit),
+        @"openingFaceCount": @(state.capturedFaceTopologyIndices.size()),
         @"capturedFaceTopologyIndex": @(
             state.capturedFaceTopologyIndex),
         @"sourceTopologyNodeCount": @(

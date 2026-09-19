@@ -74,7 +74,7 @@ struct ShellPreviewWorkerRequest {
     Standard_Real sourceBounds[6] = {};
     std::string fingerprint;
     TopoDS_Shape source;
-    TopoDS_Face openingFace;
+    std::vector<TopoDS_Face> openingFaces;
     std::shared_ptr<std::atomic_bool> cancellation;
     Standard_Size maximumResultTopologyNodes =
         ShellOperationController::kMaximumResultTopologyNodes;
@@ -262,25 +262,6 @@ Standard_Boolean CountBoundedTopology(
         return theCount > 0;
     } catch (...) {
         theCount = 0;
-        return Standard_False;
-    }
-}
-
-Standard_Boolean IsSinglePlanarOpening(
-    const TopoDS_Face& theFace) noexcept
-{
-    if (theFace.IsNull()) {
-        return Standard_False;
-    }
-    try {
-        BRepAdaptor_Surface aSurface(theFace, Standard_True);
-        if (aSurface.GetType() != GeomAbs_Plane) {
-            return Standard_False;
-        }
-        TopTools_IndexedMapOfShape aWires;
-        TopExp::MapShapes(theFace, TopAbs_WIRE, aWires);
-        return aWires.Extent() == 1;
-    } catch (...) {
         return Standard_False;
     }
 }
@@ -607,12 +588,57 @@ Standard_Boolean TryPrepareFaceOperationSource(
         theProof.transform = aPresentationTransform;
         theProof.faceTopologyIndex =
             static_cast<Standard_Size>(aFaceIndex - 1);
+        theProof.openingFaces = {aCanonicalFace};
+        theProof.openingFaceTopologyIndices = {theProof.faceTopologyIndex};
         theProof.topologyNodeCount = aTopologyNodeCount;
         theProof.entityIdentifier = anEntityIdentifier;
         theProof.definitionIdentifier = aDefinitionIdentifier;
         return Standard_True;
     } catch (...) {
         theProof = FaceOperationSourceProof();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean TryPrepareShellOperationSource(
+    const Handle(AIS_InteractiveContext)& context,
+    const Handle(OcctDocument)& document,
+    const Handle(AIS_Shape)& presentation,
+    const std::vector<TopoDS_Face>& selectedFaces,
+    FaceOperationSourceProof& proof) noexcept
+{
+    proof = FaceOperationSourceProof();
+    if (selectedFaces.empty()
+        || selectedFaces.size() > ShellOperationController::kMaximumOpeningFaces)
+        return Standard_False;
+    try {
+        FaceOperationSourceProof result;
+        for (const auto& face : selectedFaces) {
+            FaceOperationSourceProof single;
+            if (!TryPrepareFaceOperationSource(context, document, presentation, face,
+                    ShellOperationController::kMaximumSourceTopologyNodes,
+                    ShellOperationController::kMaximumStyledSubshapeLabels, single))
+                return Standard_False;
+            if (result.original.IsNull()) {
+                result = single;
+                result.openingFaces.clear();
+                result.openingFaceTopologyIndices.clear();
+            }
+            auto position = std::lower_bound(result.openingFaceTopologyIndices.begin(),
+                result.openingFaceTopologyIndices.end(), single.faceTopologyIndex);
+            if (position != result.openingFaceTopologyIndices.end()
+                && *position == single.faceTopologyIndex) return Standard_False;
+            const auto offset = position - result.openingFaceTopologyIndices.begin();
+            result.openingFaceTopologyIndices.insert(position, single.faceTopologyIndex);
+            result.openingFaces.insert(result.openingFaces.begin() + offset, single.openingFace);
+        }
+        if (!ShellOpeningSetIsValid(result.shape, result.openingFaces,
+                               result.openingFaceTopologyIndices)) return Standard_False;
+        result.openingFace = result.openingFaces.front();
+        result.faceTopologyIndex = result.openingFaceTopologyIndices.front();
+        proof = std::move(result);
+        return Standard_True;
+    } catch (...) {
         return Standard_False;
     }
 }
@@ -672,7 +698,10 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
         }
         const BRepAdaptor_Surface aSurface(
             theProof.openingFace, Standard_True);
-        return aSurface.GetType() == GeomAbs_Plane;
+        return aSurface.GetType() == GeomAbs_Plane
+            && (theProof.openingFaces.size() <= 1
+                || ShellOpeningSetIsValid(theProof.shape, theProof.openingFaces,
+                                          theProof.openingFaceTopologyIndices));
     } catch (...) {
         return Standard_False;
     }
@@ -901,20 +930,9 @@ private:
             Handle(ShellCancellationIndicator) aProgress =
                 new ShellCancellationIndicator(
                     theRequest.cancellation);
-            TopTools_ListOfShape anOpenings;
-            anOpenings.Append(theRequest.openingFace);
             BRepOffsetAPI_MakeThickSolid aBuilder;
-            aBuilder.MakeThickSolidByJoin(
-                theRequest.source,
-                anOpenings,
-                -theRequest.thickness,
-                theRequest.tolerance,
-                BRepOffset_Skin,
-                Standard_False,
-                Standard_False,
-                GeomAbs_Arc,
-                Standard_False,
-                aProgress->Start());
+            MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
+                            theRequest.thickness, theRequest.tolerance, aProgress->Start());
             if (wasCancelled()
                 || (!aBuilder.IsDone()
                     && aBuilder.MakeOffset().Error()
@@ -1105,7 +1123,8 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
                 myDoc,
                 aProof,
                 kMaximumStyledSubshapeLabels)
-            || !IsSinglePlanarOpening(aProof.openingFace)) {
+            || !ShellOpeningSetIsValid(aProof.shape, aProof.openingFaces,
+                                  aProof.openingFaceTopologyIndices)) {
             return Standard_False;
         }
 
@@ -1146,10 +1165,10 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
         aSource->original = aProof.original;
         aSource->label = aProof.documentLabel;
         aSource->shape = aProof.shape;
-        aSource->openingFace = aProof.openingFace;
+        aSource->openingFaces = aProof.openingFaces;
         aSource->transform = aProof.transform;
         aSource->selectionMode = theSelection.selectionMode;
-        aSource->faceTopologyIndex = aProof.faceTopologyIndex;
+        aSource->openingFaceTopologyIndices = aProof.openingFaceTopologyIndices;
         aSource->topologyNodeCount = aProof.topologyNodeCount;
         aSource->documentMetersPerUnit = aMetersPerUnit;
         aSource->metersPerUnit = aMetersPerLocalUnit;
@@ -1200,6 +1219,36 @@ Standard_Boolean ShellOperationController::begin(
     }
 }
 
+Standard_Boolean ShellOperationController::toggleOpening(
+    const Handle(AIS_Shape)& presentation, const TopoDS_Face& face) noexcept
+{
+    if (myState != ShellPreviewState::Selecting || mySelectionFrozen
+        || mySource == nullptr || presentation != mySource->original
+        || !sourceIsCurrent()) return Standard_False;
+    try {
+        auto faces = mySource->openingFaces;
+        const auto found = std::find_if(faces.begin(), faces.end(),
+            [&](const TopoDS_Face& existing) { return existing.IsEqual(face); });
+        if (found != faces.end()) {
+            if (faces.size() == 1) return Standard_False;
+            faces.erase(found);
+        } else {
+            faces.push_back(face);
+        }
+        ShellSourceSelection selection;
+        selection.selectionMode = mySource->selectionMode;
+        if (!TryPrepareShellOperationSource(myContext, myDoc, presentation,
+                                             faces, selection.proof)) return Standard_False;
+        std::unique_ptr<Source> replacement;
+        if (!tryPrepareSource(selection, replacement)) return Standard_False;
+        mySource = std::move(replacement);
+        notifyPreviewStateChanged();
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
 {
     if (mySource == nullptr || myDoc.IsNull()) {
@@ -1243,9 +1292,8 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
                 != mySource->definitionIdentifier) {
             return Standard_False;
         }
-        return (mySource->openingFace.Orientation() == TopAbs_FORWARD
-                || mySource->openingFace.Orientation() == TopAbs_REVERSED)
-            && IsSinglePlanarOpening(mySource->openingFace);
+        return ShellOpeningSetIsValid(mySource->shape, mySource->openingFaces,
+                                 mySource->openingFaceTopologyIndices);
     } catch (...) {
         return Standard_False;
     }
@@ -1267,10 +1315,12 @@ std::string ShellOperationController::selectionFingerprint(
             << mySource->entityIdentifier << '|'
             << mySource->definitionIdentifier << ':'
             << reinterpret_cast<std::uintptr_t>(
-                mySource->shape.TShape().get()) << ':'
-            << reinterpret_cast<std::uintptr_t>(
-                mySource->openingFace.TShape().get()) << ':'
-            << mySource->faceTopologyIndex;
+                mySource->shape.TShape().get());
+        for (std::size_t i = 0; i < mySource->openingFaces.size(); ++i) {
+            aFingerprint << ':' << reinterpret_cast<std::uintptr_t>(
+                mySource->openingFaces[i].TShape().get()) << ':'
+                << mySource->openingFaceTopologyIndices[i];
+        }
         for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
             for (Standard_Integer aColumn = 1; aColumn <= 4;
                  ++aColumn) {
@@ -1320,13 +1370,15 @@ ShellOperationController::enqueuePreviewRequest() noexcept
             Standard_True,
             Standard_False);
         const TopoDS_Shape aCopiedShape = aCopy.Shape();
-        const TopoDS_Shape aCopiedFaceShape =
-            aCopy.ModifiedShape(mySource->openingFace);
-        if (aCopiedShape.IsNull()
-            || aCopiedShape.ShapeType() != TopAbs_SOLID
-            || aCopiedFaceShape.IsNull()
-            || aCopiedFaceShape.ShapeType() != TopAbs_FACE) {
+        if (aCopiedShape.IsNull() || aCopiedShape.ShapeType() != TopAbs_SOLID) {
             return Standard_False;
+        }
+        std::vector<TopoDS_Face> aCopiedFaces;
+        for (const auto& face : mySource->openingFaces) {
+            const TopoDS_Shape copied = aCopy.ModifiedShape(face);
+            if (copied.IsNull() || copied.ShapeType() != TopAbs_FACE)
+                return Standard_False;
+            aCopiedFaces.push_back(TopoDS::Face(copied));
         }
 
         Standard_Real aCopiedBounds[6] = {};
@@ -1364,8 +1416,7 @@ ShellOperationController::enqueuePreviewRequest() noexcept
             std::begin(aRequest.sourceBounds));
         aRequest.fingerprint = aFingerprint;
         aRequest.source = aCopiedShape;
-        aRequest.openingFace =
-            TopoDS::Face(aCopiedFaceShape);
+        aRequest.openingFaces = std::move(aCopiedFaces);
         aRequest.cancellation =
             std::make_shared<std::atomic_bool>(false);
 #ifdef DEBUG
@@ -2027,13 +2078,16 @@ ShellOperationController::debugPreviewState() const noexcept
         aState.metersPerUnit = mySource->metersPerUnit;
         aState.capturedFaceTopologyIndex =
             static_cast<Standard_Integer>(
-                mySource->faceTopologyIndex);
+                mySource->openingFaceTopologyIndices.front());
         aState.sourceTopologyNodeCount =
             mySource->topologyNodeCount;
         aState.sourceVolume = mySource->sourceVolume;
     }
     try {
         OCC_CATCH_SIGNALS
+        if (mySource != nullptr) {
+            aState.capturedFaceTopologyIndices = mySource->openingFaceTopologyIndices;
+        }
         const TopoDS_Shape aCandidate =
             !myPreviewResult.IsNull()
             ? myPreviewResult->Shape()

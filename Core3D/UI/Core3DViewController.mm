@@ -14935,6 +14935,7 @@ struct NativeModelingPermitIssuer final {
     };
 #endif
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{CORE3D_CUT_NOTE("bridge.cut.main-thread");completion(Core3DProfileConstructionResultRejected);});return nil;}
+    _lastCylindricalCutAdmissionReason=nil;
     if(_nativeSolidWork||_isLoading.load()){CORE3D_CUT_NOTE("bridge.cut.busy");completion(Core3DProfileConstructionResultBusy);return nil;}
     if(![original isKindOfClass:Core3DCylindricalCutSnapshot.class]||!GLController||!GLController.viewer
         ||![original matchesOwner:self viewer:GLController.viewer]
@@ -14952,7 +14953,26 @@ struct NativeModelingPermitIssuer final {
         const CGSize size=GLController.drawableSize;
         const auto work=GLController.viewer->prepareCylindricalCut(before,create,rebuild,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
-        if(!work){CORE3D_CUT_NOTE("bridge.cut.prepare");completion(Core3DProfileConstructionResultRejected);return nil;}
+        if(!work){
+            auto envelope=before.source.envelope;
+            bool valuesReady=false;
+            if(create){
+                envelope.axis=static_cast<std::uint8_t>(create->axis);envelope.point=create->localCenter;envelope.operandID=1;
+                // Admission requires a complete envelope, including the as-yet
+                // uncommitted derived identity. This copy never reaches storage.
+                envelope.derivedFeature=envelope.sourceFeature;envelope.derivedFeature[0]^=0x80;
+                valuesReady=core3d::cylindrical_cut::Radius(create->worldRadiusMM,before.source.effectiveMM,envelope.radius);
+            }else if(rebuild)valuesReady=core3d::cylindrical_cut::Rebuild(before.source.envelope,*rebuild,before.source.effectiveMM,envelope);
+            if(valuesReady&&envelope.sourceFamily==3){
+                const auto clearance=core3d::saved_cut_bore_clearance::Inspect(envelope);
+                using S=core3d::saved_cut_bore_clearance::Status;
+                if(clearance.transverseAxis>=0&&clearance.status==S::OutsideOrInsufficientLigament)
+                    _lastCylindricalCutAdmissionReason=@"loft.TransverseSideWall";
+                else if(clearance.status==S::Nonparallel||clearance.status==S::UnsupportedFrame)
+                    _lastCylindricalCutAdmissionReason=@"loft.UnsupportedAxis";
+            }
+            CORE3D_CUT_NOTE("bridge.cut.prepare");completion(Core3DProfileConstructionResultRejected);return nil;
+        }
         __block BOOL delivered=NO;
         [self runNativeSolidWork:work completion:^(Core3DProfileConstructionResult result){delivered=YES;completion(result);}];
         // No yield: only this exact admitted work receives cancellation rights.
@@ -17461,6 +17481,22 @@ struct NativeModelingPermitIssuer final {
 
 - (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
                           faceTopologyIndex:(NSUInteger)faceTopologyIndex {
+    return [self debugBeginShellWithEntityIdentifier:entityIdentifier
+                               faceTopologyIndices:@[@(faceTopologyIndex)]];
+}
+
+- (NSArray<NSNumber *> *)debugShellOpeningFaceTopologyIndices {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil) return @[];
+    const auto viewer = GLController.viewer;
+    if (viewer == nullptr || viewer->getShapeInteractor() == nullptr) return @[];
+    NSMutableArray<NSNumber *> *indices = [NSMutableArray array];
+    for (const auto index : viewer->getShapeInteractor()->debugShellState().capturedFaceTopologyIndices)
+        [indices addObject:@(index)];
+    return indices;
+}
+
+- (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
+                          faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
         || ![entityIdentifier isKindOfClass:NSString.class]
         || entityIdentifier.length == 0
@@ -17468,10 +17504,27 @@ struct NativeModelingPermitIssuer final {
         return NO;
     }
     try {
-        const BOOL didBegin =
-            [GLController debugBeginShellWithEntityIdentifier:
-                entityIdentifier
-                faceTopologyIndex:faceTopologyIndex];
+        const auto viewer = GLController.viewer;
+        if (viewer == nullptr || viewer->getShapeInteractor() == nullptr
+            || viewer->getObjectInteractor() == nullptr
+            || faceTopologyIndices.count == 0 || faceTopologyIndices.count > 8) return NO;
+        std::vector<Standard_Size> indices;
+        for (NSNumber *index in faceTopologyIndices) {
+            if (![index isKindOfClass:NSNumber.class] || index.doubleValue < 0
+                || index.doubleValue != static_cast<double>(index.unsignedIntegerValue)) return NO;
+            indices.push_back(index.unsignedIntegerValue);
+        }
+        BOOL didBegin = viewer->getShapeInteractor()->debugBeginShellSelection(
+            std::string(entityIdentifier.UTF8String), indices);
+        if (didBegin) {
+            viewer->getObjectInteractor()->setManipulatorType(
+                core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeShell);
+            if (viewer->getObjectInteractor()->getManipulatorType()
+                != core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeShell) {
+                (void)viewer->getShapeInteractor()->cancelShell();
+                didBegin = NO;
+            }
+        }
         _currentGizmoType = [GLController getGizmoType];
         if (didBegin) {
             _availableGizmoTypes = @[

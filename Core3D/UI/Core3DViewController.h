@@ -1058,6 +1058,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
                           faceTopologyIndex:(NSUInteger)faceTopologyIndex
     NS_SWIFT_NAME(debugBeginShell(entityIdentifier:faceTopologyIndex:));
+- (BOOL)debugBeginShellWithEntityIdentifier:(NSString *)entityIdentifier
+                        faceTopologyIndices:(NSArray<NSNumber *> *)faceTopologyIndices
+    NS_SWIFT_NAME(debugBeginShell(entityIdentifier:faceTopologyIndices:));
+- (NSArray<NSNumber *> *)debugShellOpeningFaceTopologyIndices;
 //! Shell state values are Unavailable=0, Selecting=1, Computing=2, Ready=3,
 //! Committing=4, OutcomeUnknown=5, and Failed=6. Worker and result counters
 //! expose latest-wins behavior without changing production scheduling.
