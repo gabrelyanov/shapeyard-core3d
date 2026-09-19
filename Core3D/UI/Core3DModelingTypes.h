@@ -173,6 +173,37 @@ __attribute__((objc_subclassing_restricted))
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
+//! Discovery never creates a transaction. Tokens group one immutable opening query;
+//! edits still require the original program and scene authority.
+typedef NS_ENUM(NSInteger, Core3DRetainedFilletCandidateStatus) {
+    Core3DRetainedFilletCandidateStatusAvailable, Core3DRetainedFilletCandidateStatusUnsupported,
+    Core3DRetainedFilletCandidateStatusStale, Core3DRetainedFilletCandidateStatusBudget,
+    Core3DRetainedFilletCandidateStatusFailed
+};
+typedef NS_ENUM(NSInteger, Core3DRetainedFilletOutcome) {
+    Core3DRetainedFilletOutcomeGeneric, Core3DRetainedFilletOutcomeRadiusAdmission,
+    Core3DRetainedFilletOutcomeAnchorNoMatch, Core3DRetainedFilletOutcomeAnchorAmbiguous,
+    Core3DRetainedFilletOutcomeOcctFailure, Core3DRetainedFilletOutcomeBudget
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRetainedFilletCandidate : NSObject
+@property(nonatomic,copy,readonly) NSUUID *openingToken;
+//! Kind, location, direction and circle radius are local values in this anchor.
+@property(nonatomic,strong,readonly) Core3DRetainedFilletAnchor *anchor;
+@property(nonatomic,readonly) double lengthLocal;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRetainedFilletCandidateQuery : NSObject
+@property(nonatomic,copy,readonly) NSUUID *openingToken;
+@property(nonatomic,readonly) Core3DRetainedFilletCandidateStatus status;
+@property(nonatomic,readonly) BOOL truncated;
+@property(nonatomic,copy,readonly) NSArray<Core3DRetainedFilletCandidate *> *candidates;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Read-only saved step values. Stable identifiers survive source replay.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DRetainedFilletStep : NSObject

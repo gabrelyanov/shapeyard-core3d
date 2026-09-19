@@ -327,7 +327,13 @@ NS_ASSUME_NONNULL_BEGIN
     operandIdentifier:(uint32_t)operandIdentifier worldRadiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginCylindricalCutBoreRadius(_:operandIdentifier:worldRadiusMM:expected:completion:));
-//! Append or edit one retained wedge, one ordinary history step.
+//! Main-thread, bounded, read-only query tied to the opening program and scene.
+//! A nil program explicitly reports unsupported (e.g. a bare loft).
+- (Core3DRetainedFilletCandidateQuery *)retainedFilletCandidates:(nullable Core3DCylindricalCutProgramSnapshot *)original
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(retainedFilletCandidates(_:expected:));
+//! Cleared to generic at admission; populated before synchronous or asynchronous completion.
+@property(nonatomic,readonly) Core3DRetainedFilletOutcome lastRetainedFilletOutcome;
+//! Append/edit/remove retained rounds through one ordinary history step.
 - (nullable Core3DCylindricalCutOperation *)beginFilletStepAppend:(Core3DCylindricalCutProgramSnapshot *)original
     anchors:(NSArray<Core3DRetainedFilletAnchor *> *)anchors radiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion NS_SWIFT_NAME(beginFilletStepAppend(_:anchors:radiusMM:expected:completion:));

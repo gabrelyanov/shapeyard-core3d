@@ -156,6 +156,9 @@ namespace core3d {
             Standard_Integer mode, Standard_Integer axis,
             const std::vector<Standard_Real>& values,
             std::vector<std::array<Standard_Real, 2>>& samples) noexcept;
+        const std::vector<std::map<std::string, double>>& debugGestureTrace() const {
+            return _debugGestureTrace;
+        }
 #endif
         void setManipulatorType(PrimitiveManipulatorType type);
 		Handle(TopLoc_Datum3D) manipulatorTransform();
@@ -614,6 +617,9 @@ namespace core3d {
 		std::uint64_t _mirrorPreviewGeneration = 0;
 		bool _manipulatorGestureActive = false;
 #ifdef DEBUG
+        bool _debugGestureTraceActive = false;
+        std::vector<std::map<std::string, double>> _debugGestureTrace;
+        std::unordered_map<const AIS_InteractiveObject*, Standard_Integer> _debugGestureTraceIndices;
 		Standard_Integer _debugDuplicateCommitMode = 0;
         Standard_Integer _debugDuplicateProfileFault = 0;
         Standard_Integer _debugDuplicateEnclosureFault = 0;

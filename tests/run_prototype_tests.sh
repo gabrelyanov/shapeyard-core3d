@@ -6,6 +6,26 @@ set -euo pipefail
 mkdir -p "$1"
 output_dir=$(cd "$1" && pwd)
 tests_dir=$(cd "$(dirname "$0")" && pwd)
+# Standalone production angle helper; no simulator or OCCT libraries required.
+if [[ -z "${3:-}" || "${3:-}" == "manipulator_angle_wrap_tests" ]]; then
+    /usr/bin/clang++ -std=c++17 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-overloaded-virtual -O2 \
+        -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/manipulator_angle_wrap_tests.cpp" -o "$output_dir/manipulator_angle_wrap_tests"
+    "$output_dir/manipulator_angle_wrap_tests"
+    if [[ "${3:-}" == "manipulator_angle_wrap_tests" ]]; then exit; fi
+fi
+# Optional focused mode keeps bounded workers on the changed native regression.
+if [[ "${3:-}" == "retained_fillet_anchor_tests" ]]; then
+    : "${2:?focused fillet tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/retained_fillet_anchor_tests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -lTKVCAF -lTKHLR -o "$output_dir/retained_fillet_anchor_tests"
+    "$output_dir/retained_fillet_anchor_tests"
+    exit
+fi
 for name in CurvedMeshUVPrototypeTests ToroidalMeshUVPrototypeTests CurvedUVPackerTests CurvedFaceUVUnwrapTests; do
     /usr/bin/clang++ -std=c++17 -Wall -Wextra -Werror -O2 "$tests_dir/$name.cpp" -o "$output_dir/$name"
     "$output_dir/$name"
@@ -45,7 +65,7 @@ if [[ -n "${2:-}" ]]; then
         "$tests_dir/retained_fillet_anchor_tests.cpp" -L "$2" \
         -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
-        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/retained_fillet_anchor_tests"
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -lTKVCAF -lTKHLR -o "$output_dir/retained_fillet_anchor_tests"
     "$output_dir/retained_fillet_anchor_tests"
 
 else

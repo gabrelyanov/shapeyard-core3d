@@ -280,6 +280,9 @@ namespace core3d {
     std::shared_ptr<NativeSolidWork> prepareWedgeCutProgramEdit(const CylindricalCutProgramSnapshot&,
         const retained_boolean::ProgramEdit&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    retained_fillet::Candidates retainedFilletCandidates(const CylindricalCutProgramSnapshot&,
+        const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    retained_fillet::Outcome lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::Generic;
     std::shared_ptr<NativeSolidWork> prepareRetainedFilletEdit(const CylindricalCutProgramSnapshot&,
         const retained_boolean::ProgramEdit&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;

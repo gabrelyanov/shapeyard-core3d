@@ -1133,15 +1133,16 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             {
                 myStartPick = aNewPosition;
                 myHasStartedTransformation = Standard_True;
-                gp_Dir aStartAxis = gce_MakeDir (aPosLoc, myStartPick);
-                myPrevState = aStartAxis.AngleWithRef (gce_MakeDir(aPosLoc, aNewPosition), aCurrAxis.Direction());
-                return Standard_True;
-            }
-            
-            if (aNewPosition.Distance (myStartPick) < Precision::Confusion())
-            {
-                theTrsf = gp_Trsf();
+                // The start direction is identical to itself. Computing its
+                // angle can yield signed roundoff; the gesture seed is exact.
                 myPrevState = 0.0;
+#ifdef DEBUG
+                const gp_Dir aStartAxis = gce_MakeDir(aPosLoc, myStartPick);
+                myDebugLegacyPreviousAngle = aStartAxis.AngleWithRef(
+                    gce_MakeDir(aPosLoc, aNewPosition), aCurrAxis.Direction());
+                myDebugRotationTrace = {{"seed", myPrevState},
+                    {"legacySeed", myDebugLegacyPreviousAngle}};
+#endif
                 return Standard_True;
             }
             
@@ -1150,14 +1151,33 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
             : gce_MakeDir (aPosLoc, myStartPick);
             
             gp_Dir aCurrentAxis = gce_MakeDir (aPosLoc, aNewPosition);
-            Standard_Real anAngle = aStartAxis.AngleWithRef (aCurrentAxis, aCurrAxis.Direction());
-            
-            // Change value of an angle if it should have different sign.
-            if (anAngle * myPrevState < 0 && Abs (anAngle) < M_PI_2)
-            {
-                Standard_Real aSign = myPrevState > 0 ? -1.0 : 1.0;
-                anAngle = aSign * (M_PI * 2 - anAngle);
+            const Standard_Real aRawAngle =
+                aNewPosition.Distance(myStartPick) < Precision::Confusion()
+                ? 0.0 : aStartAxis.AngleWithRef(aCurrentAxis, aCurrAxis.Direction());
+            Standard_Real anAngle = core3d::UnwrapManipulatorAngle(aRawAngle, myPrevState);
+#ifdef DEBUG
+            const bool aLegacyBranch = aRawAngle * myDebugLegacyPreviousAngle < 0
+                && Abs(aRawAngle) < M_PI_2;
+            const double aLegacyCorrected = aLegacyBranch
+                ? (myDebugLegacyPreviousAngle > 0 ? -1.0 : 1.0) * (M_PI * 2 - aRawAngle)
+                : aRawAngle;
+            myDebugRotationTrace["previous"] = myPrevState;
+            myDebugRotationTrace["raw"] = aRawAngle;
+            myDebugRotationTrace["corrected"] = anAngle;
+            myDebugRotationTrace["branch"] = anAngle > aRawAngle ? 1 : (anAngle < aRawAngle ? -1 : 0);
+            myDebugRotationTrace["legacyPrevious"] = myDebugLegacyPreviousAngle;
+            myDebugRotationTrace["legacyBranch"] = aLegacyBranch ? 1 : 0;
+            myDebugRotationTrace["legacyCorrected"] = aLegacyCorrected;
+            myDebugLegacyPreviousAngle = Abs(aLegacyCorrected) < Precision::Confusion()
+                ? 0.0 : aLegacyCorrected;
+            if (snapping_angular.has_value()) {
+                const double step = *snapping_angular * M_PI / 180.0;
+                myDebugLegacyPreviousAngle = floor(myDebugLegacyPreviousAngle / step) * step;
             }
+            myDebugRotationTrace["applied"] = Abs(anAngle) < Precision::Confusion() ? 0.0 : anAngle;
+#endif
+            // Snapping must not determine which turn the next raw sample uses.
+            myPrevState = anAngle;
             
             if (Abs (anAngle) < Precision::Confusion())
             {
@@ -1172,10 +1192,12 @@ Standard_Boolean Core3DManipulator::ObjectTransformation (const Standard_Integer
                 anAngle = floor(steps) * radians_step;
             }
             
+#ifdef DEBUG
+            myDebugRotationTrace["applied"] = anAngle;
+#endif
             gp_Trsf aNewTrsf;
             aNewTrsf.SetRotation (aCurrAxis, anAngle);
             theTrsf *= aNewTrsf;
-            myPrevState = anAngle;
             return Standard_True;
         }
         case AIS_MM_TranslationPlane:

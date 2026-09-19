@@ -7,6 +7,7 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
@@ -14,19 +15,22 @@
 #include <map>
 #include <functional>
 namespace core3d::retained_fillet {
-enum class Outcome { Built, DeclinedRadiusAdmission, DeclinedAnchorNoMatch, DeclinedAnchorAmbiguous, DeclinedOcctFailure, Cancelled };
 inline bool IsDeclined(Outcome outcome) noexcept {
     switch(outcome){
         case Outcome::DeclinedRadiusAdmission:
         case Outcome::DeclinedAnchorNoMatch:
         case Outcome::DeclinedAnchorAmbiguous:
+        case Outcome::DeclinedBudget:
         case Outcome::DeclinedOcctFailure:return true;
+        case Outcome::Generic:
         case Outcome::Built:
         case Outcome::Cancelled:return false;
     }
     return false;
 }
 inline const char* Reason(Outcome o){switch(o){
+    case Outcome::Generic:return "fillet.generic";
+    case Outcome::DeclinedBudget:return "fillet.budget";
     case Outcome::Built:return "fillet.built";
     case Outcome::DeclinedRadiusAdmission:return "fillet.DeclinedRadiusAdmission";
     case Outcome::DeclinedAnchorNoMatch:return "fillet.DeclinedAnchorNoMatch";
@@ -61,7 +65,7 @@ inline Outcome Resolve(const TopoDS_Shape& shape,const EdgeAnchor& anchor,double
     out.Nullify();try {
         if(!ValidAnchor(anchor,mm)||shape.IsNull())return Outcome::DeclinedAnchorNoMatch;
         TopTools_IndexedMapOfShape edges;TopExp::MapShapes(shape,TopAbs_EDGE,edges);
-        if(edges.Extent()>4096)return Outcome::DeclinedOcctFailure;unsigned count=0;
+        if(edges.Extent()>4096)return Outcome::DeclinedBudget;unsigned count=0;
         for(int i=1;i<=edges.Extent();++i){const auto edge=TopoDS::Edge(edges(i));
             if(BRep_Tool::Degenerated(edge)||!Matches(edge,anchor,mm))continue;
             if(++count>1){out.Nullify();return Outcome::DeclinedAnchorAmbiguous;}out=edge;}
@@ -218,7 +222,7 @@ inline Result Build(const TopoDS_Shape& input,const retained_boolean::Program& p
             if(!std::isfinite(before)||!std::isfinite(after)||after<=0
                 ||removed<interval.lower-std::abs(interval.lower)*1e-6||removed>interval.upper+std::abs(interval.upper)*1e-6
                 ||!BoundsContained(current,solid,1e-4/mm))return fail(Outcome::DeclinedOcctFailure);
-            if(charge&&!charge(solid))return fail(Outcome::DeclinedOcctFailure);
+            if(charge&&!charge(solid))return fail(Outcome::DeclinedBudget);
             current=solid;out.intervals.push_back(interval);
         }
         out.outcome=Outcome::Built;out.solid=current;return out;

@@ -1,3 +1,4 @@
+#include "RetainedFilletCandidates.hxx"
 #include "SavedCutSourceEdit.hxx"
 
 #if DEBUG // Cut475 phase diagnostics only
@@ -7552,22 +7553,30 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
 
 Standard_Boolean OcctDocument::CaptureRetainedFilletAnchors(const TDF_Label& label,
     const std::vector<core3d::retained_fillet::EdgeAnchor>& requested,
-    std::vector<core3d::retained_fillet::EdgeAnchor>& captured) const noexcept {
+    std::vector<core3d::retained_fillet::EdgeAnchor>& captured, core3d::retained_fillet::Outcome* outcome) const noexcept {
+    if(outcome)*outcome=core3d::retained_fillet::Outcome::Generic;
     captured.clear();try {
         namespace f=core3d::retained_fillet;OcctCylindricalCutProgramSource source;
-        if(requested.empty()||requested.size()>f::MaximumAnchors||!CaptureCylindricalCutProgramSource(label,source))return Standard_False;
+        if(requested.size()>f::MaximumAnchors){if(outcome)*outcome=f::Outcome::DeclinedBudget;return Standard_False;}
+        if(requested.empty()||!CaptureCylindricalCutProgramSource(label,source))return Standard_False;
         const double mm=core3d::retained_boolean::Identities(source.recipe).metersPerUnit*1000;
         TopTools_IndexedMapOfShape unique;
         for(const auto& anchor:requested){TopoDS_Edge edge;const auto status=f::Resolve(source.original.shape,anchor,mm,edge);
-            if(status!=f::Outcome::Built){CORE3D_CUT_NOTE(f::Reason(status));return Standard_False;}
-            if(unique.Contains(edge)){CORE3D_CUT_NOTE(f::Reason(f::Outcome::DeclinedAnchorAmbiguous));return Standard_False;}unique.Add(edge);
+            if(status!=f::Outcome::Built){if(outcome)*outcome=status;CORE3D_CUT_NOTE(f::Reason(status));return Standard_False;}
+            if(unique.Contains(edge)){if(outcome)*outcome=f::Outcome::DeclinedAnchorAmbiguous;CORE3D_CUT_NOTE(f::Reason(f::Outcome::DeclinedAnchorAmbiguous));return Standard_False;}unique.Add(edge);
             if(anchor.curveKind==f::CurveKind::Line){BRepAdaptor_Curve curve(edge);
                 if(f::Point(anchor).Distance(curve.Value(curve.FirstParameter()))<=1e-4/mm
                     ||f::Point(anchor).Distance(curve.Value(curve.LastParameter()))<=1e-4/mm){
-                    CORE3D_CUT_NOTE("fillet.capture-anchor-at-vertex");return Standard_False;}}
+                    if(outcome)*outcome=f::Outcome::DeclinedAnchorNoMatch;CORE3D_CUT_NOTE("fillet.capture-anchor-at-vertex");return Standard_False;}}
         }
-        captured=requested;return Standard_True;
+        captured=requested;if(outcome)*outcome=f::Outcome::Built;return Standard_True;
     }catch(...){captured.clear();return Standard_False;}
+}
+
+core3d::retained_fillet::Candidates OcctDocument::RetainedFilletCandidates(const TDF_Label& label) const noexcept {
+    OcctCylindricalCutProgramSource source;
+    if(!NSThread.isMainThread||!CaptureCylindricalCutProgramSource(label,source))return {};
+    return core3d::retained_fillet::DiscoverCandidates(source.original.shape,source.recipe,source.base);
 }
 
 Standard_Boolean OcctDocument::StageCylindricalCutReplacement(

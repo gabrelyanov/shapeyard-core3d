@@ -4,12 +4,22 @@
 #include "RetainedSolidEnvelope.hxx"
 #include <set>
 namespace core3d::retained_fillet {
+enum class Outcome { Built, DeclinedRadiusAdmission, DeclinedAnchorNoMatch, DeclinedAnchorAmbiguous, DeclinedOcctFailure, Cancelled, DeclinedBudget, Generic };
 enum class CurveKind:std::uint8_t { Line=1, Circle=2 };
 struct EdgeAnchor {
     std::uint64_t identifier=0;
     CurveKind curveKind=CurveKind::Line;
     std::array<double,3> anchorPoint{},axis{{1,0,0}};
     double circleRadius=0;
+};
+// Discovery records are values only; no live geometry escapes the query.
+inline constexpr std::size_t MaximumCandidates=64;
+enum class CandidateStatus { Available, Unsupported, Stale, Budget, Failed };
+struct Candidate { EdgeAnchor anchor; double lengthLocal=0; };
+struct Candidates {
+    CandidateStatus status=CandidateStatus::Unsupported;
+    bool truncated=false;
+    std::vector<Candidate> values;
 };
 struct Step {
     std::uint64_t stepIdentifier=0;

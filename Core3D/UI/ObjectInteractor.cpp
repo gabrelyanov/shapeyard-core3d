@@ -49,6 +49,7 @@
 #include <AIS_Shape.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
+#include <Aspect_Window.hxx>
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -2427,11 +2428,30 @@ namespace core3d {
     }
 
 #ifdef DEBUG
+    // Flat numeric payloads keep the existing NSNumber-only replay bridge.
+    // Matrix suffixes are zero-based column-major, matching the XCTest snapshot.
+    static void TraceGestureMatrix(std::map<std::string, double>& trace,
+                                   const std::string& prefix, const gp_Trsf& transform) {
+        for (Standard_Integer column = 1; column <= 4; ++column) {
+            for (Standard_Integer row = 1; row <= 4; ++row) {
+                trace[prefix + std::to_string((column - 1) * 4 + row - 1)] =
+                    row == 4 ? (column == 4 ? 1.0 : 0.0) : transform.Value(row, column);
+            }
+        }
+    }
+
     bool ObjectInteractor::debugReplayGesture(
         const Standard_Integer mode, const Standard_Integer axis,
         const std::vector<Standard_Real>& values,
         std::vector<std::array<Standard_Real, 2>>& samples) noexcept {
         samples.clear();
+        _debugGestureTrace.clear();
+        _debugGestureTraceIndices.clear();
+        _debugGestureTraceActive = true;
+        struct TraceReset final {
+            bool& active;
+            ~TraceReset() { active = false; }
+        } traceReset{_debugGestureTraceActive};
         if (mode < 0 || mode > 3 || axis < 0 || axis > 2
             || values.size() < 2 || values.size() > 32
             || _manipulator.IsNull() || !_manipulator->IsAttached()
@@ -2493,6 +2513,7 @@ namespace core3d {
                 cancelInteraction();
                 return false;
             }
+            std::vector<TDF_Label> traceLabels;
             for (std::size_t index = 1; index < points.size(); ++index) {
                 if (!transformManipulator(points[index][0], points[index][1])) {
                     cancelInteraction();
@@ -2500,12 +2521,42 @@ namespace core3d {
                     return false;
                 }
                 std::array<Standard_Real, 2> sample = {0.0, 0.0};
+                std::map<std::string, double> trace = _manipulator->DebugRotationTrace();
+                trace["sample"] = static_cast<double>(index);
+                trace["mode"] = mode;
+                trace["axis"] = axis;
+                trace["startX"] = points.front()[0];
+                trace["startY"] = points.front()[1];
+                trace["endX"] = points[index][0];
+                trace["endY"] = points[index][1];
+                Standard_Integer width = 0, height = 0;
+                myView->Window()->Size(width, height);
+                trace["viewportPixelWidth"] = width;
+                trace["viewportPixelHeight"] = height;
+                trace["cameraScale"] = myView->Camera()->Scale();
+                for (int component = 1; component <= 3; ++component) {
+                    const std::string suffix = std::to_string(component - 1);
+                    trace["origin" + suffix] = position.Location().Coord(component);
+                    trace["frameX" + suffix] = directions[0].Coord(component);
+                    trace["frameY" + suffix] = directions[1].Coord(component);
+                    trace["frameZ" + suffix] = directions[2].Coord(component);
+                }
+                TraceGestureMatrix(trace, "delta", _manipulator->GestureTransformation());
                 const auto objects = _manipulator->Objects();
+                traceLabels.clear();
                 Standard_Integer objectIndex = 1;
                 for (Core3DManipulatorObjectSequence::Iterator object(*objects);
                      object.More(); object.Next(), ++objectIndex) {
                     const gp_Trsf current = object.Value()->LocalTransformation();
                     const gp_Trsf initial = _manipulator->StartTransformation(objectIndex);
+                    _debugGestureTraceIndices[object.Value().get()] = objectIndex;
+                    const auto label = _manipulatorSourceLabels.find(object.Value().get());
+                    traceLabels.push_back(label == _manipulatorSourceLabels.end()
+                        ? TDF_Label() : label->second);
+                    const std::string prefix = "object" + std::to_string(objectIndex) + ".";
+                    trace[prefix + "labelTag"] = traceLabels.back().IsNull() ? -1 : traceLabels.back().Tag();
+                    TraceGestureMatrix(trace, prefix + "initial", initial);
+                    TraceGestureMatrix(trace, prefix + "preview", current);
                     for (Standard_Integer row = 1; row <= 3; ++row) {
                         for (Standard_Integer column = 1; column <= 4; ++column) {
                             sample[0] = std::max(sample[0], std::abs(
@@ -2520,8 +2571,18 @@ namespace core3d {
                     }
                 }
                 samples.push_back(sample);
+                _debugGestureTrace.push_back(std::move(trace));
             }
             finishInteraction();
+            // Read authority after reconciliation, even if it aborted the batch.
+            for (std::size_t index = 0; index < traceLabels.size(); ++index) {
+                OcctObjectTransformState committed;
+                const bool captured = !traceLabels[index].IsNull()
+                    && myDoc->CaptureObjectTransformStateForLabel(traceLabels[index], committed);
+                const std::string prefix = "object" + std::to_string(index + 1) + ".";
+                _debugGestureTrace.back()[prefix + "committedAvailable"] = captured ? 1 : 0;
+                if (captured) TraceGestureMatrix(_debugGestureTrace.back(), prefix + "committed", committed.transform);
+            }
             return true;
         } catch (...) {
             try { cancelInteraction(); } catch (...) {}
@@ -2723,6 +2784,15 @@ namespace core3d {
                         request.rotationAroundPivot = rotation;
                         request.transform = rotation.delta * before.transform;
                     }
+#ifdef DEBUG
+                    if (_debugGestureTraceActive && !_debugGestureTrace.empty()) {
+                        const auto index = _debugGestureTraceIndices.find(change.first.get());
+                        if (index != _debugGestureTraceIndices.end()) {
+                            const std::string prefix = "object" + std::to_string(index->second) + ".";
+                            TraceGestureMatrix(_debugGestureTrace.back(), prefix + "request", request.transform);
+                        }
+                    }
+#endif
                     requests.push_back(std::move(request));
                 }
                 OrdinaryEditResult failure = OrdinaryEditResult::Invalid;

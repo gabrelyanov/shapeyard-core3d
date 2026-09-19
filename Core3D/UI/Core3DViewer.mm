@@ -3346,11 +3346,30 @@ std::optional<CylindricalCutProgramSnapshot> Core3DViewer::cylindricalCutProgram
         result.identity=identity;result.authorityStamp=*stamp;return result;
     }catch(...){CORE3D_CUT_REFUSE("program-capture.exception", {});}
 }
+retained_fillet::Candidates Core3DViewer::retainedFilletCandidates(const CylindricalCutProgramSnapshot& original,
+    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept {
+    using namespace retained_fillet;
+    if(!NSThread.isMainThread)return {CandidateStatus::Stale,false,{}};
+    try {
+        const auto current=cylindricalCutProgramSource(identity,presentation,width,height);
+        if(!current||!(current->authorityStamp==original.authorityStamp)||!current->source.original.IsEqual(original.source.original)
+            ||!sweep_rebuild::SameRawScalars(current->source.original.scalars,original.source.original.scalars)
+            ||current->source.effectiveMM!=original.source.effectiveMM||current->source.recipeBytes!=original.source.recipeBytes
+            ||!myDoc->SavedCutSceneStateMatches(original.guard))return {CandidateStatus::Stale,false,{}};
+        auto result=myDoc->RetainedFilletCandidates(original.source.original.label);
+        const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(!after||!(*after==original.authorityStamp)||!myDoc->SavedCutSceneStateMatches(original.guard))
+            return {CandidateStatus::Stale,false,{}};
+        return result;
+    }catch(...){return {CandidateStatus::Failed,false,{}};}
+}
+
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(const CylindricalCutProgramSnapshot& original,
     const retained_boolean::ProgramEdit& edit,
     const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
-    if(!NSThread.isMainThread
-        ||identity.entityIdentifier!=original.identity.entityIdentifier||identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
+    if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("program-prepare.thread", {});
+    lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::Generic;
+    if(identity.entityIdentifier!=original.identity.entityIdentifier||identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
         ||identity.documentGeneration!=original.identity.documentGeneration||identity.modelRevision!=original.identity.modelRevision)CORE3D_CUT_REFUSE("program-prepare.context", {});
     try {
         // Revalidate against a freshly captured original; stale input is never
@@ -3363,7 +3382,24 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
             ||!myDoc->SavedCutSceneStateMatches(original.guard))CORE3D_CUT_REFUSE("program-prepare.stale-source", {});
         if(const auto* append=std::get_if<retained_boolean::AppendFilletStep>(&edit)){
             std::vector<retained_fillet::EdgeAnchor> captured;
-            if(!myDoc->CaptureRetainedFilletAnchors(original.source.original.label,append->anchors,captured))return {};
+            if(!myDoc->CaptureRetainedFilletAnchors(original.source.original.label,append->anchors,captured,&lastRetainedFilletAdmissionOutcome))return {};
+        }
+        if(retained_boolean::FilletEdit(edit)){
+            // Report typed value/budget failures before Apply's generic refusal.
+            retained_boolean::Program p;
+            if(const auto* legacy=std::get_if<retained_boolean::Legacy>(&original.source.recipe)){
+                if(!retained_boolean::Promote(*legacy,p))return {};
+            }else p=std::get<retained_boolean::Program>(original.source.recipe);
+            const auto* append=std::get_if<retained_boolean::AppendFilletStep>(&edit);
+            const auto* radius=std::get_if<retained_boolean::SetFilletRadius>(&edit);
+            if(append){std::size_t count=append->anchors.size();for(const auto& step:p.filletSteps)count+=step.anchors.size();
+                if(p.filletSteps.size()>=retained_fillet::MaximumSteps||count>retained_fillet::MaximumAnchors
+                    ||p.nextFilletStepID==UINT64_MAX||p.nextFilletEdgeID>UINT64_MAX-append->anchors.size()){
+                    lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::DeclinedBudget;return {};}}
+            if(append||radius){double local=0;
+                if(!cylindrical_cut::Radius(append?append->radiusMM:radius->radiusMM,original.source.effectiveMM,local)){
+                    lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::DeclinedRadiusAdmission;return {};}}
+            lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::Generic;
         }
         const auto change=retained_boolean::Apply(original.source.recipe,edit,original.source.effectiveMM);
         if(!change)CORE3D_CUT_REFUSE("program-prepare.apply-edit", {});
@@ -3400,10 +3436,12 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         std::size_t envelopeBytes=carrier->bytes.size();
         for(const auto& r:retained){
             if(r.owner.IsEqual(original.source.original.label))continue;
-            if(r.value->bytes.size()>retained_solid::MaximumAggregateEnvelopeBytes-envelopeBytes)CORE3D_CUT_REFUSE("program-prepare.envelope-budget", {});
+            if(r.value->bytes.size()>retained_solid::MaximumAggregateEnvelopeBytes-envelopeBytes){
+                lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::DeclinedBudget;CORE3D_CUT_REFUSE("program-prepare.envelope-budget", {});}
             envelopeBytes+=r.value->bytes.size();
         }
-        std::atomic_bool stopped{false};if(!analytic_boolean::detail::Bounded(original.source.base,1024,stopped))CORE3D_CUT_REFUSE("program-prepare.base-budget", {});
+        std::atomic_bool stopped{false};if(!analytic_boolean::detail::Bounded(original.source.base,1024,stopped)){
+            lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::DeclinedBudget;CORE3D_CUT_REFUSE("program-prepare.base-budget", {});}
         // The main-only immutable carrier keeps the actual original. Only a
         // deep geometry copy with no live labels/materials reaches the worker.
         BRepBuilderAPI_Copy copy(original.source.base,Standard_True,Standard_False);if(!copy.IsDone())CORE3D_CUT_REFUSE("program-prepare.base-copy", {});

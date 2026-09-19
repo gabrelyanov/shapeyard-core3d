@@ -1243,6 +1243,47 @@ static NSString *Core3DCutAdmissionReason(const core3d::retained_boolean::Recipe
         _worldHalfWidthApexMM=operand.halfWidthApex*mm;_worldHalfWidthMouthMM=operand.halfWidthMouth*mm;_worldLengthMM=operand.length*mm;}return self;
 }
 @end
+static Core3DRetainedFilletOutcome Core3DFilletOutcome(core3d::retained_fillet::Outcome value) {
+    using O=core3d::retained_fillet::Outcome;
+    switch(value){
+        case O::DeclinedRadiusAdmission:return Core3DRetainedFilletOutcomeRadiusAdmission;
+        case O::DeclinedAnchorNoMatch:return Core3DRetainedFilletOutcomeAnchorNoMatch;
+        case O::DeclinedAnchorAmbiguous:return Core3DRetainedFilletOutcomeAnchorAmbiguous;
+        case O::DeclinedOcctFailure:return Core3DRetainedFilletOutcomeOcctFailure;
+        case O::DeclinedBudget:return Core3DRetainedFilletOutcomeBudget;
+        case O::Built:case O::Cancelled:case O::Generic:return Core3DRetainedFilletOutcomeGeneric;
+    }
+}
+@interface Core3DRetainedFilletCandidate ()
+- (instancetype)initWithNative:(const core3d::retained_fillet::Candidate&)value token:(NSUUID *)token;
+@end
+@implementation Core3DRetainedFilletCandidate
+- (instancetype)initWithNative:(const core3d::retained_fillet::Candidate&)value token:(NSUUID *)token {
+    self=[super init];if(!self)return nil;
+    const auto& a=value.anchor;
+    _anchor=[[Core3DRetainedFilletAnchor alloc] initWithCurveKind:static_cast<Core3DRetainedFilletCurveKind>(a.curveKind)
+        localX:a.anchorPoint[0] localY:a.anchorPoint[1] localZ:a.anchorPoint[2]
+        axisX:a.axis[0] axisY:a.axis[1] axisZ:a.axis[2] circleRadius:a.circleRadius];
+    if(!_anchor)return nil;_openingToken=[token copy];_lengthLocal=value.lengthLocal;return self;
+}
+@end
+@interface Core3DRetainedFilletCandidateQuery ()
+- (instancetype)initWithNative:(const core3d::retained_fillet::Candidates&)value;
+@end
+@implementation Core3DRetainedFilletCandidateQuery
+- (instancetype)initWithNative:(const core3d::retained_fillet::Candidates&)value {
+    self=[super init];if(!self)return nil;_openingToken=[NSUUID UUID];
+    _status=static_cast<Core3DRetainedFilletCandidateStatus>(value.status);_truncated=value.truncated;
+    NSMutableArray<Core3DRetainedFilletCandidate *> *records=[NSMutableArray array];
+    for(const auto& native:value.values){
+        Core3DRetainedFilletCandidate *record=[[Core3DRetainedFilletCandidate alloc] initWithNative:native token:_openingToken];
+        if(!record){_status=Core3DRetainedFilletCandidateStatusFailed;_truncated=NO;[records removeAllObjects];break;}
+        [records addObject:record];
+    }
+    _candidates=[records copy];return self;
+}
+@end
+
 @interface Core3DRetainedFilletStep ()
 - (instancetype)initWithStep:(const core3d::retained_fillet::Step&)step effectiveMM:(double)mm;
 @end
@@ -9102,11 +9143,23 @@ struct NativeModelingPermitIssuer final {
     }
     NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *result =
         [NSMutableArray arrayWithCapacity:observed.size()];
-    for (const auto& sample : observed) {
-        [result addObject:@{
+    const auto& trace = interactor->debugGestureTrace();
+    for (std::size_t index = 0; index < observed.size(); ++index) {
+        const auto& sample = observed[index];
+        NSMutableDictionary<NSString *, NSNumber *> *row = [@{
             @"transformDelta": @(sample[0]),
             @"changedShapeCount": @(sample[1]),
-        }];
+            @"viewportPointWidth": @(GLController.view.bounds.size.width),
+            @"viewportPointHeight": @(GLController.view.bounds.size.height),
+            @"viewportContentScale": @(GLController.view.contentScaleFactor),
+            @"screenScale": @(GLController.view.window.screen.scale),
+        } mutableCopy];
+        if (index < trace.size()) {
+            for (const auto& value : trace[index]) {
+                row[[NSString stringWithUTF8String:value.first.c_str()]] = @(value.second);
+            }
+        }
+        [result addObject:row];
     }
     return result;
 }
@@ -14550,7 +14603,8 @@ struct NativeModelingPermitIssuer final {
         diagnosticCompletion(result);
     };
 #endif
-    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{self->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;completion(Core3DProfileConstructionResultRejected);});return nil;}
+    _lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;
     if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
         completion(Core3DProfileConstructionResultBusy);return nil;
     }
@@ -14631,6 +14685,7 @@ struct NativeModelingPermitIssuer final {
                     Core3DSavedCutSourceJob *pending=weakJob;
                     if(!controller||!pending){Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);return;}
                     if(controller->_savedCutSourceJob!=pending){[pending finish:Core3DProfileConstructionResultRejected];return;}
+                    controller->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;
                     Core3DProfileConstructionResult result=Core3DProfileConstructionResultRejected;
                     const auto currentViewer=pending->_viewer.lock();
                     if(pending->_cancelled)result=Core3DProfileConstructionResultCancelled;
@@ -14641,6 +14696,7 @@ struct NativeModelingPermitIssuer final {
                         &&controller.glController&&((GLViewController *)controller.glController).viewer==currentViewer){
                         if(!built){
                             if(core3d::retained_fillet::IsDeclined(filletOutcome)){
+                                controller->_lastRetainedFilletOutcome=Core3DFilletOutcome(filletOutcome);
                                 CORE3D_CUT_NOTE(core3d::retained_fillet::Reason(filletOutcome));
                                 result=Core3DProfileConstructionResultRejected;
                             }else{CORE3D_CUT_NOTE("source-edit.build");result=Core3DProfileConstructionResultFailed;}
@@ -14806,6 +14862,40 @@ struct NativeModelingPermitIssuer final {
         return result ? [[Core3DCylindricalCutProgramSnapshot alloc] initWithNative:*result owner:self viewer:GLController.viewer] : nil;
     } catch (...) { CORE3D_CUT_REFUSE("bridge.capture.exception", nil); }
 }
+- (Core3DRetainedFilletCandidateQuery *)retainedFilletCandidates:(Core3DCylindricalCutProgramSnapshot *)original
+    expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::retained_fillet;
+    Candidates result;result.status=CandidateStatus::Stale;
+    if(NSThread.isMainThread){
+        if(!original)result.status=CandidateStatus::Unsupported;
+        else if([original isKindOfClass:Core3DCylindricalCutProgramSnapshot.class]
+            &&[expected isKindOfClass:Core3DSceneSnapshot.class]&&GLController&&GLController.viewer
+            &&[original matchesOwner:self viewer:GLController.viewer]){
+            Core3DSceneSnapshot *scene=[self captureSceneSnapshot];
+            BOOL same=scene&&scene.selectionMode==expected.selectionMode
+                &&[scene.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+                &&scene.revisions.documentGeneration==expected.revisions.documentGeneration
+                &&scene.revisions.modelRevision==expected.revisions.modelRevision
+                &&scene.revisions.presentationRevision==expected.revisions.presentationRevision
+                &&core3d::retained_solid::Bits(scene.metersPerUnit)==core3d::retained_solid::Bits(expected.metersPerUnit)
+                &&scene.selection.selectedElements.count==expected.selection.selectedElements.count;
+            if(same)for(NSUInteger i=0;i<scene.selection.selectedElements.count;++i){
+                Core3DSceneElementIdentifier *a=scene.selection.selectedElements[i];
+                Core3DSceneElementIdentifier *b=expected.selection.selectedElements[i];
+                if(![a.entityIdentifier isEqualToString:b.entityIdentifier]||a.kind!=b.kind
+                    ||a.topologyIndex!=b.topologyIndex||a.geometryRevision!=b.geometryRevision){same=NO;break;}
+            }
+            if(!same)return [[Core3DRetainedFilletCandidateQuery alloc] initWithNative:result];
+            Core3DCylindricalCutProgramSnapshot *live=[self cylindricalCutProgramWithEntityIdentifier:original.entityIdentifier expected:expected];
+            if(live){const CGSize size=GLController.drawableSize;
+                result=GLController.viewer->retainedFilletCandidates([original nativeSnapshot],[live nativeSnapshot].identity,
+                    expected.revisions.presentationRevision,static_cast<std::uint32_t>(std::llround(size.width)),
+                    static_cast<std::uint32_t>(std::llround(size.height)));}
+        }
+    }
+    return [[Core3DRetainedFilletCandidateQuery alloc] initWithNative:result];
+}
+
 - (Core3DCylindricalCutOperation *)core3d_beginProgramEdit:(Core3DCylindricalCutProgramSnapshot *)original
     definition:(Core3DCylindricalCutDefinition *)definition
     radius:(std::optional<core3d::retained_boolean::SetBoreRadius>)radius
@@ -14836,7 +14926,8 @@ struct NativeModelingPermitIssuer final {
         diagnosticCompletion(result);
     };
 #endif
-    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{CORE3D_CUT_NOTE("bridge.program.main-thread");completion(Core3DProfileConstructionResultRejected);});return nil;}
+    if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{self->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;CORE3D_CUT_NOTE("bridge.program.main-thread");completion(Core3DProfileConstructionResultRejected);});return nil;}
+    _lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;
     if(_nativeSolidWork||_isLoading.load()){CORE3D_CUT_NOTE("bridge.program.busy");completion(Core3DProfileConstructionResultBusy);return nil;}
     _lastCylindricalCutAdmissionReason=nil;
     // Runtime class and exclusivity validation on the correct main-thread
@@ -14870,6 +14961,8 @@ struct NativeModelingPermitIssuer final {
         const auto work=(GLController.viewer.get()->*prepare)(before,edit,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if(!work){
+            if(core3d::retained_boolean::FilletEdit(edit))
+                _lastRetainedFilletOutcome=Core3DFilletOutcome(GLController.viewer->lastRetainedFilletAdmissionOutcome);
             if(core3d::retained_boolean::RingEdit(edit)||core3d::retained_boolean::WedgeEdit(edit))
                 _lastCylindricalCutAdmissionReason=Core3DCutAdmissionReason(before.source.recipe,edit,before.source.effectiveMM);
             CORE3D_CUT_NOTE("bridge.program.prepare");completion(Core3DProfileConstructionResultRejected);return nil;
@@ -14925,7 +15018,13 @@ struct NativeModelingPermitIssuer final {
     anchors:(NSArray<Core3DRetainedFilletAnchor *> *)anchors radiusMM:(double)radius expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion {
     core3d::retained_boolean::AppendFilletStep append;append.radiusMM=radius;
-    if([anchors isKindOfClass:NSArray.class]&&anchors.count<=core3d::retained_fillet::MaximumAnchors){
+    if([anchors isKindOfClass:NSArray.class]&&anchors.count>core3d::retained_fillet::MaximumAnchors){
+        void (^refuse)(void)=^{self->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeBudget;
+            if(completion)completion(Core3DProfileConstructionResultRejected);};
+        if(NSThread.isMainThread)refuse();else dispatch_async(dispatch_get_main_queue(),refuse);
+        return nil;
+    }
+    if([anchors isKindOfClass:NSArray.class]){
         for(Core3DRetainedFilletAnchor *anchor in anchors){
             if(![anchor isKindOfClass:Core3DRetainedFilletAnchor.class]){append.anchors.clear();break;}
             core3d::retained_fillet::EdgeAnchor value;value.curveKind=static_cast<core3d::retained_fillet::CurveKind>(anchor.curveKind);
@@ -15248,6 +15347,7 @@ struct NativeModelingPermitIssuer final {
 #endif
                 Core3DViewController* controller = weakSelf;
                 if (!controller) { CORE3D_CUT_NOTE("delivery.owner-released"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return; }
+                controller->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;
                 Core3DModelingPlanningContext *planningContext = weakPlanningContext;
                 const BOOL cancelled = controller->_nativeSolidCancelled;
                 // Main-thread work owns live scene authority. The worker's only
@@ -15282,6 +15382,7 @@ struct NativeModelingPermitIssuer final {
                 }
                 if (!built) {
                     if(core3d::retained_fillet::IsDeclined(filletOutcome)){
+                        controller->_lastRetainedFilletOutcome=Core3DFilletOutcome(filletOutcome);
                         CORE3D_CUT_NOTE(core3d::retained_fillet::Reason(filletOutcome));
                         Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);
                     }else{

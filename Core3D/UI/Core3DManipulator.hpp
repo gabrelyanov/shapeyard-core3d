@@ -22,8 +22,20 @@
 #include <TopoDS.hxx>
 #include "Core3DView.hpp"
 #include <map>
+#include <cmath>
+#include <string>
 
 namespace core3d {
+// Preserve the raw angle modulo whole turns, choosing the representation nearest
+// the previous unsnapped sample. A sign change near zero is not a wrap at +/-pi.
+inline double UnwrapManipulatorAngle(const double raw, const double previous) {
+  constexpr double pi = 3.14159265358979323846;
+  constexpr double turn = 2.0 * pi;
+  const double delta = raw - previous;
+  if (delta > pi) return raw - turn * std::ceil((delta - pi) / turn);
+  if (delta < -pi) return raw + turn * std::ceil((-delta - pi) / turn);
+  return raw;
+}
 namespace scene {
 struct PresentationOverlayContent;
 }
@@ -294,9 +306,17 @@ public: //! @name Setters for parameters
             && mode != AIS_MM_Scaling && mode != AIS_MM_ScalingUniform)) {
       return Standard_False;
     }
+    myDebugRotationTrace.clear();
+    myDebugLegacyPreviousAngle = 0.0;
     myCurrentMode = mode;
     myCurrentIndex = axis;
     return Standard_True;
+  }
+#endif
+
+#ifdef DEBUG
+  const std::map<std::string, double>& DebugRotationTrace() const {
+    return myDebugRotationTrace;
   }
 #endif
 
@@ -856,7 +876,11 @@ protected: //! @name Fields for interactive transformation. Fields only for inte
   gp_Trsf myGestureTrsf; //!< Last accepted gesture delta; reset at gesture start.
   gp_Ax2 myStartPosition; //! Start position of manipulator.
   gp_Pnt myStartPick; //! 3d point corresponding to start mouse pick.
-  Standard_Real myPrevState; //! Previous value of angle during rotation.
+  Standard_Real myPrevState; //! Previous unsnapped, unwrapped rotation angle.
+#ifdef DEBUG
+  std::map<std::string, double> myDebugRotationTrace;
+  double myDebugLegacyPreviousAngle = 0.0;
+#endif
   Standard_Boolean myHasCenter;
   Standard_Boolean myObjectOrientation;
 

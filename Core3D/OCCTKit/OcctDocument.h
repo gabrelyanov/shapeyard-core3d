@@ -859,7 +859,9 @@ public:
         const TDF_Label& label,OcctCylindricalCutProgramSource& output)const noexcept;
     Standard_EXPORT Standard_Boolean CaptureRetainedFilletAnchors(const TDF_Label& label,
         const std::vector<core3d::retained_fillet::EdgeAnchor>& requested,
-        std::vector<core3d::retained_fillet::EdgeAnchor>& captured) const noexcept;
+        std::vector<core3d::retained_fillet::EdgeAnchor>& captured,
+        core3d::retained_fillet::Outcome* outcome=nullptr) const noexcept;
+    Standard_EXPORT core3d::retained_fillet::Candidates RetainedFilletCandidates(const TDF_Label& label) const noexcept;
 
     Standard_EXPORT Standard_Boolean CaptureScalarAppearanceForSavedSweepRebuild(
         const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept;
