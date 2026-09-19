@@ -445,6 +445,10 @@ NS_ASSUME_NONNULL_BEGIN
 //! capture. Preserves model and selected targets; rejects active work, gestures,
 //! modeling previews, readonly views and recovery without cancelling them.
 - (BOOL)prepareForModelingPlanning NS_SWIFT_NAME(prepareForModelingPlanning());
+//! One committed AI history step, with selection/detection retired before OCAF
+//! publishes its synchronous change notification. Refuses previews or busy work.
+//! Returns YES only for one verified ordinary Undo on the same document.
+- (BOOL)undoCommittedModelingStep NS_SWIFT_NAME(undoCommittedModelingStep());
 //! Capture supersedes the previous unused lease. Camera changes alone remain
 //! valid; any observed semantic selection/tool or native edit/history boundary
 //! invalidates it, even if geometry or selection later returns to the same value.

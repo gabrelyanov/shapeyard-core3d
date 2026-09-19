@@ -9114,7 +9114,12 @@ struct NativeModelingPermitIssuer final {
 }
 
 - (NSInteger)debugDocumentUndoCount {
-    auto document = GLController.viewer->getDocument()->ChangeDocument();
+    if (!NSThread.isMainThread || !GLController) return 0;
+    const auto viewer = GLController.viewer;
+    if (!viewer) return 0;
+    const auto owner = viewer->getDocument();
+    if (owner.IsNull()) return 0;
+    const auto document = owner->Document();
     return document.IsNull()
         ? 0
         : static_cast<NSInteger>(document->GetAvailableUndos());
@@ -13018,6 +13023,34 @@ struct NativeModelingPermitIssuer final {
 - (BOOL)core3d_canCaptureModelingContext {
     return [self core3d_canCaptureModelingContextForReservation:nil];
 }
+
+- (BOOL)undoCommittedModelingStep {
+    if (![self core3d_canCaptureModelingContext]) return NO;
+    try {
+        // Keep the exact native owners alive across the synchronous Undo callbacks.
+        const auto viewer = GLController.viewer;
+        const auto owner = viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return NO;
+        const auto document = owner->Document();
+        const auto context = viewer->AisContext();
+        const auto interactor = viewer->getObjectInteractor();
+        if (context.IsNull() || !interactor || !owner->canUndo()) return NO;
+        const auto depth = document->GetAvailableUndos();
+        // performHistory redraws only AFTER OcctDocument::undo publishes
+        // NotifyChanges. During that notification a selected CafShapePrs can still
+        // refer to a label whose attributes Undo just removed. Retire those live
+        // presentation references before changing OCAF, not in the later redraw.
+        [self retireModelingPlanningContext:_issuedModelingPlanningContext];
+        interactor->detachManipulator(false);
+        context->ClearDetected(Standard_False);
+        context->ClearSelected(Standard_False);
+        [self undo];
+        return GLController.viewer == viewer && viewer->getDocument() == owner
+            && owner->Document() == document
+            && document->GetAvailableUndos() == depth - 1;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)core3d_canCaptureModelingContextForReservation:(Core3DModelingPlanningContext *)context {
     if(!NSThread.isMainThread)return NO;
     if(_pendingModelingReservation&&(!context||_pendingModelingReservation->_requestContext!=context))return NO;
