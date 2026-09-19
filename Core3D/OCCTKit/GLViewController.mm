@@ -2572,8 +2572,11 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (PrimitiveGizmoType)getGizmoType {
+    if (_viewer == nullptr) { return PrimitiveGizmoTypeNone; }
+    const auto interactor = _viewer->getObjectInteractor();
+    if (interactor == nullptr) { return PrimitiveGizmoTypeNone; }
     PrimitiveGizmoType type = PrimitiveGizmoTypeNone;
-    switch (_viewer->getObjectInteractor()->getManipulatorType()) {
+    switch (interactor->getManipulatorType()) {
         case PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate:
             type = PrimitiveGizmoTypeMoveRotate;
             break;

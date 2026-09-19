@@ -561,6 +561,11 @@ NS_ASSUME_NONNULL_BEGIN
     segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
     radius:(double)radius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame
     NS_SWIFT_NAME(sweepAdmission(pathIdentifier:vertices:segments:plane:radius:metersPerUnit:constructionFrameValues:));
++ (NSString *)sweepAdmissionWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius endRadius:(double)endRadius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame
+    NS_SWIFT_NAME(sweepAdmission(pathIdentifier:vertices:segments:plane:radius:endRadius:metersPerUnit:constructionFrameValues:));
 //! Fixed saved path structure with fully re-admitted geometry; one SweepRebuild.
 - (void)rebuildSweepPathWithDefinition:(Core3DSweepDefinition *)definition
     context:(Core3DModelingPlanningContext *)context

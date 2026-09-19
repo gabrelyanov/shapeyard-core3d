@@ -16,6 +16,10 @@ struct Definition {
     std::vector<ProfileCurveSegment> segments;
     int plane = 0; // Existing ProfilePointInPlane convention: XY, XZ, YZ.
     double radius = 0; // All lengths below are frozen native document scalars.
+    // Omitted endpoint follows radius, including legacy callers assigning it after construction.
+    // Explicit zero/nonfinite endpoints are invalid; absence alone means constant radius.
+    std::optional<double> endRadius;
+    double EndRadius() const noexcept { return endRadius.value_or(radius); }
     double dimensionMetersPerUnit = 0;
     std::optional<profile::ConstructionFrame> constructionFrame;
 };
@@ -89,7 +93,7 @@ inline Admission Inspect(const Definition& input, Inspection& output) noexcept {
             return scalar(value) && value>=kernelMinimum && value*mm>=detail::minimumPhysical;
         };
         const auto point=[&](const gp_Pnt2d& p) { return scalar(p.X()) && scalar(p.Y()); };
-        if (!positive(input.radius)) return Admission::InvalidNumber;
+        if (!positive(input.radius) || !positive(input.EndRadius())) return Admission::InvalidNumber;
         if (input.constructionFrame && !input.constructionFrame->IsValid()) return Admission::InvalidFrame;
         std::set<ElementID> identifiers;
         const auto claim=[&](ElementID value) { return value!=0 && identifiers.insert(value).second; };
@@ -128,7 +132,7 @@ inline Admission Inspect(const Definition& input, Inspection& output) noexcept {
                     || segment.sweepDegrees==0 || std::abs(segment.sweepDegrees)>180) return Admission::InvalidArc;
                 edge.arc=true;edge.radius=segment.radius*mm;
                 edge.start=segment.startDegrees*a::pi()/180;edge.sweep=segment.sweepDegrees*a::pi()/180;
-                if (segment.radius<4*input.radius) return Admission::TightBend;
+                if (segment.radius<4*std::max(input.radius,input.EndRadius())) return Admission::TightBend;
                 if (a::distance(detail::at(edge,0),edge.a)>endpointTolerance
                     || a::distance(detail::at(edge,1),edge.b)>endpointTolerance) return Admission::InvalidArc;
             } else return Admission::InvalidArc;
@@ -143,7 +147,7 @@ inline Admission Inspect(const Definition& input, Inspection& output) noexcept {
             }
             edges.push_back(edge);
         }
-        const double radiusMM=input.radius*mm,required=2*radiusMM+clearance;
+        const double radiusMM=std::max(input.radius,input.EndRadius())*mm,required=2*radiusMM+clearance;
         for (std::size_t i=0;i<edges.size();++i) for (std::size_t j=i+1;j<edges.size();++j) {
             if (j!=i+1) {
                 // Conservative first-slice limit: no merging/resegmentation to
@@ -170,7 +174,10 @@ inline Admission Inspect(const Definition& input, Inspection& output) noexcept {
         Inspection result;
         result.length=totalMM/mm;result.millimetersPerUnit=mm;result.clearanceMM=clearance;
         const auto first=detail::tangent(edges.front(),false);result.firstTangent={first.x,first.y};
-        result.expectedVolume=a::pi()*input.radius*input.radius*result.length;
+        result.expectedVolume=input.radius==input.EndRadius()
+            ? a::pi()*input.radius*input.radius*result.length
+            : a::pi()*result.length*(input.radius*input.radius+input.radius*input.EndRadius()
+                +input.EndRadius()*input.EndRadius())/3;
         if (input.constructionFrame) result.expectedVolume*=input.constructionFrame->AbsoluteVolumeScale();
         if (!std::isfinite(result.length) || !std::isfinite(result.expectedVolume) || result.expectedVolume<=0)
             return Admission::InvalidNumber;

@@ -26,6 +26,21 @@ if [[ "${3:-}" == "retained_fillet_anchor_tests" ]]; then
     "$output_dir/retained_fillet_anchor_tests"
     exit
 fi
+# Shared focused/default tapered-sweep coverage uses retained host libraries only.
+run_sweep_tests() {
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/PlanarSweepSolidTests.cpp" -L "$1" \
+        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKBinXCAF -lTKBin -lTKBinL -lTKV3d -lTKService -lTKMesh -o "$output_dir/PlanarSweepSolidTests"
+    "$output_dir/PlanarSweepSolidTests"
+}
+if [[ "${3:-}" == "PlanarSweepSolidTests" ]]; then
+    : "${2:?focused sweep tests require retained host OCCT libraries}"
+    run_sweep_tests "$2"
+    exit
+fi
 for name in CurvedMeshUVPrototypeTests ToroidalMeshUVPrototypeTests CurvedUVPackerTests CurvedFaceUVUnwrapTests; do
     /usr/bin/clang++ -std=c++17 -Wall -Wextra -Werror -O2 "$tests_dir/$name.cpp" -o "$output_dir/$name"
     "$output_dir/$name"
@@ -39,6 +54,7 @@ done
 # Optional retained host OCCT libraries enable the native planar-loft regression.
 # Explicit input avoids selecting iOS libraries or invoking Xcode/tool discovery.
 if [[ -n "${2:-}" ]]; then
+    run_sweep_tests "$2"
     /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
         -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
         "$tests_dir/RectangularLoftPlanarBuilderTests.cpp" -L "$2" \
@@ -69,5 +85,5 @@ if [[ -n "${2:-}" ]]; then
     "$output_dir/retained_fillet_anchor_tests"
 
 else
-    echo "SKIP RectangularLoftPlanarBuilderTests, loft_cut_source_patch_tests RingBoltRadiusEditTests and retained_fillet_anchor_tests: pass retained host OCCT library directory as argument 2"
+    echo "SKIP PlanarSweepSolidTests, RectangularLoftPlanarBuilderTests, loft_cut_source_patch_tests RingBoltRadiusEditTests and retained_fillet_anchor_tests: pass retained host OCCT library directory as argument 2"
 fi

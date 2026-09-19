@@ -3106,6 +3106,11 @@ namespace core3d {
     }
 
     const PrimitiveManipulatorType ObjectInteractor::getManipulatorType() const {
+        // The presentation is lazy, so a null _manipulator alone does not
+        // invalidate a selected tool. Its native owners must exist, however.
+        if (myContext.IsNull() || myView.IsNull() || myDoc.IsNull()) {
+            return PrimitiveManipulatorType::PrimitiveGizmoTypeNone;
+        }
         return _manipulatorType;
     }
 

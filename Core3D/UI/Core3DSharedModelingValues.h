@@ -98,7 +98,7 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(init(identifier:startVertex:endVertex:kind:center:radius:startDegrees:sweepDegrees:));
 @end
 
-//! Immutable bounded planar G1 open line/arc path with a constant solid-circle section.
+//! Immutable bounded planar G1 open line/arc path with a constant or linearly tapered solid-circle section.
 //! Lengths and frame translations use raw document units. No target/lease/receipt authority.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DSweepDefinition : NSObject
@@ -107,6 +107,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSArray<Core3DSweepPathSegment *> *segments;
 @property(nonatomic,readonly) Core3DProfilePlane plane;
 @property(nonatomic,readonly) double radius;
+@property(nonatomic,readonly) double endRadius;
 @property(nonatomic,readonly) double metersPerUnit;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
 - (instancetype)init NS_UNAVAILABLE;
@@ -118,8 +119,15 @@ __attribute__((objc_subclassing_restricted))
     radius:(double)radius metersPerUnit:(double)metersPerUnit
     constructionFrameValues:(NSArray<NSNumber *> *)frame
     NS_SWIFT_NAME(init(pathIdentifier:vertices:segments:plane:radius:metersPerUnit:constructionFrameValues:));
+- (nullable instancetype)initWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius endRadius:(double)endRadius metersPerUnit:(double)metersPerUnit
+    constructionFrameValues:(NSArray<NSNumber *> *)frame
+    NS_SWIFT_NAME(init(pathIdentifier:vertices:segments:plane:radius:endRadius:metersPerUnit:constructionFrameValues:));
 //! Clone only the raw feature-unit circle radius. All path/frame/unit bits are retained.
 - (nullable Core3DSweepDefinition *)changingRadius:(double)radius NS_SWIFT_NAME(changingRadius(_:));
+- (nullable Core3DSweepDefinition *)changingStartRadius:(double)radius endRadius:(double)endRadius NS_SWIFT_NAME(changingStartRadius(_:endRadius:));
 @end
 
 //! Immutable parallel-XY rectangular station. IDs are local recipe identity, not object UUIDs.

@@ -7712,11 +7712,12 @@ Standard_Boolean OcctDocument::StageSavedSweepReplacement(
 #endif
         const auto label=previous.sweep.label;
         TNaming_Builder(label).Select(candidate,candidate);
-        // Fixed structure means count/schema/identity and label are unchanged.
+        // Upgrade legacy v1 records in this same undoable command. Identity and label stay fixed.
+        TDataStd_Integer::Set(label,p::SchemaID(),p::Schema);
+        TDataStd_Integer::Set(label,p::CountID(),int(values.size()));
         // Recreate scalar attributes so +0/-0 writes cannot be elided by numeric Set equality.
         for (std::size_t i=0;i<values.size();++i) {
-            const auto child=label.FindChild(int(i)+1,Standard_False);
-            if (child.IsNull()) return Standard_False;
+            const auto child=label.FindChild(int(i)+1,Standard_True);
             child.ForgetAttribute(TDataStd_Real::GetID());TDataStd_Real::Set(child,values[i]);
         }
         OcctObjectTransformState stored;OcctScalarAppearanceState after;

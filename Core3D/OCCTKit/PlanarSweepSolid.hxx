@@ -1,4 +1,5 @@
 #pragma once
+#include <Law_Linear.hxx>
 
 // Detached OCCT geometry only: no OCAF labels, AIS objects, commands or receipts.
 #include "PlanarSweepDefinition.hxx"
@@ -84,7 +85,7 @@ inline BuildStatus Build(const std::shared_ptr<const Prepared>& prepared,
         const auto& checked=prepared->inspection;
         const double mm=checked.millimetersPerUnit;
         const double scale=input.constructionFrame ? std::abs(input.constructionFrame->values[7]) : 1;
-        if (input.radius*scale<32*Precision::Confusion()) return BuildStatus::InvalidDefinition;
+        if (std::min(input.radius,input.EndRadius())*scale<32*Precision::Confusion()) return BuildStatus::InvalidDefinition;
         const gp_Dir normal=input.plane==0 ? gp::DZ() : input.plane==1 ? gp_Dir(0,-1,0) : gp::DX();
         const gp_Dir uDirection=input.plane==2 ? gp::DY() : gp::DX();
         std::vector<TopoDS_Vertex> vertices;vertices.reserve(input.vertices.size());
@@ -138,7 +139,14 @@ inline BuildStatus Build(const std::shared_ptr<const Prepared>& prepared,
         const double tolerance=std::max(Precision::Confusion(),1e-5/mm);
         pipe.SetTolerance(tolerance,tolerance,detail::tangentTolerance);
         pipe.SetMaxDegree(12);pipe.SetMaxSegments(64);
-        pipe.Add(section.Wire(),vertices.front(),Standard_False,Standard_False);
+        if (input.EndRadius()==input.radius) {
+            // Preserve the legacy builder exactly for constant sections.
+            pipe.Add(section.Wire(),vertices.front(),Standard_False,Standard_False);
+        } else {
+            Handle(Law_Linear) law=new Law_Linear;
+            law->Set(0,1,1,input.EndRadius()/input.radius);
+            pipe.SetLaw(section.Wire(),law,vertices.front(),Standard_False,Standard_False);
+        }
         if (!pipe.IsReady()) return BuildStatus::KernelFailure;
         pipe.Build(progress.Next());
         if (cancelled.load()) return BuildStatus::Cancelled;
@@ -165,7 +173,10 @@ inline BuildStatus Build(const std::shared_ptr<const Prepared>& prepared,
             return BuildStatus::InvalidSolid;
         const auto interference=detail::CheckInterference(solid,cancelled,progress.Next());
         if (interference!=BuildStatus::Built) return interference;
-        GProp_GProps properties;BRepGProp::VolumeProperties(solid,properties);
+        GProp_GProps properties;
+        if(input.EndRadius()==input.radius) BRepGProp::VolumeProperties(solid,properties);
+        // Rational tapered surfaces need adaptive integration; keep the same 1e-7 audit.
+        else BRepGProp::VolumeProperties(solid,properties,1e-10);
         const double volume=properties.Mass(),expected=checked.expectedVolume;
         if (!std::isfinite(volume) || volume<=0 || std::abs(volume-expected)>expected*1e-7)
             return BuildStatus::VerificationFailed;

@@ -9,7 +9,7 @@
 // No loader, ordinary command, copy or request capability is installed here.
 namespace core3d::sweep_persistence {
 using Definition = planar_sweep::Definition;
-inline constexpr int Schema = 1, MinimumScalars = 24, MaximumScalars = 404;
+inline constexpr int Schema = 2, MinimumScalars = 24, MaximumScalars = 405;
 inline constexpr int MinimumRecordTag = 13, MaximumLabels = 100000;
 inline const Standard_GUID& SchemaID() {
     static const Standard_GUID id("FE068D01-49F0-4694-8E80-B6B30AAF45E7"); return id;
@@ -34,7 +34,7 @@ inline bool Encode(const Definition& d,std::vector<double>& output) noexcept {
     try {
         planar_sweep::Inspection inspection;
         if (planar_sweep::Inspect(d,inspection)!=planar_sweep::Admission::Accepted) return false;
-        std::vector<double> values{double(d.plane),0,0,double(d.pathIdentifier),d.radius,
+        std::vector<double> values{double(d.plane),0,0,double(d.pathIdentifier),d.radius,d.EndRadius(),
             d.dimensionMetersPerUnit,double(d.vertices.size()),double(d.segments.size()),
             d.constructionFrame?1.0:0.0};
         for (const auto& v:d.vertices)
@@ -48,23 +48,24 @@ inline bool Encode(const Definition& d,std::vector<double>& output) noexcept {
         output=std::move(values); return true;
     } catch (...) { output.clear(); return false; }
 }
-inline bool Decode(const std::vector<double>& values,Definition& output) noexcept {
+inline bool Decode(const std::vector<double>& values,Definition& output,int schema) noexcept {
     output={};
     try {
-        if (values.size()<MinimumScalars || values.size()>MaximumScalars) return false;
+        if ((schema!=1 && schema!=Schema) || values.size()<MinimumScalars || values.size()>MaximumScalars) return false;
+        const std::size_t shift=schema==1 ? 0 : 1;
         for (double v:values) if (!std::isfinite(v)) return false;
         const auto integer=[](double v,double low,double high) { return v>=low && v<=high && v==std::floor(v); };
         const auto identity=[&](double v) { return integer(v,1,double(std::numeric_limits<ProfileCurveID>::max())); };
         if (!integer(values[0],0,2) || values[1]!=0 || values[2]!=0 || !identity(values[3])
-            || !integer(values[6],2,33) || !integer(values[7],1,32)
-            || values[6]!=values[7]+1 || !integer(values[8],0,1)) return false;
-        const std::size_t vertices=std::size_t(values[6]),segments=std::size_t(values[7]);
-        const bool framed=values[8]==1;
-        if (values.size()!=9+3*vertices+9*segments+(framed?8:0)) return false;
+            || !integer(values[6+shift],2,33) || !integer(values[7+shift],1,32)
+            || values[6+shift]!=values[7+shift]+1 || !integer(values[8+shift],0,1)) return false;
+        const std::size_t vertices=std::size_t(values[6+shift]),segments=std::size_t(values[7+shift]);
+        const bool framed=values[8+shift]==1;
+        if (values.size()!=9+shift+3*vertices+9*segments+(framed?8:0)) return false;
         Definition d; d.plane=int(values[0]); d.pathIdentifier=ProfileCurveID(values[3]);
-        d.radius=values[4]; d.dimensionMetersPerUnit=values[5];
+        d.radius=values[4]; d.endRadius=schema==1 ? d.radius : values[5]; d.dimensionMetersPerUnit=values[5+shift];
         d.vertices.reserve(vertices); d.segments.reserve(segments);
-        std::size_t offset=9;
+        std::size_t offset=9+shift;
         for (std::size_t i=0;i<vertices;++i,offset+=3) {
             if (!identity(values[offset])) return false;
             d.vertices.push_back({ProfileCurveID(values[offset]),gp_Pnt2d(values[offset+1],values[offset+2])});
@@ -84,14 +85,23 @@ inline bool Decode(const std::vector<double>& values,Definition& output) noexcep
         }
         std::vector<double> encoded;
         // Scalar tags/IDs are canonical integers; authored geometry/frame bits survive exactly.
-        if (!Encode(d,encoded) || !SameBits(values,encoded)) return false;
+        if (!Encode(d,encoded)) return false;
+        if (schema==1) encoded.erase(encoded.begin()+5);
+        if (!SameBits(values,encoded)) return false;
         output=std::move(d); return true;
     } catch (...) { output={}; return false; }
+}
+// Bare numeric callers may reopen either historical layout. Their lengths are
+// disjoint modulo 12 (v1: 0/8, v2: 1/9); persisted records always pass their schema explicitly.
+inline bool Decode(const std::vector<double>& values,Definition& output) noexcept {
+    const auto remainder=values.size()%12;
+    return Decode(values,output,(remainder==0 || remainder==8) ? 1 : Schema);
 }
 inline bool HasAttribute(const TDF_Label& label) {
     return label.IsAttribute(SchemaID()) || label.IsAttribute(IdentityID()) || label.IsAttribute(CountID());
 }
 struct Record {
+    int schema = Schema;
     TDF_Label label;
     std::string identifier;
     Definition definition;
@@ -100,7 +110,7 @@ struct Record {
     bool IsEqual(const Record& other) const {
         if (label.IsNull() || other.label.IsNull()) return label.IsNull() && other.label.IsNull();
         return label.IsEqual(other.label) && label.Data()==other.label.Data()
-            && identifier==other.identifier && SameBits(values,other.values)
+            && schema==other.schema && identifier==other.identifier && SameBits(values,other.values)
             && !boundShape.IsNull() && !other.boundShape.IsNull() && boundShape.IsEqual(other.boundShape);
     }
     bool IsCurrent(const Handle(TDocStd_Document)& document,const TDF_Label& owner) const {
@@ -133,7 +143,7 @@ inline bool Read(const Handle(TDocStd_Document)& document,const TDF_Label& owner
             || !enclosure::Read(document,owner,e) || !e.label.IsNull()) return false;
         Handle(TDataStd_Integer) schema,count; Handle(TDataStd_AsciiString) identity;
         Handle(TNaming_NamedShape) binding;
-        if (!r.label.FindAttribute(SchemaID(),schema) || schema->Get()!=Schema
+        if (!r.label.FindAttribute(SchemaID(),schema) || (schema->Get()!=1 && schema->Get()!=Schema)
             || !r.label.FindAttribute(CountID(),count) || count->Get()<MinimumScalars || count->Get()>MaximumScalars
             || !r.label.FindAttribute(IdentityID(),identity)
             || !r.label.FindAttribute(TNaming_NamedShape::GetID(),binding)) return false;
@@ -145,6 +155,7 @@ inline bool Read(const Handle(TDocStd_Document)& document,const TDF_Label& owner
             const auto& id=it.Value()->ID();
             if (id!=SchemaID() && id!=CountID() && id!=IdentityID() && id!=TNaming_NamedShape::GetID()) return false;
         }
+        r.schema=schema->Get();
         r.values.resize(count->Get()); int present=0;
         for (TDF_ChildIterator it(r.label,Standard_False);it.More();it.Next()) {
             const auto child=it.Value(); if (++visited>MaximumLabels || child.Tag()<1) return false;
@@ -158,7 +169,7 @@ inline bool Read(const Handle(TDocStd_Document)& document,const TDF_Label& owner
                 if (attr.Value()->ID()!=TDataStd_Real::GetID()) return false;
             r.values[child.Tag()-1]=scalar->Get(); ++present;
         }
-        if (present!=count->Get() || !Decode(r.values,r.definition) || !r.IsCurrent(document,owner)) return false;
+        if (present!=count->Get() || !Decode(r.values,r.definition,r.schema) || !r.IsCurrent(document,owner)) return false;
         output=std::move(r); return true;
     } catch (...) { output={}; return false; }
 }

@@ -648,7 +648,9 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ledger.sweepGuard=std::make_shared<SweepRebuildGuard>(*request.sweepSource);
                 // All numeric values are finite and fixed fields bit-equal. Only
                 // mutable geometric signed-zero aliases compare numerically here.
-                sweepNoChange=values==record.previous.sweep.values;
+                std::vector<double> previousValues;
+                if(!sweep_persistence::Encode(record.previous.sweep.definition,previousValues)) return reject(OrdinaryEditResult::Invalid);
+                sweepNoChange=values==previousValues;
             }
             if(request.operation==OrdinaryTransformOperation::LoftStationRebuild) {
                 std::vector<double> values;

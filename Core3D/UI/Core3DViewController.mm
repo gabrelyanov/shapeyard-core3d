@@ -1464,7 +1464,7 @@ static Core3DRetainedFilletOutcome Core3DFilletOutcome(core3d::retained_fillet::
         }
         if (d.constructionFrame) for (double v:d.constructionFrame->values) [frame addObject:@(v)];
         _definition=[[Core3DSweepDefinition alloc] initWithPathIdentifier:d.pathIdentifier vertices:vertices segments:segments
-            plane:static_cast<Core3DProfilePlane>(d.plane) radius:d.radius metersPerUnit:d.dimensionMetersPerUnit constructionFrameValues:frame];
+            plane:static_cast<Core3DProfilePlane>(d.plane) radius:d.radius endRadius:d.EndRadius() metersPerUnit:d.dimensionMetersPerUnit constructionFrameValues:frame];
         if (!_definition) return nil;
         _native=snapshot;
         _entityIdentifier=[[NSString alloc] initWithUTF8String:snapshot.identity.entityIdentifier.c_str()];
@@ -1812,7 +1812,7 @@ static bool Core3DModelingSweepSupported(const core3d::planar_sweep::Definition&
         if(!std::isfinite(mm)||mm<=0)return false;
         const auto scalar=[&](double v){return std::isfinite(v*mm)&&std::abs(v*mm)<=1e6;};
         const auto length=[&](double v){return scalar(v)&&v*mm>=0.001;};
-        if(!length(d.radius))return false;
+        if(!length(d.radius)||!length(d.EndRadius()))return false;
         for(const auto& v:d.vertices)if(!scalar(v.point.X())||!scalar(v.point.Y()))return false;
         for(const auto& edge:d.segments)if(edge.kind==core3d::ProfileCurveKind::CircularArc
             &&(!scalar(edge.center.X())||!scalar(edge.center.Y())||!length(edge.radius)))return false;
@@ -8098,10 +8098,11 @@ struct NativeModelingPermitIssuer final {
 + (NSDictionary<NSString *, id> *)debugDetachedPlanarSweep:(NSInteger)fixture
     metersPerUnit:(double)metersPerUnit plane:(NSInteger)plane frame:(NSInteger)frame {
     namespace sweep=core3d::planar_sweep;
-    if (![NSThread isMainThread] || fixture<0 || fixture>4 || plane<0 || plane>2 || frame<0 || frame>3
+    if (![NSThread isMainThread] || fixture<0 || fixture>5 || plane<0 || plane>2 || frame<0 || frame>3
         || (metersPerUnit!=0.001 && metersPerUnit!=1)) return @{@"status":@"bridge-rejected"};
     try {
-        auto source=sweep::probe::Fixture(int(fixture),metersPerUnit,int(plane),int(frame));
+        auto source=sweep::probe::Fixture(fixture==5 ? 4 : int(fixture),metersPerUnit,int(plane),int(frame));
+        if(fixture==5)source.endRadius=source.radius/2;
         const auto before=sweep::probe::Snapshot(source);
         sweep::Admission admission;const auto prepared=sweep::Prepare(source,admission);
         if (!prepared) return @{@"status":@"admission",@"admission":@(sweep::probe::Name(admission))};
@@ -8404,7 +8405,7 @@ struct NativeModelingPermitIssuer final {
             for (double value:record.values) {[bits addObject:@(core3d::sweep_persistence::Bits(value))];[values addObject:@(value)];}
             return @{@"featureIdentifier": [NSString stringWithUTF8String:record.identifier.c_str()],
                 @"definitionIdentifier": [NSString stringWithUTF8String:state.object.definitionIdentifier.c_str()],
-                @"entityIdentifier": identifier,@"bits":bits,@"values":values,
+                @"entityIdentifier": identifier,@"bits":bits,@"values":values,@"schema":@(record.schema),
                 @"appearanceBits":appearanceBits,@"objectTransformBits":objectBits,@"rawMetersPerUnit":@(record.definition.dimensionMetersPerUnit),
                 @"current":@(record.IsCurrent(doc->Document(),label))};
         }
@@ -8527,11 +8528,19 @@ struct NativeModelingPermitIssuer final {
     });
 }
 - (NSData *)debugSavedSweepAdmissionFixture:(NSInteger)fault {
-    if (![NSThread isMainThread] || fault<0 || fault>5) return nil;
+    if (![NSThread isMainThread] || fault<0 || fault>6) return nil;
     return Core3DCreateDebugBinXCAFFixture(@"sweep-admission",[fault](const Handle(TDocStd_Document)& document) {
         namespace p=core3d::sweep_persistence;
         const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
-        const auto shape=BRepPrimAPI_MakeBox(10,10,10).Shape();
+        TopoDS_Shape shape=BRepPrimAPI_MakeBox(10,10,10).Shape();
+        if(fault==6) {
+            core3d::planar_sweep::Admission admission;std::atomic_bool cancelled{false};
+            const auto prepared=core3d::planar_sweep::Prepare(core3d::planar_sweep::probe::Fixture(4,.001),admission);
+            core3d::planar_sweep::SolidResult built;
+            if(core3d::planar_sweep::Build(prepared,cancelled,built)!=core3d::planar_sweep::BuildStatus::Built)
+                throw Standard_Failure("Legacy sweep fixture build failed");
+            shape=built.solid;
+        }
         const auto owner=shapes->AddShape(shape,Standard_False,Standard_True);
         Core3DSetDebugGeometryRepresentation(owner,1);
         auto definition=core3d::planar_sweep::probe::Fixture(4,0.001);
@@ -8540,6 +8549,17 @@ struct NativeModelingPermitIssuer final {
         if (!p::Stage(document,owner,definition,id) || !document->CommitCommand())
             throw Standard_Failure("Sweep admission fixture staging failed");
         p::Record record;if (!p::Read(document,owner,record)) throw Standard_Failure("Sweep fixture read failed");
+        if(fault==6) {
+            // Exact historical v1 header; save/reopen tests exercise the production reader and upgrade.
+            auto legacy=record.values;legacy.erase(legacy.begin()+5);
+            document->NewCommand();
+            TDataStd_Integer::Set(record.label,p::SchemaID(),1);
+            TDataStd_Integer::Set(record.label,p::CountID(),int(legacy.size()));
+            for(TDF_ChildIterator it(record.label,Standard_False);it.More();it.Next())it.Value().ForgetAllAttributes(Standard_True);
+            for(std::size_t i=0;i<legacy.size();++i)TDataStd_Real::Set(record.label.FindChild(int(i)+1,Standard_True),legacy[i]);
+            if(!p::Read(document,owner,record)||record.schema!=1||!document->CommitCommand())
+                throw Standard_Failure("Legacy sweep fixture staging failed");
+        }
         if (fault==0) TDataStd_Integer::Set(record.label,p::SchemaID(),99);
         if (fault==1) record.label.FindChild(4).ForgetAllAttributes();
         if (fault==2) TDataStd_Integer::Set(document->GetData()->Root(),p::CountID(),24);
@@ -8614,9 +8634,65 @@ struct NativeModelingPermitIssuer final {
         using namespace core3d::sweep_persistence::probe;
         Checks checks;
         switch (scenario) {
-            case 0: checks=Numeric(); break;
+            case 0: checks=[] { using namespace core3d::sweep_persistence;
+                    Checks c; Definition decoded; std::vector<double> v;
+                    auto d=Fixture(4); c["minimum25"]=Encode(d,v)&&v.size()==25&&Decode(v,decoded);
+                    if (!c["minimum25"]) return c; // A failed positive fixture must not index empty output.
+                    c["signedZero"]=Bits(decoded.vertices.front().point.X())==Bits(-0.0);
+                    const auto rejected=[&](std::vector<double> candidate) { Definition out=Fixture(0); const bool ok=Decode(candidate,out); return !ok&&out.vertices.empty()&&out.pathIdentifier==0; };
+                    auto rejectAt=[&](const char* name,std::size_t index,double value) { auto a=v;a[index]=value;c[name]=rejected(a); };
+                    rejectAt("unknownSection",1,1);rejectAt("unknownPolicy",2,1);rejectAt("fractionalID",3,1.5);
+                    rejectAt("overflowID",3,4294967296.0);rejectAt("zeroID",3,0);rejectAt("nan",4,std::numeric_limits<double>::quiet_NaN());
+                    rejectAt("infiniteUnit",6,std::numeric_limits<double>::infinity());rejectAt("negativeUnit",6,-0.001);
+                    rejectAt("oversizedVertices",7,34);rejectAt("mismatchedCounts",8,2);rejectAt("invalidFrameFlag",9,2);
+                    rejectAt("duplicateID",10,1);rejectAt("wrongConnectivity",18,999);rejectAt("hiddenLineArc",22,2);
+                    auto shortValues=v;shortValues.pop_back();c["truncated"]=rejected(shortValues);
+                    auto longValues=v;longValues.push_back(0);c["trailing"]=rejected(longValues);
+                    c["over405"]=rejected(std::vector<double>(406,0));
+                    d.vertices.clear();d.segments.clear();d.radius=1;
+                    for (int i=0;i<33;++i) d.vertices.push_back({core3d::ProfileCurveID(100+i),gp_Pnt2d(i*20,0)});
+                    for (int i=0;i<32;++i) d.segments.push_back({core3d::ProfileCurveID(200+i),core3d::ProfileCurveID(100+i),core3d::ProfileCurveID(101+i),core3d::ProfileCurveKind::Line,{},0,0,0});
+                    core3d::profile::ConstructionFrame frame; frame.values={-0.0,2,3,-0.0,-0.0,-std::sqrt(0.5),-std::sqrt(0.5),-2};d.constructionFrame=frame;
+                    c["maximum405"]=Encode(d,v)&&v.size()==405&&Decode(v,decoded);
+                    if (!c["maximum405"]) return c; // Preserve a safe test failure before fixed-index checks.
+                    std::vector<double> again;c["frameBits"]=Encode(decoded,again)&&SameBits(v,again);
+                    auto equivalent=v;equivalent[10+3*33+9*32]=0;
+                    c["bitComparisonDistinguishesSignedZero"]=!SameBits(v,equivalent);
+                    return c;
+            }(); break;
             case 1: checks=RoundTrip(); break;
-            case 2: checks=Malformed(); break;
+            case 2: checks=[] { using namespace core3d::sweep_persistence;
+                    Checks c;
+                    for (int mode=0;mode<17;++mode) {
+                        RawDocument raw;auto d=Fixture(0);raw.document->NewCommand();
+                        if (!Stage(raw.document,raw.owner,d,Identifier)) {c[std::to_string(mode)]=false;continue;}
+                        Record record;if (!Read(raw.document,raw.owner,record)) {c[std::to_string(mode)]=false;continue;}
+                        const auto label=record.label;const int count=int(record.values.size());
+                        switch (mode) {
+                            case 0:label.ForgetAttribute(SchemaID());break;
+                            case 1:TDataStd_Integer::Set(label,SchemaID(),99);break;
+                            case 2:TDataStd_Integer::Set(label,CountID(),406);break;
+                            case 3:TDataStd_Integer::Set(label,CountID(),23);break;
+                            case 4:label.FindChild(1).ForgetAllAttributes();break;
+                            case 5:TDataStd_Real::Set(label.FindChild(count+1,Standard_True),0);break;
+                            case 6:TDataStd_Real::Set(label.FindChild(1).FindChild(1,Standard_True),0);break;
+                            case 7:TDataStd_Integer::Set(label.FindChild(1),42);break;
+                            case 8:TDataStd_Real::Set(label.FindChild(1),std::numeric_limits<double>::infinity());break;
+                            case 9:TDataStd_AsciiString::Set(label,IdentityID(),TCollection_AsciiString("a3ffca1a-a4f9-421d-a2dd-c68c6565e060"));break;
+                            case 10:TDataStd_Integer::Set(raw.owner.FindChild(label.Tag()+1,Standard_True),SchemaID(),1);break;
+                            case 11:label.ForgetAttribute(TNaming_NamedShape::GetID());break;
+                            case 12:TDataStd_Real::Set(label,1);break;
+                            case 13:TDataStd_Integer::Set(raw.owner.FindChild(label.Tag()+1,Standard_True),core3d::profile::SchemaID(),1);break;
+                            case 14:TDataStd_Integer::Set(raw.owner.FindChild(label.Tag()+1,Standard_True),core3d::enclosure::SchemaID(),1);break;
+                            case 15:TDataStd_Real::Set(label.FindChild(4),1.25);break;
+                            case 16:TDataStd_AsciiString::Set(label,IdentityID(),TCollection_AsciiString("not-a-uuid"));break;
+                        }
+                        Record result;c[std::to_string(mode)]=!Read(raw.document,raw.owner,result)&&result.label.IsNull();
+                        raw.document->AbortCommand();
+                        Record absent;c["abort:"+std::to_string(mode)]=Read(raw.document,raw.owner,absent)&&absent.label.IsNull();
+                    }
+                    return c;
+            }(); break;
             case 3: checks=BindingAndTransaction(); break;
         }
         NSMutableDictionary<NSString *, NSNumber *> *result=[NSMutableDictionary dictionary];
@@ -14144,7 +14220,7 @@ struct NativeModelingPermitIssuer final {
         }
         // Radius is the only admitted delta, including signed-zero and optional
         // presence bits elsewhere. Neither JSON nor a new scene can refresh it.
-        auto expected=original.definition;expected.radius=requested.radius;
+        auto expected=original.definition;expected.radius=requested.radius;expected.endRadius=requested.EndRadius();
         std::vector<double> expectedValues,requestedValues;
         if(!core3d::sweep_persistence::Encode(expected,expectedValues)
             ||!core3d::sweep_persistence::Encode(requested,requestedValues)
@@ -14154,11 +14230,12 @@ struct NativeModelingPermitIssuer final {
         const double factor=original.effectiveDimensionMetersPerUnit*1000;
         // If both raw radii advertise the exact same finite physical Double,
         // retain original raw bits before ordinary semantic no-change admission.
-        Core3DSweepDefinition *frozen=definition;
-        if(requested.radius*factor==original.definition.radius*factor){
-            frozen=[context.selectedSweep.definition changingRadius:original.definition.radius];
-            if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
-        }
+        const double startRadius=requested.radius*factor==original.definition.radius*factor
+            ? original.definition.radius : requested.radius;
+        const double endRadius=requested.EndRadius()*factor==original.definition.EndRadius()*factor
+            ? original.definition.EndRadius() : requested.EndRadius();
+        Core3DSweepDefinition *frozen=[definition changingStartRadius:startRadius endRadius:endRadius];
+        if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
         context->_planningConsumed=YES;_modelingConstructionContext=context;
         __weak Core3DViewController *weakSelf=self;
         __weak Core3DModelingPlanningContext *weakContext=context;
@@ -14185,13 +14262,20 @@ struct NativeModelingPermitIssuer final {
     vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
     segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
     radius:(double)radius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame {
+    return [self sweepAdmissionWithPathIdentifier:identifier vertices:vertices segments:segments plane:plane
+        radius:radius endRadius:radius metersPerUnit:metersPerUnit constructionFrameValues:frame];
+}
++ (NSString *)sweepAdmissionWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius endRadius:(double)endRadius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame {
     if(![vertices isKindOfClass:NSArray.class]||![segments isKindOfClass:NSArray.class]
         ||vertices.count<2||vertices.count>33||segments.count<1||segments.count>32
         ||vertices.count!=segments.count+1)return @"InvalidCount";
     if(![frame isKindOfClass:NSArray.class]||(frame.count!=0&&frame.count!=8))return @"InvalidFrame";
     try {
         core3d::planar_sweep::Definition d;
-        d.pathIdentifier=identifier;d.plane=int(plane);d.radius=radius;d.dimensionMetersPerUnit=metersPerUnit;
+        d.pathIdentifier=identifier;d.plane=int(plane);d.radius=radius;d.endRadius=endRadius;d.dimensionMetersPerUnit=metersPerUnit;
         for(Core3DProfileCurveVertex *v in vertices){
             if(![v isKindOfClass:Core3DProfileCurveVertex.class])return @"InvalidNumber";
             d.vertices.push_back({v.identifier,gp_Pnt2d(v.point.x,v.point.y)});
@@ -14253,12 +14337,12 @@ struct NativeModelingPermitIssuer final {
         const double factor=original.effectiveDimensionMetersPerUnit*1000;
         // If both raw radii advertise the exact same finite physical Double,
         // retain original raw bits before ordinary semantic no-change admission.
-        Core3DSweepDefinition *frozen=definition;
-        if(requested.radius*factor==original.definition.radius*factor){
-            // Normalize only the section radius; keep the requested path geometry.
-            frozen=[definition changingRadius:original.definition.radius];
-            if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
-        }
+        const double startRadius=requested.radius*factor==original.definition.radius*factor
+            ? original.definition.radius : requested.radius;
+        const double endRadius=requested.EndRadius()*factor==original.definition.EndRadius()*factor
+            ? original.definition.EndRadius() : requested.EndRadius();
+        Core3DSweepDefinition *frozen=[definition changingStartRadius:startRadius endRadius:endRadius];
+        if(!frozen){completion(Core3DProfileConstructionResultRejected);return;}
         context->_planningConsumed=YES;_modelingConstructionContext=context;
         __weak Core3DViewController *weakSelf=self;
         __weak Core3DModelingPlanningContext *weakContext=context;

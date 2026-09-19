@@ -303,6 +303,12 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
     vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
     segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
     radius:(double)radius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame {
+    return [self initWithPathIdentifier:identifier vertices:vertices segments:segments plane:plane radius:radius endRadius:radius metersPerUnit:metersPerUnit constructionFrameValues:frame];
+}
+- (instancetype)initWithPathIdentifier:(uint32_t)identifier
+    vertices:(NSArray<Core3DProfileCurveVertex *> *)vertices
+    segments:(NSArray<Core3DSweepPathSegment *> *)segments plane:(Core3DProfilePlane)plane
+    radius:(double)radius endRadius:(double)endRadius metersPerUnit:(double)metersPerUnit constructionFrameValues:(NSArray<NSNumber *> *)frame {
     if (![vertices isKindOfClass:[NSArray class]] || vertices.count<2 || vertices.count>33
         || ![segments isKindOfClass:[NSArray class]] || segments.count<1 || segments.count>32
         || vertices.count!=segments.count+1 || ![frame isKindOfClass:[NSArray class]]
@@ -310,7 +316,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         || plane<Core3DProfilePlaneXY || plane>Core3DProfilePlaneYZ) return nil;
     try {
         core3d::planar_sweep::Definition d;d.pathIdentifier=identifier;d.plane=int(plane);
-        d.radius=radius;d.dimensionMetersPerUnit=metersPerUnit;
+        d.radius=radius;d.endRadius=endRadius;d.dimensionMetersPerUnit=metersPerUnit;
         for (Core3DProfileCurveVertex *v in vertices) {
             if (![v isKindOfClass:[Core3DProfileCurveVertex class]]) return nil;
             d.vertices.push_back({v.identifier,gp_Pnt2d(v.point.x,v.point.y)});
@@ -338,10 +344,14 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 - (uint32_t)pathIdentifier {return _definition.pathIdentifier;}
 - (Core3DProfilePlane)plane {return static_cast<Core3DProfilePlane>(_definition.plane);}
 - (double)radius {return _definition.radius;}
+- (double)endRadius {return _definition.EndRadius();}
 - (double)metersPerUnit {return _definition.dimensionMetersPerUnit;}
 - (Core3DSweepDefinition *)changingRadius:(double)radius {
+    return [self changingStartRadius:radius endRadius:radius];
+}
+- (Core3DSweepDefinition *)changingStartRadius:(double)radius endRadius:(double)endRadius {
     try {
-        auto d=_definition;d.radius=radius;
+        auto d=_definition;d.radius=radius;d.endRadius=endRadius;
         core3d::planar_sweep::Inspection inspected;
         if(core3d::planar_sweep::Inspect(d,inspected)!=core3d::planar_sweep::Admission::Accepted)return nil;
         // Rebuild public readonly fields from the already frozen native values,
@@ -361,7 +371,7 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         }
         if(d.constructionFrame)for(double v:d.constructionFrame->values)[frame addObject:@(v)];
         Core3DSweepDefinition *result=[[Core3DSweepDefinition alloc] initWithPathIdentifier:d.pathIdentifier vertices:vertices segments:segments
-            plane:static_cast<Core3DProfilePlane>(d.plane) radius:d.radius metersPerUnit:d.dimensionMetersPerUnit constructionFrameValues:frame];
+            plane:static_cast<Core3DProfilePlane>(d.plane) radius:d.radius endRadius:d.EndRadius() metersPerUnit:d.dimensionMetersPerUnit constructionFrameValues:frame];
         if(!result)return nil;
         std::vector<double> expected,actual;
         if(!core3d::sweep_persistence::Encode(d,expected)||!core3d::sweep_persistence::Encode([result nativeDefinition],actual)
