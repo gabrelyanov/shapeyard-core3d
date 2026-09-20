@@ -514,6 +514,10 @@ class OcctDocument : public Standard_Transient
   DEFINE_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
   
 public:
+  // Benchmark assets need more than 40 steps; 1000 keeps memory bounded on
+  // device while preserving a long editable native session.
+  static constexpr Standard_Integer kNativeSessionUndoLimit = 1000;
+
   Standard_EXPORT OcctDocument();
 
   Standard_EXPORT virtual ~OcctDocument();

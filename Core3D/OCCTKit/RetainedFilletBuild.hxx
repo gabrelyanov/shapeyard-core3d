@@ -1,5 +1,6 @@
 #pragma once
 #include "SavedBooleanResultCorrespondence.hxx"
+#include "SavedCutSourceEdit.hxx"
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -17,6 +18,9 @@
 namespace core3d::retained_fillet {
 inline bool IsDeclined(Outcome outcome) noexcept {
     switch(outcome){
+        case Outcome::DeclinedUnsupportedEdge:
+        case Outcome::DeclinedReplayIdentity:
+        case Outcome::DeclinedNonRemoving:
         case Outcome::DeclinedRadiusAdmission:
         case Outcome::DeclinedAnchorNoMatch:
         case Outcome::DeclinedAnchorAmbiguous:
@@ -29,6 +33,9 @@ inline bool IsDeclined(Outcome outcome) noexcept {
     return false;
 }
 inline const char* Reason(Outcome o){switch(o){
+    case Outcome::DeclinedUnsupportedEdge:return "fillet.UnsupportedEdge";
+    case Outcome::DeclinedReplayIdentity:return "fillet.ReplayIdentity";
+    case Outcome::DeclinedNonRemoving:return "fillet.NonRemoving";
     case Outcome::Generic:return "fillet.generic";
     case Outcome::DeclinedBudget:return "fillet.budget";
     case Outcome::Built:return "fillet.built";
@@ -109,7 +116,7 @@ struct Interval {double lower=0,upper=0;std::size_t corners=0;};
 inline double StraightLoss(double radius,double theta){return radius*radius*(1/std::tan(theta/2)-(std::acos(-1.)-theta)/2);}
 inline double RimLoss(double radius,double boreRadius){const double pi=std::acos(-1.);
     return 2*pi*(boreRadius*radius*radius*(1-pi/4)+radius*radius*radius*(5./6-pi/4));}
-inline bool ExpectedRemoval(const retained_boolean::Program& program,const Step& step,Interval& out,const std::vector<TopoDS_Edge>* resolved=nullptr) noexcept {
+inline bool AnalyticExpectedRemoval(const retained_boolean::Program& program,const Step& step,Interval& out,const std::vector<TopoDS_Edge>* resolved=nullptr) noexcept {
     out={};try {
         saved_cut_whole_result::Expected expected;
         const bool single=program.steps.size()==1&&program.steps[0].operand.kind==analytic_boolean::OperandKind::Cylinder;
@@ -182,46 +189,140 @@ inline bool BoundsContained(const TopoDS_Shape& before,const TopoDS_Shape& after
     for(unsigned i=0;i<3;++i)if(!std::isfinite(bb[i])||!std::isfinite(bb[i+3])||bb[i]<aa[i]-tol||bb[i+3]>aa[i+3]+tol||bb[i]>=bb[i+3])return false;
     return true;
 }
+// One detached kernel round. This is used independently for the expectation
+// and the candidate; neither may grow the certified Boolean carrier.
+inline Outcome Round(const TopoDS_Shape& current,const Step& step,double mm,
+    const std::atomic_bool& stop,TopoDS_Shape& solid,bool exactContainment=false) {
+    solid.Nullify();if(stop.load())return Outcome::Cancelled;
+    std::vector<TopoDS_Edge> selected;TopTools_IndexedMapOfShape unique;
+    TopTools_IndexedDataMapOfShapeListOfShape owners;
+    TopExp::MapShapesAndAncestors(current,TopAbs_EDGE,TopAbs_FACE,owners);
+    for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge);
+        if(resolved!=Outcome::Built)return resolved;
+        if(unique.Contains(edge))return Outcome::DeclinedAnchorAmbiguous;unique.Add(edge);
+        if(!owners.Contains(edge))return Outcome::DeclinedUnsupportedEdge;
+        TopTools_IndexedMapOfShape faces;
+        for(TopTools_ListIteratorOfListOfShape it(owners.FindFromKey(edge));it.More();it.Next())faces.Add(it.Value());
+        if(faces.Extent()!=2)return Outcome::DeclinedUnsupportedEdge;
+        for(int i=1;i<=faces.Extent();++i){BRepAdaptor_Surface surface(TopoDS::Face(faces(i)));
+            if(surface.GetType()!=GeomAbs_Plane&&surface.GetType()!=GeomAbs_Cylinder)return Outcome::DeclinedUnsupportedEdge;}
+        if(!RadiusAdmitted(current,edge,anchor,step.radiusLocal,mm))return Outcome::DeclinedRadiusAdmission;
+        selected.push_back(edge);
+    }
+    BRepFilletAPI_MakeFillet fillet(current);for(const auto& edge:selected)fillet.Add(step.radiusLocal,edge);
+    fillet.Build();if(stop.load())return Outcome::Cancelled;
+    if(!fillet.IsDone()||fillet.Shape().IsNull())return Outcome::DeclinedOcctFailure;
+    auto result=fillet.Shape();
+    if(result.ShapeType()==TopAbs_COMPOUND){TopoDS_Iterator child(result);
+        if(!child.More()||child.Value().ShapeType()!=TopAbs_SOLID)return Outcome::DeclinedOcctFailure;
+        const auto only=child.Value();child.Next();if(child.More())return Outcome::DeclinedOcctFailure;result=only;}
+    if(result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD
+        ||!BRepCheck_Analyzer(result).IsValid())return Outcome::DeclinedOcctFailure;
+    TopTools_IndexedMapOfShape consumed;
+    for(int c=1;c<=fillet.NbContours();++c)for(int e=1;e<=fillet.NbEdges(c);++e)consumed.Add(fillet.Edge(c,e));
+    if(consumed.Extent()!=unique.Extent())return Outcome::DeclinedUnsupportedEdge;
+    for(int i=1;i<=unique.Extent();++i)if(!consumed.Contains(unique(i)))return Outcome::DeclinedUnsupportedEdge;
+    const double before=Volume(current),after=Volume(result);
+    if(!std::isfinite(before)||!std::isfinite(after)||after<=0||after>=before)return Outcome::DeclinedNonRemoving;
+    if(exactContainment){
+        // Spline bounds overestimate extrema, and a mixed convex/concave set
+        // can have net removal while adding material inside those bounds.
+        // Require an empty regularized difference for EVERY transverse round,
+        // never a larger physical tolerance or a small allowed extra volume.
+        BRepAlgoAPI_Cut excess;excess.SetNonDestructive(Standard_True);
+        TopTools_ListOfShape arguments,tools;arguments.Append(result);tools.Append(current);
+        excess.SetArguments(arguments);excess.SetTools(tools);excess.Build();
+        if(stop.load())return Outcome::Cancelled;
+        if(!excess.IsDone()||excess.Shape().IsNull())return Outcome::DeclinedNonRemoving;
+        TopExp_Explorer remaining(excess.Shape(),TopAbs_FACE);
+        if(remaining.More())return Outcome::DeclinedNonRemoving;
+    }else if(!BoundsContained(current,result,1e-4/mm))return Outcome::DeclinedNonRemoving;
+    solid=result;return Outcome::Built;
+}
+// Discovery has no carrier argument. Reconstruct it exclusively from the
+// authored source/tools, never from a candidate fillet or fitted dimensions.
+inline bool TransverseCarrier(const retained_boolean::Program& program,const std::atomic_bool& stop,TopoDS_Shape& carrier,std::uint64_t stopBefore=0){
+    rectangular_loft::Definition loft;if(!loft_persistence::Decode(program.source.values,loft))return false;
+    rectangular_loft::Admission admission;auto prepared=rectangular_loft::Prepare(loft,admission);
+    rectangular_loft::SolidResult source;if(!prepared||rectangular_loft::Build(prepared,stop,source)!=rectangular_loft::BuildStatus::Built)return false;
+    carrier=source.solid;
+    for(const auto& step:program.steps){
+        analytic_boolean::Recipe recipe;recipe.metersPerUnit=program.source.metersPerUnit;recipe.operation=step.operation;recipe.tool=step.operand;
+        double removed=0;
+        if(step.operand.kind==analytic_boolean::OperandKind::Wedge){const auto strip=analytic_boolean_wedge::TransverseBoundary(
+            saved_boolean_result::detail::GeometryView(program,step.operand),step.operand);
+            if(strip.status!=analytic_boolean_wedge::Status::Clear)return false;removed=strip.removedVolume;}
+        analytic_boolean::Result cut;if(analytic_boolean::Build(carrier,recipe,stop,cut,removed)!=analytic_boolean::Status::Built)return false;
+        carrier=cut.solid;
+    }
+    for(const auto& step:program.filletSteps){if(step.stepIdentifier==stopBefore)break;TopoDS_Shape rounded;
+        if(Round(carrier,step,program.source.metersPerUnit*1000,stop,rounded,true)!=Outcome::Built)return false;carrier=rounded;}
+    return true;
+}
+inline bool ExpectedRemoval(const retained_boolean::Program& program,const Step& step,Interval& out,
+    const std::vector<TopoDS_Edge>* resolved=nullptr) noexcept {
+    if(AnalyticExpectedRemoval(program,step,out,resolved))return true;
+    try {
+        if(!saved_boolean_result::detail::TransverseProgram(program)||!saved_boolean_result::detail::AdmitSections(program))return false;
+        std::atomic_bool stop(false);TopoDS_Shape carrier,rounded;
+        if(!TransverseCarrier(program,stop,carrier,step.stepIdentifier)||Round(carrier,step,program.source.metersPerUnit*1000,stop,rounded,true)!=Outcome::Built)return false;
+        out={Volume(carrier)-Volume(rounded),Volume(carrier)-Volume(rounded),0};return true;
+    }catch(...){out={};return false;}
+}
+inline bool SameBoundary(const TopoDS_Shape& actual,const TopoDS_Shape& expected,const std::atomic_bool& stop,std::size_t& streamBytes){
+    if(!analytic_boolean::detail::Bounded(actual,65536,stop)||!analytic_boolean::detail::Bounded(expected,65536,stop))return false;
+    for(auto type:{TopAbs_VERTEX,TopAbs_EDGE,TopAbs_WIRE,TopAbs_FACE,TopAbs_SHELL,TopAbs_SOLID}){
+        TopTools_IndexedMapOfShape a,b;TopExp::MapShapes(actual,type,a);TopExp::MapShapes(expected,type,b);
+        if(a.Extent()!=b.Extent())return false;
+    }
+    // Reuse the bounded geometry commitment stream and aggregate work budget.
+    saved_cut_source_edit::ShapeCommitment a,b;
+    const auto commit=[&](const TopoDS_Shape& shape,saved_cut_source_edit::ShapeCommitment& out){
+        saved_cut_source_edit::CommitmentStream sink(stop,streamBytes);std::ostream stream(&sink);
+        stream.imbue(std::locale::classic());
+        BRepTools::Write(shape,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
+        return stream.good()&&sink.finish(out)&&!stop.load();
+    };
+    return commit(actual,a)&&commit(expected,b)&&a==b;
+}
 struct Result {Outcome outcome=Outcome::DeclinedOcctFailure;TopoDS_Shape solid;std::vector<Interval> intervals;};
 inline Result Build(const TopoDS_Shape& input,const retained_boolean::Program& program,const std::atomic_bool& stop,
-    const std::function<bool(const TopoDS_Shape&)>& charge={}) noexcept {
+    const std::function<bool(const TopoDS_Shape&)>& charge={},std::size_t* aggregateStreamBytes=nullptr) noexcept {
+    std::size_t localStreamBytes=0;auto& streamBytes=aggregateStreamBytes?*aggregateStreamBytes:localStreamBytes;
     Result out;const auto fail=[&](Outcome why){Result r;r.outcome=stop.load()?Outcome::Cancelled:why;CORE3D_CUT_NOTE(Reason(r.outcome));return r;};
     try {
         if(stop.load())return fail(Outcome::Cancelled);
         if(!retained_boolean::Valid(program)||input.IsNull())return fail(Outcome::DeclinedOcctFailure);
-        // Fillet never mutates the correspondence-certified pre-fillet carrier.
         BRepBuilderAPI_Copy copy(input,Standard_True,Standard_False);if(!copy.IsDone())return fail(Outcome::DeclinedOcctFailure);
         TopoDS_Shape current=copy.Shape();const double mm=program.source.metersPerUnit*1000;
+        const bool transverse=saved_boolean_result::detail::TransverseProgram(program);
         for(const auto& step:program.filletSteps){
-            if(stop.load())return fail(Outcome::Cancelled);std::vector<TopoDS_Edge> selected;TopTools_IndexedMapOfShape unique;
+            if(stop.load())return fail(Outcome::Cancelled);
+            std::vector<TopoDS_Edge> selected;
             for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge);
-                if(resolved!=Outcome::Built)return fail(resolved);
-                if(unique.Contains(edge))return fail(Outcome::DeclinedAnchorAmbiguous);unique.Add(edge);
-                if(!RadiusAdmitted(current,edge,anchor,step.radiusLocal,mm))return fail(Outcome::DeclinedRadiusAdmission);
-                selected.push_back(edge);}
-            Interval interval;if(!ExpectedRemoval(program,step,interval,&selected))return fail(Outcome::DeclinedOcctFailure);
+                if(resolved!=Outcome::Built)return fail(resolved);selected.push_back(edge);}
+            Interval analytic;const bool hasAnalytic=AnalyticExpectedRemoval(program,step,analytic,&selected);
+            if(!transverse&&!hasAnalytic)return fail(Outcome::DeclinedUnsupportedEdge);
+            Interval interval=analytic;TopoDS_Shape expected;
+            if(transverse){
+                BRepBuilderAPI_Copy expectation(current,Standard_True,Standard_False);
+                if(!expectation.IsDone())return fail(Outcome::DeclinedOcctFailure);
+                const auto outcome=Round(expectation.Shape(),step,mm,stop,expected,true);
+                if(outcome!=Outcome::Built)return fail(outcome);
+                if(charge&&!charge(expected))return fail(Outcome::DeclinedBudget);
+                const double loss=Volume(expectation.Shape())-Volume(expected);
+                interval={loss,loss,0};
+            }
 #if DEBUG
             if(ConsumeFailure())return fail(Outcome::DeclinedOcctFailure);
 #endif
-            BRepFilletAPI_MakeFillet fillet(current);for(const auto& edge:selected)fillet.Add(step.radiusLocal,edge);
-            fillet.Build();if(stop.load())return fail(Outcome::Cancelled);
-            if(!fillet.IsDone()||fillet.Shape().IsNull())return fail(Outcome::DeclinedOcctFailure);
-            TopoDS_Shape solid=fillet.Shape();
-            if(solid.ShapeType()==TopAbs_COMPOUND){TopoDS_Iterator child(solid);
-                if(!child.More()||child.Value().ShapeType()!=TopAbs_SOLID)return fail(Outcome::DeclinedOcctFailure);
-                const TopoDS_Shape only=child.Value();child.Next();if(child.More())return fail(Outcome::DeclinedOcctFailure);solid=only;}
-            if(solid.ShapeType()!=TopAbs_SOLID||solid.Orientation()!=TopAbs_FORWARD
-                ||!BRepCheck_Analyzer(solid).IsValid())return fail(Outcome::DeclinedOcctFailure);
-            // OCCT must consume precisely the requested edges; tangent chaining
-            // to an unanchored edge is an unsupported operation, not a success.
-            TopTools_IndexedMapOfShape consumed;
-            for(int c=1;c<=fillet.NbContours();++c)for(int e=1;e<=fillet.NbEdges(c);++e)consumed.Add(fillet.Edge(c,e));
-            if(consumed.Extent()!=unique.Extent())return fail(Outcome::DeclinedOcctFailure);
-            for(int i=1;i<=unique.Extent();++i)if(!consumed.Contains(unique(i)))return fail(Outcome::DeclinedOcctFailure);
-            const double before=Volume(current),after=Volume(solid),removed=before-after;
-            if(!std::isfinite(before)||!std::isfinite(after)||after<=0
-                ||removed<interval.lower-std::abs(interval.lower)*1e-6||removed>interval.upper+std::abs(interval.upper)*1e-6
-                ||!BoundsContained(current,solid,1e-4/mm))return fail(Outcome::DeclinedOcctFailure);
+            TopoDS_Shape solid;const auto outcome=Round(current,step,mm,stop,solid,transverse);
+            if(outcome!=Outcome::Built)return fail(outcome);
+            const double removed=Volume(current)-Volume(solid);
+            const auto contains=[&](const Interval& i){return removed>=i.lower-std::abs(i.lower)*1e-6
+                &&removed<=i.upper+std::abs(i.upper)*1e-6;};
+            if(!contains(interval)||(hasAnalytic&&!contains(analytic))
+                ||(transverse&&!SameBoundary(solid,expected,stop,streamBytes)))return fail(Outcome::DeclinedOcctFailure);
             if(charge&&!charge(solid))return fail(Outcome::DeclinedBudget);
             current=solid;out.intervals.push_back(interval);
         }

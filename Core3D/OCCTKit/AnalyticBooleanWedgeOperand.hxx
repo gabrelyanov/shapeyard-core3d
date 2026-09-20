@@ -13,7 +13,7 @@ struct Wedge {
 };
 enum class Status : std::uint8_t { Clear, InvalidWidths, InvalidLength, InvalidAngle,
     NonConvexOrDegenerate, OutsideDomain, WrongAxis, OutsideOrInsufficientLigament,
-    UnsupportedConfiguration, NumericUncertain };
+    UnsupportedConfiguration, NumericUncertain, TransverseSideWall, BoundaryApex, TransverseDirection };
 inline Wedge FromOperand(const analytic_boolean::Operand& t){
     return {t.point,t.directionAngle,t.halfWidthApex,t.halfWidthMouth,t.length};
 }
@@ -172,6 +172,90 @@ inline bool PolygonClear(const std::vector<gp_Pnt2d>& host,const SectionPoints& 
     }return true;
 }
 }
+// D35: transverse strips are checked in the authored loft frame. The apex
+// may be on an end boundary (within 1e-9 mm); then the narrow end is open.
+// Otherwise the entire slot is closed. The mouth and every other boundary
+// retain the strict 0.002 mm ligament. Occurrence placement is irrelevant.
+inline int TransverseAxis(const retained_solid::Envelope& source,
+    const analytic_boolean::Operand& tool) noexcept {
+    try {
+    if(source.sourceFamily!=3||unsigned(tool.axis)>2)return -1;
+    rectangular_loft::Definition loft;
+    if(!loft_persistence::Decode(source.sourceValues,loft))return -1;
+    gp_Trsf frame;if(loft.constructionFrame&&!loft.constructionFrame->Transform(frame))return -1;
+    gp_Vec axis;axis.SetCoord(unsigned(tool.axis)+1,1);axis.Transform(frame.Inverted());
+    for(int a=0;a<2;++a)if(std::hypot(axis.Coord(2-a),axis.Z())<=1e-12*axis.Magnitude())return a;
+    return -1;
+    }catch(...){return -1;}
+}
+inline Admission TransverseBoundary(const retained_solid::Envelope& source,
+    const analytic_boolean::Operand& tool) {
+    using namespace detail;Admission report;
+    report.status=Inspect(FromOperand(tool),tool.axis,source.metersPerUnit);
+    if(report.status!=Status::Clear)return report;
+    if(std::fegetround()!=FE_TONEAREST){report.status=Status::NumericUncertain;return report;}
+    report.status=Status::TransverseDirection;
+    const int axis=TransverseAxis(source,tool);if(axis<0)return report;
+    rectangular_loft::Definition loft;if(!loft_persistence::Decode(source.sourceValues,loft))return report;
+    gp_Trsf frame;if(loft.constructionFrame&&!loft.constructionFrame->Transform(frame))return report;
+    const auto inverse=frame.Inverted();const double scale=frame.ScaleFactor(),mm=source.metersPerUnit*1000*scale;
+    const unsigned u=(unsigned(tool.axis)+1)%3,v=(unsigned(tool.axis)+2)%3;
+    const auto section=Expand(tool);std::vector<gp_Pnt2d> polygon;
+    for(const auto& q:section){gp_Pnt point(tool.point[0],tool.point[1],tool.point[2]);point.SetCoord(u+1,q[0]);point.SetCoord(v+1,q[1]);
+        point.Transform(inverse);polygon.emplace_back(point.Coord(2-axis),point.Z());}
+    const double bottom=loft.stations.front().z,top=loft.stations.back().z;
+    // Account for frame inversion, trigonometry and clipped-vertex arithmetic.
+    // Refuse ill-conditioned coordinates rather than spending the ligament.
+    double magnitude=1;
+    for(const auto& q:polygon)magnitude=std::max({magnitude,std::abs(q.X()),std::abs(q.Y())});
+    for(const auto& station:loft.stations)magnitude=std::max({magnitude,std::abs(station.z),
+        std::abs(station.centerX)+station.width,std::abs(station.centerY)+station.depth});
+    for(double value:tool.point)magnitude=std::max(magnitude,std::abs(value)/scale);
+    const double uncertainty=512*std::numeric_limits<double>::epsilon()*magnitude;
+    if(!std::isfinite(uncertainty)||uncertainty*mm>saved_cut_bore_clearance::MaximumNumericUncertaintyMM){
+        report.status=Status::NumericUncertain;return report;}
+    int openEnd=-1;
+    for(int end=0;end<2;++end){const double z=end?top:bottom;
+        if(std::max(std::abs(polygon[0].Y()-z),std::abs(polygon[3].Y()-z))*mm<=1e-9)openEnd=end;}
+    report.status=Status::BoundaryApex;
+    for(unsigned k=0;k<4;++k){const double z=polygon[k].Y();
+        if((k==0||k==3)&&openEnd>=0)continue;
+        if(!Clear(i::sub(i::widen(i::I(z),uncertainty),i::I(bottom)),mm)
+            ||!Clear(i::sub(i::I(top),i::widen(i::I(z),uncertainty)),mm))return report;
+    }
+    // Clip the exact quadrilateral to every crossed station band. At a band,
+    // the host walls and strip edges are affine, so checking all clipped
+    // vertices certifies the complete strip (including between stations).
+    const auto clip=[](const std::vector<gp_Pnt2d>& input,double z,bool above){
+        std::vector<gp_Pnt2d> output;if(input.empty())return output;
+        for(unsigned k=0;k<input.size();++k){const auto a=input[k],b=input[(k+1)%input.size()];
+            const bool inA=above?a.Y()>=z:a.Y()<=z,inB=above?b.Y()>=z:b.Y()<=z;
+            if(inA)output.push_back(a);
+            if(inA!=inB){const double t=(z-a.Y())/(b.Y()-a.Y());output.emplace_back(a.X()+t*(b.X()-a.X()),z);}}
+        return output;
+    };
+    report.status=Status::TransverseSideWall;
+    for(unsigned n=1;n<loft.stations.size();++n){const auto& a=loft.stations[n-1];const auto& b=loft.stations[n];
+        auto band=clip(clip(polygon,a.z,true),b.z,false);if(band.size()<3)continue;
+        const double ca=axis==0?a.centerY:a.centerX,cb=axis==0?b.centerY:b.centerX;
+        const double wa=axis==0?a.depth:a.width,wb=axis==0?b.depth:b.width;
+        for(const auto& q:band){const auto t=i::div(i::sub(i::I(q.Y()),i::I(a.z)),i::sub(i::I(b.z),i::I(a.z)));
+            const auto center=i::add(i::I(ca),i::mul(t,i::sub(i::I(cb),i::I(ca))));
+            const auto half=i::mul(i::I(.5),i::add(i::I(wa),i::mul(t,i::sub(i::I(wb),i::I(wa)))));
+            if(!Clear(i::sub(i::sub(half,i::abs(i::sub(i::I(q.X()),center))),i::I(uncertainty)),mm))return report;}
+        // Integrate affine through-thickness over this polygon using area and
+        // first Z moment. No measured Boolean volume participates in admission.
+        double twiceArea=0,sixMoment=0;
+        for(unsigned k=0;k<band.size();++k){const auto& x=band[k];const auto& y=band[(k+1)%band.size()];
+            const double cross=x.X()*(y.Y()-a.z)-y.X()*(x.Y()-a.z);
+            twiceArea+=cross;sixMoment+=((x.Y()-a.z)+(y.Y()-a.z))*cross;}
+        const double ta=axis==0?a.width:a.depth,tb=axis==0?b.width:b.depth;
+        report.removedVolume+=std::abs(ta*twiceArea/2+(tb-ta)/(b.z-a.z)*sixMoment/6);++report.bands;
+    }
+    report.removedVolume*=scale*scale*scale;
+    if(!std::isfinite(report.removedVolume)||report.removedVolume<=0){report.status=Status::NumericUncertain;return report;}
+    report.open=openEnd>=0;report.status=Status::Clear;return report;
+}
 // Derive all split edges, cap notches and wall cycles from source recipe
 // vertices. No Boolean output, observed face count or volume enters admission.
 inline Admission ExpectedBoundary(const retained_solid::Envelope& source,const analytic_boolean::Operand& tool,
@@ -180,6 +264,8 @@ inline Admission ExpectedBoundary(const retained_solid::Envelope& source,const a
     try {
         if(Inspect(FromOperand(tool),tool.axis,source.metersPerUnit)!=Status::Clear){report.status=Status::OutsideDomain;return report;}
         if(std::fegetround()!=FE_TONEAREST){report.status=Status::NumericUncertain;return report;}
+        if(TransverseAxis(source,tool)>=0){const auto transverse=TransverseBoundary(source,tool);
+            if(transverse.status==Status::Clear)out.transverseProgram=true;return transverse;}
         const Expected original=out;Expected sourceExpected;
         if(!saved_cut_whole_result::ExpectedSource(source,sourceExpected))return report;
         const double mm=source.metersPerUnit*1000;

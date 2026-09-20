@@ -4,7 +4,7 @@
 #include "RetainedSolidEnvelope.hxx"
 #include <set>
 namespace core3d::retained_fillet {
-enum class Outcome { Built, DeclinedRadiusAdmission, DeclinedAnchorNoMatch, DeclinedAnchorAmbiguous, DeclinedOcctFailure, Cancelled, DeclinedBudget, Generic };
+enum class Outcome { Built, DeclinedRadiusAdmission, DeclinedAnchorNoMatch, DeclinedAnchorAmbiguous, DeclinedOcctFailure, Cancelled, DeclinedBudget, Generic, DeclinedUnsupportedEdge, DeclinedNonRemoving, DeclinedReplayIdentity };
 enum class CurveKind:std::uint8_t { Line=1, Circle=2 };
 struct EdgeAnchor {
     std::uint64_t identifier=0;

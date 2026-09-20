@@ -6,16 +6,28 @@ set -euo pipefail
 mkdir -p "$1"
 output_dir=$(cd "$1" && pwd)
 tests_dir=$(cd "$(dirname "$0")" && pwd)
-# B04 diagnostic: distinguishes unsupported revolved-host proof from clearance.
+# B04 exact revolved-host admission, boundary and retained replay.
 if [[ "${3:-}" == "RingCutAdmissionTests" ]]; then
     : "${2:?focused ring admission tests require retained host OCCT libraries}"
     /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
         -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
         "$tests_dir/RingCutAdmissionTests.cpp" -L "$2" \
-        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
         -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
         -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/RingCutAdmissionTests"
     "$output_dir/RingCutAdmissionTests"
+    exit
+fi
+# B05 complete transverse program: admission, exact wedge, replay and refusals.
+if [[ "${3:-}" == "WedgeAfterTransverseBoreTests" ]]; then
+    : "${2:?focused wedge tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/WedgeAfterTransverseBoreTests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/WedgeAfterTransverseBoreTests"
+    "$output_dir/WedgeAfterTransverseBoreTests"
     exit
 fi
 # Focused transverse loft bore admission, exact kernel and replay regression.

@@ -3658,7 +3658,7 @@ void OcctDocument::InitDoc()
 	  Message::SendFail("Unable to assign Core3D document identifier");
 	}
 	myOcafDoc->ClearUndos();
-	myOcafDoc->SetUndoLimit(40);
+	myOcafDoc->SetUndoLimit(kNativeSessionUndoLimit);
   }
   ObserveSuccessfulNativeDocumentAdoption();
 #if DEBUG

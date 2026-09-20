@@ -107,11 +107,59 @@ inline I roundedCavityDistance(I x,I y,const EnclosureDimensions& d){
     return neg(sub(add(norm(maximum(qx,I(0)),maximum(qy,I(0))),minimum(maximum(qx,qy),I(0))),r));
 }
 }
+// A proof-only circular chart for an exactly rectangular full revolution.
+// Never persist this view or replace the retained revolve recipe/base. Bounds
+// alone are insufficient: all four authored edges must bound that rectangle.
+inline bool RevolvedCylinderChart(const profile::Parameters& source,profile::Parameters& chart) {
+    const auto& d=source.definition;double area=0,volume=0;
+    if(!d.revolve||d.depth!=360||d.circle||d.curves||!d.holes.empty()||d.points.size()!=4
+        ||!ProfileDefinitionExpectedVolume(d,area,volume))return false;
+    double outer=0,low=INFINITY,high=-INFINITY;
+    for(const auto& p:d.points){outer=std::max(outer,p.X());low=std::min(low,p.Y());high=std::max(high,p.Y());}
+    if(!(outer>0&&high>low))return false;
+    unsigned corners=0;
+    for(unsigned n=0;n<4;++n){const auto& a=d.points[n];const auto& b=d.points[(n+1)%4];
+        if((a.X()!=0&&a.X()!=outer)||(a.Y()!=low&&a.Y()!=high)
+            ||((a.X()==b.X())==(a.Y()==b.Y())))return false;
+        const unsigned bit=1u<<((a.X()==outer?2:0)+(a.Y()==high?1:0));
+        if(corners&bit)return false;corners|=bit;
+    }
+    if(corners!=15)return false;
+    gp_Trsf frame;
+    if(source.constructionFrame&&(!source.constructionFrame->IsValid()
+        ||source.constructionFrame->values[7]<=0||!source.constructionFrame->Transform(frame)))return false;
+    gp_Trsf local;
+    // XY revolves about Y; XZ and YZ revolve about Z. Preserve the authored
+    // meridian (+X or +Y), which is independently checked by the seam proof.
+    if(d.plane==0)local.SetRotation(gp_Ax1(gp::Origin(),gp::DX()),-std::acos(-1.)/2);
+    if(d.plane==2)local.SetRotation(gp_Ax1(gp::Origin(),gp::DZ()),std::acos(-1.)/2);
+    local.SetTranslationPart(d.plane==0?gp_Vec(0,low,0):gp_Vec(0,0,low));
+    frame.Multiply(local);profile::ConstructionFrame mapped;
+    if(!profile::ConstructionFrame::Capture(frame,mapped))return false;
+    chart={};chart.metersPerUnit=source.metersPerUnit;chart.constructionFrame=mapped;
+    chart.definition.plane=0;chart.definition.depth=high-low;
+    chart.definition.circle=ProfileCircularSection{{0,0},outer,0};return true;
+}
+inline bool BoundaryProofView(const retained_solid::Envelope& source,retained_solid::Envelope& view) {
+    view=source;if(source.sourceFamily!=1)return true;
+    profile::Parameters p;if(!profile::Decode(source.sourceValues,p))return false;
+    if(!p.definition.revolve)return true;
+    profile::Parameters chart;if(!RevolvedCylinderChart(p,chart))return false;
+    view.sourceSchema=profile::SchemaFor(chart);
+    return profile::Encode(chart,view.sourceValues)&&retained_solid::Valid(view);
+}
 inline Report Inspect(const retained_solid::Envelope& envelope) noexcept {
     using namespace detail; Report out;
     try {
         if(!retained_solid::Valid(envelope))return out;
         if(std::fegetround()!=FE_TONEAREST){out.status=Status::NumericUncertain;return out;}
+        if(envelope.sourceFamily==1){profile::Parameters source;
+            if(!profile::Decode(envelope.sourceValues,source))return out;
+            if(source.definition.revolve){retained_solid::Envelope view;
+                if(!BoundaryProofView(envelope,view)){out.status=Status::UnsupportedFamily;return out;}
+                return Inspect(view);
+            }
+        }
         std::optional<profile::ConstructionFrame> frame;ProfileDefinition polygon;EnclosureDefinition enclosureDefinition;
         rectangular_loft::Definition loft;
         double bottom=0,thickness=0;int plane=-1;

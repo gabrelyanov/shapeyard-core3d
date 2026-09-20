@@ -1894,8 +1894,8 @@ bool Core3DViewer::prepareSavedCutSourceDetached(
         // Source guard already binds exact live content. Perform classifiers'
         // raw location/representation admission before our cumulative traversal
         // or stream/copy. Final full-scene check also covers these inspections.
-        if(!saved_cut_source_edit::InspectBase(base,work->values.oldEnvelope,stop)
-            ||saved_cut_whole_result::Inspect(result,work->values.oldEnvelope,work->values.oldEnvelope,stop).classification
+        if(!saved_boolean_build::InspectSourceBase(base,work->values.oldEnvelope,stop)
+            ||saved_boolean_result::InspectAxialBore(result,work->values.oldEnvelope,work->values.oldEnvelope,stop).classification
                 !=saved_cut_whole_result::Classification::MatchedOrientedBoundary
             ||stop.load())return refuse();
         // Re-charge occurrence and stream budgets before any geometry copy.
@@ -1912,8 +1912,8 @@ bool Core3DViewer::prepareSavedCutSourceDetached(
         if(stop.load()||!resultCopy.IsDone()||resultCopy.Shape().IsNull()
             ||resultCopy.Shape().IsPartner(result))return refuse();
         work->oldBase=baseCopy.Shape();work->oldResult=resultCopy.Shape();
-        if(!saved_cut_source_edit::InspectBase(work->oldBase,work->values.oldEnvelope,stop)
-            ||saved_cut_whole_result::Inspect(work->oldResult,work->values.oldEnvelope,work->values.oldEnvelope,stop).classification
+        if(!saved_boolean_build::InspectSourceBase(work->oldBase,work->values.oldEnvelope,stop)
+            ||saved_boolean_result::InspectAxialBore(work->oldResult,work->values.oldEnvelope,work->values.oldEnvelope,stop).classification
                 !=saved_cut_whole_result::Classification::MatchedOrientedBoundary
             ||!saved_cut_source_edit::Commit(work->oldBase,stop,work->streamBytes,work->privateBase)
             ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->streamBytes,work->privateResult))return refuse();
@@ -1947,8 +1947,8 @@ std::shared_ptr<const SavedCutSourceDetachedResult> Core3DViewer::buildSavedCutS
         if(stop.load()||!work->displayCaptured||!saved_cut_source_edit::Commit(work->oldBase,stop,work->streamBytes,beforeBase)
             ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->streamBytes,beforeResult)
             ||!(beforeBase==work->privateBase)||!(beforeResult==work->privateResult)
-            ||!saved_cut_source_edit::InspectBase(work->oldBase,work->values.oldEnvelope,stop)
-            ||saved_cut_whole_result::Inspect(work->oldResult,work->values.oldEnvelope,work->values.oldEnvelope,stop).classification
+            ||!saved_boolean_build::InspectSourceBase(work->oldBase,work->values.oldEnvelope,stop)
+            ||saved_boolean_result::InspectAxialBore(work->oldResult,work->values.oldEnvelope,work->values.oldEnvelope,stop).classification
                 !=saved_cut_whole_result::Classification::MatchedOrientedBoundary)return refuse();
         auto output=std::shared_ptr<SavedCutSourceDetachedResult>(new SavedCutSourceDetachedResult());
         output->values=work->values;output->sourceBase=work->sourceBase;output->sourceResult=work->sourceResult;
@@ -1972,14 +1972,14 @@ std::shared_ptr<const SavedCutSourceDetachedResult> Core3DViewer::buildSavedCutS
             }else if(e.sourceFamily==3){
                 if(saved_cut_source_edit::RebuildLoftBase(e,stop,base)!=saved_cut_source_edit::LoftBaseStatus::Built)return refuse();
             }else return refuse();
-            if(stop.load()||!saved_cut_source_edit::InspectBase(base,e,stop)
+            if(stop.load()||!saved_boolean_build::InspectSourceBase(base,e,stop)
                 ||!saved_cut_source_edit::Commit(base,stop,work->streamBytes,output->generatedBase))return refuse();
             analytic_boolean::Result cut;
             if(analytic_boolean::Build(base,cylindrical_cut::Recipe(e),stop,cut)!=analytic_boolean::Status::Built
                 // Existing radius presentation preparation mutates only this
                 // detached result. Classify and commit the final meshed stream.
                 ||!cut_display::Prepare(cut.solid,work->displaySettings,stop)
-                ||saved_cut_whole_result::Inspect(cut.solid,work->values.oldEnvelope,e,stop).classification
+                ||saved_boolean_result::InspectAxialBore(cut.solid,work->values.oldEnvelope,e,stop).classification
                     !=saved_cut_whole_result::Classification::MatchedOrientedBoundary)return refuse();
             saved_cut_source_edit::ShapeCommitment afterBase;
             if(stop.load()||!saved_cut_source_edit::Commit(base,stop,work->streamBytes,afterBase)
@@ -2482,7 +2482,7 @@ bool Core3DViewer::prepareSavedProgramSourceDetached(
         // raw admission for EVERY operand before our cumulative traversal or
         // stream/copy. Final full-scene check also covers these inspections.
         for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
-            if(!saved_cut_source_edit::InspectBase(base,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
+            if(!saved_boolean_build::InspectSourceBase(base,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
         if(!saved_boolean_build::VerifyCurrent(base,result,work->values.oldProgram,work->displaySettings,stop,work->budget)||stop.load())return refuse();
         // Re-charge occurrence and stream budgets into the ONE aggregate job
         // budget before any geometry copy; the rebuild below shares it.
@@ -2504,7 +2504,7 @@ bool Core3DViewer::prepareSavedProgramSourceDetached(
         if(!saved_boolean_build::Charge(work->oldBase,stop,work->budget)
             ||!saved_boolean_build::Charge(work->oldResult,stop,work->budget))return refuse();
         for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
-            if(!saved_cut_source_edit::InspectBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
+            if(!saved_boolean_build::InspectSourceBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
         if((work->values.oldProgram.filletSteps.empty()&&saved_boolean_build::PreFilletInspection(work->oldResult,work->values.oldProgram,stop).classification
             !=saved_boolean_result::Classification::MatchedOrientedBoundary)
             ||!saved_cut_source_edit::Commit(work->oldBase,stop,work->budget.streamBytes,work->privateBase)
@@ -2542,7 +2542,7 @@ std::shared_ptr<const SavedProgramSourceDetachedResult> Core3DViewer::buildSaved
             ||!saved_cut_source_edit::Commit(work->oldResult,stop,work->budget.streamBytes,beforeResult)
             ||!(beforeBase==work->privateBase)||!(beforeResult==work->privateResult))return refuse();
         for(std::size_t i=0;i<work->values.oldProgram.steps.size();++i)
-            if(!saved_cut_source_edit::InspectBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
+            if(!saved_boolean_build::InspectSourceBase(work->oldBase,saved_boolean_result::detail::GeometryView(work->values.oldProgram,i),stop))return refuse();
         if((work->values.oldProgram.filletSteps.empty()&&saved_boolean_build::PreFilletInspection(work->oldResult,work->values.oldProgram,stop).classification
             !=saved_boolean_result::Classification::MatchedOrientedBoundary))return refuse();
         auto output=std::shared_ptr<SavedProgramSourceDetachedResult>(new SavedProgramSourceDetachedResult());
@@ -3271,7 +3271,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         bool circularHost=false;
         if(envelope.sourceFamily==1){profile::Parameters source;
             if(!profile::Decode(envelope.sourceValues,source))CORE3D_CUT_REFUSE("prepare.profile-decode", {});
-            circularHost=bool(source.definition.circle);
+            circularHost=bool(source.definition.circle)||source.definition.revolve;
         }
         if(circularHost||envelope.sourceFamily==3){
             const auto clearance=saved_cut_bore_clearance::Inspect(envelope);
@@ -3403,7 +3403,24 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
             lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::Generic;
         }
         const auto change=retained_boolean::Apply(original.source.recipe,edit,original.source.effectiveMM);
-        if(!change)CORE3D_CUT_REFUSE("program-prepare.apply-edit", {});
+        if(!change){
+            if(retained_boolean::RingEdit(edit)){
+                retained_boolean::Program diagnostic;
+                if(const auto* legacy=std::get_if<retained_boolean::Legacy>(&original.source.recipe))retained_boolean::Promote(*legacy,diagnostic);
+                else diagnostic=std::get<retained_boolean::Program>(original.source.recipe);
+                if(const auto* append=std::get_if<retained_boolean::AppendRing>(&edit)){
+                    analytic_boolean::Operand candidate;candidate.kind=analytic_boolean::OperandKind::CylinderRing;
+                    candidate.axis=append->edit.axis;candidate.point=append->edit.localCenter;
+                    candidate.boltCircleRadius=append->edit.boltCircleRadius;candidate.radius=append->edit.worldHoleRadiusMM/original.source.effectiveMM;
+                    candidate.count=append->edit.count;double extent=0;
+                    if(saved_boolean_result::detail::HostRadialExtent(diagnostic,candidate,extent))candidate.hostRadiusRatio=candidate.boltCircleRadius/extent;
+                    const auto status=saved_boolean_result::detail::RingAdmissionStatus(diagnostic,candidate);
+                    if(status==analytic_boolean_ring::Status::OverlappingHoles)CORE3D_CUT_REFUSE("ring.OverlappingHoles", {});
+                    if(status==analytic_boolean_ring::Status::OutsideOrInsufficientLigament)CORE3D_CUT_REFUSE("ring.OutsideOrInsufficientLigament", {});
+                }
+            }
+            CORE3D_CUT_REFUSE("program-prepare.apply-edit", {});
+        }
         const auto* program=std::get_if<retained_boolean::Program>(&change->recipe);
         // This packet emits only v2 programs. A legacy one-bore radius keeps
         // its exact legacy API; nothing is silently downgraded or reissued.
@@ -3548,7 +3565,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
             // A current planar loft already has the full source boundary.
             // Keep its original carrier/base content; regenerating it would
             // break the independent exact retained-base seal after meshing.
-            if(saved_cut_source_edit::InspectBase((*p)->detachedBase,*(*p)->provenHost,(*p)->cancelled))
+            if(saved_boolean_build::InspectSourceBase((*p)->detachedBase,*(*p)->provenHost,(*p)->cancelled))
                 (*p)->rebuildLoftBase=false;
         }
         if((*p)->rebuildLoftBase){
@@ -3564,7 +3581,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
         if(!cut_display::Prepare((*p)->result.solid,(*p)->displaySettings,(*p)->cancelled))
             CORE3D_CUT_REFUSE("build.display", false);
         if((*p)->provenHost){const auto& source=*(*p)->provenHost;
-            if(!saved_cut_source_edit::InspectBase((*p)->detachedBase,source,(*p)->cancelled))
+            if(!saved_boolean_build::InspectSourceBase((*p)->detachedBase,source,(*p)->cancelled))
                 CORE3D_CUT_REFUSE("proof.base", false);
             if(saved_cut_bore_clearance::Inspect(source).status==saved_cut_bore_clearance::Status::ClearRecipeTransverse){
                 analytic_boolean::Result replay;
@@ -3572,7 +3589,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
                     ||!saved_cut_bore_clearance::VerifyTransverseResult((*p)->detachedBase,(*p)->result.solid,source,(*p)->cancelled,replay.solid))
                     CORE3D_CUT_REFUSE("proof.transverse-replay", false);
             }else{
-                const auto proof=saved_cut_whole_result::Inspect((*p)->result.solid,source,source,(*p)->cancelled);
+                const auto proof=saved_boolean_result::InspectAxialBore((*p)->result.solid,source,source,(*p)->cancelled);
                 if(proof.classification!=saved_cut_whole_result::Classification::MatchedOrientedBoundary){
                     CORE3D_CUT_DETAIL("proof.whole-result",proof.classification);return false;
                 }
@@ -6207,7 +6224,7 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InternalFailure;
 		}
-		candidate->SetUndoLimit(40);
+		candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
 
 #if DEBUG
         if (_debugFailNextDocumentPreparation) {

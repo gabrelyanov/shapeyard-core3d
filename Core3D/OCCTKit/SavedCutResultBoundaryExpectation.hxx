@@ -10,6 +10,10 @@ struct Expected {
     std::vector<enclosure_correspondence::ExpectedFace> faces;
     std::array<unsigned,2> caps{};
     unsigned hostGenus=0;
+    // Transverse cuts intersect station sides, rather than axial cap loops.
+    // The source cells above remain recipe-derived; the complete program uses
+    // bounded canonical replay for every resulting face/edge and representation.
+    bool transverseProgram=false;
 };
 // Full original boundary; the result matcher adds ONLY the explicit bore patch.
 inline bool ExpectedSource(const retained_solid::Envelope& e,Expected& out){
@@ -22,6 +26,10 @@ inline bool ExpectedSource(const retained_solid::Envelope& e,Expected& out){
         out.vertices.assign(x.vertices.begin(),x.vertices.end());out.edges.assign(x.edges.begin(),x.edges.end());out.faces.assign(x.faces.begin(),x.faces.end());out.caps={16,17};return true;}
     if(e.sourceFamily==1){profile::Parameters circle;
         if(!profile::Decode(e.sourceValues,circle))return false;
+        if(circle.definition.revolve){profile::Parameters chart;
+            if(!saved_cut_bore_clearance::RevolvedCylinderChart(circle,chart))return false;
+            circle=std::move(chart);
+        }
         if(circle.definition.circle){saved_cut_circular_host::Expectation x;
             if(!saved_cut_circular_host::BuildExpectedBoundary(circle.definition,circle.constructionFrame,x))return false;
             out.vertices=std::move(x.vertices);out.edges=std::move(x.edges);out.faces=std::move(x.faces);

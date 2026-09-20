@@ -3,6 +3,9 @@
 #include "RetainedBooleanProgram.hxx"
 #include "AnalyticBooleanWedgeOperand.hxx"
 #include "SavedCutWholeResultCorrespondence.hxx"
+#include "AnalyticBooleanSolid.hxx"
+#include "RectangularLoftSolid.hxx"
+#include <BinTools.hxx>
 namespace core3d::saved_boolean_result {
 namespace old=core3d::saved_cut_whole_result;
 namespace d=core3d::enclosure_correspondence::detail;
@@ -79,11 +82,26 @@ inline bool ProgramBoundary(const retained_boolean::Program& p,old::Expected& ex
     }
     return true;
 }
+inline analytic_boolean_ring::Status RingAdmissionStatus(const retained_boolean::Program& p,
+    const analytic_boolean::Operand& t);
+inline bool ClearBore(const retained_solid::Envelope& view){
+    const auto status=saved_cut_bore_clearance::Inspect(view).status;
+    return status==saved_cut_bore_clearance::Status::ClearRecipeDisk
+        ||status==saved_cut_bore_clearance::Status::ClearRecipeTransverse;
+}
+inline bool TransverseProgram(const retained_boolean::Program& p){
+    return !p.steps.empty()&&analytic_boolean_wedge::TransverseAxis(GeometryView(p,0),p.steps.front().operand)>=0;
+}
 inline bool AdmitSections(const retained_boolean::Program& p){
+    if(!retained_boolean::Valid(p))return false;
+    // This admits the Boolean carrier only. RetainedFilletBuild separately
+    // proves the selected-edge removal and complete rounded boundary.
     old::Expected expected;if(!ProgramBoundary(p,expected))return false;
+    for(const auto& step:p.steps)if(step.operand.kind==analytic_boolean::OperandKind::CylinderRing
+        &&RingAdmissionStatus(p,step.operand)!=analytic_boolean_ring::Status::Clear)return false;
     std::vector<retained_boolean::Disk> sections;if(!retained_boolean::ExpandedSections(p,sections))return false;
     for(const auto& s:sections)if(s.operand.kind==analytic_boolean::OperandKind::Cylinder
-        &&saved_cut_bore_clearance::Inspect(GeometryView(p,s.operand)).status!=saved_cut_bore_clearance::Status::ClearRecipeDisk)return false;
+        &&!ClearBore(GeometryView(p,s.operand)))return false;
     return true;
 }
 // Independent source-recipe radial extent, never inferred from a cut result.
@@ -92,9 +110,9 @@ inline bool HostRadialExtent(const retained_boolean::Program& p,const analytic_b
     if(!old::ExpectedSource(GeometryView(p,t),expected)||unsigned(t.axis)>2)return false;
     const unsigned axis=unsigned(t.axis),u=(axis+1)%3,v=(axis+2)%3;
     if(p.source.family==1){profile::Parameters source;if(!profile::Decode(p.source.values,source))return false;
-        if(source.definition.circle){
+        if(source.definition.circle||source.definition.revolve){
             for(const auto& face:expected.faces)if(face.cylinder&&face.radialSign==1){
-                gp_Vec direction(0,0,0);direction.SetCoord(axis+1,1);
+                const gp_Vec direction(axis==0?1:0,axis==1?1:0,axis==2?1:0);
                 const gp_Vec delta(gp_Pnt(t.point[0],t.point[1],t.point[2]),face.origin);
                 if(face.normalOrAxis.Crossed(direction).Magnitude()>Precision::Angular()
                     ||(delta-direction*delta.Dot(direction)).Magnitude()*p.source.metersPerUnit*1000>1e-9)return false;
@@ -113,12 +131,76 @@ inline bool HostRadialExtent(const retained_boolean::Program& p,const analytic_b
     const double dv=std::max(std::abs(low[v]-t.point[v]),std::abs(high[v]-t.point[v]));
     extent=std::hypot(du,dv);return std::isfinite(extent)&&extent>0;
 }
+// Ring admission is stricter than the generic source-disk proof.  A full
+// revolution has two authored radial boundaries: the outer wall and the
+// existing hub bore (the first axial cylinder in the retained program).
+// Keep a strict 0.002 mm kernel gap on both boundaries before any edit bytes
+// or history state are produced.
+inline analytic_boolean_ring::Status RingAdmissionStatus(const retained_boolean::Program& p,
+    const analytic_boolean::Operand& t) {
+    const auto analytic=analytic_boolean_ring::Inspect(
+        analytic_boolean_ring::FromOperand(t,p.source.metersPerUnit),p.source.metersPerUnit);
+    if(analytic!=analytic_boolean_ring::Status::Clear)return analytic;
+    double outer=0;if(!HostRadialExtent(p,t,outer))return analytic_boolean_ring::Status::OutsideOrInsufficientLigament;
+    const double mm=p.source.metersPerUnit*1000;
+    double hub=0;
+    if(p.source.family==1){
+        profile::Parameters source;
+        if(!profile::Decode(p.source.values,source))return analytic_boolean_ring::Status::OutsideOrInsufficientLigament;
+        if(source.definition.revolve){
+            for(const auto& step:p.steps){
+                const auto& operand=step.operand;
+                if(operand.kind!=analytic_boolean::OperandKind::Cylinder||operand.axis!=t.axis)continue;
+                const unsigned axis=unsigned(t.axis),u=(axis+1)%3,v=(axis+2)%3;
+                const double du=(operand.point[u]-t.point[u])*mm,dv=(operand.point[v]-t.point[v])*mm;
+                if(std::hypot(du,dv)<=.001&&std::isfinite(operand.radius))
+                    hub=std::max(hub,operand.radius*mm);
+            }
+        }
+    }
+    if(!std::isfinite(outer)||!std::isfinite(hub)||outer<=hub)return analytic_boolean_ring::Status::OutsideOrInsufficientLigament;
+    const double bolt=t.boltCircleRadius*mm,radius=t.radius*mm;
+    if(!std::isfinite(bolt)||!std::isfinite(radius)
+        ||bolt-radius<=hub+.002||bolt+radius>=outer-.002)
+        return analytic_boolean_ring::Status::OutsideOrInsufficientLigament;
+    return analytic_boolean_ring::Status::Clear;
+}
 inline bool AdmitDisks(const retained_boolean::Program& p){
     std::vector<retained_boolean::Disk> disks;
     if(!SeparateDisks(p)||!retained_boolean::ExpandedDisks(p,disks))return false;
+    for(const auto& step:p.steps)if(step.operand.kind==analytic_boolean::OperandKind::CylinderRing
+        &&RingAdmissionStatus(p,step.operand)!=analytic_boolean_ring::Status::Clear)return false;
     for(const auto& disk:disks)if(saved_cut_bore_clearance::Inspect(GeometryView(p,disk.operand)).status
         !=saved_cut_bore_clearance::Status::ClearRecipeDisk)return false;
     return true;
+}
+// Supplement the complete cell/seam proof with independent face areas and
+// the exact removed-volume sum (n*pi*r*r*thickness for an equal-radius ring).
+inline bool RevolvedMeasures(const TopoDS_Shape& result,const retained_solid::Envelope& source,
+    const std::vector<double>& radii) {
+    if(source.sourceFamily!=1)return true;
+    profile::Parameters p;if(!profile::Decode(source.sourceValues,p))return false;
+    if(!p.definition.revolve)return true;
+    profile::Parameters chart;if(!saved_cut_bore_clearance::RevolvedCylinderChart(p,chart))return false;
+    gp_Trsf frame;if(!chart.constructionFrame->Transform(frame))return false;
+    const double scale=frame.ScaleFactor(),r=chart.definition.circle->outerRadius*scale;
+    const double h=chart.definition.depth*scale,pi=std::acos(-1.);
+    double cap=pi*r*r;
+    std::vector<double> wanted{2*pi*r*h};
+    for(double bore:radii){cap-=pi*bore*bore;wanted.push_back(2*pi*bore*h);}
+    if(!std::isfinite(cap)||cap<=0)return false;
+    wanted.push_back(cap);wanted.push_back(cap);
+    std::vector<double> actual;
+    for(TopExp_Explorer it(result,TopAbs_FACE);it.More();it.Next()){
+        GProp_GProps props;BRepGProp::SurfaceProperties(it.Current(),props);
+        if(!std::isfinite(props.Mass())||props.Mass()<=0)return false;
+        actual.push_back(props.Mass());
+    }
+    if(actual.size()!=wanted.size())return false;
+    std::sort(actual.begin(),actual.end());std::sort(wanted.begin(),wanted.end());
+    for(unsigned i=0;i<wanted.size();++i)if(std::abs(actual[i]-wanted[i])>wanted[i]*1e-9)return false;
+    GProp_GProps props;BRepGProp::VolumeProperties(result,props);
+    return std::isfinite(props.Mass())&&std::abs(props.Mass()-cap*h)<=cap*h*1e-9;
 }
 struct Bore {unsigned face=0,seam=0,operand=0;std::vector<unsigned> openings;};
 inline bool RepresentationOwners(const Graph& g,const std::map<unsigned,unsigned>& seams,Budget& budget){
@@ -187,7 +269,81 @@ inline bool VertexLinks(const Graph& g,const TopTools_IndexedMapOfShape& vertice
     }return true;
 }
 } // detail
+// D35 extends D33's complete representation proof to separated programs.
+// Independently rebuild the authored loft and every explicit tool. Census and
+// exact geometry-only V3 bytes bind ALL faces, edges, wires, pcurves, tolerances
+// and orientations, not just a local bore observation or equal volume. A second
+// independent strip integral proves the total subtraction. Never compare a
+// candidate with itself, even when called immediately after a detached build.
+inline Inspection InspectTransverse(const TopoDS_Shape& result,const retained_boolean::Program& program,
+    const std::atomic_bool& stop) noexcept {
+    Inspection report;report.phase="transverse-program-admission";
+    const auto fail=[&](){report.classification=stop.load()?Classification::Cancelled:Classification::Refused;return report;};
+    try {
+        if(stop.load()||!program.filletSteps.empty()||!detail::TransverseProgram(program)||!detail::AdmitSections(program)
+            ||result.IsNull()||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return fail();
+        rectangular_loft::Definition loft;if(!loft_persistence::Decode(program.source.values,loft))return fail();
+        rectangular_loft::Admission admission;auto prepared=rectangular_loft::Prepare(loft,admission);
+        rectangular_loft::SolidResult source;if(!prepared||rectangular_loft::Build(prepared,stop,source)!=rectangular_loft::BuildStatus::Built)return fail();
+        TopoDS_Shape expected=source.solid;double removed=0;
+        report.phase="transverse-program-replay";
+        for(const auto& step:program.steps){
+            if(stop.load())return fail();const auto view=detail::GeometryView(program,step.operand);double volume=0;
+            if(step.operand.kind==analytic_boolean::OperandKind::Cylinder){
+                if(!saved_cut_bore_clearance::TransverseRemovedVolume(view,volume))return fail();
+            }else if(step.operand.kind==analytic_boolean::OperandKind::Wedge){
+                const auto strip=analytic_boolean_wedge::TransverseBoundary(view,step.operand);
+                if(strip.status!=analytic_boolean_wedge::Status::Clear)return fail();volume=strip.removedVolume;
+            }else return fail(); // ring topology has its own axial proof
+            analytic_boolean::Recipe recipe;recipe.metersPerUnit=program.source.metersPerUnit;
+            recipe.operation=step.operation;recipe.tool=step.operand;analytic_boolean::Result cut;
+            if(analytic_boolean::Build(expected,recipe,stop,cut,
+                step.operand.kind==analytic_boolean::OperandKind::Wedge?volume:0)!=analytic_boolean::Status::Built)return fail();
+            expected=cut.solid;removed+=volume;
+        }
+        report.phase="transverse-program-census";
+        if(!analytic_boolean::detail::Bounded(result,65536,stop)||!analytic_boolean::detail::Bounded(expected,65536,stop))return fail();
+        for(auto type:{TopAbs_VERTEX,TopAbs_EDGE,TopAbs_WIRE,TopAbs_FACE,TopAbs_SHELL,TopAbs_SOLID}){
+            TopTools_IndexedMapOfShape actualCells,expectedCells;TopExp::MapShapes(result,type,actualCells);TopExp::MapShapes(expected,type,expectedCells);
+            if(actualCells.Extent()!=expectedCells.Extent())return fail();
+            if(type==TopAbs_VERTEX)report.vertices=actualCells.Extent();
+            if(type==TopAbs_EDGE)report.edges=actualCells.Extent();
+            if(type==TopAbs_FACE)report.faces=actualCells.Extent();
+        }
+        report.phase="transverse-program-integral";
+        GProp_GProps before,after;BRepGProp::VolumeProperties(source.solid,before,1e-12,Standard_True);
+        BRepGProp::VolumeProperties(result,after,1e-12,Standard_True);
+        if(!std::isfinite(after.Mass())||std::abs(before.Mass()-after.Mass()-removed)>removed*1e-9)return fail();
+        report.phase="transverse-program-whole-representation";
+        // Bounded streams also cover persistence's axis re-normalization. The
+        // readback alternative is generated solely from the recipe expectation.
+        class Stream final:public std::stringbuf {
+            static constexpr std::size_t limit(){return 16*1024*1024;}
+            std::size_t charged=0;
+            std::streamsize xsputn(const char* p,std::streamsize n) override {
+                if(n<0||std::size_t(n)>limit()-charged)return 0;charged+=std::size_t(n);return std::stringbuf::xsputn(p,n);
+            }
+            int_type overflow(int_type c) override {
+                if(charged>=limit())return traits_type::eof();++charged;return std::stringbuf::overflow(c);
+            }
+        };
+        const auto bytes=[&](const TopoDS_Shape& shape,std::string& value){Stream buffer;std::ostream stream(&buffer);stream.imbue(std::locale::classic());
+            BRepTools::Write(shape,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
+            if(!stream.good()||stop.load())return false;value=buffer.str();return true;};
+        std::string actual,wanted;if(!bytes(result,actual)||!bytes(expected,wanted))return fail();
+        if(actual!=wanted){Stream buffer;std::iostream binary(&buffer);
+            BinTools::Write(expected,binary,Standard_False,Standard_False,BinTools_FormatVersion_VERSION_4);
+            if(!binary.good()||stop.load())return fail();binary.seekg(0);TopoDS_Shape readback;BinTools::Read(readback,binary);
+            if(!binary.good()||!bytes(readback,wanted)||actual!=wanted)return fail();}
+        report.phase="transverse-program-kernel-validity";
+        if(stop.load()||!BRepCheck_Analyzer(result,Standard_True).IsValid())return fail();
+        BRepClass3d_SolidClassifier outside(result);outside.PerformInfinitePoint(Precision::Confusion());
+        if(stop.load()||outside.State()!=TopAbs_OUT)return fail();
+        report.phase="matched-complete-transverse-program-boundary";report.classification=Classification::MatchedOrientedBoundary;return report;
+    }catch(...){return fail();}
+}
 inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Program& program,const std::atomic_bool& stop) noexcept {
+    if(detail::TransverseProgram(program))return InspectTransverse(result,program,stop);
     Inspection report;const auto fail=[&](){report.classification=stop.load()?Classification::Cancelled:Classification::Refused;return report;};
     try {
         std::vector<retained_boolean::Disk> disks;
@@ -209,7 +365,8 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
             maximumFaceWires=std::max(maximumFaceWires,sourceWires+openingWires);
         }
         for(const auto& disk:disks){
-            const auto view=detail::GeometryView(program,disk.operand);
+            retained_solid::Envelope view;
+            if(!saved_cut_bore_clearance::BoundaryProofView(detail::GeometryView(program,disk.operand),view))return fail();
             const auto bore=saved_cut_bore_result::Inspect(result,view,view,stop,maximumFaceWires);
             report.phase=bore.phase;
             if(bore.status!=saved_cut_bore_result::Status::BoreWallObservedExteriorUnproven)return fail();
@@ -286,7 +443,7 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
                 const double radius=d::Norm(surface.x),yr=d::Norm(surface.y),z=d::Norm(surface.z);
                 if(radius<=0||yr<=0||z<=0)return fail();
                 for(unsigned k=0;k<n;++k){const auto& tool=disks[k].operand;
-                    gp_Vec axis(0,0,0);axis.SetCoord(unsigned(tool.axis)+1,1);
+                    const gp_Vec axis(tool.axis==analytic_boolean::Axis::X?1:0,tool.axis==analytic_boolean::Axis::Y?1:0,tool.axis==analytic_boolean::Axis::Z?1:0);
                     const gp_Vec center(tool.point[0],tool.point[1],tool.point[2]);const auto delta=surface.c-center;
                     if(std::abs(radius-tool.radius)*mm<=error&&std::abs(yr-tool.radius)*mm<=error
                         &&d::Norm((surface.z/z).Crossed(axis))*tool.radius*mm<=error
@@ -342,6 +499,9 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
         long cellEuler=long(vertices.Extent())-long(graph.edges.size());
         for(const auto& face:graph.faces)cellEuler+=2-long(face.wires.size());
         if(cellEuler!=2-2*long(expected.hostGenus+n))return fail(); // supplementary to complete mapped cells/links
+        report.phase="revolved-area-and-volume";std::vector<double> radii;
+        for(const auto& disk:disks)radii.push_back(disk.operand.radius);
+        if(!detail::RevolvedMeasures(result,newSource,radii))return fail();
         report.phase="kernel-validity";if(stop.load()||!BRepCheck_Analyzer(result,Standard_True).IsValid())return fail();
         if(stop.load())return fail();BRepClass3d_SolidClassifier outside(result);
         outside.PerformInfinitePoint(Precision::Confusion());
@@ -349,5 +509,22 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
         if(stop.load())return fail();report.vertices=vertices.Extent();report.edges=graph.edges.size();report.faces=graph.faces.size();report.vertexLinks=vertices.Extent();
         report.phase="matched-complete-program-boundary";report.classification=Classification::MatchedOrientedBoundary;return report;
     }catch(...){return fail();}
+}
+// Single axial bore uses the same complete boundary matcher in the derived
+// cylindrical chart; fixed tool/identity checks still apply to both views.
+inline Inspection InspectAxialBore(const TopoDS_Shape& result,const retained_solid::Envelope& before,
+    const retained_solid::Envelope& after,const std::atomic_bool& stop) noexcept {
+    try {
+        if(!od::FixedTool(before,after))return {};
+        retained_solid::Envelope a,b;
+        if(!saved_cut_bore_clearance::BoundaryProofView(before,a)
+            ||!saved_cut_bore_clearance::BoundaryProofView(after,b))return {};
+        auto report=old::Inspect(result,a,b,stop);
+        if(report.classification==Classification::MatchedOrientedBoundary
+            &&!detail::RevolvedMeasures(result,after,{after.radius})){
+            report.classification=Classification::Refused;report.phase="revolved-area-and-volume";
+        }
+        return report;
+    }catch(...){return {};}
 }
 } // core3d::saved_boolean_result

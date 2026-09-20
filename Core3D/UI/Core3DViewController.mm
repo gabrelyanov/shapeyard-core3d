@@ -1178,7 +1178,7 @@ static NSString *Core3DCutAdmissionReason(const core3d::retained_boolean::Recipe
         }
         if(candidate.axis!=p.steps.front().operand.axis)return retained_boolean::RingEdit(edit)?@"ring.OffAxis":@"wedge.WrongAxis";
         if(retained_boolean::RingEdit(edit)){
-            const auto status=analytic_boolean_ring::Inspect(analytic_boolean_ring::FromOperand(candidate,p.source.metersPerUnit),p.source.metersPerUnit);
+            const auto status=saved_boolean_result::detail::RingAdmissionStatus(p,candidate);
             switch(status){
                 case analytic_boolean_ring::Status::InvalidCount:return @"ring.InvalidCount";
                 case analytic_boolean_ring::Status::InvalidRadii:return @"ring.InvalidRadii";
@@ -1206,10 +1206,15 @@ static NSString *Core3DCutAdmissionReason(const core3d::retained_boolean::Recipe
                 case analytic_boolean_wedge::Status::InvalidAngle:return @"wedge.InvalidAngle";
                 case analytic_boolean_wedge::Status::OutsideDomain:return @"wedge.OutsideDomain";
                 case analytic_boolean_wedge::Status::NonConvexOrDegenerate:return @"wedge.NonConvexOrDegenerate";
-                case analytic_boolean_wedge::Status::WrongAxis:return @"wedge.WrongAxis";
+                // Candidate and retained axes were compared above. This status
+                // comes from the source cap normals, not a mismatched user axis.
+                case analytic_boolean_wedge::Status::WrongAxis:return @"wedge.UnsupportedHostDirection";
                 case analytic_boolean_wedge::Status::OutsideOrInsufficientLigament:return @"wedge.OutsideOrInsufficientLigament";
                 case analytic_boolean_wedge::Status::UnsupportedConfiguration:return @"wedge.UnsupportedConfiguration";
                 case analytic_boolean_wedge::Status::NumericUncertain:return @"wedge.NumericUncertain";
+                case analytic_boolean_wedge::Status::TransverseSideWall:return @"wedge.TransverseSideWall";
+                case analytic_boolean_wedge::Status::BoundaryApex:return @"wedge.BoundaryApex";
+                case analytic_boolean_wedge::Status::TransverseDirection:return @"wedge.TransverseDirection";
                 case analytic_boolean_wedge::Status::Clear:break;
             }
         }
@@ -1250,6 +1255,7 @@ static Core3DRetainedFilletOutcome Core3DFilletOutcome(core3d::retained_fillet::
         case O::DeclinedAnchorNoMatch:return Core3DRetainedFilletOutcomeAnchorNoMatch;
         case O::DeclinedAnchorAmbiguous:return Core3DRetainedFilletOutcomeAnchorAmbiguous;
         case O::DeclinedOcctFailure:return Core3DRetainedFilletOutcomeOcctFailure;
+        case O::DeclinedUnsupportedEdge:case O::DeclinedNonRemoving:case O::DeclinedReplayIdentity:return Core3DRetainedFilletOutcomeGeneric;
         case O::DeclinedBudget:return Core3DRetainedFilletOutcomeBudget;
         case O::Built:case O::Cancelled:case O::Generic:return Core3DRetainedFilletOutcomeGeneric;
     }
@@ -14738,6 +14744,7 @@ struct NativeModelingPermitIssuer final {
 #endif
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{self->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;completion(Core3DProfileConstructionResultRejected);});return nil;}
     _lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;
+    _lastCylindricalCutAdmissionReason=nil;
     if(_savedCutSourceJob||_nativeSolidWork||_objectAlignmentWork||_isLoading.load()){
         completion(Core3DProfileConstructionResultBusy);return nil;
     }
@@ -14830,6 +14837,7 @@ struct NativeModelingPermitIssuer final {
                         if(!built){
                             if(core3d::retained_fillet::IsDeclined(filletOutcome)){
                                 controller->_lastRetainedFilletOutcome=Core3DFilletOutcome(filletOutcome);
+                                controller->_lastCylindricalCutAdmissionReason=[NSString stringWithUTF8String:core3d::retained_fillet::Reason(filletOutcome)];
                                 CORE3D_CUT_NOTE(core3d::retained_fillet::Reason(filletOutcome));
                                 result=Core3DProfileConstructionResultRejected;
                             }else{CORE3D_CUT_NOTE("source-edit.build");result=Core3DProfileConstructionResultFailed;}
@@ -15081,8 +15089,8 @@ struct NativeModelingPermitIssuer final {
 #endif
     if(!NSThread.isMainThread){dispatch_async(dispatch_get_main_queue(),^{self->_lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;CORE3D_CUT_NOTE("bridge.program.main-thread");completion(Core3DProfileConstructionResultRejected);});return nil;}
     _lastRetainedFilletOutcome=Core3DRetainedFilletOutcomeGeneric;
-    if(_nativeSolidWork||_isLoading.load()){CORE3D_CUT_NOTE("bridge.program.busy");completion(Core3DProfileConstructionResultBusy);return nil;}
     _lastCylindricalCutAdmissionReason=nil;
+    if(_nativeSolidWork||_isLoading.load()){CORE3D_CUT_NOTE("bridge.program.busy");completion(Core3DProfileConstructionResultBusy);return nil;}
     // Runtime class and exclusivity validation on the correct main-thread
     // completion path BEFORE any definition selector is read, exactly like
     // core3d_beginCut; a wrong-class input rejects here, never at the callers.
@@ -15114,8 +15122,11 @@ struct NativeModelingPermitIssuer final {
         const auto work=(GLController.viewer.get()->*prepare)(before,edit,identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         if(!work){
-            if(core3d::retained_boolean::FilletEdit(edit))
-                _lastRetainedFilletOutcome=Core3DFilletOutcome(GLController.viewer->lastRetainedFilletAdmissionOutcome);
+            if(core3d::retained_boolean::FilletEdit(edit)){
+                const auto outcome=GLController.viewer->lastRetainedFilletAdmissionOutcome;
+                _lastRetainedFilletOutcome=Core3DFilletOutcome(outcome);
+                _lastCylindricalCutAdmissionReason=[NSString stringWithUTF8String:core3d::retained_fillet::Reason(outcome)];
+            }
             if(core3d::retained_boolean::RingEdit(edit)||core3d::retained_boolean::WedgeEdit(edit))
                 _lastCylindricalCutAdmissionReason=Core3DCutAdmissionReason(before.source.recipe,edit,before.source.effectiveMM);
             CORE3D_CUT_NOTE("bridge.program.prepare");completion(Core3DProfileConstructionResultRejected);return nil;
@@ -15560,6 +15571,7 @@ struct NativeModelingPermitIssuer final {
                 if (!built) {
                     if(core3d::retained_fillet::IsDeclined(filletOutcome)){
                         controller->_lastRetainedFilletOutcome=Core3DFilletOutcome(filletOutcome);
+                        controller->_lastCylindricalCutAdmissionReason=[NSString stringWithUTF8String:core3d::retained_fillet::Reason(filletOutcome)];
                         CORE3D_CUT_NOTE(core3d::retained_fillet::Reason(filletOutcome));
                         Core3DDeliverNativeSolidCompletion(completionToken,Core3DProfileConstructionResultRejected);
                     }else{
@@ -16226,6 +16238,21 @@ struct NativeModelingPermitIssuer final {
         if(box.IsVoid()||box.IsOpen())return nil;
         double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
         for(int i=0;i<3;++i)if(!std::isfinite(bounds[i])||!std::isfinite(bounds[i+3])||bounds[i]>bounds[i+3])return nil;
+        // Read the retained object-local BRep, as the inspector's worker does.
+        // Add is a conservative diagnostic (it can include surface poles);
+        // only AddOptimal is the exact extents oracle. Neither uses mesh bounds.
+        auto localBounds = [&](bool optimal) -> NSArray<NSNumber *> * {
+            Bnd_Box local;
+            if(optimal) BRepBndLib::AddOptimal(copy.Shape(),local,Standard_False,Standard_False);
+            else BRepBndLib::Add(copy.Shape(),local,Standard_False);
+            if(local.IsVoid()||local.IsOpen())return nil;
+            double values[6];local.Get(values[0],values[1],values[2],values[3],values[4],values[5]);
+            NSMutableArray<NSNumber *> *result=[NSMutableArray arrayWithCapacity:6];
+            for(double value:values){if(!std::isfinite(value*mm))return nil;[result addObject:@(value*mm)];}
+            return result;
+        };
+        NSArray<NSNumber *> *localOptimal=localBounds(true), *localConservative=localBounds(false);
+        if(!localOptimal||!localConservative)return nil;
         GProp_GProps props;
         // Adaptive integration of analytic surfaces; no tessellated volume.
         const double error=BRepGProp::VolumeProperties(world,props,1.0e-9,Standard_False,Standard_False);
@@ -16242,6 +16269,7 @@ struct NativeModelingPermitIssuer final {
             @"edges":@(edges.Extent()),@"vertices":@(vertices.Extent()),@"topologyNodes":@(nodes),
             @"valid":@(BRepCheck_Analyzer(world,Standard_True).IsValid()?YES:NO),
             @"volumeMM3":@(volume),@"volumeIntegrationRelativeError":@(error),
+            @"localBoundsOptimalMM":localOptimal,@"localBoundsConservativeMM":localConservative,
             @"boundsMinMM":@[@(bounds[0]),@(bounds[1]),@(bounds[2])],
             @"boundsMaxMM":@[@(bounds[3]),@(bounds[4]),@(bounds[5])]};
     }catch(...){return nil;}
