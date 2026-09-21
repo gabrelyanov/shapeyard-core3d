@@ -8678,65 +8678,9 @@ struct NativeModelingPermitIssuer final {
         using namespace core3d::sweep_persistence::probe;
         Checks checks;
         switch (scenario) {
-            case 0: checks=[] { using namespace core3d::sweep_persistence;
-                    Checks c; Definition decoded; std::vector<double> v;
-                    auto d=Fixture(4); c["minimum25"]=Encode(d,v)&&v.size()==25&&Decode(v,decoded);
-                    if (!c["minimum25"]) return c; // A failed positive fixture must not index empty output.
-                    c["signedZero"]=Bits(decoded.vertices.front().point.X())==Bits(-0.0);
-                    const auto rejected=[&](std::vector<double> candidate) { Definition out=Fixture(0); const bool ok=Decode(candidate,out); return !ok&&out.vertices.empty()&&out.pathIdentifier==0; };
-                    auto rejectAt=[&](const char* name,std::size_t index,double value) { auto a=v;a[index]=value;c[name]=rejected(a); };
-                    rejectAt("unknownSection",1,1);rejectAt("unknownPolicy",2,1);rejectAt("fractionalID",3,1.5);
-                    rejectAt("overflowID",3,4294967296.0);rejectAt("zeroID",3,0);rejectAt("nan",4,std::numeric_limits<double>::quiet_NaN());
-                    rejectAt("infiniteUnit",6,std::numeric_limits<double>::infinity());rejectAt("negativeUnit",6,-0.001);
-                    rejectAt("oversizedVertices",7,34);rejectAt("mismatchedCounts",8,2);rejectAt("invalidFrameFlag",9,2);
-                    rejectAt("duplicateID",10,1);rejectAt("wrongConnectivity",18,999);rejectAt("hiddenLineArc",22,2);
-                    auto shortValues=v;shortValues.pop_back();c["truncated"]=rejected(shortValues);
-                    auto longValues=v;longValues.push_back(0);c["trailing"]=rejected(longValues);
-                    c["over405"]=rejected(std::vector<double>(406,0));
-                    d.vertices.clear();d.segments.clear();d.radius=1;
-                    for (int i=0;i<33;++i) d.vertices.push_back({core3d::ProfileCurveID(100+i),gp_Pnt2d(i*20,0)});
-                    for (int i=0;i<32;++i) d.segments.push_back({core3d::ProfileCurveID(200+i),core3d::ProfileCurveID(100+i),core3d::ProfileCurveID(101+i),core3d::ProfileCurveKind::Line,{},0,0,0});
-                    core3d::profile::ConstructionFrame frame; frame.values={-0.0,2,3,-0.0,-0.0,-std::sqrt(0.5),-std::sqrt(0.5),-2};d.constructionFrame=frame;
-                    c["maximum405"]=Encode(d,v)&&v.size()==405&&Decode(v,decoded);
-                    if (!c["maximum405"]) return c; // Preserve a safe test failure before fixed-index checks.
-                    std::vector<double> again;c["frameBits"]=Encode(decoded,again)&&SameBits(v,again);
-                    auto equivalent=v;equivalent[10+3*33+9*32]=0;
-                    c["bitComparisonDistinguishesSignedZero"]=!SameBits(v,equivalent);
-                    return c;
-            }(); break;
+            case 0: checks=Numeric(); break;
             case 1: checks=RoundTrip(); break;
-            case 2: checks=[] { using namespace core3d::sweep_persistence;
-                    Checks c;
-                    for (int mode=0;mode<17;++mode) {
-                        RawDocument raw;auto d=Fixture(0);raw.document->NewCommand();
-                        if (!Stage(raw.document,raw.owner,d,Identifier)) {c[std::to_string(mode)]=false;continue;}
-                        Record record;if (!Read(raw.document,raw.owner,record)) {c[std::to_string(mode)]=false;continue;}
-                        const auto label=record.label;const int count=int(record.values.size());
-                        switch (mode) {
-                            case 0:label.ForgetAttribute(SchemaID());break;
-                            case 1:TDataStd_Integer::Set(label,SchemaID(),99);break;
-                            case 2:TDataStd_Integer::Set(label,CountID(),406);break;
-                            case 3:TDataStd_Integer::Set(label,CountID(),23);break;
-                            case 4:label.FindChild(1).ForgetAllAttributes();break;
-                            case 5:TDataStd_Real::Set(label.FindChild(count+1,Standard_True),0);break;
-                            case 6:TDataStd_Real::Set(label.FindChild(1).FindChild(1,Standard_True),0);break;
-                            case 7:TDataStd_Integer::Set(label.FindChild(1),42);break;
-                            case 8:TDataStd_Real::Set(label.FindChild(1),std::numeric_limits<double>::infinity());break;
-                            case 9:TDataStd_AsciiString::Set(label,IdentityID(),TCollection_AsciiString("a3ffca1a-a4f9-421d-a2dd-c68c6565e060"));break;
-                            case 10:TDataStd_Integer::Set(raw.owner.FindChild(label.Tag()+1,Standard_True),SchemaID(),1);break;
-                            case 11:label.ForgetAttribute(TNaming_NamedShape::GetID());break;
-                            case 12:TDataStd_Real::Set(label,1);break;
-                            case 13:TDataStd_Integer::Set(raw.owner.FindChild(label.Tag()+1,Standard_True),core3d::profile::SchemaID(),1);break;
-                            case 14:TDataStd_Integer::Set(raw.owner.FindChild(label.Tag()+1,Standard_True),core3d::enclosure::SchemaID(),1);break;
-                            case 15:TDataStd_Real::Set(label.FindChild(4),1.25);break;
-                            case 16:TDataStd_AsciiString::Set(label,IdentityID(),TCollection_AsciiString("not-a-uuid"));break;
-                        }
-                        Record result;c[std::to_string(mode)]=!Read(raw.document,raw.owner,result)&&result.label.IsNull();
-                        raw.document->AbortCommand();
-                        Record absent;c["abort:"+std::to_string(mode)]=Read(raw.document,raw.owner,absent)&&absent.label.IsNull();
-                    }
-                    return c;
-            }(); break;
+            case 2: checks=Malformed(); break;
             case 3: checks=BindingAndTransaction(); break;
         }
         NSMutableDictionary<NSString *, NSNumber *> *result=[NSMutableDictionary dictionary];

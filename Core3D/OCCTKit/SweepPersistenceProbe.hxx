@@ -34,27 +34,27 @@ inline Definition Fixture(int kind,double unit=0.001) {
 }
 inline Checks Numeric() {
     Checks c; Definition decoded; std::vector<double> v;
-    auto d=Fixture(4); c["minimum24"]=Encode(d,v)&&v.size()==24&&Decode(v,decoded);
-    if (!c["minimum24"]) return c; // A failed positive fixture must not index empty output.
+    auto d=Fixture(4); c["minimum25"]=Encode(d,v)&&v.size()==25&&Decode(v,decoded);
+    if (!c["minimum25"]) return c; // A failed positive fixture must not index empty output.
     c["signedZero"]=Bits(decoded.vertices.front().point.X())==Bits(-0.0);
     const auto rejected=[&](std::vector<double> candidate) { Definition out=Fixture(0); const bool ok=Decode(candidate,out); return !ok&&out.vertices.empty()&&out.pathIdentifier==0; };
     auto rejectAt=[&](const char* name,std::size_t index,double value) { auto a=v;a[index]=value;c[name]=rejected(a); };
     rejectAt("unknownSection",1,1);rejectAt("unknownPolicy",2,1);rejectAt("fractionalID",3,1.5);
     rejectAt("overflowID",3,4294967296.0);rejectAt("zeroID",3,0);rejectAt("nan",4,std::numeric_limits<double>::quiet_NaN());
-    rejectAt("infiniteUnit",5,std::numeric_limits<double>::infinity());rejectAt("negativeUnit",5,-0.001);
-    rejectAt("oversizedVertices",6,34);rejectAt("mismatchedCounts",7,2);rejectAt("invalidFrameFlag",8,2);
-    rejectAt("duplicateID",9,1);rejectAt("wrongConnectivity",17,999);rejectAt("hiddenLineArc",21,2);
+    rejectAt("infiniteUnit",6,std::numeric_limits<double>::infinity());rejectAt("negativeUnit",6,-0.001);
+    rejectAt("oversizedVertices",7,34);rejectAt("mismatchedCounts",8,2);rejectAt("invalidFrameFlag",9,2);
+    rejectAt("duplicateID",10,1);rejectAt("wrongConnectivity",18,999);rejectAt("hiddenLineArc",22,2);
     auto shortValues=v;shortValues.pop_back();c["truncated"]=rejected(shortValues);
     auto longValues=v;longValues.push_back(0);c["trailing"]=rejected(longValues);
-    c["over404"]=rejected(std::vector<double>(405,0));
+    c["over405"]=rejected(std::vector<double>(406,0));
     d.vertices.clear();d.segments.clear();d.radius=1;
     for (int i=0;i<33;++i) d.vertices.push_back({ProfileCurveID(100+i),gp_Pnt2d(i*20,0)});
     for (int i=0;i<32;++i) d.segments.push_back({ProfileCurveID(200+i),ProfileCurveID(100+i),ProfileCurveID(101+i),ProfileCurveKind::Line,{},0,0,0});
     profile::ConstructionFrame frame; frame.values={-0.0,2,3,-0.0,-0.0,-std::sqrt(0.5),-std::sqrt(0.5),-2};d.constructionFrame=frame;
-    c["maximum404"]=Encode(d,v)&&v.size()==404&&Decode(v,decoded);
-    if (!c["maximum404"]) return c; // Preserve a safe test failure before fixed-index checks.
+    c["maximum405"]=Encode(d,v)&&v.size()==405&&Decode(v,decoded);
+    if (!c["maximum405"]) return c; // Preserve a safe test failure before fixed-index checks.
     std::vector<double> again;c["frameBits"]=Encode(decoded,again)&&SameBits(v,again);
-    auto equivalent=v;equivalent[9+3*33+9*32]=0;
+    auto equivalent=v;equivalent[10+3*33+9*32]=0;
     c["bitComparisonDistinguishesSignedZero"]=!SameBits(v,equivalent);
     return c;
 }
@@ -95,8 +95,8 @@ inline Checks Malformed() {
         const auto label=record.label;const int count=int(record.values.size());
         switch (mode) {
             case 0:label.ForgetAttribute(SchemaID());break;
-            case 1:TDataStd_Integer::Set(label,SchemaID(),2);break;
-            case 2:TDataStd_Integer::Set(label,CountID(),405);break;
+            case 1:TDataStd_Integer::Set(label,SchemaID(),99);break;
+            case 2:TDataStd_Integer::Set(label,CountID(),406);break;
             case 3:TDataStd_Integer::Set(label,CountID(),23);break;
             case 4:label.FindChild(1).ForgetAllAttributes();break;
             case 5:TDataStd_Real::Set(label.FindChild(count+1,Standard_True),0);break;

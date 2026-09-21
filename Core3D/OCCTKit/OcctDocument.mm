@@ -9591,6 +9591,12 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
             || !core3d::enclosure::Read(myOcafDoc,label,enclosure)
             || !core3d::sweep_persistence::Read(myOcafDoc,label,sweep)
             || !core3d::loft_persistence::Read(myOcafDoc,label,loft)) return Standard_False;
+        // The sweep/loft edit guard captures EVERY scene root, including cut
+        // siblings. Their validated retained recipe is metadata, not face styling.
+        // CaptureObjectTransformStateForLabel / IsEqual already preserve its
+        // payload bytes, base and current binding in the surrounding catalog.
+        core3d::retained_solid::Record retained;
+        if (!core3d::retained_solid::Read(myOcafDoc,label,retained)) return Standard_False;
         TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
         if (children.Length()>core3d::profile::MaximumLabels) return Standard_False;
         for (int i=1;i<=children.Length();++i) {
@@ -9598,7 +9604,8 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
             if ((profile.label.IsNull() || !child.IsEqual(profile.label))
                 && (enclosure.label.IsNull() || !child.IsEqual(enclosure.label))
                 && (sweep.label.IsNull() || !child.IsEqual(sweep.label))
-                && (loft.label.IsNull() || !child.IsEqual(loft.label))) return Standard_False;
+                && (loft.label.IsNull() || !child.IsEqual(loft.label))
+                && (retained.label.IsNull() || !child.IsEqual(retained.label))) return Standard_False;
         }
         for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
             if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
@@ -9649,7 +9656,7 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
     } catch (...) {output={};return Standard_False;}
 }
 
-// Cut-specific retained metadata admission. Existing sweep/loft guard stays exact.
+// Cut-specific appearance capture; both catalogs admit validated retained metadata.
 Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedCut(
     const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {
     output={};
