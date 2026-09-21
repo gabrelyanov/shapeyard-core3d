@@ -770,6 +770,14 @@ __attribute__((objc_subclassing_restricted))
 //! unresolved edit, invalid unit, non-BRep or excessive topology with nil.
 - (nullable NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugNativeSolidEvidence(_:));
+//! Signed enter/exit distances in mm along the normalized world direction from
+//! originMM. Ordered material intervals on the whole line (not a ray); [] means
+//! no material. Selection independent. Same admission/placement as the solid
+//! observer. nil for unknown entity, nonfinite/zero input, ambiguous boundary,
+//! non-solid geometry or excessive work (8192 nodes, 4096 hits, 64 intervals).
+- (nullable NSArray<NSArray<NSNumber *> *> *)debugNativeSolidIntervals:(NSString *)entity
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    NS_SWIFT_NAME(debugNativeSolidIntervals(_:originMM:direction:));
 #endif
 
 //! Capture authoritative single-selection transform values. Main-thread only.

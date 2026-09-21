@@ -21,6 +21,8 @@
 #include "../OCCTKit/EnclosureParameters.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
 #include <Graphic3d_CLight.hxx>
 #include <Prs3d_ShadingAspect.hxx>
 #endif
@@ -16310,6 +16312,150 @@ struct NativeModelingPermitIssuer final {
             @"stateBytes":[NSData dataWithBytes:e.stateBytes.data() length:e.stateBytes.size()]};
     }catch(...){return nil;}
 }
+// Shared with both DEBUG observers: the same bounded capture and one world
+// placement application; neither observer acquires selection or edit authority.
+static bool core3dDebugSolidCopy(const Handle(OcctDocument)& owner, NSString *entity,
+    OcctObjectNameState& named, TopoDS_Shape& local, TopoDS_Shape& world,
+    double& unit, double& mm, std::size_t& nodes) {
+        if(owner.IsNull()||owner->Document().IsNull())return false;
+        TDF_Label label;
+        if(!core3d::placement::Find(owner,entity.UTF8String,label))return false;
+        if(!owner->CaptureObjectNameStateForLabel(label,named))return false;
+        const auto& state=named.object;
+        if(state.resolvedRepresentation!=OcctGeometryRepresentation::BRep)return false;
+        if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return false;
+        if(!core3d::placement::MillimetersPerUnit(unit,mm))return false;
+        // Shared-aware unique-node admission with the same 8192 cap the
+        // transform-inspector BRep bounds path enforces, BEFORE any copy,
+        // checker or measurement. Above the cap observation refuses outright.
+        constexpr auto maxNodes=core3d::TransformInspectorMeasurementController::kMaximumBRepTopologyNodes;
+        nodes=0;
+        {
+            std::vector<TopoDS_Shape> stack{state.shape};
+            TopTools_IndexedMapOfShape visited;
+            while(!stack.empty()){
+                const auto shape=stack.back();stack.pop_back();
+                if(visited.Contains(shape))continue;
+                visited.Add(shape);
+                if(++nodes>maxNodes)return false;
+                for(TopoDS_Iterator child(shape,Standard_True,Standard_True);child.More();child.Next()){
+                    if(stack.size()>=maxNodes)return false;
+                    if(!visited.Contains(child.Value()))stack.push_back(child.Value());
+                }
+            }
+            if(nodes==0)return false;
+        }
+        // World composition matches production object-alignment measurement
+        // (Core3DViewer::measureObjectAlignment) exactly: the persisted
+        // gp_Trsf is applied ONCE by BRepBuilderAPI_Transform to the private
+        // copy, which already carries the stored XCAF location. The shape is
+        // never Moved by an extra location and the transform is never
+        // multiplied into an already-transformed duplicate.
+        BRepBuilderAPI_Copy copy(state.shape,Standard_True,Standard_False);
+        if(!copy.IsDone()||copy.Shape().IsNull())return false;
+        BRepBuilderAPI_Transform transformed(copy.Shape(),state.transform,Standard_True);
+        if(!transformed.IsDone()||transformed.Shape().IsNull())return false;
+        local=copy.Shape();world=transformed.Shape();
+        return true;
+}
+
+// BEGIN DEBUG SOLID LINE ROUTINE
+static bool core3dDebugSolidLineIntervals(const TopoDS_Shape& world, double mm,
+    const double originMM[3], const double direction[3],
+    std::vector<std::pair<double,double>>& intervals) {
+    intervals.clear();
+    if(world.IsNull()||!std::isfinite(mm)||mm<=0)return false;
+    double scale=0;
+    for(int i=0;i<3;++i){
+        if(!std::isfinite(originMM[i])||!std::isfinite(direction[i])
+            ||!std::isfinite(originMM[i]/mm))return false;
+        scale=std::max(scale,std::abs(direction[i]));
+    }
+    if(scale==0)return false;
+    const gp_Dir unit(direction[0]/scale,direction[1]/scale,direction[2]/scale);
+    const gp_Pnt origin(originMM[0]/mm,originMM[1]/mm,originMM[2]/mm);
+    const gp_Lin line(origin,unit);
+    const double tolerance=1.0e-7/mm;
+    if(!std::isfinite(tolerance)||tolerance<=0)return false;
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(world,TopAbs_SOLID,solids);
+    if(solids.IsEmpty()||solids.Extent()>64)return false;
+    if(!BRepCheck_Analyzer(world,Standard_True).IsValid())return false;
+    Bnd_Box box;BRepBndLib::AddOptimal(world,box,Standard_False,Standard_False);
+    if(box.IsVoid()||box.IsOpen())return false;
+    double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+    double low=std::numeric_limits<double>::max(),high=-low;
+    for(int corner=0;corner<8;++corner){
+        const gp_Pnt point(bounds[(corner&1)?3:0],bounds[(corner&2)?4:1],bounds[(corner&4)?5:2]);
+        const double t=gp_Vec(origin,point).Dot(gp_Vec(unit));
+        if(!std::isfinite(t))return false;
+        low=std::min(low,t);high=std::max(high,t);
+    }
+    low-=tolerance*4;high+=tolerance*4;
+    if(!std::isfinite(low)||!std::isfinite(high)||low>=high)return false;
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(world,tolerance);intersector.Perform(line,low,high);
+    if(!intersector.IsDone()||intersector.NbPnt()>4096)return false;
+    std::vector<double> cuts;
+    for(int i=1;i<=intersector.NbPnt();++i){
+        const double t=intersector.WParameter(i);
+        if(!std::isfinite(t)||!std::isfinite(t*mm))return false;
+        cuts.push_back(t);
+    }
+    std::sort(cuts.begin(),cuts.end());
+    cuts.erase(std::unique(cuts.begin(),cuts.end(),[tolerance](double a,double b){
+        return std::abs(a-b)<=tolerance;
+    }),cuts.end());
+    // Classify open spans, not alternating face hits: shared edges, tangencies
+    // and multiple solids must not fabricate material. Boundary-only spans are
+    // ambiguous and refuse rather than certifying a wall of zero thickness.
+    for(std::size_t i=1;i<cuts.size();++i){
+        const double mid=cuts[i-1]*0.5+cuts[i]*0.5;
+        const gp_Pnt point=origin.Translated(gp_Vec(unit)*mid);
+        bool inside=false,boundary=false;
+        for(int j=1;j<=solids.Extent();++j){
+            BRepClass3d_SolidClassifier classifier(solids(j),point,tolerance);
+            const TopAbs_State state=classifier.State();
+            if(state==TopAbs_UNKNOWN)return false;
+            inside=inside||state==TopAbs_IN;boundary=boundary||state==TopAbs_ON;
+        }
+        if(!inside){if(boundary)return false;continue;}
+        const double enter=cuts[i-1]*mm,exit=cuts[i]*mm;
+        if(!intervals.empty()&&std::abs(intervals.back().second-enter)<=1.0e-7)
+            intervals.back().second=exit;
+        else {
+            if(intervals.size()>=64)return false;
+            intervals.emplace_back(enter,exit);
+        }
+    }
+    return true;
+}
+// END DEBUG SOLID LINE ROUTINE
+
+- (NSArray<NSArray<NSNumber *> *> *)debugNativeSolidIntervals:(NSString *)entity
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity
+        ||entity.length>128||!entity.UTF8String||originMM.count!=3||direction.count!=3)return nil;
+    double origin[3],vector[3];
+    for(NSUInteger i=0;i<3;++i){
+        if(![originMM[i] isKindOfClass:NSNumber.class]||![direction[i] isKindOfClass:NSNumber.class])return nil;
+        origin[i]=originMM[i].doubleValue;vector[i]=direction[i].doubleValue;
+        if(!std::isfinite(origin[i])||!std::isfinite(vector[i]))return nil;
+    }
+    if(vector[0]==0&&vector[1]==0&&vector[2]==0)return nil;
+    try {
+        if(![self core3d_canBeginCommittedEdit])return nil;
+        OcctObjectNameState named;TopoDS_Shape local,world;
+        double unit=0,mm=0;std::size_t nodes=0;
+        if(!core3dDebugSolidCopy(GLController.viewer->getDocument(),entity,named,local,world,unit,mm,nodes))return nil;
+        std::vector<std::pair<double,double>> intervals;
+        if(!core3dDebugSolidLineIntervals(world,mm,origin,vector,intervals))return nil;
+        NSMutableArray<NSArray<NSNumber *> *> *result=[NSMutableArray arrayWithCapacity:intervals.size()];
+        for(const auto& interval:intervals)[result addObject:@[@(interval.first),@(interval.second)]];
+        return result;
+    }catch(...){return nil;}
+}
+
 // Bounded DEBUG read-only kernel evidence for the ACTUAL retained BRep of one
 // saved entity. Every reported value is measured from a private mesh-free
 // deep copy of the stored shape, never projected from any stored recipe;
@@ -16324,49 +16470,10 @@ struct NativeModelingPermitIssuer final {
         // canBeginCommittedEdit atomically refuses an open OCAF command, an
         // unresolved ordinary edit and any active operation ledger (busy).
         if(![self core3d_canBeginCommittedEdit])return nil;
-        const auto owner=GLController.viewer->getDocument();
-        if(owner.IsNull()||owner->Document().IsNull())return nil;
-        TDF_Label label;
-        if(!core3d::placement::Find(owner,entity.UTF8String,label))return nil;
-        OcctObjectNameState named;
-        if(!owner->CaptureObjectNameStateForLabel(label,named))return nil;
+        OcctObjectNameState named;TopoDS_Shape localShape,world;
+        double unit=0,mm=0;std::size_t nodes=0;
+        if(!core3dDebugSolidCopy(GLController.viewer->getDocument(),entity,named,localShape,world,unit,mm,nodes))return nil;
         const auto& state=named.object;
-        if(state.resolvedRepresentation!=OcctGeometryRepresentation::BRep)return nil;
-        double unit=0;
-        if(!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit))return nil;
-        double mm=0;
-        if(!core3d::placement::MillimetersPerUnit(unit,mm))return nil;
-        // Shared-aware unique-node admission with the same 8192 cap the
-        // transform-inspector BRep bounds path enforces, BEFORE any copy,
-        // checker or measurement. Above the cap observation refuses outright.
-        constexpr auto maxNodes=core3d::TransformInspectorMeasurementController::kMaximumBRepTopologyNodes;
-        std::size_t nodes=0;
-        {
-            std::vector<TopoDS_Shape> stack{state.shape};
-            TopTools_IndexedMapOfShape visited;
-            while(!stack.empty()){
-                const auto shape=stack.back();stack.pop_back();
-                if(visited.Contains(shape))continue;
-                visited.Add(shape);
-                if(++nodes>maxNodes)return nil;
-                for(TopoDS_Iterator child(shape,Standard_True,Standard_True);child.More();child.Next()){
-                    if(stack.size()>=maxNodes)return nil;
-                    if(!visited.Contains(child.Value()))stack.push_back(child.Value());
-                }
-            }
-            if(nodes==0)return nil;
-        }
-        // World composition matches production object-alignment measurement
-        // (Core3DViewer::measureObjectAlignment) exactly: the persisted
-        // gp_Trsf is applied ONCE by BRepBuilderAPI_Transform to the private
-        // copy, which already carries the stored XCAF location. The shape is
-        // never Moved by an extra location and the transform is never
-        // multiplied into an already-transformed duplicate.
-        BRepBuilderAPI_Copy copy(state.shape,Standard_True,Standard_False);
-        if(!copy.IsDone()||copy.Shape().IsNull())return nil;
-        BRepBuilderAPI_Transform transformed(copy.Shape(),state.transform,Standard_True);
-        if(!transformed.IsDone()||transformed.Shape().IsNull())return nil;
-        const auto world=transformed.Shape();
         TopTools_IndexedMapOfShape solids,shells,faces,edges,vertices;
         TopExp::MapShapes(world,TopAbs_SOLID,solids);TopExp::MapShapes(world,TopAbs_SHELL,shells);
         TopExp::MapShapes(world,TopAbs_FACE,faces);TopExp::MapShapes(world,TopAbs_EDGE,edges);
@@ -16380,8 +16487,8 @@ struct NativeModelingPermitIssuer final {
         // only AddOptimal is the exact extents oracle. Neither uses mesh bounds.
         auto localBounds = [&](bool optimal) -> NSArray<NSNumber *> * {
             Bnd_Box local;
-            if(optimal) BRepBndLib::AddOptimal(copy.Shape(),local,Standard_False,Standard_False);
-            else BRepBndLib::Add(copy.Shape(),local,Standard_False);
+            if(optimal) BRepBndLib::AddOptimal(localShape,local,Standard_False,Standard_False);
+            else BRepBndLib::Add(localShape,local,Standard_False);
             if(local.IsVoid()||local.IsOpen())return nil;
             double values[6];local.Get(values[0],values[1],values[2],values[3],values[4],values[5]);
             NSMutableArray<NSNumber *> *result=[NSMutableArray arrayWithCapacity:6];

@@ -143,6 +143,8 @@ inline analytic_boolean_ring::Status RingAdmissionStatus(const retained_boolean:
     if(analytic!=analytic_boolean_ring::Status::Clear)return analytic;
     double outer=0;if(!HostRadialExtent(p,t,outer))return analytic_boolean_ring::Status::OutsideOrInsufficientLigament;
     const double mm=p.source.metersPerUnit*1000;
+    // HostRadialExtent is in model units; admission clearances are in mm.
+    outer*=mm;
     double hub=0;
     if(p.source.family==1){
         profile::Parameters source;

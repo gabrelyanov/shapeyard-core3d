@@ -83,7 +83,10 @@ inline BuildStatus Build(const std::shared_ptr<const Prepared>& prepared,
                 if (!edge.IsDone()) return BuildStatus::KernelFailure;
                 rings[station][i]=edge.Edge();
                 if (station) {
-                    BRepBuilderAPI_MakeEdge rail(vertices[station-1][i],vertices[station][i]);
+                    const gp_Dir initial(gp_Vec(corners[station-1][i],corners[station][i]));
+                    const gp_Dir stable(initial.XYZ());
+                    BRepBuilderAPI_MakeEdge rail(gp_Lin(corners[station-1][i],stable),
+                        vertices[station-1][i],vertices[station][i]);
                     if (!rail.IsDone()) return BuildStatus::KernelFailure;
                     rails[station-1][i]=rail.Edge();
                 }
@@ -115,7 +118,7 @@ inline BuildStatus Build(const std::shared_ptr<const Prepared>& prepared,
                 // normal, including rectangles and equal-length parallelograms.
                 const gp_Vec along(corners[station][i],corners[station][j]);
                 const gp_Vec rise(corners[station][i],corners[station+1][i]);
-                const gp_Pln plane(corners[station][i],gp_Dir(along.Crossed(rise)));
+                const gp_Pln plane(corners[station][i],gp_Dir(gp_Dir(along.Crossed(rise)).XYZ()));
                 if (!addFace({rings[station][i],rails[station][j],
                               reversed(rings[station+1][i]),reversed(rails[station][i])},plane))
                     return BuildStatus::KernelFailure;

@@ -2,6 +2,7 @@
 // Read-only recipe clearance and detached transverse-result verification.
 // No occurrence, document owner, command, history, or permission is issued here.
 #include "CylindricalCutDefinition.hxx"
+#include <gp_Ax1.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
