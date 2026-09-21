@@ -247,6 +247,10 @@ namespace core3d {
         Standard_Boolean toggleDetectedShellOpening() noexcept;
         Standard_Boolean canBeginShellSelection() const noexcept;
         Standard_Boolean beginShellSelection() noexcept;
+        Standard_Boolean captureShellOpenings(const std::string& entityIdentifier,
+            const std::vector<ShellOpeningSelector>& selectors,
+            FaceOperationSourceProof& proof) const noexcept;
+        Standard_Boolean beginCapturedShell(const FaceOperationSourceProof& proof) noexcept;
         Standard_Boolean setShellThickness(
             Standard_Real thickness) noexcept;
         ShellApplyResult applyShell() noexcept;

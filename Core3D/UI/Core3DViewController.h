@@ -23,6 +23,42 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, Core3DShellOpeningAxis) {
+    Core3DShellOpeningAxisX, Core3DShellOpeningAxisY, Core3DShellOpeningAxisZ,
+};
+typedef NS_ENUM(NSInteger, Core3DShellOpeningSide) {
+    Core3DShellOpeningSideMinimum, Core3DShellOpeningSideMaximum,
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DShellOpeningSelector : NSObject
+@property(nonatomic,readonly) Core3DShellOpeningAxis axis;
+@property(nonatomic,readonly) Core3DShellOpeningSide side;
+- (nullable instancetype)initWithAxis:(Core3DShellOpeningAxis)axis side:(Core3DShellOpeningSide)side;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+typedef NS_ENUM(NSInteger, Core3DShellOperationState) {
+    Core3DShellOperationStateCaptured,
+    Core3DShellOperationStatePreparing,
+    Core3DShellOperationStateReady,
+    Core3DShellOperationStateCommitted,
+    Core3DShellOperationStateCancelled,
+    Core3DShellOperationStateRejected,
+    Core3DShellOperationStateOutcomeUnknown,
+    Core3DShellOperationStateRetryableFailure,
+};
+//! Opaque native capture, never deserialized from provider fields. Main-thread
+//! only. Opening descriptors are descriptive; canonical faces stay private.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DShellOperation : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,copy,readonly) NSArray<Core3DShellOpeningSelector *> *openings;
+@property(nonatomic,readonly) double thicknessMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 @protocol Core3DViewControllerProtocol<NSObject>
 
 @optional
@@ -453,6 +489,18 @@ NS_ASSUME_NONNULL_BEGIN
 //! valid; any observed semantic selection/tool or native edit/history boundary
 //! invalidates it, even if geometry or selection later returns to the same value.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContext;
+//! Additive plain-profile shell route. Capture is read-only and uses the exact
+//! selected target and planning lease. Prepare consumes that lease once and
+//! runs the existing bounded Shell preview. Poll state until Ready; Apply and
+//! Cancel retain the native controller on unknown/retryable outcomes. Never
+//! replay an unknown result. A retired handle cannot act on later touch work.
+- (nullable Core3DShellOperation *)captureModelingShellWithOpenings:(NSArray<Core3DShellOpeningSelector *> *)openings
+    context:(Core3DModelingPlanningContext *)context NS_SWIFT_NAME(captureModelingShell(openings:context:));
+- (Core3DShellOperationState)prepareModelingShell:(Core3DShellOperation *)operation thicknessMM:(double)thickness
+    NS_SWIFT_NAME(prepareModelingShell(_:thicknessMM:));
+- (Core3DShellOperationState)modelingShellState:(Core3DShellOperation *)operation NS_SWIFT_NAME(modelingShellState(_:));
+- (Core3DShellOperationState)applyModelingShell:(Core3DShellOperation *)operation NS_SWIFT_NAME(applyModelingShell(_:));
+- (Core3DShellOperationState)cancelModelingShell:(Core3DShellOperation *)operation NS_SWIFT_NAME(cancelModelingShell(_:));
 // Additive opt-in capture. Existing capture/advertised catalogs remain unchanged.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContextIncludingSavedCutSource;
 - (nullable Core3DSavedCutSourceOperation *)beginModelingSavedCutSourceEdit:(Core3DSavedCutSourcePatch *)patch

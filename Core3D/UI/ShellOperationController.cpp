@@ -482,6 +482,63 @@ private:
 
 } // namespace
 
+Standard_Boolean TryResolveShellOpeningSelectors(
+    const TopoDS_Shape& shape,
+    const std::vector<ShellOpeningSelector>& selectors,
+    std::vector<TopoDS_Face>& faces) noexcept
+{
+    faces.clear();
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+        || selectors.empty() || selectors.size() > 6) return Standard_False;
+    try {
+        std::array<bool, 6> requested{};
+        for (const auto& selector : selectors) {
+            const auto axis = static_cast<unsigned>(selector.axis);
+            const auto side = static_cast<unsigned>(selector.side);
+            if (axis > 2 || side > 1 || requested[axis * 2 + side]) return Standard_False;
+            requested[axis * 2 + side] = true;
+        }
+        Standard_Size count = 0;
+        Standard_Real bounds[6] = {};
+        if (!CountBoundedTopology(shape, ShellOperationController::kMaximumSourceTopologyNodes, count)
+            || !ShapeBounds(shape, bounds)) return Standard_False;
+        TopTools_IndexedMapOfShape canonical;
+        TopExp::MapShapes(shape, TopAbs_FACE, canonical);
+        std::vector<Standard_Size> indices;
+        for (unsigned key = 0; key < requested.size(); ++key) {
+            if (!requested[key]) continue;
+            const unsigned axis = key / 2;
+            const double extremum = bounds[axis + (key % 2 ? 3 : 0)];
+            const double tolerance = std::max(Precision::Confusion(),
+                32 * std::numeric_limits<double>::epsilon() * std::max(1.0, std::abs(extremum)));
+            Standard_Integer match = 0;
+            for (Standard_Integer i = 1; i <= canonical.Extent(); ++i) {
+                const auto face = TopoDS::Face(canonical(i));
+                BRepAdaptor_Surface surface(face, Standard_True);
+                if (surface.GetType() != GeomAbs_Plane) continue;
+                const auto plane = surface.Plane();
+                gp_Dir direction(axis == 0, axis == 1, axis == 2);
+                if (!plane.Axis().Direction().IsParallel(direction, Precision::Angular())
+                    || std::abs(plane.Location().Coord(axis + 1) - extremum) > tolerance) continue;
+                // Count all coplanar patches, including faces with inner wires.
+                // A valid-looking patch cannot conceal an ambiguous opening.
+                if (match != 0) return Standard_False;
+                match = i;
+            }
+            if (match == 0) return Standard_False;
+            indices.push_back(static_cast<Standard_Size>(match - 1));
+        }
+        std::sort(indices.begin(), indices.end());
+        std::vector<TopoDS_Face> resolved;
+        for (const auto index : indices) resolved.push_back(TopoDS::Face(canonical(index + 1)));
+        if (!ShellOpeningSetIsValid(shape, resolved, indices)) return Standard_False;
+        faces = std::move(resolved);
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean TryPrepareFaceOperationSource(
     const Handle(AIS_InteractiveContext)& theContext,
     const Handle(OcctDocument)& theDocument,

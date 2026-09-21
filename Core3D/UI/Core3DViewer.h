@@ -381,6 +381,10 @@ namespace core3d {
         //! True only while no typed operation owns a command, preview, or
         //! exactly-once recovery ledger and the OCAF document is writable.
         bool canBeginCommittedEdit() const noexcept;
+        bool captureShellOpenings(const std::string& entityIdentifier,
+            const std::vector<ShellOpeningSelector>& selectors,
+            FaceOperationSourceProof& proof) const noexcept;
+        bool beginCapturedShell(const FaceOperationSourceProof& proof) noexcept;
         //! Conservative semantic transition fence, including failed/no-op
         //! selection and tool attempts. Camera-only publication does not call it.
         void observeNativePlanningInteraction() noexcept;

@@ -29,6 +29,20 @@ namespace core3d {
 
 inline constexpr Standard_Size kMaximumShellOpeningFaces = 8;
 
+enum class ShellOpeningAxis : std::uint8_t { X, Y, Z };
+enum class ShellOpeningSide : std::uint8_t { Minimum, Maximum };
+struct ShellOpeningSelector {
+    ShellOpeningAxis axis;
+    ShellOpeningSide side;
+};
+
+//! Local BRep frame, before occurrence placement. Bounded before any full map
+//! or bounds traversal; refuses ambiguous, missing, non-planar and adjacent caps.
+Standard_Boolean TryResolveShellOpeningSelectors(
+    const TopoDS_Shape& shape,
+    const std::vector<ShellOpeningSelector>& selectors,
+    std::vector<TopoDS_Face>& faces) noexcept;
+
 inline Standard_Boolean ShellFaceIsSinglePlanarOpening(
     const TopoDS_Face& theFace) noexcept
 {

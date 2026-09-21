@@ -65,7 +65,7 @@ inline bool Encode(const Descriptor&d,std::vector<std::uint8_t>&out)noexcept{
             if(!Nonzero(p.entity)||!Nonzero(p.definition)||!Nonzero(p.geometry)||!Nonzero(p.recipe)||!Nonzero(p.state)
                 ||p.family<1||p.family>5||(p.family==5?Nonzero(p.feature)||p.schema!=0:!Nonzero(p.feature)||p.schema<1)
                 ||(p.family==1&&p.schema>4)||(p.family==2&&p.schema>2)
-                ||((p.family==3||p.family==4)&&p.schema!=1)
+                ||(p.family==3&&p.schema>2)||(p.family==4&&p.schema!=1)
                 ||p.kind>1||p.axis>2||!std::isfinite(p.metersPerUnit)||p.metersPerUnit<=0
                 ||!std::isfinite(p.metersPerUnit*1000)||p.metersPerUnit*1000<=0
                 ||!std::isfinite(p.value)||std::abs(p.value)>1e6)return false;

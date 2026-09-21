@@ -621,6 +621,41 @@ namespace core3d {
 		}
 	}
 
+    Standard_Boolean ShapeInteractor::captureShellOpenings(
+        const std::string& entityIdentifier,
+        const std::vector<ShellOpeningSelector>& selectors,
+        FaceOperationSourceProof& proof) const noexcept {
+        proof = FaceOperationSourceProof();
+        if (myContext.IsNull() || myDoc.IsNull() || !_shellController
+            || hasActiveShell() || entityIdentifier.empty()
+            || myContext->NbSelected() != 1) return Standard_False;
+        try {
+            myContext->InitSelected();
+            const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+            if (presentation.IsNull()) return Standard_False;
+            const auto label = myDoc->ShapeLabel(presentation);
+            if (label.IsNull() || myDoc->EntityIdentifierForLabel(label) != entityIdentifier)
+                return Standard_False;
+            std::vector<TopoDS_Face> faces;
+            FaceOperationSourceProof captured;
+            if (!TryResolveShellOpeningSelectors(presentation->Shape(), selectors, faces)
+                || !TryPrepareShellOperationSource(myContext, myDoc, presentation, faces, captured))
+                return Standard_False;
+            ShellSourceSelection selection;
+            selection.proof = captured;
+            selection.selectionMode = AIS_Shape::SelectionMode(_topAbsSelMode);
+            if (!_shellController->canBegin(selection)) return Standard_False;
+            proof = std::move(captured);
+            return Standard_True;
+        } catch (...) { return Standard_False; }
+    }
+
+    Standard_Boolean ShapeInteractor::beginCapturedShell(
+        const FaceOperationSourceProof& proof) noexcept {
+        // Unlike touch begin, a typed request never cancels someone else's work.
+        return !hasActiveShell() && beginShellSelectionImpl(proof);
+    }
+
 	Standard_Boolean ShapeInteractor::beginShellSelection() noexcept {
 		if (myContext.IsNull() || _shellController == nullptr) {
 			return Standard_False;

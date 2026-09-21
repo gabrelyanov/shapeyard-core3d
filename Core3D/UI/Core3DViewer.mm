@@ -1619,6 +1619,21 @@ void Core3DViewer::setBevelPreviewStateChangedCallback(
     }
 }
 
+bool Core3DViewer::captureShellOpenings(const std::string& entityIdentifier,
+    const std::vector<ShellOpeningSelector>& selectors,
+    FaceOperationSourceProof& proof) const noexcept
+{
+    proof = FaceOperationSourceProof();
+    return canBeginCommittedEdit() && _shapeInteractor
+        && _shapeInteractor->captureShellOpenings(entityIdentifier, selectors, proof);
+}
+
+bool Core3DViewer::beginCapturedShell(const FaceOperationSourceProof& proof) noexcept
+{
+    return canBeginCommittedEdit() && _shapeInteractor && _objectInteractor
+        && _shapeInteractor->beginCapturedShell(proof);
+}
+
 void Core3DViewer::setShellPreviewStateChangedCallback(
     std::function<void()> theCallback)
 {

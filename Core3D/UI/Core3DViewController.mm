@@ -1863,6 +1863,39 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 - (instancetype)initPrivate { return [super init]; }
 @end
 
+@implementation Core3DShellOpeningSelector
+- (instancetype)initWithAxis:(Core3DShellOpeningAxis)axis side:(Core3DShellOpeningSide)side {
+    if (axis < Core3DShellOpeningAxisX || axis > Core3DShellOpeningAxisZ
+        || side < Core3DShellOpeningSideMinimum || side > Core3DShellOpeningSideMaximum) return nil;
+    if ((self = [super init])) { _axis = axis; _side = side; }
+    return self;
+}
+@end
+
+@interface Core3DShellOperation () {
+@public
+    __weak Core3DViewController *_shellOwner;
+    std::weak_ptr<core3d::Core3DViewer> _shellViewer;
+    std::weak_ptr<core3d::ShapeInteractor> _shellInteractor;
+    core3d::FaceOperationSourceProof _shellProof;
+    Core3DModelingPlanningContext *_shellContext;
+    Core3DShellOperationState _shellState;
+    uint64_t _shellGeneration;
+    BOOL _shellStarted;
+}
+@property(nonatomic,readwrite) double thicknessMM;
+- (instancetype)initPrivateWithEntity:(NSString *)entity openings:(NSArray<Core3DShellOpeningSelector *> *)openings;
+@end
+@implementation Core3DShellOperation
+- (instancetype)initPrivateWithEntity:(NSString *)entity openings:(NSArray<Core3DShellOpeningSelector *> *)openings {
+    if ((self = [super init])) {
+        _entityIdentifier = [entity copy]; _openings = [openings copy];
+        _shellState = Core3DShellOperationStateCaptured;
+    }
+    return self;
+}
+@end
+
 @class Core3DSavedCutSourceJob;
 @interface Core3DModelingPlanningContext () {
 @public
@@ -2957,6 +2990,7 @@ struct NativeModelingPermitIssuer final {
     BOOL _nativeSolidCancelled;
     __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
     Core3DModelingPlanningContext *_modelingConstructionContext;
+    Core3DShellOperation *_activeModelingShell;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
     Core3DMeshContactOperation *_meshContactOperation;
@@ -13784,6 +13818,163 @@ struct NativeModelingPermitIssuer final {
     }catch(...){[self stopModelingPreparedRequest:request];return NO;}
 }
 
+- (Core3DShellOperation *)captureModelingShellWithOpenings:(NSArray<Core3DShellOpeningSelector *> *)openings
+    context:(Core3DModelingPlanningContext *)context {
+    if (![self isModelingPlanningContextCurrent:context] || _activeModelingShell
+        || ![openings isKindOfClass:NSArray.class] || openings.count == 0 || openings.count > 6
+        || context.scene.selection.selectedElements.count != 1) return nil;
+    try {
+        NSString *entity = context.scene.selection.selectedElements.firstObject.entityIdentifier;
+        // The old planning descriptors deliberately omit polygon revolutions.
+        // This opt-in route reads the current native recipe under the ORIGINAL
+        // lease, without broadening those descriptors/catalogs for old routes.
+        Core3DStoredProfileSnapshot *profile = [self storedProfileWithEntityIdentifier:entity expected:context.scene];
+        if (!profile || !profile.current) return nil;
+        if (![entity isEqualToString:profile.entityIdentifier]) return nil;
+        std::vector<core3d::ShellOpeningSelector> selectors;
+        NSMutableArray<Core3DShellOpeningSelector *> *canonical = [NSMutableArray array];
+        std::array<bool, 6> seen{};
+        for (Core3DShellOpeningSelector *opening in openings) {
+            if (![opening isMemberOfClass:Core3DShellOpeningSelector.class]
+                || opening.axis < 0 || opening.axis > 2 || opening.side < 0 || opening.side > 1) return nil;
+            const auto key = opening.axis * 2 + opening.side;
+            if (seen[key]) return nil;
+            seen[key] = true;
+        }
+        for (NSUInteger key = 0; key < seen.size(); ++key) {
+            if (!seen[key]) continue;
+            selectors.push_back({static_cast<core3d::ShellOpeningAxis>(key / 2),
+                static_cast<core3d::ShellOpeningSide>(key % 2)});
+            [canonical addObject:[[Core3DShellOpeningSelector alloc]
+                initWithAxis:static_cast<Core3DShellOpeningAxis>(key / 2)
+                side:static_cast<Core3DShellOpeningSide>(key % 2)]];
+        }
+        const auto viewer = GLController.viewer;
+        core3d::FaceOperationSourceProof proof;
+        if (!viewer || !viewer->captureShellOpenings(entity.UTF8String, selectors, proof)
+            || ![self isModelingPlanningContextCurrent:context]) return nil;
+        Core3DShellOperation *operation = [[Core3DShellOperation alloc] initPrivateWithEntity:entity openings:canonical];
+        operation->_shellOwner = self; operation->_shellViewer = viewer;
+        operation->_shellInteractor = viewer->getShapeInteractor();
+        operation->_shellContext = context; operation->_shellProof = std::move(proof);
+        return operation;
+    } catch (...) { return nil; }
+}
+
+- (BOOL)core3d_ownsModelingShell:(Core3DShellOperation *)operation {
+    return NSThread.isMainThread && [operation isMemberOfClass:Core3DShellOperation.class]
+        && operation->_shellOwner == self && GLController
+        && operation->_shellViewer.lock() == GLController.viewer;
+}
+
+- (Core3DShellOperationState)modelingShellState:(Core3DShellOperation *)operation {
+    if (![self core3d_ownsModelingShell:operation]) return Core3DShellOperationStateRejected;
+    if (!operation->_shellStarted) {
+        if (operation->_shellState == Core3DShellOperationStateCaptured
+            && ![self isModelingPlanningContextCurrent:operation->_shellContext])
+            operation->_shellState = Core3DShellOperationStateRejected;
+        return operation->_shellState;
+    }
+    if (operation->_shellState == Core3DShellOperationStateCommitted
+        || operation->_shellState == Core3DShellOperationStateCancelled) return operation->_shellState;
+    const auto interactor = operation->_shellInteractor.lock();
+    if (_activeModelingShell != operation || !interactor
+        || GLController.viewer->getShapeInteractor() != interactor
+        || interactor->shellPreviewGeneration() != operation->_shellGeneration
+        || !interactor->hasActiveShell()) {
+        // Another native entry may have resolved/mutated the preview. Absence
+        // is not proof of rollback and must never authorize a replacement.
+        return Core3DShellOperationStateOutcomeUnknown;
+    }
+    switch (interactor->shellPreviewState()) {
+        case core3d::ShellPreviewState::Ready: return Core3DShellOperationStateReady;
+        case core3d::ShellPreviewState::Computing:
+        case core3d::ShellPreviewState::Committing: return Core3DShellOperationStatePreparing;
+        case core3d::ShellPreviewState::OutcomeUnknown: return Core3DShellOperationStateOutcomeUnknown;
+        default: return Core3DShellOperationStateRetryableFailure;
+    }
+}
+
+- (Core3DShellOperationState)prepareModelingShell:(Core3DShellOperation *)operation thicknessMM:(double)thickness {
+    if (![self core3d_ownsModelingShell:operation]) return Core3DShellOperationStateRejected;
+    if (operation->_shellStarted || operation->_shellState != Core3DShellOperationStateCaptured)
+        return [self modelingShellState:operation];
+    operation->_shellState = Core3DShellOperationStateRejected;
+    if (_activeModelingShell || !std::isfinite(thickness) || thickness < 0.001 || thickness > 1000000
+        || ![self isModelingPlanningContextCurrent:operation->_shellContext]) return operation->_shellState;
+    operation->_shellContext->_planningConsumed = YES;
+    const auto viewer = GLController.viewer;
+    const auto interactor = operation->_shellInteractor.lock();
+    if (!interactor || viewer->getShapeInteractor() != interactor
+        || !viewer->beginCapturedShell(operation->_shellProof)) return operation->_shellState;
+    operation->_shellStarted = YES;
+    _activeModelingShell = operation;
+    viewer->getObjectInteractor()->setManipulatorType(core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeShell);
+    _currentGizmoType = [GLController getGizmoType];
+    // The production range includes document units and occurrence scale.
+    // Do not clamp an out-of-range request into a different shell.
+    const double factor = interactor->shellMetersPerUnit() * 1000.0;
+    const double localThickness = thickness / factor;
+    const auto range = interactor->shellThicknessRange();
+    operation.thicknessMM = thickness;
+    BOOL prepared = _currentGizmoType == PrimitiveGizmoTypeShell
+        && std::isfinite(factor) && factor > 0 && std::isfinite(localThickness)
+        && localThickness >= range.first && localThickness <= range.second
+        && interactor->setShellThickness(localThickness);
+    operation->_shellGeneration = interactor->shellPreviewGeneration();
+    if (!prepared) return [self cancelModelingShell:operation];
+    self.can_apply = interactor->canApplyShell();
+    [GLController requestRender];
+    [self viewDidChangeViewportPresentationOverlay];
+    [self sendNotifyUIState:(UIStateChangingGizmo | UIStateChangingSelection | UIStateChangingApply)];
+    return [self modelingShellState:operation];
+}
+
+- (Core3DShellOperationState)core3d_finishModelingShell:(Core3DShellOperation *)operation apply:(BOOL)apply {
+    if (![self core3d_ownsModelingShell:operation]) return Core3DShellOperationStateRejected;
+    if (!operation->_shellStarted) {
+        if (!apply && operation->_shellState != Core3DShellOperationStateCommitted) {
+            operation->_shellState = Core3DShellOperationStateCancelled;
+            if (!operation->_shellContext->_planningConsumed)
+                operation->_shellContext->_planningRetired = YES;
+            operation->_shellProof = {};
+        }
+        return [self modelingShellState:operation];
+    }
+    if (operation->_shellState == Core3DShellOperationStateCommitted
+        || operation->_shellState == Core3DShellOperationStateCancelled) return operation->_shellState;
+    const auto interactor = operation->_shellInteractor.lock();
+    if (_activeModelingShell != operation || !interactor
+        || GLController.viewer->getShapeInteractor() != interactor
+        || interactor->shellPreviewGeneration() != operation->_shellGeneration
+        || !interactor->hasActiveShell() || _currentGizmoType != PrimitiveGizmoTypeShell)
+        return Core3DShellOperationStateOutcomeUnknown;
+    const auto result = apply ? [self tryApplyShell] : [self tryCancelShell];
+    operation->_shellGeneration = interactor->shellPreviewGeneration();
+    if (result == Core3DModelingOperationResultSucceeded) {
+        operation->_shellState = apply ? Core3DShellOperationStateCommitted : Core3DShellOperationStateCancelled;
+        operation->_shellContext->_planningRetired = YES;
+        operation->_shellProof = {};
+        _activeModelingShell = nil;
+        // Touch completion restores Move/Rotate. A typed shell must instead
+        // leave the planning lane idle for the next context and committed Undo.
+        // Only normalize a confirmed terminal result; unknown/retryable shells
+        // retain their exact recovery controller and tool.
+        [self setGizmoType:PrimitiveGizmoTypeNone];
+        return operation->_shellState;
+    }
+    // Unknown and retryable results keep the exact controller/token alive;
+    // Apply may reconcile that controller, but can never begin a new command.
+    return [self modelingShellState:operation];
+}
+
+- (Core3DShellOperationState)applyModelingShell:(Core3DShellOperation *)operation {
+    return [self core3d_finishModelingShell:operation apply:YES];
+}
+- (Core3DShellOperationState)cancelModelingShell:(Core3DShellOperation *)operation {
+    return [self core3d_finishModelingShell:operation apply:NO];
+}
+
 - (Core3DModelingPlanningContext *)captureModelingPlanningContext {
     if (![self core3d_canCaptureModelingContext]) return nil;
     try {
@@ -14035,6 +14226,8 @@ struct NativeModelingPermitIssuer final {
     if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
         || context->_planningOwner != self) return;
     [self core3d_retireReservationContext:context];
+    if (_activeModelingShell && _activeModelingShell->_shellContext == context)
+        (void)[self cancelModelingShell:_activeModelingShell];
     Core3DSavedCutSourceJob *sourceJob=context->_planningSavedCutJob;
     if(sourceJob&&sourceJob->_planningContext==context)[sourceJob cancel];
     context->_planningRetired = YES;
