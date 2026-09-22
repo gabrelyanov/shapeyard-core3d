@@ -3465,10 +3465,13 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(
         // Check every plain bore against the unchanged source at admission,
         // including an append to an already retained loft/circle program.
         if(!retained_boolean::HasRing(*program)&&!retained_boolean::HasWedge(*program)){
+            const bool singleTransverseFillet=saved_boolean_result::detail::SingleTransverseFilletCarrier(*program);
             for(const auto& step:program->steps){
                 const auto clearance=saved_cut_bore_clearance::Inspect(
                     saved_boolean_result::detail::GeometryView(*program,step.operand));
-                if(clearance.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk){
+                if(clearance.status!=saved_cut_bore_clearance::Status::ClearRecipeDisk
+                    &&!(singleTransverseFillet
+                        &&clearance.status==saved_cut_bore_clearance::Status::ClearRecipeTransverse)){
                     CORE3D_CUT_DETAIL("program-clearance.source-disk",clearance.status);return {};
                 }
             }

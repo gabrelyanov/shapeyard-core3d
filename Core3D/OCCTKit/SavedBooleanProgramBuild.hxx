@@ -113,9 +113,14 @@ inline bool InspectSourceBase(const TopoDS_Shape& base,const retained_solid::Env
 inline bool PrepareTransversePersistence(TopoDS_Shape& shape,const std::atomic_bool& stop,Budget& budget);
 inline bool SingleFilletCarrier(const Program& p){return p.codecMinor==4&&p.steps.size()==1
     &&p.steps[0].operand.kind==analytic_boolean::OperandKind::Cylinder;}
-inline bool AdmitProgram(const Program& p){return SingleFilletCarrier(p)?retained_boolean::Valid(p)
-    &&saved_cut_bore_clearance::Inspect(saved_boolean_result::detail::GeometryView(p,0)).status==saved_cut_bore_clearance::Status::ClearRecipeDisk
-    :saved_boolean_result::detail::AdmitSections(p);}
+inline bool AdmitProgram(const Program& p){
+    if(!SingleFilletCarrier(p))return saved_boolean_result::detail::AdmitSections(p);
+    if(!retained_boolean::Valid(p))return false;
+    const auto status=saved_cut_bore_clearance::Inspect(saved_boolean_result::detail::GeometryView(p,0)).status;
+    return status==saved_cut_bore_clearance::Status::ClearRecipeDisk
+        ||(status==saved_cut_bore_clearance::Status::ClearRecipeTransverse
+            &&saved_boolean_result::detail::SingleTransverseFilletCarrier(p));
+}
 inline saved_boolean_result::Inspection PreFilletInspection(const TopoDS_Shape& shape,const Program& p,const std::atomic_bool& stop){
     if(saved_boolean_result::detail::TransverseProgram(p)){
         auto carrier=p;carrier.filletSteps.clear();

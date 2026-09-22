@@ -92,6 +92,18 @@ inline bool ClearBore(const retained_solid::Envelope& view){
 inline bool TransverseProgram(const retained_boolean::Program& p){
     return !p.steps.empty()&&analytic_boolean_wedge::TransverseAxis(GeometryView(p,0),p.steps.front().operand)>=0;
 }
+// D48's exception is deliberately narrower than general program admission:
+// it is only the codec-4 carrier produced by appending a retained fillet to
+// one existing transverse cylinder (including the pre-fillet proof copy and
+// a later removal, whose fillet list is empty). SeparateDisks keeps its two-disk floor;
+// the complete transverse replay/integral/representation proof below owns
+// this one-carrier case instead.
+inline bool SingleTransverseFilletCarrier(const retained_boolean::Program& p){
+    if(!retained_boolean::Valid(p)||p.codecMinor!=4||p.source.family!=3||p.steps.size()!=1
+        ||p.steps.front().operand.kind!=analytic_boolean::OperandKind::Cylinder||!TransverseProgram(p))return false;
+    return saved_cut_bore_clearance::Inspect(GeometryView(p,0)).status
+        ==saved_cut_bore_clearance::Status::ClearRecipeTransverse;
+}
 inline bool AdmitSections(const retained_boolean::Program& p){
     if(!retained_boolean::Valid(p))return false;
     // This admits the Boolean carrier only. RetainedFilletBuild separately
@@ -282,7 +294,8 @@ inline Inspection InspectTransverse(const TopoDS_Shape& result,const retained_bo
     Inspection report;report.phase="transverse-program-admission";
     const auto fail=[&](){report.classification=stop.load()?Classification::Cancelled:Classification::Refused;return report;};
     try {
-        if(stop.load()||!program.filletSteps.empty()||!detail::TransverseProgram(program)||!detail::AdmitSections(program)
+        const bool admitted=detail::AdmitSections(program)||detail::SingleTransverseFilletCarrier(program);
+        if(stop.load()||!program.filletSteps.empty()||!detail::TransverseProgram(program)||!admitted
             ||result.IsNull()||result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return fail();
         rectangular_loft::Definition loft;if(!loft_persistence::Decode(program.source.values,loft))return fail();
         rectangular_loft::Admission admission;auto prepared=rectangular_loft::Prepare(loft,admission);
