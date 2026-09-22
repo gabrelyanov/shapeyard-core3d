@@ -19,6 +19,7 @@
 #include <TopoDS_Shape.hxx>
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -42,6 +43,12 @@ Standard_Boolean TryResolveShellOpeningSelectors(
     const TopoDS_Shape& shape,
     const std::vector<ShellOpeningSelector>& selectors,
     std::vector<TopoDS_Face>& faces) noexcept;
+
+//! Detached profile rebuilds use exactly the Shell tool's admission and kernel
+//! boundary. Failure/Stop publishes no shape and never touches OCAF.
+Standard_Boolean ReplayProfileShells(
+    const TopoDS_Shape& base, const profile::Parameters& parameters,
+    std::atomic_bool& cancelled, TopoDS_Shape& result) noexcept;
 
 inline Standard_Boolean ShellFaceIsSinglePlanarOpening(
     const TopoDS_Face& theFace) noexcept
@@ -324,6 +331,8 @@ private:
         Standard_Real maximumThickness = 0.0;
         std::string entityIdentifier;
         std::string definitionIdentifier;
+        profile::Record profileRecord;
+        std::vector<int> profileShellOpenings;
     };
 
     Standard_Boolean tryPrepareSource(
@@ -357,6 +366,7 @@ private:
     std::unique_ptr<Source> mySource;
     Handle(AIS_Shape) myPreviewResult;
     TopoDS_Shape myPendingCandidate;
+    std::optional<profile::Parameters> myPendingProfile;
     std::shared_ptr<ShellPreviewWorker> myWorker;
     std::function<void()> myPreviewStateChangedCallback;
     ShellPreviewState myState = ShellPreviewState::Unavailable;

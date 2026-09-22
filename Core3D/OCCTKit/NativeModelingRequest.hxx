@@ -64,7 +64,7 @@ inline bool Encode(const Descriptor&d,std::vector<std::uint8_t>&out)noexcept{
             const auto&p=*d.placement;
             if(!Nonzero(p.entity)||!Nonzero(p.definition)||!Nonzero(p.geometry)||!Nonzero(p.recipe)||!Nonzero(p.state)
                 ||p.family<1||p.family>5||(p.family==5?Nonzero(p.feature)||p.schema!=0:!Nonzero(p.feature)||p.schema<1)
-                ||(p.family==1&&p.schema>4)||(p.family==2&&p.schema>2)
+                ||(p.family==1&&p.schema>5)||(p.family==2&&p.schema>2)
                 ||(p.family==3&&p.schema>2)||(p.family==4&&p.schema!=1)
                 ||p.kind>1||p.axis>2||!std::isfinite(p.metersPerUnit)||p.metersPerUnit<=0
                 ||!std::isfinite(p.metersPerUnit*1000)||p.metersPerUnit*1000<=0
@@ -89,7 +89,7 @@ inline bool Encode(const Descriptor&d,std::vector<std::uint8_t>&out)noexcept{
         }
         Writer w;w.raw(reinterpret_cast<const std::uint8_t*>("SYMD"),4);w.integer(loft?2:1,1);w.integer(std::uint8_t(d.operation),1);w.integer(d.parts.size(),1);w.integer(0,1);
         for(const auto&p:d.parts){const auto expected=(d.operation==Operation::CreateEnclosure||d.operation==Operation::RebuildEnclosure)?Recipe::Enclosure:(loft?Recipe::RectangularLoft:Recipe::Profile);
-            if(p.recipe!=expected||p.schema<1||p.schema>(p.recipe==Recipe::Profile?4u:(loft?1u:2u))||!UTF8(p.name,256,true)||p.values.empty()||p.values.size()>MaximumValues
+            if(p.recipe!=expected||p.schema<1||p.schema>(p.recipe==Recipe::Profile?5u:(loft?1u:2u))||!UTF8(p.name,256,true)||p.values.empty()||p.values.size()>MaximumValues
                 ||(d.operation!=Operation::CreateAssembly&&!p.name.empty()))return false;
             w.integer(std::uint8_t(p.recipe),1);w.integer(p.schema,4);w.text(p.name);w.integer(p.values.size(),4);for(double x:p.values)w.scalar(x);
         }

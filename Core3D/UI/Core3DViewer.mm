@@ -1739,6 +1739,8 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
 struct ProfileSolidGeometry : ProfileDefinition {
     std::atomic_bool cancelled{false};
     std::optional<profile::ConstructionFrame> constructionFrame;
+    std::vector<profile::ShellStep> shells;
+    double shellMetersPerUnit = 0;
     TopoDS_Shape solid;
     std::array<double, 6> bounds{};
     bool built = false;
@@ -1847,6 +1849,16 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         BRepGProp::VolumeProperties(solid, properties);
         if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
             || std::abs(properties.Mass() - expected) > std::max(1e-8, expected * 1e-8)) { return false; }
+        if (!geometry->shells.empty()) {
+            profile::Parameters parameters{static_cast<const ProfileDefinition&>(*geometry), geometry->shellMetersPerUnit};
+            parameters.constructionFrame = geometry->constructionFrame;
+            parameters.shells = geometry->shells;
+            TopoDS_Shape shelled;
+            if (!ReplayProfileShells(solid, parameters, geometry->cancelled, shelled)
+                || shelled.IsNull() || shelled.ShapeType() != TopAbs_SOLID) return false;
+            solid = TopoDS::Solid(shelled);
+            if (!BRepCheck_Analyzer(solid, Standard_True).IsValid()) return false;
+        }
         Bnd_Box bounds;
         BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
         if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
@@ -2785,7 +2797,7 @@ OrdinaryEditResult Core3DViewer::commitSavedProgramSourceEdit(const std::shared_
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareProfileSolid(
     const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
-    if (![NSThread isMainThread] || parameters.constructionFrame
+    if (![NSThread isMainThread] || parameters.constructionFrame || !parameters.shells.empty()
         || !std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit <= 0) return {};
     try {
         // No unit conversion or new history occurs during preparation. The
@@ -3029,7 +3041,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         || identity.documentGeneration != original.identity.documentGeneration
         || identity.modelRevision != original.identity.modelRevision
         || parameters.metersPerUnit != original.parameters.metersPerUnit
-        || parameters.constructionFrame != original.parameters.constructionFrame) return {};
+        || parameters.constructionFrame != original.parameters.constructionFrame
+        || parameters.shells != original.parameters.shells) return {};
     try {
         const auto current = storedProfileDefinition(identity, presentationRevision, width, height);
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
@@ -3047,6 +3060,8 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         auto work = prepareProfileSolid(d, identity, presentationRevision, width, height);
         if (!work) return {};
         profileSolidGeometry(work)->constructionFrame = parameters.constructionFrame;
+        profileSolidGeometry(work)->shells = parameters.shells;
+        profileSolidGeometry(work)->shellMetersPerUnit = parameters.metersPerUnit;
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
@@ -3737,6 +3752,7 @@ bool Core3DViewer::attachModelingRebuildPermit(const std::shared_ptr<NativeSolid
                 ||!receipt::ParseUUID(record.previous.profile.identifier,feature))return false;
             profile::Parameters parameters{static_cast<const ProfileDefinition&>(*geometry),record.requested.profileRebuild->metersPerUnit};
             parameters.constructionFrame=geometry->constructionFrame;
+            parameters.shells=geometry->shells;
             part.recipe=request::Recipe::Profile;part.schema=profile::SchemaFor(parameters);
             if(!profile::Encode(parameters,part.values))return false;
             std::vector<double> requested;if(!profile::Encode(*record.requested.profileRebuild,requested)||requested!=part.values)return false;

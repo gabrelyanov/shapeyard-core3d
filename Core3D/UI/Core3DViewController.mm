@@ -973,11 +973,14 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
     metersPerUnit:(double)metersPerUnit values:(const std::vector<double>&)values;
 @end
 @interface Core3DSavedCutSourceLoftStation ()
-- (instancetype)initWithIdentifier:(uint32_t)identifier widthMM:(double)width depthMM:(double)depth;
+- (instancetype)initWithIdentifier:(uint32_t)identifier zMM:(double)z
+    centerXMM:(double)centerX centerYMM:(double)centerY widthMM:(double)width depthMM:(double)depth;
 @end
 @implementation Core3DSavedCutSourceLoftStation
-- (instancetype)initWithIdentifier:(uint32_t)identifier widthMM:(double)width depthMM:(double)depth {
-    self=[super init];if(self){_stationIdentifier=identifier;_widthMM=width;_depthMM=depth;}return self;
+- (instancetype)initWithIdentifier:(uint32_t)identifier zMM:(double)z
+    centerXMM:(double)centerX centerYMM:(double)centerY widthMM:(double)width depthMM:(double)depth {
+    self=[super init];if(self){_stationIdentifier=identifier;_zMM=z;_centerXMM=centerX;_centerYMM=centerY;
+        _widthMM=width;_depthMM=depth;}return self;
 }
 @end
 @implementation Core3DSavedCutSourceValues
@@ -1050,7 +1053,11 @@ bool Core3DSourceMMToRecipe(double requested,double original,double factor,doubl
                 double width=0,depth=0;
                 if(!Core3DSourceRecipeToMM(station.width,factor,width)||!Core3DSourceRecipeToMM(station.depth,factor,depth)
                     ||width<=0||depth<=0||width>1e6||depth>1e6)return nil;
-                [stations addObject:[[Core3DSavedCutSourceLoftStation alloc] initWithIdentifier:station.identifier widthMM:width depthMM:depth]];
+                // Decode already validates these coordinates. Project the same
+                // retained source in order, without adding edit admission rules.
+                [stations addObject:[[Core3DSavedCutSourceLoftStation alloc] initWithIdentifier:station.identifier
+                    zMM:station.z*factor centerXMM:station.centerX*factor centerYMM:station.centerY*factor
+                    widthMM:width depthMM:depth]];
             }
             _loftStationsMM=[stations copy];
         }else{
@@ -8694,7 +8701,7 @@ struct NativeModelingPermitIssuer final {
 }
 
 + (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)input {
-    if (![input isKindOfClass:[NSArray class]] || input.count > 6211)
+    if (![input isKindOfClass:[NSArray class]] || input.count > core3d::profile::MaximumScalars)
         return @{@"accepted": @NO, @"bridgeRejected": @YES};
     try {
         std::vector<double> values; values.reserve(input.count);
@@ -8723,6 +8730,61 @@ struct NativeModelingPermitIssuer final {
     } catch (...) {
         return @{@"accepted": @NO, @"exception": @YES};
     }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugProfileShellRequestCodec {
+    namespace q = core3d::request;
+    NSMutableDictionary<NSString *, NSNumber *> *checks = [NSMutableDictionary dictionary];
+    try {
+        q::Descriptor profile; profile.operation = q::Operation::RebuildProfile;
+        q::Part part; part.schema = 5; part.values = {0.0, -0.0}; profile.parts = {part};
+        q::Descriptor placement; placement.operation = q::Operation::SetPlacement;
+        q::PlacementIntent intent; intent.entity.fill(1); intent.definition.fill(2); intent.feature.fill(3);
+        intent.geometry.fill(4); intent.recipe.fill(5); intent.state.fill(6);
+        intent.family = 1; intent.schema = 5; intent.metersPerUnit = 0.001;
+        placement.placement = intent;
+        for (unsigned schema = 1; schema <= 5; ++schema) {
+            profile.parts[0].schema = schema; placement.placement->schema = schema;
+            std::vector<std::uint8_t> a, b; q::Descriptor decoded;
+            checks[[NSString stringWithFormat:@"profile-schema-%u", schema]] = @(q::Encode(profile, a)
+                && q::Decode(a, decoded) && q::Encode(decoded, b) && a == b);
+            checks[[NSString stringWithFormat:@"placement-schema-%u", schema]] = @(q::Encode(placement, a)
+                && q::Decode(a, decoded) && q::Encode(decoded, b) && a == b);
+        }
+        std::vector<std::uint8_t> bytes; q::Descriptor decoded;
+        q::Encode(profile, bytes); bytes[9] = 6;
+        checks[@"profile-schema-6-decode-refused"] = @(!q::Decode(bytes, decoded));
+        q::Encode(placement, bytes); bytes[158] = 6;
+        checks[@"placement-schema-6-decode-refused"] = @(!q::Decode(bytes, decoded));
+        profile.parts[0].schema = 6; placement.placement->schema = 6;
+        checks[@"profile-schema-6-encode-refused"] = @(!q::Encode(profile, bytes));
+        checks[@"placement-schema-6-encode-refused"] = @(!q::Encode(placement, bytes));
+        checks[@"profile-record-schema-6-refused"] = @(core3d::profile::ScalarLimitForSchema(6) == 0);
+        placement.placement->schema = 5;
+        for (unsigned i = 0; i < 7; ++i) {
+            auto bad = placement;
+            switch (i) {
+                case 0: bad.placement->family = 0; break;
+                case 1: bad.placement->family = 6; break;
+                case 2: bad.placement->feature.fill(0); break;
+                case 3: bad.placement->axis = 3; break;
+                case 4: bad.placement->kind = 2; break;
+                case 5: bad.placement->schema = 0; break;
+                case 6: bad.placement->metersPerUnit = std::numeric_limits<double>::infinity(); break;
+            }
+            checks[[NSString stringWithFormat:@"placement-refusal-%u", i]] = @(!q::Encode(bad, bytes));
+        }
+        for (unsigned family = 2; family <= 4; ++family) {
+            auto bad = placement; bad.placement->family = family; bad.placement->schema = family == 4 ? 2 : 3;
+            checks[[NSString stringWithFormat:@"other-family-cap-%u", family]] = @(!q::Encode(bad, bytes));
+        }
+        auto bad = profile; bad.parts[0].schema = 5; bad.parts[0].values.resize(q::MaximumValues + 1);
+        checks[@"value-limit"] = @(!q::Encode(bad, bytes));
+        bad = profile; bad.operation = q::Operation::CreateAssembly; bad.parts[0].schema = 5;
+        bad.parts[0].name = std::string("\xc0\x80", 2);
+        checks[@"utf8-refusal"] = @(!q::Encode(bad, bytes));
+    } catch (...) { checks[@"exception"] = @NO; }
+    return checks;
 }
 
 
@@ -13424,6 +13486,7 @@ struct NativeModelingPermitIssuer final {
             // Match the existing rebuild adapter: null/unchanged fields already
             // preserve exact raw values, and the native frame remains opening.
             parameters.constructionFrame=original.parameters.constructionFrame;
+            parameters.shells=original.parameters.shells;
         } else if (parameters.metersPerUnit!=context.scene.metersPerUnit||!Core3DRequestUUID(NSUUID.UUID,feature)) return nil;
         core3d::request::Part part;part.recipe=core3d::request::Recipe::Profile;
         part.schema=core3d::profile::SchemaFor(parameters);
@@ -14531,7 +14594,8 @@ struct NativeModelingPermitIssuer final {
     }
     try {
         const auto original=[context.selectedProfileRecipe nativeSnapshot];
-        const auto requested=[definition nativeParameters];
+        auto requested=[definition nativeParameters];
+        requested.shells=original.parameters.shells;
         if (!original.current || !Core3DModelingProfileRecipeSupported(original.parameters,original.dimensionMetersPerUnit)
             || !Core3DModelingProfileRecipeSupported(requested,original.dimensionMetersPerUnit)) {
             completion(Core3DProfileConstructionResultRejected);return;
@@ -15835,6 +15899,7 @@ struct NativeModelingPermitIssuer final {
         // frame. Retain that frame from the exact opening authority; native
         // admission rejects stale originals or attempts to change it.
         requested.constructionFrame = originalNative.parameters.constructionFrame;
+        requested.shells = originalNative.parameters.shells;
         const auto work = GLController.viewer->prepareStoredProfileRebuild(requested,
             originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));

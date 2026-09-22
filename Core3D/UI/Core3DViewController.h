@@ -1364,6 +1364,7 @@ __attribute__((objc_subclassing_restricted))
 //! Pure native codec diagnostic; no live document or mutation authority.
 + (NSDictionary<NSString *, id> *)debugCurveProfileCodecValues:(NSArray<NSNumber *> *)values
     NS_SWIFT_NAME(debugCurveProfileCodec(values:));
++ (NSDictionary<NSString *, NSNumber *> *)debugProfileShellRequestCodec;
 //! Read-only saved construction record from the actual OCAF object.
 - (NSDictionary<NSString *, id> *_Nullable)debugStoredProfileDefinitionForEntityIdentifier:(NSString *)identifier
     NS_SWIFT_NAME(debugStoredProfileDefinition(entityIdentifier:));

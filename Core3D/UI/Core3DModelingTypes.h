@@ -65,10 +65,15 @@ __attribute__((objc_subclassing_restricted))
     cornerRadiusMM:(nullable NSNumber *)corner
     NS_SWIFT_NAME(init(enclosureWidthMM:depthMM:heightMM:wallMM:floorMM:cornerRadiusMM:));
 @end
-//! Immutable station dimensions in source-recipe millimetres.
+//! Immutable station values in source-recipe millimetres, before construction
+//! and occurrence transforms. Coordinates are descriptive; patches still edit
+//! only width/depth for an existing station identity.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DSavedCutSourceLoftStation : NSObject
 @property(nonatomic,readonly) uint32_t stationIdentifier;
+@property(nonatomic,readonly) double zMM;
+@property(nonatomic,readonly) double centerXMM;
+@property(nonatomic,readonly) double centerYMM;
 @property(nonatomic,readonly) double widthMM;
 @property(nonatomic,readonly) double depthMM;
 - (instancetype)init NS_UNAVAILABLE;
@@ -81,6 +86,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) Core3DSavedCutSourceFamily family;
 @property(nonatomic,copy,readonly,nullable) NSNumber *circleOuterRadiusMM;
 @property(nonatomic,copy,readonly,nullable) NSNumber *circleInnerRadiusMM;
+//! Complete stations in retained source order, preserving their native IDs.
 @property(nonatomic,copy,readonly) NSArray<Core3DSavedCutSourceLoftStation *> *loftStationsMM;
 @property(nonatomic,readonly) Core3DProfilePlane plane;
 @property(nonatomic,readonly) double metersPerUnit;

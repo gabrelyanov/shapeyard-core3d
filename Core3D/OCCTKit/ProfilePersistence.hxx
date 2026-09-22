@@ -41,31 +41,79 @@ inline const Standard_GUID& CountID() {
 inline constexpr int MaximumLegacyScalars = 7 + 64 * 2 + 16 * 3;
 inline constexpr int MaximumFramedLegacyScalars = MaximumLegacyScalars + 8;
 inline constexpr int MaximumCurveScalars = 7 + 3 * 17 + 3 * 512 + 9 * 512;
-inline constexpr int MaximumScalars = MaximumCurveScalars + 8;
+inline constexpr int MaximumBaseScalars = MaximumCurveScalars + 8;
+inline constexpr int MaximumShellSteps = 8;
+// V5 wraps the byte-exact v1..4 base recipe and bounded shell dependencies.
+inline constexpr int MaximumScalars = MaximumBaseScalars + 3 + MaximumShellSteps * 17;
 inline int ScalarLimitForSchema(int schema) {
     switch (schema) {
         case 1: return MaximumLegacyScalars;
         case 2: return MaximumFramedLegacyScalars;
         case 3: return MaximumCurveScalars;
-        case 4: return MaximumScalars;
+        case 4: return MaximumBaseScalars;
+        case 5: return MaximumScalars;
         default: return 0;
     }
 }
 inline constexpr int MaximumLabels = 100000;
 inline constexpr int MaximumRecords = 4096;
 
+struct ShellStep {
+    // Thickness and tolerance units in the frozen BRep frame at Shell capture.
+    // The frame is independent of later baked copy/mirror construction frames.
+    double thickness = 0;
+    double metersPerLocalUnit = 0;
+    ConstructionFrame frame;
+    // Canonical axis*2+side: X/Y/Z, minimum/maximum. Never topology ordinals.
+    std::vector<int> openings;
+    bool operator==(const ShellStep& other) const {
+        return thickness == other.thickness && metersPerLocalUnit == other.metersPerLocalUnit
+            && frame == other.frame && openings == other.openings;
+    }
+    bool IsValid() const {
+        if (!std::isfinite(thickness) || thickness <= 0
+            || !std::isfinite(metersPerLocalUnit) || metersPerLocalUnit <= 0
+            || !std::isfinite(thickness * metersPerLocalUnit)
+            || !frame.IsValid() || openings.empty() || openings.size() > 6) return false;
+        int previous = -1;
+        for (int key : openings) {
+            if (key <= previous || key > 5) return false;
+            previous = key;
+        }
+        return true;
+    }
+};
+
 struct Parameters {
     ProfileDefinition definition;
     double metersPerUnit = 0;
     std::optional<ConstructionFrame> constructionFrame;
+    std::vector<ShellStep> shells;
 };
 
 inline int SchemaFor(const Parameters& parameters) {
+    if (!parameters.shells.empty()) return 5;
     return (parameters.definition.curves ? 3 : 1) + (parameters.constructionFrame ? 1 : 0);
 }
 
 inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
     values.clear();
+    if (!parameters.shells.empty()) {
+        if (parameters.shells.size() > MaximumShellSteps) return false;
+        auto base = parameters; base.shells.clear();
+        std::vector<double> baseValues;
+        if (!Encode(base, baseValues)) return false;
+        values = {5, double(baseValues.size()), double(parameters.shells.size())};
+        values.insert(values.end(), baseValues.begin(), baseValues.end());
+        for (const auto& step : parameters.shells) {
+            if (!step.IsValid()) { values.clear(); return false; }
+            values.insert(values.end(), {step.thickness, step.metersPerLocalUnit});
+            values.insert(values.end(), step.frame.values.begin(), step.frame.values.end());
+            values.push_back(double(step.openings.size()));
+            for (int key : step.openings) values.push_back(double(key));
+        }
+        return values.size() <= MaximumScalars;
+    }
     const auto& d = parameters.definition;
     double area = 0, volume = 0;
     if (!std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit <= 0
@@ -113,7 +161,7 @@ inline bool Encode(const Parameters& parameters, std::vector<double>& values) {
 
 inline bool DecodeCurves(const std::vector<double>& values, Parameters& result) {
     result={};
-    if (values.size()<7 || values.size()>MaximumScalars) return false;
+    if (values.size()<7 || values.size()>MaximumBaseScalars) return false;
     for (double value:values) if (!std::isfinite(value)) return false;
     const auto integer=[](double v,double low,double high) {
         return v>=low && v<=high && v==std::floor(v);
@@ -121,7 +169,7 @@ inline bool DecodeCurves(const std::vector<double>& values, Parameters& result) 
     if (!integer(values[0],0,2) || !integer(values[2],0,1) || values[3]!=2
         || !integer(values[4],1,17) || !integer(values[5],0,1)) return false;
     const bool framed=values[5]==1;
-    if (values.size()>std::size_t(framed?MaximumScalars:MaximumCurveScalars)) return false;
+    if (values.size()>std::size_t(framed?MaximumBaseScalars:MaximumCurveScalars)) return false;
     const auto identity=[&](double value) {
         return integer(value,1,double(std::numeric_limits<ProfileCurveID>::max()));
     };
@@ -172,6 +220,36 @@ inline bool Decode(const std::vector<double>& values, Parameters& result) {
     result = {};
     if (values.size() < 7 || values.size() > MaximumScalars) return false;
     for (double value : values) if (!std::isfinite(value)) return false;
+    if (values[0] == 5) {
+        const auto integer = [](double v, int low, int high) {
+            return v >= low && v <= high && v == std::floor(v);
+        };
+        if (!integer(values[1], 7, MaximumBaseScalars)
+            || !integer(values[2], 1, MaximumShellSteps)
+            || std::size_t(values[1]) > values.size() - 3) return false;
+        std::size_t offset = 3 + std::size_t(values[1]);
+        std::vector<double> base(values.begin() + 3, values.begin() + offset);
+        Parameters p;
+        // No recursive composite envelopes and no new interpretation of v1..4.
+        if (base[0] == 5 || !Decode(base, p)) return false;
+        for (int i = 0; i < int(values[2]); ++i) {
+            if (values.size() - offset < 11) return false;
+            ShellStep step; step.thickness = values[offset++];
+            step.metersPerLocalUnit = values[offset++];
+            std::copy_n(values.begin() + offset, 8, step.frame.values.begin()); offset += 8;
+            const double count = values[offset++];
+            if (!integer(count, 1, 6) || std::size_t(count) > values.size() - offset) return false;
+            for (int j = 0; j < int(count); ++j) {
+                if (!integer(values[offset], 0, 5)) return false;
+                step.openings.push_back(int(values[offset++]));
+            }
+            if (!step.IsValid()) return false;
+            p.shells.push_back(std::move(step));
+        }
+        std::vector<double> canonical;
+        if (offset != values.size() || !Encode(p, canonical) || canonical != values) return false;
+        result = std::move(p); return true;
+    }
     if (values[3]==2) return DecodeCurves(values,result);
     if (values.size()>MaximumFramedLegacyScalars) return false;
     const auto integer = [](double value, int maximum) {
@@ -305,7 +383,8 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
 // The caller owns the ordinary OCAF transaction and must retain/abort it on
 // failure. Parameters and geometry are staged before candidate publication.
 inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
-                  const Parameters& parameters, const std::string& identifier) noexcept {
+                  const Parameters& parameters, const std::string& identifier,
+                  bool appendShell = false) noexcept {
     try {
         Record previous;
         std::vector<double> values;
@@ -315,6 +394,15 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
             || !XCAFDoc_ShapeTool::IsSimpleShape(owner) || !XCAFDoc_ShapeTool::IsFree(owner)
             || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit) || unit != parameters.metersPerUnit
             || (!previous.label.IsNull() && previous.identifier != identifier)) return false;
+        if (!previous.label.IsNull() && previous.parameters.shells != parameters.shells) {
+            if (!appendShell || parameters.shells.size() != previous.parameters.shells.size() + 1
+                || !std::equal(previous.parameters.shells.begin(), previous.parameters.shells.end(),
+                               parameters.shells.begin())) return false;
+            auto before = previous.parameters, after = parameters;
+            before.shells.clear(); after.shells.clear();
+            std::vector<double> a, b;
+            if (!Encode(before, a) || !Encode(after, b) || a != b) return false;
+        }
         const auto shape = XCAFDoc_ShapeTool::GetShape(owner);
         if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID) return false;
         auto label = previous.label;

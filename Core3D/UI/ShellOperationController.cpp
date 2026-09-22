@@ -10,6 +10,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
@@ -537,6 +538,57 @@ Standard_Boolean TryResolveShellOpeningSelectors(
     } catch (...) {
         return Standard_False;
     }
+}
+
+Standard_Boolean ReplayProfileShells(
+    const TopoDS_Shape& base, const profile::Parameters& parameters,
+    std::atomic_bool& cancelled, TopoDS_Shape& result) noexcept
+{
+    result.Nullify();
+    try {
+        std::vector<double> encoded;
+        if (cancelled.load() || base.IsNull() || !profile::Encode(parameters, encoded)) return Standard_False;
+        TopoDS_Shape current = base;
+        const profile::ConstructionFrame finalFrame = parameters.constructionFrame.value_or(profile::ConstructionFrame{});
+        auto frame = finalFrame;
+        const auto moveTo = [&](const profile::ConstructionFrame& next) {
+            if (frame == next) return true;
+            gp_Trsf from, to;
+            if (!frame.Transform(from) || !next.Transform(to) || cancelled.load()) return false;
+            BRepBuilderAPI_Transform moved(current, to * from.Inverted(), Standard_True, Standard_False);
+            if (!moved.IsDone() || moved.Shape().IsNull()) return false;
+            current = moved.Shape(); frame = next; return !cancelled.load();
+        };
+        // The alias is synchronous; no worker or callback outlives this call.
+        const auto stop = std::shared_ptr<std::atomic_bool>(&cancelled, [](std::atomic_bool*) {});
+        for (const auto& step : parameters.shells) {
+            if (cancelled.load() || !moveTo(step.frame)) return Standard_False;
+            Standard_Size nodes = 0;
+            Standard_Real bounds[6] = {}, volume = 0, vertexTolerance = 0;
+            Standard_Real minimum = 0, maximum = 0, tolerance = 0;
+            if (!CountBoundedTopology(current, ShellOperationController::kMaximumSourceTopologyNodes, nodes)
+                || !ShapeBounds(current, bounds) || !ShapeVolume(current, volume)
+                || !MaximumVertexTolerance(current, vertexTolerance)
+                || !ComputeThicknessRange(bounds, step.metersPerLocalUnit, vertexTolerance,
+                                          minimum, maximum, tolerance)
+                || step.thickness < minimum || step.thickness > maximum
+                || !BRepCheck_Analyzer(current, Standard_True).IsValid()) return Standard_False;
+            std::vector<ShellOpeningSelector> selectors;
+            for (int key : step.openings)
+                selectors.push_back({ShellOpeningAxis(key / 2), ShellOpeningSide(key % 2)});
+            std::vector<TopoDS_Face> faces;
+            if (!TryResolveShellOpeningSelectors(current, selectors, faces) || cancelled.load()) return Standard_False;
+            Handle(ShellCancellationIndicator) progress = new ShellCancellationIndicator(stop);
+            BRepOffsetAPI_MakeThickSolid builder;
+            MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start());
+            if (cancelled.load() || !builder.IsDone() || builder.MakeOffset().Error() != BRepOffset_NoError
+                || !IsValidInwardResult(builder.Shape(), current, volume, bounds, tolerance,
+                                       ShellOperationController::kMaximumResultTopologyNodes, stop)) return Standard_False;
+            current = builder.Shape();
+        }
+        if (!moveTo(finalFrame) || cancelled.load()) return Standard_False;
+        result = current; return Standard_True;
+    } catch (...) { result.Nullify(); return Standard_False; }
 }
 
 Standard_Boolean TryPrepareFaceOperationSource(
@@ -1234,6 +1286,24 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
         aSource->maximumThickness = aMaximumThickness;
         aSource->entityIdentifier = aProof.entityIdentifier;
         aSource->definitionIdentifier = aProof.definitionIdentifier;
+        if (!profile::Read(aDocument, aProof.documentLabel, aSource->profileRecord)) return Standard_False;
+        if (aSource->profileRecord.IsCurrent(aDocument, aProof.documentLabel)) {
+            // Derive durable geometric selectors from the actual manual/AI
+            // face set, never from display names or transient face ordinals.
+            for (int key = 0; key < 6; ++key) {
+                std::vector<TopoDS_Face> resolved;
+                if (!TryResolveShellOpeningSelectors(aProof.shape,
+                        {{ShellOpeningAxis(key / 2), ShellOpeningSide(key % 2)}}, resolved)) continue;
+                if (std::any_of(aProof.openingFaces.begin(), aProof.openingFaces.end(),
+                        [&](const auto& face) { return face.IsEqual(resolved.front()); }))
+                    aSource->profileShellOpenings.push_back(key);
+            }
+            // Non-cap manual shells keep their existing geometry-only UX.
+            // They cannot be rebound to a recipe we cannot safely replay.
+            if (aSource->profileShellOpenings.size() != aProof.openingFaces.size()
+                || aSource->profileRecord.parameters.shells.size() >= profile::MaximumShellSteps)
+                aSource->profileShellOpenings.clear();
+        }
 
         theSource = std::move(aSource);
         return Standard_True;
@@ -1318,7 +1388,10 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
             XCAFDoc_ShapeTool::GetShape(mySource->label);
         gp_Trsf aPersistedTransform;
         Standard_Real aDocumentMetersPerUnit = 0.0;
+        profile::Record liveProfile;
         if (aDocument.IsNull() || aDocument->HasOpenCommand()
+            || !profile::Read(aDocument, mySource->label, liveProfile)
+            || !liveProfile.IsEqual(mySource->profileRecord)
             || !TryReadMetersPerUnit(aDocument, aDocumentMetersPerUnit)
             || aDocumentMetersPerUnit != mySource->documentMetersPerUnit
             || mySource->label.IsNull()
@@ -1859,6 +1932,16 @@ ShellOperationController::inspectDocumentState() const noexcept
         }
         if (!myPendingCandidate.IsNull()
             && aStored.IsEqual(myPendingCandidate)) {
+            if (myPendingProfile) {
+                profile::Record storedProfile;
+                std::vector<double> expected;
+                if (!profile::Read(myDoc->Document(), mySource->label, storedProfile)
+                    || !profile::Encode(*myPendingProfile, expected)
+                    || storedProfile.values != expected
+                    || storedProfile.identifier != mySource->profileRecord.identifier
+                    || !storedProfile.IsCurrent(myDoc->Document(), mySource->label))
+                    return DocumentState::Other;
+            }
             return myDoc->GeometryRepresentationForLabel(
                     mySource->label)
                     == OcctGeometryRepresentation::BRep
@@ -1869,6 +1952,9 @@ ShellOperationController::inspectDocumentState() const noexcept
         }
         if (!mySource->shape.IsNull()
             && aStored.IsEqual(mySource->shape)) {
+            profile::Record restored;
+            if (!profile::Read(myDoc->Document(), mySource->label, restored)
+                || !restored.IsEqual(mySource->profileRecord)) return DocumentState::Other;
             return IsBRepModelingLabel(myDoc, mySource->label)
                 ? DocumentState::Original
                 : DocumentState::Other;
@@ -1954,6 +2040,7 @@ ShellApplyResult ShellOperationController::apply() noexcept
         }
         if (aState == DocumentState::Original) {
             myPendingCandidate.Nullify();
+            myPendingProfile.reset();
             myOwnsDocumentCommand = Standard_False;
             myCanApply = !myPreviewResult.IsNull()
                 && myStateValid && sourceIsCurrent();
@@ -2002,6 +2089,16 @@ ShellApplyResult ShellOperationController::apply() noexcept
             return ShellApplyResult::NoChange;
         }
         myPendingCandidate = myPreviewResult->Shape();
+        myPendingProfile.reset();
+        if (!mySource->profileShellOpenings.empty()) {
+            auto parameters = mySource->profileRecord.parameters;
+            profile::ShellStep step;
+            step.thickness = myThickness; step.metersPerLocalUnit = mySource->metersPerUnit;
+            step.frame = parameters.constructionFrame.value_or(profile::ConstructionFrame{});
+            step.openings = mySource->profileShellOpenings;
+            parameters.shells.push_back(std::move(step));
+            myPendingProfile = std::move(parameters);
+        }
         myState = ShellPreviewState::Committing;
         myCanApply = Standard_False;
         mySelectionFrozen = Standard_True;
@@ -2014,6 +2111,7 @@ ShellApplyResult ShellOperationController::apply() noexcept
         if (!aDocument->HasOpenCommand()) {
             myOwnsDocumentCommand = Standard_False;
             myPendingCandidate.Nullify();
+            myPendingProfile.reset();
             myCanApply = Standard_True;
             myState = ShellPreviewState::Ready;
             notifyPreviewStateChanged();
@@ -2025,8 +2123,9 @@ ShellApplyResult ShellOperationController::apply() noexcept
             return resolveAfterMutation();
         }
 #endif
-        if (!myDoc->ReplaceShape(
-                mySource->label, myPreviewResult)) {
+        if (!myDoc->ReplaceShape(mySource->label, myPreviewResult)
+            || (myPendingProfile && !profile::Stage(aDocument, mySource->label,
+                    *myPendingProfile, mySource->profileRecord.identifier, true))) {
             return resolveAfterMutation();
         }
         const TopoDS_Shape aStored =
@@ -2102,6 +2201,7 @@ void ShellOperationController::clearState() noexcept
     mySource.reset();
     myPreviewResult.Nullify();
     myPendingCandidate.Nullify();
+    myPendingProfile.reset();
     myRequestedFingerprint.clear();
     myThickness = 0.0;
     myCanApply = Standard_False;
