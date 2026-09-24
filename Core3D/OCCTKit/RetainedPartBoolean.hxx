@@ -3,6 +3,8 @@
 // A1a detached geometry gate. It has no OCAF label, command, AIS dependency,
 // or mutation authority. A later owner must recheck the full semantic read set
 // before it can use an admitted shape in one atomic retained-owner command.
+// It never routes or changes the existing general UI Boolean geometry worker.
+// Agentic routing remains closed until that retained owner is implemented.
 #include "RetainedRecipeAdmission.hxx"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
