@@ -58,8 +58,15 @@ public:
             if (!source.GetByteArray(bytes.data(), count)) return Refuse();
             Definition definition; if (!Decode(bytes, definition)) return Refuse();
             std::size_t expectedSources = 0;
+            std::vector<TopAbs_ShapeEnum> expectedShapeTypes(std::size_t(shapeCount), TopAbs_SHAPE);
             for (const Node& node : definition.nodes)
-                if (std::holds_alternative<SourceNode>(node.value)) ++expectedSources;
+                if (const auto* sourceNode = std::get_if<SourceNode>(&node.value)) {
+                    ++expectedSources;
+                    if (sourceNode->shapeSlot >= expectedShapeTypes.size()
+                        || expectedShapeTypes[sourceNode->shapeSlot] != TopAbs_SHAPE) return Refuse();
+                    expectedShapeTypes[sourceNode->shapeSlot] =
+                        TopologyKind(ExpectedSourceShapeKind(sourceNode->recipe));
+                }
             if (expectedSources != std::size_t(shapeCount)) return Refuse();
             auto* shared = shapes_->ShapeSet(Standard_True); if (!shared) return Refuse();
             std::vector<TopoDS_Shape> sourceShapes; sourceShapes.reserve(std::size_t(shapeCount));
@@ -89,7 +96,8 @@ public:
                     if(extent<8||extent>std::uint64_t(std::streamoff(fileEnd-begin)))return Refuse();
                     const auto expected=begin+std::streamoff(extent);stream->seekg(body);
                     shared->Read(*stream, shape);
-                    if (!*stream || stream->tellg()!=expected || shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+                    if (!*stream || stream->tellg()!=expected || shape.IsNull()
+                        || shape.ShapeType() != expectedShapeTypes[std::size_t(index)]
                         || shape.Orientation() != TopAbs_FORWARD) return Refuse();
                     sourceShapes.push_back(std::move(shape));
                 }
@@ -104,7 +112,8 @@ public:
                     TopoDS_Shape shape = set->Shape(shapeID);
                     shape.Location(set->Locations().Location(locationID), Standard_False);
                     shape.Orientation(TopAbs_Orientation(orientation));
-                    if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+                    if (shape.IsNull()
+                        || shape.ShapeType() != expectedShapeTypes[std::size_t(index)]
                         || shape.Orientation() != TopAbs_FORWARD) return Refuse();
                     sourceShapes.push_back(std::move(shape));
                 }
@@ -130,9 +139,21 @@ public:
         if (!Encode(value.definition, encoded) || encoded != value.bytes || value.sourceShapes.empty()
             || value.sourceShapes.size() > MaximumSourceNodes)
             Standard_Failure::Raise("Composite recipe writer envelope");
-        for (const TopoDS_Shape& shape : value.sourceShapes)
-            if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID || shape.Orientation() != TopAbs_FORWARD)
+        std::vector<TopAbs_ShapeEnum> expectedShapeTypes(value.sourceShapes.size(), TopAbs_SHAPE);
+        for (const Node& node : value.definition.nodes)
+            if (const auto* sourceNode = std::get_if<SourceNode>(&node.value)) {
+                if (sourceNode->shapeSlot >= expectedShapeTypes.size()
+                    || expectedShapeTypes[sourceNode->shapeSlot] != TopAbs_SHAPE)
+                    Standard_Failure::Raise("Composite recipe writer shape slot");
+                expectedShapeTypes[sourceNode->shapeSlot] =
+                    TopologyKind(ExpectedSourceShapeKind(sourceNode->recipe));
+            }
+        for (std::size_t index = 0; index < value.sourceShapes.size(); ++index) {
+            const TopoDS_Shape& shape = value.sourceShapes[index];
+            if (shape.IsNull() || shape.ShapeType() != expectedShapeTypes[index]
+                || shape.Orientation() != TopAbs_FORWARD)
                 Standard_Failure::Raise("Composite recipe writer shape");
+        }
         target << Standard_Integer(1) << Standard_Integer(encoded.size())
                << Standard_Integer(shapes_->IsQuickPart() ? 1 : 0)
                << Standard_Integer(value.sourceShapes.size());

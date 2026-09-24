@@ -28,6 +28,7 @@ enum class RecipeKind : std::uint8_t {
     RetainedBoolean = 4,
 };
 enum class NodeKind : std::uint8_t { Source = 1, Feature = 2 };
+enum class SourceShapeKind : std::uint8_t { Solid = 1, Wire = 2 };
 
 struct InputPlacement {
     // Row-major authored-source-to-carrier affine transform. Authored recipe
@@ -56,6 +57,15 @@ struct SourceNode {
     Commitments commitments;
     std::uint32_t shapeSlot = 0;
 };
+
+// SYCR/1 and the first P1 SYCR/2 profile retain only forward solids.  Later
+// registry owners may add recipe kinds with a different explicit shape kind;
+// callers must use this function instead of assuming every future source is a
+// solid.  Unknown recipe tags never reach this point because ValidRecipe
+// rejects them before a binary shape is accepted.
+inline SourceShapeKind ExpectedSourceShapeKind(const SourceRecipe&) noexcept {
+    return SourceShapeKind::Solid;
+}
 
 struct FeatureNode {
     UUID node{}, feature{};

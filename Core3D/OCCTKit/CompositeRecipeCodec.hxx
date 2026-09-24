@@ -1,5 +1,6 @@
 #pragma once
 #include "CompositeRecipeDefinition.hxx"
+#include "PartBooleanPersistence.hxx"
 #include "RetainedBooleanProgram.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
@@ -8,8 +9,9 @@
 #include <set>
 
 namespace core3d::composite_recipe {
-inline constexpr std::uint32_t PartBooleanFeatureKind = 1; // Value reservation only; A1 owns build/proof.
-inline constexpr std::uint32_t PartBooleanFeatureCodec = 1;
+inline constexpr std::uint32_t PartBooleanFeatureKind = part_boolean::FeatureKind;
+inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCodecVersion;
+inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
 
 class Writer {
 public:
@@ -128,9 +130,47 @@ inline bool ValidRecipe(const SourceRecipe& recipe) noexcept {
     } catch (...) { return false; }
 }
 
+inline bool ValidShellFeature(const FeatureNode& feature,
+                              const std::vector<Node>& priorNodes) noexcept {
+    try {
+        if (feature.kind != PartBooleanFeatureKind
+            || feature.codecVersion != PartBooleanShellFeatureCodec
+            || feature.inputs.size() != 2 || feature.inputs[0] == feature.inputs[1]) return false;
+        part_boolean::Definition payload;
+        if (!part_boolean::Decode(feature.parameters, payload)) return false;
+        bool sawShell = false, sawTool = false;
+        for (std::size_t index = 0; index < feature.inputs.size(); ++index) {
+            if (payload.inputs[index].rootNode != feature.inputs[index]) return false;
+            const auto found = std::find_if(priorNodes.begin(), priorNodes.end(),
+                [&](const Node& node) { return NodeID(node) == feature.inputs[index]; });
+            if (found == priorNodes.end()) return false;
+            const auto* source = std::get_if<SourceNode>(&found->value);
+            if (!source || source->original.sourceFeature != payload.inputs[index].originalSourceFeature
+                || source->commitments.geometry != payload.inputs[index].commitments.geometry
+                || source->commitments.recipe != payload.inputs[index].commitments.recipe
+                || source->commitments.placement != payload.inputs[index].commitments.placement
+                || source->commitments.material != payload.inputs[index].commitments.material
+                || source->commitments.groups != payload.inputs[index].commitments.groups
+                || source->recipe.kind != RecipeKind::Profile) return false;
+            if (payload.inputs[index].family == part_boolean::InputFamily::ShellProfile) {
+                if (source->recipe.schema != 5) return false;
+                std::vector<double> values; profile::Parameters decoded;
+                if (!DecodeScalarRecipe(source->recipe, values) || !profile::Decode(values, decoded)
+                    || profile::SchemaFor(decoded) != 5 || decoded.shells.size() != 1) return false;
+                sawShell = true;
+            } else if (payload.inputs[index].family == part_boolean::InputFamily::AnalyticRectangularPrism) {
+                if (source->recipe.schema < 1 || source->recipe.schema > 4) return false;
+                sawTool = true;
+            } else return false;
+        }
+        return sawShell && sawTool;
+    } catch (...) { return false; }
+}
+
 inline bool Valid(const Definition& definition) noexcept {
     try {
-        if (definition.schemaVersion != 1 || !retained_recipe::Valid(definition.owner)
+        if ((definition.schemaVersion != 1 && definition.schemaVersion != 2)
+            || !retained_recipe::Valid(definition.owner)
             || !retained_recipe::Valid(definition.issuance) || !retained_recipe::Nonzero(definition.outputNode)
             || definition.nodes.empty() || definition.nodes.size() > MaximumNodes) return false;
         std::set<UUID> nodeIDs, featureIDs;
@@ -158,9 +198,15 @@ inline bool Valid(const Definition& definition) noexcept {
                 depths.push_back(1); continue;
             }
             const auto& feature = std::get<FeatureNode>(node.value);
+            const bool legacyPartBoolean = definition.schemaVersion == 1
+                && feature.kind == PartBooleanFeatureKind
+                && feature.codecVersion == PartBooleanFeatureCodec
+                && feature.inputs.size() == 2 && feature.inputs[0] != feature.inputs[1];
+            const bool shellPartBoolean = definition.schemaVersion == 2
+                && ValidShellFeature(feature,
+                    std::vector<Node>(definition.nodes.begin(), definition.nodes.begin() + depths.size()));
             if (!retained_recipe::Nonzero(feature.feature) || !featureIDs.insert(feature.feature).second
-                || feature.kind != PartBooleanFeatureKind || feature.codecVersion != PartBooleanFeatureCodec
-                || feature.inputs.size() != 2 || feature.inputs[0] == feature.inputs[1]
+                || (!legacyPartBoolean && !shellPartBoolean)
                 || feature.parameters.size() > MaximumFeaturePayloadBytes) return false;
             std::size_t depth = 1;
             for (const UUID& input : feature.inputs) {
@@ -183,12 +229,14 @@ inline bool Valid(const Definition& definition) noexcept {
     } catch (...) { return false; }
 }
 
-inline bool Encode(const Definition& definition, std::vector<std::uint8_t>& output) noexcept {
+inline bool EncodeVersion(const Definition& definition, std::uint32_t version,
+                          std::vector<std::uint8_t>& output) noexcept {
     output.clear();
     try {
-        if (!Valid(definition)) return false;
+        if (!Valid(definition) || definition.schemaVersion != version
+            || (version != 1 && version != 2)) return false;
         Writer writer; writer.raw(reinterpret_cast<const std::uint8_t*>("SYCR"), 4);
-        writer.integer(1, 1); writer.integer(0, 1); writer.integer(0, 2);
+        writer.integer(version, 1); writer.integer(0, 1); writer.integer(0, 2);
         writer.raw(definition.owner.document); writer.raw(definition.owner.entity); writer.raw(definition.owner.definition);
         writer.raw(definition.outputNode); writer.integer(definition.issuance.nextLocalID);
         writer.integer(definition.issuance.retiredLocalIDs.size(), 2);
@@ -225,16 +273,31 @@ inline bool Encode(const Definition& definition, std::vector<std::uint8_t>& outp
     } catch (...) { output.clear(); return false; }
 }
 
-inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) noexcept {
+inline bool EncodeV1(const Definition& definition, std::vector<std::uint8_t>& output) noexcept {
+    return EncodeVersion(definition, 1, output);
+}
+inline bool EncodeV2(const Definition& definition, std::vector<std::uint8_t>& output) noexcept {
+    return EncodeVersion(definition, 2, output);
+}
+inline bool Encode(const Definition& definition, std::vector<std::uint8_t>& output) noexcept {
+    if (definition.schemaVersion == 1) return EncodeV1(definition, output);
+    if (definition.schemaVersion == 2) return EncodeV2(definition, output);
+    output.clear(); return false;
+}
+
+inline bool DecodeVersion(const std::vector<std::uint8_t>& bytes, std::uint32_t version,
+                          Definition& output) noexcept {
     output = {};
     try {
-        if (bytes.size() < 8 + 64 + 12 + 32 || bytes.size() > MaximumEnvelopeBytes
-            || std::memcmp(bytes.data(), "SYCR\1\0\0\0", 8) != 0) return false;
+        if ((version != 1 && version != 2) || bytes.size() < 8 + 64 + 12 + 32
+            || bytes.size() > MaximumEnvelopeBytes || std::memcmp(bytes.data(), "SYCR", 4) != 0
+            || bytes[4] != std::uint8_t(version) || bytes[5] != 0
+            || bytes[6] != 0 || bytes[7] != 0) return false;
         Digest expected, actual; std::vector<std::uint8_t> body(bytes.begin(), bytes.end() - 32);
         if (!Hash(body, expected)) return false;
         std::copy_n(bytes.end() - 32, 32, actual.begin()); if (actual != expected) return false;
         Reader reader(bytes, bytes.size() - 32); std::array<std::uint8_t, 8> prefix{};
-        Definition definition; definition.schemaVersion = 1;
+        Definition definition; definition.schemaVersion = version;
         std::uint64_t retiredCount = 0, nodeCount = 0;
         if (!reader.raw(prefix) || !reader.raw(definition.owner.document)
             || !reader.raw(definition.owner.entity) || !reader.raw(definition.owner.definition)
@@ -287,8 +350,23 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
             } else return false;
         }
         std::vector<std::uint8_t> canonical;
-        if (!reader.complete() || !Encode(definition, canonical) || canonical != bytes) return false;
+        if (!reader.complete() || !EncodeVersion(definition, version, canonical)
+            || canonical != bytes) return false;
         output = std::move(definition); return true;
     } catch (...) { output = {}; return false; }
+}
+
+inline bool DecodeV1(const std::vector<std::uint8_t>& bytes, Definition& output) noexcept {
+    return DecodeVersion(bytes, 1, output);
+}
+inline bool DecodeV2(const std::vector<std::uint8_t>& bytes, Definition& output) noexcept {
+    return DecodeVersion(bytes, 2, output);
+}
+inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) noexcept {
+    output = {};
+    if (bytes.size() < 5) return false;
+    if (bytes[4] == 1) return DecodeV1(bytes, output);
+    if (bytes[4] == 2) return DecodeV2(bytes, output);
+    return false;
 }
 } // namespace core3d::composite_recipe

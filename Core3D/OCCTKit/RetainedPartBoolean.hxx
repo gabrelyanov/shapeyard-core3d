@@ -12,13 +12,19 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepTools.hxx>
 #include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_FormatVersion.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Shape.hxx>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <locale>
+#include <sstream>
+#include <string>
 
 namespace core3d::retained_part_boolean {
 
@@ -52,6 +58,34 @@ struct Candidate {
 
     bool admitted() const noexcept { return refusal == Refusal::None; }
 };
+
+// Optional, detached evidence only.  It exposes no face identity and grants no
+// persistence or mutation authority.  Counts merely prove that native history
+// was queried for both inputs before independent correspondence validation.
+struct CandidateEvidence {
+    bool explicitDeterministicOptions = false;
+    bool inputBytesUnchanged = false;
+    bool historyObserved = false;
+    std::size_t leftHistoryRelations = 0;
+    std::size_t rightHistoryRelations = 0;
+};
+
+inline bool ExactShapeBytes(const TopoDS_Shape& shape,
+                            std::string& bytes) noexcept {
+    bytes.clear();
+    try {
+        std::ostringstream stream;
+        stream.imbue(std::locale::classic());
+        BRepTools::Write(shape, stream, Standard_False, Standard_False,
+                         TopTools_FormatVersion_VERSION_3);
+        if (!stream.good()) return false;
+        bytes = stream.str();
+        return !bytes.empty();
+    } catch (...) {
+        bytes.clear();
+        return false;
+    }
+}
 
 inline bool IsOneValidForwardSolid(const TopoDS_Shape& value) noexcept {
     try {
@@ -129,8 +163,10 @@ inline Candidate BuildDetachedCandidate(
     const TopoDS_Shape& rightSourceShape,
     double tolerance,
     const OperandReadSet& capturedReads,
-    const OperandReadSet& currentReads) noexcept {
+    const OperandReadSet& currentReads,
+    CandidateEvidence* evidence = nullptr) noexcept {
     Candidate result;
+    if (evidence != nullptr) *evidence = {};
     try {
         if (!ValidOperandRead(capturedReads.leftSource)
             || !ValidOperandRead(capturedReads.rightSource)
@@ -156,9 +192,48 @@ inline Candidate BuildDetachedCandidate(
             return result;
         }
 
+        std::string leftBefore, rightBefore;
+        if (evidence != nullptr
+            && (!ExactShapeBytes(leftSourceShape, leftBefore)
+                || !ExactShapeBytes(rightSourceShape, rightBefore))) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(leftSourceShape);
+        tools.Append(rightSourceShape);
+        const auto configureAndBuild = [&](auto& builder) {
+            builder.SetArguments(arguments);
+            builder.SetTools(tools);
+            builder.SetRunParallel(Standard_False);
+            builder.SetNonDestructive(Standard_True);
+            builder.SetFuzzyValue(tolerance);
+            builder.SetUseOBB(Standard_True);
+            builder.SetCheckInverted(Standard_True);
+            builder.Build();
+            if (evidence != nullptr)
+                evidence->explicitDeterministicOptions = true;
+            return builder.IsDone() && !builder.HasErrors();
+        };
+        const auto observeHistory = [&](auto& builder) {
+            if (evidence == nullptr) return;
+            const auto charge = [&](const TopoDS_Shape& source) {
+                std::size_t count = 0;
+                for (TopExp_Explorer it(source, TopAbs_FACE); it.More(); it.Next()) {
+                    count += std::size_t(builder.Modified(it.Current()).Extent());
+                    count += std::size_t(builder.Generated(it.Current()).Extent());
+                    if (builder.IsDeleted(it.Current())) ++count;
+                }
+                return count;
+            };
+            evidence->leftHistoryRelations = charge(leftSourceShape);
+            evidence->rightHistoryRelations = charge(rightSourceShape);
+            evidence->historyObserved = true;
+        };
+
         const double volumeTolerance = tolerance * tolerance * tolerance;
-        BRepAlgoAPI_Common common(leftSourceShape, rightSourceShape);
-        if (!common.IsDone()) {
+        BRepAlgoAPI_Common common;
+        if (!configureAndBuild(common)) {
             result.refusal = Refusal::BuildFailed;
             return result;
         }
@@ -190,23 +265,24 @@ inline Candidate BuildDetachedCandidate(
 
         TopoDS_Shape built;
         if (operation == Operation::Union) {
-            BRepAlgoAPI_Fuse boolean(
-                leftSourceShape, rightSourceShape);
-            if (!boolean.IsDone()) {
+            BRepAlgoAPI_Fuse boolean;
+            if (!configureAndBuild(boolean)) {
                 result.refusal = Refusal::BuildFailed;
                 return result;
             }
             built = boolean.Shape();
+            observeHistory(boolean);
         } else if (operation == Operation::Subtract) {
-            BRepAlgoAPI_Cut boolean(
-                leftSourceShape, rightSourceShape);
-            if (!boolean.IsDone()) {
+            BRepAlgoAPI_Cut boolean;
+            if (!configureAndBuild(boolean)) {
                 result.refusal = Refusal::BuildFailed;
                 return result;
             }
             built = boolean.Shape();
+            observeHistory(boolean);
         } else {
             built = common.Shape();
+            observeHistory(common);
         }
         if (built.IsNull() || Volume(built) <= volumeTolerance) {
             result.refusal = Refusal::EmptyResult;
@@ -222,6 +298,13 @@ inline Candidate BuildDetachedCandidate(
         }
         result.refusal = Refusal::None;
         result.solid = built;
+        if (evidence != nullptr) {
+            std::string leftAfter, rightAfter;
+            evidence->inputBytesUnchanged =
+                ExactShapeBytes(leftSourceShape, leftAfter)
+                && ExactShapeBytes(rightSourceShape, rightAfter)
+                && leftBefore == leftAfter && rightBefore == rightAfter;
+        }
         return result;
     } catch (...) {
         result = {};

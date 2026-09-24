@@ -1182,6 +1182,9 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSavedBooleanWedgeGeometry(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanFilletProbe:(NSInteger)scenario NS_SWIFT_NAME(debugSavedBooleanFilletProbe(_:));
 + (void)debugSetRetainedFilletFailureCount:(NSInteger)count NS_SWIFT_NAME(debugSetRetainedFilletFailureCount(_:));
+//! Pure DEBUG codec/history evidence; never observes or mutates the live document.
++ (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe
+    NS_SWIFT_NAME(debugPartBooleanCodecProbe());
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedBooleanWedgeProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario
@@ -1200,6 +1203,10 @@ __attribute__((objc_subclassing_restricted))
 //! Detached A1a evidence only; reports that the document command stayed closed.
 - (NSDictionary<NSString *, NSNumber *> *)debugRetainedPartBooleanProbe
     NS_SWIFT_NAME(debugRetainedPartBooleanProbe());
+//! Detached A3 P1b evidence only. Scenario 0 is S/S2/Lug boundary evidence;
+//! scenario 1 is N->N' split/merge correspondence. No route or mutation.
+- (NSDictionary<NSString *, NSNumber *> *)debugA3ShellBooleanEvidence:(NSInteger)scenario
+    NS_SWIFT_NAME(debugA3ShellBooleanEvidence(_:));
 //! Detached DEBUG trim-domain qualification only.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutTrimDomainProbe
     NS_SWIFT_NAME(debugSavedCutTrimDomainProbe());

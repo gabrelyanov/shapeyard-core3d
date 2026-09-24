@@ -61,6 +61,10 @@ struct Record {
     TopoDS_Shape current;
 };
 
+inline TopAbs_ShapeEnum TopologyKind(SourceShapeKind kind) noexcept {
+    return kind == SourceShapeKind::Wire ? TopAbs_WIRE : TopAbs_SOLID;
+}
+
 inline bool HasRecord(const TDF_Label& owner) noexcept {
     try {
         if (owner.IsNull()) return false;
@@ -116,7 +120,8 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
                 ++sources;
                 if (source->shapeSlot >= value->sourceShapes.size()) return false;
                 const TopoDS_Shape& shape = value->sourceShapes[source->shapeSlot];
-                if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+                if (shape.IsNull()
+                    || shape.ShapeType() != TopologyKind(ExpectedSourceShapeKind(source->recipe))
                     || shape.Orientation() != TopAbs_FORWARD) return false;
             }
             if (sources != value->sourceShapes.size()) return false;

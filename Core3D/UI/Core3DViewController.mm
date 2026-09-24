@@ -2,6 +2,7 @@
 #include "../OCCTKit/DetachedLoftCutProbe.hxx"
 #if DEBUG
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
+#include "../OCCTKit/PartBooleanCorrespondence.hxx"
 #include <thread>
 #endif
 #if DEBUG
@@ -17,6 +18,7 @@
 #endif
 #if DEBUG
 #include "../OCCTKit/SweepPersistenceProbe.hxx"
+#include "../OCCTKit/PartBooleanCodecProbe.hxx"
 #include "../OCCTKit/SavedFeatureRecords.hxx"
 #include "../OCCTKit/EnclosureParameters.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
@@ -7129,6 +7131,15 @@ struct NativeModelingPermitIssuer final {
     return [out copy];
 }
 + (void)debugSetRetainedFilletFailureCount:(NSInteger)count {Core3DDebugSetRetainedFilletFailureCount(static_cast<Standard_Integer>(std::clamp<NSInteger>(count,0,100)));}
++ (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe {
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    for (const auto& check : core3d::composite_recipe::Probe::Run()) {
+        NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+        if (key == nil) return @{ @"invalidKey": @NO };
+        result[key] = @(check.second);
+    }
+    return [result copy];
+}
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario {
     NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
     for(const std::pair<const std::string,bool>& row:Core3DDebugSavedBooleanWedgeProbe(static_cast<Standard_Integer>(scenario)))
@@ -7220,6 +7231,39 @@ struct NativeModelingPermitIssuer final {
             NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
             if (key == nil) return @{ @"invalidKey": @NO };
             result[key] = @(check.second);
+        }
+        result[@"command-remained-closed"] = @(!document->HasOpenCommand());
+        result[@"undo-count-unchanged"] =
+            @(undoBefore == document->GetAvailableUndos());
+        return result;
+    } catch (...) {
+        return @{ @"setupException": @NO };
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugA3ShellBooleanEvidence:(NSInteger)scenario {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 1
+        || !GLController || !GLController.viewer) {
+        return @{ @"invalidHostOrScenario": @NO };
+    }
+    const auto owner = GLController.viewer->getDocument();
+    const auto document = owner.IsNull()
+        ? Handle(TDocStd_Document)() : owner->Document();
+    if (document.IsNull() || document->HasOpenCommand()) {
+        return @{ @"command-remained-closed": @NO };
+    }
+    try {
+        const Standard_Integer undoBefore = document->GetAvailableUndos();
+        const auto evidence = scenario == 0
+            ? core3d::part_boolean::correspondence::BoundaryEvidence()
+            : core3d::part_boolean::correspondence::SplitMergeEvidence();
+        NSMutableDictionary<NSString *, NSNumber *> *result =
+            [NSMutableDictionary dictionaryWithCapacity:evidence.size() + 2];
+        for (const auto& row : evidence) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || !std::isfinite(row.second))
+                return @{ @"invalidEvidence": @NO };
+            result[key] = @(row.second);
         }
         result[@"command-remained-closed"] = @(!document->HasOpenCommand());
         result[@"undo-count-unchanged"] =
