@@ -21,6 +21,7 @@ struct AdmissionRule {
     std::vector<composite_recipe::RecipeKind> orderedSourceKinds;
     Digest parameterBounds{};
     bool nativeBuilderInstalled = false, nativeProofInstalled = false;
+    bool nativeOwnerInstalled = false, retainedInputsPersistenceInstalled = false;
 };
 
 struct AdmissionDecision {
@@ -36,7 +37,8 @@ inline AdmissionDecision Evaluate(const OwnerSnapshot& snapshot,
     try {
         for (const auto& source : snapshot.sources) result.completeReadSet.push_back(source.locator);
         if (snapshot.status != OwnerStatus::CurrentEditable) { result.refusal = Refusal::SnapshotNotCurrent; return result; }
-        if (!rule.nativeBuilderInstalled || !rule.nativeProofInstalled) return result;
+        if (!rule.nativeBuilderInstalled || !rule.nativeProofInstalled
+            || !rule.nativeOwnerInstalled || !rule.retainedInputsPersistenceInstalled) return result;
         if (rule.featureKind != composite_recipe::PartBooleanFeatureKind
             || rule.featureCodecVersion != composite_recipe::PartBooleanFeatureCodec) {
             result.refusal = Refusal::FeatureKind; return result;
@@ -49,7 +51,13 @@ inline AdmissionDecision Evaluate(const OwnerSnapshot& snapshot,
             if (snapshot.sources[index].recipe.kind != rule.orderedSourceKinds[index]) {
                 result.refusal = Refusal::SourceFamily; return result;
             }
-        result.refusal = Refusal::None; return result;
+        result.refusal = Refusal::None;
+        // Only the native owner evaluates a CurrentEditable snapshot carrying
+        // its process-local receipt. Public analytic and shell dispatch remain
+        // separately disabled; this flag only distinguishes a complete native
+        // prepared change from a detached candidate.
+        result.detachedCandidateOnly = false;
+        return result;
     } catch (...) { result.refusal = Refusal::RuleNotInstalled; result.completeReadSet.clear(); return result; }
 }
 

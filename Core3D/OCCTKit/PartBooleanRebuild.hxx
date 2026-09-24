@@ -12,6 +12,48 @@ struct FixedPointEvidence final {
     bool bothBuildsAdmitted = false;
 };
 
+struct AnalyticFixedPointEvidence final {
+    bool sourceRecipesExact = false;
+    bool sourceShapesExact = false;
+    bool resultShapeExact = false;
+    bool bothBuildsAdmitted = false;
+    bool completeDependencyClosure = false;
+    bool fixedPoint() const noexcept {
+        return sourceRecipesExact && sourceShapesExact && resultShapeExact
+            && bothBuildsAdmitted && completeDependencyClosure;
+    }
+};
+
+inline AnalyticFixedPointEvidence CheckAnalytic(
+    const AnalyticDefinition& definition,
+    double carrierMetersPerUnit,
+    const retained_part_boolean::OperandReadSet& reads) noexcept {
+    AnalyticFixedPointEvidence result;
+    try {
+        std::vector<std::uint8_t> firstRecipe, secondRecipe;
+        AnalyticDefinition decoded;
+        result.sourceRecipesExact = EncodeAnalytic(definition, firstRecipe)
+            && DecodeAnalytic(firstRecipe, decoded)
+            && EncodeAnalytic(decoded, secondRecipe) && firstRecipe == secondRecipe;
+        const build::AnalyticBuild first = build::BuildAnalytic(
+            definition, carrierMetersPerUnit, reads, reads);
+        const build::AnalyticBuild second = build::BuildAnalytic(
+            decoded, carrierMetersPerUnit, reads, reads);
+        result.bothBuildsAdmitted = first.complete && second.complete;
+        result.sourceShapesExact = result.bothBuildsAdmitted
+            && first.sourceBytes == second.sourceBytes;
+        std::string firstResult, secondResult;
+        result.resultShapeExact = result.bothBuildsAdmitted
+            && retained_part_boolean::ExactShapeBytes(first.candidate.solid, firstResult)
+            && retained_part_boolean::ExactShapeBytes(second.candidate.solid, secondResult)
+            && firstResult == secondResult;
+        result.completeDependencyClosure = definition.inputs.size() == 2
+            && reads.leftSource.locator.node == definition.inputs[0].rootNode
+            && reads.rightSource.locator.node == definition.inputs[1].rootNode;
+        return result;
+    } catch (...) { return {}; }
+}
+
 // Two independent detached replays.  No prior result cache, face pointer,
 // document label, or history entry is an input to the second build.
 inline FixedPointEvidence Check(

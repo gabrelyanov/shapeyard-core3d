@@ -378,8 +378,9 @@ namespace core3d {
         std::shared_ptr<ObjectInteractor> getObjectInteractor();
         std::shared_ptr<ShapeInteractor> getShapeInteractor();
         Handle(OcctDocument) getDocument();
-        //! True only while no typed operation owns a command, preview, or
-        //! exactly-once recovery ledger and the OCAF document is writable.
+        //! True only while no typed operation, including the retained Boolean
+        //! editor, owns a command, preview, or exactly-once recovery ledger and
+        //! the OCAF document is writable.
         bool canBeginCommittedEdit() const noexcept;
         bool captureShellOpenings(const std::string& entityIdentifier,
             const std::vector<ShellOpeningSelector>& selectors,

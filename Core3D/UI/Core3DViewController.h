@@ -139,6 +139,15 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
 
+//! Read-only retained-input discovery. Returns nil for absent, malformed,
+//! unsupported or unqualified composite ownership; it never falls back to a
+//! free-object/saved-cut editor. The returned session owns the native capture.
+- (Core3DPartBooleanEditingSession *_Nullable)openPartBooleanEditorForEntityIdentifier:
+    (NSString *)entityIdentifier NS_SWIFT_NAME(openPartBooleanEditor(entityIdentifier:));
+//! Passive construction-input discovery for Objects. No capture/session/history.
+- (Core3DPartBooleanValues *_Nullable)partBooleanEditorValuesForEntityIdentifier:
+    (NSString *)entityIdentifier NS_SWIFT_NAME(partBooleanEditorValues(entityIdentifier:));
+
 //! Deep-copy the committed model and semantic camera into renderer-neutral,
 //! immutable values. Returns nil while a model transaction is open, while a
 //! committed Shell result remains indeterminate, or before the native viewer
@@ -171,6 +180,18 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugReplayCameraTouch:(NSInteger)mode;
 - (void)debugFailNextNativeViewportDraw;
 - (void)debugSkipNextNativeViewportPresentation;
+//! Installs only the N1 analytic evidence record and binds this controller's
+//! DEBUG qualification seam to that exact fixture/document. Public discovery
+//! and opening remain disabled until the production admission flags promote.
+- (NSString *_Nullable)debugInstallPartBooleanEditorFixtureOperation:
+    (Core3DPartBooleanOperation)operation metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugInstallPartBooleanEditorFixture(operation:metersPerUnit:));
+//! Qualifies only the installer-owned fixture through the shared production
+//! discovery/session internals. These methods never promote public availability.
+- (Core3DPartBooleanValues *_Nullable)debugPartBooleanEditorValuesForEntityIdentifier:
+    (NSString *)entityIdentifier NS_SWIFT_NAME(debugPartBooleanEditorValues(entityIdentifier:));
+- (Core3DPartBooleanEditingSession *_Nullable)debugOpenPartBooleanEditorForEntityIdentifier:
+    (NSString *)entityIdentifier NS_SWIFT_NAME(debugOpenPartBooleanEditor(entityIdentifier:));
 #endif
 
 //! Change camera projection without changing target-plane scale or the model.
@@ -1182,6 +1203,8 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSavedBooleanWedgeGeometry(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanFilletProbe:(NSInteger)scenario NS_SWIFT_NAME(debugSavedBooleanFilletProbe(_:));
 + (void)debugSetRetainedFilletFailureCount:(NSInteger)count NS_SWIFT_NAME(debugSetRetainedFilletFailureCount(_:));
+//! N1 internal owner evidence. This does not expose or enable a product route.
++ (NSDictionary<NSString *, NSNumber *> *)debugNativeBooleanOwnerProbe:(NSInteger)scenario NS_SWIFT_NAME(debugNativeBooleanOwnerProbe(_:));
 //! Pure DEBUG codec/history evidence; never observes or mutates the live document.
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe
     NS_SWIFT_NAME(debugPartBooleanCodecProbe());

@@ -10,6 +10,7 @@ namespace core3d::part_boolean::family_admission {
 
 enum class SourceSignature : std::uint8_t {
     ProfileSchema5SingleAxialCapShell = 1,
+    AnalyticRectangularPrismPair = 2,
 };
 
 struct EvidenceSignature final {
@@ -32,6 +33,14 @@ inline constexpr std::array<EvidenceSignature, 1> InstalledEvidenceSignatures{{
 inline constexpr bool NativeAdmissionEnabled = false;
 inline constexpr bool BooleanRouteInstalled = false;
 inline constexpr bool TreatmentFamilyInstalled = false;
+
+// N1 compilation facts are kept separate from promotion/admission. They are
+// false until the guarded N1 qualification receipt promotes an isolated delta.
+inline constexpr bool OwnerInstalled = false;
+inline constexpr bool OperandEditorInstalled = false;
+inline constexpr bool RetainedInputsPersistenceInstalled = false;
+inline constexpr bool AnalyticNativeAdmissionEnabled = false;
+inline constexpr bool AnalyticBooleanRouteInstalled = false;
 
 inline bool EvidenceOperationInstalled(Operation operation) noexcept {
     const std::uint8_t bit = operation == Operation::Union ? UnionMask

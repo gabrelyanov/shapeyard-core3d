@@ -1,8 +1,12 @@
 #include "../OCCTKit/PlanarSweepTangentArc.hxx"
+#include "../OCCTKit/PartBooleanOwner.hxx"
+#include "../OCCTKit/PartBooleanFamilyAdmission.hxx"
+#include "../OCCTKit/PartBooleanPersistence.hxx"
 #include "../OCCTKit/DetachedLoftCutProbe.hxx"
 #if DEBUG
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
 #include "../OCCTKit/PartBooleanCorrespondence.hxx"
+#include "../OCCTKit/RetainedPartBoolean.hxx"
 #include <thread>
 #endif
 #if DEBUG
@@ -1912,6 +1916,188 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 }
 @end
 
+@interface Core3DPartBooleanEditResult ()
+- (instancetype)initWithOutcome:(Core3DPartBooleanEditOutcome)outcome
+    reason:(NSString *)reason historyDelta:(NSInteger)historyDelta;
+@end
+@implementation Core3DPartBooleanEditResult
+- (instancetype)initWithOutcome:(Core3DPartBooleanEditOutcome)outcome
+    reason:(NSString *)reason historyDelta:(NSInteger)historyDelta {
+    if ((self=[super init])) {_outcome=outcome;_reason=[reason copy] ?: @"rejected";_measuredHistoryDelta=historyDelta;}
+    return self;
+}
+@end
+
+static Core3DPartBooleanEditOutcome Core3DPartBooleanOutcome(
+    core3d::part_boolean::owner::Outcome value, bool prepared = false) {
+    using Native = core3d::part_boolean::owner::Outcome;
+    switch (value) {
+        case Native::Committed: return Core3DPartBooleanEditOutcomeCommitted;
+        case Native::Unchanged: return prepared ? Core3DPartBooleanEditOutcomePrepared : Core3DPartBooleanEditOutcomeCaptured;
+        case Native::Cancelled: return Core3DPartBooleanEditOutcomeCancelled;
+        case Native::RecoveryRequired: return Core3DPartBooleanEditOutcomeRecoveryRequired;
+        case Native::Rejected: return Core3DPartBooleanEditOutcomeRejected;
+    }
+}
+static Core3DPartBooleanEditResult *Core3DPartBooleanPublicResult(
+    const core3d::part_boolean::owner::Receipt& receipt, bool prepared = false) {
+    NSString *reason=[[NSString alloc] initWithBytes:receipt.reason.data() length:receipt.reason.size()
+        encoding:NSUTF8StringEncoding] ?: @"rejected";
+    return [[Core3DPartBooleanEditResult alloc] initWithOutcome:Core3DPartBooleanOutcome(receipt.outcome,prepared)
+        reason:reason historyDelta:receipt.measuredHistoryDelta];
+}
+static Core3DPartBooleanEditResult *Core3DPartBooleanLocalResult(
+    Core3DPartBooleanEditOutcome outcome, NSString *reason) {
+    return [[Core3DPartBooleanEditResult alloc] initWithOutcome:outcome reason:reason historyDelta:0];
+}
+static Core3DPartBooleanValues *Core3DPartBooleanPublicValues(
+    const core3d::part_boolean::AnalyticDefinition& definition) {
+    NSMutableArray<Core3DPartBooleanInputValues *> *inputs=[NSMutableArray arrayWithCapacity:2];
+    for (std::size_t index=0;index<2;++index) {
+        const auto& value=definition.inputs[index];
+        const double mm=value.metersPerUnit*1000.0;
+        NSString *name=[[NSString alloc] initWithBytes:value.originalName.data() length:value.originalName.size()
+            encoding:NSUTF8StringEncoding] ?: @"";
+        Core3DPartBooleanInputValues *input=[[Core3DPartBooleanInputValues alloc]
+            initWithRole:index==0?@"left":@"right" name:name
+            dimensionsMM:simd_make_double3(value.dimensions[0]*mm,value.dimensions[1]*mm,value.dimensions[2]*mm)
+            translationMM:simd_make_double3(value.translation[0]*mm,value.translation[1]*mm,value.translation[2]*mm)
+            rotationXYZW:simd_make_double4(value.rotationXYZW[0],value.rotationXYZW[1],value.rotationXYZW[2],value.rotationXYZW[3])
+            metersPerUnit:value.metersPerUnit
+            baseColorSRGB:simd_make_double3(value.originalMaterial.baseColorSRGB[0],
+                value.originalMaterial.baseColorSRGB[1],value.originalMaterial.baseColorSRGB[2])
+            metallic:value.originalMaterial.metallic roughness:value.originalMaterial.roughness];
+        if (!input) return nil; [inputs addObject:input];
+    }
+    return [[Core3DPartBooleanValues alloc] initWithOperation:
+        static_cast<Core3DPartBooleanOperation>(definition.operation) inputs:inputs];
+}
+#if DEBUG
+static NSString *Core3DDebugPartBooleanFixtureRefusal(const char *reason) {
+    NSLog(@"Part Boolean DEBUG fixture refused: %s",reason ? reason : "unknown");
+    return nil;
+}
+#endif
+
+@interface Core3DPartBooleanEditingSession () {
+@public
+    __weak Core3DViewController *_booleanOwner;
+    Handle(OcctDocument) _booleanDocument;
+    core3d::part_boolean::owner::PartBooleanOwner *_booleanNativeOwner;
+    std::shared_ptr<const core3d::part_boolean::owner::Capture> _booleanCapture;
+    std::shared_ptr<const core3d::part_boolean::owner::PreparedBooleanDocumentChange> _booleanPrepared;
+    uint64_t _booleanSession;
+    BOOL _booleanTerminal;
+#if DEBUG
+    core3d::part_boolean::owner::FaultPoint _booleanFault;
+#endif
+}
+- (instancetype)initWithOwner:(Core3DViewController *)owner document:(const Handle(OcctDocument)&)document
+    nativeOwner:(core3d::part_boolean::owner::PartBooleanOwner *)nativeOwner
+    capture:(const std::shared_ptr<const core3d::part_boolean::owner::Capture>&)capture
+    entityIdentifier:(NSString *)entity values:(Core3DPartBooleanValues *)values;
+@end
+@implementation Core3DPartBooleanEditingSession
+- (instancetype)initWithOwner:(Core3DViewController *)owner document:(const Handle(OcctDocument)&)document
+    nativeOwner:(core3d::part_boolean::owner::PartBooleanOwner *)nativeOwner
+    capture:(const std::shared_ptr<const core3d::part_boolean::owner::Capture>&)capture
+    entityIdentifier:(NSString *)entity values:(Core3DPartBooleanValues *)values {
+    if (!owner || document.IsNull() || !nativeOwner || !capture || !values) return nil;
+    if ((self=[super init])) {
+        _booleanOwner=owner;_booleanDocument=document;_booleanNativeOwner=nativeOwner;_booleanCapture=capture;
+        _booleanSession=capture->editorSession();_entityIdentifier=[entity copy];_openingValues=values;
+    }
+    return self;
+}
+- (BOOL)ownsCurrentNativeSession {
+    return [NSThread isMainThread] && !_booleanTerminal && !_booleanDocument.IsNull()
+        && _booleanDocument->PartBooleanOwnerService()==_booleanNativeOwner && _booleanCapture
+        && _booleanNativeOwner->matchingContinuation(_booleanSession);
+}
+- (Core3DPartBooleanEditResult *)prepareValues:(Core3DPartBooleanValues *)values {
+    if (![self ownsCurrentNativeSession] || _booleanPrepared || ![values isMemberOfClass:Core3DPartBooleanValues.class]
+        || values.inputs.count!=2) return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"session-not-captured");
+    try {
+        core3d::part_boolean::AnalyticDefinition requested=_booleanCapture->editorAnalytic();
+        requested.operation=static_cast<core3d::part_boolean::Operation>(values.operation);
+        for (std::size_t index=0;index<2;++index) {
+            Core3DPartBooleanInputValues *input=values.inputs[index];
+            const auto& original=_openingValues.inputs[index];
+            if (![input.role isEqualToString:original.role]
+                || input.metersPerUnit != original.metersPerUnit) {
+                return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"input-role-or-unit-changed");
+            }
+            auto& target=requested.inputs[index];const double local=1.0/(target.metersPerUnit*1000.0);
+            target.dimensions={input.dimensionsMM.x*local,input.dimensionsMM.y*local,input.dimensionsMM.z*local};
+            target.translation={input.translationMM.x*local,input.translationMM.y*local,input.translationMM.z*local};
+            target.rotationXYZW={input.rotationXYZW.x,input.rotationXYZW.y,input.rotationXYZW.z,input.rotationXYZW.w};
+            target.originalMaterial.baseColorSRGB[0]=input.baseColorSRGB.x;
+            target.originalMaterial.baseColorSRGB[1]=input.baseColorSRGB.y;
+            target.originalMaterial.baseColorSRGB[2]=input.baseColorSRGB.z;
+            target.originalMaterial.metallic=input.metallic;target.originalMaterial.roughness=input.roughness;
+        }
+        if (!core3d::part_boolean::Valid(requested))
+            return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"invalid-editor-values");
+        std::vector<std::uint8_t> beforeBytes,requestedBytes;
+        if (!core3d::part_boolean::EncodeAnalytic(_booleanCapture->editorAnalytic(),beforeBytes)
+            || !core3d::part_boolean::EncodeAnalytic(requested,requestedBytes))
+            return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"editor-codec-refused");
+        if (beforeBytes==requestedBytes) {
+            const auto cancelled=_booleanNativeOwner->cancel(_booleanSession);
+            _booleanTerminal=true;_booleanCapture.reset();
+            return cancelled.outcome==core3d::part_boolean::owner::Outcome::Cancelled
+                ? Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeUnchanged,@"already-current")
+                : Core3DPartBooleanPublicResult(cancelled);
+        }
+        const auto prepared=_booleanNativeOwner->prepare(_booleanCapture,requested
+#if DEBUG
+            ,_booleanFault
+#endif
+        );
+        _booleanPrepared=prepared.handle;
+        return Core3DPartBooleanPublicResult(prepared.receipt,true);
+    } catch (...) { return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"prepare-exception"); }
+}
+- (Core3DPartBooleanEditResult *)apply {
+    if (![self ownsCurrentNativeSession] || !_booleanPrepared)
+        return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"session-not-prepared");
+    const auto receipt=_booleanNativeOwner->apply(_booleanPrepared);
+    _recoveryRequired=receipt.outcome==core3d::part_boolean::owner::Outcome::RecoveryRequired;
+    _booleanTerminal=!_recoveryRequired;_booleanPrepared.reset();_booleanCapture.reset();
+    if (receipt.outcome==core3d::part_boolean::owner::Outcome::Committed) {
+        Core3DViewController *owner=_booleanOwner;
+        if (owner) [owner viewDidInvalidateSceneSnapshot];
+    }
+    return Core3DPartBooleanPublicResult(receipt);
+}
+- (Core3DPartBooleanEditResult *)cancel {
+    if (![NSThread isMainThread] || _recoveryRequired || _booleanTerminal || _booleanDocument.IsNull()
+        || _booleanDocument->PartBooleanOwnerService()!=_booleanNativeOwner)
+        return Core3DPartBooleanLocalResult(_recoveryRequired?Core3DPartBooleanEditOutcomeRecoveryRequired:
+            Core3DPartBooleanEditOutcomeRejected,_recoveryRequired?@"recovery-required":@"cancel-not-owner");
+    const auto receipt=_booleanNativeOwner->cancel(_booleanSession);
+    _booleanTerminal=receipt.outcome!=core3d::part_boolean::owner::Outcome::RecoveryRequired;
+    _recoveryRequired=!_booleanTerminal;_booleanPrepared.reset();_booleanCapture.reset();
+    return Core3DPartBooleanPublicResult(receipt);
+}
+- (Core3DPartBooleanEditResult *)reconcile {
+    if (![NSThread isMainThread] || !_recoveryRequired || _booleanDocument.IsNull()
+        || _booleanDocument->PartBooleanOwnerService()!=_booleanNativeOwner)
+        return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"reconcile-not-owner");
+    const auto receipt=_booleanNativeOwner->reconcile(_booleanSession);
+    _recoveryRequired=receipt.outcome==core3d::part_boolean::owner::Outcome::RecoveryRequired;
+    _booleanTerminal=!_recoveryRequired;
+    return Core3DPartBooleanPublicResult(receipt);
+}
+#if DEBUG
+- (void)debugSetFaultPoint:(NSInteger)fault {
+    if (fault>=0 && fault<=11 && !_booleanPrepared && !_booleanTerminal)
+        _booleanFault=static_cast<core3d::part_boolean::owner::FaultPoint>(fault);
+}
+#endif
+- (void)dealloc { if ([NSThread isMainThread] && !_booleanTerminal && !_recoveryRequired) (void)[self cancel]; }
+@end
+
 @class Core3DSavedCutSourceJob;
 @interface Core3DModelingPlanningContext () {
 @public
@@ -3018,6 +3204,11 @@ struct NativeModelingPermitIssuer final {
     void (^_debugMeshContactAfterCapture)(void);
     void (^_debugMeshContactBeforeDelivery)(void);
     void (^_debugMeshContactDeliveryGate)(void (^resume)(void));
+    std::weak_ptr<core3d::Core3DViewer> _debugPartBooleanFixtureViewer;
+    Handle(OcctDocument) _debugPartBooleanFixtureDocument;
+    Handle(TDocStd_Document) _debugPartBooleanFixtureOcafDocument;
+    core3d::part_boolean::owner::PartBooleanOwner *_debugPartBooleanFixtureOwner;
+    NSString *_debugPartBooleanFixtureEntityIdentifier;
 #endif
 }
 
@@ -3066,6 +3257,14 @@ struct NativeModelingPermitIssuer final {
     slot:(OcctMaterialTextureSlot)slot error:(NSError* _Nullable * _Nullable)error;
 - (BOOL)core3d_clearSelectionTexture:(OcctMaterialTextureSlot)slot
     error:(NSError* _Nullable * _Nullable)error;
+- (nullable Core3DPartBooleanEditingSession *)core3d_openPartBooleanEditorForEntityIdentifier:
+    (NSString *)entityIdentifier;
+- (nullable Core3DPartBooleanValues *)core3d_partBooleanEditorValuesForEntityIdentifier:
+    (NSString *)entityIdentifier;
+#if DEBUG
+- (void)core3d_clearDebugPartBooleanFixtureBinding;
+- (BOOL)core3d_matchesDebugPartBooleanFixtureEntityIdentifier:(NSString *)entityIdentifier;
+#endif
 @end
 
 @interface Core3DViewController (ProfileConstructionPrivate)
@@ -7131,6 +7330,125 @@ struct NativeModelingPermitIssuer final {
     return [out copy];
 }
 + (void)debugSetRetainedFilletFailureCount:(NSInteger)count {Core3DDebugSetRetainedFilletFailureCount(static_cast<Standard_Integer>(std::clamp<NSInteger>(count,0,100)));}
+#if DEBUG
+- (void)core3d_clearDebugPartBooleanFixtureBinding {
+    _debugPartBooleanFixtureViewer.reset();
+    _debugPartBooleanFixtureDocument.Nullify();
+    _debugPartBooleanFixtureOcafDocument.Nullify();
+    _debugPartBooleanFixtureOwner=nullptr;
+    _debugPartBooleanFixtureEntityIdentifier=nil;
+}
+
+- (BOOL)core3d_matchesDebugPartBooleanFixtureEntityIdentifier:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length==0 || entityIdentifier.length>128
+        || !entityIdentifier.UTF8String || GLController==nil) return NO;
+    const auto viewer=GLController.viewer;
+    const auto installedViewer=_debugPartBooleanFixtureViewer.lock();
+    if (!viewer || !installedViewer || viewer!=installedViewer) return NO;
+    const Handle(OcctDocument) document=viewer->getDocument();
+    if (document.IsNull() || _debugPartBooleanFixtureDocument.IsNull()
+        || document.get()!=_debugPartBooleanFixtureDocument.get()) return NO;
+    const Handle(TDocStd_Document) ocaf=document->Document();
+    return !ocaf.IsNull() && !_debugPartBooleanFixtureOcafDocument.IsNull()
+        && ocaf.get()==_debugPartBooleanFixtureOcafDocument.get()
+        && _debugPartBooleanFixtureOwner!=nullptr
+        && document->PartBooleanOwnerService()==_debugPartBooleanFixtureOwner
+        && _debugPartBooleanFixtureOwner->boundTo(ocaf)
+        && [_debugPartBooleanFixtureEntityIdentifier isEqualToString:entityIdentifier];
+}
+
+- (NSString *)debugInstallPartBooleanEditorFixtureOperation:(Core3DPartBooleanOperation)operation
+    metersPerUnit:(double)metersPerUnit {
+    if (![NSThread isMainThread])
+        return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+    [self core3d_clearDebugPartBooleanFixtureBinding];
+    if (operation<Core3DPartBooleanOperationUnion
+        || operation>Core3DPartBooleanOperationIntersect || !std::isfinite(metersPerUnit)
+        || metersPerUnit<=0 || !_isSetuped || _isLoading.load() || GLController==nil)
+        return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+    try {
+        const auto viewer=GLController.viewer;
+        if (!viewer || !viewer->canBeginCommittedEdit()
+            || viewer->hasUnresolvedOrdinaryEdit())
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        const Handle(OcctDocument) document=viewer->getDocument();
+        const Handle(TDocStd_Document) ocaf=document.IsNull()?Handle(TDocStd_Document)():document->Document();
+        auto *owner=document.IsNull()?nullptr:document->PartBooleanOwnerService();
+        if (ocaf.IsNull() || !owner || owner->blocksOtherWork() || ocaf->HasOpenCommand()
+            || ocaf->GetAvailableUndos()!=0 || ocaf->GetAvailableRedos()!=0)
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        const Handle(XCAFDoc_ShapeTool) shapes=XCAFDoc_DocumentTool::ShapeTool(ocaf->Main());
+        TDF_LabelSequence beforeRoots;
+        if (shapes.IsNull()) return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        shapes->GetFreeShapes(beforeRoots);
+        if (beforeRoots.Length()!=0)
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        XCAFDoc_DocumentTool::SetLengthUnit(ocaf,metersPerUnit);
+        double installedUnit=0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(ocaf,installedUnit)
+            || std::memcmp(&installedUnit,&metersPerUnit,sizeof(double))!=0)
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        TDF_Label carrier;
+        if (!owner || !owner->installEvidenceFixture(
+            static_cast<core3d::part_boolean::Operation>(operation),metersPerUnit,carrier))
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        const std::string entity=document->EntityIdentifierForLabel(carrier);
+        if (entity.empty()) return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        NSString *identifier=[[NSString alloc] initWithBytes:entity.data() length:entity.size()
+            encoding:NSUTF8StringEncoding];
+        if (!identifier) return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        TDF_LabelSequence installedRoots;shapes->GetFreeShapes(installedRoots);
+        core3d::part_boolean::AnalyticDefinition definition;
+        if (installedRoots.Length()!=1 || !carrier.IsEqual(installedRoots.Value(1))
+            || !owner->describe(carrier,definition) || !Core3DPartBooleanPublicValues(definition)
+            || ocaf->HasOpenCommand() || ocaf->GetAvailableUndos()!=0
+            || ocaf->GetAvailableRedos()!=0 || owner->blocksOtherWork())
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        std::string beforePublication;
+        if (!core3d::retained_part_boolean::ExactShapeBytes(
+                XCAFDoc_ShapeTool::GetShape(carrier),beforePublication))
+            return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        if (!viewer->redrawDocument())
+            return Core3DDebugPartBooleanFixtureRefusal("publication-redraw");
+        [GLController refreshSelectionState];[GLController requestRender];[self viewDidInvalidateSceneSnapshot];
+        Core3DSceneSnapshot *scene=[self captureSceneSnapshot];
+        std::string afterPublication;
+        if (!core3d::retained_part_boolean::ExactShapeBytes(
+                XCAFDoc_ShapeTool::GetShape(carrier),afterPublication)
+            || afterPublication!=beforePublication)
+            return Core3DDebugPartBooleanFixtureRefusal("publication-byte-mismatch");
+        core3d::part_boolean::AnalyticDefinition publishedDefinition;
+        if (!owner->describe(carrier,publishedDefinition)
+            || !Core3DPartBooleanPublicValues(publishedDefinition))
+            return Core3DDebugPartBooleanFixtureRefusal("post-publication-describe");
+        const double sceneUnit=scene?scene.metersPerUnit:0;
+        NSUInteger entityMatches=0;
+        for (Core3DSceneRenderItemSnapshot *item in scene.renderItems)
+            if ([item.entityIdentifier isEqualToString:identifier]) ++entityMatches;
+        if (!scene || std::memcmp(&sceneUnit,&metersPerUnit,sizeof(double))!=0
+            || entityMatches!=1 || ocaf->HasOpenCommand() || ocaf->GetAvailableUndos()!=0
+            || ocaf->GetAvailableRedos()!=0 || owner->blocksOtherWork()
+            || GLController.viewer!=viewer || viewer->getDocument().get()!=document.get()
+            || document->Document().get()!=ocaf.get()
+            || document->PartBooleanOwnerService()!=owner || !owner->boundTo(ocaf)
+            || !viewer->canBeginCommittedEdit() || viewer->hasUnresolvedOrdinaryEdit())
+            return Core3DDebugPartBooleanFixtureRefusal("post-publication-binding-or-readiness");
+        _debugPartBooleanFixtureViewer=viewer;
+        _debugPartBooleanFixtureDocument=document;
+        _debugPartBooleanFixtureOcafDocument=ocaf;
+        _debugPartBooleanFixtureOwner=owner;
+        _debugPartBooleanFixtureEntityIdentifier=[identifier copy];
+        return identifier;
+    } catch (...) { return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness-exception"); }
+}
+#endif
++ (NSDictionary<NSString *, NSNumber *> *)debugNativeBooleanOwnerProbe:(NSInteger)scenario {
+    NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
+    for(const auto& row:Core3DDebugNativeBooleanOwnerProbe(static_cast<Standard_Integer>(scenario)))
+        out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+    return [out copy];
+}
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe {
     NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
     for (const auto& check : core3d::composite_recipe::Probe::Run()) {
@@ -16160,6 +16478,123 @@ struct NativeModelingPermitIssuer final {
         return selected;
     } catch (...) { return NO; }
 }
+
+- (Core3DPartBooleanEditingSession *)core3d_openPartBooleanEditorForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
+        || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
+        || entityIdentifier.length>128 || !entityIdentifier.UTF8String
+        || GLController==nil || GLController.viewer==nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) return nil;
+    core3d::part_boolean::owner::PartBooleanOwner *capturedOwner=nullptr;
+    std::uint64_t capturedSession=0;
+    try {
+        const Handle(OcctDocument) document=GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return nil;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+        if (shapes.IsNull()) return nil;
+        TDF_LabelSequence roots;shapes->GetFreeShapes(roots);TDF_Label carrier;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index=1;index<=roots.Length();++index) {
+            const TDF_Label candidate=roots.Value(index);
+            if (document->EntityIdentifierForLabel(candidate)==entity) {
+                if (!carrier.IsNull()) return nil; carrier=candidate;
+            }
+        }
+        auto *nativeOwner=document->PartBooleanOwnerService();
+        if (carrier.IsNull() || !nativeOwner) return nil;
+        const auto captured=nativeOwner->capture(carrier);
+        if (!captured.handle) {
+#if DEBUG
+            if ([self core3d_matchesDebugPartBooleanFixtureEntityIdentifier:entityIdentifier]) {
+                const std::size_t reasonBytes=std::min<std::size_t>(captured.receipt.reason.size(),128);
+                NSLog(@"Part Boolean DEBUG fixture native capture refused: %.*s",
+                    static_cast<int>(reasonBytes),captured.receipt.reason.data());
+            }
+#endif
+            return nil;
+        }
+        capturedOwner=nativeOwner;capturedSession=captured.handle->editorSession();
+        Core3DPartBooleanValues *values=Core3DPartBooleanPublicValues(captured.handle->editorAnalytic());
+        if (!values) { (void)capturedOwner->cancel(capturedSession); return nil; }
+        Core3DPartBooleanEditingSession *session=[[Core3DPartBooleanEditingSession alloc]
+            initWithOwner:self document:document nativeOwner:nativeOwner capture:captured.handle
+            entityIdentifier:entityIdentifier values:values];
+        if (!session) (void)capturedOwner->cancel(capturedSession);
+        else capturedSession=0;
+        return session;
+    } catch (...) {
+        if (capturedOwner && capturedSession) (void)capturedOwner->cancel(capturedSession);
+        return nil;
+    }
+}
+
+- (Core3DPartBooleanValues *)core3d_partBooleanEditorValuesForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
+        || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
+        || entityIdentifier.length>128 || !entityIdentifier.UTF8String
+        || GLController==nil || GLController.viewer==nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) return nil;
+    try {
+        const Handle(OcctDocument) document=GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return nil;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+        if (shapes.IsNull()) return nil;
+        TDF_LabelSequence roots;shapes->GetFreeShapes(roots);TDF_Label carrier;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index=1;index<=roots.Length();++index)
+            if (document->EntityIdentifierForLabel(roots.Value(index))==entity) {
+                if (!carrier.IsNull()) return nil;carrier=roots.Value(index);
+            }
+        auto *nativeOwner=document->PartBooleanOwnerService();core3d::part_boolean::AnalyticDefinition definition;
+        return !carrier.IsNull() && nativeOwner && nativeOwner->describe(carrier,definition)
+            ? Core3DPartBooleanPublicValues(definition) : nil;
+    } catch (...) { return nil; }
+}
+
+- (Core3DPartBooleanEditingSession *)openPartBooleanEditorForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    using namespace core3d::part_boolean::family_admission;
+    if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
+        || !OwnerInstalled || !RetainedInputsPersistenceInstalled || !OperandEditorInstalled
+        || !AnalyticNativeAdmissionEnabled || !AnalyticBooleanRouteInstalled
+        || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
+        || entityIdentifier.length>128 || !entityIdentifier.UTF8String
+        || GLController==nil || GLController.viewer==nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) return nil;
+    return [self core3d_openPartBooleanEditorForEntityIdentifier:entityIdentifier];
+}
+
+- (Core3DPartBooleanValues *)partBooleanEditorValuesForEntityIdentifier:(NSString *)entityIdentifier {
+    using namespace core3d::part_boolean::family_admission;
+    if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
+        || !OwnerInstalled || !RetainedInputsPersistenceInstalled || !OperandEditorInstalled
+        || !AnalyticNativeAdmissionEnabled || !AnalyticBooleanRouteInstalled
+        || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
+        || entityIdentifier.length>128 || !entityIdentifier.UTF8String
+        || GLController==nil || GLController.viewer==nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) return nil;
+    return [self core3d_partBooleanEditorValuesForEntityIdentifier:entityIdentifier];
+}
+
+#if DEBUG
+- (Core3DPartBooleanValues *)debugPartBooleanEditorValuesForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    return [self core3d_matchesDebugPartBooleanFixtureEntityIdentifier:entityIdentifier]
+        ? [self core3d_partBooleanEditorValuesForEntityIdentifier:entityIdentifier] : nil;
+}
+
+- (Core3DPartBooleanEditingSession *)debugOpenPartBooleanEditorForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    return [self core3d_matchesDebugPartBooleanFixtureEntityIdentifier:entityIdentifier]
+        ? [self core3d_openPartBooleanEditorForEntityIdentifier:entityIdentifier] : nil;
+}
+#endif
 
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect

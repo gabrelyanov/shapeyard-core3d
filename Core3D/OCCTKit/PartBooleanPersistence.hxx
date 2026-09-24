@@ -198,4 +198,98 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
         output = std::move(value); return true;
     } catch (...) { output = {}; return false; }
 }
+
+inline bool EncodeAnalytic(const AnalyticDefinition& value,
+                           std::vector<std::uint8_t>& output) noexcept {
+    output.clear();
+    try {
+        if (!Valid(value)) return false;
+        Writer writer;
+        writer.raw(reinterpret_cast<const std::uint8_t*>("SYPB"), 4);
+        writer.integer(AnalyticPayloadVersion, 1); writer.integer(0, 3);
+        writer.integer(std::uint8_t(value.operation), 1);
+        writer.integer(std::uint8_t(value.materialPolicy), 1);
+        writer.integer(0, 2); // persisted admission and reserved byte
+        for (std::uint32_t version : {value.versions.serializer, value.versions.build,
+             value.versions.proof, value.versions.selector, value.versions.material})
+            writer.integer(version, 4);
+        for (const AnalyticPrismInput& input : value.inputs) {
+            writer.raw(input.rootNode); writer.raw(input.originalSourceFeature);
+            writer.integer(input.originallyVisible ? 1 : 0, 1); writer.integer(0, 3);
+            writer.raw(input.commitments.geometry); writer.raw(input.commitments.recipe);
+            writer.raw(input.commitments.placement); writer.raw(input.commitments.material);
+            writer.raw(input.commitments.groups);
+            for (double scalar : input.dimensions) writer.scalar(scalar);
+            for (double scalar : input.translation) writer.scalar(scalar);
+            for (double scalar : input.rotationXYZW) writer.scalar(scalar);
+            writer.scalar(input.metersPerUnit); WriteMaterial(writer, input.originalMaterial);
+            writer.text(input.originalName); writer.integer(input.originalGroups.size(), 2);
+            for (const auto& group : input.originalGroups) writer.text(group);
+        }
+        if (!writer.valid || writer.bytes.size() > MaximumPayloadBytes - 32) return false;
+        Digest digest{};
+        if (!retained_solid::Hash(writer.bytes, digest)) return false;
+        writer.raw(digest);
+        if (!writer.valid) return false;
+        output = std::move(writer.bytes); return true;
+    } catch (...) { output.clear(); return false; }
+}
+
+inline bool DecodeAnalytic(const std::vector<std::uint8_t>& bytes,
+                           AnalyticDefinition& output) noexcept {
+    output = {};
+    try {
+        if (bytes.size() < 8 + 4 + 20 + 32 || bytes.size() > MaximumPayloadBytes
+            || std::memcmp(bytes.data(), "SYPB\1\0\0\0", 8) != 0) return false;
+        std::vector<std::uint8_t> body(bytes.begin(), bytes.end() - 32);
+        Digest expected{}, actual{};
+        if (!retained_solid::Hash(body, expected)) return false;
+        std::copy_n(bytes.end() - 32, 32, actual.begin());
+        if (expected != actual) return false;
+        Reader reader(bytes, bytes.size() - 32);
+        std::array<std::uint8_t, 8> prefix{};
+        std::uint64_t operation = 0, policy = 0, admission = 0, reserved = 0;
+        AnalyticDefinition value;
+        if (!reader.raw(prefix) || !reader.integer(1, operation)
+            || !reader.integer(1, policy) || !reader.integer(1, admission)
+            || admission != 0 || !reader.integer(1, reserved) || reserved != 0) return false;
+        value.operation = Operation(operation); value.materialPolicy = MaterialPolicy(policy);
+        std::uint32_t* versions[] = {&value.versions.serializer, &value.versions.build,
+            &value.versions.proof, &value.versions.selector, &value.versions.material};
+        for (auto* version : versions) {
+            std::uint64_t decoded = 0;
+            if (!reader.integer(4, decoded) || decoded > UINT32_MAX) return false;
+            *version = std::uint32_t(decoded);
+        }
+        for (AnalyticPrismInput& input : value.inputs) {
+            std::uint64_t visible = 0, groups = 0;
+            if (!reader.raw(input.rootNode) || !reader.raw(input.originalSourceFeature)
+                || !reader.integer(1, visible) || visible > 1
+                || !reader.integer(3, reserved) || reserved != 0
+                || !reader.raw(input.commitments.geometry)
+                || !reader.raw(input.commitments.recipe)
+                || !reader.raw(input.commitments.placement)
+                || !reader.raw(input.commitments.material)
+                || !reader.raw(input.commitments.groups)) return false;
+            input.originallyVisible = visible != 0;
+            for (double& scalar : input.dimensions) if (!reader.scalar(scalar)) return false;
+            for (double& scalar : input.translation) if (!reader.scalar(scalar)) return false;
+            for (double& scalar : input.rotationXYZW) if (!reader.scalar(scalar)) return false;
+            if (!reader.scalar(input.metersPerUnit)
+                || !ReadMaterial(reader, input.originalMaterial)
+                || !reader.text(input.originalName) || !reader.integer(2, groups)
+                || groups > MaximumGroupsPerInput) return false;
+            input.originalGroups.reserve(std::size_t(groups));
+            for (std::uint64_t index = 0; index < groups; ++index) {
+                std::string group;
+                if (!reader.text(group)) return false;
+                input.originalGroups.push_back(std::move(group));
+            }
+        }
+        std::vector<std::uint8_t> canonical;
+        if (!reader.complete() || !Valid(value) || !EncodeAnalytic(value, canonical)
+            || canonical != bytes) return false;
+        output = std::move(value); return true;
+    } catch (...) { output = {}; return false; }
+}
 } // namespace core3d::part_boolean

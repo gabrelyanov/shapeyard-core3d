@@ -81,26 +81,31 @@ public:
                 const bool little=std::memcmp(marker.data(),"\4\3\2\1",4)==0;
                 const bool big=std::memcmp(marker.data(),"\1\2\3\4",4)==0;
                 if(!little&&!big)return Refuse();
+                const auto body = stream->tellg();
+                if (body == std::streampos(-1) || body < std::streampos(8)) return Refuse();
+                const auto begin = body - std::streamoff(8);
+                std::array<std::uint8_t,8> framing{};
+                stream->seekg(begin);stream->read(reinterpret_cast<char*>(framing.data()),8);
+                if(!*stream)return Refuse();
+                stream->seekg(0,std::ios::end);const auto fileEnd=stream->tellg();
+                if(fileEnd==std::streampos(-1)||fileEnd<body)return Refuse();
+                std::uint64_t extent=0;for(unsigned byte=0;byte<8;++byte)
+                    extent|=std::uint64_t(framing[byte])<<(8*(little?byte:7-byte));
+                if(extent<8||extent>std::uint64_t(std::streamoff(fileEnd-begin)))return Refuse();
+                const auto expected=begin+std::streamoff(extent);stream->seekg(body);
                 for (Standard_Integer index = 0; index < shapeCount; ++index) {
+                    const auto before=stream->tellg();
+                    if(before==std::streampos(-1)||before<body||before>=expected)return Refuse();
                     TopoDS_Shape shape;
-                    const auto cursor=stream->tellg();if(cursor==std::streampos(-1))return Refuse();
-                    const auto begin=index==0?cursor-std::streamoff(8):cursor;
-                    if(begin<std::streampos(0))return Refuse();
-                    std::array<std::uint8_t,8> framing{};
-                    stream->seekg(begin);stream->read(reinterpret_cast<char*>(framing.data()),8);
-                    if(!*stream)return Refuse();
-                    const auto body=stream->tellg();stream->seekg(0,std::ios::end);const auto fileEnd=stream->tellg();
-                    if(fileEnd==std::streampos(-1)||fileEnd<body)return Refuse();
-                    std::uint64_t extent=0;for(unsigned byte=0;byte<8;++byte)
-                        extent|=std::uint64_t(framing[byte])<<(8*(little?byte:7-byte));
-                    if(extent<8||extent>std::uint64_t(std::streamoff(fileEnd-begin)))return Refuse();
-                    const auto expected=begin+std::streamoff(extent);stream->seekg(body);
                     shared->Read(*stream, shape);
-                    if (!*stream || stream->tellg()!=expected || shape.IsNull()
+                    const auto after=stream->tellg();
+                    if (!*stream || after==std::streampos(-1) || after<=before || after>expected
+                        || shape.IsNull()
                         || shape.ShapeType() != expectedShapeTypes[std::size_t(index)]
                         || shape.Orientation() != TopAbs_FORWARD) return Refuse();
                     sourceShapes.push_back(std::move(shape));
                 }
+                if (stream->tellg()!=expected) return Refuse();
             } else {
                 auto* set = dynamic_cast<BinTools_ShapeSet*>(shared); if (!set) return Refuse();
                 for (Standard_Integer index = 0; index < shapeCount; ++index) {

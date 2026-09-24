@@ -393,4 +393,73 @@ inline Evidence SplitMergeEvidence() noexcept {
     }
 }
 
+struct AnalyticProof final {
+    bool sourceEquations = false;
+    bool operationOracle = false;
+    bool completePlanarBoundary = false;
+    bool correspondenceComplete = false;
+    bool materialsComplete = false;
+    bool connectedPositiveSolid = false;
+    double expectedVolume = 0;
+    double observedVolume = 0;
+    bool proven() const noexcept {
+        return sourceEquations && operationOracle && completePlanarBoundary
+            && correspondenceComplete && materialsComplete && connectedPositiveSolid;
+    }
+};
+
+inline AnalyticProof ProveAnalytic(
+    const AnalyticDefinition& definition,
+    const build::AnalyticBuild& built,
+    double carrierMetersPerUnit) noexcept {
+    AnalyticProof proof;
+    try {
+        if (!Valid(definition) || !built.complete || carrierMetersPerUnit <= 0) return proof;
+        std::array<std::array<double, 6>, 2> bounds{};
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& input = definition.inputs[index];
+            // N1's proved transform domain is an axis-aligned pair in one
+            // proper carrier frame. Oblique values remain structurally readable
+            // but are not admitted by this proof profile.
+            if (input.rotationXYZW != std::array<double, 4>{{0, 0, 0, 1}}) return proof;
+            const double scale = input.metersPerUnit / carrierMetersPerUnit;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                bounds[index][axis] = input.translation[axis] * scale;
+                bounds[index][axis + 3] = bounds[index][axis] + input.dimensions[axis] * scale;
+            }
+        }
+        auto volume = [](const std::array<double, 6>& value) {
+            return (value[3] - value[0]) * (value[4] - value[1]) * (value[5] - value[2]);
+        };
+        std::array<double, 6> overlap{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            overlap[axis] = std::max(bounds[0][axis], bounds[1][axis]);
+            overlap[axis + 3] = std::min(bounds[0][axis + 3], bounds[1][axis + 3]);
+            if (!(overlap[axis + 3] > overlap[axis])) return proof;
+        }
+        const double left = volume(bounds[0]), right = volume(bounds[1]), common = volume(overlap);
+        proof.expectedVolume = definition.operation == Operation::Union ? left + right - common
+            : definition.operation == Operation::Subtract ? left - common : common;
+        proof.observedVolume = retained_part_boolean::Volume(built.candidate.solid);
+        proof.sourceEquations = Near(retained_part_boolean::Volume(built.sources[0]), left)
+            && Near(retained_part_boolean::Volume(built.sources[1]), right);
+        proof.operationOracle = Near(proof.observedVolume, proof.expectedVolume);
+        std::size_t faces = 0, classified = 0;
+        for (TopExp_Explorer it(built.candidate.solid, TopAbs_FACE); it.More(); it.Next()) {
+            ++faces;
+            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()), Standard_True);
+            GProp_GProps area; BRepGProp::SurfaceProperties(it.Current(), area);
+            if (surface.GetType() == GeomAbs_Plane && area.Mass() > Precision::Confusion()) ++classified;
+        }
+        proof.completePlanarBoundary = faces >= 6 && faces == classified;
+        proof.correspondenceComplete = proof.completePlanarBoundary
+            && built.evidence.historyObserved && built.evidence.inputBytesUnchanged;
+        proof.materialsComplete = definition.inputs[0].originalMaterial.kind == MaterialKind::ResolvedScalars
+            && definition.inputs[1].originalMaterial.kind == MaterialKind::ResolvedScalars;
+        proof.connectedPositiveSolid = retained_part_boolean::IsOneValidForwardSolid(built.candidate.solid)
+            && proof.observedVolume > Precision::Confusion();
+        return proof;
+    } catch (...) { return {}; }
+}
+
 } // namespace core3d::part_boolean::correspondence

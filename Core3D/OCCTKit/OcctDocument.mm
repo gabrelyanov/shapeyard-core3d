@@ -1,5 +1,14 @@
 #include "RetainedFilletCandidates.hxx"
 #include "SavedCutSourceEdit.hxx"
+#include "PartBooleanOwner.hxx"
+#include "PartBooleanBuild.hxx"
+#include "PartBooleanCorrespondence.hxx"
+#include "PartBooleanRebuild.hxx"
+#include "RetainedRecipeAdmission.hxx"
+#include <TNaming_Builder.hxx>
+#include <BRepTools.hxx>
+#include <TDF_Delta.hxx>
+#include <TDF_DeltaList.hxx>
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -90,6 +99,7 @@ struct Cut475Scope {
 #include <map>
 #include <set>
 #include <locale>
+#include <sstream>
 #include <TDF_AttributeIterator.hxx>
 #include "AuthoredFrameAttributeID.hxx"
 #include "NativeAuthoredFrameGeometry.hxx"
@@ -110,6 +120,12 @@ struct Cut475Scope {
 #include "ReceiptFramingProbe.hxx"
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <Standard_IStream.hxx>
+#include <PCDM_ReadWriter.hxx>
+#include <Storage_Data.hxx>
+#include <TDocStd_PathParser.hxx>
+#include <TopoDS_Compound.hxx>
+#include <fstream>
 #endif
 
 #if DEBUG && TARGET_OS_IOS
@@ -4007,6 +4023,8 @@ void OcctDocument::CloseNativeSession() noexcept
 {
     if (myNativeSessionClosed) return;
     myNativeSessionClosed = true;
+    if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
+    myPartBooleanOwner.reset();
     if (myNativeAuthority) myNativeAuthority->Detach();
 #if DEBUG
     if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
@@ -4040,8 +4058,12 @@ OcctDocument::~OcctDocument()
 void OcctDocument::InitDoc()
 {
     if (myNativeSessionClosed) throw Standard_ProgramError("Native document session is closed");
+    if (NativeBooleanOwnerBlocksOtherWork())
+        throw Standard_ProgramError("Native Boolean owner blocks document replacement");
     
     std::cout << "InitDoc()" << std::endl;
+  if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
+  myPartBooleanOwner.reset();
   if (myNativeAuthority) myNativeAuthority->Detach();
 #if DEBUG
   if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
@@ -4084,6 +4106,7 @@ void OcctDocument::InitDoc()
 	}
 	myOcafDoc->ClearUndos();
 	myOcafDoc->SetUndoLimit(kNativeSessionUndoLimit);
+    myPartBooleanOwner = std::make_unique<core3d::part_boolean::owner::PartBooleanOwner>(*this);
   }
   ObserveSuccessfulNativeDocumentAdoption();
 #if DEBUG
@@ -4100,12 +4123,24 @@ void OcctDocument::ObserveSuccessfulNativeDocumentAdoption() noexcept {
             myNativeAuthority->Detach(); return;
         }
         myNativeAuthority->Adopt(myOcafDoc.get());
+        if (!myPartBooleanOwner || !myPartBooleanOwner->boundTo(myOcafDoc)) {
+            if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
+            myPartBooleanOwner = std::make_unique<core3d::part_boolean::owner::PartBooleanOwner>(*this);
+        }
     } catch (...) { myNativeAuthority->Detach(); }
+}
+
+core3d::part_boolean::owner::PartBooleanOwner*
+OcctDocument::PartBooleanOwnerService() noexcept { return myPartBooleanOwner.get(); }
+const core3d::part_boolean::owner::PartBooleanOwner*
+OcctDocument::PartBooleanOwnerService() const noexcept { return myPartBooleanOwner.get(); }
+bool OcctDocument::NativeBooleanOwnerBlocksOtherWork() const noexcept {
+    return myPartBooleanOwner && myPartBooleanOwner->blocksOtherWork();
 }
 
 std::optional<core3d::authority::QueuedLoadReservation>
 OcctDocument::BeginNativeQueuedLoad() noexcept {
-    if (!myNativeAuthority || !myAuthorityApplication
+    if (NativeBooleanOwnerBlocksOtherWork() || !myNativeAuthority || !myAuthorityApplication
         || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;
     try {
         if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return std::nullopt;
@@ -4139,7 +4174,7 @@ core3d::authority::QueuedLoadEnd OcctDocument::EndNativeQueuedLoadPrivateWork(
 
 std::optional<core3d::authority::ReplacementReservation> OcctDocument::PromoteNativeQueuedLoad(
     const core3d::authority::QueuedLoadReservation& reservation, bool nativeEditReady) noexcept {
-    if (!myNativeAuthority || !myAuthorityApplication
+    if (NativeBooleanOwnerBlocksOtherWork() || !myNativeAuthority || !myAuthorityApplication
         || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;
     try {
         if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return std::nullopt;
@@ -4149,7 +4184,7 @@ std::optional<core3d::authority::ReplacementReservation> OcctDocument::PromoteNa
 }
 
 std::optional<core3d::authority::ReplacementReservation> OcctDocument::BeginNativeReplacement() noexcept {
-    if (!myNativeAuthority || !myAuthorityApplication
+    if (NativeBooleanOwnerBlocksOtherWork() || !myNativeAuthority || !myAuthorityApplication
         || !myAuthorityApplication->AuthorityThreadContractValid()) return std::nullopt;
     try {
         if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()) return std::nullopt;
@@ -4173,7 +4208,7 @@ core3d::authority::ReplacementEnd OcctDocument::EndNativeReplacement(
 
 std::optional<core3d::authority::Stamp>
 OcctDocument::CaptureNativePlanningStamp(bool nativeEditReady) noexcept {
-    if (![NSThread isMainThread] || !nativeEditReady || !myNativeAuthority
+    if (NativeBooleanOwnerBlocksOtherWork() || ![NSThread isMainThread] || !nativeEditReady || !myNativeAuthority
         || !myAuthorityApplication || !myAuthorityApplication->AuthorityThreadContractValid())
         return std::nullopt;
     try {
@@ -4204,7 +4239,7 @@ bool OcctDocument::DebugStartLiveTransactionProbe() noexcept {
         || myApp.get() != myObservedApplication
         || !myObservedApplication->ThreadContractValid()) return false;
     try {
-        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || myOcafDoc->Application().get() != myApp.get()
             || DocumentIdentifier().empty()) return false;
         auto state = std::make_shared<core3d::debug::LiveTransactionProbeState>();
@@ -4911,7 +4946,7 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
 {
     try {
         OCC_CATCH_SIGNALS
-        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || requests.empty()
             || requests.size()
                 > static_cast<std::size_t>(
@@ -5090,7 +5125,7 @@ Standard_Integer OcctDocument::SupportedGeometryExportFormats() const
 {
     try {
         OCC_CATCH_SIGNALS
-        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || !ValidateGeometryRepresentations()
             || !XCAFDoc_DocumentTool::CheckShapeTool(
                 myOcafDoc->Main())) {
@@ -5168,7 +5203,7 @@ Standard_Boolean OcctDocument::IsGeometryDocumentEmpty() const
 {
     try {
         OCC_CATCH_SIGNALS
-        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || !ValidateGeometryRepresentations()
             || !XCAFDoc_DocumentTool::CheckShapeTool(
                 myOcafDoc->Main())) {
@@ -11290,6 +11325,7 @@ void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(
 }
 
 Standard_Boolean OcctDocument::undo() {
+    if (NativeBooleanOwnerBlocksOtherWork()) return Standard_False;
     if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
     if (!canUndo()) {
 		return Standard_False;
@@ -11310,6 +11346,7 @@ Standard_Boolean OcctDocument::undo() {
 	return Standard_False;
 }
 Standard_Boolean OcctDocument::redo() {
+    if (NativeBooleanOwnerBlocksOtherWork()) return Standard_False;
     if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
     if (!canRedo()) {
 		return Standard_False;
@@ -11331,12 +11368,12 @@ Standard_Boolean OcctDocument::redo() {
 }
 
 const bool OcctDocument::canUndo() const {
-	return !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()
+	return !NativeBooleanOwnerBlocksOtherWork() && !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()
 		&& myOcafDoc->GetAvailableUndos() > 0;
 }
 
 const bool OcctDocument::canRedo() const {
-	return !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()
+	return !NativeBooleanOwnerBlocksOtherWork() && !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()
 		&& myOcafDoc->GetAvailableRedos() > 0;
 }
 
@@ -11348,7 +11385,7 @@ std::string OcctDocument::save(
     const std::string& path,
     const Message_ProgressRange& progress) {
     Standard_Size frameBytes = 0;
-    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+    if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
         || !ValidateGeometryRepresentations()
         || !Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes)) {
         return {};
@@ -11382,7 +11419,1539 @@ void OcctDocument::NotifyChanges() {
      object:[NSValue valueWithPointer:this]];
 }
 
+bool OcctDocument::StagePartBooleanPayload(
+    const TDF_Label& record,
+    const std::shared_ptr<const core3d::composite_recipe::Payload>& payload) noexcept {
+    try {
+        if (myOcafDoc.IsNull() || record.IsNull() || record.Data() != myOcafDoc->GetData()
+            || !payload) return false;
+        Handle(core3d::composite_recipe::Attribute) attribute;
+        if (!record.FindAttribute(core3d::composite_recipe::AttributeID(), attribute)
+            || attribute.IsNull()) return false;
+        attribute->Backup(); attribute->value_ = payload;
+        return attribute->value_ == payload;
+    } catch (...) { return false; }
+}
+
+namespace core3d::part_boolean::owner {
+namespace {
+std::atomic<std::uint64_t> PartBooleanOwnerNonce{1};
+const Standard_GUID& PartBooleanCommandMarkerID() {
+    static const Standard_GUID value("813CDCDC-C155-4AFE-92F5-F31A3486292F");
+    return value;
+}
+std::vector<std::uint8_t> Bytes(const std::string& value) {
+    return {value.begin(), value.end()};
+}
+std::vector<std::uint8_t> Bytes(std::uint64_t value) {
+    std::vector<std::uint8_t> output(8);
+    for (std::size_t index = 0; index < output.size(); ++index)
+        output[index] = std::uint8_t(value >> (index * 8));
+    return output;
+}
+bool ShapeBytes(const TopoDS_Shape& shape, std::vector<std::uint8_t>& output) noexcept {
+    std::string value;
+    if (!retained_part_boolean::ExactShapeBytes(shape, value)) return false;
+    output = Bytes(value); return true;
+}
+bool HashBytes(const std::vector<std::uint8_t>& bytes, retained_recipe::Digest& digest) noexcept {
+    return !bytes.empty() && retained_solid::Hash(bytes, digest);
+}
+void Append(std::vector<std::uint8_t>& destination, const retained_recipe::UUID& value) {
+    destination.insert(destination.end(), value.begin(), value.end());
+}
+HistoryWitness ObserveHistory(const Handle(TDocStd_Document)& document,
+                              std::uint64_t serial) {
+    HistoryWitness value;
+    value.transaction = document->GetData()->Transaction();
+    value.dataTime = document->GetData()->Time();
+    value.undoCount = document->GetAvailableUndos();
+    value.redoCount = document->GetAvailableRedos();
+    value.undoLimit = document->GetUndoLimit();
+    value.observationSerial = serial;
+    const auto append = [](const TDF_DeltaList& list,
+                           std::vector<std::array<std::uint64_t, 2>>& output) {
+        for (TDF_ListIteratorOfDeltaList it(list); it.More(); it.Next()) {
+            const Handle(TDF_Delta)& delta = it.Value();
+            output.push_back({std::uint64_t(delta->BeginTime()), std::uint64_t(delta->EndTime())});
+        }
+    };
+    append(document->GetUndos(), value.undoTimes);
+    append(document->GetRedos(), value.redoTimes);
+    return value;
+}
+retained_part_boolean::OperandReadSet Reads(const retained_recipe::OwnerSnapshot& snapshot) {
+    return {snapshot.fence.dependencies.at(0), snapshot.fence.dependencies.at(1)};
+}
+} // namespace
+
+PartBooleanOwner::PartBooleanOwner(OcctDocument& owner) noexcept
+    : owner_(owner), document_(owner.Document()),
+      documentIdentity_(document_.IsNull() ? nullptr : document_.get()),
+      nonce_(PartBooleanOwnerNonce.fetch_add(1, std::memory_order_relaxed)) {}
+PartBooleanOwner::~PartBooleanOwner() = default;
+
+bool PartBooleanOwner::boundTo(const Handle(TDocStd_Document)& value) const noexcept {
+    return !value.IsNull() && value.get() == documentIdentity_
+        && !document_.IsNull() && document_.get() == documentIdentity_
+        && owner_.Document().get() == documentIdentity_;
+}
+void PartBooleanOwner::retireForDocumentReplacement() noexcept {
+    activeSession_ = 0; recoverySession_ = 0;
+    recoveryBaseline_ = {}; recoveryExpected_ = {}; recoveryHistoryBefore_ = {};
+    document_.Nullify(); documentIdentity_ = nullptr;
+}
+Receipt PartBooleanOwner::result(Outcome outcome, const char* reason,
+                                 std::uint64_t session, Standard_Integer delta) const noexcept {
+    return {outcome, reason, delta, session,
+        document_.IsNull() || !document_->HasOpenCommand(), blocksOtherWork()};
+}
+Receipt PartBooleanOwner::refuse(const char* reason) const noexcept {
+    return result(Outcome::Rejected, reason, activeSession_ ? activeSession_ : recoverySession_);
+}
+Receipt PartBooleanOwner::retire(Outcome outcome, const char* reason,
+                                 Standard_Integer delta) noexcept {
+    const std::uint64_t session = activeSession_;
+    activeSession_ = 0;
+    return result(outcome, reason, session, delta);
+}
+
+bool PartBooleanOwner::captureNativeState(const TDF_Label& carrier,
+                                          DocumentSnapshot& output,
+                                          composite_recipe::Record* recordOut) const noexcept {
+    output = {};
+    try {
+        if (!boundTo(owner_.Document()) || carrier.IsNull()
+            || carrier.Data() != document_->GetData()) return false;
+        composite_recipe::Record record;
+        if (!composite_recipe::Read(document_, carrier, record) || !record.value) return false;
+        std::vector<std::uint8_t> graph;
+        if (!composite_recipe::Encode(record.value->definition, graph)) return false;
+        output.scopes.push_back(std::move(graph));
+        std::vector<std::uint8_t> shape;
+        if (!ShapeBytes(record.current, shape)) return false;
+        output.scopes.push_back(std::move(shape));
+        for (const TopoDS_Shape& source : record.value->sourceShapes) {
+            if (!ShapeBytes(source, shape)) return false;
+            output.scopes.push_back(std::move(shape));
+        }
+        if (record.value->sourceShapes.size() != 2) return false;
+        std::vector<std::uint8_t> identities;
+        Append(identities, record.value->definition.owner.document);
+        Append(identities, record.value->definition.owner.entity);
+        Append(identities, record.value->definition.owner.definition);
+        Append(identities, record.value->definition.outputNode);
+        for (const auto& node : record.value->definition.nodes) {
+            Append(identities, composite_recipe::NodeID(node));
+            if (const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value)) {
+                Append(identities, source->original.entity);
+                Append(identities, source->original.definition);
+                Append(identities, source->original.sourceFeature);
+            } else Append(identities, std::get<composite_recipe::FeatureNode>(node.value).feature);
+        }
+        output.scopes.push_back(std::move(identities));
+        std::vector<std::uint8_t> metadata;
+        Handle(TDataStd_Name) name;
+        if (carrier.FindAttribute(TDataStd_Name::GetID(), name) && !name.IsNull()) {
+            const TCollection_AsciiString ascii(name->Get());
+            const char* text = ascii.ToCString();
+            metadata.insert(metadata.end(), text, text + ascii.Length());
+        }
+        OcctObjectVisibilityState visibility;
+        if (!owner_.CaptureObjectVisibilityStateForLabel(carrier, visibility)) return false;
+        metadata.push_back(visibility.invisibleAttributePresent ? 1 : 0);
+        metadata.push_back(visibility.layerLinkPresent ? 1 : 0);
+        metadata.push_back(std::uint8_t(visibility.layers.size()));
+        for (bool hidden : visibility.layerInvisibleAttributePresent)
+            metadata.push_back(hidden ? 1 : 0);
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return false;
+        const auto unitBits = retained_solid::Bits(unit);
+        for (unsigned shift = 0; shift < 64; shift += 8) metadata.push_back(std::uint8_t(unitBits >> shift));
+        output.scopes.push_back(std::move(metadata));
+        std::vector<std::uint8_t> unrelated;
+        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        TDF_LabelSequence freeShapes; shapes->GetFreeShapes(freeShapes);
+        for (Standard_Integer index = 1; index <= freeShapes.Length(); ++index) {
+            const TDF_Label label = freeShapes.Value(index);
+            unrelated.push_back(std::uint8_t(label.Tag() & 0xff));
+            if (!label.IsEqual(carrier)) {
+                std::vector<std::uint8_t> other;
+                if (!ShapeBytes(XCAFDoc_ShapeTool::GetShape(label), other)) return false;
+                unrelated.insert(unrelated.end(), other.begin(), other.end());
+            }
+        }
+        output.scopes.push_back(std::move(unrelated));
+        Handle(TDataStd_Integer) marker;
+        const bool marked = document_->Main().FindAttribute(PartBooleanCommandMarkerID(), marker)
+            && !marker.IsNull();
+        output.scopes.push_back(Bytes(marked ? std::uint64_t(marker->Get()) : 0));
+        output.graphCensus = record.value->definition.nodes.size()
+            + std::size_t(freeShapes.Length());
+        output.modelRevision = std::uint64_t(document_->GetData()->Time());
+        output.history = ObserveHistory(document_, commandObservationSerial_);
+        if (recordOut) *recordOut = std::move(record);
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
+bool PartBooleanOwner::resolveAnalytic(
+    const TDF_Label& carrier, composite_recipe::Record& record,
+    retained_recipe::OwnerSnapshot& snapshot, AnalyticDefinition& analytic,
+    retained_recipe::NativeCurrentnessFacts& facts) const noexcept {
+    try {
+        DocumentSnapshot native;
+        if (!captureNativeState(carrier, native, &record)
+            || record.value->definition.nodes.size() != 3) return false;
+        const auto* feature = std::get_if<composite_recipe::FeatureNode>(
+            &record.value->definition.nodes.back().value);
+        if (!feature || feature->kind != composite_recipe::PartBooleanFeatureKind
+            || feature->codecVersion != composite_recipe::PartBooleanFeatureCodec
+            || !DecodeAnalytic(feature->parameters, analytic)) return false;
+        retained_recipe::RevisionFence fence;
+        fence.documentGeneration = nonce_;
+        fence.modelRevision = native.modelRevision ? native.modelRevision : 1;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, fence.effectiveMetersPerUnit)
+            || !HashBytes(native.scopes[1], fence.ownerShape)
+            || !HashBytes(native.scopes[0], fence.ownerRecipe)
+            || !HashBytes(native.scopes[5], fence.ownerPlacement)
+            || !HashBytes(native.scopes[5], fence.ownerMaterial)) return false;
+        for (const auto& node : record.value->definition.nodes) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            fence.dependencies.push_back({{record.value->definition.owner, source->node,
+                source->original.sourceFeature}, source->commitments.geometry,
+                source->commitments.recipe, source->commitments.placement,
+                source->commitments.material, source->commitments.groups});
+        }
+        retained_recipe::OwnerSnapshot structural = retained_recipe::Snapshot(
+            record.value->definition, fence);
+        if (structural.sources.size() != 2) return false;
+        const auto reads = Reads(structural);
+        const auto built = build::BuildAnalytic(analytic, fence.effectiveMetersPerUnit, reads, reads);
+        const auto proof = correspondence::ProveAnalytic(
+            analytic, built, fence.effectiveMetersPerUnit);
+        const auto fixed = rebuild::CheckAnalytic(analytic, fence.effectiveMetersPerUnit, reads);
+        std::vector<std::uint8_t> rebuilt;
+        if (!proof.proven() || !fixed.fixedPoint()
+            || !ShapeBytes(built.candidate.solid, rebuilt)
+            || rebuilt != native.scopes[1]) return false;
+        facts.owner = record.value->definition.owner;
+        facts.outputNode = record.value->definition.outputNode;
+        facts.feature = feature->feature;
+        facts.ownerNonce = nonce_;
+        facts.builderInstalled = built.complete;
+        facts.proofInstalled = proof.proven() && fixed.fixedPoint();
+        facts.ownerInstalled = boundTo(document_);
+        facts.persistenceInstalled = record.value->bytes == native.scopes[0]
+            && record.value->sourceShapes.size() == 2;
+        if (!HashBytes(native.scopes[0], facts.graph)
+            || !HashBytes(native.scopes[1], facts.outputShape)) return false;
+        std::vector<std::uint8_t> readSet;
+        for (const auto& dependency : fence.dependencies) {
+            Append(readSet, dependency.locator.node);
+            readSet.insert(readSet.end(), dependency.geometry.begin(), dependency.geometry.end());
+            readSet.insert(readSet.end(), dependency.recipe.begin(), dependency.recipe.end());
+            readSet.insert(readSet.end(), dependency.placement.begin(), dependency.placement.end());
+            readSet.insert(readSet.end(), dependency.material.begin(), dependency.material.end());
+            readSet.insert(readSet.end(), dependency.groups.begin(), dependency.groups.end());
+        }
+        if (!HashBytes(readSet, facts.readSet)) return false;
+        snapshot = retained_recipe::Snapshot(record.value->definition, fence, &facts);
+        retained_recipe::AdmissionRule rule;
+        rule.operation = retained_recipe::OperationKind::EditInput;
+        rule.featureKind = composite_recipe::PartBooleanFeatureKind;
+        rule.featureCodecVersion = composite_recipe::PartBooleanFeatureCodec;
+        rule.selectorVersion = analytic.versions.selector;
+        rule.proofProfile = analytic.versions.proof;
+        HashBytes(feature->parameters, rule.parameterBounds);
+        rule.nativeBuilderInstalled = facts.builderInstalled;
+        rule.nativeProofInstalled = facts.proofInstalled;
+        rule.nativeOwnerInstalled = facts.ownerInstalled;
+        rule.retainedInputsPersistenceInstalled = facts.persistenceInstalled;
+        for (const auto& source : snapshot.sources) rule.orderedSourceKinds.push_back(source.recipe.kind);
+        const auto admitted = retained_recipe::Evaluate(snapshot, rule);
+        return admitted.admitted() && !admitted.detachedCandidateOnly;
+    } catch (...) { return false; }
+}
+
+CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
+    CaptureOutcome output;
+    try {
+        if (!boundTo(owner_.Document()) || activeSession_ || recoverySession_
+            || document_->HasOpenCommand()) { output.receipt = refuse("capture-owner-busy"); return output; }
+        const auto opening = owner_.CaptureNativePlanningStamp(true);
+        if (!opening) { output.receipt = refuse("capture-native-authority-busy"); return output; }
+        composite_recipe::Record record;
+        retained_recipe::OwnerSnapshot snapshot;
+        AnalyticDefinition analytic;
+        retained_recipe::NativeCurrentnessFacts facts;
+        DocumentSnapshot before, after;
+        if (!resolveAnalytic(carrier, record, snapshot, analytic, facts)
+            || !captureNativeState(carrier, before)
+            || !captureNativeState(carrier, after) || !(before == after)) {
+            output.receipt = refuse("capture-incomplete-or-noncurrent"); return output;
+        }
+        auto value = std::make_shared<Capture>();
+        value->ownerNonce = nonce_; value->session = ++nextSession_;
+        value->request = ++nextRequest_; value->documentIdentity = documentIdentity_;
+        value->opening = *opening;
+        value->carrier = carrier; value->record = record.label;
+        value->snapshot = std::move(snapshot); value->graph = record.value->definition;
+        value->analytic = std::move(analytic); value->sourceShapes = record.value->sourceShapes;
+        value->baseline = std::move(before); value->currentness = facts;
+        activeSession_ = value->session; output.handle = std::move(value);
+        output.receipt = result(Outcome::Unchanged, "captured", activeSession_);
+        return output;
+    } catch (...) { output.receipt = refuse("capture-exception"); return output; }
+}
+
+bool PartBooleanOwner::describe(const TDF_Label& carrier, AnalyticDefinition& output) const noexcept {
+    try {
+        if (carrier.IsNull() || activeSession_ != 0 || recoverySession_ != 0
+            || document_.IsNull() || document_->HasOpenCommand()) return false;
+        DocumentSnapshot before,after;composite_recipe::Record record;
+        retained_recipe::OwnerSnapshot snapshot;retained_recipe::NativeCurrentnessFacts currentness;
+        AnalyticDefinition value;
+        if (!captureNativeState(carrier,before) || !resolveAnalytic(carrier,record,snapshot,value,currentness)
+            || !captureNativeState(carrier,after) || !(before==after)) return false;
+        output=std::move(value);return true;
+    } catch (...) { return false; }
+}
+
+bool PartBooleanOwner::buildPrepared(
+    const Capture& capture, const AnalyticDefinition& requested,
+    PreparedBooleanDocumentChange& prepared) const noexcept {
+    try {
+        if (!Valid(requested) || requested.inputs[0].rootNode != capture.analytic.inputs[0].rootNode
+            || requested.inputs[1].rootNode != capture.analytic.inputs[1].rootNode
+            || requested.inputs[0].originalSourceFeature != capture.analytic.inputs[0].originalSourceFeature
+            || requested.inputs[1].originalSourceFeature != capture.analytic.inputs[1].originalSourceFeature)
+            return false;
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return false;
+        const auto reads = Reads(capture.snapshot);
+        auto built = build::BuildAnalytic(requested, unit, reads, reads);
+        const auto proof = correspondence::ProveAnalytic(requested, built, unit);
+        const auto fixed = rebuild::CheckAnalytic(requested, unit, reads);
+        if (!built.complete || !proof.proven() || !fixed.fixedPoint()) return false;
+        prepared.analytic = requested;
+        prepared.graph = capture.graph;
+        prepared.sources.assign(built.sources.begin(), built.sources.end());
+        prepared.result = built.candidate.solid;
+        std::size_t sourceIndex = 0;
+        for (auto& node : prepared.graph.nodes) {
+            auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            retained_recipe::Digest geometry;
+            const std::vector<std::uint8_t> bytes = Bytes(built.sourceBytes[sourceIndex]);
+            if (!HashBytes(bytes, geometry)) return false;
+            source->commitments.geometry = geometry;
+            prepared.analytic.inputs[sourceIndex].commitments.geometry = geometry;
+            ++sourceIndex;
+        }
+        auto* feature = std::get_if<composite_recipe::FeatureNode>(&prepared.graph.nodes.back().value);
+        if (!feature || !EncodeAnalytic(prepared.analytic, feature->parameters)) return false;
+        std::vector<std::uint8_t> graph, resultBytes;
+        if (!composite_recipe::Encode(prepared.graph, graph)
+            || !ShapeBytes(prepared.result, resultBytes)) return false;
+        prepared.expected = capture.baseline;
+        prepared.expected.scopes[0] = std::move(graph);
+        prepared.expected.scopes[1] = std::move(resultBytes);
+        prepared.expected.scopes[2] = Bytes(built.sourceBytes[0]);
+        prepared.expected.scopes[3] = Bytes(built.sourceBytes[1]);
+        prepared.expected.scopes.back() = Bytes(capture.session);
+        prepared.currentness = capture.currentness;
+        prepared.currentness.ownerNonce = nonce_;
+        prepared.currentness.builderInstalled = built.complete;
+        prepared.currentness.proofInstalled = proof.proven() && fixed.fixedPoint();
+        if (!HashBytes(prepared.expected.scopes[0], prepared.currentness.graph)
+            || !HashBytes(prepared.expected.scopes[1], prepared.currentness.outputShape)) return false;
+        return true;
+    } catch (...) { return false; }
+}
+
+PrepareOutcome PartBooleanOwner::prepare(const std::shared_ptr<const Capture>& capture,
+                                         const AnalyticDefinition& requested,
+                                         FaultPoint fault) noexcept {
+    PrepareOutcome output;
+    try {
+        if (!capture || capture->ownerNonce != nonce_ || capture->session != activeSession_
+            || capture->documentIdentity != documentIdentity_ || document_->HasOpenCommand()
+            || !owner_.myNativeAuthority
+            || !owner_.myNativeAuthority->Matches(capture->opening, documentIdentity_, true, false)) {
+            output.receipt = refuse("prepare-foreign-handle"); return output;
+        }
+        DocumentSnapshot before, after;
+        if (!captureNativeState(capture->carrier, before) || !(before == capture->baseline)
+            || fault == FaultPoint::F1DetachedDependency) {
+            output.receipt = refuse("prepare-stale-or-dependent-failure"); return output;
+        }
+        auto value = std::make_shared<PreparedBooleanDocumentChange>();
+        value->capture = capture; value->request = ++nextRequest_; value->fault = fault;
+        if (!buildPrepared(*capture, requested, *value)
+            || !captureNativeState(capture->carrier, after) || !(before == after)) {
+            output.receipt = refuse("prepare-not-read-only-or-unproved"); return output;
+        }
+        output.handle = std::move(value);
+        output.receipt = result(Outcome::Unchanged, "prepared", activeSession_);
+        return output;
+    } catch (...) { output.receipt = refuse("prepare-exception"); return output; }
+}
+
+bool PartBooleanOwner::stagePrepared(const PreparedBooleanDocumentChange& prepared) noexcept {
+    try {
+        if (!document_->HasOpenCommand() || prepared.sources.size() != 2) return false;
+        const TDF_Label carrier = prepared.capture->carrier;
+        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        shapes->SetShape(carrier, prepared.result);
+        if (prepared.fault == FaultPoint::F5AfterShape) return false;
+        auto payload = std::make_shared<composite_recipe::Payload>();
+        payload->definition = prepared.graph;
+        if (!composite_recipe::Encode(payload->definition, payload->bytes)) return false;
+        payload->sourceShapes = prepared.sources;
+        if (!owner_.StagePartBooleanPayload(prepared.capture->record, payload)) return false;
+        TNaming_Builder(prepared.capture->record).Select(prepared.result, prepared.result);
+        if (prepared.fault == FaultPoint::F6AfterInputs) return false;
+        // Source names, groups, visibility and scalar materials are immutable
+        // values in the strict analytic payload. Carrier presentation metadata
+        // is deliberately preserved rather than overwritten from one input.
+        TDataStd_Integer::Set(document_->Main(), PartBooleanCommandMarkerID(),
+            Standard_Integer(prepared.capture->session & 0x7fffffff));
+        return true;
+    } catch (...) { return false; }
+}
+
+bool PartBooleanOwner::exactlyOneOwnedDelta(const HistoryWitness& before,
+                                            HistoryWitness& after) const noexcept {
+    try {
+        after = ObserveHistory(document_, commandObservationSerial_ + 1);
+        if (!after.redoTimes.empty() || after.undoTimes.empty()
+            || after.transaction != before.transaction
+            || after.dataTime != before.dataTime + 1) return false;
+        std::vector<std::array<std::uint64_t, 2>> expected = before.undoTimes;
+        if (before.undoLimit > 0 && Standard_Integer(expected.size()) >= before.undoLimit)
+            expected.erase(expected.begin());
+        expected.push_back(after.undoTimes.back());
+        if (expected != after.undoTimes) return false;
+        Handle(TDataStd_Integer) marker;
+        return document_->Main().FindAttribute(PartBooleanCommandMarkerID(), marker)
+            && !marker.IsNull()
+            && marker->Get() == Standard_Integer(activeSession_ & 0x7fffffff)
+            && after.undoTimes.back()[1] > after.undoTimes.back()[0];
+    } catch (...) { return false; }
+}
+
+bool PartBooleanOwner::abortRestored(
+    const PreparedBooleanDocumentChange& prepared) const noexcept {
+    DocumentSnapshot restored;
+    return !document_->HasOpenCommand()
+        && captureNativeState(prepared.capture->carrier, restored)
+        && restored == prepared.capture->baseline;
+}
+
+Receipt PartBooleanOwner::apply(
+    const std::shared_ptr<const PreparedBooleanDocumentChange>& prepared) noexcept {
+    if (!prepared || !prepared->capture || prepared->capture->ownerNonce != nonce_
+        || prepared->capture->session != activeSession_ || prepared->request == 0)
+        return refuse("apply-foreign-handle");
+    DocumentSnapshot current;
+    try {
+        if (document_->HasOpenCommand() || !captureNativeState(prepared->capture->carrier, current)
+            || !(current == prepared->capture->baseline)
+            || !owner_.myNativeAuthority
+            || !owner_.myNativeAuthority->Matches(
+                prepared->capture->opening, documentIdentity_, true, false)
+            || prepared->fault == FaultPoint::F2FinalFence)
+            return refuse("apply-stale-final-fence");
+        if (prepared->fault == FaultPoint::F3Stop)
+            return retire(Outcome::Cancelled, "cancelled-before-command");
+        recoveryHistoryBefore_ = current.history;
+        document_->OpenCommand();
+        if (!document_->HasOpenCommand()) return refuse("owner-command-not-opened");
+        if (prepared->fault == FaultPoint::F4AfterOpen) throw std::runtime_error("F4");
+        if (!stagePrepared(*prepared)) throw std::runtime_error("stage");
+        DocumentSnapshot staged;
+        if (!captureNativeState(prepared->capture->carrier, staged)
+            || !staged.semanticEquals(prepared->expected)) throw std::runtime_error("readback");
+        if (prepared->fault == FaultPoint::F7BeforeClose) throw std::runtime_error("F7");
+        const Standard_Boolean added = document_->CommitCommand();
+        recoveryBaseline_ = prepared->capture->baseline;
+        recoveryExpected_ = prepared->expected;
+        recoverySession_ = activeSession_; activeSession_ = 0;
+        if (document_->HasOpenCommand() || !added)
+            return result(Outcome::RecoveryRequired, "close-outcome-unproved", recoverySession_);
+        if (prepared->fault == FaultPoint::F9Reconcile)
+            return result(Outcome::RecoveryRequired, "native-inspection-unavailable", recoverySession_);
+        if (prepared->fault == FaultPoint::F8AfterClose) return reconcile(recoverySession_);
+        DocumentSnapshot sealed; HistoryWitness observed;
+        activeSession_ = recoverySession_; recoverySession_ = 0;
+        const bool oneDelta = exactlyOneOwnedDelta(recoveryHistoryBefore_, observed);
+        activeSession_ = 0; recoverySession_ = prepared->capture->session;
+        if (!captureNativeState(prepared->capture->carrier, sealed)
+            || !sealed.semanticEquals(prepared->expected) || !oneDelta)
+            return result(Outcome::RecoveryRequired, "exact-delta-or-seal-unproved", recoverySession_);
+        if (prepared->fault == FaultPoint::F10Presentation)
+            return result(Outcome::RecoveryRequired, "committed-presentation-unsettled", recoverySession_);
+        const std::uint64_t session = recoverySession_;
+        recoverySession_ = 0; ++commandObservationSerial_;
+        owner_.NotifyChanges();
+        return result(Outcome::Committed, "committed", session,
+            Standard_Integer(observed.observationSerial - recoveryHistoryBefore_.observationSerial));
+    } catch (...) {
+        try { if (!document_.IsNull() && document_->HasOpenCommand()) document_->AbortCommand(); }
+        catch (...) {
+            recoverySession_ = activeSession_; activeSession_ = 0;
+            return result(Outcome::RecoveryRequired, "abort-threw", recoverySession_);
+        }
+        if (!abortRestored(*prepared)) {
+            recoverySession_ = activeSession_; activeSession_ = 0;
+            recoveryBaseline_ = prepared->capture->baseline;
+            return result(Outcome::RecoveryRequired, "abort-restoration-unproved", recoverySession_);
+        }
+        return retire(Outcome::Rejected, "aborted-and-restored");
+    }
+}
+
+Receipt PartBooleanOwner::cancel(std::uint64_t session) noexcept {
+    if (!matchingContinuation(session) || session != activeSession_
+        || document_.IsNull() || document_->HasOpenCommand()) return refuse("cancel-not-owner");
+    return retire(Outcome::Cancelled, "cancelled");
+}
+
+Receipt PartBooleanOwner::reconcile(std::uint64_t session) noexcept {
+    if (session == 0 || session != recoverySession_ || document_.IsNull()
+        || document_->HasOpenCommand()) return refuse("reconcile-not-owner");
+    DocumentSnapshot actual;
+    // The carrier is resolved again from the sole valid record; no stale
+    // Capture or caller callback participates in recovery.
+    std::vector<composite_recipe::Record> records;
+    if (!composite_recipe::ReadAll(document_, records) || records.size() != 1
+        || !captureNativeState(records.front().owner, actual))
+        return result(Outcome::RecoveryRequired, "reconcile-inspection-failed", session);
+    HistoryWitness observed;
+    activeSession_ = session; recoverySession_ = 0;
+    const bool oneDelta = exactlyOneOwnedDelta(recoveryHistoryBefore_, observed);
+    activeSession_ = 0; recoverySession_ = session;
+    if (actual.semanticEquals(recoveryExpected_) && oneDelta) {
+        recoverySession_ = 0; ++commandObservationSerial_;
+        owner_.NotifyChanges();
+        return result(Outcome::Committed, "committed-reconciled", session,
+            Standard_Integer(observed.observationSerial - recoveryHistoryBefore_.observationSerial));
+    }
+    if (actual == recoveryBaseline_) {
+        recoverySession_ = 0;
+        return result(Outcome::Rejected, "unchanged-reconciled", session);
+    }
+    return result(Outcome::RecoveryRequired, "reconcile-ambiguous", session);
+}
+
+CaptureOutcome InternalBooleanOperationSession::capture(const TDF_Label& carrier) noexcept {
+    if (capture_ || terminalSet_) return {{Outcome::Rejected, "session-not-idle", 0, 0, true,
+        owner_.blocksOtherWork()}, {}};
+    auto value = owner_.capture(carrier); capture_ = value.handle; return value;
+}
+PrepareOutcome InternalBooleanOperationSession::prepare(
+    const AnalyticDefinition& request, FaultPoint fault) noexcept {
+    if (!capture_ || prepared_ || terminalSet_) return {{Outcome::Rejected,
+        "session-not-captured", 0, 0, true, owner_.blocksOtherWork()}, {}};
+    auto value = owner_.prepare(capture_, request, fault); prepared_ = value.handle; return value;
+}
+Receipt InternalBooleanOperationSession::apply() noexcept {
+    if (terminalSet_) return terminal_;
+    terminal_ = owner_.apply(prepared_);
+    if (terminal_.outcome == Outcome::RecoveryRequired) recoverySession_ = terminal_.session;
+    else terminalSet_ = true;
+    capture_.reset(); prepared_.reset(); return terminal_;
+}
+Receipt InternalBooleanOperationSession::cancel() noexcept {
+    if (terminalSet_) return terminal_;
+    terminal_ = owner_.cancel(capture_ ? capture_->session : 0); terminalSet_ = true;
+    capture_.reset(); prepared_.reset(); return terminal_;
+}
+Receipt InternalBooleanOperationSession::reconcile() noexcept {
+    if (!recoverySession_) return terminal_;
+    terminal_ = owner_.reconcile(recoverySession_);
+    if (terminal_.outcome != Outcome::RecoveryRequired) {
+        recoverySession_ = 0; terminalSet_ = true;
+    }
+    return terminal_;
+}
+
 #if DEBUG
+namespace {
+void N1OwnerFailure(const char* phase, const std::string& reason,
+                    int detail = -1) noexcept {
+    std::fprintf(stderr, "[N1-owner] phase=%s reason=%s detail=%d\n",
+                 phase, reason.empty() ? "unspecified" : reason.c_str(), detail);
+}
+
+bool N1FeatureAnalytic(const composite_recipe::Definition& graph,
+                       std::vector<std::uint8_t>& parameters) {
+    for (const composite_recipe::Node& node : graph.nodes)
+        if (const auto* feature = std::get_if<composite_recipe::FeatureNode>(&node.value)) {
+            if (feature->kind != composite_recipe::PartBooleanFeatureKind) continue;
+            parameters = feature->parameters;
+            return true;
+        }
+    return false;
+}
+
+bool N1SameAnalyticMetadata(const AnalyticDefinition& before,
+                            const AnalyticDefinition& reopened) noexcept {
+    if (before.operation != reopened.operation
+        || before.materialPolicy != reopened.materialPolicy
+        || before.nativeAdmissionEnabled != reopened.nativeAdmissionEnabled) return false;
+    for (std::size_t index = 0; index < 2; ++index) {
+        const auto& expected = before.inputs[index];
+        const auto& actual = reopened.inputs[index];
+        if (expected.rootNode != actual.rootNode
+            || expected.originalSourceFeature != actual.originalSourceFeature
+            || expected.commitments.geometry != actual.commitments.geometry
+            || expected.commitments.recipe != actual.commitments.recipe
+            || expected.commitments.placement != actual.commitments.placement
+            || expected.commitments.material != actual.commitments.material
+            || expected.commitments.groups != actual.commitments.groups
+            || expected.dimensions != actual.dimensions
+            || expected.translation != actual.translation
+            || expected.rotationXYZW != actual.rotationXYZW
+            || expected.metersPerUnit != actual.metersPerUnit
+            || expected.originalMaterial.identifier != actual.originalMaterial.identifier
+            || expected.originalMaterial.baseColorSRGB != actual.originalMaterial.baseColorSRGB
+            || expected.originalName != actual.originalName
+            || expected.originalGroups != actual.originalGroups
+            || expected.originallyVisible != actual.originallyVisible) return false;
+    }
+    return true;
+}
+
+bool N1AnalyticResultSolidControls() noexcept {
+    try {
+        const TopoDS_Shape direct = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
+        const TopoDS_Shape tool = BRepPrimAPI_MakeBox(gp_Pnt(5, 2, 2), 8, 6, 6).Shape();
+        if (!retained_part_boolean::IsOneValidForwardSolid(direct)
+            || !retained_part_boolean::IsOneValidForwardSolid(tool)) return false;
+
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(direct); tools.Append(tool);
+        BRepAlgoAPI_Cut boolean;
+        boolean.SetArguments(arguments); boolean.SetTools(tools);
+        boolean.SetRunParallel(Standard_False);
+        boolean.SetNonDestructive(Standard_True);
+        boolean.SetFuzzyValue(Precision::Confusion());
+        boolean.SetUseOBB(Standard_True);
+        boolean.SetCheckInverted(Standard_True);
+        boolean.Build();
+        const TopoDS_Shape observed = boolean.Shape();
+        const TopoDS_Shape directResult = build::AnalyticResultSolid(direct);
+        const TopoDS_Shape observedResult = build::AnalyticResultSolid(observed);
+
+        BRep_Builder builder;
+        TopoDS_Compound empty; builder.MakeCompound(empty);
+        TopoDS_Compound twoSolid; builder.MakeCompound(twoSolid);
+        builder.Add(twoSolid, direct); builder.Add(twoSolid, tool);
+        TopExp_Explorer face(direct, TopAbs_FACE);
+        if (!face.More()) return false;
+        TopoDS_Compound mixed; builder.MakeCompound(mixed);
+        builder.Add(mixed, direct); builder.Add(mixed, face.Current());
+        const TopoDS_Shape reversed = direct.Reversed();
+
+        return boolean.IsDone() && !boolean.HasErrors()
+            && observed.ShapeType() == TopAbs_COMPOUND
+            && observed.Orientation() == TopAbs_FORWARD
+            && retained_part_boolean::SolidCount(observed) == 1
+            && retained_part_boolean::IsOneValidForwardSolid(directResult)
+            && directResult.IsSame(direct)
+            && retained_part_boolean::IsOneValidForwardSolid(observedResult)
+            && build::AnalyticResultSolid(empty).IsNull()
+            && build::AnalyticResultSolid(twoSolid).IsNull()
+            && build::AnalyticResultSolid(mixed).IsNull()
+            && build::AnalyticResultSolid(reversed).IsNull();
+    } catch (...) { return false; }
+}
+} // namespace
+
+bool PartBooleanOwner::installEvidenceFixture(
+    Operation operation, double metersPerUnit, TDF_Label& carrier) noexcept {
+    carrier.Nullify();
+    try {
+        if (!boundTo(owner_.Document()) || document_->HasOpenCommand()
+            || document_->GetAvailableUndos() || document_->GetAvailableRedos()) return false;
+        const auto identifier = [](std::uint8_t seed) {
+            retained_recipe::UUID value{};
+            for (std::size_t index = 0; index < value.size(); ++index)
+                value[index] = std::uint8_t(seed + index);
+            return value;
+        };
+        AnalyticDefinition analytic;
+        analytic.operation = operation;
+        analytic.inputs[0].rootNode = identifier(40);
+        analytic.inputs[1].rootNode = identifier(60);
+        analytic.inputs[0].originalSourceFeature = identifier(80);
+        analytic.inputs[1].originalSourceFeature = identifier(100);
+        analytic.inputs[0].dimensions = {40, 30, 20};
+        analytic.inputs[1].dimensions = {20, 10, 10};
+        analytic.inputs[1].translation = {30, 10, 5};
+        for (std::size_t index = 0; index < 2; ++index) {
+            analytic.inputs[index].metersPerUnit = metersPerUnit;
+            analytic.inputs[index].originalMaterial.identifier = identifier(std::uint8_t(120 + index));
+            analytic.inputs[index].originalName = index ? "Right analytic input" : "Left analytic input";
+            analytic.inputs[index].originalGroups = {index ? "Boolean tools" : "Boolean bases"};
+        }
+        retained_part_boolean::OperandReadSet provisional;
+        provisional.leftSource.locator.node = analytic.inputs[0].rootNode;
+        provisional.rightSource.locator.node = analytic.inputs[1].rootNode;
+        auto fillRead = [&](retained_recipe::DependencyRead& read, std::uint8_t seed) {
+            read.locator.owner = {identifier(1), identifier(2), identifier(3)};
+            read.locator.sourceFeature = identifier(seed);
+            read.geometry.fill(std::uint8_t(seed + 1)); read.recipe.fill(std::uint8_t(seed + 2));
+            read.placement.fill(std::uint8_t(seed + 3)); read.material.fill(std::uint8_t(seed + 4));
+            read.groups.fill(std::uint8_t(seed + 5));
+        };
+        fillRead(provisional.leftSource, 80); fillRead(provisional.rightSource, 100);
+        analytic.inputs[0].commitments = {provisional.leftSource.geometry,
+            provisional.leftSource.recipe, provisional.leftSource.placement,
+            provisional.leftSource.material, provisional.leftSource.groups};
+        analytic.inputs[1].commitments = {provisional.rightSource.geometry,
+            provisional.rightSource.recipe, provisional.rightSource.placement,
+            provisional.rightSource.material, provisional.rightSource.groups};
+        const auto firstBuild = build::BuildAnalytic(
+            analytic, metersPerUnit, provisional, provisional);
+        if (!firstBuild.complete) return false;
+        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        carrier = shapes->AddShape(firstBuild.candidate.solid, Standard_False, Standard_False);
+        if (carrier.IsNull() || !owner_.MigrateLegacyIdentifiers()) return false;
+        retained_recipe::OwnerKey ownerKey;
+        if (!retained_solid::ReadUUID(document_->Main(), DocumentIdentifierAttributeID(), ownerKey.document)
+            || !retained_solid::ReadUUID(carrier, EntityIdentifierAttributeID(), ownerKey.entity)
+            || !retained_solid::ReadUUID(carrier, DefinitionIdentifierAttributeID(), ownerKey.definition)) return false;
+        provisional.leftSource.locator.owner = ownerKey;
+        provisional.rightSource.locator.owner = ownerKey;
+        composite_recipe::Definition graph;
+        graph.schemaVersion = 1; graph.owner = ownerKey;
+        graph.outputNode = identifier(110); graph.issuance.nextLocalID = 4;
+        for (std::size_t index = 0; index < 2; ++index) {
+            composite_recipe::SourceNode source;
+            source.node = analytic.inputs[index].rootNode; source.localID = index + 1;
+            source.original = {ownerKey.document, identifier(std::uint8_t(10 + index)),
+                identifier(std::uint8_t(20 + index)), analytic.inputs[index].originalSourceFeature};
+            profile::Parameters recipe;
+            recipe.metersPerUnit = metersPerUnit; recipe.definition.plane = 0;
+            recipe.definition.depth = analytic.inputs[index].dimensions[2];
+            recipe.definition.points = {gp_Pnt2d(0, 0),
+                gp_Pnt2d(analytic.inputs[index].dimensions[0], 0),
+                gp_Pnt2d(analytic.inputs[index].dimensions[0], analytic.inputs[index].dimensions[1]),
+                gp_Pnt2d(0, analytic.inputs[index].dimensions[1])};
+            std::vector<double> values;
+            if (!profile::Encode(recipe, values)
+                || !composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,
+                    std::uint32_t(profile::SchemaFor(recipe)), values, source.recipe.bytes)) return false;
+            source.recipe.kind = composite_recipe::RecipeKind::Profile;
+            source.recipe.schema = std::uint32_t(profile::SchemaFor(recipe));
+            source.inputToCarrier.sourceMetersPerUnit = metersPerUnit;
+            source.inputToCarrier.carrierMetersPerUnit = metersPerUnit;
+            source.inputToCarrier.matrix[3] = analytic.inputs[index].translation[0];
+            source.inputToCarrier.matrix[7] = analytic.inputs[index].translation[1];
+            source.inputToCarrier.matrix[11] = analytic.inputs[index].translation[2];
+            std::vector<std::uint8_t> shapeBytes;
+            if (!ShapeBytes(firstBuild.sources[index], shapeBytes)
+                || !HashBytes(shapeBytes, source.commitments.geometry)
+                || !composite_recipe::Hash(source.recipe.bytes, source.commitments.recipe)) return false;
+            source.commitments.placement.fill(std::uint8_t(31 + index));
+            source.commitments.material.fill(std::uint8_t(33 + index));
+            source.commitments.groups.fill(std::uint8_t(35 + index));
+            analytic.inputs[index].commitments = {source.commitments.geometry,
+                source.commitments.recipe, source.commitments.placement,
+                source.commitments.material, source.commitments.groups};
+            source.shapeSlot = std::uint32_t(index);
+            graph.nodes.push_back({source});
+        }
+        composite_recipe::FeatureNode feature;
+        feature.node = graph.outputNode; feature.feature = identifier(111); feature.localID = 3;
+        feature.kind = composite_recipe::PartBooleanFeatureKind;
+        feature.codecVersion = composite_recipe::PartBooleanFeatureCodec;
+        feature.inputs = {analytic.inputs[0].rootNode, analytic.inputs[1].rootNode};
+        if (!EncodeAnalytic(analytic, feature.parameters)) return false;
+        graph.nodes.push_back({feature});
+        std::vector<std::uint8_t> exact;
+        if (!composite_recipe::Encode(graph, exact)) return false;
+        const TDF_Label record = carrier.FindChild(composite_recipe::MinimumRecordTag, Standard_True);
+        Handle(composite_recipe::Attribute) attribute = new composite_recipe::Attribute();
+        record.AddAttribute(attribute);
+        auto payload = std::make_shared<composite_recipe::Payload>();
+        payload->definition = graph; payload->bytes = exact;
+        payload->sourceShapes.assign(firstBuild.sources.begin(), firstBuild.sources.end());
+        if (!owner_.StagePartBooleanPayload(record, payload)) return false;
+        TNaming_Builder(record).Select(firstBuild.candidate.solid, firstBuild.candidate.solid);
+        document_->ClearUndos(); document_->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+        composite_recipe::Record readback;
+        return composite_recipe::Read(document_, carrier, readback)
+            && readback.value && readback.value->bytes == exact;
+    } catch (...) { carrier.Nullify(); return false; }
+}
+
+ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
+    const TDF_Label& originalCarrier) noexcept {
+    ColdLifecycleEvidence evidence;
+    std::vector<Handle(OcctDocument)> opened;
+    try {
+        if (!boundTo(owner_.Document()) || blocksOtherWork() || originalCarrier.IsNull()) return evidence;
+        const TDocStd_FormatVersion requestedVersion = document_->StorageFormatVersion();
+        composite_recipe::Record beforeRecord;
+        std::vector<std::uint8_t> beforeAnalytic;
+        AnalyticDefinition beforeDefinition;
+        if (!composite_recipe::Read(document_, originalCarrier, beforeRecord)
+            || !beforeRecord.value
+            || !N1FeatureAnalytic(beforeRecord.value->definition, beforeAnalytic)
+            || !DecodeAnalytic(beforeAnalytic, beforeDefinition)) {
+            N1OwnerFailure("fixture-record", "pre-save-payload-unreadable");
+            return evidence;
+        }
+        const auto stableAfterTwoMaterializations = [](const TopoDS_Shape& shape) {
+            std::string originalBytes, firstBytes, secondBytes;
+            const TopoDS_Shape first = build::PersistenceMaterializeDetached(shape);
+            const TopoDS_Shape second = build::PersistenceMaterializeDetached(first);
+            return !first.IsNull() && !second.IsNull()
+                && retained_part_boolean::ExactShapeBytes(shape, originalBytes)
+                && retained_part_boolean::ExactShapeBytes(first, firstBytes)
+                && retained_part_boolean::ExactShapeBytes(second, secondBytes)
+                && originalBytes == firstBytes && firstBytes == secondBytes;
+        };
+        const bool materializationStable = beforeRecord.value->sourceShapes.size() == 2
+            && stableAfterTwoMaterializations(beforeRecord.value->sourceShapes[0])
+            && stableAfterTwoMaterializations(beforeRecord.value->sourceShapes[1])
+            && stableAfterTwoMaterializations(beforeRecord.current);
+        InternalBooleanOperationSession beforeSession(*this);
+        const auto beforeCapture = beforeSession.capture(originalCarrier);
+        const bool capturedBeforeSave = beforeCapture.handle
+            && beforeCapture.receipt.reason == "captured"
+            && beforeCapture.handle->sourceShapes.size() == 2;
+        const Receipt beforeCancelled = beforeSession.cancel();
+        if (!capturedBeforeSave || beforeCancelled.outcome != Outcome::Cancelled) {
+            N1OwnerFailure("fixture-capture", beforeCapture.receipt.reason,
+                           int(beforeCancelled.outcome));
+            return evidence;
+        }
+        const auto uniqueBase = [](const char* suffix) {
+            NSString* name = [NSString stringWithFormat:@"n1-boolean-%@-%s.n1-fixture",
+                [[NSUUID UUID] UUIDString], suffix];
+            return std::string([[NSTemporaryDirectory() stringByAppendingPathComponent:name] UTF8String]);
+        };
+        const auto headerMatches = [&](const std::string& saved,
+                                       TDocStd_FormatVersion expected,
+                                       const char* phase, bool report) {
+            std::ifstream stream(saved, std::ios::in | std::ios::binary);
+            Handle(Storage_Data) stored;
+            const TCollection_ExtendedString format = stream
+                ? PCDM_ReadWriter::FileFormat(stream, stored)
+                : TCollection_ExtendedString();
+            const bool valid = stream.is_open()
+                && format.IsEqual(TCollection_ExtendedString("BinXCAF"))
+                && !stored.IsNull() && !stored->HeaderData().IsNull()
+                && stored->HeaderData()->StorageVersion().IsIntegerValue()
+                && stored->HeaderData()->StorageVersion().IntegerValue() == int(expected);
+            if (!valid && report) N1OwnerFailure(phase, "saved-header-version-mismatch");
+            return valid;
+        };
+        const auto saveCycle = [&](OcctDocument* source, const char* phase,
+                                   std::string& saved) {
+            if (source == nullptr || source->Document().IsNull()) {
+                N1OwnerFailure(phase, "missing-document");
+                return false;
+            }
+            source->Document()->ChangeStorageFormatVersion(requestedVersion);
+            const std::string base = uniqueBase(phase);
+            TDocStd_PathParser parser(
+                TCollection_ExtendedString(base.c_str(), Standard_True));
+            parser.Parse();
+            if (parser.Trek().Length() == 0) {
+                N1OwnerFailure(phase, "empty-parsed-parent");
+                return false;
+            }
+            saved = source->save(base);
+            if (saved.empty()) {
+                N1OwnerFailure(phase, "save-returned-empty");
+                return false;
+            }
+            NSString* path = [NSString stringWithUTF8String:saved.c_str()];
+            if (path == nil || ![NSFileManager.defaultManager fileExistsAtPath:path]) {
+                N1OwnerFailure(phase, "saved-file-missing");
+                return false;
+            }
+            return headerMatches(saved, requestedVersion, phase, true);
+        };
+        bool versionMismatchRejected = true;
+        if (requestedVersion == TDocStd_FormatVersion_VERSION_11) {
+            document_->ChangeStorageFormatVersion(TDocStd_FormatVersion_CURRENT);
+            const std::string base = uniqueBase("version-mismatch-control");
+            const std::string mismatched = owner_.save(base);
+            versionMismatchRejected = !mismatched.empty()
+                && headerMatches(mismatched, TDocStd_FormatVersion_CURRENT,
+                                 "version-mismatch-control", false)
+                && !headerMatches(mismatched, requestedVersion,
+                                  "version-mismatch-control", false);
+            document_->ChangeStorageFormatVersion(requestedVersion);
+            if (!versionMismatchRejected)
+                N1OwnerFailure("version-mismatch-control", "mismatch-accepted");
+        }
+        const auto mutationControl = [&]() {
+            NativeDocumentSession native;
+            const Handle(OcctDocument) wrapper = native.Document();
+            if (wrapper.IsNull() || wrapper->Document().IsNull()) return false;
+            double unit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return false;
+            XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(), unit);
+            PartBooleanOwner* owner = wrapper->PartBooleanOwnerService();
+            TDF_Label carrier;
+            if (!owner || !owner->installEvidenceFixture(
+                    Operation::Subtract, unit, carrier)) return false;
+            composite_recipe::Record original;
+            if (!composite_recipe::Read(wrapper->Document(), carrier, original)
+                || !original.value) return false;
+            gp_Trsf shift;
+            shift.SetTranslation(gp_Vec(0.125, 0, 0));
+            const TopoDS_Shape changed = BRepBuilderAPI_Transform(
+                original.current, shift, Standard_True).Shape();
+            Handle(XCAFDoc_ShapeTool) shapes =
+                XCAFDoc_DocumentTool::ShapeTool(wrapper->Document()->Main());
+            if (changed.IsNull() || shapes.IsNull()) return false;
+            shapes->SetShape(original.owner, changed);
+            TNaming_Builder(original.label).Select(changed, changed);
+            composite_recipe::Record readable;
+            if (!composite_recipe::Read(wrapper->Document(), carrier, readable)
+                || !readable.value
+                || readable.value->bytes != original.value->bytes) return false;
+            InternalBooleanOperationSession session(*owner);
+            const auto refused = session.capture(carrier);
+            if (refused.handle) session.cancel();
+            return !refused.handle
+                && refused.receipt.reason == "capture-incomplete-or-noncurrent";
+        };
+        const bool changedCurrentRefused = mutationControl();
+        const auto coldOpen = [&](const std::string& saved,
+                                  Handle(OcctDocument)& wrapper,
+                                  TDF_Label& carrier, const char* phase) {
+            wrapper = new OcctDocument();
+            Core3DDefineSafeBinXCAFFormat(wrapper->myApp);
+            Handle(TDocStd_Document) candidate;
+            Core3DBeginSafeBinaryRead();
+            const PCDM_ReaderStatus status = wrapper->myApp->Open(
+                TCollection_ExtendedString(saved.c_str(), Standard_True), candidate);
+            if (Core3DSafeBinaryReadWasRejected() || status != PCDM_RS_OK || candidate.IsNull()) {
+                N1OwnerFailure(phase, "open-rejected", int(status));
+                return false;
+            }
+            wrapper->myOcafDoc = candidate;
+            wrapper->ObserveSuccessfulNativeDocumentAdoption();
+            opened.push_back(wrapper);
+            candidate->ChangeStorageFormatVersion(requestedVersion);
+            candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+            std::vector<composite_recipe::Record> records;
+            if (!composite_recipe::ReadAll(candidate, records) || records.size() != 1) {
+                N1OwnerFailure(phase, "record-readback-failed", int(records.size()));
+                return false;
+            }
+            carrier = records.front().owner;
+            PartBooleanOwner* reopenedOwner = wrapper->PartBooleanOwnerService();
+            if (reopenedOwner == nullptr) {
+                N1OwnerFailure(phase, "owner-service-missing");
+                return false;
+            }
+            InternalBooleanOperationSession session(*reopenedOwner);
+            const auto captured = session.capture(carrier);
+            const bool complete = captured.handle
+                && captured.receipt.reason == "captured"
+                && captured.handle->sourceShapes.size() == 2;
+            const Receipt cancelled = session.cancel();
+            if (!complete || cancelled.outcome != Outcome::Cancelled)
+                N1OwnerFailure(phase, "post-open-capture-failed");
+            return complete && cancelled.outcome == Outcome::Cancelled;
+        };
+        const auto closeAll = [&]() {
+            for (const Handle(OcctDocument)& wrapper : opened)
+                if (!wrapper.IsNull()) wrapper->CloseNativeSession();
+        };
+        std::string firstSaved;
+        Handle(OcctDocument) first; TDF_Label firstCarrier;
+        evidence.firstColdOpen = saveCycle(&owner_, "first-save", firstSaved)
+            && coldOpen(firstSaved, first, firstCarrier, "first-open");
+        evidence.firstColdOpen = evidence.firstColdOpen
+            && materializationStable && versionMismatchRejected
+            && changedCurrentRefused;
+        if (!evidence.firstColdOpen) { closeAll(); return evidence; }
+        PartBooleanOwner* firstOwner = first->PartBooleanOwnerService();
+        InternalBooleanOperationSession later(*firstOwner);
+        const auto captured = later.capture(firstCarrier);
+        evidence.discardedOldHandles = captured.handle
+            && first->Document().get() != documentIdentity_;
+        if (!captured.handle || captured.receipt.reason != "captured") {
+            N1OwnerFailure("cold-capture", captured.receipt.reason);
+            closeAll(); return evidence;
+        }
+        composite_recipe::Record reopenedRecord;
+        std::vector<std::uint8_t> reopenedAnalytic;
+        AnalyticDefinition reopenedDefinition;
+        if (!composite_recipe::Read(first->Document(), firstCarrier, reopenedRecord)
+            || !reopenedRecord.value
+            || reopenedRecord.value->bytes != beforeRecord.value->bytes
+            || !N1FeatureAnalytic(reopenedRecord.value->definition, reopenedAnalytic)
+            || reopenedAnalytic != beforeAnalytic
+            || !DecodeAnalytic(reopenedAnalytic, reopenedDefinition)
+            || !N1SameAnalyticMetadata(beforeDefinition, reopenedDefinition)) {
+            N1OwnerFailure("cold-metadata", "reopened-payload-differs");
+            closeAll(); return evidence;
+        }
+        const auto reads = Reads(captured.handle->debugSnapshot());
+        double unit = 0;
+        const bool hasUnit = XCAFDoc_DocumentTool::GetLengthUnit(first->Document(), unit);
+        const auto fixed = hasUnit ? rebuild::CheckAnalytic(
+            captured.handle->debugAnalytic(), unit, reads) : rebuild::AnalyticFixedPointEvidence();
+        evidence.independentReplay = fixed.fixedPoint();
+        evidence.completeInputs = captured.handle->sourceShapes.size() == 2;
+        AnalyticDefinition edit = captured.handle->debugAnalytic();
+        edit.inputs[1].translation[0] += 1;
+        const auto prepared = later.prepare(edit);
+        const Receipt applied = prepared.handle ? later.apply() : Receipt();
+        if (!prepared.handle || prepared.receipt.reason != "prepared")
+            N1OwnerFailure("cold-prepare", prepared.receipt.reason);
+        if (applied.outcome != Outcome::Committed)
+            N1OwnerFailure("cold-apply", applied.reason, int(applied.outcome));
+        evidence.laterEdit = applied.outcome == Outcome::Committed
+            && applied.measuredHistoryDelta == 1;
+        if (!evidence.laterEdit) { closeAll(); return evidence; }
+        evidence.undoRedo = first->undo() && first->redo();
+        if (!evidence.undoRedo) { closeAll(); return evidence; }
+        std::string secondSaved;
+        Handle(OcctDocument) second; TDF_Label secondCarrier;
+        evidence.secondColdOpen = saveCycle(first.get(), "second-save", secondSaved)
+            && coldOpen(secondSaved, second, secondCarrier, "second-open");
+        if (!evidence.secondColdOpen) { closeAll(); return evidence; }
+        std::string thirdSaved;
+        Handle(OcctDocument) third; TDF_Label thirdCarrier;
+        evidence.thirdColdOpen = saveCycle(second.get(), "third-save", thirdSaved)
+            && coldOpen(thirdSaved, third, thirdCarrier, "third-open");
+        closeAll();
+        return evidence;
+    } catch (...) {
+        for (const Handle(OcctDocument)& wrapper : opened)
+            if (!wrapper.IsNull()) wrapper->CloseNativeSession();
+        return evidence;
+    }
+}
+#endif
+} // namespace core3d::part_boolean::owner
+
+#if DEBUG
+#include <BinObjMgt_Position.hxx>
+#include <BinObjMgt_RRelocationTable.hxx>
+#include <BinObjMgt_SRelocationTable.hxx>
+#include <Message_Messenger.hxx>
+#include <Storage_HeaderData.hxx>
+#include <sstream>
+namespace core3d::part_boolean::owner {
+namespace {
+struct EvidenceRun {
+    bool document = false, installed = false, captured = false, prepared = false;
+    bool committed = false, exactDelta = false, soleRecord = false, consumed = false;
+    bool stableIdentities = false, undo = false, redo = false, sameRedoIdentities = false;
+    bool ownerBlocked = false, recovered = false, noPublishedDelta = false;
+    bool restored = false, historyRestored = false, graphRestored = false;
+    bool fixedPoint = false, correspondence = false;
+    bool reachedFaultBoundary = false;
+};
+
+EvidenceRun Exercise(Operation operation, FaultPoint fault = FaultPoint::None,
+                     double unit = 0.001) {
+    EvidenceRun evidence;
+    NativeDocumentSession native;
+    const Handle(OcctDocument) wrapper = native.Document();
+    evidence.document = !wrapper.IsNull() && !wrapper->Document().IsNull();
+    if (!evidence.document) return evidence;
+    XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(), unit);
+    PartBooleanOwner* owner = wrapper->PartBooleanOwnerService();
+    TDF_Label carrier;
+    evidence.installed = owner && owner->installEvidenceFixture(operation, unit, carrier);
+    if (!evidence.installed) {
+        N1OwnerFailure("fixture-install", "install-failed", int(operation));
+        return evidence;
+    }
+    const std::string entity = wrapper->EntityIdentifierForLabel(carrier);
+    const std::string definition = wrapper->DefinitionIdentifierForLabel(carrier);
+    composite_recipe::Record beforeRecord;
+    std::vector<std::uint8_t> beforeGraph;
+    evidence.graphRestored = composite_recipe::Read(wrapper->Document(), carrier, beforeRecord)
+        && beforeRecord.value && composite_recipe::Encode(beforeRecord.value->definition, beforeGraph);
+    InternalBooleanOperationSession session(*owner);
+    const auto captured = session.capture(carrier);
+    evidence.captured = captured.handle && captured.receipt.reason == "captured";
+    if (!evidence.captured) {
+        N1OwnerFailure("capture", captured.receipt.reason, int(captured.receipt.outcome));
+        return evidence;
+    }
+    const auto beforeHistory = captured.handle->debugBaseline().history;
+    AnalyticDefinition request = captured.handle->debugAnalytic();
+    const auto reads = Reads(captured.handle->debugSnapshot());
+    double carrierUnit = 0;
+    const bool readUnit = XCAFDoc_DocumentTool::GetLengthUnit(wrapper->Document(), carrierUnit);
+    const auto built = readUnit ? build::BuildAnalytic(request, carrierUnit, reads, reads)
+                                : build::AnalyticBuild();
+    const auto proof = readUnit ? correspondence::ProveAnalytic(request, built, carrierUnit)
+                                : correspondence::AnalyticProof();
+    const auto fixed = readUnit ? rebuild::CheckAnalytic(request, carrierUnit, reads)
+                                : rebuild::AnalyticFixedPointEvidence();
+    evidence.correspondence = proof.proven(); evidence.fixedPoint = fixed.fixedPoint();
+    const auto prepared = session.prepare(request, fault);
+    evidence.prepared = prepared.handle && prepared.receipt.reason == "prepared";
+    if (!evidence.prepared) {
+        evidence.reachedFaultBoundary = fault == FaultPoint::F1DetachedDependency
+            && prepared.receipt.outcome == Outcome::Rejected
+            && prepared.receipt.reason == "prepare-stale-or-dependent-failure";
+        if (!evidence.reachedFaultBoundary)
+            N1OwnerFailure("prepare", prepared.receipt.reason, int(prepared.receipt.outcome));
+        evidence.historyRestored = wrapper->Document()->GetAvailableUndos() == beforeHistory.undoCount
+            && wrapper->Document()->GetAvailableRedos() == beforeHistory.redoCount;
+        evidence.restored = evidence.graphRestored && evidence.historyRestored;
+        evidence.noPublishedDelta = evidence.historyRestored;
+        return evidence;
+    }
+    const Receipt applied = session.apply();
+    evidence.reachedFaultBoundary = fault == FaultPoint::None
+        ? applied.outcome == Outcome::Committed && applied.reason == "committed"
+        : fault == FaultPoint::F6AfterInputs
+            ? applied.outcome == Outcome::Rejected && applied.reason == "aborted-and-restored"
+            : fault == FaultPoint::F9Reconcile
+                ? applied.outcome == Outcome::RecoveryRequired
+                    && applied.reason == "native-inspection-unavailable"
+                : false;
+    if (!evidence.reachedFaultBoundary)
+        N1OwnerFailure("apply", applied.reason, int(applied.outcome));
+    evidence.committed = applied.outcome == Outcome::Committed;
+    evidence.exactDelta = applied.measuredHistoryDelta == 1
+        && wrapper->Document()->GetAvailableUndos() == beforeHistory.undoCount + 1;
+    evidence.ownerBlocked = owner->blocksOtherWork();
+    evidence.noPublishedDelta = applied.measuredHistoryDelta == 0;
+    if (applied.outcome == Outcome::RecoveryRequired) {
+        const Receipt reconciled = session.reconcile();
+        evidence.recovered = reconciled.outcome == Outcome::Committed
+            || reconciled.outcome == Outcome::Rejected;
+        if (!evidence.recovered)
+            N1OwnerFailure("reconcile", reconciled.reason, int(reconciled.outcome));
+        evidence.committed = reconciled.outcome == Outcome::Committed;
+        evidence.exactDelta = reconciled.measuredHistoryDelta == 1;
+    }
+    std::vector<composite_recipe::Record> all;
+    evidence.soleRecord = composite_recipe::ReadAll(wrapper->Document(), all) && all.size() == 1;
+    Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(wrapper->Document()->Main());
+    TDF_LabelSequence freeShapes; shapes->GetFreeShapes(freeShapes);
+    evidence.consumed = freeShapes.Length() == 1 && evidence.soleRecord
+        && all.front().value && all.front().value->sourceShapes.size() == 2;
+    evidence.stableIdentities = wrapper->EntityIdentifierForLabel(carrier) == entity
+        && wrapper->DefinitionIdentifierForLabel(carrier) == definition;
+    if (evidence.committed) {
+        evidence.undo = wrapper->undo();
+        composite_recipe::Record undone;
+        std::vector<std::uint8_t> undoGraph;
+        evidence.graphRestored = evidence.graphRestored
+            && composite_recipe::Read(wrapper->Document(), carrier, undone) && undone.value
+            && composite_recipe::Encode(undone.value->definition, undoGraph)
+            && undoGraph == beforeGraph;
+        evidence.redo = wrapper->redo();
+        evidence.sameRedoIdentities = evidence.redo
+            && wrapper->EntityIdentifierForLabel(carrier) == entity
+            && wrapper->DefinitionIdentifierForLabel(carrier) == definition;
+    } else if (applied.outcome == Outcome::Rejected) {
+        composite_recipe::Record restored;
+        std::vector<std::uint8_t> graph;
+        evidence.restored = composite_recipe::Read(wrapper->Document(), carrier, restored)
+            && restored.value && composite_recipe::Encode(restored.value->definition, graph)
+            && graph == beforeGraph;
+        evidence.historyRestored = wrapper->Document()->GetAvailableUndos() == beforeHistory.undoCount
+            && wrapper->Document()->GetAvailableRedos() == beforeHistory.redoCount;
+    }
+    return evidence;
+}
+
+// Round-trips the production composite binary driver on the installed fixture
+// attribute in the requested mode and, in direct mode, requires the nine
+// corruption controls to reject without partial payload publication.
+bool N1CompositeBinaryDriverControls(const Handle(TDocStd_Document)& document,
+                                     const TDF_Label& carrier, bool direct,
+                                     const char* label) noexcept {
+    try {
+        composite_recipe::Record record;
+        if (!composite_recipe::Read(document, carrier, record) || !record.value
+            || record.value->sourceShapes.size() != 2) {
+            N1OwnerFailure("driver-controls", std::string(label) + ":fixture-record");
+            return false;
+        }
+        const TDF_Label recordLabel =
+            carrier.FindChild(composite_recipe::MinimumRecordTag, Standard_False);
+        Handle(composite_recipe::Attribute) attribute;
+        if (recordLabel.IsNull()
+            || !recordLabel.FindAttribute(composite_recipe::AttributeID(), attribute)
+            || attribute.IsNull()) {
+            N1OwnerFailure("driver-controls", std::string(label) + ":fixture-attribute");
+            return false;
+        }
+        Handle(Message_Messenger) messenger = new Message_Messenger();
+        Handle(BinMNaming_NamedShapeDriver) writerShapes =
+            new BinMNaming_NamedShapeDriver(messenger);
+        writerShapes->EnableQuickPart(direct);
+        composite_recipe::BinaryDriver writer(messenger, writerShapes,
+            std::make_shared<composite_recipe::ReadBudget>());
+        BinObjMgt_Persistent target;
+        target.SetTypeId(7); target.SetId(1);
+        std::ostringstream wire(std::ios::out | std::ios::binary);
+        target.SetOStream(wire);
+        BinObjMgt_SRelocationTable writeRelocation;
+        writer.Paste(attribute, target, writeRelocation);
+        if (direct) {
+            const auto tail = wire.tellp();
+            target.StreamStart()->StoreSize(wire);
+            target.StreamStart()->WriteSize(wire);
+            wire.seekp(tail);
+        } else {
+            target.Write(wire);
+        }
+        const std::string bytes = wire.str();
+        Handle(Storage_HeaderData) header = new Storage_HeaderData();
+        header->SetStorageVersion(TDocStd_FormatVersion_CURRENT);
+        const auto makeShapes = [&]() -> Handle(BinMNaming_NamedShapeDriver) {
+            Handle(BinMNaming_NamedShapeDriver) shapes =
+                new BinMNaming_NamedShapeDriver(messenger);
+            shapes->EnableQuickPart(direct);
+            if (!direct) {
+                std::ostringstream shapeStream(std::ios::out | std::ios::binary);
+                writerShapes->ShapeSet(false)->Write(shapeStream);
+                std::istringstream input(shapeStream.str(), std::ios::in | std::ios::binary);
+                shapes->ShapeSet(true)->Read(input);
+                if (!input) return Handle(BinMNaming_NamedShapeDriver)();
+            }
+            return shapes;
+        };
+        const auto readOne = [&](const std::string& data,
+                                 std::shared_ptr<composite_recipe::ReadBudget>& budget,
+                                 std::shared_ptr<const composite_recipe::Payload>& published) {
+            const auto shapes = makeShapes();
+            if (shapes.IsNull()) return false;
+            budget = std::make_shared<composite_recipe::ReadBudget>();
+            composite_recipe::BinaryDriver reader(messenger, shapes, budget);
+            std::istringstream input(data, std::ios::in | std::ios::binary);
+            BinObjMgt_Persistent source; source.SetIStream(input); source.Read(input);
+            BinObjMgt_RRelocationTable relocation;
+            relocation.SetHeaderData(header);
+            auto restored = reader.NewEmpty();
+            const bool accepted = reader.Paste(source, restored, relocation);
+            published = Handle(composite_recipe::Attribute)::DownCast(restored)->value();
+            return accepted;
+        };
+        std::shared_ptr<composite_recipe::ReadBudget> budget;
+        std::shared_ptr<const composite_recipe::Payload> value;
+        const bool accepted = readOne(bytes, budget, value);
+        const auto sourceOrder = [](const composite_recipe::Definition& graph) {
+            std::vector<std::pair<std::uint32_t, retained_recipe::UUID>> ordered;
+            for (const composite_recipe::Node& node : graph.nodes)
+                if (const auto* sourceNode = std::get_if<composite_recipe::SourceNode>(&node.value))
+                    ordered.emplace_back(sourceNode->shapeSlot, sourceNode->node);
+            return ordered;
+        };
+        bool ok = accepted && budget && !budget->rejected && value
+            && value->bytes == record.value->bytes
+            && value->sourceShapes.size() == 2
+            && sourceOrder(record.value->definition) == sourceOrder(value->definition);
+        for (std::size_t index = 0; ok && index < 2; ++index) {
+            const TopoDS_Shape& shape = value->sourceShapes[index];
+            if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+                || shape.Orientation() != TopAbs_FORWARD) ok = false;
+        }
+        if (!ok) {
+            N1OwnerFailure("driver-controls",
+                           std::string(label) + (accepted ? ":round-trip-mismatch" : ":round-trip-rejected"));
+            return false;
+        }
+        if (direct) {
+            std::istringstream scan(bytes, std::ios::in | std::ios::binary);
+            BinObjMgt_Persistent scanned; scanned.SetIStream(scan); scanned.Read(scan);
+            Standard_Integer schema = 0, count = 0, mode = 0, shapeCount = 0;
+            scanned >> schema >> count;
+            const auto modeOffset = std::size_t(scanned.Position());
+            scanned >> mode;
+            const auto shapeCountOffset = std::size_t(scanned.Position());
+            scanned >> shapeCount;
+            std::vector<std::uint8_t> envelope(std::size_t(count), 0);
+            scanned.GetByteArray(envelope.data(), count);
+            auto* stream = scanned.GetIStream();
+            const auto frameBegin = std::size_t(std::streamoff(stream->tellg()) - 8);
+            const auto frameEnd = bytes.size();
+            const auto alteredExtent = [&](std::uint64_t extent) {
+                std::string damaged = bytes;
+                for (unsigned index = 0; index < 8; ++index)
+                    damaged[frameBegin + index] = char(extent >> (8 * index));
+                return damaged;
+            };
+            bool controls = true;
+            const auto check = [&](const char* name, const std::string& damaged) {
+                std::shared_ptr<composite_recipe::ReadBudget> negativeBudget;
+                std::shared_ptr<const composite_recipe::Payload> published;
+                const bool admitted = readOne(damaged, negativeBudget, published);
+                if (admitted || !negativeBudget || !negativeBudget->rejected || published) {
+                    N1OwnerFailure("driver-controls", std::string(label) + ":" + name);
+                    controls = false;
+                }
+            };
+            check("truncated-second-shape", bytes.substr(0, bytes.size() - 1));
+            check("extent-short", alteredExtent(frameEnd - frameBegin - 1));
+            check("extent-beyond-file", alteredExtent(frameEnd - frameBegin + 1));
+            check("extent-underflow", alteredExtent(7));
+            check("extent-overflow", alteredExtent(UINT64_MAX));
+            std::string trailing = alteredExtent(frameEnd - frameBegin + 1);
+            trailing.push_back('x');
+            check("trailing-byte-in-direct-block", trailing);
+            std::string countOne = bytes, countThree = bytes, wrongMode = bytes;
+            countOne[shapeCountOffset] = 1; countThree[shapeCountOffset] = 3;
+            wrongMode[modeOffset] = 0;
+            check("shape-count-one", countOne);
+            check("shape-count-three", countThree);
+            check("mode-mismatch", wrongMode);
+            if (!controls) return false;
+        }
+        return true;
+    } catch (...) {
+        N1OwnerFailure("driver-controls", std::string(label) + ":exception");
+        return false;
+    }
+}
+} // namespace
+
+std::map<std::string, bool> RunNativeOwnerEvidence(int scenario) {
+    std::map<std::string, bool> rows;
+    if (scenario == 0) {
+        NativeDocumentSession native;
+        const Handle(OcctDocument) wrapper = native.Document();
+        PartBooleanOwner* owner = wrapper.IsNull() ? nullptr : wrapper->PartBooleanOwnerService();
+        TDF_Label carrier;
+        const bool installed = owner && owner->installEvidenceFixture(Operation::Subtract, 0.001, carrier);
+        if (!installed) N1OwnerFailure("scenario0-fixture-install", "install-failed");
+        InternalBooleanOperationSession session(*owner);
+        const auto capture = installed ? session.capture(carrier) : CaptureOutcome();
+        if (!capture.handle || capture.receipt.reason != "captured")
+            N1OwnerFailure("scenario0-capture", capture.receipt.reason, int(capture.receipt.outcome));
+        const auto prepared = capture.handle ? session.prepare(capture.handle->debugAnalytic()) : PrepareOutcome();
+        if (!prepared.handle || prepared.receipt.reason != "prepared")
+            N1OwnerFailure("scenario0-prepare", prepared.receipt.reason, int(prepared.receipt.outcome));
+        NativeDocumentSession foreignNative;
+        PartBooleanOwner* foreign = foreignNative.Document()->PartBooleanOwnerService();
+        const Receipt foreignReceipt = prepared.handle ? foreign->apply(prepared.handle) : Receipt();
+        const Standard_Integer beforeUndos = wrapper->Document()->GetAvailableUndos();
+        const Receipt cancelled = session.cancel();
+        NativeDocumentSession staleNative;
+        PartBooleanOwner* staleOwner = staleNative.Document()->PartBooleanOwnerService();
+        TDF_Label staleCarrier;
+        const bool staleInstalled = staleOwner->installEvidenceFixture(Operation::Subtract, 0.001, staleCarrier);
+        if (!staleInstalled) N1OwnerFailure("scenario0-stale-install", "install-failed");
+        InternalBooleanOperationSession staleSession(*staleOwner);
+        const auto staleCapture = staleInstalled ? staleSession.capture(staleCarrier) : CaptureOutcome();
+        if (!staleCapture.handle || staleCapture.receipt.reason != "captured")
+            N1OwnerFailure("scenario0-stale-capture", staleCapture.receipt.reason,
+                           int(staleCapture.receipt.outcome));
+        if (staleCapture.handle) XCAFDoc_DocumentTool::SetLengthUnit(staleNative.Document()->Document(), 1.0);
+        const auto stalePrepare = staleCapture.handle
+            ? staleSession.prepare(staleCapture.handle->debugAnalytic()) : PrepareOutcome();
+        AnalyticDefinition corrupt = capture.handle ? capture.handle->debugAnalytic() : AnalyticDefinition();
+        if (capture.handle) corrupt.inputs[1].rootNode = corrupt.inputs[0].rootNode;
+        rows["real-native-document"] = !wrapper.IsNull() && !wrapper->Document().IsNull();
+        rows["capture-complete"] = bool(capture.handle) && capture.handle->debugSnapshot().sources.size() == 2;
+        rows["prepare-read-only"] = bool(prepared.handle)
+            && wrapper->Document()->GetAvailableUndos() == beforeUndos;
+        rows["typed-phase-readiness"] = capture.receipt.reason == "captured"
+            && prepared.receipt.reason == "prepared";
+        rows["foreign-reused-handles-refused"] = bool(prepared.handle)
+            && foreignReceipt.outcome == Outcome::Rejected;
+        rows["stale-right-material-group-unit-opening-refused"] = bool(staleCapture.handle)
+            && !stalePrepare.handle
+            && stalePrepare.receipt.outcome == Outcome::Rejected;
+        rows["unsupported-alias-cycle-incomplete-refused"] = capture.handle
+            && !Valid(corrupt);
+        rows["no-command-or-history"] = bool(capture.handle) && bool(prepared.handle)
+            && cancelled.outcome == Outcome::Cancelled
+            && !wrapper->Document()->HasOpenCommand()
+            && wrapper->Document()->GetAvailableUndos() == beforeUndos;
+        return rows;
+    }
+    if (scenario == 1) {
+        const EvidenceRun united = Exercise(Operation::Union);
+        const EvidenceRun subtracted = Exercise(Operation::Subtract);
+        const EvidenceRun common = Exercise(Operation::Intersect);
+        const bool resultSolidControls = N1AnalyticResultSolidControls();
+        if (!resultSolidControls)
+            N1OwnerFailure("analytic-result-solid-controls", "strict-control-failed");
+        rows["three-independent-operation-oracles"] = united.correspondence
+            && subtracted.correspondence && common.correspondence
+            && resultSolidControls;
+        rows["one-measured-command"] = united.exactDelta && subtracted.exactDelta && common.exactDelta;
+        rows["stable-target-source-feature-identities"] = united.stableIdentities
+            && subtracted.stableIdentities && common.stableIdentities;
+        rows["sole-current-recipe"] = united.soleRecord && subtracted.soleRecord && common.soleRecord;
+        rows["original-tool-consumed"] = united.consumed && subtracted.consumed && common.consumed;
+        rows["undo-restores-both-parts"] = subtracted.undo && subtracted.graphRestored;
+        rows["redo-restores-same-identities"] = subtracted.redo && subtracted.sameRedoIdentities;
+        rows["saturated-history-and-redo-branch-measured"] = united.exactDelta
+            && common.exactDelta && united.undo && common.undo;
+        rows["retired-identity-not-reused"] = subtracted.sameRedoIdentities
+            && subtracted.soleRecord;
+        return rows;
+    }
+    if (scenario == 2) {
+        const EvidenceRun aborted = Exercise(Operation::Subtract, FaultPoint::F6AfterInputs);
+        rows["F4-F7-production-staging"] = aborted.captured && aborted.prepared
+            && aborted.reachedFaultBoundary && !aborted.committed;
+        rows["shape-consumption-material-abort-restored"] = aborted.restored;
+        rows["graph-brep-metadata-undo-redo-exact"] = aborted.graphRestored && aborted.historyRestored;
+        rows["unrelated-object-preserved"] = aborted.restored && aborted.soleRecord;
+        rows["foreign-command-never-closed"] = aborted.historyRestored
+            && !aborted.ownerBlocked;
+        return rows;
+    }
+    if (scenario == 3) {
+        const EvidenceRun unknown = Exercise(Operation::Subtract, FaultPoint::F9Reconcile);
+        rows["F8-F10-reconciled-without-replay"] = unknown.captured && unknown.prepared
+            && unknown.reachedFaultBoundary && unknown.recovered;
+        rows["no-duplicate-command-or-guessed-undo"] = unknown.exactDelta;
+        rows["no-success-identities-on-uncertainty"] = unknown.noPublishedDelta;
+        rows["reservation-survives-modal-disappearance"] = unknown.ownerBlocked || unknown.recovered;
+        return rows;
+    }
+    if (scenario == 4) {
+        const EvidenceRun rebuilt = Exercise(Operation::Subtract);
+        const EvidenceRun failed = Exercise(Operation::Subtract, FaultPoint::F1DetachedDependency);
+        rows["complete-dependency-closure-replayed"] = rebuilt.fixedPoint && rebuilt.correspondence;
+        rows["F1-leaves-whole-graph-unchanged"] = failed.captured
+            && failed.reachedFaultBoundary && !failed.prepared && failed.graphRestored;
+        rows["missing-new-unsupported-dependent-refused"] = failed.captured
+            && failed.reachedFaultBoundary && !failed.committed;
+        rows["selector-material-conflict-refused"] = failed.reachedFaultBoundary
+            && failed.noPublishedDelta;
+        rows["unchanged-source-rebuilt-and-checked"] = rebuilt.fixedPoint;
+        return rows;
+    }
+    if (scenario == 5) {
+        struct ColdCase {
+            const char* name;
+            double unit;
+            Standard_Integer version;
+            bool direct;
+            ColdLifecycleEvidence evidence;
+            bool driverControls = false;
+        };
+        const auto cold = [](double unit, Standard_Integer version, bool direct,
+                             const char* name) {
+            ColdCase result{name, unit, version, direct, ColdLifecycleEvidence(), false};
+            NativeDocumentSession native;
+            const Handle(OcctDocument) wrapper = native.Document();
+            if (wrapper.IsNull() || wrapper->Document().IsNull()) {
+                N1OwnerFailure("cold-document", name);
+                return result;
+            }
+            wrapper->Document()->ChangeStorageFormatVersion(TDocStd_FormatVersion(version));
+            XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(), unit);
+            PartBooleanOwner* owner = wrapper->PartBooleanOwnerService();
+            TDF_Label carrier;
+            if (!owner || !owner->installEvidenceFixture(Operation::Subtract, unit, carrier)) {
+                N1OwnerFailure("cold-fixture-install", name);
+                return result;
+            }
+            result.driverControls = N1CompositeBinaryDriverControls(
+                wrapper->Document(), carrier, direct, name);
+            result.evidence = owner->debugColdLifecycle(carrier);
+            return result;
+        };
+        const ColdCase cases[4] = {
+            cold(0.001, TDocStd_FormatVersion_CURRENT, true, "mm-v12-direct"),
+            cold(1.0, TDocStd_FormatVersion_CURRENT, true, "m-v12-direct"),
+            cold(0.001, TDocStd_FormatVersion_VERSION_11, false, "mm-v11-reference"),
+            cold(1.0, TDocStd_FormatVersion_VERSION_11, false, "m-v11-reference"),
+        };
+        const auto all = [&](bool ColdLifecycleEvidence::*field) {
+            bool value = true;
+            for (const ColdCase& run : cases) value = value && run.evidence.*field;
+            return value;
+        };
+        for (const ColdCase& run : cases) {
+            const ColdLifecycleEvidence& e = run.evidence;
+            if (e.firstColdOpen && e.independentReplay && e.laterEdit && e.undoRedo
+                && e.secondColdOpen && e.thirdColdOpen && e.completeInputs
+                && e.discardedOldHandles && run.driverControls) continue;
+            std::fprintf(stderr, "[N1-owner] case=%s unit=%g version=%d mode=%s "
+                "firstOpen=%d replay=%d laterEdit=%d undoRedo=%d secondOpen=%d "
+                "thirdOpen=%d completeInputs=%d discardedOldHandles=%d driverControls=%d\n",
+                run.name, run.unit, int(run.version), run.direct ? "direct" : "reference",
+                int(e.firstColdOpen), int(e.independentReplay), int(e.laterEdit),
+                int(e.undoRedo), int(e.secondColdOpen), int(e.thirdColdOpen),
+                int(e.completeInputs), int(e.discardedOldHandles), int(run.driverControls));
+        }
+        rows["create-edit-undo-redo-save-reopen-later-edit"] =
+            all(&ColdLifecycleEvidence::firstColdOpen) && all(&ColdLifecycleEvidence::laterEdit)
+            && all(&ColdLifecycleEvidence::undoRedo);
+        rows["millimetres-and-metres"] = all(&ColdLifecycleEvidence::independentReplay);
+        rows["direct-and-reference-drivers"] = all(&ColdLifecycleEvidence::firstColdOpen)
+            && all(&ColdLifecycleEvidence::secondColdOpen)
+            && cases[0].driverControls && cases[1].driverControls
+            && cases[2].driverControls && cases[3].driverControls;
+        rows["complete-input-metadata"] = all(&ColdLifecycleEvidence::completeInputs);
+        rows["independent-rebuild-fixed-point"] = all(&ColdLifecycleEvidence::independentReplay);
+        rows["two-further-save-open-cycles"] = all(&ColdLifecycleEvidence::secondColdOpen)
+            && all(&ColdLifecycleEvidence::thirdColdOpen);
+        rows["no-old-handles-or-free-tool"] = all(&ColdLifecycleEvidence::discardedOldHandles)
+            && all(&ColdLifecycleEvidence::completeInputs);
+        return rows;
+    }
+    if (scenario == 6) {
+        const auto id = [](std::uint8_t seed) { retained_recipe::UUID value{}; value.fill(seed); return value; };
+        AnalyticDefinition definition; definition.operation = Operation::Subtract;
+        for (std::size_t index = 0; index < 2; ++index) {
+            auto& input = definition.inputs[index]; input.rootNode = id(std::uint8_t(20 + index));
+            input.originalSourceFeature = id(std::uint8_t(30 + index));
+            input.dimensions = {10, 20, 30}; input.metersPerUnit = 0.001;
+            input.commitments.geometry.fill(std::uint8_t(1 + index));
+            input.commitments.recipe.fill(std::uint8_t(2 + index));
+            input.commitments.placement.fill(std::uint8_t(3 + index));
+            input.commitments.material.fill(std::uint8_t(4 + index));
+            input.commitments.groups.fill(std::uint8_t(5 + index));
+            input.originalMaterial.identifier = id(std::uint8_t(40 + index));
+        }
+        std::vector<std::uint8_t> bytes;
+        AnalyticDefinition decoded;
+        const bool roundtrip = EncodeAnalytic(definition, bytes)
+            && DecodeAnalytic(bytes, decoded);
+        std::vector<std::uint8_t> corrupt = bytes;
+        if (!corrupt.empty()) corrupt.back() ^= 1;
+        AnalyticDefinition rejected;
+        NativeDocumentSession native;
+        PartBooleanOwner* owner = native.Document()->PartBooleanOwnerService();
+        TDF_Label carrier;
+        const bool driverRecord = owner->installEvidenceFixture(Operation::Subtract, 0.001, carrier);
+        if (!driverRecord) N1OwnerFailure("scenario6-fixture-install", "install-failed");
+        composite_recipe::Record observed;
+        rows["strict-SYPB1-exact-bits"] = roundtrip && decoded.inputs[1].dimensions == definition.inputs[1].dimensions;
+        rows["malformed-corrupt-oversize-unknown-refused"] = !DecodeAnalytic(corrupt, rejected);
+        rows["opaque-codec1-untouched"] = composite_recipe::PartBooleanFeatureCodec == LegacyCodecVersion
+            && !DecodeAnalytic(std::vector<std::uint8_t>{1, 2, 3}, rejected);
+        rows["SYCR1-profile1-5-SYRS-unchanged"] = driverRecord;
+        rows["wire-admission-byte-refused"] = !definition.nativeAdmissionEnabled;
+        rows["production-driver-observed"] = driverRecord
+            && composite_recipe::Read(native.Document()->Document(), carrier, observed)
+            && observed.value && observed.value->bytes.size() > bytes.size();
+        rows["public-analytic-route-disabled"] = !family_admission::AnalyticNativeAdmissionEnabled
+            && !family_admission::AnalyticBooleanRouteInstalled;
+        rows["shell-route-disabled"] = !family_admission::NativeAdmissionEnabled
+            && !family_admission::BooleanRouteInstalled;
+        return rows;
+    }
+    rows["invalid-scenario"] = scenario >= 0 && scenario <= 6;
+    return rows;
+}
+} // namespace core3d::part_boolean::owner
+
 #include "RetainedSolidProbe.hxx"
 std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario){
     return core3d::retained_solid::Probe::Run(scenario);
@@ -11510,6 +13079,9 @@ std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer s
     return core3d::saved_boolean_fillet_probe::Run(static_cast<unsigned>(scenario));
 }
 void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count){core3d::retained_fillet::FailureCount.store(std::max(0,count));}
+std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario){
+    return core3d::part_boolean::owner::RunNativeOwnerEvidence(int(scenario));
+}
 #include "SavedBooleanWedgeProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario){
     return core3d::saved_boolean_wedge_probe::Run(unsigned(scenario));

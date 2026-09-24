@@ -1,7 +1,7 @@
 // Shared immutable modeling recipe implementations.
 // Keep this file Objective-C++: the public Objective-C values own validated,
 // detached native recipe values but no document, viewer, controller or UI state.
-#import "Core3DSharedModelingValues.h"
+#import "Core3DModelingTypes.h"
 
 #include "../OCCTKit/ProfileCurvePresets.hxx"
 #include "../OCCTKit/ProfilePersistence.hxx"
@@ -15,6 +15,52 @@
 #include <set>
 #include <utility>
 #include <vector>
+
+static bool Core3DPartBooleanFinite3(simd_double3 value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+static bool Core3DPartBooleanFinite4(simd_double4 value) {
+    return std::isfinite(value.x) && std::isfinite(value.y)
+        && std::isfinite(value.z) && std::isfinite(value.w);
+}
+
+@implementation Core3DPartBooleanInputValues
+- (instancetype)initWithRole:(NSString *)role name:(NSString *)name
+    dimensionsMM:(simd_double3)dimensions translationMM:(simd_double3)translation
+    rotationXYZW:(simd_double4)rotation metersPerUnit:(double)metersPerUnit
+    baseColorSRGB:(simd_double3)baseColor metallic:(double)metallic roughness:(double)roughness {
+    const double norm = simd_length_squared(rotation);
+    if (![role isKindOfClass:NSString.class] || !([role isEqualToString:@"left"] || [role isEqualToString:@"right"])
+        || ![name isKindOfClass:NSString.class] || name.length > 128
+        || !Core3DPartBooleanFinite3(dimensions) || dimensions.x <= 0 || dimensions.y <= 0 || dimensions.z <= 0
+        || !Core3DPartBooleanFinite3(translation) || !Core3DPartBooleanFinite4(rotation)
+        || !std::isfinite(norm) || std::abs(norm - 1.0) > 1e-10
+        || !std::isfinite(metersPerUnit) || metersPerUnit <= 0
+        || !Core3DPartBooleanFinite3(baseColor) || baseColor.x < 0 || baseColor.x > 1
+        || baseColor.y < 0 || baseColor.y > 1 || baseColor.z < 0 || baseColor.z > 1
+        || !std::isfinite(metallic) || metallic < 0 || metallic > 1
+        || !std::isfinite(roughness) || roughness < 0 || roughness > 1) return nil;
+    if ((self=[super init])) {
+        _role=[role copy];_name=[name copy];_dimensionsMM=dimensions;_translationMM=translation;
+        _rotationXYZW=rotation;_metersPerUnit=metersPerUnit;_baseColorSRGB=baseColor;
+        _metallic=metallic;_roughness=roughness;
+    }
+    return self;
+}
+@end
+
+@implementation Core3DPartBooleanValues
+- (instancetype)initWithOperation:(Core3DPartBooleanOperation)operation
+    inputs:(NSArray<Core3DPartBooleanInputValues *> *)inputs {
+    if (operation < Core3DPartBooleanOperationUnion || operation > Core3DPartBooleanOperationIntersect
+        || ![inputs isKindOfClass:NSArray.class] || inputs.count != 2
+        || ![inputs[0] isMemberOfClass:Core3DPartBooleanInputValues.class]
+        || ![inputs[1] isMemberOfClass:Core3DPartBooleanInputValues.class]
+        || ![inputs[0].role isEqualToString:@"left"] || ![inputs[1].role isEqualToString:@"right"]) return nil;
+    if ((self=[super init])) {_operation=operation;_inputs=[inputs copy];}
+    return self;
+}
+@end
 
 // Foundation's typed storage preserves the public CGPoint encoding on both
 // platforms without depending on UIKit's NSValue convenience category.
@@ -613,4 +659,3 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 - (double)metersPerUnit { return _parameters.metersPerUnit; }
 - (core3d::enclosure::Parameters)nativeParameters { return _parameters; }
 @end
-

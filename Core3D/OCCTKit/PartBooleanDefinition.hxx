@@ -16,9 +16,11 @@ using retained_recipe::Digest;
 using retained_recipe::UUID;
 
 inline constexpr std::uint32_t FeatureKind = 1;
-inline constexpr std::uint32_t LegacyCodecVersion = 1;
+inline constexpr std::uint32_t LegacyCodecVersion = 1; // opaque transport remains unchanged
 inline constexpr std::uint32_t ShellCodecVersion = 2;
 inline constexpr std::uint32_t PayloadVersion = 2;
+inline constexpr std::uint32_t AnalyticPayloadVersion = 1;
+inline constexpr char AnalyticOwner[] = "part_boolean::analytic_owner_v1";
 inline constexpr std::size_t MaximumPayloadBytes = 16 * 1024;
 inline constexpr std::size_t MaximumMaterials = 64;
 inline constexpr std::size_t MaximumRegions = 128;
@@ -104,6 +106,30 @@ struct Definition final {
     std::vector<ShellAdoptionAlias> shellAliases;
     // Persisted values may be decoded before a native rule exists.  Admission
     // is deliberately not a wire-controlled switch and must remain false.
+    bool nativeAdmissionEnabled = false;
+};
+
+// SYPB/1 is a strict native meaning inside the reserved codec-1 byte field.
+// It is never inferred from an arbitrary old codec-1 payload.
+struct AnalyticPrismInput final {
+    UUID rootNode{};
+    UUID originalSourceFeature{};
+    SignatureCommitments commitments;
+    std::array<double, 3> dimensions{{0, 0, 0}};
+    std::array<double, 3> translation{{0, 0, 0}};
+    std::array<double, 4> rotationXYZW{{0, 0, 0, 1}};
+    double metersPerUnit = 0;
+    MaterialValue originalMaterial;
+    std::string originalName;
+    std::vector<std::string> originalGroups;
+    bool originallyVisible = true;
+};
+
+struct AnalyticDefinition final {
+    Operation operation = Operation::Union;
+    std::array<AnalyticPrismInput, 2> inputs;
+    MaterialPolicy materialPolicy = MaterialPolicy::RejectConflictingMerges;
+    CodecVersions versions;
     bool nativeAdmissionEnabled = false;
 };
 
@@ -195,5 +221,39 @@ inline bool Valid(const Definition& value) noexcept {
             && alias.sourceInput == shellIndex && alias.shellStepIndex == 0
             && alias.originalSourceFeature == value.inputs[shellIndex].originalSourceFeature;
     } catch (...) { return false; }
+}
+inline bool Valid(const AnalyticPrismInput& value) noexcept {
+    if (!retained_recipe::Nonzero(value.rootNode)
+        || !retained_recipe::Nonzero(value.originalSourceFeature)
+        || !Valid(value.commitments) || !Valid(value.originalMaterial)
+        || value.originalMaterial.kind != MaterialKind::ResolvedScalars
+        || !ValidText(value.originalName)
+        || value.originalGroups.size() > MaximumGroupsPerInput
+        || !std::isfinite(value.metersPerUnit) || value.metersPerUnit <= 0) return false;
+    for (double dimension : value.dimensions)
+        if (!std::isfinite(dimension) || dimension <= 0) return false;
+    for (double coordinate : value.translation)
+        if (!std::isfinite(coordinate)) return false;
+    double norm = 0;
+    for (double coordinate : value.rotationXYZW) {
+        if (!std::isfinite(coordinate)) return false;
+        norm += coordinate * coordinate;
+    }
+    if (std::abs(norm - 1.0) > 1e-12) return false;
+    std::set<std::string> groups;
+    for (const auto& group : value.originalGroups)
+        if (group.empty() || !ValidText(group) || !groups.insert(group).second) return false;
+    return true;
+}
+inline bool Valid(const AnalyticDefinition& value) noexcept {
+    return !value.nativeAdmissionEnabled
+        && value.materialPolicy == MaterialPolicy::RejectConflictingMerges
+        && (value.operation == Operation::Union || value.operation == Operation::Subtract
+            || value.operation == Operation::Intersect)
+        && value.versions.serializer == 1 && value.versions.build == 1
+        && value.versions.proof == 1 && value.versions.selector == 1
+        && value.versions.material == 1 && Valid(value.inputs[0]) && Valid(value.inputs[1])
+        && value.inputs[0].rootNode != value.inputs[1].rootNode
+        && value.inputs[0].originalSourceFeature != value.inputs[1].originalSourceFeature;
 }
 } // namespace core3d::part_boolean

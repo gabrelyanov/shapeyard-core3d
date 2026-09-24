@@ -42,6 +42,33 @@ struct OwnerSnapshot {
     std::vector<SourceSnapshot> sources;
 };
 
+// Process-local receipt minted only after the document owner has decoded the
+// canonical SYPB/1 feature, rebuilt both inputs/result, proved correspondence,
+// and captured the complete native read set. It is intentionally absent from
+// every persistence codec.
+struct NativeCurrentnessFacts final {
+    OwnerKey owner;
+    UUID outputNode{}, feature{};
+    Digest graph{}, outputShape{}, readSet{};
+    std::uint64_t ownerNonce = 0;
+    bool builderInstalled = false;
+    bool proofInstalled = false;
+    bool ownerInstalled = false;
+    bool persistenceInstalled = false;
+};
+
+inline bool Valid(const NativeCurrentnessFacts& value,
+                  const composite_recipe::Definition& definition) noexcept {
+    if (!value.builderInstalled || !value.proofInstalled || !value.ownerInstalled
+        || !value.persistenceInstalled || value.ownerNonce == 0
+        || !(value.owner == definition.owner) || value.outputNode != definition.outputNode
+        || !Nonzero(value.feature) || !Nonzero(value.graph)
+        || !Nonzero(value.outputShape) || !Nonzero(value.readSet)) return false;
+    const auto* feature = definition.nodes.empty() ? nullptr
+        : std::get_if<composite_recipe::FeatureNode>(&definition.nodes.back().value);
+    return feature && feature->feature == value.feature;
+}
+
 inline bool Valid(const RevisionFence& fence) noexcept {
     if (fence.documentGeneration == 0 || fence.modelRevision == 0
         || !std::isfinite(fence.effectiveMetersPerUnit) || fence.effectiveMetersPerUnit <= 0
@@ -57,7 +84,8 @@ inline bool Valid(const RevisionFence& fence) noexcept {
 }
 
 inline OwnerSnapshot Snapshot(const composite_recipe::Definition& definition,
-                              const RevisionFence& fence) noexcept {
+                              const RevisionFence& fence,
+                              const NativeCurrentnessFacts* facts = nullptr) noexcept {
     OwnerSnapshot result;
     try {
         result.owner = definition.owner; result.outputNode = definition.outputNode; result.fence = fence;
@@ -86,10 +114,36 @@ inline OwnerSnapshot Snapshot(const composite_recipe::Definition& definition,
             result.sources.push_back({locator, source->original, source->recipe,
                 source->inputToCarrier, source->commitments});
         }
-        // P1 recognizes the reserved feature value but grants no build/proof
-        // route. A later admitted track changes this status only after native proof.
+        const auto* feature = definition.nodes.empty() ? nullptr
+            : std::get_if<composite_recipe::FeatureNode>(&definition.nodes.back().value);
+        part_boolean::AnalyticDefinition analytic;
+        bool exactAnalytic = definition.schemaVersion == 1 && result.sources.size() == 2
+            && definition.nodes.size() == 3 && feature
+            && feature->kind == composite_recipe::PartBooleanFeatureKind
+            && feature->codecVersion == composite_recipe::PartBooleanFeatureCodec
+            && feature->inputs.size() == 2 && part_boolean::DecodeAnalytic(feature->parameters, analytic);
+        for (std::size_t index = 0; exactAnalytic && index < 2; ++index) {
+            const auto& source = result.sources[index];
+            const auto& input = analytic.inputs[index];
+            exactAnalytic = feature->inputs[index] == source.locator.node
+                && input.rootNode == source.locator.node
+                && input.originalSourceFeature == source.locator.sourceFeature
+                && input.commitments.geometry == source.commitments.geometry
+                && input.commitments.recipe == source.commitments.recipe
+                && input.commitments.placement == source.commitments.placement
+                && input.commitments.material == source.commitments.material
+                && input.commitments.groups == source.commitments.groups;
+        }
+        if (exactAnalytic && facts && Valid(*facts, definition)) {
+            result.status = OwnerStatus::CurrentEditable;
+            result.reason = "native-analytic-current";
+            return result;
+        }
+        // Structural decode never grants editability without the nonserializable
+        // owner receipt. Malformed present records remain distinct from absence.
         result.status = OwnerStatus::UnsupportedVersion;
-        result.reason = "feature-admission-not-installed";
+        result.reason = exactAnalytic ? "native-currentness-not-installed"
+                                      : "feature-admission-not-installed";
         return result;
     } catch (...) { return {}; }
 }

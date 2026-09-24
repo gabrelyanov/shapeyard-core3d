@@ -10,6 +10,7 @@
 #include "Core3DViewer.h"
 #include "../OCCTKit/SavedCutWholeResultCorrespondence.hxx"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
+#include "../OCCTKit/CompositeRecipeAttribute.hxx"
 #include "../OCCTKit/CutDisplayPreparation.hxx"
 #include "../OCCTKit/SavedBooleanProgramBuild.hxx"
 #include "../OCCTKit/SavedFeatureRecords.hxx"
@@ -23,6 +24,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Solid.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_TShape.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
@@ -1725,7 +1727,7 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
             || hasUnresolvedOrdinaryEdit()
             || HasActiveOperationLedger(
                 _objectInteractor, _shapeInteractor)
-            || myDoc.IsNull()) {
+            || myDoc.IsNull() || myDoc->NativeBooleanOwnerBlocksOtherWork()) {
             return false;
         }
         const Handle(TDocStd_Document) document = myDoc->Document();
@@ -4301,6 +4303,7 @@ bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
     return _queuedAssetLoadWork != nullptr || hasUnresolvedOrdinaryEditExcludingQueuedLoad();
 }
 bool Core3DViewer::hasUnresolvedEdit() const noexcept {
+    if (!myDoc.IsNull() && myDoc->NativeBooleanOwnerBlocksOtherWork()) return true;
     if (hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate()) return true;
     if (!_objectInteractor) return false;
     // Availability must agree with the authoritative preview outcome. A ready
@@ -6432,6 +6435,65 @@ bool Core3DViewer::redrawDocument() noexcept {
         ? ShapeSelectionMode::WholeShape
         : _shapeInteractor->getSelectionMode();
     AIS_ListOfInteractive previousPresentations;
+    // Shaded publication may clear a face TShape's Checked bit while adding
+    // triangulation. That bit belongs to the exact persisted BRep stream even
+    // though triangles do not. Keep only a synchronous, structurally-derived
+    // snapshot and restore the original value on every exit; this is not a
+    // discovery-time repair or a new currentness baseline.
+    struct RedrawShapeFlags final {
+        std::vector<std::pair<TopoDS_Shape,Standard_Boolean>> rootFree;
+        std::vector<std::pair<Handle(TopoDS_TShape),Standard_Boolean>> carrierFaceChecked;
+        ~RedrawShapeFlags() {
+            for (auto& entry:carrierFaceChecked)
+                if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+            for (auto& entry:rootFree) entry.first.Free(entry.second);
+        }
+    } preservedFlags;
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) document = myDoc.IsNull()
+            ? Handle(TDocStd_Document)() : myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        const Handle(XCAFDoc_ShapeTool) shapes =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull()) return false;
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        for (int i=1;i<=roots.Length();++i) {
+            const TopoDS_Shape shape=XCAFDoc_ShapeTool::GetShape(roots.Value(i));
+            if (!shape.IsNull()) preservedFlags.rootFree.emplace_back(shape,shape.Free());
+        }
+
+        std::vector<composite_recipe::Record> records;
+        if (!composite_recipe::ReadAll(document,records)) return false;
+        constexpr std::size_t maximumAnalyticCarrierFaces=1024;
+        std::unordered_set<const TopoDS_TShape*> retainedFaceIdentities;
+        for (const auto& record:records) {
+            if (!record.value || record.value->definition.nodes.empty()) return false;
+            const auto* feature=std::get_if<composite_recipe::FeatureNode>(
+                &record.value->definition.nodes.back().value);
+            if (!feature || feature->kind!=composite_recipe::PartBooleanFeatureKind) continue;
+            if (feature->codecVersion==composite_recipe::PartBooleanShellFeatureCodec) continue;
+            part_boolean::AnalyticDefinition analytic;
+            if (record.value->definition.nodes.size()!=3
+                || feature->codecVersion!=composite_recipe::PartBooleanFeatureCodec
+                || !part_boolean::DecodeAnalytic(feature->parameters,analytic)
+                || record.current.IsNull()) return false;
+            std::unordered_set<const TopoDS_TShape*> distinctCarrierFaces;
+            std::size_t faceCount=0;
+            for (TopExp_Explorer face(record.current,TopAbs_FACE);face.More();face.Next()) {
+                const Handle(TopoDS_TShape)& tshape=face.Current().TShape();
+                if (tshape.IsNull()) return false;
+                if (!distinctCarrierFaces.insert(tshape.get()).second) continue;
+                if (++faceCount>maximumAnalyticCarrierFaces) return false;
+                if (retainedFaceIdentities.insert(tshape.get()).second)
+                    preservedFlags.carrierFaceChecked.emplace_back(tshape,tshape->Checked());
+            }
+            if (faceCount==0) return false;
+        }
+    } catch (...) {
+        return false;
+    }
     try {
         OCC_CATCH_SIGNALS
         // OCAF has already restored the original TShapes, including their
@@ -6440,18 +6502,6 @@ bool Core3DViewer::redrawDocument() noexcept {
         // its shared Free flag outside any command. Preserve that exact bit
         // through redraw (also on failure), so Undo does not alter the saved
         // geometry stream merely by replacing a plain AIS presentation.
-        struct RootFreeFlags {
-            std::vector<std::pair<TopoDS_Shape,Standard_Boolean>> values;
-            ~RootFreeFlags() {
-                for (auto& entry:values) entry.first.Free(entry.second);
-            }
-        } rootFreeFlags;
-        TDF_LabelSequence roots;
-        XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main())->GetFreeShapes(roots);
-        for (int i=1;i<=roots.Length();++i) {
-            const TopoDS_Shape shape=XCAFDoc_ShapeTool::GetShape(roots.Value(i));
-            if (!shape.IsNull()) rootFreeFlags.values.emplace_back(shape,shape.Free());
-        }
         myContext->DisplayedObjects(
             AIS_KOI_Shape,
             -1,

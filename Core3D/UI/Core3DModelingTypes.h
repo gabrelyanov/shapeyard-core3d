@@ -33,6 +33,81 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultUnchanged,
 };
 
+//! Narrow production facade for the retained analytic-prism Boolean owner.
+//! Every value is descriptive. Authority remains in Core3DPartBooleanEditingSession.
+typedef NS_ENUM(NSInteger, Core3DPartBooleanOperation) {
+    Core3DPartBooleanOperationUnion = 1,
+    Core3DPartBooleanOperationSubtract,
+    Core3DPartBooleanOperationIntersect,
+};
+typedef NS_ENUM(NSInteger, Core3DPartBooleanEditOutcome) {
+    Core3DPartBooleanEditOutcomeCaptured = 0,
+    Core3DPartBooleanEditOutcomePrepared,
+    Core3DPartBooleanEditOutcomeCommitted,
+    Core3DPartBooleanEditOutcomeUnchanged,
+    Core3DPartBooleanEditOutcomeRejected,
+    Core3DPartBooleanEditOutcomeCancelled,
+    Core3DPartBooleanEditOutcomeRecoveryRequired,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPartBooleanInputValues : NSObject
+@property(nonatomic,copy,readonly) NSString *role;
+@property(nonatomic,copy,readonly) NSString *name;
+@property(nonatomic,readonly) simd_double3 dimensionsMM;
+@property(nonatomic,readonly) simd_double3 translationMM;
+@property(nonatomic,readonly) simd_double4 rotationXYZW;
+@property(nonatomic,readonly) double metersPerUnit;
+@property(nonatomic,readonly) simd_double3 baseColorSRGB;
+@property(nonatomic,readonly) double metallic;
+@property(nonatomic,readonly) double roughness;
+- (nullable instancetype)initWithRole:(NSString *)role name:(NSString *)name
+    dimensionsMM:(simd_double3)dimensions translationMM:(simd_double3)translation
+    rotationXYZW:(simd_double4)rotation metersPerUnit:(double)metersPerUnit
+    baseColorSRGB:(simd_double3)baseColor metallic:(double)metallic roughness:(double)roughness
+    NS_SWIFT_NAME(init(role:name:dimensionsMM:translationMM:rotationXYZW:metersPerUnit:baseColorSRGB:metallic:roughness:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPartBooleanValues : NSObject
+@property(nonatomic,readonly) Core3DPartBooleanOperation operation;
+@property(nonatomic,copy,readonly) NSArray<Core3DPartBooleanInputValues *> *inputs;
+- (nullable instancetype)initWithOperation:(Core3DPartBooleanOperation)operation
+    inputs:(NSArray<Core3DPartBooleanInputValues *> *)inputs NS_SWIFT_NAME(init(operation:inputs:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPartBooleanEditResult : NSObject
+@property(nonatomic,readonly) Core3DPartBooleanEditOutcome outcome;
+@property(nonatomic,copy,readonly) NSString *reason;
+@property(nonatomic,readonly) NSInteger measuredHistoryDelta;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Main-thread, single-use owner-relative session. Dismissal calls cancel but
+//! cannot turn RecoveryRequired into cancellation or release the native fence.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPartBooleanEditingSession : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,strong,readonly) Core3DPartBooleanValues *openingValues;
+@property(nonatomic,readonly) BOOL recoveryRequired;
+- (Core3DPartBooleanEditResult *)prepareValues:(Core3DPartBooleanValues *)values
+    NS_SWIFT_NAME(prepare(values:));
+- (Core3DPartBooleanEditResult *)apply;
+- (Core3DPartBooleanEditResult *)cancel;
+- (Core3DPartBooleanEditResult *)reconcile;
+#if DEBUG
+- (void)debugSetFaultPoint:(NSInteger)fault NS_SWIFT_NAME(debugSetFaultPoint(_:));
+#endif
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 
 //! Native-issued, main-owned selected sweep snapshot. Wire fields cannot recreate it.
 __attribute__((objc_subclassing_restricted))

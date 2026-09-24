@@ -287,10 +287,22 @@ struct Probe final {
             rule.parameterBounds = FixedDigest(200);
             rule.nativeBuilderInstalled = true;
             rule.nativeProofInstalled = true;
+            rule.nativeOwnerInstalled = true;
+            rule.retainedInputsPersistenceInstalled = true;
             const auto admission = retained_recipe::Evaluate(snapshot, rule);
+            auto missingOwner = rule;
+            missingOwner.nativeOwnerInstalled = false;
+            const auto ownerRefusal = retained_recipe::Evaluate(snapshot, missingOwner);
+            auto missingPersistence = rule;
+            missingPersistence.retainedInputsPersistenceInstalled = false;
+            const auto persistenceRefusal = retained_recipe::Evaluate(snapshot, missingPersistence);
             checks["codec2-production-route-refused"] =
                 admission.refusal == retained_recipe::Refusal::FeatureKind
-                && !admission.admitted();
+                && !admission.admitted()
+                && ownerRefusal.refusal == retained_recipe::Refusal::RuleNotInstalled
+                && !ownerRefusal.admitted()
+                && persistenceRefusal.refusal == retained_recipe::Refusal::RuleNotInstalled
+                && !persistenceRefusal.admitted();
 
             struct Holder final {
                 Handle(TDocStd_Application) app = new TDocStd_Application();

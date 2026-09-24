@@ -63,6 +63,8 @@ class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
 namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
+namespace core3d::part_boolean::owner { class PartBooleanOwner; }
+namespace core3d::composite_recipe { struct Payload; }
 
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
@@ -505,6 +507,7 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Stan
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario);
 Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
+Standard_EXPORT std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario);
 //! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
 Standard_EXPORT std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario);
@@ -546,6 +549,12 @@ public:
   Standard_EXPORT virtual ~OcctDocument();
 
   Standard_EXPORT void InitDoc();
+  // Internal native service. The pointer is document-owned and is replaced
+  // only with the adopted TDocStd_Document. N2 may retain sessions, never this
+  // pointer as authority after an adoption boundary.
+  core3d::part_boolean::owner::PartBooleanOwner* PartBooleanOwnerService() noexcept;
+  const core3d::part_boolean::owner::PartBooleanOwner* PartBooleanOwnerService() const noexcept;
+  bool NativeBooleanOwnerBlocksOtherWork() const noexcept;
   // Internal committed-adoption boundary; no public AI token is exposed.
   void ObserveSuccessfulNativeDocumentAdoption() noexcept;
   // Private live-import ownership; native readiness is checked by the viewer.
@@ -1076,6 +1085,9 @@ public:
 
 private:
   friend class core3d::NativeDocumentSession;
+  friend class core3d::part_boolean::owner::PartBooleanOwner;
+  bool StagePartBooleanPayload(
+      const TDF_Label&, const std::shared_ptr<const core3d::composite_recipe::Payload>&) noexcept;
   void CloseNativeSession() noexcept;
   bool myNativeSessionClosed = false;
   friend class core3d::OrdinaryEditController;
@@ -1139,6 +1151,7 @@ private:
   core3d::authority::NativeObservedApplication* myAuthorityApplication = nullptr;
   Handle(TDocStd_Application) myApp;
   Handle(TDocStd_Document) myOcafDoc;
+  std::unique_ptr<core3d::part_boolean::owner::PartBooleanOwner> myPartBooleanOwner;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;

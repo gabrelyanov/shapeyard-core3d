@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <memory>
 #include <variant>
 
 namespace core3d::boolean_editor {
@@ -72,12 +73,17 @@ struct EditBooleanInput final {
     std::variant<RecipeParameterEdit, InputPlacementEdit, InputMaterialEdit> value;
 };
 
-struct Capture final {
+class CaptureHandle;
+class PreparedHandle;
+struct CaptureReply final {
     Result result;
     std::vector<AdvertisedPart> parts;
-    // Opaque native snapshot/fence remains private to the bridge.
+    std::shared_ptr<const CaptureHandle> handle;
 };
-struct Prepared final { Result result; };
+struct PrepareReply final {
+    Result result;
+    std::shared_ptr<const PreparedHandle> handle;
+};
 
 // Required ordering, implemented by the G0/A1 serial owner:
 // Capture checks both complete recipes, identities, units, placement, aliases,
@@ -90,12 +96,15 @@ struct Prepared final { Result result; };
 class NativeBooleanOperandEditor {
 public:
     virtual ~NativeBooleanOperandEditor() = default;
-    virtual Capture captureBooleanParts(const BooleanParts&) = 0;
-    virtual Capture captureEditBooleanInput(const EditBooleanInput&) = 0;
-    virtual Prepared prepareBooleanParts(const BooleanParts&, const Capture&) = 0;
-    virtual Prepared prepareEditBooleanInput(const EditBooleanInput&, const Capture&) = 0;
-    virtual Result apply(const Prepared&) = 0;
-    virtual Result cancel(const Prepared&) = 0;
+    virtual CaptureReply captureBooleanParts(const BooleanParts&) = 0;
+    virtual CaptureReply captureEditBooleanInput(const EditBooleanInput&) = 0;
+    virtual PrepareReply prepareBooleanParts(
+        const BooleanParts&, const std::shared_ptr<const CaptureHandle>&) = 0;
+    virtual PrepareReply prepareEditBooleanInput(
+        const EditBooleanInput&, const std::shared_ptr<const CaptureHandle>&) = 0;
+    virtual Result apply(const std::shared_ptr<const PreparedHandle>&) = 0;
+    // Capture is authority too: Stop after capture must retire it.
+    virtual Result cancelSession() = 0;
 };
 
 inline bool IsTerminalFailure(const Result& value) noexcept {
