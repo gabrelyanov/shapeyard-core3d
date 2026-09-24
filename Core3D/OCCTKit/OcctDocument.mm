@@ -61,6 +61,23 @@ struct Cut475Scope {
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <TargetConditionals.h>
+
+#if DEBUG && TARGET_OS_IOS
+#import "../UI/Core3DViewController.h"
+#import "GLViewController.h"
+#include "../UI/ShellOperationController.hpp"
+#include <AIS_ListIteratorOfListOfInteractive.hxx>
+#include <Precision.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <string>
+#include <vector>
+#endif
 
 #include "OcctDocument.h"
 #include "NativeDocumentSession.hxx"
@@ -82,13 +99,420 @@ struct Cut475Scope {
 #include "ReceiptFramedTraversal.hxx"
 #include "ReceiptCatalogBinaryDriver.hxx"
 #include "RetainedSolidBinaryDriver.hxx"
+#include "CompositeRecipeBinaryDriver.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #if DEBUG
+#include "RetainedPartBoolean.hxx"
 #include "ReceiptFramingProbe.hxx"
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#endif
+
+#if DEBUG && TARGET_OS_IOS
+namespace {
+
+std::shared_ptr<core3d::Core3DViewer>
+P4RefusalFixtureViewer(Core3DViewController *owner) noexcept
+{
+    if (owner == nil) return {};
+    @try {
+        id candidate = [owner valueForKey:@"glController"];
+        if (![candidate isKindOfClass:GLViewController.class]) return {};
+        return [(GLViewController *)candidate viewer];
+    } @catch (NSException *exception) {
+        (void)exception;
+        return {};
+    }
+}
+
+bool P4ReferenceAxesMatch(
+    const OcctReferenceAxis& left,
+    const OcctReferenceAxis& right) noexcept
+{
+    return left.pivotSpace == right.pivotSpace
+        && left.directionSpace == right.directionSpace
+        && left.pivot.IsEqual(right.pivot, 0.0)
+        && left.direction.IsEqual(right.direction, 0.0);
+}
+
+NSDictionary<NSString *, NSNumber *> *
+P4ReferenceAxisDictionary(
+    const OcctReferenceAxisReadState state,
+    const OcctReferenceAxis& axis)
+{
+    return @{
+        @"readState": @(static_cast<Standard_Integer>(state)),
+        @"pivotSpace": @(static_cast<Standard_Integer>(axis.pivotSpace)),
+        @"pivotX": @(axis.pivot.X()),
+        @"pivotY": @(axis.pivot.Y()),
+        @"pivotZ": @(axis.pivot.Z()),
+        @"directionSpace": @(
+            static_cast<Standard_Integer>(axis.directionSpace)),
+        @"directionX": @(axis.direction.X()),
+        @"directionY": @(axis.direction.Y()),
+        @"directionZ": @(axis.direction.Z()),
+    };
+}
+
+void P4AbortOpenCommandNoThrow(
+    const Handle(TDocStd_Document)& document) noexcept
+{
+    try {
+        if (!document.IsNull() && document->HasOpenCommand()) {
+            document->AbortCommand();
+        }
+    } catch (...) {
+    }
+}
+
+} // namespace
+
+@interface Core3DViewController (P4RefusalFixtureSupport)
+- (nullable NSDictionary<NSString *, id> *)
+    debugP4InteriorShellOpeningForEntity:(NSString *)entityIdentifier;
+- (nullable NSDictionary<NSString *, id> *)
+    debugP4CommitSecondBooleanInputReferenceAxis:
+        (NSDictionary<NSString *, NSString *> *)identifiers;
+@end
+
+@implementation Core3DViewController (P4RefusalFixtureSupport)
+
+- (NSDictionary<NSString *, id> *)
+    debugP4InteriorShellOpeningForEntity:(NSString *)entityIdentifier
+{
+    if (![NSThread isMainThread]
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 256) {
+        return nil;
+    }
+    const std::shared_ptr<core3d::Core3DViewer> viewer =
+        P4RefusalFixtureViewer(self);
+    if (viewer == nullptr || !viewer->canBeginCommittedEdit()) return nil;
+
+    const Handle(OcctDocument) owner = viewer->getDocument();
+    const Handle(TDocStd_Document) document = owner.IsNull()
+        ? Handle(TDocStd_Document)() : owner->Document();
+    const Handle(AIS_InteractiveContext)& context = viewer->AisContext();
+    if (owner.IsNull() || document.IsNull() || context.IsNull()
+        || document->HasOpenCommand()) return nil;
+
+    try {
+        OCC_CATCH_SIGNALS
+        const char *utf8 = entityIdentifier.UTF8String;
+        if (utf8 == nullptr) return nil;
+        const std::string requested(utf8);
+        if (requested.empty() || requested.find('\0') != std::string::npos)
+            return nil;
+
+        Handle(AIS_Shape) presentation;
+        TDF_Label label;
+        Standard_Size matchingCount = 0;
+        AIS_ListOfInteractive displayed;
+        context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        for (AIS_ListIteratorOfListOfInteractive it(displayed);
+             it.More(); it.Next()) {
+            const Handle(AIS_InteractiveObject) candidate = it.Value();
+            const TDF_Label candidateLabel = owner->ShapeLabel(candidate);
+            if (candidateLabel.IsNull()
+                || owner->EntityIdentifierForLabel(candidateLabel)
+                    != requested) continue;
+            const Handle(AIS_Shape) candidateShape =
+                Handle(AIS_Shape)::DownCast(candidate);
+            if (candidateShape.IsNull() || candidateShape->Shape().IsNull()
+                || candidateShape->Shape().ShapeType() != TopAbs_SOLID
+                || !context->IsDisplayed(candidateShape)
+                || !owner->IsPresentationEditable(candidateShape)
+                || !owner->IsEditableFreeSimpleDefinitionLabel(
+                    candidateLabel)) return nil;
+            ++matchingCount;
+            presentation = candidateShape;
+            label = candidateLabel;
+        }
+        if (matchingCount != 1 || presentation.IsNull() || label.IsNull()
+            || owner->RetainedRecipeCoverageForLabel(label)
+                != OcctRetainedRecipeCoverage::CurrentProfile) return nil;
+
+        const TopoDS_Shape shape = presentation->Shape();
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        // Triangulation-backed BRep bounds include deflection/tolerance and
+        // can make a true boundary plane look interior. This planar fixture
+        // needs its exact supporting-plane extrema instead.
+        const gp_Dir localZ(0.0, 0.0, 1.0);
+        Standard_Real minimumZ =
+            std::numeric_limits<Standard_Real>::infinity();
+        Standard_Real maximumZ =
+            -std::numeric_limits<Standard_Real>::infinity();
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            BRepAdaptor_Surface surface(
+                TopoDS::Face(faces(index)), Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) continue;
+            const gp_Pln plane = surface.Plane();
+            if (!plane.Axis().Direction().IsParallel(
+                    localZ, Precision::Angular())) continue;
+            const Standard_Real offset = plane.Location().Z();
+            minimumZ = std::min(minimumZ, offset);
+            maximumZ = std::max(maximumZ, offset);
+        }
+        if (!std::isfinite(minimumZ) || !std::isfinite(maximumZ)
+            || minimumZ >= maximumZ) return nil;
+        const Standard_Real zTolerance = std::max(
+            Precision::Confusion(),
+            32.0 * std::numeric_limits<Standard_Real>::epsilon()
+                * std::max({1.0, std::abs(minimumZ), std::abs(maximumZ)}));
+
+        TopoDS_Face interiorFloor;
+        Standard_Size faceIndex = 0;
+        Standard_Real planeOffset = 0.0;
+        Standard_Size interiorCount = 0;
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            const TopoDS_Face face = TopoDS::Face(faces(index));
+            if (!core3d::ShellFaceIsSinglePlanarOpening(face)) continue;
+            BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) continue;
+            const gp_Pln plane = surface.Plane();
+            if (!plane.Axis().Direction().IsParallel(
+                    localZ, Precision::Angular())) continue;
+            const Standard_Real offset = plane.Location().Z();
+            if (offset <= minimumZ + zTolerance
+                || offset >= maximumZ - zTolerance) continue;
+            ++interiorCount;
+            interiorFloor = face;
+            faceIndex = static_cast<Standard_Size>(index - 1);
+            planeOffset = offset;
+        }
+        if (interiorCount != 1 || interiorFloor.IsNull()) return nil;
+
+        core3d::FaceOperationSourceProof proof;
+        if (!core3d::TryPrepareShellOperationSource(
+                context, owner, presentation, {interiorFloor}, proof)
+            || proof.entityIdentifier != requested
+            || proof.openingFaceTopologyIndices.size() != 1
+            || proof.openingFaceTopologyIndices.front() != faceIndex
+            || proof.openingFaces.size() != 1
+            || !proof.openingFaces.front().IsEqual(interiorFloor)) return nil;
+
+        Standard_Size selectorMatchCount = 0;
+        for (int key = 0; key < 6; ++key) {
+            std::vector<core3d::ShellOpeningSelector> selectors = {{
+                static_cast<core3d::ShellOpeningAxis>(key / 2),
+                static_cast<core3d::ShellOpeningSide>(key % 2)}};
+            std::vector<TopoDS_Face> resolved;
+            if (core3d::TryResolveShellOpeningSelectors(
+                    shape, selectors, resolved)
+                && resolved.size() == 1
+                && resolved.front().IsEqual(interiorFloor)) {
+                ++selectorMatchCount;
+            }
+        }
+        if (selectorMatchCount != 0 || document->HasOpenCommand()
+            || !viewer->canBeginCommittedEdit()) return nil;
+        return @{
+            @"faceIndex": @(faceIndex),
+            @"sourceProofValid": @YES,
+            @"selectorMatchCount": @(selectorMatchCount),
+            @"planeOffset": @(planeOffset),
+        };
+    } catch (...) {
+        return nil;
+    }
+}
+
+- (NSDictionary<NSString *, id> *)
+    debugP4CommitSecondBooleanInputReferenceAxis:
+        (NSDictionary<NSString *, NSString *> *)identifiers
+{
+    if (![NSThread isMainThread]
+        || ![identifiers isKindOfClass:NSDictionary.class]
+        || identifiers.count != 2) return nil;
+    NSString *retained = identifiers[@"retained"];
+    NSString *second = identifiers[@"second"];
+    if (![retained isKindOfClass:NSString.class]
+        || ![second isKindOfClass:NSString.class]
+        || retained.length == 0 || retained.length > 256
+        || second.length == 0 || second.length > 256
+        || [retained isEqualToString:second]) return nil;
+
+    const std::shared_ptr<core3d::Core3DViewer> viewer =
+        P4RefusalFixtureViewer(self);
+    if (viewer == nullptr) return nil;
+    const Handle(OcctDocument) owner = viewer->getDocument();
+    const Handle(TDocStd_Document) document = owner.IsNull()
+        ? Handle(TDocStd_Document)() : owner->Document();
+    const std::shared_ptr<core3d::ObjectInteractor> interactor =
+        viewer->getObjectInteractor();
+    if (owner.IsNull() || document.IsNull() || interactor == nullptr
+        || document->HasOpenCommand()) return nil;
+
+    try {
+        OCC_CATCH_SIGNALS
+        const char *retainedUTF8 = retained.UTF8String;
+        const char *secondUTF8 = second.UTF8String;
+        if (retainedUTF8 == nullptr || secondUTF8 == nullptr) return nil;
+        const std::string retainedID(retainedUTF8);
+        const std::string secondID(secondUTF8);
+        if (retainedID.empty() || secondID.empty()
+            || retainedID == secondID
+            || retainedID.find('\0') != std::string::npos
+            || secondID.find('\0') != std::string::npos) return nil;
+
+        const core3d::BooleanPreviewDebugState beforeState =
+            interactor->debugBooleanPreviewState();
+        if (beforeState.state != core3d::BooleanPreviewState::Ready
+            || !beforeState.activeOperation || !beforeState.canApply
+            || beforeState.actorOperandCount != 1
+            || beforeState.subjectOperandCount != 1
+            || beforeState.documentCommandUnresolved
+            || beforeState.documentCommandOpen
+            || beforeState.workerActive || beforeState.workerPending) return nil;
+
+        core3d::scene::PresentationOverlayContent overlay;
+        std::vector<Handle(AIS_Shape)> mirrorObjects;
+        core3d::BooleanPreviewCapture preview;
+        if (interactor->captureIdlePresentationOverlay(
+                overlay, mirrorObjects, preview)
+                != core3d::PresentationOverlayCaptureStatus::Available
+            || !mirrorObjects.empty()
+            || preview.action != core3d::BooleanAction::BooleanSubtract
+            || preview.suppressedSourceLabels.size() != 2
+            || preview.actors.size() != 1 || preview.results.empty()) return nil;
+
+        const TDF_Label secondLabel = preview.suppressedSourceLabels[0];
+        const TDF_Label retainedLabel = preview.suppressedSourceLabels[1];
+        if (secondLabel.IsNull() || retainedLabel.IsNull()
+            || owner->EntityIdentifierForLabel(secondLabel) != secondID
+            || owner->EntityIdentifierForLabel(retainedLabel) != retainedID)
+            return nil;
+
+        core3d::profile::Record retainedProfile;
+        core3d::profile::Record secondProfile;
+        const TopoDS_Shape retainedShape =
+            XCAFDoc_ShapeTool::GetShape(retainedLabel);
+        const TopoDS_Shape secondShape =
+            XCAFDoc_ShapeTool::GetShape(secondLabel);
+        const std::string retainedIdentity =
+            owner->EntityIdentifierForLabel(retainedLabel);
+        const std::string secondIdentity =
+            owner->EntityIdentifierForLabel(secondLabel);
+        OcctReferenceAxis retainedAxis;
+        OcctReferenceAxis secondAxis;
+        const OcctReferenceAxisReadState retainedAxisState =
+            owner->ReadReferenceAxisForLabel(retainedLabel, retainedAxis);
+        const OcctReferenceAxisReadState secondAxisState =
+            owner->ReadReferenceAxisForLabel(secondLabel, secondAxis);
+        if (!core3d::profile::Read(
+                document, retainedLabel, retainedProfile)
+            || !core3d::profile::Read(
+                document, secondLabel, secondProfile)
+            || retainedProfile.label.IsNull() || secondProfile.label.IsNull()
+            || !retainedProfile.IsCurrent(document, retainedLabel)
+            || !secondProfile.IsCurrent(document, secondLabel)
+            || retainedShape.IsNull() || secondShape.IsNull()
+            || retainedAxisState == OcctReferenceAxisReadState::Invalid
+            || secondAxisState == OcctReferenceAxisReadState::Invalid
+            || secondAxis.pivotSpace != OcctReferenceSpace::Object) return nil;
+
+        OcctReferenceAxis changedAxis = secondAxis;
+        const Standard_Real changedPivotX = secondAxis.pivot.X() + 1.0;
+        if (!std::isfinite(changedPivotX)) return nil;
+        changedAxis.pivot.SetX(changedPivotX);
+        const Standard_Integer beforeUndo = document->GetAvailableUndos();
+        document->NewCommand();
+        if (!document->HasOpenCommand()
+            || !owner->SetReferenceAxisForLabel(
+                secondLabel, changedAxis)
+            || !document->CommitCommand() || document->HasOpenCommand()) {
+            P4AbortOpenCommandNoThrow(document);
+            return nil;
+        }
+
+        OcctReferenceAxis retainedAxisAfter;
+        OcctReferenceAxis secondAxisAfter;
+        core3d::profile::Record retainedProfileAfter;
+        core3d::profile::Record secondProfileAfter;
+        const core3d::BooleanPreviewDebugState afterState =
+            interactor->debugBooleanPreviewState();
+        const bool retainedIDUnchanged =
+            owner->EntityIdentifierForLabel(retainedLabel)
+                == retainedIdentity;
+        const bool secondIDUnchanged =
+            owner->EntityIdentifierForLabel(secondLabel)
+                == secondIdentity;
+        const bool retainedShapeUnchanged =
+            XCAFDoc_ShapeTool::GetShape(retainedLabel)
+                .IsEqual(retainedShape);
+        const bool secondShapeUnchanged =
+            XCAFDoc_ShapeTool::GetShape(secondLabel)
+                .IsEqual(secondShape);
+        const bool retainedProfileUnchanged =
+            core3d::profile::Read(
+                document, retainedLabel, retainedProfileAfter)
+            && retainedProfileAfter.IsEqual(retainedProfile);
+        const bool secondProfileUnchanged =
+            core3d::profile::Read(
+                document, secondLabel, secondProfileAfter)
+            && secondProfileAfter.IsEqual(secondProfile);
+        const OcctReferenceAxisReadState retainedAxisStateAfter =
+            owner->ReadReferenceAxisForLabel(
+                retainedLabel, retainedAxisAfter);
+        const OcctReferenceAxisReadState secondAxisStateAfter =
+            owner->ReadReferenceAxisForLabel(secondLabel, secondAxisAfter);
+        const bool retainedUnchanged =
+            retainedAxisStateAfter == retainedAxisState
+            && P4ReferenceAxesMatch(retainedAxisAfter, retainedAxis);
+        const bool secondChangedExactly =
+            secondAxisStateAfter == OcctReferenceAxisReadState::Authored
+            && P4ReferenceAxesMatch(secondAxisAfter, changedAxis)
+            && secondAxisAfter.pivot.X() == secondAxis.pivot.X() + 1.0
+            && secondAxisAfter.pivot.Y() == secondAxis.pivot.Y()
+            && secondAxisAfter.pivot.Z() == secondAxis.pivot.Z();
+        const bool previewPreserved =
+            afterState.state == core3d::BooleanPreviewState::Ready
+            && afterState.generation == beforeState.generation
+            && afterState.activeOperation && afterState.canApply
+            && afterState.actorOperandCount == 1
+            && afterState.subjectOperandCount == 1
+            && !afterState.documentCommandUnresolved
+            && !afterState.documentCommandOpen
+            && !afterState.workerActive && !afterState.workerPending;
+        const Standard_Integer afterUndo = document->GetAvailableUndos();
+        if (afterUndo != beforeUndo + 1 || document->HasOpenCommand()
+            || !retainedIDUnchanged || !secondIDUnchanged
+            || !retainedShapeUnchanged || !secondShapeUnchanged
+            || !retainedProfileUnchanged || !secondProfileUnchanged
+            || !retainedUnchanged || !secondChangedExactly
+            || !previewPreserved) return nil;
+
+        return @{
+            @"committed": @YES,
+            @"changedID": second,
+            @"beforeUndo": @(beforeUndo),
+            @"afterUndo": @(afterUndo),
+            @"beforeAxis": P4ReferenceAxisDictionary(
+                secondAxisState, secondAxis),
+            @"afterAxis": P4ReferenceAxisDictionary(
+                secondAxisStateAfter, secondAxisAfter),
+            @"generation": @(beforeState.generation),
+            @"retainedUnchanged": @(retainedUnchanged),
+            @"retainedIDUnchanged": @(retainedIDUnchanged),
+            @"secondIDUnchanged": @(secondIDUnchanged),
+            @"retainedShapeUnchanged": @(retainedShapeUnchanged),
+            @"secondShapeUnchanged": @(secondShapeUnchanged),
+            @"retainedProfileUnchanged": @(retainedProfileUnchanged),
+            @"secondProfileUnchanged": @(secondProfileUnchanged),
+            @"previewPreserved": @(previewPreserved),
+        };
+    } catch (...) {
+        P4AbortOpenCommandNoThrow(document);
+        return nil;
+    }
+}
+
+@end
 #endif
 #include "CafShapePrs.h"
 #include "../Common/Core3DMobileResourceLimits.h"
@@ -1605,6 +2029,7 @@ public:
         aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
             theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
         if (myAllowRetainedSolid) core3d::retained_solid::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::composite_recipe::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
         if (!myReceiptFrameDriver.IsNull()) aTable->AddDriver(myReceiptFrameDriver);
         return aTable;
     }
@@ -3477,13 +3902,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>());
+        new core3d::receipt::v3::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>());
+        new core3d::receipt::v3::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>());
 }
 
 #if DEBUG
@@ -3984,6 +4409,17 @@ Standard_Boolean ValidateGeometryDocument(
         std::vector<core3d::loft_persistence::Record> lofts;
         std::vector<core3d::retained_solid::Record> retained;
         if (!core3d::saved_features::Validate(document, profiles, enclosures, sweeps, lofts,&retained)) return Standard_False;
+        std::size_t retainedBytes=0;
+        for(const auto& record:retained){
+            if(!record.value||record.value->bytes.size()>core3d::composite_recipe::MaximumDocumentAggregateBytes-retainedBytes)
+                return Standard_False;
+            retainedBytes+=record.value->bytes.size();
+        }
+        std::vector<core3d::composite_recipe::Record> composites;
+        if(!core3d::composite_recipe::ReadAll(document,composites,retainedBytes))return Standard_False;
+        TDF_LabelMap retainedOwners;
+        for(const auto& record:retained)if(!retainedOwners.Add(record.owner))return Standard_False;
+        for(const auto& record:composites)if(retainedOwners.Contains(record.owner))return Standard_False;
         const TDF_Label aRoot = document->GetData()->Root();
         Handle(TDataStd_Integer) aRootMarker;
         Handle(TNaming_NamedShape) aRootShape;
@@ -4087,6 +4523,20 @@ Standard_Boolean ValidateGeometryDocument(
             if(!shells)return Standard_False;
             BRepClass3d_SolidClassifier classifier(base);classifier.PerformInfinitePoint(Precision::Confusion());
             GProp_GProps volume;BRepGProp::VolumeProperties(base,volume,Standard_True,Standard_False,Standard_False);
+            if(classifier.State()!=TopAbs_OUT||!std::isfinite(volume.Mass())||volume.Mass()<=0)return Standard_False;
+        }
+
+        // Charge every retained composite source independently. The visible
+        // carrier is charged by the ordinary definition traversal below.
+        for(const auto& record:composites)for(const auto& source:record.value->sourceShapes){
+            if(ClassifyDefinitionGeometry(source,&aBudget)!=DefinitionGeometryClass::BRep
+                ||!BRepCheck_Analyzer(source,Standard_True).IsValid())return Standard_False;
+            unsigned shells=0;for(TopExp_Explorer shell(source,TopAbs_SHELL);shell.More();shell.Next()){
+                ++shells;if(!BRep_Tool::IsClosed(shell.Current()))return Standard_False;
+            }
+            if(!shells)return Standard_False;
+            BRepClass3d_SolidClassifier classifier(source);classifier.PerformInfinitePoint(Precision::Confusion());
+            GProp_GProps volume;BRepGProp::VolumeProperties(source,volume,Standard_True,Standard_False,Standard_False);
             if(classifier.State()!=TopAbs_OUT||!std::isfinite(volume.Mass())||volume.Mass()<=0)return Standard_False;
         }
 
@@ -4350,7 +4800,8 @@ Standard_Boolean ValidateGeometryDocument(
             usage.labels = aLabelCount;
             usage.graphVisits = anAggregateGraphVisitCount;
             usage.leafOccurrences = aLeafOccurrenceCount;
-            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size() + 2*retained.size());
+            Standard_Size compositeNodes=0;for(const auto& record:composites)compositeNodes+=record.value->definition.nodes.size();
+            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size() + 2*retained.size())+compositeNodes;
             *output = usage;
         }
         return Standard_True;
@@ -4363,6 +4814,48 @@ Standard_Boolean ValidateGeometryDocument(
 
 Standard_Boolean Core3DValidateRetainedSolidDocument(const Handle(TDocStd_Document)& document){
     return ValidateGeometryDocument(document,nullptr);
+}
+
+Standard_Boolean Core3DValidateCompositeRecipeDocument(const Handle(TDocStd_Document)& document){
+    return ValidateGeometryDocument(document,nullptr);
+}
+
+OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
+    const TDF_Label& label) const noexcept
+{
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()) {
+            return OcctRetainedRecipeCoverage::InvalidOrUnknown;
+        }
+        // These reads distinguish no record from partial/corrupt records. Do
+        // not use HasRecord here: an incomplete record must refuse, not look
+        // like a legacy BRep-only solid.
+        core3d::composite_recipe::Record composite;
+        core3d::retained_solid::Record retained;
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+            || !core3d::retained_solid::Read(myOcafDoc, label, retained)
+            || !core3d::profile::Read(myOcafDoc, label, profile)
+            || !core3d::enclosure::Read(myOcafDoc, label, enclosure)
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep)
+            || !core3d::loft_persistence::Read(myOcafDoc, label, loft)) {
+            return OcctRetainedRecipeCoverage::InvalidOrUnknown;
+        }
+        if (composite.value || retained.value || !enclosure.label.IsNull()
+            || !sweep.label.IsNull() || !loft.label.IsNull()) {
+            return OcctRetainedRecipeCoverage::PresentOutsideP4Coverage;
+        }
+        if (profile.label.IsNull()) return OcctRetainedRecipeCoverage::Absent;
+        return profile.IsCurrent(myOcafDoc, label)
+            ? OcctRetainedRecipeCoverage::CurrentProfile
+            : OcctRetainedRecipeCoverage::PresentOutsideP4Coverage;
+    } catch (...) {
+        return OcctRetainedRecipeCoverage::InvalidOrUnknown;
+    }
 }
 
 Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
@@ -8989,12 +9482,21 @@ bool OcctDocument::StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalar
     }catch(...){return false;}
 }
 #ifdef DEBUG
-std::optional<OcctPBRScalarDebugEvidence> OcctDocument::DebugPBRScalarEvidence(const TDF_Label& target) const noexcept {
+std::optional<OcctPBRScalarDebugEvidence> OcctDocument::DebugPBRScalarEvidence(
+    const TDF_Label& target, bool allowUnboundMaterial) const noexcept {
     try{
         const auto state=CapturePBRScalarState(target);if(!state)return {};
-        const auto link=state->links.find(state->target);if(link==state->links.end())return {};
-        const auto material=state->materials.find(link->second);if(material==state->materials.end())return {};
-        OcctPBRScalarDebugEvidence output;output.material=material->second.material;std::size_t diagnosticBytes=0;
+        const auto attributes=state->objectMaterialAttributes.find(state->target);if(attributes==state->objectMaterialAttributes.end())return {};
+        OcctPBRScalarDebugEvidence output;output.materialAttributes=attributes->second;
+        const auto link=state->links.find(state->target);
+        if(link==state->links.end()){
+            if(!allowUnboundMaterial)return {};
+            // Validated legacy/unbound root: no bound material bytes exist.
+        }else{
+            const auto material=state->materials.find(link->second);if(material==state->materials.end())return {};
+            output.hasMaterialBinding=true;output.material=material->second.material;
+        }
+        std::size_t diagnosticBytes=0;
         PBRWriter protectedBytes;protectedBytes.string(TCollection_AsciiString(DocumentIdentifier().c_str()));protectedBytes.scalar(state->metersPerUnit);
         for(const auto& [key,entry]:state->roots){const auto& object=entry.object.object.object;
             protectedBytes.string(TCollection_AsciiString(key.c_str()));protectedBytes.string(TCollection_AsciiString(object.entityIdentifier.c_str()));protectedBytes.string(TCollection_AsciiString(object.definitionIdentifier.c_str()));
@@ -10944,6 +11446,64 @@ std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard
 }
 std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe(){
     return SavedCutResultProbeChecks(core3d::saved_boolean_build::probe::Run(),"program",257);
+}
+std::map<std::string,bool> Core3DDebugRetainedPartBooleanProbe(){
+    try {
+        namespace retained = core3d::retained_part_boolean;
+        namespace recipe = core3d::retained_recipe;
+        auto identifier=[](std::uint8_t seed){
+            recipe::UUID value{};value.fill(seed);return value;
+        };
+        auto digest=[](std::uint8_t seed){
+            recipe::Digest value{};value.fill(seed);return value;
+        };
+        auto read=[&](std::uint8_t seed){
+            recipe::DependencyRead value;
+            value.locator.owner={identifier(seed),identifier(seed+1),identifier(seed+2)};
+            value.locator.node=identifier(seed+3);
+            value.locator.sourceFeature=identifier(seed+4);
+            value.geometry=digest(seed+5);value.recipe=digest(seed+6);
+            value.placement=digest(seed+7);value.material=digest(seed+8);
+            value.groups=digest(seed+9);return value;
+        };
+        const retained::OperandReadSet capturedReads{read(1),read(21)};
+        retained::OperandReadSet currentReads=capturedReads;
+        retained::OperandReadSet staleRightReads=currentReads;
+        staleRightReads.rightSource.geometry[0]^=0xff;
+
+        const TopoDS_Shape leftSource=BRepPrimAPI_MakeBox(10,10,10).Shape();
+        gp_Trsf overlapMove;overlapMove.SetTranslation(gp_Vec(5,0,0));
+        const TopoDS_Shape overlapSource=BRepBuilderAPI_Transform(
+            BRepPrimAPI_MakeBox(10,10,10).Shape(),overlapMove).Shape();
+        gp_Trsf tangentMove;tangentMove.SetTranslation(gp_Vec(10,0,0));
+        const TopoDS_Shape tangentSource=BRepBuilderAPI_Transform(
+            BRepPrimAPI_MakeBox(10,10,10).Shape(),tangentMove).Shape();
+        gp_Trsf separateMove;separateMove.SetTranslation(gp_Vec(20,0,0));
+        const TopoDS_Shape separateSource=BRepBuilderAPI_Transform(
+            BRepPrimAPI_MakeBox(10,10,10).Shape(),separateMove).Shape();
+
+        const auto united=retained::BuildDetachedCandidate(retained::Operation::Union,
+            leftSource,overlapSource,1e-7,capturedReads,currentReads);
+        const auto subtracted=retained::BuildDetachedCandidate(retained::Operation::Subtract,
+            leftSource,overlapSource,1e-7,capturedReads,currentReads);
+        const auto intersected=retained::BuildDetachedCandidate(retained::Operation::Intersect,
+            leftSource,overlapSource,1e-7,capturedReads,currentReads);
+        const auto empty=retained::BuildDetachedCandidate(retained::Operation::Intersect,
+            leftSource,separateSource,1e-7,capturedReads,currentReads);
+        const auto tangent=retained::BuildDetachedCandidate(retained::Operation::Union,
+            leftSource,tangentSource,1e-7,capturedReads,currentReads);
+        const auto disconnected=retained::BuildDetachedCandidate(retained::Operation::Union,
+            leftSource,separateSource,1e-7,capturedReads,currentReads);
+        const auto staleRight=retained::BuildDetachedCandidate(retained::Operation::Union,
+            leftSource,overlapSource,1e-7,capturedReads,staleRightReads);
+        return {{"union-single-solid",united.admitted()&&retained::SolidCount(united.solid)==1},
+            {"subtract-single-solid",subtracted.admitted()&&retained::SolidCount(subtracted.solid)==1},
+            {"intersect-single-solid",intersected.admitted()&&retained::SolidCount(intersected.solid)==1},
+            {"empty-refused-no-candidate",empty.refusal==retained::Refusal::EmptyResult&&empty.solid.IsNull()},
+            {"tangent-refused-no-candidate",tangent.refusal==retained::Refusal::TangentOnly&&tangent.solid.IsNull()},
+            {"disconnected-refused-no-candidate",disconnected.refusal==retained::Refusal::Disconnected&&disconnected.solid.IsNull()},
+            {"stale-right-source-refused-no-candidate",staleRight.refusal==retained::Refusal::StaleRightSource&&staleRight.solid.IsNull()}};
+    }catch(...){return {{"setup-exception",false}};}
 }
 #include "SavedBooleanFilletProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario){

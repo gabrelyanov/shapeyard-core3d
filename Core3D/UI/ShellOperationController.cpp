@@ -1304,6 +1304,17 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
                 || aSource->profileRecord.parameters.shells.size() >= profile::MaximumShellSteps)
                 aSource->profileShellOpenings.clear();
         }
+		// Cap-shell is P4's one retained-operation exception. Every other
+		// recipe-bearing carrier (including noncurrent/unknown metadata) must
+		// refuse before preview work, and a non-cap face may not clear selectors
+		// to obtain the historical destructive fallback.
+		const auto coverage = myDoc->RetainedRecipeCoverageForLabel(aProof.documentLabel);
+		if (coverage == OcctRetainedRecipeCoverage::CurrentProfile) {
+			if (aSource->profileShellOpenings.size() != aProof.openingFaces.size())
+				return Standard_False;
+		} else if (coverage != OcctRetainedRecipeCoverage::Absent) {
+			return Standard_False;
+		}
 
         theSource = std::move(aSource);
         return Standard_True;

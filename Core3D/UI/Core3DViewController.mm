@@ -106,6 +106,10 @@
 #include "BRep_Tool.hxx"
 #include "BRepCheck_Analyzer.hxx"
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <Geom2dAPI_InterCurveCurve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
 #include "BRepTools.hxx"
 #include "BRepPrimAPI_MakeBox.hxx"
 #include "BRepPrimAPI_MakePrism.hxx"
@@ -118,6 +122,7 @@
 #include "TopoDS_CompSolid.hxx"
 #include "TopoDS.hxx"
 #include "TopoDS_Face.hxx"
+#include "TopoDS_Edge.hxx"
 #include "TopoDS_Shell.hxx"
 #include "TopoDS_Solid.hxx"
 #include "TopoDS_Iterator.hxx"
@@ -3692,15 +3697,19 @@ struct NativeModelingPermitIssuer final {
     }catch(...){return nil;}
 }
 - (NSDictionary<NSString *,id> *)debugScalarPBREvidence:(NSString *)entity {
+    return [self debugScalarPBREvidence:entity allowUnboundMaterial:NO];
+}
+- (NSDictionary<NSString *,id> *)debugScalarPBREvidence:(NSString *)entity
+    allowUnboundMaterial:(BOOL)allowUnboundMaterial {
     if(![NSThread isMainThread]||!entity||entity.length>128||!GLController||!GLController.viewer)return nil;
     try{
         auto owner=GLController.viewer->getDocument();if(owner.IsNull()||owner->Document().IsNull())return nil;
         TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return nil;
         TDF_Label target;for(int i=1;i<=roots.Length();++i)if(owner->EntityIdentifierForLabel(roots.Value(i))==(entity.UTF8String?:"")){if(!target.IsNull())return nil;target=roots.Value(i);}
-        const auto e=owner->DebugPBRScalarEvidence(target);if(!e)return nil;
+        const auto e=owner->DebugPBRScalarEvidence(target,allowUnboundMaterial);if(!e)return nil;
         NSMutableDictionary* geometry=[NSMutableDictionary dictionary];for(const auto& [key,digest]:e->geometry)geometry[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:digest.data() length:digest.size()];
         NSMutableDictionary* streams=[NSMutableDictionary dictionary];for(const auto& [key,bytes]:e->geometryStreams)streams[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:bytes.data() length:bytes.size()];
-        return @{@"geometryStreams":streams,@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
+        return @{@"geometryStreams":streams,@"hasMaterialBinding":@(e->hasMaterialBinding),@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"materialAttributesBytes":[NSData dataWithBytes:e->materialAttributes.data() length:e->materialAttributes.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
             @"tableBytes":[NSData dataWithBytes:e->table.data() length:e->table.size()],@"geometry":geometry};
     }catch(...){return nil;}
 }
@@ -7190,6 +7199,35 @@ struct NativeModelingPermitIssuer final {
         }
         return result;
     } catch (...) { return @{ @"setupException": @NO }; }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)debugRetainedPartBooleanProbe {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer) {
+        return @{ @"invalidHost": @NO };
+    }
+    const auto owner = GLController.viewer->getDocument();
+    const auto document = owner.IsNull()
+        ? Handle(TDocStd_Document)() : owner->Document();
+    if (document.IsNull() || document->HasOpenCommand()) {
+        return @{ @"command-remained-closed": @NO };
+    }
+    try {
+        const Standard_Integer undoBefore = document->GetAvailableUndos();
+        const auto checks = Core3DDebugRetainedPartBooleanProbe();
+        NSMutableDictionary<NSString *, NSNumber *> *result =
+            [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        result[@"command-remained-closed"] = @(!document->HasOpenCommand());
+        result[@"undo-count-unchanged"] =
+            @(undoBefore == document->GetAvailableUndos());
+        return result;
+    } catch (...) {
+        return @{ @"setupException": @NO };
+    }
 }
 
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutTrimDomainProbe {
@@ -16497,6 +16535,178 @@ static bool core3dDebugSolidLineIntervals(const TopoDS_Shape& world, double mm,
 }
 // END DEBUG SOLID LINE ROUTINE
 
+// Additive exact-boundary routine. The strict routine above intentionally
+// remains unchanged: this path adds all trimmed coplanar-face cuts before
+// resolving an ON-only span from one regular planar support and its oriented
+// outward normal. It never samples a shifted line.
+static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, double mm,
+    const double originMM[3], const double direction[3], const double approach[3],
+    std::vector<std::pair<double,double>>& intervals) {
+    intervals.clear();
+    if(world.IsNull()||!std::isfinite(mm)||mm<=0)return false;
+    double lineScale=0,approachScale=0;
+    for(int i=0;i<3;++i){
+        if(!std::isfinite(originMM[i])||!std::isfinite(direction[i])||!std::isfinite(approach[i])
+            ||!std::isfinite(originMM[i]/mm))return false;
+        lineScale=std::max(lineScale,std::abs(direction[i]));
+        approachScale=std::max(approachScale,std::abs(approach[i]));
+    }
+    if(lineScale==0||approachScale==0)return false;
+    const gp_Dir unit(direction[0]/lineScale,direction[1]/lineScale,direction[2]/lineScale);
+    const gp_Dir side(approach[0]/approachScale,approach[1]/approachScale,approach[2]/approachScale);
+    if(gp_Vec(unit).Crossed(gp_Vec(side)).SquareMagnitude()<=1.0e-24)return false;
+    const gp_Pnt origin(originMM[0]/mm,originMM[1]/mm,originMM[2]/mm);
+    const gp_Lin line(origin,unit);
+    const double tolerance=1.0e-7/mm;
+    if(!std::isfinite(tolerance)||tolerance<=0)return false;
+    TopTools_IndexedMapOfShape solids,faces;
+    TopExp::MapShapes(world,TopAbs_SOLID,solids);TopExp::MapShapes(world,TopAbs_FACE,faces);
+    if(solids.IsEmpty()||solids.Extent()>64||faces.Extent()>8192)return false;
+    if(!BRepCheck_Analyzer(world,Standard_True).IsValid())return false;
+    GProp_GProps volumeProperties;
+    const double volumeError=BRepGProp::VolumeProperties(world,volumeProperties,1.0e-9,Standard_False,Standard_False);
+    if(!std::isfinite(volumeError)||volumeError<0||!std::isfinite(volumeProperties.Mass())
+        ||volumeProperties.Mass()<=0)return false;
+    Bnd_Box box;BRepBndLib::AddOptimal(world,box,Standard_False,Standard_False);
+    if(box.IsVoid()||box.IsOpen())return false;
+    double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
+    double low=std::numeric_limits<double>::max(),high=-low;
+    for(int corner=0;corner<8;++corner){
+        const gp_Pnt point(bounds[(corner&1)?3:0],bounds[(corner&2)?4:1],bounds[(corner&4)?5:2]);
+        const double t=gp_Vec(origin,point).Dot(gp_Vec(unit));
+        if(!std::isfinite(t))return false;
+        low=std::min(low,t);high=std::max(high,t);
+    }
+    low-=tolerance*4;high+=tolerance*4;
+    if(!std::isfinite(low)||!std::isfinite(high)||low>=high)return false;
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(world,tolerance);intersector.Perform(line,low,high);
+    if(!intersector.IsDone()||intersector.NbPnt()>4096)return false;
+    std::vector<double> cuts;
+    cuts.reserve(static_cast<std::size_t>(intersector.NbPnt())+faces.Extent()*2);
+    for(int i=1;i<=intersector.NbPnt();++i){
+        const double t=intersector.WParameter(i);
+        if(!std::isfinite(t)||!std::isfinite(t*mm))return false;
+        cuts.push_back(t);
+    }
+    std::size_t traversed=0;
+    for(int i=1;i<=faces.Extent();++i){
+        const TopoDS_Face face=TopoDS::Face(faces(i));
+        if(face.Orientation()!=TopAbs_FORWARD&&face.Orientation()!=TopAbs_REVERSED)return false;
+        const BRepAdaptor_Surface surface(face,Standard_True);
+        if(surface.GetType()!=GeomAbs_Plane)continue;
+        const gp_Pln plane=surface.Plane();
+        if(plane.Distance(origin)>tolerance||std::abs(gp_Vec(plane.Axis().Direction()).Dot(gp_Vec(unit)))>1.0e-12)continue;
+        const gp_Vec fromPlane(plane.Location(),origin);
+        const gp_Pnt2d uvOrigin(fromPlane.Dot(gp_Vec(plane.XAxis().Direction())),
+                                fromPlane.Dot(gp_Vec(plane.YAxis().Direction())));
+        const gp_Dir2d uvDirection(gp_Vec(unit).Dot(gp_Vec(plane.XAxis().Direction())),
+                                   gp_Vec(unit).Dot(gp_Vec(plane.YAxis().Direction())));
+        const Handle(Geom2d_Line) line2d=new Geom2d_Line(uvOrigin,uvDirection);
+        for(TopExp_Explorer edges(face,TopAbs_EDGE);edges.More();edges.Next()){
+            if(++traversed>8192)return false;
+            const TopoDS_Edge edge=TopoDS::Edge(edges.Current());
+            double first=0,last=0;
+            const Handle(Geom2d_Curve) curve=BRep_Tool::CurveOnSurface(edge,face,first,last);
+            if(curve.IsNull()||!std::isfinite(first)||!std::isfinite(last)||first>=last)return false;
+            const Handle(Geom2d_TrimmedCurve) trimmed=new Geom2d_TrimmedCurve(curve,first,last);
+            const Geom2dAPI_InterCurveCurve hit(line2d,trimmed,tolerance);
+            if(hit.NbSegments()!=0)return false;
+            if(hit.NbPoints()>4096||cuts.size()+static_cast<std::size_t>(hit.NbPoints())>4096)return false;
+            for(int j=1;j<=hit.NbPoints();++j){
+                const auto& detail=hit.Intersector().Point(j);
+                if(detail.TransitionOfFirst().TransitionType()==IntRes2d_Undecided
+                    ||detail.TransitionOfSecond().TransitionType()==IntRes2d_Undecided
+                    ||detail.TransitionOfFirst().IsTangent()||detail.TransitionOfSecond().IsTangent())return false;
+                const gp_Pnt2d uv=hit.Point(j);
+                const gp_Pnt point=plane.Location().Translated(
+                    gp_Vec(plane.XAxis().Direction())*uv.X()+gp_Vec(plane.YAxis().Direction())*uv.Y());
+                const double t=gp_Vec(origin,point).Dot(gp_Vec(unit));
+                if(!std::isfinite(t)||t<low-tolerance||t>high+tolerance)return false;
+                cuts.push_back(t);
+            }
+        }
+    }
+    std::sort(cuts.begin(),cuts.end());
+    cuts.erase(std::unique(cuts.begin(),cuts.end(),[tolerance](double a,double b){
+        return std::abs(a-b)<=tolerance;
+    }),cuts.end());
+    for(std::size_t i=1;i<cuts.size();++i){
+        const double enterT=cuts[i-1],exitT=cuts[i];
+        if(exitT-enterT<=tolerance)continue;
+        const double mid=enterT*0.5+exitT*0.5;
+        const gp_Pnt point=origin.Translated(gp_Vec(unit)*mid);
+        bool inside=false,boundary=false;
+        for(int j=1;j<=solids.Extent();++j){
+            BRepClass3d_SolidClassifier classifier(solids(j),point,tolerance);
+            const TopAbs_State state=classifier.State();
+            if(state==TopAbs_UNKNOWN)return false;
+            inside=inside||state==TopAbs_IN;boundary=boundary||state==TopAbs_ON;
+        }
+        bool material=inside;
+        if(!inside&&boundary){
+            int supports=0;double outwardDot=0;
+            for(int j=1;j<=faces.Extent();++j){
+                const TopoDS_Face face=TopoDS::Face(faces(j));
+                const BRepAdaptor_Surface surface(face,Standard_True);
+                if(surface.GetType()!=GeomAbs_Plane)continue;
+                const gp_Pln plane=surface.Plane();
+                if(plane.Distance(origin)>tolerance||std::abs(gp_Vec(plane.Axis().Direction()).Dot(gp_Vec(unit)))>1.0e-12)continue;
+                bool covers=true;
+                for(const double fraction:{0.25,0.5,0.75}){
+                    const gp_Pnt sample=origin.Translated(gp_Vec(unit)*(enterT+(exitT-enterT)*fraction));
+                    const BRepClass_FaceClassifier classifier(face,sample,tolerance,Standard_True);
+                    if(classifier.State()!=TopAbs_IN){covers=false;break;}
+                }
+                if(!covers)continue;
+                gp_Dir normal=plane.Axis().Direction();
+                if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();
+                const double dot=gp_Vec(normal).Dot(gp_Vec(side));
+                if(std::abs(dot)<=1.0e-12)return false;
+                ++supports;outwardDot=dot;
+                if(supports>1)return false;
+            }
+            if(supports!=1)return false;
+            material=outwardDot<0;
+        }
+        if(!material)continue;
+        const double enter=enterT*mm,exit=exitT*mm;
+        if(!std::isfinite(enter)||!std::isfinite(exit)||enter>=exit)return false;
+        if(!intervals.empty()&&std::abs(intervals.back().second-enter)<=1.0e-7)
+            intervals.back().second=exit;
+        else {
+            if(intervals.size()>=64)return false;
+            intervals.emplace_back(enter,exit);
+        }
+    }
+    return true;
+}
+
++ (NSDictionary<NSString *,NSNumber *> *)debugNativeSolidBoundaryAdmissionProbe {
+    if(!NSThread.isMainThread)return @{ @"mainThread": @NO };
+    try {
+        const TopoDS_Shape first=BRepPrimAPI_MakeBox(gp_Pnt(0,0,0),10,10,10).Shape();
+        const TopoDS_Shape second=BRepPrimAPI_MakeBox(gp_Pnt(0,0,0),10,10,10).Shape();
+        BRep_Builder builder;TopoDS_Compound coincident;builder.MakeCompound(coincident);
+        builder.Add(coincident,first);builder.Add(coincident,second);
+        const TopoDS_Shape zeroThickness=BRepBuilderAPI_MakeFace(
+            gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,0,1)),0,10,0,10).Shape();
+        const double capOrigin[3]={5,0,0},edgeOrigin[3]={0,0,0};
+        const double lineDirection[3]={0,1,0},approach[3]={0,0,1};
+        std::vector<std::pair<double,double>> measured,unresolved,edgeOnly,zero;
+        const bool valid=core3dDebugSolidBoundaryLineIntervals(first,1,capOrigin,lineDirection,approach,measured)
+            &&measured.size()==1&&std::abs(measured[0].first)<=1.0e-7&&std::abs(measured[0].second-10)<=1.0e-7;
+        const bool unresolvedRefused=!core3dDebugSolidBoundaryLineIntervals(
+            coincident,1,capOrigin,lineDirection,approach,unresolved);
+        const bool edgeOnlyRefused=!core3dDebugSolidBoundaryLineIntervals(
+            first,1,edgeOrigin,lineDirection,approach,edgeOnly);
+        const bool zeroThicknessRefused=!core3dDebugSolidBoundaryLineIntervals(
+            zeroThickness,1,capOrigin,lineDirection,approach,zero);
+        return @{ @"validPlanarBoundary":@(valid), @"unresolvedCoincidentRefused":@(unresolvedRefused),
+            @"edgeOnlyOrTangentRefused":@(edgeOnlyRefused), @"zeroThicknessRefused":@(zeroThicknessRefused) };
+    }catch(...){return @{ @"setupException": @NO };}
+}
+
 - (NSArray<NSArray<NSNumber *> *> *)debugNativeSolidIntervals:(NSString *)entity
     originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction {
     if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity
@@ -16515,6 +16725,35 @@ static bool core3dDebugSolidLineIntervals(const TopoDS_Shape& world, double mm,
         if(!core3dDebugSolidCopy(GLController.viewer->getDocument(),entity,named,local,world,unit,mm,nodes))return nil;
         std::vector<std::pair<double,double>> intervals;
         if(!core3dDebugSolidLineIntervals(world,mm,origin,vector,intervals))return nil;
+        NSMutableArray<NSArray<NSNumber *> *> *result=[NSMutableArray arrayWithCapacity:intervals.size()];
+        for(const auto& interval:intervals)[result addObject:@[@(interval.first),@(interval.second)]];
+        return result;
+    }catch(...){return nil;}
+}
+
+- (NSArray<NSArray<NSNumber *> *> *)debugNativeSolidBoundaryIntervals:(NSString *)entity
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    approachDirection:(NSArray<NSNumber *> *)approachDirection {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer||!entity
+        ||entity.length>128||!entity.UTF8String||originMM.count!=3||direction.count!=3
+        ||approachDirection.count!=3)return nil;
+    double origin[3],vector[3],approach[3];
+    for(NSUInteger i=0;i<3;++i){
+        if(![originMM[i] isKindOfClass:NSNumber.class]||![direction[i] isKindOfClass:NSNumber.class]
+            ||![approachDirection[i] isKindOfClass:NSNumber.class])return nil;
+        origin[i]=originMM[i].doubleValue;vector[i]=direction[i].doubleValue;
+        approach[i]=approachDirection[i].doubleValue;
+        if(!std::isfinite(origin[i])||!std::isfinite(vector[i])||!std::isfinite(approach[i]))return nil;
+    }
+    if((vector[0]==0&&vector[1]==0&&vector[2]==0)
+        ||(approach[0]==0&&approach[1]==0&&approach[2]==0))return nil;
+    try {
+        if(![self core3d_canBeginCommittedEdit])return nil;
+        OcctObjectNameState named;TopoDS_Shape local,world;
+        double unit=0,mm=0;std::size_t nodes=0;
+        if(!core3dDebugSolidCopy(GLController.viewer->getDocument(),entity,named,local,world,unit,mm,nodes))return nil;
+        std::vector<std::pair<double,double>> intervals;
+        if(!core3dDebugSolidBoundaryLineIntervals(world,mm,origin,vector,approach,intervals))return nil;
         NSMutableArray<NSArray<NSNumber *> *> *result=[NSMutableArray arrayWithCapacity:intervals.size()];
         for(const auto& interval:intervals)[result addObject:@[@(interval.first),@(interval.second)]];
         return result;

@@ -2904,6 +2904,15 @@ BooleanApplyResult BooleanOperationController::apply(
         || aSourceLabels.size() > kMaxSourceOperands) {
         return failWithoutMutation();
     }
+	// P4 has no admitted retained two-input Boolean builder/proof. The preview
+	// is intentionally allowed, but this final authority check is before
+	// NewCommand, so no label, history entry or metadata can half-apply.
+	for (const TDF_Label& source : aSourceLabels) {
+		if (myDoc->RetainedRecipeCoverageForLabel(source)
+			!= OcctRetainedRecipeCoverage::Absent) {
+			return failWithoutMutation();
+		}
+	}
 	for (const auto& aSelection : _selectionMap) {
 		if (!IsCurrentBRepSelection(myDoc, aSelection.second)) {
 			return failWithoutMutation();

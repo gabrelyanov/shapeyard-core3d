@@ -778,6 +778,19 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSArray<NSArray<NSNumber *> *> *)debugNativeSolidIntervals:(NSString *)entity
     originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
     NS_SWIFT_NAME(debugNativeSolidIntervals(_:originMM:direction:));
+//! Additive exact-boundary observer. Returns the one-sided material limit of
+//! L(t) + epsilon * approachDirection as positive epsilon tends to zero,
+//! without moving L itself. Both directions must be finite/nonzero and the
+//! approach must be transverse to L. Distances and normalization are in mm,
+//! as above. [] is a measured empty section; nil means the boundary support,
+//! input, solid or bounded work could not be resolved safely.
+- (nullable NSArray<NSArray<NSNumber *> *> *)debugNativeSolidBoundaryIntervals:(NSString *)entity
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    approachDirection:(NSArray<NSNumber *> *)approachDirection
+    NS_SWIFT_NAME(debugNativeSolidBoundaryIntervals(_:originMM:direction:approachDirection:));
+//! Detached bounded controls for boundary-only pathologies that cannot be
+//! admitted into a document. No document, selection or history is touched.
++ (NSDictionary<NSString *,NSNumber *> *)debugNativeSolidBoundaryAdmissionProbe;
 #endif
 
 //! Capture authoritative single-selection transform values. Main-thread only.
@@ -1184,6 +1197,9 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSavedCutResultCorrespondenceProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanProgramProbe
     NS_SWIFT_NAME(debugSavedBooleanProgramProbe());
+//! Detached A1a evidence only; reports that the document command stayed closed.
+- (NSDictionary<NSString *, NSNumber *> *)debugRetainedPartBooleanProbe
+    NS_SWIFT_NAME(debugRetainedPartBooleanProbe());
 //! Detached DEBUG trim-domain qualification only.
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedCutTrimDomainProbe
     NS_SWIFT_NAME(debugSavedCutTrimDomainProbe());
@@ -1393,6 +1409,10 @@ __attribute__((objc_subclassing_restricted))
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 - (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;
+//! Opt-in DEBUG observation of a native-validated unbound root; grants no edit authority.
+- (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity
+    allowUnboundMaterial:(BOOL)allowUnboundMaterial
+    NS_SWIFT_NAME(debugScalarPBREvidence(_:allowUnboundMaterial:));
 - (BOOL)debugSeedScalarPBRCommonMismatch;
 //! Lower the selected-object admission cap for aggregate texture-authoring
 //! budget tests. Values above the production cap reset to that cap.

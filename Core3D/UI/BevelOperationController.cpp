@@ -1549,6 +1549,18 @@ BevelApplyResult BevelOperationController::apply() noexcept
         notifyPreviewStateChanged();
         return BevelApplyResult::NoChange;
     }
+	// No retained edge-treatment proof is installed in P4. This is the final
+	// read-only gate before NewCommand; malformed metadata also refuses rather
+	// than being treated as a BRep-only legacy source.
+	for (const Source& source : mySources) {
+		if (myDoc->RetainedRecipeCoverageForLabel(source.label)
+			!= OcctRetainedRecipeCoverage::Absent) {
+			myCanApply = Standard_False;
+			myState = BevelPreviewState::Failed;
+			notifyPreviewStateChanged();
+			return BevelApplyResult::NoChange;
+		}
+	}
     Handle(TDocStd_Document) aDocument;
     try {
         aDocument = myDoc->ChangeDocument();

@@ -26,6 +26,7 @@
 #include "CylindricalCutDefinition.hxx"
 #include "SavedCutSourceEdit.hxx"
 #include "RetainedBooleanEditValues.hxx"
+#include "RetainedRecipeSnapshot.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -382,6 +383,18 @@ Standard_EXPORT OcctAuthoredFrameReadState Core3DReadAuthoredFrameOwner(
     OcctAuthoredFrameRecord& record) noexcept;
 //! Full existing document admission, including retained owner and shape budgets.
 Standard_EXPORT Standard_Boolean Core3DValidateRetainedSolidDocument(const Handle(TDocStd_Document)& document);
+Standard_EXPORT Standard_Boolean Core3DValidateCompositeRecipeDocument(const Handle(TDocStd_Document)& document);
+
+//! Read-only classification used by destructive native operation gates. A
+//! malformed/unknown record is deliberately not collapsed to legacy absence.
+//! `CurrentProfile` is the sole P4 exception and may only be consumed by the
+//! already-admitted cap-shell route, which still proves its complete selectors.
+enum class OcctRetainedRecipeCoverage : Standard_Integer {
+    Absent = 0,
+    CurrentProfile = 1,
+    PresentOutsideP4Coverage = 2,
+    InvalidOrUnknown = 3,
+};
 
 //! Scans every label, including hidden/unbound/orphan records and foreign arrays.
 //! This validates frame ownership, not the rest of the document schema. Callers
@@ -423,7 +436,9 @@ struct OcctPBRScalarPatch {
 // Private immutable values; no mutable material or viewer handle is exposed.
 #ifdef DEBUG
 struct OcctPBRScalarDebugEvidence {
+    bool hasMaterialBinding = false;
     std::vector<std::uint8_t> material,preserved,table;
+    std::vector<std::uint8_t> materialAttributes;
     std::map<std::string,std::array<unsigned char,32>> geometry;
     std::map<std::string,std::vector<std::uint8_t>> geometryStreams;
 };
@@ -483,6 +498,9 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe
 //! DEBUG observer/whole-result fixtures only; no source-edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutResultCorrespondenceProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanProgramProbe();
+//! A1a detached geometry evidence only. It creates no document command and
+//! cannot route the existing general Boolean UI worker through retained ownership.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedPartBooleanProbe();
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario);
 Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count);
@@ -514,6 +532,11 @@ class OcctDocument : public Standard_Transient
   DEFINE_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
   
 public:
+  //! Never opens a command or repairs metadata. Call immediately before a
+  //! destructive operation's NewCommand; callers must reject every result
+  //! except the explicitly admitted route above.
+  Standard_EXPORT OcctRetainedRecipeCoverage RetainedRecipeCoverageForLabel(
+      const TDF_Label& label) const noexcept;
   // Benchmark assets need more than 40 steps; 1000 keeps memory bounded on
   // device while preserving a long editable native session.
   static constexpr Standard_Integer kNativeSessionUndoLimit = 1000;
@@ -816,7 +839,8 @@ public:
     //! definition set is checked against the safe reader's per-serialized-slot
     //! texture-byte budget before any table entry is added, removed, or linked.
 #ifdef DEBUG
-    Standard_EXPORT std::optional<OcctPBRScalarDebugEvidence> DebugPBRScalarEvidence(const TDF_Label&) const noexcept;
+    Standard_EXPORT std::optional<OcctPBRScalarDebugEvidence> DebugPBRScalarEvidence(
+        const TDF_Label&, bool allowUnboundMaterial = false) const noexcept;
 #endif
     // Complete immutable source and staged readback for one scalar appearance edit.
     Standard_EXPORT std::shared_ptr<const OcctPBRScalarPreparation> PreparePBRScalarPatch(
