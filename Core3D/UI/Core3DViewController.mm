@@ -1972,6 +1972,76 @@ static Core3DPartBooleanValues *Core3DPartBooleanPublicValues(
     return [[Core3DPartBooleanValues alloc] initWithOperation:
         static_cast<Core3DPartBooleanOperation>(definition.operation) inputs:inputs];
 }
+static bool Core3DPartBooleanPlacement(
+    const core3d::composite_recipe::InputPlacement& value,
+    simd_double3& translationMM, simd_double4& rotation) {
+    try {
+        const auto& m=value.matrix;gp_Trsf transform;
+        transform.SetValues(m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],
+                            m[8],m[9],m[10],m[11]);
+        const auto t=transform.TranslationPart();const auto q=transform.GetRotation();
+        const double mm=value.carrierMetersPerUnit*1000.0;
+        translationMM=simd_make_double3(t.X()*mm,t.Y()*mm,t.Z()*mm);
+        rotation=simd_make_double4(q.X(),q.Y(),q.Z(),q.W());return true;
+    } catch (...) { return false; }
+}
+
+static Core3DPartBooleanValues *Core3DPartBooleanPublicValues(
+    const core3d::part_boolean::owner::ShellEditDefinition& definition) {
+    NSMutableArray<Core3DPartBooleanInputValues *> *inputs=[NSMutableArray arrayWithCapacity:2];
+    for (std::size_t index=0;index<2;++index) {
+        const auto& profile=definition.profiles[index];
+        const auto& binding=definition.feature.inputs[index];
+        simd_double3 translation;simd_double4 rotation;
+        if (!Core3DPartBooleanPlacement(definition.placements[index],translation,rotation)) return nil;
+        NSString *name=[[NSString alloc] initWithBytes:binding.originalName.data()
+            length:binding.originalName.size() encoding:NSUTF8StringEncoding] ?: @"";
+        const double sourceMM=profile.metersPerUnit*1000.0;
+        const auto color=simd_make_double3(binding.originalMaterial.baseColorSRGB[0],
+            binding.originalMaterial.baseColorSRGB[1],binding.originalMaterial.baseColorSRGB[2]);
+        Core3DPartBooleanInputValues *input=nil;
+        if (index==0) {
+            NSMutableArray<NSValue *> *points=[NSMutableArray arrayWithCapacity:4];
+            for (const gp_Pnt2d& point:profile.definition.points) {
+                CGPoint value=CGPointMake(point.X()*sourceMM,point.Y()*sourceMM);
+                [points addObject:[NSValue valueWithBytes:&value objCType:@encode(CGPoint)]];
+            }
+            core3d::profile::ConstructionFrame construction;
+            if (profile.constructionFrame) construction=*profile.constructionFrame;
+            const auto& shell=profile.shells.front();
+            NSMutableArray<NSNumber *> *openings=[NSMutableArray arrayWithCapacity:shell.openings.size()];
+            for (int opening:shell.openings) [openings addObject:@(opening)];
+            input=[[Core3DPartBooleanInputValues alloc] initWithShellRole:@"left" name:name
+                profilePointsMM:points extrusionDepthMM:profile.definition.depth*sourceMM
+                extrusionPlane:profile.definition.plane
+                constructionTranslationMM:simd_make_double3(construction.values[0]*sourceMM,
+                    construction.values[1]*sourceMM,construction.values[2]*sourceMM)
+                constructionRotationXYZW:simd_make_double4(construction.values[3],construction.values[4],
+                    construction.values[5],construction.values[6]) constructionScale:construction.values[7]
+                inputTranslationMM:translation inputRotationXYZW:rotation metersPerUnit:profile.metersPerUnit
+                shellThicknessMM:shell.thickness*shell.metersPerLocalUnit*1000.0
+                shellTranslationMM:simd_make_double3(shell.frame.values[0]*shell.metersPerLocalUnit*1000.0,
+                    shell.frame.values[1]*shell.metersPerLocalUnit*1000.0,
+                    shell.frame.values[2]*shell.metersPerLocalUnit*1000.0)
+                shellRotationXYZW:simd_make_double4(shell.frame.values[3],shell.frame.values[4],
+                    shell.frame.values[5],shell.frame.values[6]) shellScale:shell.frame.values[7]
+                shellOpeningKeys:openings baseColorSRGB:color
+                metallic:binding.originalMaterial.metallic roughness:binding.originalMaterial.roughness];
+        } else {
+            const auto& p=profile.definition.points;
+            input=[[Core3DPartBooleanInputValues alloc] initWithRole:@"right" name:name
+                dimensionsMM:simd_make_double3((p[1].X()-p[0].X())*sourceMM,
+                    (p[3].Y()-p[0].Y())*sourceMM,profile.definition.depth*sourceMM)
+                translationMM:translation rotationXYZW:rotation metersPerUnit:profile.metersPerUnit
+                baseColorSRGB:color metallic:binding.originalMaterial.metallic
+                roughness:binding.originalMaterial.roughness];
+        }
+        if (!input) return nil;[inputs addObject:input];
+    }
+    return [[Core3DPartBooleanValues alloc] initWithOperation:
+        static_cast<Core3DPartBooleanOperation>(definition.feature.operation) inputs:inputs];
+}
+
 #if DEBUG
 static NSString *Core3DDebugPartBooleanFixtureRefusal(const char *reason) {
     NSLog(@"Part Boolean DEBUG fixture refused: %s",reason ? reason : "unknown");
@@ -2018,6 +2088,105 @@ static NSString *Core3DDebugPartBooleanFixtureRefusal(const char *reason) {
     if (![self ownsCurrentNativeSession] || _booleanPrepared || ![values isMemberOfClass:Core3DPartBooleanValues.class]
         || values.inputs.count!=2) return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"session-not-captured");
     try {
+        if (_booleanCapture->editorIsShell()) {
+            auto requested=_booleanCapture->editorShell();
+            requested.feature.operation=static_cast<core3d::part_boolean::Operation>(values.operation);
+            Core3DPartBooleanInputValues *left=values.inputs[0];
+            Core3DPartBooleanInputValues *right=values.inputs[1];
+            if (left.family!=Core3DPartBooleanInputFamilyShellProfile
+                || right.family!=Core3DPartBooleanInputFamilyAnalyticRectangularPrism
+                || ![left.role isEqualToString:@"left"] || ![right.role isEqualToString:@"right"]
+                || left.metersPerUnit!=_openingValues.inputs[0].metersPerUnit
+                || right.metersPerUnit!=_openingValues.inputs[1].metersPerUnit
+                || left.profilePointsMM.count!=4 || !left.shellThicknessMM)
+                return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,
+                    @"shell-input-role-or-unit-changed");
+            auto& shellProfile=requested.profiles[0];
+            const double leftLocal=1.0/(shellProfile.metersPerUnit*1000.0);
+            for (std::size_t index=0;index<4;++index) {
+                CGPoint point{};NSValue *boxed=left.profilePointsMM[index];
+                if (strcmp(boxed.objCType,@encode(CGPoint))!=0)
+                    return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,@"shell-point-invalid");
+                [boxed getValue:&point size:sizeof(point)];
+                shellProfile.definition.points[index].SetCoord(point.x*leftLocal,point.y*leftLocal);
+            }
+            shellProfile.definition.depth=left.dimensionsMM.z*leftLocal;
+            core3d::profile::ConstructionFrame construction;
+            construction.values={left.constructionTranslationMM.x*leftLocal,
+                left.constructionTranslationMM.y*leftLocal,left.constructionTranslationMM.z*leftLocal,
+                left.constructionRotationXYZW.x,left.constructionRotationXYZW.y,
+                left.constructionRotationXYZW.z,left.constructionRotationXYZW.w,left.constructionScale};
+            shellProfile.constructionFrame=construction;
+            auto& shell=shellProfile.shells.front();
+            const double shellLocal=1.0/(shell.metersPerLocalUnit*1000.0);
+            shell.thickness=left.shellThicknessMM.doubleValue*shellLocal;
+            shell.frame.values={left.shellTranslationMM.x*shellLocal,left.shellTranslationMM.y*shellLocal,
+                left.shellTranslationMM.z*shellLocal,left.shellRotationXYZW.x,left.shellRotationXYZW.y,
+                left.shellRotationXYZW.z,left.shellRotationXYZW.w,left.shellScale};
+            shell.openings.clear();
+            for (NSNumber *opening in left.shellOpeningKeys) shell.openings.push_back(opening.intValue);
+            auto& tool=requested.profiles[1];const double rightLocal=1.0/(tool.metersPerUnit*1000.0);
+            const double x0=tool.definition.points[0].X(),y0=tool.definition.points[0].Y();
+            tool.definition.points={{x0,y0},{x0+right.dimensionsMM.x*rightLocal,y0},
+                {x0+right.dimensionsMM.x*rightLocal,y0+right.dimensionsMM.y*rightLocal},
+                {x0,y0+right.dimensionsMM.y*rightLocal}};
+            tool.definition.depth=right.dimensionsMM.z*rightLocal;
+            Core3DPartBooleanInputValues *publicInputs[]={left,right};
+            for (std::size_t index=0;index<2;++index) {
+                const auto input=publicInputs[index];auto& placement=requested.placements[index];
+                gp_Trsf transform;transform.SetRotationPart(gp_Quaternion(input.rotationXYZW.x,
+                    input.rotationXYZW.y,input.rotationXYZW.z,input.rotationXYZW.w));
+                const double carrierLocal=1.0/(placement.carrierMetersPerUnit*1000.0);
+                transform.SetTranslationPart(gp_Vec(input.translationMM.x*carrierLocal,
+                    input.translationMM.y*carrierLocal,input.translationMM.z*carrierLocal));
+                for (int row=0;row<3;++row) for (int column=0;column<4;++column)
+                    placement.matrix[std::size_t(row*4+column)]=transform.Value(row+1,column+1);
+                auto& binding=requested.feature.inputs[index];
+                binding.originalMaterial.baseColorSRGB[0]=input.baseColorSRGB.x;
+                binding.originalMaterial.baseColorSRGB[1]=input.baseColorSRGB.y;
+                binding.originalMaterial.baseColorSRGB[2]=input.baseColorSRGB.z;
+                binding.originalMaterial.metallic=input.metallic;
+                binding.originalMaterial.roughness=input.roughness;
+                for (auto& material:requested.feature.materials)
+                    if (material.identifier==binding.originalMaterial.identifier)
+                        material=binding.originalMaterial;
+            }
+            if (!core3d::part_boolean::Valid(requested.feature)
+                || !core3d::part_boolean::build::IsRectangularP1BaseRecipe(shellProfile,true)
+                || !core3d::part_boolean::build::IsRectangularP1BaseRecipe(tool,false))
+                return Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeRejected,
+                    @"invalid-shell-editor-values");
+            const auto& original=_booleanCapture->editorShell();
+            std::vector<std::uint8_t> oldFeature,newFeature;
+            bool same=core3d::part_boolean::Encode(original.feature,oldFeature)
+                && core3d::part_boolean::Encode(requested.feature,newFeature)
+                && oldFeature==newFeature;
+            for (std::size_t index=0;same && index<2;++index) {
+                std::vector<double> oldProfile,newProfile;
+                same=core3d::profile::Encode(original.profiles[index],oldProfile)
+                    && core3d::profile::Encode(requested.profiles[index],newProfile)
+                    && oldProfile==newProfile
+                    && original.placements[index].matrix==requested.placements[index].matrix
+                    && original.placements[index].sourceMetersPerUnit
+                        ==requested.placements[index].sourceMetersPerUnit
+                    && original.placements[index].carrierMetersPerUnit
+                        ==requested.placements[index].carrierMetersPerUnit;
+            }
+            if (same) {
+                const auto cancelled=_booleanNativeOwner->cancel(_booleanSession);
+                _booleanTerminal=true;_booleanCapture.reset();
+                return cancelled.outcome==core3d::part_boolean::owner::Outcome::Cancelled
+                    ? Core3DPartBooleanLocalResult(Core3DPartBooleanEditOutcomeUnchanged,@"already-current")
+                    : Core3DPartBooleanPublicResult(cancelled);
+            }
+            const auto prepared=_booleanNativeOwner->prepare(_booleanCapture,requested
+#if DEBUG
+                ,_booleanFault
+#endif
+            );
+            _booleanPrepared=prepared.handle;
+            return Core3DPartBooleanPublicResult(prepared.receipt,true);
+        }
         core3d::part_boolean::AnalyticDefinition requested=_booleanCapture->editorAnalytic();
         requested.operation=static_cast<core3d::part_boolean::Operation>(values.operation);
         for (std::size_t index=0;index<2;++index) {
@@ -3262,6 +3431,8 @@ struct NativeModelingPermitIssuer final {
 - (nullable Core3DPartBooleanValues *)core3d_partBooleanEditorValuesForEntityIdentifier:
     (NSString *)entityIdentifier;
 #if DEBUG
+- (nullable NSString *)core3d_installDebugPartBooleanEditorFixtureOperation:
+    (Core3DPartBooleanOperation)operation metersPerUnit:(double)metersPerUnit shell:(BOOL)shellFixture;
 - (void)core3d_clearDebugPartBooleanFixtureBinding;
 - (BOOL)core3d_matchesDebugPartBooleanFixtureEntityIdentifier:(NSString *)entityIdentifier;
 #endif
@@ -7360,6 +7531,12 @@ struct NativeModelingPermitIssuer final {
 
 - (NSString *)debugInstallPartBooleanEditorFixtureOperation:(Core3DPartBooleanOperation)operation
     metersPerUnit:(double)metersPerUnit {
+    return [self core3d_installDebugPartBooleanEditorFixtureOperation:operation
+        metersPerUnit:metersPerUnit shell:NO];
+}
+
+- (NSString *)core3d_installDebugPartBooleanEditorFixtureOperation:
+    (Core3DPartBooleanOperation)operation metersPerUnit:(double)metersPerUnit shell:(BOOL)shellFixture {
     if (![NSThread isMainThread])
         return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
     [self core3d_clearDebugPartBooleanFixtureBinding];
@@ -7390,18 +7567,31 @@ struct NativeModelingPermitIssuer final {
             || std::memcmp(&installedUnit,&metersPerUnit,sizeof(double))!=0)
             return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
         TDF_Label carrier;
-        if (!owner || !owner->installEvidenceFixture(
-            static_cast<core3d::part_boolean::Operation>(operation),metersPerUnit,carrier))
+        if (!owner || !(shellFixture
+            ? owner->installShellEvidenceFixture(metersPerUnit,carrier)
+            : owner->installEvidenceFixture(
+                static_cast<core3d::part_boolean::Operation>(operation),metersPerUnit,carrier)))
             return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
         const std::string entity=document->EntityIdentifierForLabel(carrier);
         if (entity.empty()) return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
         NSString *identifier=[[NSString alloc] initWithBytes:entity.data() length:entity.size()
             encoding:NSUTF8StringEncoding];
         if (!identifier) return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
+        // Both fixture families must pass the same native readback, publication,
+        // and exact document/owner/entity binding before the DEBUG seam is usable.
+        const auto describeValues=[&]() -> Core3DPartBooleanValues * {
+            if (shellFixture) {
+                core3d::part_boolean::owner::ShellEditDefinition definition;
+                return owner->describeShell(carrier,definition)
+                    ? Core3DPartBooleanPublicValues(definition) : nil;
+            }
+            core3d::part_boolean::AnalyticDefinition definition;
+            return owner->describe(carrier,definition)
+                ? Core3DPartBooleanPublicValues(definition) : nil;
+        };
         TDF_LabelSequence installedRoots;shapes->GetFreeShapes(installedRoots);
-        core3d::part_boolean::AnalyticDefinition definition;
         if (installedRoots.Length()!=1 || !carrier.IsEqual(installedRoots.Value(1))
-            || !owner->describe(carrier,definition) || !Core3DPartBooleanPublicValues(definition)
+            || !describeValues()
             || ocaf->HasOpenCommand() || ocaf->GetAvailableUndos()!=0
             || ocaf->GetAvailableRedos()!=0 || owner->blocksOtherWork())
             return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness");
@@ -7418,9 +7608,7 @@ struct NativeModelingPermitIssuer final {
                 XCAFDoc_ShapeTool::GetShape(carrier),afterPublication)
             || afterPublication!=beforePublication)
             return Core3DDebugPartBooleanFixtureRefusal("publication-byte-mismatch");
-        core3d::part_boolean::AnalyticDefinition publishedDefinition;
-        if (!owner->describe(carrier,publishedDefinition)
-            || !Core3DPartBooleanPublicValues(publishedDefinition))
+        if (!describeValues())
             return Core3DDebugPartBooleanFixtureRefusal("post-publication-describe");
         const double sceneUnit=scene?scene.metersPerUnit:0;
         NSUInteger entityMatches=0;
@@ -7442,10 +7630,32 @@ struct NativeModelingPermitIssuer final {
         return identifier;
     } catch (...) { return Core3DDebugPartBooleanFixtureRefusal("binding-or-readiness-exception"); }
 }
+- (NSString *)debugInstallShellBooleanEditorFixtureMetersPerUnit:(double)metersPerUnit {
+    return [self core3d_installDebugPartBooleanEditorFixtureOperation:Core3DPartBooleanOperationUnion
+        metersPerUnit:metersPerUnit shell:YES];
+}
 #endif
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeBooleanOwnerProbe:(NSInteger)scenario {
     NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
     for(const auto& row:Core3DDebugNativeBooleanOwnerProbe(static_cast<Standard_Integer>(scenario)))
+        out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
+    return [out copy];
+}
++ (NSDictionary<NSString *, NSData *> *)debugLegacyCorpusCapture {
+    if (![NSThread isMainThread]) return @{};
+    try {
+        NSMutableDictionary<NSString *, NSData *> *out = [NSMutableDictionary dictionary];
+        for (const auto& row : Core3DDebugLegacyCorpusCapture()) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || out[key] != nil) return @{};
+            out[key] = [NSData dataWithBytes:row.second.data() length:row.second.size()];
+        }
+        return [out copy];
+    } catch (...) { return @{}; }
+}
++ (NSDictionary<NSString *, NSNumber *> *)debugRetainedFeatureRegistryProbe:(NSInteger)scenario {
+    NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
+    for(const auto& row:Core3DDebugRetainedFeatureRegistryProbe(static_cast<Standard_Integer>(scenario)))
         out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
     return [out copy];
 }
@@ -16517,7 +16727,9 @@ struct NativeModelingPermitIssuer final {
             return nil;
         }
         capturedOwner=nativeOwner;capturedSession=captured.handle->editorSession();
-        Core3DPartBooleanValues *values=Core3DPartBooleanPublicValues(captured.handle->editorAnalytic());
+        Core3DPartBooleanValues *values=captured.handle->editorIsShell()
+            ? Core3DPartBooleanPublicValues(captured.handle->editorShell())
+            : Core3DPartBooleanPublicValues(captured.handle->editorAnalytic());
         if (!values) { (void)capturedOwner->cancel(capturedSession); return nil; }
         Core3DPartBooleanEditingSession *session=[[Core3DPartBooleanEditingSession alloc]
             initWithOwner:self document:document nativeOwner:nativeOwner capture:captured.handle
@@ -16551,18 +16763,24 @@ struct NativeModelingPermitIssuer final {
             if (document->EntityIdentifierForLabel(roots.Value(index))==entity) {
                 if (!carrier.IsNull()) return nil;carrier=roots.Value(index);
             }
-        auto *nativeOwner=document->PartBooleanOwnerService();core3d::part_boolean::AnalyticDefinition definition;
-        return !carrier.IsNull() && nativeOwner && nativeOwner->describe(carrier,definition)
-            ? Core3DPartBooleanPublicValues(definition) : nil;
+        auto *nativeOwner=document->PartBooleanOwnerService();
+        if (carrier.IsNull()||!nativeOwner) return nil;
+        core3d::part_boolean::AnalyticDefinition analytic;
+        if (nativeOwner->describe(carrier,analytic)) return Core3DPartBooleanPublicValues(analytic);
+        core3d::part_boolean::owner::ShellEditDefinition shell;
+        return nativeOwner->describeShell(carrier,shell)
+            ? Core3DPartBooleanPublicValues(shell):nil;
     } catch (...) { return nil; }
 }
 
 - (Core3DPartBooleanEditingSession *)openPartBooleanEditorForEntityIdentifier:
     (NSString *)entityIdentifier {
     using namespace core3d::part_boolean::family_admission;
+    const bool routeInstalled=(AnalyticNativeAdmissionEnabled&&AnalyticBooleanRouteInstalled)
+        ||(NativeAdmissionEnabled&&BooleanRouteInstalled);
     if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
         || !OwnerInstalled || !RetainedInputsPersistenceInstalled || !OperandEditorInstalled
-        || !AnalyticNativeAdmissionEnabled || !AnalyticBooleanRouteInstalled
+        || !routeInstalled
         || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
         || entityIdentifier.length>128 || !entityIdentifier.UTF8String
         || GLController==nil || GLController.viewer==nullptr
@@ -16572,9 +16790,11 @@ struct NativeModelingPermitIssuer final {
 
 - (Core3DPartBooleanValues *)partBooleanEditorValuesForEntityIdentifier:(NSString *)entityIdentifier {
     using namespace core3d::part_boolean::family_admission;
+    const bool routeInstalled=(AnalyticNativeAdmissionEnabled&&AnalyticBooleanRouteInstalled)
+        ||(NativeAdmissionEnabled&&BooleanRouteInstalled);
     if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
         || !OwnerInstalled || !RetainedInputsPersistenceInstalled || !OperandEditorInstalled
-        || !AnalyticNativeAdmissionEnabled || !AnalyticBooleanRouteInstalled
+        || !routeInstalled
         || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
         || entityIdentifier.length>128 || !entityIdentifier.UTF8String
         || GLController==nil || GLController.viewer==nullptr

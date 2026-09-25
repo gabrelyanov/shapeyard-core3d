@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -22,6 +23,111 @@
 namespace core3d::part_boolean::correspondence {
 
 using Evidence = std::map<std::string, double>;
+
+struct FaceBinding final {
+    TopoDS_Face face;
+    std::string stableKey;
+    retained_recipe::UUID region{};
+    std::uint16_t materialIndex = 0;
+};
+
+struct ShellProductionProof final {
+    bool completeBoundary = false;
+    bool sourceRecipesBound = false;
+    bool materialRegionsBound = false;
+    bool selectorPolicyBound = false;
+    std::vector<FaceBinding> faces;
+    bool proven() const noexcept {
+        return completeBoundary && sourceRecipesBound && materialRegionsBound
+            && selectorPolicyBound;
+    }
+};
+
+inline ShellProductionProof ProveShellComposite(
+    const build::ShellCompositeRequest& request,
+    const build::ShellCompositeBuild& built) noexcept {
+    ShellProductionProof proof;
+    try {
+        proof.completeBoundary = built.complete
+            && retained_part_boolean::IsOneValidForwardSolid(built.sources[0])
+            && retained_part_boolean::IsOneValidForwardSolid(built.sources[1])
+            && retained_part_boolean::IsOneValidForwardSolid(built.candidate.solid)
+            && retained_part_boolean::Volume(built.candidate.solid) > 0;
+        proof.sourceRecipesBound = build::IsRectangularP1BaseRecipe(
+            request.profiles[0], true)
+            && build::IsRectangularP1BaseRecipe(request.profiles[1], false)
+            && request.definition.inputs[0].family == InputFamily::ShellProfile
+            && request.definition.inputs[1].family
+                == InputFamily::AnalyticRectangularPrism;
+        std::set<retained_recipe::UUID> regions;
+        proof.materialRegionsBound = built.historyResultExact
+            && !request.definition.materials.empty()
+            && !request.definition.regions.empty();
+        for (const auto& region : request.definition.regions) {
+            proof.materialRegionsBound = proof.materialRegionsBound
+                && region.materialIndex < request.definition.materials.size()
+                && request.definition.materials[region.materialIndex].kind
+                    == MaterialKind::ResolvedScalars
+                && regions.insert(region.region).second;
+        }
+        std::map<std::string, std::pair<retained_recipe::UUID, std::uint16_t>> assigned;
+        for (const build::FaceHistoryRelation& relation : built.faceHistory) {
+            const RegionBinding* match = nullptr;
+            const RegionBinding* soleSourceRegion = nullptr;
+            std::size_t sourceRegionCount = 0;
+            for (const RegionBinding& region : request.definition.regions) {
+                if (region.sourceInput != relation.sourceInput) continue;
+                soleSourceRegion = &region; ++sourceRegionCount;
+                if (region.kind == relation.kind) {
+                    if (match != nullptr) { proof.materialRegionsBound = false; break; }
+                    match = &region;
+                }
+            }
+            if (match == nullptr && sourceRegionCount == 1) match = soleSourceRegion;
+            if (match == nullptr) { proof.materialRegionsBound = false; continue; }
+            const auto value = std::make_pair(match->region, match->materialIndex);
+            const auto inserted = assigned.emplace(relation.faceKey, value);
+            if (!inserted.second && inserted.first->second != value)
+                proof.materialRegionsBound = false;
+        }
+        std::map<std::string, TopoDS_Face> finalFaces;
+        for (TopExp_Explorer it(built.candidate.solid, TopAbs_FACE);
+             it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            std::string key;
+            if (!retained_part_boolean::ExactShapeBytes(face, key)
+                || !finalFaces.emplace(key, face).second) {
+                proof.materialRegionsBound = false; break;
+            }
+        }
+        proof.materialRegionsBound = proof.materialRegionsBound
+            && !finalFaces.empty() && assigned.size() == finalFaces.size();
+        if (proof.materialRegionsBound) {
+            for (const auto& [key, face] : finalFaces) {
+                const auto found = assigned.find(key);
+                if (found == assigned.end()) { proof.materialRegionsBound = false; break; }
+                proof.faces.push_back({face, key, found->second.first,
+                                       found->second.second});
+            }
+        }
+        proof.selectorPolicyBound = true;
+        for (const auto& selector : request.definition.selectors) {
+            proof.selectorPolicyBound = proof.selectorPolicyBound
+                && regions.count(selector.region) == 1
+                && selector.expectedCardinality > 0
+                && (selector.policy != SelectorPolicy::UniqueFace
+                    || selector.expectedCardinality == 1);
+            if (selector.policy == SelectorPolicy::UniqueFace) {
+                const auto count = std::count_if(
+                    proof.faces.begin(), proof.faces.end(), [&](const FaceBinding& value) {
+                        return value.region == selector.region;
+                    });
+                proof.selectorPolicyBound = proof.selectorPolicyBound && count == 1;
+            }
+        }
+        return proof;
+    } catch (...) { return {}; }
+}
 
 inline void Check(Evidence& evidence, const std::string& key, bool value) {
     evidence.emplace(key, value ? 1.0 : 0.0);

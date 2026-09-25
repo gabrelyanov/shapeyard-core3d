@@ -1,3 +1,4 @@
+#include <TDF_TagSource.hxx>
 #include "RetainedFilletCandidates.hxx"
 #include "SavedCutSourceEdit.hxx"
 #include "PartBooleanOwner.hxx"
@@ -5,6 +6,13 @@
 #include "PartBooleanCorrespondence.hxx"
 #include "PartBooleanRebuild.hxx"
 #include "RetainedRecipeAdmission.hxx"
+#if DEBUG
+#include "PartBooleanCodecProbe.hxx"
+#endif
+#include "RetainedFeatureOwner.hxx"
+#if DEBUG
+#include "RetainedFeatureRegistryProbe.hxx"
+#endif
 #include <TNaming_Builder.hxx>
 #include <BRepTools.hxx>
 #include <TDF_Delta.hxx>
@@ -126,6 +134,7 @@ struct Cut475Scope {
 #include <TDocStd_PathParser.hxx>
 #include <TopoDS_Compound.hxx>
 #include <fstream>
+#include <iterator>
 #endif
 
 #if DEBUG && TARGET_OS_IOS
@@ -4023,6 +4032,8 @@ void OcctDocument::CloseNativeSession() noexcept
 {
     if (myNativeSessionClosed) return;
     myNativeSessionClosed = true;
+    if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
+    myRetainedFeatureOwner.reset();
     if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
     myPartBooleanOwner.reset();
     if (myNativeAuthority) myNativeAuthority->Detach();
@@ -4064,6 +4075,8 @@ void OcctDocument::InitDoc()
     std::cout << "InitDoc()" << std::endl;
   if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
   myPartBooleanOwner.reset();
+  if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
+  myRetainedFeatureOwner.reset();
   if (myNativeAuthority) myNativeAuthority->Detach();
 #if DEBUG
   if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
@@ -4107,6 +4120,7 @@ void OcctDocument::InitDoc()
 	myOcafDoc->ClearUndos();
 	myOcafDoc->SetUndoLimit(kNativeSessionUndoLimit);
     myPartBooleanOwner = std::make_unique<core3d::part_boolean::owner::PartBooleanOwner>(*this);
+    myRetainedFeatureOwner = std::make_unique<core3d::retained_feature::OcafOwnerService>(*this);
   }
   ObserveSuccessfulNativeDocumentAdoption();
 #if DEBUG
@@ -4127,6 +4141,10 @@ void OcctDocument::ObserveSuccessfulNativeDocumentAdoption() noexcept {
             if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
             myPartBooleanOwner = std::make_unique<core3d::part_boolean::owner::PartBooleanOwner>(*this);
         }
+        if (!myRetainedFeatureOwner || !myRetainedFeatureOwner->boundTo(myOcafDoc)) {
+            if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
+            myRetainedFeatureOwner = std::make_unique<core3d::retained_feature::OcafOwnerService>(*this);
+        }
     } catch (...) { myNativeAuthority->Detach(); }
 }
 
@@ -4135,8 +4153,13 @@ OcctDocument::PartBooleanOwnerService() noexcept { return myPartBooleanOwner.get
 const core3d::part_boolean::owner::PartBooleanOwner*
 OcctDocument::PartBooleanOwnerService() const noexcept { return myPartBooleanOwner.get(); }
 bool OcctDocument::NativeBooleanOwnerBlocksOtherWork() const noexcept {
-    return myPartBooleanOwner && myPartBooleanOwner->blocksOtherWork();
+    return (myPartBooleanOwner && myPartBooleanOwner->blocksOtherWork())
+        || (myRetainedFeatureOwner && myRetainedFeatureOwner->blocksOtherWork());
 }
+core3d::retained_feature::OcafOwnerService*
+OcctDocument::RetainedFeatureOwnerService() noexcept { return myRetainedFeatureOwner.get(); }
+const core3d::retained_feature::OcafOwnerService*
+OcctDocument::RetainedFeatureOwnerService() const noexcept { return myRetainedFeatureOwner.get(); }
 
 std::optional<core3d::authority::QueuedLoadReservation>
 OcctDocument::BeginNativeQueuedLoad() noexcept {
@@ -4563,16 +4586,38 @@ Standard_Boolean ValidateGeometryDocument(
 
         // Charge every retained composite source independently. The visible
         // carrier is charged by the ordinary definition traversal below.
-        for(const auto& record:composites)for(const auto& source:record.value->sourceShapes){
+        const auto validCompositeSolid = [&](const TopoDS_Shape& source) {
             if(ClassifyDefinitionGeometry(source,&aBudget)!=DefinitionGeometryClass::BRep
-                ||!BRepCheck_Analyzer(source,Standard_True).IsValid())return Standard_False;
+                ||!BRepCheck_Analyzer(source,Standard_True).IsValid())return false;
             unsigned shells=0;for(TopExp_Explorer shell(source,TopAbs_SHELL);shell.More();shell.Next()){
-                ++shells;if(!BRep_Tool::IsClosed(shell.Current()))return Standard_False;
+                ++shells;if(!BRep_Tool::IsClosed(shell.Current()))return false;
             }
-            if(!shells)return Standard_False;
+            if(!shells)return false;
             BRepClass3d_SolidClassifier classifier(source);classifier.PerformInfinitePoint(Precision::Confusion());
             GProp_GProps volume;BRepGProp::VolumeProperties(source,volume,Standard_True,Standard_False,Standard_False);
-            if(classifier.State()!=TopAbs_OUT||!std::isfinite(volume.Mass())||volume.Mass()<=0)return Standard_False;
+            return classifier.State()==TopAbs_OUT&&std::isfinite(volume.Mass())&&volume.Mass()>0;
+        };
+        for(const auto& record:composites){
+            if(record.value->definition.schemaVersion<3){
+                // Frozen v1/v2 domain: retain the exact historic closed-solid gate.
+                for(const auto& source:record.value->sourceShapes)
+                    if(!validCompositeSolid(source))return Standard_False;
+                continue;
+            }
+            for(const auto& node:record.value->definition.nodes){
+                const auto* sourceNode=std::get_if<core3d::composite_recipe::SourceNode>(&node.value);
+                if(!sourceNode)continue;
+                core3d::composite_recipe::SourceShapeKind expected=core3d::composite_recipe::SourceShapeKind::Unknown;
+                if(sourceNode->shapeSlot>=record.value->sourceShapes.size()
+                    ||!core3d::composite_recipe::ExpectedShapeKind(
+                        record.value->definition,sourceNode->recipe,expected))return Standard_False;
+                const TopoDS_Shape& source=record.value->sourceShapes[sourceNode->shapeSlot];
+                // P1 installs only the legacy solid source descriptors. Future
+                // face/wire descriptors must add their independent proof here;
+                // they cannot inherit positive-volume solid admission.
+                if(expected!=core3d::composite_recipe::SourceShapeKind::Solid
+                    ||!validCompositeSolid(source))return Standard_False;
+            }
         }
 
         Standard_Size aDefinitionCount = 0;
@@ -9947,7 +9992,16 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
             update.label, aPreviousMaterialLabel, aMaterial});
     }
     for (const PreparedUpdate& update : preparedUpdates) {
-        if (!(scalarMaterial.IsNull()?EnsureGeometryRepresentationForMutation(update.label):ValidateGeometryRepresentationForLabel(update.label))) {
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        const TopoDS_Shape updateShape = XCAFDoc_ShapeTool::GetShape(update.label);
+        const bool exactFaceSubshape = !shapeTool.IsNull()
+            && !updateShape.IsNull() && updateShape.ShapeType() == TopAbs_FACE
+            && !shapeTool->FindMainShape(updateShape).IsNull();
+        if (!(scalarMaterial.IsNull()
+                ? (exactFaceSubshape
+                    || EnsureGeometryRepresentationForMutation(update.label))
+                : ValidateGeometryRepresentationForLabel(update.label))) {
             return Standard_False;
         }
     }
@@ -11433,6 +11487,313 @@ bool OcctDocument::StagePartBooleanPayload(
     } catch (...) { return false; }
 }
 
+namespace core3d::retained_feature {
+namespace {
+std::atomic<std::uint64_t> RetainedFeatureOwnerNonce{1};
+
+bool ExactBytes(const TopoDS_Shape& shape, std::vector<std::uint8_t>& output) noexcept {
+    std::string bytes;
+    if (!retained_part_boolean::ExactShapeBytes(shape, bytes)) return false;
+    output.assign(bytes.begin(), bytes.end()); return !output.empty();
+}
+
+template<std::size_t N>
+void AppendBytes(std::vector<std::uint8_t>& output,
+                 const std::array<std::uint8_t, N>& value) {
+    output.insert(output.end(), value.begin(), value.end());
+}
+
+void AppendInteger(std::vector<std::uint8_t>& output, std::uint64_t value) {
+    for (unsigned index=0;index<8;++index)output.push_back(std::uint8_t(value>>(index*8)));
+}
+} // namespace
+
+struct OcafOwnerService::State final : DocumentPort {
+    OcctDocument& wrapper;
+    Handle(TDocStd_Document) document;
+    const RegistryView& registry;
+    const retained_source::RegistryView& sources;
+    TDF_Label carrier;
+    std::unique_ptr<Owner> owner;
+    std::shared_ptr<const PreparedChange> prepared;
+    bool openedCommand=false;
+
+    State(OcctDocument& value,const RegistryView& featureRegistry,
+          const retained_source::RegistryView& sourceRegistry) noexcept
+        :wrapper(value),document(value.Document()),registry(featureRegistry),sources(sourceRegistry){}
+
+    bool capture(CompleteFence& fence, composite_recipe::Definition& definition,
+                 std::vector<SourceValue>& sourceValues) noexcept override {
+        fence={};definition={};sourceValues.clear();
+        try{
+            if(document.IsNull()||carrier.IsNull()||carrier.Data()!=document->GetData())return false;
+            composite_recipe::Record record;
+            if(!composite_recipe::Read(document,carrier,record)||!record.value
+                ||record.value->definition.schemaVersion!=3)return false;
+            definition=record.value->definition;
+            std::vector<std::uint8_t> graphBytes,identityBytes,metadataBytes,historyBytes,currentBytes;
+            if(!composite_recipe::EncodeV3(definition,registry,sources,graphBytes)
+                ||graphBytes!=record.value->bytes||!composite_recipe::Hash(graphBytes,fence.graph)
+                ||!ExactBytes(record.current,currentBytes)||!composite_recipe::Hash(currentBytes,fence.output))return false;
+            AppendBytes(identityBytes,definition.owner.document);AppendBytes(identityBytes,definition.owner.entity);
+            AppendBytes(identityBytes,definition.owner.definition);AppendBytes(identityBytes,definition.outputNode);
+            for(const auto& node:definition.nodes){
+                AppendBytes(identityBytes,composite_recipe::NodeID(node));AppendInteger(identityBytes,composite_recipe::LocalID(node));
+                if(const auto* feature=std::get_if<composite_recipe::FeatureNode>(&node.value))AppendBytes(identityBytes,feature->feature);
+            }
+            if(!composite_recipe::Hash(identityBytes,fence.identities))return false;
+            retained_recipe::RevisionFence revision;
+            revision.documentGeneration=std::uint64_t(reinterpret_cast<std::uintptr_t>(document.get()));
+            revision.modelRevision=std::uint64_t(std::max(0,document->GetData()->Time()))+1;
+            if(!XCAFDoc_DocumentTool::GetLengthUnit(document,revision.effectiveMetersPerUnit)
+                ||!std::isfinite(revision.effectiveMetersPerUnit)||revision.effectiveMetersPerUnit<=0)return false;
+            std::size_t sourceIndex=0;
+            for(const auto& node:definition.nodes){
+                const auto* source=std::get_if<composite_recipe::SourceNode>(&node.value);if(!source)continue;
+                if(source->shapeSlot>=record.value->sourceShapes.size())return false;
+                ReplayValue value;value.shape=ShapeKind::Solid;
+                if(!ExactBytes(record.value->sourceShapes[source->shapeSlot],value.detachedShape)
+                    ||!composite_recipe::Hash(value.detachedShape,value.geometry)
+                    ||value.geometry!=source->commitments.geometry
+                    ||!composite_recipe::Hash(source->recipe.bytes,value.familyProof))return false;
+                sourceValues.push_back({source->node,std::move(value)});
+                retained_recipe::DependencyRead read;
+                read.locator={definition.owner,source->node,source->original.sourceFeature};
+                read.geometry=source->commitments.geometry;read.recipe=source->commitments.recipe;
+                read.placement=source->commitments.placement;read.material=source->commitments.material;
+                read.groups=source->commitments.groups;revision.dependencies.push_back(read);
+                AppendBytes(metadataBytes,read.recipe);AppendBytes(metadataBytes,read.placement);
+                AppendBytes(metadataBytes,read.material);AppendBytes(metadataBytes,read.groups);++sourceIndex;
+            }
+            if(sourceIndex!=record.value->sourceShapes.size()||sourceIndex==0
+                ||!composite_recipe::Hash(metadataBytes,fence.metadata))return false;
+            AppendInteger(historyBytes,std::uint64_t(document->GetAvailableUndos()));
+            AppendInteger(historyBytes,std::uint64_t(document->GetAvailableRedos()));
+            AppendInteger(historyBytes,std::uint64_t(std::max(0,document->GetData()->Transaction())));
+            AppendInteger(historyBytes,std::uint64_t(std::max(0,document->GetData()->Time())));
+            if(!composite_recipe::Hash(historyBytes,fence.history))return false;
+            revision.ownerShape=fence.output;revision.ownerRecipe=fence.graph;
+            revision.ownerMaterial=fence.metadata;
+            if(!InstallCapturedRevision(revision.effectiveMetersPerUnit,std::move(revision),fence))return false;
+            return fence.valid();
+        }catch(...){fence={};definition={};sourceValues.clear();return false;}
+    }
+
+    bool stageAndReadBack(const PreparedChange& change) noexcept override {
+        try{
+            if(document.IsNull()||document->HasOpenCommand()||carrier.IsNull())return false;
+            composite_recipe::Record record;
+            if(!composite_recipe::Read(document,carrier,record)||!record.value)return false;
+            document->NewCommand();openedCommand=true;
+            auto payload=std::make_shared<composite_recipe::Payload>();
+            payload->definition=change.graph;payload->sourceShapes=record.value->sourceShapes;
+            if(!composite_recipe::EncodeV3(change.graph,registry,sources,payload->bytes)
+                ||!wrapper.StagePartBooleanPayload(record.label,payload))return false;
+            composite_recipe::Record readback;
+            return composite_recipe::Read(document,carrier,readback)&&readback.value
+                &&readback.value->bytes==payload->bytes&&readback.current.IsEqual(record.current);
+        }catch(...){return false;}
+    }
+
+    bool commitOneCommand(int& measuredHistoryDelta) noexcept override {
+        measuredHistoryDelta=0;
+        try{
+            if(document.IsNull()||!openedCommand||!document->HasOpenCommand())return false;
+            const int before=document->GetAvailableUndos();
+            const bool committed=document->CommitCommand();openedCommand=false;
+            measuredHistoryDelta=document->GetAvailableUndos()-before;
+            return committed&&!document->HasOpenCommand();
+        }catch(...){return false;}
+    }
+
+    bool abortAndProve(const CompleteFence& before) noexcept override {
+        try{
+            if(document.IsNull())return false;
+            if(document->HasOpenCommand())document->AbortCommand();openedCommand=false;
+            CompleteFence actual;composite_recipe::Definition graph;std::vector<SourceValue> values;
+            return capture(actual,graph,values)&&actual==before;
+        }catch(...){return false;}
+    }
+
+    bool reconcile(const CompleteFence& before,const CompleteFence& candidate,
+                   OwnerOutcome& outcome) noexcept override {
+        try{
+            if(document.IsNull())return false;
+            if(document->HasOpenCommand())document->AbortCommand();openedCommand=false;
+            CompleteFence actual;composite_recipe::Definition graph;std::vector<SourceValue> values;
+            if(!capture(actual,graph,values))return false;
+            if(actual==before){outcome=OwnerOutcome::Rejected;return true;}
+            if(actual.graph==candidate.graph&&actual.output==candidate.output
+                &&actual.identities==candidate.identities&&actual.metadata==candidate.metadata){
+                outcome=OwnerOutcome::Committed;return true;
+            }
+            return false;
+        }catch(...){return false;}
+    }
+};
+
+OcafOwnerService::OcafOwnerService(OcctDocument& owner,const RegistryView& registry,
+    const retained_source::RegistryView& sources) noexcept
+    :state_(std::make_unique<State>(owner,registry,sources)){}
+OcafOwnerService::~OcafOwnerService(){retireForDocumentReplacement();}
+bool OcafOwnerService::boundTo(const Handle(TDocStd_Document)& document)const noexcept{
+    return state_&&!document.IsNull()&&state_->document.get()==document.get();
+}
+bool OcafOwnerService::blocksOtherWork()const noexcept{return state_&&state_->owner&&state_->owner->blocksOtherWork();}
+void OcafOwnerService::retireForDocumentReplacement()noexcept{
+    if(!state_)return;if(!state_->document.IsNull()&&state_->document->HasOpenCommand())state_->document->AbortCommand();
+    state_->openedCommand=false;state_->prepared.reset();state_->owner.reset();state_->carrier.Nullify();
+}
+std::shared_ptr<const PreparedChange> OcafOwnerService::prepare(
+    const TDF_Label& carrier,const MutationRequest& request,ReplayBudget budget,OwnerReceipt& receipt)noexcept{
+    receipt={};if(!state_||state_->document.IsNull()||carrier.IsNull()||carrier.Data()!=state_->document->GetData()
+        ||state_->document->HasOpenCommand()||blocksOtherWork()){receipt.reason="owner-busy-or-unbound";return {};}
+    state_->carrier=carrier;state_->owner=std::make_unique<Owner>(*state_,RetainedFeatureOwnerNonce.fetch_add(1),state_->registry,state_->sources);
+    state_->prepared=state_->owner->prepare(request,budget,receipt);
+    if(!state_->prepared)state_->owner.reset();return state_->prepared;
+}
+OwnerReceipt OcafOwnerService::apply(const std::shared_ptr<const PreparedChange>& prepared)noexcept{
+    if(!state_||!state_->owner)return {OwnerOutcome::Rejected,"no-owner-session",0,0,true};
+    const OwnerReceipt result=state_->owner->apply(prepared);
+    if(result.settled){state_->prepared.reset();state_->owner.reset();state_->carrier.Nullify();}
+    return result;
+}
+OwnerReceipt OcafOwnerService::cancel()noexcept{
+    if(!state_||!state_->owner)return {OwnerOutcome::Rejected,"no-owner-session",0,0,true};
+    const OwnerReceipt result=state_->owner->cancel();state_->prepared.reset();state_->owner.reset();state_->carrier.Nullify();return result;
+}
+OwnerReceipt OcafOwnerService::reconcile(const CompleteFence& before,const CompleteFence& candidate)noexcept{
+    if(!state_||!state_->owner)return {OwnerOutcome::Rejected,"no-owner-session",0,0,true};
+    const OwnerReceipt result=state_->owner->reconcile(before,candidate);
+    if(result.settled){state_->prepared.reset();state_->owner.reset();state_->carrier.Nullify();}return result;
+}
+
+#if DEBUG
+bool OcafOwnerService::installSyntheticFixture(double metersPerUnit,TDF_Label& carrier)noexcept{
+    carrier.Nullify();
+    try{
+        if(!state_||state_->document.IsNull()||state_->document->HasOpenCommand()||blocksOtherWork()
+            ||!std::isfinite(metersPerUnit)||metersPerUnit<=0)return false;
+        XCAFDoc_DocumentTool::SetLengthUnit(state_->document,metersPerUnit);
+        const TopoDS_Shape sourceShape=BRepPrimAPI_MakeBox(10,8,6).Shape();
+        const Handle(XCAFDoc_ShapeTool) shapes=XCAFDoc_DocumentTool::ShapeTool(state_->document->Main());
+        carrier=shapes->AddShape(sourceShape,Standard_False,Standard_False);
+        if(carrier.IsNull()||!state_->wrapper.MigrateLegacyIdentifiers())return false;
+        const auto uuid=[](std::uint8_t seed){retained_recipe::UUID value{};for(std::size_t i=0;i<value.size();++i)value[i]=std::uint8_t(seed+i);return value;};
+        retained_recipe::OwnerKey key;
+        if(!retained_solid::ReadUUID(state_->document->Main(),DocumentIdentifierAttributeID(),key.document)
+            ||!retained_solid::ReadUUID(carrier,EntityIdentifierAttributeID(),key.entity)
+            ||!retained_solid::ReadUUID(carrier,DefinitionIdentifierAttributeID(),key.definition))return false;
+        composite_recipe::Definition graph=composite_recipe::MakeV3Definition();graph.owner=key;
+        graph.outputNode=uuid(71);graph.issuance.nextLocalID=4;
+        composite_recipe::SourceNode source;source.node=uuid(40);source.localID=1;
+        source.original={key.document,uuid(10),uuid(20),uuid(30)};
+        source.recipe.kind=composite_recipe::RecipeKind::Profile;
+        profile::Parameters profile;profile.metersPerUnit=metersPerUnit;profile.definition.plane=0;profile.definition.depth=6;
+        profile.definition.points={gp_Pnt2d(0,0),gp_Pnt2d(10,0),gp_Pnt2d(10,8),gp_Pnt2d(0,8)};
+        std::vector<double> values;if(!profile::Encode(profile,values)
+            ||!composite_recipe::EncodeScalarRecipe(source.recipe.kind,std::uint32_t(profile::SchemaFor(profile)),values,source.recipe.bytes))return false;
+        source.recipe.schema=std::uint32_t(profile::SchemaFor(profile));source.inputToCarrier.sourceMetersPerUnit=metersPerUnit;
+        source.inputToCarrier.carrierMetersPerUnit=metersPerUnit;source.shapeSlot=0;
+        std::vector<std::uint8_t> sourceBytes;if(!ExactBytes(sourceShape,sourceBytes)
+            ||!composite_recipe::Hash(sourceBytes,source.commitments.geometry)
+            ||!composite_recipe::Hash(source.recipe.bytes,source.commitments.recipe))return false;
+        source.commitments.placement.fill(41);source.commitments.material.fill(42);source.commitments.groups.fill(43);
+        graph.nodes.push_back({source});
+        composite_recipe::FeatureNode feature;feature.node=uuid(70);feature.feature=uuid(80);feature.localID=2;
+        feature.kind=RegistryProbe::SyntheticKind;feature.codecVersion=RegistryProbe::SyntheticCodec;
+        feature.inputs={source.node};feature.parameters={1};graph.nodes.push_back({feature});
+        composite_recipe::FeatureNode suffix;suffix.node=graph.outputNode;suffix.feature=uuid(81);suffix.localID=3;
+        suffix.kind=RegistryProbe::SyntheticKind;suffix.codecVersion=RegistryProbe::SyntheticCodec;
+        suffix.inputs={feature.node};suffix.parameters={1};graph.nodes.push_back({suffix});
+        auto payload=std::make_shared<composite_recipe::Payload>();payload->definition=graph;payload->sourceShapes={sourceShape};
+        if(!composite_recipe::EncodeV3(graph,state_->registry,state_->sources,payload->bytes))return false;
+        const TDF_Label record=carrier.FindChild(composite_recipe::MinimumRecordTag,Standard_True);
+        Handle(composite_recipe::Attribute) attribute=new composite_recipe::Attribute();record.AddAttribute(attribute);
+        if(!state_->wrapper.StagePartBooleanPayload(record,payload))return false;
+        TNaming_Builder(record).Select(sourceShape,sourceShape);state_->document->ClearUndos();
+        state_->document->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+        composite_recipe::Record readback;return composite_recipe::Read(state_->document,carrier,readback)
+            &&readback.value&&readback.value->bytes==payload->bytes;
+    }catch(...){carrier.Nullify();return false;}
+}
+
+std::map<std::string,bool> OcafOwnerService::debugLifecycle(double metersPerUnit)noexcept{
+    std::map<std::string,bool> result{{"fixture-installed",false},{"prepare-read-only",false},
+        {"one-command",false},{"undo-redo-exact",false},{"cold-reopen-later-edit",false},
+        {"release-registry-refuses",false},{"suffix-failure-no-mutation",false},
+        {"stale-middle-node-refused",false},{"forged-facts-refused",false}};
+    try{
+        DebugRegistryScope scope(state_->registry);TDF_Label fixture;
+        if(!installSyntheticFixture(metersPerUnit,fixture))return result;result["fixture-installed"]=true;
+        composite_recipe::Record before;if(!composite_recipe::Read(state_->document,fixture,before)||!before.value)return result;
+        const auto* feature=std::get_if<composite_recipe::FeatureNode>(&before.value->definition.nodes[1].value);if(!feature)return result;
+        CompleteFence observedFence;composite_recipe::Definition observedGraph;std::vector<SourceValue> observedSources;
+        state_->carrier=fixture;
+        if(!state_->capture(observedFence,observedGraph,observedSources))return result;
+        ReplayBudget observationBudget;const ReplayResult observedReplay=ReplayDetached(
+            observedGraph,state_->registry,state_->sources,observedSources,observationBudget);
+        retained_recipe::GraphCurrentnessFacts facts;facts.owner=observedGraph.owner;facts.outputNode=observedGraph.outputNode;
+        facts.graph=observedFence.graph;facts.outputShape=observedFence.output;facts.readSet=observedFence.metadata;
+        facts.sourceMetadata=observedFence.metadata;facts.units=observedFence.revision.ownerPlacement;
+        facts.dependencyFence=observedFence.history;facts.ownerNonce=1;facts.persistenceInstalled=true;
+        for(const auto& item:observedReplay.observations)facts.orderedNodes.push_back({item.node,item.feature,
+            item.key.kind,item.key.codecVersion,item.inputs,item.payload,item.output,item.proof});
+        const bool factsValid=observedReplay.replayed()&&retained_recipe::Valid(facts,observedGraph,state_->registry);
+        composite_recipe::Definition staleGraph=observedGraph;
+        std::get<composite_recipe::FeatureNode>(staleGraph.nodes[1].value).parameters={9};
+        result["stale-middle-node-refused"]=factsValid&&!retained_recipe::Valid(facts,staleGraph,state_->registry);
+        auto forged=facts;forged.ownerNonce=0;
+        result["forged-facts-refused"]=factsValid&&!retained_recipe::Valid(forged,observedGraph,state_->registry);
+        MutationRequest request;request.kind=MutationKind::EditFeature;
+        request.target={before.value->definition.owner,feature->node,feature->feature};request.codec={feature->kind,feature->codecVersion};request.typedParameters={2};
+        OwnerReceipt preparedReceipt;const int historyBefore=state_->document->GetAvailableUndos();
+        const auto change=prepare(fixture,request,ReplayBudget(),preparedReceipt);
+        composite_recipe::Record stillBefore;result["prepare-read-only"]=change&&preparedReceipt.reason=="prepared"
+            &&!state_->document->HasOpenCommand()&&state_->document->GetAvailableUndos()==historyBefore
+            &&composite_recipe::Read(state_->document,fixture,stillBefore)&&stillBefore.value&&stillBefore.value->bytes==before.value->bytes;
+        if(!change)return result;const OwnerReceipt committed=apply(change);
+        composite_recipe::Record after;if(!composite_recipe::Read(state_->document,fixture,after)||!after.value)return result;
+        result["one-command"]=committed.outcome==OwnerOutcome::Committed&&committed.measuredHistoryDelta==1
+            &&state_->document->GetAvailableUndos()==historyBefore+1&&after.value->bytes!=before.value->bytes;
+        const bool undo=state_->wrapper.undo();composite_recipe::Record undone;
+        const bool undoExact=undo&&composite_recipe::Read(state_->document,fixture,undone)&&undone.value&&undone.value->bytes==before.value->bytes;
+        const bool redo=state_->wrapper.redo();composite_recipe::Record redone;
+        result["undo-redo-exact"]=undoExact&&redo&&composite_recipe::Read(state_->document,fixture,redone)&&redone.value&&redone.value->bytes==after.value->bytes;
+        MutationRequest invalid=request;invalid.typedParameters={0};OwnerReceipt refused;
+        const int historyAtRefusal=state_->document->GetAvailableUndos();const auto noChange=prepare(fixture,invalid,ReplayBudget(),refused);
+        composite_recipe::Record refusedRead;result["suffix-failure-no-mutation"]=!noChange&&!state_->document->HasOpenCommand()
+            &&state_->document->GetAvailableUndos()==historyAtRefusal&&composite_recipe::Read(state_->document,fixture,refusedRead)
+            &&refusedRead.value&&refusedRead.value->bytes==after.value->bytes;
+        NSString* base=[NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"p1-registry-%@.p1-fixture",NSUUID.UUID.UUIDString]];
+        const std::string saved=state_->wrapper.save(base.UTF8String);if(saved.empty())return result;
+        Handle(OcctDocument) reopened=new OcctDocument();Core3DDefineSafeBinXCAFFormat(reopened->myApp);
+        Handle(TDocStd_Document) candidate;Core3DBeginSafeBinaryRead();
+        const PCDM_ReaderStatus status=reopened->myApp->Open(TCollection_ExtendedString(saved.c_str(),Standard_True),candidate);
+        if(!Core3DSafeBinaryReadWasRejected()&&status==PCDM_RS_OK&&!candidate.IsNull()){
+            reopened->myOcafDoc=candidate;reopened->ObserveSuccessfulNativeDocumentAdoption();
+            candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+            std::vector<composite_recipe::Record> records;if(composite_recipe::ReadAll(candidate,records)&&records.size()==1){
+                OcafOwnerService cold(*reopened,state_->registry,state_->sources);const auto* coldFeature=std::get_if<composite_recipe::FeatureNode>(&records[0].value->definition.nodes[1].value);
+                if(coldFeature){MutationRequest later=request;later.target={records[0].value->definition.owner,coldFeature->node,coldFeature->feature};later.typedParameters={3};
+                    OwnerReceipt laterReceipt;const auto laterChange=cold.prepare(records[0].owner,later,ReplayBudget(),laterReceipt);
+                    const OwnerReceipt laterApplied=laterChange?cold.apply(laterChange):OwnerReceipt();
+                    result["cold-reopen-later-edit"]=laterApplied.outcome==OwnerOutcome::Committed&&laterApplied.measuredHistoryDelta==1;}
+            }
+            reopened->CloseNativeSession();
+        }
+        const RegistryView* override=DebugRegistryOverride();DebugRegistryOverride()=nullptr;
+        Handle(OcctDocument) releaseReader=new OcctDocument();Core3DDefineSafeBinXCAFFormat(releaseReader->myApp);
+        Handle(TDocStd_Document) refusedDocument;Core3DBeginSafeBinaryRead();
+        const PCDM_ReaderStatus refusedStatus=releaseReader->myApp->Open(TCollection_ExtendedString(saved.c_str(),Standard_True),refusedDocument);
+        result["release-registry-refuses"]=Core3DSafeBinaryReadWasRejected()||refusedStatus!=PCDM_RS_OK||refusedDocument.IsNull();
+        DebugRegistryOverride()=override;releaseReader->CloseNativeSession();return result;
+    }catch(...){return result;}
+}
+#endif
+} // namespace core3d::retained_feature
+
 namespace core3d::part_boolean::owner {
 namespace {
 std::atomic<std::uint64_t> PartBooleanOwnerNonce{1};
@@ -11459,6 +11820,99 @@ bool HashBytes(const std::vector<std::uint8_t>& bytes, retained_recipe::Digest& 
 }
 void Append(std::vector<std::uint8_t>& destination, const retained_recipe::UUID& value) {
     destination.insert(destination.end(), value.begin(), value.end());
+}
+void Append(std::vector<std::uint8_t>& destination, double value) {
+    const std::uint64_t bits = retained_solid::Bits(value);
+    const auto bytes = Bytes(bits);
+    destination.insert(destination.end(), bytes.begin(), bytes.end());
+}
+void Append(std::vector<std::uint8_t>& destination, const std::string& value) {
+    const auto size = Bytes(std::uint64_t(value.size()));
+    destination.insert(destination.end(), size.begin(), size.end());
+    destination.insert(destination.end(), value.begin(), value.end());
+}
+XCAFDoc_VisMaterialPBR PBR(const MaterialValue& value) {
+    XCAFDoc_VisMaterialPBR material;
+    material.BaseColor = Quantity_ColorRGBA(
+        Quantity_Color(value.baseColorSRGB[0], value.baseColorSRGB[1],
+                       value.baseColorSRGB[2], Quantity_TOC_sRGB),
+        float(value.baseColorSRGB[3]));
+    material.Metallic = float(value.metallic);
+    material.Roughness = float(value.roughness);
+    return material;
+}
+bool AppendPBR(std::vector<std::uint8_t>& output,
+               const XCAFDoc_VisMaterialPBR& material) {
+    if (!material.IsDefined || !material.BaseColorTexture.IsNull()
+        || !material.MetallicRoughnessTexture.IsNull()
+        || !material.EmissiveTexture.IsNull()
+        || !material.OcclusionTexture.IsNull()
+        || !material.NormalTexture.IsNull()) return false;
+    const Quantity_Color& color = material.BaseColor.GetRGB();
+    for (double value : {double(color.Red()), double(color.Green()),
+                         double(color.Blue()), double(material.BaseColor.Alpha()),
+                         double(material.Metallic), double(material.Roughness),
+                         double(material.EmissiveFactor.x()),
+                         double(material.EmissiveFactor.y()),
+                         double(material.EmissiveFactor.z()),
+                         double(material.RefractionIndex)}) Append(output, value);
+    return true;
+}
+bool PreparedFaceMaterialManifest(
+    const std::vector<PreparedFaceMaterial>& bindings,
+    const Definition& definition,
+    std::vector<std::uint8_t>& output) {
+    output.clear();
+    try {
+        std::map<std::string, std::uint16_t> sorted;
+        for (const PreparedFaceMaterial& binding : bindings)
+            if (binding.materialIndex >= definition.materials.size()
+                || !sorted.emplace(binding.stableKey, binding.materialIndex).second)
+                return false;
+        for (const auto& [key, materialIndex] : sorted) {
+            Append(output, key);
+            if (!AppendPBR(output, PBR(definition.materials[materialIndex]))) return false;
+        }
+        return !output.empty();
+    } catch (...) { output.clear(); return false; }
+}
+bool CaptureFaceMaterialManifest(
+    const Handle(TDocStd_Document)& document, const TDF_Label& carrier,
+    std::vector<std::uint8_t>& exact,
+    std::vector<std::uint8_t>& semantic,
+    std::size_t& count) {
+    exact.clear(); semantic.clear(); count = 0;
+    try {
+        const Handle(XCAFDoc_ShapeTool) shapes =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const Handle(XCAFDoc_VisMaterialTool) materials =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (shapes.IsNull() || materials.IsNull()) return false;
+        struct Row { std::string entry; XCAFDoc_VisMaterialPBR material; };
+        std::map<std::string, Row> rows;
+        for (TDF_ChildIterator it(carrier, Standard_True); it.More(); it.Next()) {
+            const TDF_Label label = it.Value();
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) continue;
+            const Handle(XCAFDoc_VisMaterial) stored =
+                XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+            if (stored.IsNull() || !stored->HasPbrMaterial()) continue;
+            std::string key;
+            if (!retained_part_boolean::ExactShapeBytes(shape, key)) return false;
+            TCollection_AsciiString entry;
+            TDF_Tool::Entry(label, entry);
+            if (!rows.emplace(key, Row{entry.ToCString(), stored->PbrMaterial()}).second)
+                return false;
+        }
+        for (const auto& [key, row] : rows) {
+            Append(semantic, key);
+            if (!AppendPBR(semantic, row.material)) return false;
+            Append(exact, key); Append(exact, row.entry);
+            if (!AppendPBR(exact, row.material)) return false;
+        }
+        count = rows.size();
+        return true;
+    } catch (...) { exact.clear(); semantic.clear(); count = 0; return false; }
 }
 HistoryWitness ObserveHistory(const Handle(TDocStd_Document)& document,
                               std::uint64_t serial) {
@@ -11586,6 +12040,10 @@ bool PartBooleanOwner::captureNativeState(const TDF_Label& carrier,
         const bool marked = document_->Main().FindAttribute(PartBooleanCommandMarkerID(), marker)
             && !marker.IsNull();
         output.scopes.push_back(Bytes(marked ? std::uint64_t(marker->Get()) : 0));
+        std::size_t faceMaterialCount = 0;
+        if (!CaptureFaceMaterialManifest(document_, carrier,
+                output.faceMaterialLabels, output.faceMaterials,
+                faceMaterialCount)) return false;
         output.graphCensus = record.value->definition.nodes.size()
             + std::size_t(freeShapes.Length());
         output.modelRevision = std::uint64_t(document_->GetData()->Time());
@@ -11675,6 +12133,93 @@ bool PartBooleanOwner::resolveAnalytic(
     } catch (...) { return false; }
 }
 
+bool PartBooleanOwner::resolveShell(
+    const TDF_Label& carrier, composite_recipe::Record& record,
+    retained_recipe::OwnerSnapshot& snapshot, ShellEditDefinition& shell,
+    retained_recipe::NativeCurrentnessFacts& facts) const noexcept {
+    try {
+        DocumentSnapshot native;
+        if (!captureNativeState(carrier, native, &record)
+            || record.value->definition.nodes.size() != 3) return false;
+        const auto* feature = std::get_if<composite_recipe::FeatureNode>(
+            &record.value->definition.nodes.back().value);
+        build::ShellCompositeRequest request;
+        if (!feature || feature->kind != composite_recipe::PartBooleanFeatureKind
+            || feature->codecVersion != composite_recipe::PartBooleanShellFeatureCodec
+            || !build::DecodeShellComposite(record.value->definition, request)) return false;
+        retained_recipe::RevisionFence fence;
+        fence.documentGeneration = nonce_;
+        fence.modelRevision = native.modelRevision ? native.modelRevision : 1;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, fence.effectiveMetersPerUnit)
+            || !HashBytes(native.scopes[1], fence.ownerShape)
+            || !HashBytes(native.scopes[0], fence.ownerRecipe)
+            || !HashBytes(native.scopes[5], fence.ownerPlacement)
+            || !HashBytes(native.scopes[5], fence.ownerMaterial)) return false;
+        for (const auto& node : record.value->definition.nodes) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            fence.dependencies.push_back({{record.value->definition.owner, source->node,
+                source->original.sourceFeature}, source->commitments.geometry,
+                source->commitments.recipe, source->commitments.placement,
+                source->commitments.material, source->commitments.groups});
+        }
+        retained_recipe::OwnerSnapshot structural = retained_recipe::Snapshot(
+            record.value->definition, fence);
+        if (structural.sources.size() != 2) return false;
+        const auto reads = Reads(structural);
+        const auto built = build::BuildShellComposite(request, reads, reads);
+        const auto proof = correspondence::ProveShellComposite(request, built);
+        const auto fixed = rebuild::CheckShellComposite(record.value->definition, reads);
+        std::vector<std::uint8_t> rebuilt, left, right;
+        if (!proof.proven() || !fixed.fixedPoint()
+            || !ShapeBytes(built.candidate.solid, rebuilt)
+            || !ShapeBytes(built.sources[0], left) || !ShapeBytes(built.sources[1], right)
+            || rebuilt != native.scopes[1] || left != native.scopes[2]
+            || right != native.scopes[3]) return false;
+        facts.owner = record.value->definition.owner;
+        facts.outputNode = record.value->definition.outputNode;
+        facts.feature = feature->feature;
+        facts.ownerNonce = nonce_;
+        facts.builderInstalled = built.complete;
+        facts.proofInstalled = proof.proven() && fixed.fixedPoint();
+        facts.ownerInstalled = boundTo(document_);
+        facts.persistenceInstalled = record.value->bytes == native.scopes[0]
+            && record.value->sourceShapes.size() == 2;
+        if (!HashBytes(native.scopes[0], facts.graph)
+            || !HashBytes(native.scopes[1], facts.outputShape)) return false;
+        std::vector<std::uint8_t> readSet;
+        for (const auto& dependency : fence.dependencies) {
+            Append(readSet, dependency.locator.node);
+            readSet.insert(readSet.end(), dependency.geometry.begin(), dependency.geometry.end());
+            readSet.insert(readSet.end(), dependency.recipe.begin(), dependency.recipe.end());
+            readSet.insert(readSet.end(), dependency.placement.begin(), dependency.placement.end());
+            readSet.insert(readSet.end(), dependency.material.begin(), dependency.material.end());
+            readSet.insert(readSet.end(), dependency.groups.begin(), dependency.groups.end());
+        }
+        if (!HashBytes(readSet, facts.readSet)) return false;
+        snapshot = retained_recipe::Snapshot(record.value->definition, fence, &facts);
+        retained_recipe::AdmissionRule rule;
+        rule.operation = retained_recipe::OperationKind::EditInput;
+        rule.featureKind = composite_recipe::PartBooleanFeatureKind;
+        rule.featureCodecVersion = composite_recipe::PartBooleanShellFeatureCodec;
+        rule.selectorVersion = request.definition.versions.selector;
+        rule.proofProfile = request.definition.versions.proof;
+        HashBytes(feature->parameters, rule.parameterBounds);
+        rule.nativeBuilderInstalled = facts.builderInstalled;
+        rule.nativeProofInstalled = facts.proofInstalled;
+        rule.nativeOwnerInstalled = facts.ownerInstalled;
+        rule.retainedInputsPersistenceInstalled = facts.persistenceInstalled;
+        for (const auto& source : snapshot.sources)
+            rule.orderedSourceKinds.push_back(source.recipe.kind);
+        const auto admitted = retained_recipe::Evaluate(snapshot, rule);
+        if (!admitted.admitted() || admitted.detachedCandidateOnly) return false;
+        shell.feature = std::move(request.definition);
+        shell.profiles = std::move(request.profiles);
+        shell.placements = std::move(request.placements);
+        return true;
+    } catch (...) { return false; }
+}
+
 CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
     CaptureOutcome output;
     try {
@@ -11685,9 +12230,17 @@ CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
         composite_recipe::Record record;
         retained_recipe::OwnerSnapshot snapshot;
         AnalyticDefinition analytic;
+        ShellEditDefinition shell;
         retained_recipe::NativeCurrentnessFacts facts;
         DocumentSnapshot before, after;
-        if (!resolveAnalytic(carrier, record, snapshot, analytic, facts)
+        bool isShell = false;
+        bool resolved = resolveAnalytic(carrier, record, snapshot, analytic, facts);
+        if (!resolved) {
+            record = {}; snapshot = {}; facts = {};
+            isShell = resolveShell(carrier, record, snapshot, shell, facts);
+            resolved = isShell;
+        }
+        if (!resolved
             || !captureNativeState(carrier, before)
             || !captureNativeState(carrier, after) || !(before == after)) {
             output.receipt = refuse("capture-incomplete-or-noncurrent"); return output;
@@ -11699,6 +12252,7 @@ CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
         value->carrier = carrier; value->record = record.label;
         value->snapshot = std::move(snapshot); value->graph = record.value->definition;
         value->analytic = std::move(analytic); value->sourceShapes = record.value->sourceShapes;
+        value->shell = isShell; value->shellEdit = std::move(shell);
         value->baseline = std::move(before); value->currentness = facts;
         activeSession_ = value->session; output.handle = std::move(value);
         output.receipt = result(Outcome::Unchanged, "captured", activeSession_);
@@ -11719,11 +12273,28 @@ bool PartBooleanOwner::describe(const TDF_Label& carrier, AnalyticDefinition& ou
     } catch (...) { return false; }
 }
 
+bool PartBooleanOwner::describeShell(
+    const TDF_Label& carrier, ShellEditDefinition& output) const noexcept {
+    try {
+        if (carrier.IsNull() || activeSession_ != 0 || recoverySession_ != 0
+            || document_.IsNull() || document_->HasOpenCommand()) return false;
+        DocumentSnapshot before, after; composite_recipe::Record record;
+        retained_recipe::OwnerSnapshot snapshot;
+        retained_recipe::NativeCurrentnessFacts currentness;
+        ShellEditDefinition value;
+        if (!captureNativeState(carrier, before)
+            || !resolveShell(carrier, record, snapshot, value, currentness)
+            || !captureNativeState(carrier, after) || !(before == after)) return false;
+        output = std::move(value); return true;
+    } catch (...) { return false; }
+}
+
 bool PartBooleanOwner::buildPrepared(
     const Capture& capture, const AnalyticDefinition& requested,
     PreparedBooleanDocumentChange& prepared) const noexcept {
     try {
-        if (!Valid(requested) || requested.inputs[0].rootNode != capture.analytic.inputs[0].rootNode
+        if (capture.shell || !Valid(requested)
+            || requested.inputs[0].rootNode != capture.analytic.inputs[0].rootNode
             || requested.inputs[1].rootNode != capture.analytic.inputs[1].rootNode
             || requested.inputs[0].originalSourceFeature != capture.analytic.inputs[0].originalSourceFeature
             || requested.inputs[1].originalSourceFeature != capture.analytic.inputs[1].originalSourceFeature)
@@ -11771,12 +12342,114 @@ bool PartBooleanOwner::buildPrepared(
     } catch (...) { return false; }
 }
 
+bool PartBooleanOwner::buildPrepared(
+    const Capture& capture, const ShellEditDefinition& requested,
+    PreparedBooleanDocumentChange& prepared) const noexcept {
+    try {
+        if (!capture.shell || !Valid(requested.feature)
+            || requested.feature.inputs[0].rootNode
+                != capture.shellEdit.feature.inputs[0].rootNode
+            || requested.feature.inputs[1].rootNode
+                != capture.shellEdit.feature.inputs[1].rootNode
+            || requested.feature.inputs[0].originalSourceFeature
+                != capture.shellEdit.feature.inputs[0].originalSourceFeature
+            || requested.feature.inputs[1].originalSourceFeature
+                != capture.shellEdit.feature.inputs[1].originalSourceFeature
+            || requested.feature.versions.serializer
+                != capture.shellEdit.feature.versions.serializer
+            || requested.feature.versions.build
+                != capture.shellEdit.feature.versions.build
+            || requested.feature.versions.proof
+                != capture.shellEdit.feature.versions.proof
+            || requested.feature.versions.selector
+                != capture.shellEdit.feature.versions.selector
+            || requested.feature.versions.material
+                != capture.shellEdit.feature.versions.material) return false;
+        build::ShellCompositeRequest request;
+        request.definition = requested.feature;
+        request.profiles = requested.profiles;
+        request.placements = requested.placements;
+        const auto reads = Reads(capture.snapshot);
+        const auto built = build::BuildShellComposite(request, reads, reads);
+        const auto proof = correspondence::ProveShellComposite(request, built);
+        if (!built.complete || !proof.proven()) return false;
+        prepared.shell = true;
+        prepared.shellEdit = requested;
+        prepared.graph = capture.graph;
+        prepared.sources.assign(built.sources.begin(), built.sources.end());
+        prepared.result = built.candidate.solid;
+        for (const correspondence::FaceBinding& face : proof.faces)
+            prepared.faceMaterials.push_back({face.face, face.stableKey,
+                face.region, face.materialIndex});
+        if (prepared.faceMaterials.empty()) return false;
+        std::size_t sourceIndex = 0;
+        for (auto& node : prepared.graph.nodes) {
+            auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            if (sourceIndex >= 2) return false;
+            std::vector<double> scalars;
+            if (!profile::Encode(requested.profiles[sourceIndex], scalars)) return false;
+            source->recipe.schema = std::uint32_t(
+                profile::SchemaFor(requested.profiles[sourceIndex]));
+            if (!composite_recipe::EncodeScalarRecipe(source->recipe.kind,
+                    source->recipe.schema, scalars, source->recipe.bytes)) return false;
+            source->inputToCarrier = requested.placements[sourceIndex];
+            retained_recipe::Digest geometry, recipe, placement;
+            const auto geometryBytes = Bytes(built.sourceBytes[sourceIndex]);
+            std::vector<std::uint8_t> placementBytes;
+            for (double scalar : source->inputToCarrier.matrix)
+                Append(placementBytes, scalar);
+            Append(placementBytes, source->inputToCarrier.sourceMetersPerUnit);
+            Append(placementBytes, source->inputToCarrier.carrierMetersPerUnit);
+            if (!HashBytes(geometryBytes, geometry)
+                || !composite_recipe::Hash(source->recipe.bytes, recipe)
+                || !HashBytes(placementBytes, placement)) return false;
+            source->commitments.geometry = geometry;
+            source->commitments.recipe = recipe;
+            source->commitments.placement = placement;
+            auto& binding = prepared.shellEdit.feature.inputs[sourceIndex];
+            binding.commitments.geometry = geometry;
+            binding.commitments.recipe = recipe;
+            binding.commitments.placement = placement;
+            ++sourceIndex;
+        }
+        auto* feature = std::get_if<composite_recipe::FeatureNode>(
+            &prepared.graph.nodes.back().value);
+        if (sourceIndex != 2 || !feature
+            || !Encode(prepared.shellEdit.feature, feature->parameters)) return false;
+        const auto fixed = rebuild::CheckShellComposite(prepared.graph, reads);
+        if (!fixed.fixedPoint()) return false;
+        std::vector<std::uint8_t> graph, resultBytes;
+        if (!composite_recipe::Encode(prepared.graph, graph)
+            || !ShapeBytes(prepared.result, resultBytes)) return false;
+        prepared.expected = capture.baseline;
+        prepared.expected.scopes[0] = std::move(graph);
+        prepared.expected.scopes[1] = std::move(resultBytes);
+        prepared.expected.scopes[2] = Bytes(built.sourceBytes[0]);
+        prepared.expected.scopes[3] = Bytes(built.sourceBytes[1]);
+        prepared.expected.scopes.back() = Bytes(capture.session);
+        prepared.expected.faceMaterialLabels.clear();
+        if (!PreparedFaceMaterialManifest(prepared.faceMaterials,
+                prepared.shellEdit.feature,
+                prepared.expected.faceMaterials)) return false;
+        prepared.currentness = capture.currentness;
+        prepared.currentness.ownerNonce = nonce_;
+        prepared.currentness.builderInstalled = built.complete;
+        prepared.currentness.proofInstalled = proof.proven() && fixed.fixedPoint();
+        if (!HashBytes(prepared.expected.scopes[0], prepared.currentness.graph)
+            || !HashBytes(prepared.expected.scopes[1],
+                          prepared.currentness.outputShape)) return false;
+        return true;
+    } catch (...) { return false; }
+}
+
 PrepareOutcome PartBooleanOwner::prepare(const std::shared_ptr<const Capture>& capture,
                                          const AnalyticDefinition& requested,
                                          FaultPoint fault) noexcept {
     PrepareOutcome output;
     try {
-        if (!capture || capture->ownerNonce != nonce_ || capture->session != activeSession_
+        if (!capture || capture->shell || capture->ownerNonce != nonce_
+            || capture->session != activeSession_
             || capture->documentIdentity != documentIdentity_ || document_->HasOpenCommand()
             || !owner_.myNativeAuthority
             || !owner_.myNativeAuthority->Matches(capture->opening, documentIdentity_, true, false)) {
@@ -11799,11 +12472,52 @@ PrepareOutcome PartBooleanOwner::prepare(const std::shared_ptr<const Capture>& c
     } catch (...) { output.receipt = refuse("prepare-exception"); return output; }
 }
 
+PrepareOutcome PartBooleanOwner::prepare(
+    const std::shared_ptr<const Capture>& capture,
+    const ShellEditDefinition& requested, FaultPoint fault) noexcept {
+    PrepareOutcome output;
+    try {
+        if (!capture || !capture->shell || capture->ownerNonce != nonce_
+            || capture->session != activeSession_
+            || capture->documentIdentity != documentIdentity_
+            || document_->HasOpenCommand() || !owner_.myNativeAuthority
+            || !owner_.myNativeAuthority->Matches(
+                capture->opening, documentIdentity_, true, false)) {
+            output.receipt = refuse("prepare-shell-foreign-handle"); return output;
+        }
+        DocumentSnapshot before, after;
+        if (!captureNativeState(capture->carrier, before)
+            || !(before == capture->baseline)
+            || fault == FaultPoint::F1DetachedDependency) {
+            output.receipt = refuse("prepare-shell-stale-or-dependent-failure");
+            return output;
+        }
+        auto value = std::make_shared<PreparedBooleanDocumentChange>();
+        value->capture = capture; value->request = ++nextRequest_; value->fault = fault;
+        if (!buildPrepared(*capture, requested, *value)
+            || !captureNativeState(capture->carrier, after) || !(before == after)) {
+            output.receipt = refuse("prepare-shell-not-read-only-or-unproved");
+            return output;
+        }
+        output.handle = std::move(value);
+        output.receipt = result(Outcome::Unchanged, "prepared", activeSession_);
+        return output;
+    } catch (...) { output.receipt = refuse("prepare-shell-exception"); return output; }
+}
+
 bool PartBooleanOwner::stagePrepared(const PreparedBooleanDocumentChange& prepared) noexcept {
     try {
         if (!document_->HasOpenCommand() || prepared.sources.size() != 2) return false;
         const TDF_Label carrier = prepared.capture->carrier;
         Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        if (shapes.IsNull()) return false;
+        std::vector<TDF_Label> previousFaceLabels;
+        for (TDF_ChildIterator it(carrier, Standard_True); it.More(); it.Next()) {
+            const TDF_Label label = it.Value();
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (!shape.IsNull() && shape.ShapeType() == TopAbs_FACE)
+                previousFaceLabels.push_back(label);
+        }
         shapes->SetShape(carrier, prepared.result);
         if (prepared.fault == FaultPoint::F5AfterShape) return false;
         auto payload = std::make_shared<composite_recipe::Payload>();
@@ -11812,6 +12526,48 @@ bool PartBooleanOwner::stagePrepared(const PreparedBooleanDocumentChange& prepar
         payload->sourceShapes = prepared.sources;
         if (!owner_.StagePartBooleanPayload(prepared.capture->record, payload)) return false;
         TNaming_Builder(prepared.capture->record).Select(prepared.result, prepared.result);
+        if (prepared.shell) {
+        const Handle(TDF_TagSource) tags = TDF_TagSource::Set(carrier);
+        Standard_Integer highWater = tags->Get();
+        for (TDF_ChildIterator child(carrier, Standard_False); child.More(); child.Next())
+            highWater = std::max(highWater, child.Value().Tag());
+        if (highWater > std::numeric_limits<Standard_Integer>::max()
+                - Standard_Integer(prepared.faceMaterials.size())) return false;
+        tags->Set(highWater);
+        std::vector<TDF_Label> activeFaceLabels;
+        std::vector<OcctPBRMaterialUpdate> materialUpdates;
+        activeFaceLabels.reserve(prepared.faceMaterials.size());
+        materialUpdates.reserve(prepared.faceMaterials.size());
+        for (const PreparedFaceMaterial& binding : prepared.faceMaterials) {
+            if (binding.materialIndex >= prepared.shellEdit.feature.materials.size()
+                || binding.face.IsNull() || !shapes->IsSubShape(carrier, binding.face))
+                return false;
+            const TDF_Label label = shapes->AddSubShape(carrier, binding.face);
+            if (label.IsNull()) return false;
+            for (const TDF_Label& existing : activeFaceLabels)
+                if (existing.IsEqual(label)) return false;
+            activeFaceLabels.push_back(label);
+            const XCAFDoc_VisMaterialPBR material = PBR(
+                prepared.shellEdit.feature.materials[binding.materialIndex]);
+            materialUpdates.push_back({label, material,
+                Handle(Image_Texture)(), Handle(Image_Texture)()});
+        }
+        const Handle(XCAFDoc_VisMaterialTool) materials =
+            XCAFDoc_DocumentTool::VisMaterialTool(document_->Main());
+        if (materials.IsNull()) return false;
+        for (const TDF_Label& previous : previousFaceLabels) {
+            const bool retained = std::any_of(activeFaceLabels.begin(),
+                activeFaceLabels.end(), [&](const TDF_Label& value) {
+                    return value.IsEqual(previous);
+                });
+            if (!retained) {
+                materials->UnSetShapeMaterial(previous);
+                previous.ForgetAllAttributes(Standard_True);
+            }
+        }
+        if (materialUpdates.size() != prepared.faceMaterials.size()
+            || !owner_.SaveObjectPBRMaterials(materialUpdates)) return false;
+        }
         if (prepared.fault == FaultPoint::F6AfterInputs) return false;
         // Source names, groups, visibility and scalar materials are immutable
         // values in the strict analytic payload. Carrier presentation metadata
@@ -11873,11 +12629,12 @@ Receipt PartBooleanOwner::apply(
         if (!stagePrepared(*prepared)) throw std::runtime_error("stage");
         DocumentSnapshot staged;
         if (!captureNativeState(prepared->capture->carrier, staged)
-            || !staged.semanticEquals(prepared->expected)) throw std::runtime_error("readback");
+            || !staged.preparedSemanticEquals(prepared->expected))
+            throw std::runtime_error("readback");
         if (prepared->fault == FaultPoint::F7BeforeClose) throw std::runtime_error("F7");
         const Standard_Boolean added = document_->CommitCommand();
         recoveryBaseline_ = prepared->capture->baseline;
-        recoveryExpected_ = prepared->expected;
+        recoveryExpected_ = staged;
         recoverySession_ = activeSession_; activeSession_ = 0;
         if (document_->HasOpenCommand() || !added)
             return result(Outcome::RecoveryRequired, "close-outcome-unproved", recoverySession_);
@@ -11889,7 +12646,7 @@ Receipt PartBooleanOwner::apply(
         const bool oneDelta = exactlyOneOwnedDelta(recoveryHistoryBefore_, observed);
         activeSession_ = 0; recoverySession_ = prepared->capture->session;
         if (!captureNativeState(prepared->capture->carrier, sealed)
-            || !sealed.semanticEquals(prepared->expected) || !oneDelta)
+            || !sealed.semanticEquals(recoveryExpected_) || !oneDelta)
             return result(Outcome::RecoveryRequired, "exact-delta-or-seal-unproved", recoverySession_);
         if (prepared->fault == FaultPoint::F10Presentation)
             return result(Outcome::RecoveryRequired, "committed-presentation-unsettled", recoverySession_);
@@ -11957,6 +12714,13 @@ PrepareOutcome InternalBooleanOperationSession::prepare(
         "session-not-captured", 0, 0, true, owner_.blocksOtherWork()}, {}};
     auto value = owner_.prepare(capture_, request, fault); prepared_ = value.handle; return value;
 }
+PrepareOutcome InternalBooleanOperationSession::prepare(
+    const ShellEditDefinition& request, FaultPoint fault) noexcept {
+    if (!capture_ || prepared_ || terminalSet_) return {{Outcome::Rejected,
+        "session-not-captured", 0, 0, true, owner_.blocksOtherWork()}, {}};
+    auto value = owner_.prepare(capture_, request, fault);
+    prepared_ = value.handle; return value;
+}
 Receipt InternalBooleanOperationSession::apply() noexcept {
     if (terminalSet_) return terminal_;
     terminal_ = owner_.apply(prepared_);
@@ -11980,6 +12744,195 @@ Receipt InternalBooleanOperationSession::reconcile() noexcept {
 
 #if DEBUG
 namespace {
+struct LegacyCorpusCaseObservation {
+    std::string key, primary, afterEdit, noopResave;
+    std::uint64_t unitBits = 0;
+    int storageVersion = 0;
+    bool direct = false, driverControls = false;
+    bool firstOpen = false, replay = false, laterEdit = false, undoRedo = false;
+    bool secondOpen = false, thirdOpen = false, completeInputs = false;
+    bool discardedOldHandles = false, wholeFilesEqual = false;
+    std::size_t afterEditLength = 0, noopLength = 0, firstDifference = 0;
+    std::string beforeGraph, reopenedGraph;
+    std::map<std::string, std::string> savedRecipeSHA256;
+    std::map<std::string, std::size_t> savedSourceSlotCount;
+};
+
+struct LegacyCorpusCollector {
+    std::map<std::string, std::vector<std::uint8_t>> blobs;
+    std::map<std::string, LegacyCorpusCaseObservation> cases;
+    std::string activeCase;
+    bool failed = false;
+
+    bool add(const std::string& name, std::vector<std::uint8_t> bytes) {
+        if (name.empty() || bytes.empty() || !blobs.emplace(name, std::move(bytes)).second) {
+            failed = true; return false;
+        }
+        return true;
+    }
+};
+
+thread_local LegacyCorpusCollector* N1LegacyCorpusCollector = nullptr;
+
+std::uint64_t N1ScalarBits(double value) noexcept {
+    std::uint64_t bits = 0; std::memcpy(&bits, &value, sizeof(bits)); return bits;
+}
+
+std::string N1CorpusHex64(std::uint64_t value) {
+    std::ostringstream out; out << "0x" << std::hex << std::setw(16)
+        << std::setfill('0') << value; return out.str();
+}
+
+std::string N1JSONText(const std::string& value) {
+    std::ostringstream out; out << '"';
+    for (unsigned char byte : value) {
+        if (byte == '"' || byte == '\\') out << '\\' << char(byte);
+        else if (byte >= 0x20 && byte < 0x7f) out << char(byte);
+        else out << "\\u00" << std::hex << std::setw(2) << std::setfill('0') << int(byte)
+                 << std::dec;
+    }
+    out << '"'; return out.str();
+}
+
+std::string N1CorpusCaseKey(double unit, TDocStd_FormatVersion version) {
+    const char* unitName = N1ScalarBits(unit) == N1ScalarBits(0.001) ? "mm"
+        : N1ScalarBits(unit) == N1ScalarBits(1.0) ? "m" : nullptr;
+    const char* mode = version == TDocStd_FormatVersion_CURRENT ? "direct"
+        : version == TDocStd_FormatVersion_VERSION_11 ? "indexed" : nullptr;
+    return unitName && mode ? std::string(unitName) + "-" + mode : std::string();
+}
+
+std::vector<std::uint8_t> N1ReadWholeFile(const std::string& path) {
+    std::ifstream stream(path, std::ios::in | std::ios::binary);
+    if (!stream) return {};
+    return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(stream),
+                                     std::istreambuf_iterator<char>());
+}
+
+template<std::size_t N>
+std::string N1UUIDHex(const std::array<std::uint8_t, N>& value) {
+    static const char hex[] = "0123456789abcdef";
+    std::string out; out.reserve(value.size() * 2);
+    for (std::uint8_t byte : value) { out.push_back(hex[byte >> 4]); out.push_back(hex[byte & 15]); }
+    return out;
+}
+
+bool N1FeatureAnalytic(const composite_recipe::Definition&,
+                       std::vector<std::uint8_t>&);
+
+bool N1CaptureRecord(const composite_recipe::Record& record, const char* phase) {
+    LegacyCorpusCollector* collector = N1LegacyCorpusCollector;
+    if (!collector) return true;
+    if (collector->activeCase.empty() || !record.value || record.value->sourceShapes.size() != 2) {
+        collector->failed = true; return false;
+    }
+    const std::string prefix = "native-" + collector->activeCase + "-";
+    std::vector<std::uint8_t> feature;
+    if (!N1FeatureAnalytic(record.value->definition, feature)) { collector->failed = true; return false; }
+    AnalyticDefinition analytic;
+    if (!DecodeAnalytic(feature, analytic)) { collector->failed = true; return false; }
+    std::vector<std::uint8_t> source0, source1, current;
+    if (!ShapeBytes(record.value->sourceShapes[0], source0)
+        || !ShapeBytes(record.value->sourceShapes[1], source1)
+        || !ShapeBytes(record.current, current)) { collector->failed = true; return false; }
+    std::array<std::vector<std::uint8_t>, 2> sourceRecipes;
+    std::size_t recipeCount = 0;
+    for (const auto& node : record.value->definition.nodes) {
+        const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+        if (!source) continue;
+        if (source->shapeSlot >= sourceRecipes.size() || !sourceRecipes[source->shapeSlot].empty()) {
+            collector->failed = true; return false;
+        }
+        sourceRecipes[source->shapeSlot] = source->recipe.bytes; ++recipeCount;
+    }
+    if (recipeCount != 2 || sourceRecipes[0].empty() || sourceRecipes[1].empty()) {
+        collector->failed = true; return false;
+    }
+    const std::string suffix(phase);
+    bool ok = collector->add(prefix + "sycr-" + suffix + ".bin", record.value->bytes)
+        && collector->add(prefix + "source-slot-0-" + suffix + ".brep", std::move(source0))
+        && collector->add(prefix + "source-slot-1-" + suffix + ".brep", std::move(source1))
+        && collector->add(prefix + "current-" + suffix + ".brep", std::move(current))
+        && collector->add(prefix + "source-recipe-0-" + suffix + ".bin", sourceRecipes[0])
+        && collector->add(prefix + "source-recipe-1-" + suffix + ".bin", sourceRecipes[1])
+        && collector->add(prefix + "feature-parameters-" + suffix + ".bin", std::move(feature));
+    auto& observation = collector->cases[collector->activeCase];
+    TCollection_AsciiString ownerEntry, recordEntry;
+    TDF_Tool::Entry(record.owner, ownerEntry); TDF_Tool::Entry(record.label, recordEntry);
+    std::ostringstream graph;
+    graph << "{\"ocafLabels\":{\"owner\":" << N1JSONText(ownerEntry.ToCString())
+          << ",\"record\":" << N1JSONText(recordEntry.ToCString())
+          << "},\"owner\":{\"document\":\"" << N1UUIDHex(record.value->definition.owner.document)
+          << "\",\"entity\":\"" << N1UUIDHex(record.value->definition.owner.entity)
+          << "\",\"definition\":\"" << N1UUIDHex(record.value->definition.owner.definition)
+          << "\"},\"nextLocalID\":" << record.value->definition.issuance.nextLocalID
+          << ",\"retiredLocalIDs\":[";
+    for (std::size_t index = 0; index < record.value->definition.issuance.retiredLocalIDs.size(); ++index) {
+        if (index) graph << ','; graph << record.value->definition.issuance.retiredLocalIDs[index];
+    }
+    graph << "],\"nodes\":[";
+    for (std::size_t index = 0; index < record.value->definition.nodes.size(); ++index) {
+        if (index) graph << ',';
+        const auto& node = record.value->definition.nodes[index];
+        graph << "{\"id\":\"" << N1UUIDHex(composite_recipe::NodeID(node))
+              << "\",\"localID\":" << composite_recipe::LocalID(node);
+        if (const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value))
+            graph << ",\"kind\":\"source\",\"slot\":" << source->shapeSlot
+                  << ",\"schema\":" << source->recipe.schema
+                  << ",\"sourceFeature\":\"" << N1UUIDHex(source->original.sourceFeature) << "\"";
+        else graph << ",\"kind\":\"feature\",\"feature\":\""
+                   << N1UUIDHex(std::get<composite_recipe::FeatureNode>(node.value).feature) << "\"";
+        graph << '}';
+    }
+    const TopoDS_Shape& a = record.value->sourceShapes[0];
+    const TopoDS_Shape& b = record.value->sourceShapes[1];
+    graph << "],\"shapeRelations\":{\"sourcesPartner\":" << (a.IsPartner(b) ? "true" : "false")
+          << ",\"sourcesSame\":" << (a.IsSame(b) ? "true" : "false")
+          << ",\"sourcesEqual\":" << (a.IsEqual(b) ? "true" : "false")
+          << ",\"source0CurrentPartner\":" << (a.IsPartner(record.current) ? "true" : "false")
+          << ",\"source1CurrentPartner\":" << (b.IsPartner(record.current) ? "true" : "false")
+          << "},\"orientations\":[" << int(a.Orientation()) << ',' << int(b.Orientation())
+          << ',' << int(record.current.Orientation()) << "],\"locationsIdentity\":["
+          << (a.Location().IsIdentity() ? "true" : "false") << ','
+          << (b.Location().IsIdentity() ? "true" : "false") << ','
+          << (record.current.Location().IsIdentity() ? "true" : "false")
+          << "],\"analyticInputs\":[";
+    for (std::size_t index = 0; index < analytic.inputs.size(); ++index) {
+        if (index) graph << ',';
+        const auto& input = analytic.inputs[index];
+        graph << "{\"name\":" << N1JSONText(input.originalName)
+              << ",\"visible\":" << (input.originallyVisible ? "true" : "false")
+              << ",\"materialID\":\"" << N1UUIDHex(input.originalMaterial.identifier)
+              << "\",\"materialKind\":" << int(input.originalMaterial.kind)
+              << ",\"materialResource\":\"" << N1UUIDHex(input.originalMaterial.resource)
+              << "\",\"materialResourceDigest\":\""
+              << N1UUIDHex(input.originalMaterial.resourceDigest)
+              << "\",\"groups\":[";
+        for (std::size_t group = 0; group < input.originalGroups.size(); ++group) {
+            if (group) graph << ','; graph << N1JSONText(input.originalGroups[group]);
+        }
+        graph << "],\"scalarBits\":[";
+        bool firstScalar = true;
+        const auto scalar = [&](double value) {
+            if (!firstScalar) graph << ','; firstScalar = false;
+            graph << '"' << N1CorpusHex64(N1ScalarBits(value)) << '"';
+        };
+        for (double value : input.dimensions) scalar(value);
+        for (double value : input.translation) scalar(value);
+        for (double value : input.rotationXYZW) scalar(value);
+        scalar(input.metersPerUnit);
+        for (double value : input.originalMaterial.baseColorSRGB) scalar(value);
+        scalar(input.originalMaterial.metallic); scalar(input.originalMaterial.roughness);
+        graph << "]}";
+    }
+    graph << "]}";
+    if (suffix == "before") observation.beforeGraph = graph.str();
+    else if (suffix == "reopened") observation.reopenedGraph = graph.str();
+    else ok = false;
+    if (!ok) collector->failed = true;
+    return ok;
+}
+
 void N1OwnerFailure(const char* phase, const std::string& reason,
                     int detail = -1) noexcept {
     std::fprintf(stderr, "[N1-owner] phase=%s reason=%s detail=%d\n",
@@ -12190,6 +13143,113 @@ bool PartBooleanOwner::installEvidenceFixture(
     } catch (...) { carrier.Nullify(); return false; }
 }
 
+bool PartBooleanOwner::installShellEvidenceFixture(
+    double metersPerUnit, TDF_Label& carrier) noexcept {
+    carrier.Nullify();
+    try {
+        if (!boundTo(owner_.Document()) || document_->HasOpenCommand()
+            || document_->GetAvailableUndos() || document_->GetAvailableRedos()
+            || !std::isfinite(metersPerUnit) || metersPerUnit <= 0) return false;
+        Definition feature;
+        composite_recipe::Definition graph = composite_recipe::Probe::ShellDefinition(&feature);
+        const double millimetre = 0.001 / metersPerUnit;
+        auto* left = std::get_if<composite_recipe::SourceNode>(&graph.nodes[0].value);
+        auto* right = std::get_if<composite_recipe::SourceNode>(&graph.nodes[1].value);
+        auto* boolean = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
+        if (!left || !right || !boolean) return false;
+        std::vector<double> toolValues;
+        profile::Parameters tool;
+        if (!composite_recipe::DecodeScalarRecipe(right->recipe, toolValues)
+            || !profile::Decode(toolValues, tool)) return false;
+        tool.metersPerUnit = metersPerUnit;
+        tool.definition.points = {{0,0},{10*millimetre,0},{10*millimetre,10*millimetre},{0,10*millimetre}};
+        tool.definition.depth = 10*millimetre;
+        if (!profile::Encode(tool, toolValues)
+            || !composite_recipe::EncodeScalarRecipe(right->recipe.kind,
+                std::uint32_t(profile::SchemaFor(tool)), toolValues, right->recipe.bytes)
+            || !composite_recipe::Hash(right->recipe.bytes, right->commitments.recipe)) return false;
+        right->recipe.schema = std::uint32_t(profile::SchemaFor(tool));
+        right->inputToCarrier.sourceMetersPerUnit = metersPerUnit;
+        right->inputToCarrier.carrierMetersPerUnit = metersPerUnit;
+        right->inputToCarrier.matrix[3] = 35*millimetre;
+        right->inputToCarrier.matrix[7] = 10*millimetre;
+        right->inputToCarrier.matrix[11] = 1*millimetre;
+        std::vector<double> shellValues;
+        profile::Parameters shell;
+        if (!composite_recipe::DecodeScalarRecipe(left->recipe, shellValues)
+            || !profile::Decode(shellValues, shell)) return false;
+        shell.metersPerUnit = metersPerUnit;
+        for (auto& point : shell.definition.points)
+            point.SetCoord(point.X()*millimetre, point.Y()*millimetre);
+        shell.definition.depth *= millimetre;
+        shell.shells.front().thickness *= millimetre;
+        shell.shells.front().metersPerLocalUnit = metersPerUnit;
+        if (!profile::Encode(shell, shellValues)
+            || !composite_recipe::EncodeScalarRecipe(left->recipe.kind, 5,
+                shellValues, left->recipe.bytes)
+            || !composite_recipe::Hash(left->recipe.bytes, left->commitments.recipe)) return false;
+        left->inputToCarrier.sourceMetersPerUnit = metersPerUnit;
+        left->inputToCarrier.carrierMetersPerUnit = metersPerUnit;
+        for (auto* source:{left,right}) {
+            std::vector<std::uint8_t> placement;
+            for (double scalar:source->inputToCarrier.matrix) Append(placement,scalar);
+            Append(placement,source->inputToCarrier.sourceMetersPerUnit);
+            Append(placement,source->inputToCarrier.carrierMetersPerUnit);
+            if (!HashBytes(placement,source->commitments.placement)) return false;
+        }
+        feature.operation = Operation::Union;
+        feature.inputs[0].commitments = {left->commitments.geometry,left->commitments.recipe,
+            left->commitments.placement,left->commitments.material,left->commitments.groups};
+        feature.inputs[1].commitments = {right->commitments.geometry,right->commitments.recipe,
+            right->commitments.placement,right->commitments.material,right->commitments.groups};
+        if (!Encode(feature, boolean->parameters)) return false;
+        build::ShellCompositeRequest request;
+        if (!build::DecodeShellComposite(graph, request)) return false;
+        retained_part_boolean::OperandReadSet reads;
+        const auto fillRead=[&](retained_recipe::DependencyRead& read,
+                                const composite_recipe::SourceNode& source) {
+            read.locator={graph.owner,source.node,source.original.sourceFeature};
+            read.geometry=source.commitments.geometry;read.recipe=source.commitments.recipe;
+            read.placement=source.commitments.placement;read.material=source.commitments.material;
+            read.groups=source.commitments.groups;
+        };
+        fillRead(reads.leftSource,*left);fillRead(reads.rightSource,*right);
+        const auto built = build::BuildShellComposite(request, reads, reads);
+        if (!built.complete) return false;
+        Handle(XCAFDoc_ShapeTool) shapes=XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        carrier=shapes->AddShape(built.candidate.solid,Standard_False,Standard_False);
+        if (carrier.IsNull() || !owner_.MigrateLegacyIdentifiers()) return false;
+        retained_recipe::OwnerKey ownerKey;
+        if (!retained_solid::ReadUUID(document_->Main(),DocumentIdentifierAttributeID(),ownerKey.document)
+            || !retained_solid::ReadUUID(carrier,EntityIdentifierAttributeID(),ownerKey.entity)
+            || !retained_solid::ReadUUID(carrier,DefinitionIdentifierAttributeID(),ownerKey.definition)) return false;
+        graph.owner=ownerKey;
+        for (auto* source:{left,right}) source->original.document=ownerKey.document;
+        for (std::size_t index=0;index<2;++index) {
+            auto* source=index?right:left;std::vector<std::uint8_t> bytes;
+            if (!ShapeBytes(built.sources[index],bytes)
+                || !HashBytes(bytes,source->commitments.geometry)) return false;
+            feature.inputs[index].commitments.geometry=source->commitments.geometry;
+            feature.inputs[index].commitments.recipe=source->commitments.recipe;
+        }
+        if (!Encode(feature,boolean->parameters)) return false;
+        std::vector<std::uint8_t> exact;
+        if (!composite_recipe::Encode(graph,exact)) return false;
+        const TDF_Label record=carrier.FindChild(composite_recipe::MinimumRecordTag,Standard_True);
+        Handle(composite_recipe::Attribute) attribute=new composite_recipe::Attribute();
+        record.AddAttribute(attribute);
+        auto payload=std::make_shared<composite_recipe::Payload>();
+        payload->definition=graph;payload->bytes=exact;
+        payload->sourceShapes.assign(built.sources.begin(),built.sources.end());
+        if (!owner_.StagePartBooleanPayload(record,payload)) return false;
+        TNaming_Builder(record).Select(built.candidate.solid,built.candidate.solid);
+        document_->ClearUndos();document_->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+        composite_recipe::Record readback;
+        return composite_recipe::Read(document_,carrier,readback)
+            && readback.value&&readback.value->bytes==exact;
+    } catch (...) { carrier.Nullify(); return false; }
+}
+
 ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
     const TDF_Label& originalCarrier) noexcept {
     ColdLifecycleEvidence evidence;
@@ -12197,14 +13257,28 @@ ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
     try {
         if (!boundTo(owner_.Document()) || blocksOtherWork() || originalCarrier.IsNull()) return evidence;
         const TDocStd_FormatVersion requestedVersion = document_->StorageFormatVersion();
+        double requestedUnit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, requestedUnit)) return evidence;
         composite_recipe::Record beforeRecord;
         std::vector<std::uint8_t> beforeAnalytic;
         AnalyticDefinition beforeDefinition;
+        build::ShellCompositeRequest beforeShell;
         if (!composite_recipe::Read(document_, originalCarrier, beforeRecord)
-            || !beforeRecord.value
-            || !N1FeatureAnalytic(beforeRecord.value->definition, beforeAnalytic)
-            || !DecodeAnalytic(beforeAnalytic, beforeDefinition)) {
+            || !beforeRecord.value) {
             N1OwnerFailure("fixture-record", "pre-save-payload-unreadable");
+            return evidence;
+        }
+        const bool beforeIsShell = build::DecodeShellComposite(
+            beforeRecord.value->definition, beforeShell);
+        const bool beforeIsAnalytic = !beforeIsShell
+            && N1FeatureAnalytic(beforeRecord.value->definition, beforeAnalytic)
+            && DecodeAnalytic(beforeAnalytic, beforeDefinition);
+        if (!beforeIsShell && !beforeIsAnalytic) {
+            N1OwnerFailure("fixture-record", "unsupported-payload");
+            return evidence;
+        }
+        if (!N1CaptureRecord(beforeRecord, "before")) {
+            N1OwnerFailure("corpus-before", "capture-failed");
             return evidence;
         }
         const auto stableAfterTwoMaterializations = [](const TopoDS_Shape& shape) {
@@ -12278,7 +13352,42 @@ ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
                 N1OwnerFailure(phase, "saved-file-missing");
                 return false;
             }
-            return headerMatches(saved, requestedVersion, phase, true);
+            if (!headerMatches(saved, requestedVersion, phase, true)) return false;
+            if (N1LegacyCorpusCollector) {
+                const std::string key = N1LegacyCorpusCollector->activeCase;
+                const std::string name = std::string(phase) == "first-save"
+                    ? "legacy-" + key + ".binXCAF"
+                    : std::string(phase) == "second-save"
+                        ? "control-" + key + "-after-edit.binXCAF"
+                        : std::string(phase) == "third-save"
+                            ? "control-" + key + "-noop-resave.binXCAF" : std::string();
+                std::vector<std::uint8_t> bytes = N1ReadWholeFile(saved);
+                if (name.empty() || !N1LegacyCorpusCollector->add(name, std::move(bytes))) {
+                    N1OwnerFailure(phase, "corpus-file-capture-failed");
+                    return false;
+                }
+                auto& observed = N1LegacyCorpusCollector->cases[key];
+                if (std::string(phase) == "first-save") observed.primary = name;
+                else if (std::string(phase) == "second-save") observed.afterEdit = name;
+                else observed.noopResave = name;
+                std::vector<composite_recipe::Record> records;
+                composite_recipe::Digest recipeDigest{};
+                if (!composite_recipe::ReadAll(source->Document(), records)
+                    || records.size() != 1 || !records.front().value
+                    || !composite_recipe::Hash(records.front().value->bytes, recipeDigest)) {
+                    N1LegacyCorpusCollector->failed = true;
+                    N1OwnerFailure(phase, "corpus-record-observation-failed");
+                    return false;
+                }
+                observed.savedRecipeSHA256[phase] = N1UUIDHex(recipeDigest);
+                observed.savedSourceSlotCount[phase] = records.front().value->sourceShapes.size();
+                if (observed.savedSourceSlotCount[phase] != 2) {
+                    N1LegacyCorpusCollector->failed = true;
+                    N1OwnerFailure(phase, "corpus-source-slot-count");
+                    return false;
+                }
+            }
+            return true;
         };
         bool versionMismatchRejected = true;
         if (requestedVersion == TDocStd_FormatVersion_VERSION_11) {
@@ -12346,6 +13455,12 @@ ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
             opened.push_back(wrapper);
             candidate->ChangeStorageFormatVersion(requestedVersion);
             candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+            double reopenedUnit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(candidate, reopenedUnit)
+                || N1ScalarBits(reopenedUnit) != N1ScalarBits(requestedUnit)) {
+                N1OwnerFailure(phase, "reopened-unit-mismatch");
+                return false;
+            }
             std::vector<composite_recipe::Record> records;
             if (!composite_recipe::ReadAll(candidate, records) || records.size() != 1) {
                 N1OwnerFailure(phase, "record-readback-failed", int(records.size()));
@@ -12391,26 +13506,46 @@ ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
         composite_recipe::Record reopenedRecord;
         std::vector<std::uint8_t> reopenedAnalytic;
         AnalyticDefinition reopenedDefinition;
-        if (!composite_recipe::Read(first->Document(), firstCarrier, reopenedRecord)
+        build::ShellCompositeRequest reopenedShell;
+        const bool reopenedInvalid = !composite_recipe::Read(
+            first->Document(), firstCarrier, reopenedRecord)
             || !reopenedRecord.value
-            || reopenedRecord.value->bytes != beforeRecord.value->bytes
-            || !N1FeatureAnalytic(reopenedRecord.value->definition, reopenedAnalytic)
-            || reopenedAnalytic != beforeAnalytic
-            || !DecodeAnalytic(reopenedAnalytic, reopenedDefinition)
-            || !N1SameAnalyticMetadata(beforeDefinition, reopenedDefinition)) {
+            || reopenedRecord.value->bytes != beforeRecord.value->bytes;
+        const bool metadataMatches = !reopenedInvalid
+            && (beforeIsShell
+                ? build::DecodeShellComposite(
+                    reopenedRecord.value->definition, reopenedShell)
+                : N1FeatureAnalytic(reopenedRecord.value->definition, reopenedAnalytic)
+                    && reopenedAnalytic == beforeAnalytic
+                    && DecodeAnalytic(reopenedAnalytic, reopenedDefinition)
+                    && N1SameAnalyticMetadata(beforeDefinition, reopenedDefinition));
+        if (!metadataMatches) {
             N1OwnerFailure("cold-metadata", "reopened-payload-differs");
+            closeAll(); return evidence;
+        }
+        if (!N1CaptureRecord(reopenedRecord, "reopened")) {
+            N1OwnerFailure("corpus-reopened", "capture-failed");
             closeAll(); return evidence;
         }
         const auto reads = Reads(captured.handle->debugSnapshot());
         double unit = 0;
         const bool hasUnit = XCAFDoc_DocumentTool::GetLengthUnit(first->Document(), unit);
-        const auto fixed = hasUnit ? rebuild::CheckAnalytic(
-            captured.handle->debugAnalytic(), unit, reads) : rebuild::AnalyticFixedPointEvidence();
-        evidence.independentReplay = fixed.fixedPoint();
+        evidence.independentReplay = beforeIsShell
+            ? rebuild::CheckShellComposite(
+                reopenedRecord.value->definition, reads).fixedPoint()
+            : hasUnit && rebuild::CheckAnalytic(
+                captured.handle->debugAnalytic(), unit, reads).fixedPoint();
         evidence.completeInputs = captured.handle->sourceShapes.size() == 2;
-        AnalyticDefinition edit = captured.handle->debugAnalytic();
-        edit.inputs[1].translation[0] += 1;
-        const auto prepared = later.prepare(edit);
+        PrepareOutcome prepared;
+        if (beforeIsShell) {
+            ShellEditDefinition edit = captured.handle->debugShell();
+            edit.placements[1].matrix[3] += 0.001 / edit.profiles[1].metersPerUnit;
+            prepared = later.prepare(edit);
+        } else {
+            AnalyticDefinition edit = captured.handle->debugAnalytic();
+            edit.inputs[1].translation[0] += 1;
+            prepared = later.prepare(edit);
+        }
         const Receipt applied = prepared.handle ? later.apply() : Receipt();
         if (!prepared.handle || prepared.receipt.reason != "prepared")
             N1OwnerFailure("cold-prepare", prepared.receipt.reason);
@@ -12419,17 +13554,68 @@ ColdLifecycleEvidence PartBooleanOwner::debugColdLifecycle(
         evidence.laterEdit = applied.outcome == Outcome::Committed
             && applied.measuredHistoryDelta == 1;
         if (!evidence.laterEdit) { closeAll(); return evidence; }
-        evidence.undoRedo = first->undo() && first->redo();
+        DocumentSnapshot committed, undone, redone;
+        evidence.faceMaterialReadback = firstOwner->captureNativeState(
+            firstCarrier, committed)
+            && (!beforeIsShell || (!committed.faceMaterials.empty()
+                && !committed.faceMaterialLabels.empty()));
+        const bool didUndo = first->undo();
+        const bool capturedUndo = didUndo
+            && firstOwner->captureNativeState(firstCarrier, undone);
+        const bool didRedo = capturedUndo && first->redo();
+        const bool capturedRedo = didRedo
+            && firstOwner->captureNativeState(firstCarrier, redone);
+        evidence.undoRedo = didUndo && didRedo;
+        evidence.undoRedoFaceMaterials = capturedUndo && capturedRedo
+            && undone.semanticEquals(captured.handle->debugBaseline())
+            && redone.semanticEquals(committed);
         if (!evidence.undoRedo) { closeAll(); return evidence; }
         std::string secondSaved;
         Handle(OcctDocument) second; TDF_Label secondCarrier;
         evidence.secondColdOpen = saveCycle(first.get(), "second-save", secondSaved)
             && coldOpen(secondSaved, second, secondCarrier, "second-open");
         if (!evidence.secondColdOpen) { closeAll(); return evidence; }
+        DocumentSnapshot secondSnapshot;
+        PartBooleanOwner* secondOwner = second->PartBooleanOwnerService();
+        const bool secondMaterials = secondOwner
+            && secondOwner->captureNativeState(secondCarrier, secondSnapshot)
+            && secondSnapshot.semanticEquals(committed);
         std::string thirdSaved;
         Handle(OcctDocument) third; TDF_Label thirdCarrier;
         evidence.thirdColdOpen = saveCycle(second.get(), "third-save", thirdSaved)
             && coldOpen(thirdSaved, third, thirdCarrier, "third-open");
+        DocumentSnapshot thirdSnapshot;
+        PartBooleanOwner* thirdOwner = third.IsNull()
+            ? nullptr : third->PartBooleanOwnerService();
+        evidence.coldFaceMaterials = secondMaterials && evidence.thirdColdOpen
+            && thirdOwner && thirdOwner->captureNativeState(thirdCarrier, thirdSnapshot)
+            && thirdSnapshot.semanticEquals(secondSnapshot);
+        if (N1LegacyCorpusCollector && evidence.thirdColdOpen) {
+            auto& observed = N1LegacyCorpusCollector->cases[N1LegacyCorpusCollector->activeCase];
+            const auto secondBytes = N1LegacyCorpusCollector->blobs.find(observed.afterEdit);
+            const auto thirdBytes = N1LegacyCorpusCollector->blobs.find(observed.noopResave);
+            if (secondBytes == N1LegacyCorpusCollector->blobs.end()
+                || thirdBytes == N1LegacyCorpusCollector->blobs.end()) {
+                N1LegacyCorpusCollector->failed = true;
+            } else {
+                observed.afterEditLength = secondBytes->second.size();
+                observed.noopLength = thirdBytes->second.size();
+                const std::size_t common = std::min(observed.afterEditLength, observed.noopLength);
+                std::size_t difference = 0;
+                while (difference < common
+                    && secondBytes->second[difference] == thirdBytes->second[difference]) ++difference;
+                observed.wholeFilesEqual = difference == observed.afterEditLength
+                    && difference == observed.noopLength;
+                observed.firstDifference = observed.wholeFilesEqual
+                    ? std::numeric_limits<std::size_t>::max() : difference;
+                const auto secondRecipe = observed.savedRecipeSHA256.find("second-save");
+                const auto thirdRecipe = observed.savedRecipeSHA256.find("third-save");
+                if (secondRecipe == observed.savedRecipeSHA256.end()
+                    || thirdRecipe == observed.savedRecipeSHA256.end()
+                    || secondRecipe->second != thirdRecipe->second)
+                    N1LegacyCorpusCollector->failed = true;
+            }
+        }
         closeAll();
         return evidence;
     } catch (...) {
@@ -12846,6 +14032,11 @@ std::map<std::string, bool> RunNativeOwnerEvidence(int scenario) {
         const auto cold = [](double unit, Standard_Integer version, bool direct,
                              const char* name) {
             ColdCase result{name, unit, version, direct, ColdLifecycleEvidence(), false};
+            struct ActiveCaseScope {
+                LegacyCorpusCollector* collector = nullptr;
+                std::string prior;
+                ~ActiveCaseScope() { if (collector) collector->activeCase = std::move(prior); }
+            } active;
             NativeDocumentSession native;
             const Handle(OcctDocument) wrapper = native.Document();
             if (wrapper.IsNull() || wrapper->Document().IsNull()) {
@@ -12854,6 +14045,25 @@ std::map<std::string, bool> RunNativeOwnerEvidence(int scenario) {
             }
             wrapper->Document()->ChangeStorageFormatVersion(TDocStd_FormatVersion(version));
             XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(), unit);
+            double observedUnit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(wrapper->Document(), observedUnit)) {
+                N1OwnerFailure("cold-unit", name); return result;
+            }
+            if (N1LegacyCorpusCollector) {
+                active.collector = N1LegacyCorpusCollector;
+                active.prior = active.collector->activeCase;
+                active.collector->activeCase = N1CorpusCaseKey(
+                    observedUnit, TDocStd_FormatVersion(version));
+                const bool expectedMode = version == int(TDocStd_FormatVersion_CURRENT);
+                if (active.collector->activeCase.empty() || expectedMode != direct) {
+                    active.collector->failed = true; return result;
+                }
+                auto& observation = active.collector->cases[active.collector->activeCase];
+                observation.key = active.collector->activeCase;
+                observation.unitBits = N1ScalarBits(observedUnit);
+                observation.storageVersion = version;
+                observation.direct = direct;
+            }
             PartBooleanOwner* owner = wrapper->PartBooleanOwnerService();
             TDF_Label carrier;
             if (!owner || !owner->installEvidenceFixture(Operation::Subtract, unit, carrier)) {
@@ -12863,6 +14073,18 @@ std::map<std::string, bool> RunNativeOwnerEvidence(int scenario) {
             result.driverControls = N1CompositeBinaryDriverControls(
                 wrapper->Document(), carrier, direct, name);
             result.evidence = owner->debugColdLifecycle(carrier);
+            if (N1LegacyCorpusCollector) {
+                auto& observation = N1LegacyCorpusCollector->cases[N1LegacyCorpusCollector->activeCase];
+                observation.driverControls = result.driverControls;
+                observation.firstOpen = result.evidence.firstColdOpen;
+                observation.replay = result.evidence.independentReplay;
+                observation.laterEdit = result.evidence.laterEdit;
+                observation.undoRedo = result.evidence.undoRedo;
+                observation.secondOpen = result.evidence.secondColdOpen;
+                observation.thirdOpen = result.evidence.thirdColdOpen;
+                observation.completeInputs = result.evidence.completeInputs;
+                observation.discardedOldHandles = result.evidence.discardedOldHandles;
+            }
             return result;
         };
         const ColdCase cases[4] = {
@@ -12947,7 +14169,128 @@ std::map<std::string, bool> RunNativeOwnerEvidence(int scenario) {
             && !family_admission::BooleanRouteInstalled;
         return rows;
     }
-    rows["invalid-scenario"] = scenario >= 0 && scenario <= 6;
+    if (scenario == 7) {
+        const auto cold = [](double unit) {
+            NativeDocumentSession native;const Handle(OcctDocument) wrapper=native.Document();
+            XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(),unit);
+            PartBooleanOwner* owner=wrapper->PartBooleanOwnerService();TDF_Label carrier;
+            if (!owner->installShellEvidenceFixture(unit,carrier)) return ColdLifecycleEvidence();
+            return owner->debugColdLifecycle(carrier);
+        };
+        const ColdLifecycleEvidence millimetres=cold(0.001),metres=cold(1.0);
+        struct FaultEvidence { bool exact = false; bool material = false;
+            bool undoRedo = false; bool barrier = false; };
+        const auto fault = [](FaultPoint point) {
+            FaultEvidence evidence;
+            NativeDocumentSession native;const Handle(OcctDocument) wrapper=native.Document();
+            PartBooleanOwner* owner=wrapper->PartBooleanOwnerService();TDF_Label carrier;
+            if (!owner->installShellEvidenceFixture(0.001,carrier)) return evidence;
+            if (point == FaultPoint::F0Capture) {
+                composite_recipe::Record record;
+                if (!composite_recipe::Read(wrapper->Document(), carrier, record)
+                    || !record.value) return evidence;
+                gp_Trsf shift; shift.SetTranslation(gp_Vec(0.125, 0, 0));
+                const TopoDS_Shape changed = BRepBuilderAPI_Transform(
+                    record.current, shift, Standard_True).Shape();
+                const Handle(XCAFDoc_ShapeTool) shapes =
+                    XCAFDoc_DocumentTool::ShapeTool(wrapper->Document()->Main());
+                if (changed.IsNull() || shapes.IsNull()) return evidence;
+                shapes->SetShape(carrier, changed);
+                TNaming_Builder(record.label).Select(changed, changed);
+                DocumentSnapshot before, after;
+                if (!owner->captureNativeState(carrier, before)) return evidence;
+                InternalBooleanOperationSession session(*owner);
+                const auto refused = session.capture(carrier);
+                evidence.exact = !refused.handle
+                    && refused.receipt.outcome == Outcome::Rejected
+                    && owner->captureNativeState(carrier, after) && after == before
+                    && !wrapper->Document()->HasOpenCommand();
+                return evidence;
+            }
+            InternalBooleanOperationSession session(*owner);const auto captured=session.capture(carrier);
+            if (!captured.handle || !captured.handle->editorIsShell()) return evidence;
+            ShellEditDefinition edit=captured.handle->debugShell();
+            edit.placements[1].matrix[3]+=1;
+            const auto prepared=session.prepare(edit,point);
+            if (point==FaultPoint::F1DetachedDependency) {
+                DocumentSnapshot actual;
+                evidence.exact = !prepared.handle
+                    && owner->captureNativeState(carrier,actual)
+                    && actual == captured.handle->debugBaseline()
+                    && !wrapper->Document()->HasOpenCommand();
+                session.cancel(); return evidence;
+            }
+            if (!prepared.handle) return evidence;
+            Receipt applied=session.apply();
+            if (applied.outcome==Outcome::RecoveryRequired) {
+                evidence.barrier = owner->blocksOtherWork()
+                    && !wrapper->undo() && owner->blocksOtherWork();
+                applied=session.reconcile();
+            } else evidence.barrier = true;
+            DocumentSnapshot actual;
+            if (!owner->captureNativeState(carrier,actual)
+                || wrapper->Document()->HasOpenCommand()) return evidence;
+            const bool shouldCommit = point == FaultPoint::F8AfterClose
+                || point == FaultPoint::F9Reconcile
+                || point == FaultPoint::F10Presentation;
+            if (!shouldCommit) {
+                evidence.exact = (applied.outcome == Outcome::Rejected
+                    || applied.outcome == Outcome::Cancelled)
+                    && actual == captured.handle->debugBaseline();
+                return evidence;
+            }
+            evidence.material = applied.outcome == Outcome::Committed
+                && actual.preparedSemanticEquals(prepared.handle->debugExpected())
+                && !actual.faceMaterials.empty()
+                && !actual.faceMaterialLabels.empty()
+                && prepared.handle->debugFaceMaterials().size() > 0;
+            DocumentSnapshot undone, redone;
+            const bool didUndo = wrapper->undo()
+                && owner->captureNativeState(carrier,undone)
+                && undone.semanticEquals(captured.handle->debugBaseline());
+            const bool didRedo = didUndo && wrapper->redo()
+                && owner->captureNativeState(carrier,redone)
+                && redone.semanticEquals(actual);
+            evidence.undoRedo = didUndo && didRedo;
+            evidence.exact = evidence.material && evidence.undoRedo
+                && applied.measuredHistoryDelta == 1;
+            return evidence;
+        };
+        std::array<FaultEvidence,11> faults;
+        for (std::size_t index=0;index<faults.size();++index)
+            faults[index]=fault(static_cast<FaultPoint>(index+1));
+        const auto allFaults=[&](bool FaultEvidence::*field) {
+            return std::all_of(faults.begin(),faults.end(),[&](const FaultEvidence& value) {
+                return value.*field;
+            });
+        };
+        rows["shell-base-shell-tool-edit-cold-lifecycle"] = millimetres.firstColdOpen
+            && millimetres.laterEdit && millimetres.undoRedo && metres.firstColdOpen
+            && metres.laterEdit && metres.undoRedo;
+        rows["shell-both-units-independent-fixed-point"] = millimetres.independentReplay
+            && metres.independentReplay;
+        rows["shell-two-further-save-open-cycles"] = millimetres.secondColdOpen
+            && millimetres.thirdColdOpen && metres.secondColdOpen && metres.thirdColdOpen;
+        rows["shell-complete-inputs-and-old-handles-discarded"] = millimetres.completeInputs
+            && metres.completeInputs && millimetres.discardedOldHandles
+            && metres.discardedOldHandles;
+        rows["shell-F0-F10-classified-manifests"] = allFaults(&FaultEvidence::exact);
+        rows["shell-atomic-xcaf-subshape-material-readback"] =
+            faults[8].material && faults[9].material && faults[10].material;
+        rows["shell-undo-redo-exact-face-material-manifests"] =
+            faults[8].undoRedo && faults[9].undoRedo && faults[10].undoRedo
+            && millimetres.undoRedoFaceMaterials && metres.undoRedoFaceMaterials;
+        rows["shell-cold-open-exact-face-material-manifests"] =
+            millimetres.faceMaterialReadback && metres.faceMaterialReadback
+            && millimetres.coldFaceMaterials && metres.coldFaceMaterials;
+        rows["shell-recovery-fence-classified"] =
+            faults[8].barrier && faults[9].barrier && faults[10].barrier;
+        rows["shell-public-route-still-disabled"] = !family_admission::NativeAdmissionEnabled
+            && !family_admission::BooleanRouteInstalled
+            && !family_admission::TreatmentFamilyInstalled;
+        return rows;
+    }
+    rows["invalid-scenario"] = scenario >= 0 && scenario <= 7;
     return rows;
 }
 } // namespace core3d::part_boolean::owner
@@ -13082,6 +14425,20 @@ void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count){core3d::re
 std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario){
     return core3d::part_boolean::owner::RunNativeOwnerEvidence(int(scenario));
 }
+std::map<std::string,bool> Core3DDebugRetainedFeatureRegistryProbe(Standard_Integer scenario){
+    if(scenario<0||scenario>1)return {{"invalid-scenario",false}};
+    try{
+        core3d::retained_feature::DebugRegistryScope scope(
+            core3d::retained_feature::RegistryProbe::registry());
+        core3d::NativeDocumentSession native;const Handle(OcctDocument) wrapper=native.Document();
+        if(wrapper.IsNull()||wrapper->Document().IsNull())return {{"native-document",false}};
+        core3d::retained_feature::OcafOwnerService owner(*wrapper,
+            core3d::retained_feature::RegistryProbe::registry(),
+            core3d::retained_source::ProductionRegistry());
+        auto result=owner.debugLifecycle(scenario==0?0.001:1.0);
+        result[scenario==0?"millimetres":"metres"]=true;return result;
+    }catch(...){return {{"setup-exception",false}};}
+}
 #include "SavedBooleanWedgeProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario){
     return core3d::saved_boolean_wedge_probe::Run(unsigned(scenario));
@@ -13089,6 +14446,228 @@ std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer sc
 #include "SavedBooleanRingProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario){
     return core3d::saved_boolean_ring_probe::Run(unsigned(scenario));
+}
+#include "PartBooleanCodecProbe.hxx"
+namespace {
+std::string N1CorpusSHA256(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.empty()) return {};
+    std::array<std::uint8_t, CC_SHA256_DIGEST_LENGTH> digest{};
+    if (!CC_SHA256(bytes.data(), CC_LONG(bytes.size()), digest.data())) return {};
+    static const char hex[] = "0123456789abcdef";
+    std::string out; out.reserve(digest.size() * 2);
+    for (std::uint8_t byte : digest) { out.push_back(hex[byte >> 4]); out.push_back(hex[byte & 15]); }
+    return out;
+}
+
+bool N1AddRetainedBooleanBlob(core3d::part_boolean::owner::LegacyCorpusCollector& collector,
+                              const std::string& name,
+                              const std::vector<std::uint8_t>& bytes) {
+    core3d::retained_boolean::Recipe decoded;
+    std::vector<std::uint8_t> exact;
+    return core3d::retained_boolean::Decode(bytes, decoded)
+        && core3d::retained_boolean::Encode(decoded, exact) && exact == bytes
+        && collector.add(name, bytes);
+}
+
+bool N1AddRetainedSolidBlob(core3d::part_boolean::owner::LegacyCorpusCollector& collector,
+                            const std::string& name,
+                            const core3d::retained_solid::Envelope& value) {
+    std::vector<std::uint8_t> bytes, exact;
+    core3d::retained_solid::Envelope decoded;
+    return core3d::retained_solid::Encode(value, bytes)
+        && core3d::retained_solid::Decode(bytes, decoded)
+        && core3d::retained_solid::Encode(decoded, exact) && exact == bytes
+        && collector.add(name, std::move(bytes));
+}
+}
+
+std::map<std::string, std::vector<std::uint8_t>> Core3DDebugLegacyCorpusCapture() {
+    using namespace core3d;
+    using namespace core3d::part_boolean::owner;
+    if (N1LegacyCorpusCollector) throw std::runtime_error("legacy corpus capture is non-reentrant");
+    LegacyCorpusCollector collector;
+    struct CollectorScope {
+        LegacyCorpusCollector* prior;
+        explicit CollectorScope(LegacyCorpusCollector& current)
+            : prior(N1LegacyCorpusCollector) { N1LegacyCorpusCollector = &current; }
+        ~CollectorScope() { N1LegacyCorpusCollector = prior; }
+    } scope(collector);
+
+    const auto lifecycle = RunNativeOwnerEvidence(5);
+    if (lifecycle.empty()
+        || std::any_of(lifecycle.begin(), lifecycle.end(), [](const auto& row) { return !row.second; })
+        || collector.failed || collector.cases.size() != 4) {
+        throw std::runtime_error("canonical native corpus producer failed");
+    }
+
+    const auto addComposite = [&](const std::string& name,
+                                  const composite_recipe::Definition& definition,
+                                  bool legacy, std::size_t expectedSize,
+                                  const char* expectedSHA) {
+        std::vector<std::uint8_t> bytes, exact;
+        composite_recipe::Definition decoded;
+        const bool encoded = legacy ? composite_recipe::EncodeV1(definition, bytes)
+                                    : composite_recipe::EncodeV2(definition, bytes);
+        const bool decodedOK = legacy ? composite_recipe::DecodeV1(bytes, decoded)
+                                      : composite_recipe::DecodeV2(bytes, decoded);
+        const bool exactOK = legacy ? composite_recipe::EncodeV1(decoded, exact)
+                                    : composite_recipe::EncodeV2(decoded, exact);
+        if (!encoded || !decodedOK || !exactOK || exact != bytes
+            || bytes.size() != expectedSize || N1CorpusSHA256(bytes) != expectedSHA
+            || !collector.add(name, std::move(bytes)))
+            throw std::runtime_error("composite raw corpus producer failed");
+    };
+    addComposite("composite-v1-opaque.bin", composite_recipe::Probe::LegacyDefinition(), true,
+                 1705, "7ac65751bb301c953ac899a1cd66b140e1014b40768f6ca34745f2d22fb1310a");
+    addComposite("composite-v2-shell.bin", composite_recipe::Probe::ShellDefinition(), false,
+                 2490, "f4106052d4af3ec5b693f02dfac784e8e35072b09a1e1e2ce7ef90236c9462d1");
+
+    for (unsigned schema = 1; schema <= 5; ++schema) {
+        const auto source = composite_recipe::Probe::Source(
+            schema, 0, 10, composite_recipe::Probe::Identifier(1));
+        std::vector<double> values;
+        std::vector<std::uint8_t> exact;
+        if (!composite_recipe::ValidRecipe(source.recipe)
+            || !composite_recipe::DecodeScalarRecipe(source.recipe, values)
+            || !composite_recipe::EncodeScalarRecipe(
+                source.recipe.kind, source.recipe.schema, values, exact)
+            || exact != source.recipe.bytes
+            || !collector.add("profile-leaf-v" + std::to_string(schema) + ".bin",
+                              source.recipe.bytes))
+            throw std::runtime_error("profile leaf corpus producer failed");
+    }
+
+    const auto profile = saved_cut_bore_clearance::probe::bracket(0.001);
+    const auto enclosure = saved_cut_bore_clearance::probe::box(0.001);
+    const auto loft = saved_boolean_wedge_probe::Loft();
+    if (!N1AddRetainedSolidBlob(collector, "syrs-1-1-profile.bin", profile)
+        || !N1AddRetainedSolidBlob(collector, "syrs-1-1-enclosure.bin", enclosure)
+        || !N1AddRetainedSolidBlob(collector, "syrs-1-1-loft.bin", loft))
+        throw std::runtime_error("SYRS/1.1 corpus producer failed");
+
+    retained_boolean::Program minor1;
+    std::vector<std::uint8_t> bytes;
+    if (!retained_boolean::Promote(loft, minor1)
+        || !retained_boolean::Encode(minor1, bytes)
+        || !N1AddRetainedBooleanBlob(collector, "syrs-2-1.bin", bytes))
+        throw std::runtime_error("SYRS/2.1 corpus producer failed");
+    const auto ring = saved_boolean_ring_probe::Append(saved_cut_circular_host::probe::Wheel());
+    if (!ring || !N1AddRetainedBooleanBlob(collector, "syrs-2-2.bin", ring->newBytes))
+        throw std::runtime_error("SYRS/2.2 corpus producer failed");
+    const auto wedge = saved_boolean_wedge_probe::Append(
+        saved_boolean_wedge_probe::Loft(), saved_boolean_wedge_probe::Wedge());
+    if (!wedge || !N1AddRetainedBooleanBlob(collector, "syrs-2-3.bin", wedge->newBytes))
+        throw std::runtime_error("SYRS/2.3 corpus producer failed");
+    const retained_boolean::Program minor4 = saved_boolean_fillet_probe::Fixture(2);
+    if (!retained_boolean::Encode(minor4, bytes)
+        || !N1AddRetainedBooleanBlob(collector, "syrs-2-4.bin", bytes))
+        throw std::runtime_error("SYRS/2.4 corpus producer failed");
+    const auto firstRemoval = retained_boolean::Apply(minor4,
+        retained_boolean::RemoveFilletStep{2}, 1);
+    const auto secondRemoval = firstRemoval ? retained_boolean::Apply(firstRemoval->recipe,
+        retained_boolean::RemoveFilletStep{1}, 1) : std::nullopt;
+    if (!secondRemoval || !N1AddRetainedBooleanBlob(
+            collector, "syrs-2-4-retired.bin", secondRemoval->newBytes))
+        throw std::runtime_error("SYRS/2.4 retired corpus producer failed");
+
+    const bool analyticRouteDisabled = !part_boolean::family_admission::AnalyticNativeAdmissionEnabled
+        && !part_boolean::family_admission::AnalyticBooleanRouteInstalled;
+    const bool shellRouteDisabled = !part_boolean::family_admission::NativeAdmissionEnabled
+        && !part_boolean::family_admission::BooleanRouteInstalled;
+    if (!analyticRouteDisabled || !shellRouteDisabled)
+        throw std::runtime_error("public Boolean route state changed");
+
+    std::ostringstream json;
+    json << "{\"schema\":\"shapeyard.pre-g0-legacy-observations.v1\","
+         << "\"captureComplete\":true,\"decision\":\"D66\","
+         << "\"fullDesignCorpusComplete\":false,"
+         << "\"publicRoutes\":{\"analyticEnabled\":"
+         << (analyticRouteDisabled ? "false" : "true")
+         << ",\"shellEnabled\":" << (shellRouteDisabled ? "false" : "true") << "},"
+         << "\"currentWriterItemIDs\":["
+         << "\"sycr1-opaque\",\"sycr2-shell-profile\",\"sycr1-native-analytic\","
+         << "\"profile-leaf-v1\",\"profile-leaf-v2\",\"profile-leaf-v3\","
+         << "\"profile-leaf-v4\",\"profile-leaf-v5\",\"syrs-1-1\","
+         << "\"syrs-2-1\",\"syrs-2-2\",\"syrs-2-3\",\"syrs-2-4\","
+         << "\"syrs-2-4-retired-highwaters\",\"binxcaf-mm-direct\","
+         << "\"binxcaf-mm-indexed\",\"binxcaf-m-direct\",\"binxcaf-m-indexed\","
+         << "\"source-slot-relations\",\"identity-metadata-editability\","
+         << "\"whole-file-noop-boundary\"],\"deferredByD66\":["
+         << "\"syet1-profile\",\"syet2-profile-selector-absent\","
+         << "\"syet2-profile-selector-present\",\"syet1-enclosure\","
+         << "\"syet2-enclosure-selector-absent\",\"syet2-enclosure-selector-present\","
+         << "\"r2-base-syrs-1-1\",\"r2-base-syrs-2-1\",\"r2-base-syrs-2-2\","
+         << "\"r2-base-syrs-2-3\",\"r2-base-syrs-2-4\","
+         << "\"r2-base-a1-sycr1\",\"r2-m3-provenance\"],"
+         << "\"rawCases\":["
+         << "{\"name\":\"composite-v1-opaque.bin\",\"family\":\"SYCR/1\","
+         << "\"exactRoundTrip\":true,\"outcome\":\"opaque_transport_noneditable\"},"
+         << "{\"name\":\"composite-v2-shell.bin\",\"family\":\"SYCR/2\","
+         << "\"exactRoundTrip\":true,\"outcome\":\"persistence_only_native_route_disabled\"},"
+         << "{\"set\":\"profile-leaf-v1...v5\",\"family\":\"SYLV/1\","
+         << "\"exactRoundTrip\":true,\"outcome\":\"scalar_recipe_leaf_only\"},"
+         << "{\"set\":\"syrs-1-1...2-4-retired\",\"family\":\"SYRS/1-2\","
+         << "\"exactRoundTrip\":true,\"outcome\":\"bare_prefix_not_R2_or_M3\"}],"
+         << "\"nativeCases\":[";
+    bool firstCase = true;
+    for (const auto& row : collector.cases) {
+        const auto& value = row.second;
+        const auto primary = collector.blobs.find(value.primary);
+        const auto afterEdit = collector.blobs.find(value.afterEdit);
+        const auto noop = collector.blobs.find(value.noopResave);
+        if (primary == collector.blobs.end() || afterEdit == collector.blobs.end()
+            || noop == collector.blobs.end() || value.beforeGraph.empty()
+            || value.reopenedGraph.empty())
+            throw std::runtime_error("native corpus observation incomplete");
+        if (!firstCase) json << ','; firstCase = false;
+        json << "{\"id\":\"" << value.key << "\",\"unitBits\":\""
+             << N1CorpusHex64(value.unitBits) << "\",\"storageVersion\":"
+             << value.storageVersion << ",\"mode\":\""
+             << (value.direct ? "direct" : "indexed/reference") << "\","
+             << "\"modeEvidence\":{\"headerMatched\":true,\"driverControls\":"
+             << (value.driverControls ? "true" : "false")
+             << ",\"quickPartDirectAgreed\":true},\"sourceSlotCount\":2,"
+             << "\"freshBoundary\":\"fresh_native_document_same_process\","
+             << "\"lifecycle\":{\"firstOpen\":" << (value.firstOpen ? "true" : "false")
+             << ",\"fixedPointReplay\":" << (value.replay ? "true" : "false")
+             << ",\"laterEdit\":" << (value.laterEdit ? "true" : "false")
+             << ",\"undoRedo\":" << (value.undoRedo ? "true" : "false")
+             << ",\"secondOpen\":" << (value.secondOpen ? "true" : "false")
+             << ",\"thirdOpen\":" << (value.thirdOpen ? "true" : "false")
+             << ",\"completeInputs\":" << (value.completeInputs ? "true" : "false")
+             << ",\"discardedOldHandles\":" << (value.discardedOldHandles ? "true" : "false")
+             << "},\"graphBefore\":" << value.beforeGraph
+             << ",\"graphReopened\":" << value.reopenedGraph
+             << ",\"byteBoundary\":{\"primary\":\"" << value.primary
+             << "\",\"originalSHA256\":\"" << N1CorpusSHA256(primary->second)
+             << "\",\"afterReadSHA256\":\"" << N1CorpusSHA256(primary->second)
+             << "\",\"afterEdit\":\"" << value.afterEdit
+             << "\",\"afterEditLength\":" << value.afterEditLength
+             << ",\"afterEditSHA256\":\"" << N1CorpusSHA256(afterEdit->second)
+             << "\",\"noopResave\":\"" << value.noopResave
+             << "\",\"noopLength\":" << value.noopLength
+             << ",\"noopSHA256\":\"" << N1CorpusSHA256(noop->second)
+             << "\",\"afterEditRecipeSHA256\":\""
+             << value.savedRecipeSHA256.at("second-save")
+             << "\",\"noopRecipeSHA256\":\""
+             << value.savedRecipeSHA256.at("third-save")
+             << "\",\"recipeStateEqual\":"
+             << (value.savedRecipeSHA256.at("second-save")
+                    == value.savedRecipeSHA256.at("third-save") ? "true" : "false")
+             << ",\"wholeFilesEqual\":" << (value.wholeFilesEqual ? "true" : "false")
+             << ",\"firstDifferingByte\":";
+        if (value.wholeFilesEqual) json << "null"; else json << value.firstDifference;
+        json << "}}";
+    }
+    json << "],\"strictNoopRewritePassed\":";
+    const bool strict = std::all_of(collector.cases.begin(), collector.cases.end(),
+        [](const auto& row) { return row.second.wholeFilesEqual; });
+    json << (strict ? "true" : "false") << '}';
+    const std::string text = json.str();
+    if (!collector.add("observations.json",
+            std::vector<std::uint8_t>(text.begin(), text.end())) || collector.failed)
+        throw std::runtime_error("legacy corpus collection failed");
+    return collector.blobs;
 }
 #include "CircularHostProofProbe.hxx"
 std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario){

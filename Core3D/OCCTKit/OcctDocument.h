@@ -64,6 +64,7 @@ class XCAFDoc_VisMaterial;
 class Message_ProgressRange;
 namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
+namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
 
 //! Persistent geometry representation owned by each XCAF definition label.
@@ -508,6 +509,12 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(St
 Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario);
+//! One-shot, non-reentrant capture of canonical pre-G0 writer bytes. The map
+//! owns every payload; no temporary path is exposed as corpus authority.
+Standard_EXPORT std::map<std::string, std::vector<std::uint8_t>>
+Core3DDebugLegacyCorpusCapture();
+//! P1 internal synthetic registry/OCAF evidence. No product feature is installed.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedFeatureRegistryProbe(Standard_Integer scenario);
 //! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
 Standard_EXPORT std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario);
@@ -555,6 +562,8 @@ public:
   core3d::part_boolean::owner::PartBooleanOwner* PartBooleanOwnerService() noexcept;
   const core3d::part_boolean::owner::PartBooleanOwner* PartBooleanOwnerService() const noexcept;
   bool NativeBooleanOwnerBlocksOtherWork() const noexcept;
+  core3d::retained_feature::OcafOwnerService* RetainedFeatureOwnerService() noexcept;
+  const core3d::retained_feature::OcafOwnerService* RetainedFeatureOwnerService() const noexcept;
   // Internal committed-adoption boundary; no public AI token is exposed.
   void ObserveSuccessfulNativeDocumentAdoption() noexcept;
   // Private live-import ownership; native readiness is checked by the viewer.
@@ -1086,6 +1095,7 @@ public:
 private:
   friend class core3d::NativeDocumentSession;
   friend class core3d::part_boolean::owner::PartBooleanOwner;
+  friend class core3d::retained_feature::OcafOwnerService;
   bool StagePartBooleanPayload(
       const TDF_Label&, const std::shared_ptr<const core3d::composite_recipe::Payload>&) noexcept;
   void CloseNativeSession() noexcept;
@@ -1152,6 +1162,7 @@ private:
   Handle(TDocStd_Application) myApp;
   Handle(TDocStd_Document) myOcafDoc;
   std::unique_ptr<core3d::part_boolean::owner::PartBooleanOwner> myPartBooleanOwner;
+  std::unique_ptr<core3d::retained_feature::OcafOwnerService> myRetainedFeatureOwner;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;

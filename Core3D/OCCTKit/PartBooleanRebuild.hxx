@@ -24,6 +24,20 @@ struct AnalyticFixedPointEvidence final {
     }
 };
 
+struct ShellFixedPointEvidence final {
+    bool graphAndFeatureExact = false;
+    bool bothSourceRecipesExact = false;
+    bool bothSourceShapesExact = false;
+    bool resultShapeExact = false;
+    bool bothBuildsAdmitted = false;
+    bool completeDependencyClosure = false;
+    bool fixedPoint() const noexcept {
+        return graphAndFeatureExact && bothSourceRecipesExact
+            && bothSourceShapesExact && resultShapeExact
+            && bothBuildsAdmitted && completeDependencyClosure;
+    }
+};
+
 inline AnalyticFixedPointEvidence CheckAnalytic(
     const AnalyticDefinition& definition,
     double carrierMetersPerUnit,
@@ -50,6 +64,52 @@ inline AnalyticFixedPointEvidence CheckAnalytic(
         result.completeDependencyClosure = definition.inputs.size() == 2
             && reads.leftSource.locator.node == definition.inputs[0].rootNode
             && reads.rightSource.locator.node == definition.inputs[1].rootNode;
+        return result;
+    } catch (...) { return {}; }
+}
+
+//! Recipe-driven production replay. This is intentionally separate from the
+//! fixture overload below: no ShellFixture or scenario value can select this
+//! path, and both operands are rebuilt from the captured graph on every pass.
+inline ShellFixedPointEvidence CheckShellComposite(
+    const composite_recipe::Definition& graph,
+    const retained_part_boolean::OperandReadSet& reads) noexcept {
+    ShellFixedPointEvidence result;
+    try {
+        build::ShellCompositeRequest firstRequest, secondRequest;
+        std::vector<std::uint8_t> firstGraph, secondGraph;
+        // Canonical graph equality is checked through the real SYCR codec.
+        composite_recipe::Definition decoded;
+        result.graphAndFeatureExact = composite_recipe::Encode(graph, firstGraph)
+            && composite_recipe::Decode(firstGraph, decoded)
+            && composite_recipe::Encode(decoded, secondGraph)
+            && firstGraph == secondGraph;
+        if (!result.graphAndFeatureExact
+            || !build::DecodeShellComposite(graph, firstRequest)
+            || !build::DecodeShellComposite(decoded, secondRequest)) return result;
+        std::array<std::vector<double>, 2> firstValues, secondValues;
+        result.bothSourceRecipesExact = true;
+        for (std::size_t index = 0; index < 2; ++index) {
+            result.bothSourceRecipesExact = result.bothSourceRecipesExact
+                && profile::Encode(firstRequest.profiles[index], firstValues[index])
+                && profile::Encode(secondRequest.profiles[index], secondValues[index])
+                && firstValues[index] == secondValues[index];
+        }
+        const auto first = build::BuildShellComposite(firstRequest, reads, reads);
+        const auto second = build::BuildShellComposite(secondRequest, reads, reads);
+        result.bothBuildsAdmitted = first.complete && second.complete;
+        result.bothSourceShapesExact = result.bothBuildsAdmitted
+            && first.sourceBytes == second.sourceBytes;
+        std::string firstResult, secondResult;
+        result.resultShapeExact = result.bothBuildsAdmitted
+            && retained_part_boolean::ExactShapeBytes(first.candidate.solid, firstResult)
+            && retained_part_boolean::ExactShapeBytes(second.candidate.solid, secondResult)
+            && firstResult == secondResult;
+        const auto* feature = std::get_if<composite_recipe::FeatureNode>(
+            &graph.nodes.back().value);
+        result.completeDependencyClosure = feature && feature->inputs.size() == 2
+            && reads.leftSource.locator.node == feature->inputs[0]
+            && reads.rightSource.locator.node == feature->inputs[1];
         return result;
     } catch (...) { return {}; }
 }

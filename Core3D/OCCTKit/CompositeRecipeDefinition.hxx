@@ -26,9 +26,12 @@ enum class RecipeKind : std::uint8_t {
     Enclosure = 2,
     RectangularLoft = 3,
     RetainedBoolean = 4,
+    // Reserved wire value only. P1 deliberately does not install a codec,
+    // source builder, editor, or family proof for it.
+    ReservedPlanarSplineProfile = 0x10,
 };
 enum class NodeKind : std::uint8_t { Source = 1, Feature = 2 };
-enum class SourceShapeKind : std::uint8_t { Solid = 1, Wire = 2 };
+enum class SourceShapeKind : std::uint8_t { Unknown = 0, Solid = 1, Face = 2, Wire = 3 };
 
 struct InputPlacement {
     // Row-major authored-source-to-carrier affine transform. Authored recipe
@@ -63,8 +66,16 @@ struct SourceNode {
 // callers must use this function instead of assuming every future source is a
 // solid.  Unknown recipe tags never reach this point because ValidRecipe
 // rejects them before a binary shape is accepted.
-inline SourceShapeKind ExpectedSourceShapeKind(const SourceRecipe&) noexcept {
-    return SourceShapeKind::Solid;
+inline SourceShapeKind ExpectedSourceShapeKind(const SourceRecipe& recipe) noexcept {
+    switch (recipe.kind) {
+    case RecipeKind::Profile:
+    case RecipeKind::Enclosure:
+    case RecipeKind::RectangularLoft:
+    case RecipeKind::RetainedBoolean:
+        return SourceShapeKind::Solid;
+    default:
+        return SourceShapeKind::Unknown;
+    }
 }
 
 struct FeatureNode {
@@ -85,6 +96,12 @@ struct Definition {
     IssuanceState issuance;
     std::vector<Node> nodes;
 };
+
+inline Definition MakeV3Definition() noexcept {
+    Definition result;
+    result.schemaVersion = 3;
+    return result;
+}
 
 inline NodeKind Kind(const Node& node) noexcept {
     return std::holds_alternative<SourceNode>(node.value) ? NodeKind::Source : NodeKind::Feature;

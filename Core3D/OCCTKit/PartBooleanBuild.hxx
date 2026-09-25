@@ -5,10 +5,15 @@
 #include "RetainedPartBoolean.hxx"
 #include "../UI/ShellOperationController.hpp"
 #include <BinTools.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Quaternion.hxx>
@@ -18,9 +23,12 @@
 #include <array>
 #include <cstdint>
 #include <istream>
+#include <map>
 #include <ostream>
+#include <set>
 #include <streambuf>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace core3d::part_boolean::build {
@@ -50,6 +58,36 @@ struct AnalyticBuild final {
     retained_part_boolean::Candidate candidate;
     retained_part_boolean::CandidateEvidence evidence;
     std::array<std::string, 2> sourceBytes;
+    bool complete = false;
+};
+
+//! Production P1 build input. Every value is decoded from the captured
+//! SYCR/2 graph and SYPB/2 feature; no test scenario selects this branch.
+struct ShellCompositeRequest final {
+    Definition definition;
+    std::array<profile::Parameters, 2> profiles;
+    std::array<composite_recipe::InputPlacement, 2> placements;
+};
+
+struct SourceFaceClass final {
+    TopoDS_Face face;
+    RegionKind kind = RegionKind::OuterWall;
+};
+
+struct FaceHistoryRelation final {
+    std::string faceKey;
+    std::uint8_t sourceInput = 0;
+    RegionKind kind = RegionKind::OuterWall;
+    bool generated = false;
+};
+
+struct ShellCompositeBuild final {
+    std::array<TopoDS_Shape, 2> sources;
+    retained_part_boolean::Candidate candidate;
+    retained_part_boolean::CandidateEvidence evidence;
+    std::array<std::string, 2> sourceBytes;
+    std::vector<FaceHistoryRelation> faceHistory;
+    bool historyResultExact = false;
     bool complete = false;
 };
 
@@ -264,6 +302,331 @@ inline bool IsRectangularP1ShellRecipe(
     } catch (...) {
         return false;
     }
+}
+
+inline bool IsRectangularP1BaseRecipe(const profile::Parameters& value,
+                                      bool requireShell) noexcept {
+    try {
+        if (value.definition.revolve || value.definition.plane != 0
+            || value.definition.circle || value.definition.curves
+            || !value.definition.holes.empty() || value.definition.points.size() != 4
+            || !std::isfinite(value.definition.depth) || value.definition.depth <= 0)
+            return false;
+        const auto& p = value.definition.points;
+        const bool orderedRectangle = p[0].Y() == p[1].Y()
+            && p[1].X() == p[2].X() && p[2].Y() == p[3].Y()
+            && p[3].X() == p[0].X() && p[1].X() > p[0].X()
+            && p[2].Y() > p[1].Y();
+        if (!orderedRectangle) return false;
+        if (requireShell) return IsRectangularP1ShellRecipe(value);
+        return value.shells.empty() && profile::SchemaFor(value) >= 1
+            && profile::SchemaFor(value) <= 4;
+    } catch (...) { return false; }
+}
+
+inline bool DecodeShellComposite(const composite_recipe::Definition& graph,
+                                 ShellCompositeRequest& output) noexcept {
+    output = {};
+    try {
+        if (graph.schemaVersion != 2 || graph.nodes.size() != 3) return false;
+        const auto* feature = std::get_if<composite_recipe::FeatureNode>(
+            &graph.nodes.back().value);
+        if (!feature || feature->kind != composite_recipe::PartBooleanFeatureKind
+            || feature->codecVersion != composite_recipe::PartBooleanShellFeatureCodec
+            || feature->inputs.size() != 2
+            || !Decode(feature->parameters, output.definition)
+            || output.definition.inputs[0].family != InputFamily::ShellProfile
+            || output.definition.inputs[1].family != InputFamily::AnalyticRectangularPrism)
+            return false;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(
+                &graph.nodes[index].value);
+            std::vector<double> scalars;
+            if (!source || source->node != feature->inputs[index]
+                || source->node != output.definition.inputs[index].rootNode
+                || source->original.sourceFeature
+                    != output.definition.inputs[index].originalSourceFeature
+                || source->recipe.kind != composite_recipe::RecipeKind::Profile
+                || !composite_recipe::DecodeScalarRecipe(source->recipe, scalars)
+                || !profile::Decode(scalars, output.profiles[index])) return false;
+            output.placements[index] = source->inputToCarrier;
+        }
+        return IsRectangularP1BaseRecipe(output.profiles[0], true)
+            && IsRectangularP1BaseRecipe(output.profiles[1], false);
+    } catch (...) { output = {}; return false; }
+}
+
+inline TopoDS_Shape BuildProfileSource(const profile::Parameters& recipe,
+                                       bool shell) noexcept {
+    try {
+        if (!IsRectangularP1BaseRecipe(recipe, shell)) return {};
+        const auto& p = recipe.definition.points;
+        TopoDS_Shape result = BRepPrimAPI_MakeBox(
+            gp_Pnt(p[0].X(), p[0].Y(), 0),
+            p[1].X() - p[0].X(), p[3].Y() - p[0].Y(),
+            recipe.definition.depth).Shape();
+        if (result.IsNull()) return {};
+        if (recipe.constructionFrame) {
+            gp_Trsf frame;
+            if (!recipe.constructionFrame->Transform(frame)) return {};
+            result = BRepBuilderAPI_Transform(result, frame, Standard_True).Shape();
+        }
+        if (shell) {
+            std::atomic_bool cancelled{false};
+            TopoDS_Shape shelled;
+            if (!ReplayProfileShells(result, recipe, cancelled, shelled)) return {};
+            result = shelled;
+        }
+        return retained_part_boolean::IsOneValidForwardSolid(result)
+            ? result : TopoDS_Shape();
+    } catch (...) { return {}; }
+}
+
+inline TopoDS_Shape ApplyInputPlacement(
+    const TopoDS_Shape& source,
+    const composite_recipe::InputPlacement& placement) noexcept {
+    try {
+        if (source.IsNull() || !composite_recipe::ValidPlacement(placement)) return {};
+        const auto& m = placement.matrix;
+        gp_Trsf transform;
+        transform.SetValues(m[0], m[1], m[2], m[3],
+                            m[4], m[5], m[6], m[7],
+                            m[8], m[9], m[10], m[11]);
+        TopoDS_Shape result = BRepBuilderAPI_Transform(
+            source, transform, Standard_True).Shape();
+        return retained_part_boolean::IsOneValidForwardSolid(result)
+            ? result : TopoDS_Shape();
+    } catch (...) { return {}; }
+}
+
+inline bool ClassifySourceFaces(const TopoDS_Shape& source,
+                                const profile::Parameters& recipe,
+                                bool shell,
+                                std::vector<SourceFaceClass>& output) noexcept {
+    output.clear();
+    try {
+        if (!retained_part_boolean::IsOneValidForwardSolid(source)) return false;
+        GProp_GProps volume;
+        BRepGProp::VolumeProperties(source, volume);
+        const gp_Pnt centre = volume.CentreOfMass();
+        gp_Dir extrusion(0, 0, 1);
+        if (recipe.constructionFrame) {
+            gp_Trsf frame;
+            if (!recipe.constructionFrame->Transform(frame)) return false;
+            extrusion.Transform(frame);
+        }
+        for (TopExp_Explorer it(source, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) return false;
+            GProp_GProps area;
+            BRepGProp::SurfaceProperties(face, area);
+            if (!std::isfinite(area.Mass()) || area.Mass() <= 0) return false;
+            SourceFaceClass classified;
+            classified.face = face;
+            if (!shell) {
+                classified.kind = RegionKind::ToolBoundary;
+            } else {
+                gp_Dir normal = surface.Plane().Axis().Direction();
+                if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+                const gp_Vec fromCentre(centre, area.CentreOfMass());
+                const double axial = normal.Dot(extrusion);
+                if (std::abs(axial) >= 1.0 - 1e-9) {
+                    classified.kind = fromCentre.Dot(gp_Vec(extrusion)) > 0
+                        ? RegionKind::Rim : RegionKind::Floor;
+                } else {
+                    const gp_Vec radial = fromCentre
+                        - gp_Vec(extrusion) * fromCentre.Dot(gp_Vec(extrusion));
+                    classified.kind = normal.Dot(radial) >= 0
+                        ? RegionKind::OuterWall : RegionKind::InnerWall;
+                }
+            }
+            output.push_back(std::move(classified));
+        }
+        return !output.empty();
+    } catch (...) { output.clear(); return false; }
+}
+
+inline bool ApplyInputPlacement(
+    const TopoDS_Shape& source,
+    const std::vector<SourceFaceClass>& sourceFaces,
+    const composite_recipe::InputPlacement& placement,
+    TopoDS_Shape& result,
+    std::vector<SourceFaceClass>& resultFaces) noexcept {
+    result.Nullify(); resultFaces.clear();
+    try {
+        if (source.IsNull() || !composite_recipe::ValidPlacement(placement)) return false;
+        const auto& m = placement.matrix;
+        gp_Trsf transform;
+        transform.SetValues(m[0], m[1], m[2], m[3],
+                            m[4], m[5], m[6], m[7],
+                            m[8], m[9], m[10], m[11]);
+        BRepBuilderAPI_Transform builder(source, transform, Standard_True);
+        result = builder.Shape();
+        if (!retained_part_boolean::IsOneValidForwardSolid(result)) return false;
+        for (const SourceFaceClass& value : sourceFaces) {
+            const TopoDS_Shape mapped = builder.ModifiedShape(value.face);
+            if (mapped.IsNull() || mapped.ShapeType() != TopAbs_FACE) return false;
+            resultFaces.push_back({TopoDS::Face(mapped), value.kind});
+        }
+        return resultFaces.size() == sourceFaces.size();
+    } catch (...) { result.Nullify(); resultFaces.clear(); return false; }
+}
+
+template <class Builder>
+inline bool CollectShellBooleanHistory(
+    Builder& boolean,
+    const std::array<TopoDS_Shape, 2>& sources,
+    const std::array<std::vector<SourceFaceClass>, 2>& sourceFaces,
+    const TopoDS_Shape& candidate,
+    std::vector<FaceHistoryRelation>& output) noexcept {
+    output.clear();
+    try {
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(sources[0]); tools.Append(sources[1]);
+        boolean.SetArguments(arguments); boolean.SetTools(tools);
+        boolean.SetRunParallel(Standard_False);
+        boolean.SetNonDestructive(Standard_True);
+        boolean.SetFuzzyValue(Precision::Confusion());
+        boolean.SetUseOBB(Standard_True);
+        boolean.SetCheckInverted(Standard_True);
+        boolean.Build();
+        if (!boolean.IsDone() || boolean.HasErrors()) return false;
+        std::string candidateBytes, independentBytes;
+        if (!retained_part_boolean::ExactShapeBytes(candidate, candidateBytes)
+            || !retained_part_boolean::ExactShapeBytes(boolean.Shape(), independentBytes)
+            || candidateBytes != independentBytes) return false;
+
+        std::map<std::string, TopoDS_Face> finalFaces;
+        for (TopExp_Explorer it(candidate, TopAbs_FACE); it.More(); it.Next()) {
+            std::string key;
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            if (!retained_part_boolean::ExactShapeBytes(face, key)
+                || !finalFaces.emplace(key, face).second) return false;
+        }
+        std::set<std::tuple<std::string, std::uint8_t, unsigned char, bool>> seen;
+        const auto append = [&](const TopoDS_Shape& shape, std::uint8_t input,
+                                RegionKind kind, bool generated) {
+            if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) return true;
+            std::string key;
+            if (!retained_part_boolean::ExactShapeBytes(shape, key)) return false;
+            if (!finalFaces.count(key)) {
+                // OCCT history returns a face without necessarily carrying its
+                // final result orientation. Resolve it in this builder's result
+                // before using the exact oriented result bytes as its key.
+                bool found = false;
+                for (TopExp_Explorer it(boolean.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+                    if (!it.Current().IsSame(shape)) continue;
+                    if (found) return false;
+                    found = true;
+                    if (!retained_part_boolean::ExactShapeBytes(it.Current(), key)
+                        || !finalFaces.count(key)) return false;
+                }
+                if (!found) return true;
+            }
+            const auto token = std::make_tuple(key, input,
+                static_cast<unsigned char>(kind), generated);
+            if (seen.insert(token).second)
+                output.push_back({std::move(key), input, kind, generated});
+            return true;
+        };
+        for (std::uint8_t input = 0; input < 2; ++input) {
+            for (const SourceFaceClass& source : sourceFaces[input]) {
+                if (!append(source.face, input, source.kind, false)) return false;
+                for (TopTools_ListIteratorOfListOfShape it(boolean.Modified(source.face));
+                     it.More(); it.Next())
+                    if (!append(it.Value(), input, source.kind, false)) return false;
+                for (TopTools_ListIteratorOfListOfShape it(boolean.Generated(source.face));
+                     it.More(); it.Next())
+                    if (!append(it.Value(), input, source.kind, true)) return false;
+            }
+        }
+        std::set<std::string> related;
+        for (const FaceHistoryRelation& value : output) related.insert(value.faceKey);
+        return !finalFaces.empty() && related.size() == finalFaces.size();
+    } catch (...) { output.clear(); return false; }
+}
+
+inline ShellCompositeBuild BuildShellComposite(
+    const ShellCompositeRequest& request,
+    const retained_part_boolean::OperandReadSet& captured,
+    const retained_part_boolean::OperandReadSet& current) noexcept {
+    ShellCompositeBuild result;
+    try {
+        if (!Valid(request.definition)
+            || request.definition.inputs[0].family != InputFamily::ShellProfile
+            || request.definition.inputs[1].family != InputFamily::AnalyticRectangularPrism)
+            return result;
+        std::array<std::vector<SourceFaceClass>, 2> sourceFaces;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const TopoDS_Shape local = BuildProfileSource(
+                request.profiles[index], index == 0);
+            std::vector<SourceFaceClass> localFaces;
+            if (!ClassifySourceFaces(local, request.profiles[index], index == 0, localFaces)
+                || !ApplyInputPlacement(local, localFaces, request.placements[index],
+                                        result.sources[index], sourceFaces[index])) return {};
+            if (result.sources[index].IsNull()
+                || !retained_part_boolean::ExactShapeBytes(
+                    result.sources[index], result.sourceBytes[index])) return {};
+        }
+        result.candidate = retained_part_boolean::BuildDetachedCandidate(
+            NativeOperation(request.definition.operation), result.sources[0],
+            result.sources[1], Precision::Confusion(), captured, current,
+            &result.evidence);
+        if (result.candidate.admitted()) {
+            if (request.definition.operation == Operation::Union) {
+                BRepAlgoAPI_Fuse boolean;
+                result.historyResultExact = CollectShellBooleanHistory(
+                    boolean, result.sources, sourceFaces, result.candidate.solid,
+                    result.faceHistory);
+            } else if (request.definition.operation == Operation::Subtract) {
+                BRepAlgoAPI_Cut boolean;
+                result.historyResultExact = CollectShellBooleanHistory(
+                    boolean, result.sources, sourceFaces, result.candidate.solid,
+                    result.faceHistory);
+            } else {
+                BRepAlgoAPI_Common boolean;
+                result.historyResultExact = CollectShellBooleanHistory(
+                    boolean, result.sources, sourceFaces, result.candidate.solid,
+                    result.faceHistory);
+            }
+        }
+        result.complete = result.candidate.admitted()
+            && result.evidence.explicitDeterministicOptions
+            && result.evidence.inputBytesUnchanged
+            && result.evidence.historyObserved
+            && result.historyResultExact;
+        if (!result.complete) return result;
+        result.candidate.solid = AnalyticResultSolid(result.candidate.solid);
+        if (result.candidate.solid.IsNull()) return {};
+        const TopoDS_Shape persisted = PersistenceMaterializeDetached(result.candidate.solid);
+        if (persisted.IsNull()) return {};
+        std::map<std::string, std::string> persistedKeys;
+        std::set<std::string> uniquePersistedKeys;
+        TopExp_Explorer originalFace(result.candidate.solid, TopAbs_FACE);
+        TopExp_Explorer persistedFace(persisted, TopAbs_FACE);
+        for (; originalFace.More() && persistedFace.More(); originalFace.Next(), persistedFace.Next()) {
+            std::string originalKey, persistedKey;
+            if (originalFace.Current().Orientation() != persistedFace.Current().Orientation()
+                || !retained_part_boolean::ExactShapeBytes(originalFace.Current(), originalKey)
+                || !retained_part_boolean::ExactShapeBytes(persistedFace.Current(), persistedKey)
+                || !persistedKeys.emplace(originalKey, persistedKey).second
+                || !uniquePersistedKeys.insert(persistedKey).second) return {};
+        }
+        if (originalFace.More() || persistedFace.More() || persistedKeys.empty()) return {};
+        for (auto& relation : result.faceHistory) {
+            const auto key = persistedKeys.find(relation.faceKey);
+            if (key == persistedKeys.end()) return {};
+            relation.faceKey = key->second;
+        }
+        result.candidate.solid = persisted;
+        for (std::size_t index = 0; index < result.sources.size(); ++index) {
+            result.sources[index] = PersistenceMaterializeDetached(result.sources[index]);
+            if (result.sources[index].IsNull()
+                || !retained_part_boolean::ExactShapeBytes(result.sources[index], result.sourceBytes[index])) return {};
+        }
+        return result;
+    } catch (...) { return {}; }
 }
 
 inline ShellBuild BuildShell(ShellFixture fixture) noexcept {

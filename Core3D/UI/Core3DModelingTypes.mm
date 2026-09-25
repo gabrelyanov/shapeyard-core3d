@@ -41,8 +41,77 @@ static bool Core3DPartBooleanFinite4(simd_double4 value) {
         || !std::isfinite(metallic) || metallic < 0 || metallic > 1
         || !std::isfinite(roughness) || roughness < 0 || roughness > 1) return nil;
     if ((self=[super init])) {
-        _role=[role copy];_name=[name copy];_dimensionsMM=dimensions;_translationMM=translation;
+        _role=[role copy];_name=[name copy];_family=Core3DPartBooleanInputFamilyAnalyticRectangularPrism;
+        _dimensionsMM=dimensions;_translationMM=translation;
         _rotationXYZW=rotation;_metersPerUnit=metersPerUnit;_baseColorSRGB=baseColor;
+        _metallic=metallic;_roughness=roughness;
+        _profilePointsMM=@[];_extrusionPlane=0;
+        _constructionRotationXYZW=simd_make_double4(0,0,0,1);_constructionScale=1;
+        _shellRotationXYZW=simd_make_double4(0,0,0,1);_shellScale=1;
+        _shellOpeningKeys=@[];
+    }
+    return self;
+}
+- (instancetype)initWithShellRole:(NSString *)role name:(NSString *)name
+    profilePointsMM:(NSArray<NSValue *> *)points extrusionDepthMM:(double)depth
+    extrusionPlane:(NSInteger)plane
+    constructionTranslationMM:(simd_double3)constructionTranslation
+    constructionRotationXYZW:(simd_double4)constructionRotation
+    constructionScale:(double)constructionScale
+    inputTranslationMM:(simd_double3)translation inputRotationXYZW:(simd_double4)rotation
+    metersPerUnit:(double)metersPerUnit shellThicknessMM:(double)thickness
+    shellTranslationMM:(simd_double3)shellTranslation
+    shellRotationXYZW:(simd_double4)shellRotation shellScale:(double)shellScale
+    shellOpeningKeys:(NSArray<NSNumber *> *)openings
+    baseColorSRGB:(simd_double3)baseColor metallic:(double)metallic roughness:(double)roughness {
+    if (![role isKindOfClass:NSString.class]
+        || !([role isEqualToString:@"left"] || [role isEqualToString:@"right"])
+        || ![name isKindOfClass:NSString.class] || name.length > 128
+        || ![points isKindOfClass:NSArray.class] || points.count != 4
+        || ![openings isKindOfClass:NSArray.class] || openings.count < 1 || openings.count > 2
+        || !std::isfinite(depth) || depth <= 0 || plane != 0
+        || !Core3DPartBooleanFinite3(constructionTranslation)
+        || !Core3DPartBooleanFinite4(constructionRotation)
+        || !std::isfinite(constructionScale) || constructionScale <= 0
+        || !Core3DPartBooleanFinite3(translation) || !Core3DPartBooleanFinite4(rotation)
+        || !std::isfinite(metersPerUnit) || metersPerUnit <= 0
+        || !std::isfinite(thickness) || thickness <= 0
+        || !Core3DPartBooleanFinite3(shellTranslation)
+        || !Core3DPartBooleanFinite4(shellRotation)
+        || !std::isfinite(shellScale) || shellScale <= 0
+        || std::abs(simd_length_squared(constructionRotation)-1)>1e-10
+        || std::abs(simd_length_squared(rotation)-1)>1e-10
+        || std::abs(simd_length_squared(shellRotation)-1)>1e-10
+        || !Core3DPartBooleanFinite3(baseColor) || baseColor.x<0 || baseColor.x>1
+        || baseColor.y<0 || baseColor.y>1 || baseColor.z<0 || baseColor.z>1
+        || !std::isfinite(metallic) || metallic<0 || metallic>1
+        || !std::isfinite(roughness) || roughness<0 || roughness>1) return nil;
+    CGPoint decoded[4]{};
+    for (NSUInteger index=0;index<4;++index) {
+        if (![points[index] isKindOfClass:NSValue.class]
+            || strcmp([points[index] objCType],@encode(CGPoint))!=0) return nil;
+        [points[index] getValue:&decoded[index] size:sizeof(CGPoint)];
+        if (!std::isfinite(decoded[index].x)||!std::isfinite(decoded[index].y)) return nil;
+    }
+    if (!(decoded[0].y==decoded[1].y && decoded[1].x==decoded[2].x
+        && decoded[2].y==decoded[3].y && decoded[3].x==decoded[0].x
+        && decoded[1].x>decoded[0].x && decoded[3].y>decoded[0].y)) return nil;
+    NSInteger previous=-1;
+    for (NSNumber *opening in openings) {
+        if (![opening isKindOfClass:NSNumber.class] || opening.integerValue<=previous
+            || opening.integerValue<0 || opening.integerValue>5) return nil;
+        previous=opening.integerValue;
+    }
+    if ((self=[super init])) {
+        _role=[role copy];_name=[name copy];_family=Core3DPartBooleanInputFamilyShellProfile;
+        _profilePointsMM=[points copy];_dimensionsMM=simd_make_double3(
+            decoded[1].x-decoded[0].x,decoded[3].y-decoded[0].y,depth);
+        _extrusionPlane=plane;_constructionTranslationMM=constructionTranslation;
+        _constructionRotationXYZW=constructionRotation;_constructionScale=constructionScale;
+        _translationMM=translation;_rotationXYZW=rotation;_metersPerUnit=metersPerUnit;
+        _shellThicknessMM=@(thickness);_shellTranslationMM=shellTranslation;
+        _shellRotationXYZW=shellRotation;_shellScale=shellScale;
+        _shellOpeningKeys=[openings copy];_baseColorSRGB=baseColor;
         _metallic=metallic;_roughness=roughness;
     }
     return self;

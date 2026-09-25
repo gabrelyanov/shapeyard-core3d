@@ -62,7 +62,18 @@ struct Record {
 };
 
 inline TopAbs_ShapeEnum TopologyKind(SourceShapeKind kind) noexcept {
-    return kind == SourceShapeKind::Wire ? TopAbs_WIRE : TopAbs_SOLID;
+    if (kind == SourceShapeKind::Solid) return TopAbs_SOLID;
+    if (kind == SourceShapeKind::Face) return TopAbs_FACE;
+    if (kind == SourceShapeKind::Wire) return TopAbs_WIRE;
+    return TopAbs_SHAPE;
+}
+
+inline bool ExpectedShapeKind(const Definition& definition, const SourceRecipe& recipe,
+                              SourceShapeKind& output) noexcept {
+    if (definition.schemaVersion == 3)
+        return retained_source::ExpectedShape(recipe, retained_source::ProductionRegistry(), output);
+    output = ExpectedSourceShapeKind(recipe);
+    return output != SourceShapeKind::Unknown;
 }
 
 inline bool HasRecord(const TDF_Label& owner) noexcept {
@@ -120,8 +131,9 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
                 ++sources;
                 if (source->shapeSlot >= value->sourceShapes.size()) return false;
                 const TopoDS_Shape& shape = value->sourceShapes[source->shapeSlot];
-                if (shape.IsNull()
-                    || shape.ShapeType() != TopologyKind(ExpectedSourceShapeKind(source->recipe))
+                SourceShapeKind expected = SourceShapeKind::Unknown;
+                if (!ExpectedShapeKind(value->definition, source->recipe, expected)
+                    || shape.IsNull() || shape.ShapeType() != TopologyKind(expected)
                     || shape.Orientation() != TopAbs_FORWARD) return false;
             }
             if (sources != value->sourceShapes.size()) return false;

@@ -40,7 +40,11 @@ inline AdmissionDecision Evaluate(const OwnerSnapshot& snapshot,
         if (!rule.nativeBuilderInstalled || !rule.nativeProofInstalled
             || !rule.nativeOwnerInstalled || !rule.retainedInputsPersistenceInstalled) return result;
         if (rule.featureKind != composite_recipe::PartBooleanFeatureKind
-            || rule.featureCodecVersion != composite_recipe::PartBooleanFeatureCodec) {
+            || (rule.featureCodecVersion != composite_recipe::PartBooleanFeatureCodec
+                && rule.featureCodecVersion
+                    != composite_recipe::PartBooleanShellFeatureCodec)
+            || (rule.featureCodecVersion == composite_recipe::PartBooleanShellFeatureCodec
+                && rule.operation == OperationKind::PartBoolean)) {
             result.refusal = Refusal::FeatureKind; return result;
         }
         if (rule.selectorVersion == 0) { result.refusal = Refusal::SelectorVersion; return result; }
@@ -67,5 +71,45 @@ inline AdmissionDecision P1NoFeatureAdmission(const OwnerSnapshot& snapshot) noe
     result.refusal = snapshot.status == OwnerStatus::CurrentEditable
         ? Refusal::RuleNotInstalled : Refusal::SnapshotNotCurrent;
     return result;
+}
+
+enum class V3MutationKind : std::uint8_t { EditSource = 1, EditFeature = 2, AppendFeature = 3, RemoveFeature = 4 };
+struct V3MutationRequest final {
+    V3MutationKind operation = V3MutationKind::EditFeature;
+    RecipeLocator target;
+    std::uint32_t featureKind = 0, featureCodecVersion = 0;
+    std::vector<std::uint8_t> canonicalParameters;
+};
+
+inline AdmissionDecision EvaluateV3(const OwnerSnapshot& snapshot,
+                                    const V3MutationRequest& request,
+                                    const retained_feature::RegistryView& registry
+                                        = retained_feature::ProductionRegistry()) noexcept {
+    AdmissionDecision result;
+    try {
+        for (const auto& source : snapshot.sources) result.completeReadSet.push_back(source.locator);
+        for (const auto& feature : snapshot.features) result.completeReadSet.push_back(feature.locator);
+        if (snapshot.status != OwnerStatus::CurrentEditable) {
+            result.refusal = Refusal::SnapshotNotCurrent; return result;
+        }
+        const auto* entry = registry.find({request.featureKind, request.featureCodecVersion});
+        if (!entry || !entry->execution.installed()) {
+            result.refusal = entry ? Refusal::RuleNotInstalled : Refusal::FeatureKind; return result;
+        }
+        const auto found = std::find_if(snapshot.features.begin(), snapshot.features.end(),
+            [&](const FeatureSnapshot& value) { return value.locator == request.target; });
+        if ((request.operation == V3MutationKind::EditFeature
+                || request.operation == V3MutationKind::RemoveFeature)
+            && found == snapshot.features.end()) {
+            result.refusal = Refusal::FeatureKind; return result;
+        }
+        if (request.operation != V3MutationKind::RemoveFeature
+            && (request.canonicalParameters.empty()
+                || request.canonicalParameters.size() > entry->codec.maximumPayloadBytes)) {
+            result.refusal = Refusal::ParameterBounds; return result;
+        }
+        result.refusal = Refusal::None; result.detachedCandidateOnly = false;
+        return result;
+    } catch (...) { result.completeReadSet.clear(); result.refusal = Refusal::RuleNotInstalled; return result; }
 }
 } // namespace core3d::retained_recipe

@@ -6473,12 +6473,13 @@ bool Core3DViewer::redrawDocument() noexcept {
             const auto* feature=std::get_if<composite_recipe::FeatureNode>(
                 &record.value->definition.nodes.back().value);
             if (!feature || feature->kind!=composite_recipe::PartBooleanFeatureKind) continue;
-            if (feature->codecVersion==composite_recipe::PartBooleanShellFeatureCodec) continue;
-            part_boolean::AnalyticDefinition analytic;
-            if (record.value->definition.nodes.size()!=3
-                || feature->codecVersion!=composite_recipe::PartBooleanFeatureCodec
-                || !part_boolean::DecodeAnalytic(feature->parameters,analytic)
-                || record.current.IsNull()) return false;
+            if (feature->codecVersion!=composite_recipe::PartBooleanShellFeatureCodec) {
+                part_boolean::AnalyticDefinition analytic;
+                if (record.value->definition.nodes.size()!=3
+                    || feature->codecVersion!=composite_recipe::PartBooleanFeatureCodec
+                    || !part_boolean::DecodeAnalytic(feature->parameters,analytic)
+                    || record.current.IsNull()) return false;
+            }
             std::unordered_set<const TopoDS_TShape*> distinctCarrierFaces;
             std::size_t faceCount=0;
             for (TopExp_Explorer face(record.current,TopAbs_FACE);face.More();face.Next()) {

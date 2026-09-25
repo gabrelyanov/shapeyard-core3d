@@ -6,6 +6,17 @@ set -euo pipefail
 mkdir -p "$1"
 output_dir=$(cd "$1" && pwd)
 tests_dir=$(cd "$(dirname "$0")" && pwd)
+# P1 closed SYCR/3 registry/codec/replay contract. The retained library path is
+# explicit so this runner never selects an iOS archive for a macOS host test.
+if [[ "${3:-}" == "RetainedFeatureRegistryTests" ]]; then
+    : "${2:?focused registry tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-missing-field-initializers -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/RetainedFeatureRegistryTests.cpp" -L "$2" \
+        -lTKMath -lTKernel -o "$output_dir/RetainedFeatureRegistryTests"
+    "$output_dir/RetainedFeatureRegistryTests"
+    exit
+fi
 # B04 exact revolved-host admission, boundary and retained replay.
 if [[ "${3:-}" == "RingCutAdmissionTests" ]]; then
     : "${2:?focused ring admission tests require retained host OCCT libraries}"

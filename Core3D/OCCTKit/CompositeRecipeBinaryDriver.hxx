@@ -64,8 +64,9 @@ public:
                     ++expectedSources;
                     if (sourceNode->shapeSlot >= expectedShapeTypes.size()
                         || expectedShapeTypes[sourceNode->shapeSlot] != TopAbs_SHAPE) return Refuse();
-                    expectedShapeTypes[sourceNode->shapeSlot] =
-                        TopologyKind(ExpectedSourceShapeKind(sourceNode->recipe));
+                    SourceShapeKind expected = SourceShapeKind::Unknown;
+                    if (!ExpectedShapeKind(definition, sourceNode->recipe, expected)) return Refuse();
+                    expectedShapeTypes[sourceNode->shapeSlot] = TopologyKind(expected);
                 }
             if (expectedSources != std::size_t(shapeCount)) return Refuse();
             auto* shared = shapes_->ShapeSet(Standard_True); if (!shared) return Refuse();
@@ -150,8 +151,10 @@ public:
                 if (sourceNode->shapeSlot >= expectedShapeTypes.size()
                     || expectedShapeTypes[sourceNode->shapeSlot] != TopAbs_SHAPE)
                     Standard_Failure::Raise("Composite recipe writer shape slot");
-                expectedShapeTypes[sourceNode->shapeSlot] =
-                    TopologyKind(ExpectedSourceShapeKind(sourceNode->recipe));
+                SourceShapeKind expected = SourceShapeKind::Unknown;
+                if (!ExpectedShapeKind(value.definition, sourceNode->recipe, expected))
+                    Standard_Failure::Raise("Composite recipe writer source codec");
+                expectedShapeTypes[sourceNode->shapeSlot] = TopologyKind(expected);
             }
         for (std::size_t index = 0; index < value.sourceShapes.size(); ++index) {
             const TopoDS_Shape& shape = value.sourceShapes[index];

@@ -40,6 +40,10 @@ typedef NS_ENUM(NSInteger, Core3DPartBooleanOperation) {
     Core3DPartBooleanOperationSubtract,
     Core3DPartBooleanOperationIntersect,
 };
+typedef NS_ENUM(NSInteger, Core3DPartBooleanInputFamily) {
+    Core3DPartBooleanInputFamilyAnalyticRectangularPrism = 1,
+    Core3DPartBooleanInputFamilyShellProfile,
+};
 typedef NS_ENUM(NSInteger, Core3DPartBooleanEditOutcome) {
     Core3DPartBooleanEditOutcomeCaptured = 0,
     Core3DPartBooleanEditOutcomePrepared,
@@ -54,6 +58,7 @@ __attribute__((objc_subclassing_restricted))
 @interface Core3DPartBooleanInputValues : NSObject
 @property(nonatomic,copy,readonly) NSString *role;
 @property(nonatomic,copy,readonly) NSString *name;
+@property(nonatomic,readonly) Core3DPartBooleanInputFamily family;
 @property(nonatomic,readonly) simd_double3 dimensionsMM;
 @property(nonatomic,readonly) simd_double3 translationMM;
 @property(nonatomic,readonly) simd_double4 rotationXYZW;
@@ -61,11 +66,35 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) simd_double3 baseColorSRGB;
 @property(nonatomic,readonly) double metallic;
 @property(nonatomic,readonly) double roughness;
+//! Shell-only exact authored rectangle in source order; empty for analytic input.
+@property(nonatomic,copy,readonly) NSArray<NSValue *> *profilePointsMM;
+@property(nonatomic,readonly) NSInteger extrusionPlane;
+@property(nonatomic,readonly) simd_double3 constructionTranslationMM;
+@property(nonatomic,readonly) simd_double4 constructionRotationXYZW;
+@property(nonatomic,readonly) double constructionScale;
+@property(nonatomic,copy,readonly,nullable) NSNumber *shellThicknessMM;
+@property(nonatomic,readonly) simd_double3 shellTranslationMM;
+@property(nonatomic,readonly) simd_double4 shellRotationXYZW;
+@property(nonatomic,readonly) double shellScale;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *shellOpeningKeys;
 - (nullable instancetype)initWithRole:(NSString *)role name:(NSString *)name
     dimensionsMM:(simd_double3)dimensions translationMM:(simd_double3)translation
     rotationXYZW:(simd_double4)rotation metersPerUnit:(double)metersPerUnit
     baseColorSRGB:(simd_double3)baseColor metallic:(double)metallic roughness:(double)roughness
     NS_SWIFT_NAME(init(role:name:dimensionsMM:translationMM:rotationXYZW:metersPerUnit:baseColorSRGB:metallic:roughness:));
+- (nullable instancetype)initWithShellRole:(NSString *)role name:(NSString *)name
+    profilePointsMM:(NSArray<NSValue *> *)points extrusionDepthMM:(double)depth
+    extrusionPlane:(NSInteger)plane
+    constructionTranslationMM:(simd_double3)constructionTranslation
+    constructionRotationXYZW:(simd_double4)constructionRotation
+    constructionScale:(double)constructionScale
+    inputTranslationMM:(simd_double3)translation inputRotationXYZW:(simd_double4)rotation
+    metersPerUnit:(double)metersPerUnit shellThicknessMM:(double)thickness
+    shellTranslationMM:(simd_double3)shellTranslation
+    shellRotationXYZW:(simd_double4)shellRotation shellScale:(double)shellScale
+    shellOpeningKeys:(NSArray<NSNumber *> *)openings
+    baseColorSRGB:(simd_double3)baseColor metallic:(double)metallic roughness:(double)roughness
+    NS_SWIFT_NAME(init(shellRole:name:profilePointsMM:extrusionDepthMM:extrusionPlane:constructionTranslationMM:constructionRotationXYZW:constructionScale:inputTranslationMM:inputRotationXYZW:metersPerUnit:shellThicknessMM:shellTranslationMM:shellRotationXYZW:shellScale:shellOpeningKeys:baseColorSRGB:metallic:roughness:));
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end

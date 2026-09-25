@@ -192,6 +192,10 @@ __attribute__((objc_subclassing_restricted))
     (NSString *)entityIdentifier NS_SWIFT_NAME(debugPartBooleanEditorValues(entityIdentifier:));
 - (Core3DPartBooleanEditingSession *_Nullable)debugOpenPartBooleanEditorForEntityIdentifier:
     (NSString *)entityIdentifier NS_SWIFT_NAME(debugOpenPartBooleanEditor(entityIdentifier:));
+//! Installs a real SYCR/2/SYPB/2 shell carrier for the same production owner.
+//! Public opening still requires the isolated shell activation candidate.
+- (NSString *_Nullable)debugInstallShellBooleanEditorFixtureMetersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugInstallShellBooleanEditorFixture(metersPerUnit:));
 #endif
 
 //! Change camera projection without changing target-plane scale or the model.
@@ -1205,6 +1209,11 @@ __attribute__((objc_subclassing_restricted))
 + (void)debugSetRetainedFilletFailureCount:(NSInteger)count NS_SWIFT_NAME(debugSetRetainedFilletFailureCount(_:));
 //! N1 internal owner evidence. This does not expose or enable a product route.
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeBooleanOwnerProbe:(NSInteger)scenario NS_SWIFT_NAME(debugNativeBooleanOwnerProbe(_:));
+//! Canonical pre-G0 writer capture; keys are stable attachment names.
++ (NSDictionary<NSString *, NSData *> *)debugLegacyCorpusCapture
+    NS_SWIFT_NAME(debugLegacyCorpusCapture());
+//! P1 synthetic registry/OCAF evidence; never a product modeling route.
++ (NSDictionary<NSString *, NSNumber *> *)debugRetainedFeatureRegistryProbe:(NSInteger)scenario NS_SWIFT_NAME(debugRetainedFeatureRegistryProbe(_:));
 //! Pure DEBUG codec/history evidence; never observes or mutates the live document.
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe
     NS_SWIFT_NAME(debugPartBooleanCodecProbe());
