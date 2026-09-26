@@ -12,6 +12,7 @@
 
 class OcctDocument;
 namespace core3d::composite_recipe {
+namespace spatial_g0 { struct Transaction; }
 class BinaryDriver;
 #if DEBUG
 struct Probe;
@@ -48,6 +49,7 @@ public:
 private:
     friend class BinaryDriver;
     friend class ::OcctDocument;
+    friend struct spatial_g0::Transaction;
 #if DEBUG
     friend struct Probe;
 #endif

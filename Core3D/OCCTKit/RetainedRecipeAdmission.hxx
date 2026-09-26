@@ -69,6 +69,24 @@ inline AdmissionDecision Evaluate(const OwnerSnapshot& snapshot,
     } catch (...) { result.refusal = Refusal::RuleNotInstalled; result.completeReadSet.clear(); return result; }
 }
 
+inline AdmissionDecision EvaluateSpatialCircleSweep(
+    const OwnerSnapshot& snapshot, const Digest& parameterBounds) noexcept {
+    AdmissionRule rule;
+    rule.operation = OperationKind::SpatialCircleSweep;
+    rule.featureKind = composite_recipe::SpatialCircleSweepFeatureKind;
+    rule.featureCodecVersion = composite_recipe::SpatialCircleSweepFeatureCodec;
+    rule.selectorVersion = 1;
+    rule.proofProfile = 1;
+    rule.orderedSourceKinds = {composite_recipe::RecipeKind::BoundedCurvePath};
+    rule.parameterBounds = parameterBounds;
+    // This switch is intentionally installed only in the stack which already
+    // contains the exact producer, Bishop law, returned-surface proof and
+    // fixed-point transaction. It is not a catalog capability.
+    rule.nativeBuilderInstalled = true;
+    rule.nativeProofInstalled = true;
+    return Evaluate(snapshot, rule);
+}
+
 inline AdmissionDecision P1NoFeatureAdmission(const OwnerSnapshot& snapshot) noexcept {
     AdmissionDecision result;
     for (const auto& source : snapshot.sources) result.completeReadSet.push_back(source.locator);

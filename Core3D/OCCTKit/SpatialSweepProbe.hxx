@@ -3,6 +3,7 @@
 #include "SpatialSweepGeomFillBuilder.hxx"
 #include "SpatialSweepPersistence.hxx"
 #include "SpatialSweepRebuild.hxx"
+#include "SpatialSweepG0Transaction.hxx"
 #include <map>
 #include <string>
 
@@ -410,12 +411,33 @@ inline std::map<std::string, bool> K2Probe() {
     checks["solid-flipped-face-refused"] = validPositive && ValidateDetachedSolid(sweep, admission,
         flipped).refusal == SolidRefusal::InvalidSolid;
 
-    const GeometryBytes millimetres{0xa0, 1, 2, 3};
-    const GeometryBytes metres{0xa0, 4, 5, 6};
-    checks["fixed-point-millimetres"] = PrepareFixedPoint(millimetres, millimetres,
-        NormalizeFixture).admitted();
-    checks["fixed-point-metres"] = PrepareFixedPoint(metres, metres,
-        NormalizeFixture).admitted();
+    // Actual unmeshed BinTools VERSION_4 transition, not fixture-byte
+    // normalization. Each branch is independently rebuilt before the single
+    // permitted read/write transition.
+    const auto secondCylinder = BuildGeomFillSweep(Curve(), sweep, cancelled);
+    const auto mmFixed = composite_recipe::spatial_g0::PrepareFixedPoint(
+        realCylinder.solid, secondCylinder.solid,
+        composite_recipe::spatial_g0::PinnedProfile);
+    checks["fixed-point-millimetres"] = realCylinder.built()
+        && secondCylinder.built() && mmFixed.admitted()
+        && realCylinder.receipt.serializerFormatVersion == 4;
+    auto metreCurve = Curve();
+    metreCurve.controlPoints.back().local[0] = 0.1;
+    auto metreSweep = sweep;
+    metreSweep.dimensionMetersPerUnit = 1.0;
+    metreSweep.radius = {RadiusLawKind::Constant, 0.002, 0.002};
+    const auto metreFirst = BuildGeomFillSweep(metreCurve, metreSweep, cancelled);
+    const auto metreSecond = BuildGeomFillSweep(metreCurve, metreSweep, cancelled);
+    const auto metreFixed = composite_recipe::spatial_g0::PrepareFixedPoint(
+        metreFirst.solid, metreSecond.solid,
+        composite_recipe::spatial_g0::PinnedProfile);
+    checks["fixed-point-metres"] = metreFirst.built() && metreSecond.built()
+        && metreFixed.admitted();
+    const auto mismatch = composite_recipe::spatial_g0::PrepareFixedPoint(
+        realCylinder.solid, realTaper.solid,
+        composite_recipe::spatial_g0::PinnedProfile);
+    checks["actual-bintools-independent-build-mismatch-refused"] =
+        mismatch.refusal == composite_recipe::spatial_g0::FixedPointRefusal::IndependentBuildMismatch;
     checks["fixed-point-drift-refused"] = PrepareFixedPoint({0xd0, 1}, {0xd0, 1},
         NormalizeFixture).refusal == FixedPointRefusal::NonFixedPoint;
     checks["independent-build-mismatch-refused"] = PrepareFixedPoint(
@@ -453,6 +475,16 @@ inline std::map<std::string, bool> K2Probe() {
     checks["composite-ready-plan-is-one-command"] =
         PrepareRetainedReplay(replay).admitted()
         && PrepareRetainedReplay(replay).mayOpenOneOwnedCommand;
+    checks["g0-pinned-occt-platform-fp-profile"] =
+        composite_recipe::spatial_g0::RuntimeProfileIsPinned(
+            composite_recipe::spatial_g0::PinnedProfile);
+    checks["g0-unsupported-descendant-is-precommand"] =
+        PrepareRetainedReplay(unsupported).refusal == ReplayRefusal::UnsupportedDependent
+        && !PrepareRetainedReplay(unsupported).mayOpenOneOwnedCommand;
+    checks["g0-transaction-type-opens-one-owned-command"] =
+        std::is_same_v<decltype(composite_recipe::spatial_g0::ApplyResult{}.openedExactlyOneCommand), bool>;
+    checks["legacy-golden-fixtures-not-candidate-derived"] = false;
+    checks["production-save-destroy-cold-open-twice-not-exercised"] = false;
     const auto& real=RealKernelChecks();checks.insert(real.begin(),real.end());return checks;
 }
 } // namespace core3d::spatial_sweep::debug

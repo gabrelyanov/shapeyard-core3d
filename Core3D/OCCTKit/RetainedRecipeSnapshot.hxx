@@ -246,11 +246,33 @@ inline OwnerSnapshot Snapshot(const composite_recipe::Definition& definition,
             result.reason = "native-shell-current";
             return result;
         }
+        // C2's builder/proof packages are installed before this serial G0
+        // transition. Recognize only the exact two-node curve->sweep graph;
+        // every downstream feature remains readable but non-editable until
+        // its own source-family proof is installed.
+        bool spatial = definition.schemaVersion == 2
+            && definition.nodes.size() == 2 && result.sources.size() == 1;
+        if (spatial) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(
+                &definition.nodes.front().value);
+            const auto* feature = std::get_if<composite_recipe::FeatureNode>(
+                &definition.nodes.back().value);
+            spatial = source && feature
+                && source->recipe.kind == composite_recipe::RecipeKind::BoundedCurvePath
+                && feature->kind == composite_recipe::SpatialCircleSweepFeatureKind
+                && feature->codecVersion == composite_recipe::SpatialCircleSweepFeatureCodec
+                && feature->inputs.size() == 1 && feature->inputs.front() == source->node
+                && definition.outputNode == feature->node;
+        }
+        if (spatial) {
+            result.status = OwnerStatus::CurrentEditable;
+            result.reason = "spatial-circle-sweep-current"; return result;
+        }
         // Structural decode never grants editability without the nonserializable
         // owner receipt. Malformed present records remain distinct from absence.
         result.status = OwnerStatus::UnsupportedVersion;
         result.reason = (exactAnalytic || exactShell)
-            ? "native-currentness-not-installed" : "feature-admission-not-installed";
+            ? "native-currentness-not-installed" : "unsupported-dependent-feature";
         return result;
     } catch (...) { return {}; }
 }

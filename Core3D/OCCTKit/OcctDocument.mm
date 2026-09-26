@@ -118,6 +118,7 @@ struct Cut475Scope {
 #include "ReceiptCatalogBinaryDriver.hxx"
 #include "RetainedSolidBinaryDriver.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
+#include "SpatialSweepG0Transaction.hxx"
 #include "BoundedCurveBinaryDriver.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -2258,10 +2259,11 @@ Standard_Boolean ValidateCommandOwnerSentinelsDocument(
             return Standard_False;
         }
         const auto isValidLabel = [&](const TDF_Label& theLabel) {
-            const std::array<const Standard_GUID*, 3> anIds = {{
+            const std::array<const Standard_GUID*, 4> anIds = {{
                 &Core3DDuplicateCommandOwnerAttributeID(),
                 &Core3DRadialArrayCommandOwnerAttributeID(),
                 &Core3DOrdinaryEditCommandOwnerAttributeID(),
+                &core3d::composite_recipe::spatial_g0::CommandOwnerAttributeID(),
             }};
             for (const Standard_GUID* anId : anIds) {
                 Handle(TDF_Attribute) anAttribute;
@@ -4102,14 +4104,16 @@ void OcctDocument::InitDoc()
         throw Standard_ProgramError("Native Boolean owner blocks document replacement");
     
     std::cout << "InitDoc()" << std::endl;
-  if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
-  myPartBooleanOwner.reset();
-  if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
-  myRetainedFeatureOwner.reset();
+  // Observers detach before owner retirement: any abort emitted while retiring
+  // the outgoing document is replacement cleanup and must record inactive.
   if (myNativeAuthority) myNativeAuthority->Detach();
 #if DEBUG
   if (myLiveProbe) myLiveProbe->Detach(myOcafDoc);
 #endif
+  if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
+  myPartBooleanOwner.reset();
+  if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
+  myRetainedFeatureOwner.reset();
   // close old document
   if (!myOcafDoc.IsNull())
   {
