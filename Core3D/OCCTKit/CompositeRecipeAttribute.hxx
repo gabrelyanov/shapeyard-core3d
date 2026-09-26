@@ -88,11 +88,15 @@ inline bool HasRecord(const TDF_Label& owner) noexcept {
 }
 
 inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record>& output,
-                    std::size_t legacyBytes = 0) noexcept {
+                    std::size_t legacyBytes = 0,
+                    std::size_t curveBytes = 0,
+                    std::size_t curveRecords = 0) noexcept {
     output.clear();
     try {
         if (document.IsNull() || document->GetData().IsNull()
-            || legacyBytes > MaximumDocumentAggregateBytes) return false;
+            || legacyBytes > MaximumDocumentAggregateBytes
+            || curveBytes > bounded_curve::MaximumDocumentAggregateBytes
+            || curveRecords > bounded_curve::MaximumRecordsPerDocument) return false;
         UUID documentID{}; bool readDocumentID=false;
         std::vector<Record> staged; TDF_LabelMap owners;
         std::size_t aggregate = legacyBytes; int visited = 0;
@@ -112,6 +116,14 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
             if (!Encode(value->definition, exact) || exact != value->bytes
                 || exact.size() > MaximumDocumentAggregateBytes - aggregate) return false;
             aggregate += exact.size();
+            for (const Node& node : value->definition.nodes) {
+                const auto* source = std::get_if<SourceNode>(&node.value);
+                if (!source || source->recipe.kind != RecipeKind::BoundedCurvePath) continue;
+                if (curveRecords >= bounded_curve::MaximumRecordsPerDocument
+                    || source->recipe.bytes.size()
+                        > bounded_curve::MaximumDocumentAggregateBytes - curveBytes) return false;
+                ++curveRecords; curveBytes += source->recipe.bytes.size();
+            }
             if(!readDocumentID){
                 if(!retained_solid::ReadUUID(document->Main(),
                     Standard_GUID("74386E4E-F620-498F-8092-E6D883AF33A4"),documentID))return false;

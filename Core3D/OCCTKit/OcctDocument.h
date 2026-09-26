@@ -390,13 +390,31 @@ Standard_EXPORT Standard_Boolean Core3DValidateCompositeRecipeDocument(const Han
 
 //! Read-only classification used by destructive native operation gates. A
 //! malformed/unknown record is deliberately not collapsed to legacy absence.
-//! `CurrentProfile` is the sole P4 exception and may only be consumed by the
-//! already-admitted cap-shell route, which still proves its complete selectors.
+//! `CurrentProfile` may only be consumed by the already-admitted cap-shell
+//! route, which still proves its complete selectors, or by the bounded
+//! plain-profile compatibility operation below, which proves its own capture,
+//! independent rebuild correspondence, transactional retention and readback.
 enum class OcctRetainedRecipeCoverage : Standard_Integer {
     Absent = 0,
     CurrentProfile = 1,
     PresentOutsideP4Coverage = 2,
     InvalidOrUnknown = 3,
+};
+
+//! Value-only authority captured for one plain-profile compatibility
+//! operation input. No mutable OCAF attribute, open command, or edit lease
+//! escapes the document; every field is re-proved against the live document
+//! immediately before the operation's measured command.
+struct OcctPlainProfileOperationCapture {
+    TDF_Label label;
+    TDF_Label recordLabel;
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+    std::string featureIdentifier;
+    std::vector<double> recipeValues;
+    TopoDS_Shape boundRoot;
+    gp_Trsf placement;
+    Standard_Real metersPerUnit = 0.0;
 };
 
 //! Scans every label, including hidden/unbound/orphan records and foreign arrays.
@@ -547,6 +565,31 @@ public:
   //! except the explicitly admitted route above.
   Standard_EXPORT OcctRetainedRecipeCoverage RetainedRecipeCoverageForLabel(
       const TDF_Label& label) const noexcept;
+  //! Read-only eligibility and capture for the plain-profile compatibility
+  //! operation. Succeeds only for a well-formed, current plain profile: an
+  //! empty shell tail, no composite/retained-solid/sweep/loft/enclosure
+  //! co-owner, no revolve section, exact entity/definition/feature identity,
+  //! placement and units, and an independent recipe rebuild that provably
+  //! corresponds to the captured root BRep. All record and topology work is
+  //! bounded; unknown, corrupt, foreign, stale, aliased, or
+  //! later-feature-bearing inputs refuse. Never opens a command.
+  Standard_EXPORT Standard_Boolean CapturePlainProfileOperationSource(
+      const TDF_Label& label,
+      OcctPlainProfileOperationCapture& output) const noexcept;
+  //! Recapture fence: repeats the full eligibility capture and requires every
+  //! captured identity, scalar byte, bound root, placement and unit to match
+  //! the live document. Call immediately before the operation's NewCommand.
+  Standard_EXPORT Standard_Boolean PlainProfileOperationSourceCurrent(
+      const OcctPlainProfileOperationCapture& capture) const noexcept;
+  //! In-transaction readback after the root replacement: the new root must be
+  //! stored, while the old profile record label, feature identifier, exact
+  //! scalar bytes, original bound shape, entity/definition identifiers,
+  //! placement and units are preserved and the retained record is now stale
+  //! (never erased or rebound). Call only with the operation's command still
+  //! open so a failed proof aborts without history.
+  Standard_EXPORT Standard_Boolean VerifyPlainProfileOperationReplacement(
+      const OcctPlainProfileOperationCapture& capture,
+      const TopoDS_Shape& newRoot) const noexcept;
   // Benchmark assets need more than 40 steps; 1000 keeps memory bounded on
   // device while preserving a long editable native session.
   static constexpr Standard_Integer kNativeSessionUndoLimit = 1000;

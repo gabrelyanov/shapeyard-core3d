@@ -384,6 +384,84 @@ Standard_Boolean IsValidSolidResult(
     }
 }
 
+//! Proves the one canonical solid of a plain-profile bevel candidate (D81).
+//! The fillet/chamfer builders legitimately return a forward COMPOUND that
+//! wraps the single result solid, while the strict document replacement
+//! proof requires the replacement root itself to be a SOLID. Accept a valid
+//! forward SOLID unchanged. For a wrapper accept only a forward COMPOUND
+//! whose entire direct child list holds exactly one occurrence and that
+//! child is a valid forward solid, examined with cumulative orientation and
+//! location so the kept child preserves its located geometry. Refuse null
+//! or empty wrappers, multiple children (including aliases of one TShape),
+//! mixed contents, reversed or invalid solids, nested or unsupported
+//! wrappers and any budget overflow. The candidate must pass the bounded
+//! topology walk, full BRep validity and a finite positive volume. No
+//! rebuilding, sewing, healing or orientation repair is performed: removing
+//! the exactly proved redundant wrapper keeps every bit of candidate
+//! geometry. Read-only precedent: retained_part_boolean::AnalyticResultSolid
+//! in PartBooleanBuild.hxx.
+Standard_Boolean CanonicalPlainProfileBevelCandidate(
+    const TopoDS_Shape& theResult,
+    const Standard_Size theMaximumNodes,
+    TopoDS_Shape& theCandidate) noexcept
+{
+    theCandidate.Nullify();
+    if (theResult.IsNull() || theMaximumNodes == 0) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        TopoDS_Shape aCandidate;
+        if (theResult.ShapeType() == TopAbs_SOLID) {
+            if (theResult.Orientation() != TopAbs_FORWARD) {
+                return Standard_False;
+            }
+            aCandidate = theResult;
+        } else if (theResult.ShapeType() == TopAbs_COMPOUND) {
+            if (theResult.Orientation() != TopAbs_FORWARD) {
+                return Standard_False;
+            }
+            Standard_Size aChildCount = 0;
+            for (TopoDS_Iterator aChild(
+                     theResult, Standard_True, Standard_True);
+                 aChild.More(); aChild.Next()) {
+                if (++aChildCount > 1) {
+                    return Standard_False;
+                }
+                aCandidate = aChild.Value();
+            }
+            if (aChildCount != 1 || aCandidate.IsNull()
+                || aCandidate.ShapeType() != TopAbs_SOLID
+                || aCandidate.Orientation() != TopAbs_FORWARD) {
+                return Standard_False;
+            }
+        } else {
+            return Standard_False;
+        }
+        Standard_Size aNodeCount = 0;
+        if (!AccumulateBoundedTopology(
+                aCandidate,
+                theMaximumNodes,
+                theMaximumNodes,
+                aNodeCount)
+            || !BRepCheck_Analyzer(
+                aCandidate, Standard_True).IsValid()) {
+            return Standard_False;
+        }
+        GProp_GProps aVolumeProperties;
+        BRepGProp::VolumeProperties(aCandidate, aVolumeProperties);
+        const Standard_Real aVolume = aVolumeProperties.Mass();
+        if (!std::isfinite(aVolume) || aVolume <= 0.0) {
+            return Standard_False;
+        }
+        theCandidate = aCandidate;
+        return Standard_True;
+    } catch (...) {
+        theCandidate.Nullify();
+        return Standard_False;
+    }
+}
+
 class BevelCancellationIndicator final
     : public Message_ProgressIndicator {
     DEFINE_STANDARD_RTTI_INLINE(
@@ -1549,12 +1627,171 @@ BevelApplyResult BevelOperationController::apply() noexcept
         notifyPreviewStateChanged();
         return BevelApplyResult::NoChange;
     }
-	// No retained edge-treatment proof is installed in P4. This is the final
-	// read-only gate before NewCommand; malformed metadata also refuses rather
-	// than being treated as a BRep-only legacy source.
-	for (const Source& source : mySources) {
-		if (myDoc->RetainedRecipeCoverageForLabel(source.label)
-			!= OcctRetainedRecipeCoverage::Absent) {
+	// This is the final read-only gate before NewCommand. A legacy BRep-only
+	// source (Absent) continues on the unchanged path. A well-formed, current
+	// plain profile enters the bounded compatibility operation: the
+	// document-side capture proves the exact recipe record, identities,
+	// placement, units, and an independent rebuild's correspondence to the
+	// captured root. Every other retained coverage keeps the P4 refusal, and
+	// malformed metadata still refuses rather than being treated as a
+	// BRep-only legacy source.
+	std::vector<OcctPlainProfileOperationCapture> aPlainProfileCaptures;
+	try {
+		aPlainProfileCaptures.reserve(mySources.size());
+		for (const Source& source : mySources) {
+			const OcctRetainedRecipeCoverage aCoverage =
+				myDoc->RetainedRecipeCoverageForLabel(source.label);
+			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
+				continue;
+			}
+			OcctPlainProfileOperationCapture aCapture;
+			if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
+				|| !myDoc->CapturePlainProfileOperationSource(
+					source.label, aCapture)) {
+				myCanApply = Standard_False;
+				myState = BevelPreviewState::Failed;
+				notifyPreviewStateChanged();
+				return BevelApplyResult::NoChange;
+			}
+			aPlainProfileCaptures.push_back(std::move(aCapture));
+		}
+	} catch (...) {
+		myCanApply = Standard_False;
+		myState = BevelPreviewState::Failed;
+		notifyPreviewStateChanged();
+		return BevelApplyResult::NoChange;
+	}
+	// D81 (R4, cloud8182): the builders may return the measured result as a
+	// forward COMPOUND wrapping its sole solid, while
+	// VerifyPlainProfileOperationReplacement requires the replacement root
+	// itself to be a SOLID. For every captured plain-profile source, prove the
+	// one canonical solid now — before any preview shape is touched and before
+	// the final recapture and the single NewCommand — and adopt that same
+	// operation-owned shape as the preview/replacement consumed by
+	// ReplaceShape, the unchanged document verifier, the post-close comparison
+	// and the successful presentation adoption. Absent (legacy BRep-only)
+	// sources keep their candidate unchanged. A failed proof or adoption
+	// produces no command and no history and does not clear the operation
+	// ledger.
+	if (!aPlainProfileCaptures.empty()) {
+#ifdef DEBUG
+		const Standard_Size aCandidateNodeBudget =
+			myDebugMaximumResultTopologyNodes;
+#else
+		const Standard_Size aCandidateNodeBudget =
+			kMaxResultTopologyNodes;
+#endif
+		// Phase 1: pure proof, no preview or document side effects.
+		std::vector<TopoDS_Shape> aCanonicalCandidates;
+		std::vector<Standard_Boolean> aNeedsCanonicalReplacement;
+		Standard_Boolean aCandidatesProved = Standard_True;
+		try {
+			OCC_CATCH_SIGNALS
+			aCanonicalCandidates.resize(mySources.size());
+			aNeedsCanonicalReplacement.assign(
+				mySources.size(), Standard_False);
+			for (const OcctPlainProfileOperationCapture& aCapture :
+				 aPlainProfileCaptures) {
+				Standard_Size anIndex = mySources.size();
+				for (Standard_Size aSourceIndex = 0;
+					 aSourceIndex < mySources.size(); ++aSourceIndex) {
+					if (mySources[aSourceIndex].label.IsEqual(
+							aCapture.label)) {
+						anIndex = aSourceIndex;
+						break;
+					}
+				}
+				if (anIndex == mySources.size()
+					|| myPreviewResults[anIndex].IsNull()
+					|| !CanonicalPlainProfileBevelCandidate(
+						myPreviewResults[anIndex]->Shape(),
+						aCandidateNodeBudget,
+						aCanonicalCandidates[anIndex])) {
+					aCandidatesProved = Standard_False;
+					break;
+				}
+				aNeedsCanonicalReplacement[anIndex] =
+					!aCanonicalCandidates[anIndex].IsSame(
+						myPreviewResults[anIndex]->Shape());
+			}
+		} catch (...) {
+			aCandidatesProved = Standard_False;
+		}
+		if (!aCandidatesProved) {
+			myCanApply = Standard_False;
+			myState = BevelPreviewState::Failed;
+			notifyPreviewStateChanged();
+			return BevelApplyResult::NoChange;
+		}
+		// Phase 2: build every replacement presentation before changing any
+		// preview shape; each keeps the source's saved transform and material.
+		std::vector<Handle(AIS_Shape)> aCanonicalPresentations;
+		Standard_Boolean aPresentationsPrepared = Standard_True;
+		try {
+			OCC_CATCH_SIGNALS
+			aCanonicalPresentations.resize(mySources.size());
+			for (Standard_Size anIndex = 0;
+				 anIndex < mySources.size(); ++anIndex) {
+				if (!aNeedsCanonicalReplacement[anIndex]) {
+					continue;
+				}
+				Handle(AIS_Shape) aPresentation =
+					new AIS_Shape(aCanonicalCandidates[anIndex]);
+				aPresentation->SetLocalTransformation(
+					mySources[anIndex].transform);
+				myDoc->LoadObjectMeterial(
+					mySources[anIndex].label,
+					aPresentation);
+				aCanonicalPresentations[anIndex] =
+					std::move(aPresentation);
+			}
+		} catch (...) {
+			aPresentationsPrepared = Standard_False;
+		}
+		if (!aPresentationsPrepared) {
+			myCanApply = Standard_False;
+			myState = BevelPreviewState::Failed;
+			notifyPreviewStateChanged();
+			return BevelApplyResult::NoChange;
+		}
+		// Phase 3: adopt the canonical solids as this operation's preview
+		// shapes, replacing the old presentations in the context.
+		Standard_Boolean aCanonicalAdopted = Standard_True;
+		try {
+			OCC_CATCH_SIGNALS
+			for (Standard_Size anIndex = 0;
+				 anIndex < mySources.size(); ++anIndex) {
+				if (!aNeedsCanonicalReplacement[anIndex]) {
+					continue;
+				}
+				myContext->Remove(
+					myPreviewResults[anIndex], Standard_False);
+				myPreviewResults[anIndex] =
+					aCanonicalPresentations[anIndex];
+				myContext->Display(
+					myPreviewResults[anIndex],
+					AIS_Shaded,
+					mySources[anIndex].selectionMode,
+					Standard_False);
+				myContext->Deactivate(myPreviewResults[anIndex]);
+			}
+			myContext->UpdateCurrentViewer();
+		} catch (...) {
+			aCanonicalAdopted = Standard_False;
+		}
+		if (!aCanonicalAdopted) {
+			// Mirror installPreview recovery: drop every preview and restore
+			// the source presentations; the operation ledger stays intact.
+			for (const Handle(AIS_Shape)& aPresentation :
+				 myPreviewResults) {
+				try {
+					myContext->Remove(
+						aPresentation, Standard_False);
+				} catch (...) {
+				}
+			}
+			myPreviewResults.clear();
+			(void)discardPreview(Standard_True);
 			myCanApply = Standard_False;
 			myState = BevelPreviewState::Failed;
 			notifyPreviewStateChanged();
@@ -1576,6 +1813,17 @@ BevelApplyResult BevelOperationController::apply() noexcept
     notifyPreviewStateChanged();
     try {
         OCC_CATCH_SIGNALS
+		// Recapture immediately before staging: no serialized or transient
+		// state may mint authority between the read-only gate and this one
+		// measured command.
+		for (const OcctPlainProfileOperationCapture& aCapture :
+			 aPlainProfileCaptures) {
+			if (!myDoc->PlainProfileOperationSourceCurrent(aCapture)) {
+				myState = BevelPreviewState::Failed;
+				notifyPreviewStateChanged();
+				return BevelApplyResult::NoChange;
+			}
+		}
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
             myState = BevelPreviewState::Failed;
@@ -1601,6 +1849,26 @@ BevelApplyResult BevelOperationController::apply() noexcept
                 notifyPreviewStateChanged();
                 return BevelApplyResult::NoChange;
             }
+			const OcctPlainProfileOperationCapture* aCapture = nullptr;
+			for (const OcctPlainProfileOperationCapture& aCandidate :
+				 aPlainProfileCaptures) {
+				if (aCandidate.label.IsEqual(mySources[anIndex].label)) {
+					aCapture = &aCandidate;
+					break;
+				}
+			}
+			// Transactional retention proof, still inside the open command:
+			// the recipe record, identifier, scalar bytes and bound shape
+			// must survive the root replacement as a stale record. A failed
+			// proof aborts without history.
+			if (aCapture != nullptr
+				&& !myDoc->VerifyPlainProfileOperationReplacement(
+					*aCapture, myPreviewResults[anIndex]->Shape())) {
+				(void)abortOpenCommand(aDocument);
+				myState = BevelPreviewState::Failed;
+				notifyPreviewStateChanged();
+				return BevelApplyResult::NoChange;
+			}
         }
         Standard_Boolean commitReported = Standard_False;
         Standard_Boolean commitThrew = Standard_False;

@@ -118,11 +118,30 @@ struct Cut475Scope {
 #include "ReceiptCatalogBinaryDriver.hxx"
 #include "RetainedSolidBinaryDriver.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
+#include "BoundedCurveBinaryDriver.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
+#include "ProfilePersistence.hxx"
+#include "ProfileCurveFace.hxx"
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepLib.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Pln.hxx>
+#include <algorithm>
+#include <atomic>
 #if DEBUG
 #include "RetainedPartBoolean.hxx"
 #include "ReceiptFramingProbe.hxx"
@@ -1981,6 +2000,10 @@ public:
             if(myReaderStatus==PCDM_RS_OK&&myRetainedBudget
                 &&(myRetainedBudget->rejected||(myRetainedBudget->records&&!Core3DValidateRetainedSolidDocument(
                     Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
+            if(myReaderStatus==PCDM_RS_OK&&myBoundedCurveBudget
+                &&(myBoundedCurveBudget->rejected||(myBoundedCurveBudget->records
+                    &&!Core3DValidateBoundedCurveDocument(
+                        Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
             if (myValidateFrameOwners && myReaderStatus == PCDM_RS_OK) {
                 Standard_Size frameBytes = 0;
                 if (gSafeBinaryReadRejected || !Core3DValidateAuthoredFrameOwners(
@@ -2054,7 +2077,10 @@ public:
         aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
             theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
         if (myAllowRetainedSolid) core3d::retained_solid::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
-        if (myAllowRetainedSolid) core3d::composite_recipe::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::composite_recipe::Register(
+            aTable,theMessageDriver,myRetainedBudget,myBoundedCurveBudget,RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::bounded_curve::Register(
+            aTable,theMessageDriver,myBoundedCurveBudget,RejectSafeBinaryRead);
         if (!myReceiptFrameDriver.IsNull()) aTable->AddDriver(myReceiptFrameDriver);
         return aTable;
     }
@@ -2082,6 +2108,7 @@ private:
     {
         if (myFrameBudget) { myFrameBudget->bytes = 0; myFrameBudget->rejected = false; }
         if (myRetainedBudget) myRetainedBudget->reset();
+        if (myBoundedCurveBudget) myBoundedCurveBudget->reset();
         if (myAggregateTextureBytes != nullptr) {
             *myAggregateTextureBytes = 0;
         }
@@ -2095,6 +2122,8 @@ private:
     std::unique_ptr<core3d::persistence::receipt_framing::Traversal> myReceiptTraversal;
     bool myReceiptLoadActive = false;
     std::shared_ptr<core3d::retained_solid::ReadBudget> myRetainedBudget=std::make_shared<core3d::retained_solid::ReadBudget>();
+    std::shared_ptr<core3d::bounded_curve::ReadBudget> myBoundedCurveBudget=
+        std::make_shared<core3d::bounded_curve::ReadBudget>();
     bool myAllowRetainedSolid=true;
 #if DEBUG
     int myRetainedRoleFault=0;
@@ -3927,13 +3956,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>());
 }
 
 #if DEBUG
@@ -4473,8 +4502,18 @@ Standard_Boolean ValidateGeometryDocument(
                 return Standard_False;
             retainedBytes+=record.value->bytes.size();
         }
+        std::vector<core3d::bounded_curve::Record> curves;
+        if(!core3d::bounded_curve::ReadAll(document,curves))return Standard_False;
+        std::size_t curveBytes=0;
+        for(const auto& record:curves){
+            if(!record.value
+                ||record.value->definitionBytes.size()
+                    >core3d::bounded_curve::MaximumDocumentAggregateBytes-curveBytes)return Standard_False;
+            curveBytes+=record.value->definitionBytes.size();
+        }
         std::vector<core3d::composite_recipe::Record> composites;
-        if(!core3d::composite_recipe::ReadAll(document,composites,retainedBytes))return Standard_False;
+        if(!core3d::composite_recipe::ReadAll(document,composites,retainedBytes,
+            curveBytes,curves.size()))return Standard_False;
         TDF_LabelMap retainedOwners;
         for(const auto& record:retained)if(!retainedOwners.Add(record.owner))return Standard_False;
         for(const auto& record:composites)if(retainedOwners.Contains(record.owner))return Standard_False;
@@ -4900,6 +4939,11 @@ Standard_Boolean Core3DValidateCompositeRecipeDocument(const Handle(TDocStd_Docu
     return ValidateGeometryDocument(document,nullptr);
 }
 
+Standard_Boolean Core3DValidateBoundedCurveDocument(const Handle(TDocStd_Document)& document){
+    std::vector<core3d::bounded_curve::Record> records;
+    return core3d::bounded_curve::ReadAll(document,records) ? Standard_True : Standard_False;
+}
+
 OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
     const TDF_Label& label) const noexcept
 {
@@ -4935,6 +4979,409 @@ OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
             : OcctRetainedRecipeCoverage::PresentOutsideP4Coverage;
     } catch (...) {
         return OcctRetainedRecipeCoverage::InvalidOrUnknown;
+    }
+}
+
+namespace {
+
+// Independent rebuild of a plain (shell-free, non-revolve) profile recipe
+// into one oriented, valid solid. This mirrors the creation-time construction
+// exactly so the recipe alone can be proved against the captured root BRep;
+// it owns no label, document, or command.
+TopoDS_Shape BuildPlainProfileOperationSolid(
+    const core3d::profile::Parameters& parameters) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        const core3d::ProfileDefinition& aDefinition = parameters.definition;
+        if (!parameters.shells.empty() || aDefinition.revolve
+            || aDefinition.plane < 0 || aDefinition.plane > 2) {
+            return TopoDS_Shape();
+        }
+        double aSignedArea = 0.0, anExpectedVolume = 0.0;
+        if (!core3d::ProfileDefinitionExpectedVolume(
+                aDefinition, aSignedArea, anExpectedVolume)) {
+            return TopoDS_Shape();
+        }
+        const std::atomic_bool aCancelled{false};
+        const gp_Dir aNormal = aDefinition.plane == 0 ? gp::DZ()
+            : (aDefinition.plane == 1 ? gp_Dir(0, -1, 0) : gp::DX());
+        const gp_Dir anUDirection =
+            aDefinition.plane == 2 ? gp::DY() : gp::DX();
+        TopoDS_Face aProfileFace;
+        if (aDefinition.curves) {
+            core3d::ProfileCurveFaceResult aBuilt;
+            if (!core3d::BuildProfileCurveFace(
+                    *aDefinition.curves, aDefinition.plane,
+                    aCancelled, aBuilt)) {
+                return TopoDS_Shape();
+            }
+            aProfileFace = aBuilt.face;
+        } else if (aDefinition.circle) {
+            const core3d::ProfileCircularSection& aCircle =
+                *aDefinition.circle;
+            const gp_Pnt aCenter =
+                core3d::ProfilePointInPlane(aCircle.center, aDefinition.plane);
+            const gp_Ax2 aBasis(aCenter, aNormal, anUDirection);
+            BRepBuilderAPI_MakeEdge anOuterEdge(
+                gp_Circ(aBasis, aCircle.outerRadius));
+            if (!anOuterEdge.IsDone()) {
+                return TopoDS_Shape();
+            }
+            BRepBuilderAPI_MakeWire anOuterWire(anOuterEdge.Edge());
+            if (!anOuterWire.IsDone()) {
+                return TopoDS_Shape();
+            }
+            BRepBuilderAPI_MakeFace aFace(
+                gp_Pln(aCenter, aNormal), anOuterWire.Wire(), Standard_True);
+            if (!aFace.IsDone()) {
+                return TopoDS_Shape();
+            }
+            if (aCircle.innerRadius > 0) {
+                BRepBuilderAPI_MakeEdge anInnerEdge(
+                    gp_Circ(aBasis, aCircle.innerRadius));
+                if (!anInnerEdge.IsDone()) {
+                    return TopoDS_Shape();
+                }
+                BRepBuilderAPI_MakeWire anInnerWire(anInnerEdge.Edge());
+                if (!anInnerWire.IsDone()) {
+                    return TopoDS_Shape();
+                }
+                aFace.Add(TopoDS::Wire(anInnerWire.Wire().Reversed()));
+                if (!aFace.IsDone()) {
+                    return TopoDS_Shape();
+                }
+            }
+            aProfileFace = aFace.Face();
+        } else {
+            std::vector<gp_Pnt2d> aPoints = aDefinition.points;
+            if (aSignedArea < 0) {
+                std::reverse(aPoints.begin(), aPoints.end());
+            }
+            BRepBuilderAPI_MakePolygon aPolygon;
+            for (const gp_Pnt2d& aPoint : aPoints) {
+                aPolygon.Add(
+                    core3d::ProfilePointInPlane(aPoint, aDefinition.plane));
+            }
+            aPolygon.Close();
+            if (!aPolygon.IsDone()) {
+                return TopoDS_Shape();
+            }
+            BRepBuilderAPI_MakeFace aFace(aPolygon.Wire(), Standard_True);
+            if (!aFace.IsDone()) {
+                return TopoDS_Shape();
+            }
+            for (const core3d::ProfileCircularHole& aHole :
+                 aDefinition.holes) {
+                const gp_Ax2 aBasis(
+                    core3d::ProfilePointInPlane(
+                        aHole.center, aDefinition.plane),
+                    aNormal, anUDirection);
+                BRepBuilderAPI_MakeEdge anEdge(gp_Circ(aBasis, aHole.radius));
+                if (!anEdge.IsDone()) {
+                    return TopoDS_Shape();
+                }
+                BRepBuilderAPI_MakeWire aWire(anEdge.Edge());
+                if (!aWire.IsDone()) {
+                    return TopoDS_Shape();
+                }
+                aFace.Add(TopoDS::Wire(aWire.Wire().Reversed()));
+                if (!aFace.IsDone()) {
+                    return TopoDS_Shape();
+                }
+            }
+            aProfileFace = aFace.Face();
+        }
+        if (aProfileFace.IsNull()
+            || !BRepCheck_Analyzer(aProfileFace, Standard_True).IsValid()) {
+            return TopoDS_Shape();
+        }
+        const gp_Vec aDirection =
+            aDefinition.plane == 0 ? gp_Vec(0, 0, aDefinition.depth)
+            : aDefinition.plane == 1 ? gp_Vec(0, aDefinition.depth, 0)
+            : gp_Vec(aDefinition.depth, 0, 0);
+        BRepPrimAPI_MakePrism aPrism(
+            aProfileFace, aDirection, Standard_True, Standard_True);
+        if (!aPrism.IsDone()) {
+            return TopoDS_Shape();
+        }
+        TopoDS_Shape aResult = aPrism.Shape();
+        if (aResult.IsNull() || aResult.ShapeType() != TopAbs_SOLID) {
+            return TopoDS_Shape();
+        }
+        Standard_Real anExpected = anExpectedVolume;
+        if (parameters.constructionFrame) {
+            gp_Trsf aFrame;
+            if (!parameters.constructionFrame->Transform(aFrame)) {
+                return TopoDS_Shape();
+            }
+            anExpected *= parameters.constructionFrame->AbsoluteVolumeScale();
+            if (!std::isfinite(anExpected) || anExpected <= 0) {
+                return TopoDS_Shape();
+            }
+            // Only detached rebuild geometry is transformed; the persisted
+            // document shape is never touched by this proof.
+            BRepBuilderAPI_Transform aTransformed(
+                aResult, aFrame, Standard_True, Standard_False);
+            if (!aTransformed.IsDone()) {
+                return TopoDS_Shape();
+            }
+            aResult = aTransformed.Shape();
+            if (aResult.IsNull() || aResult.ShapeType() != TopAbs_SOLID) {
+                return TopoDS_Shape();
+            }
+        }
+        TopoDS_Solid aSolid = TopoDS::Solid(aResult);
+        if (!BRepLib::OrientClosedSolid(aSolid)
+            || !BRepCheck_Analyzer(aSolid, Standard_True).IsValid()) {
+            return TopoDS_Shape();
+        }
+        GProp_GProps aProperties;
+        BRepGProp::VolumeProperties(aSolid, aProperties);
+        if (!std::isfinite(aProperties.Mass()) || aProperties.Mass() <= 0
+            || std::abs(aProperties.Mass() - anExpected)
+                > std::max(1e-8, anExpected * 1e-8)) {
+            return TopoDS_Shape();
+        }
+        return aSolid;
+    } catch (...) {
+        return TopoDS_Shape();
+    }
+}
+
+// Geometric correspondence between the independent recipe rebuild and the
+// captured root: equal volume, centre of mass, optimal bounds and bounded
+// face/edge census. TShape identity is deliberately never trusted.
+Standard_Boolean PlainProfileRebuildCorresponds(
+    const TopoDS_Shape& theRebuilt,
+    const TopoDS_Shape& theStored) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (theRebuilt.IsNull() || theStored.IsNull()
+            || theRebuilt.ShapeType() != TopAbs_SOLID
+            || theStored.ShapeType() != TopAbs_SOLID) {
+            return Standard_False;
+        }
+        GProp_GProps aRebuiltVolume, aStoredVolume;
+        BRepGProp::VolumeProperties(theRebuilt, aRebuiltVolume);
+        BRepGProp::VolumeProperties(theStored, aStoredVolume);
+        const Standard_Real aStoredMass = aStoredVolume.Mass();
+        if (!std::isfinite(aStoredMass) || aStoredMass <= 0
+            || !std::isfinite(aRebuiltVolume.Mass())
+            || std::abs(aRebuiltVolume.Mass() - aStoredMass)
+                > std::max(1e-7, aStoredMass * 1e-7)) {
+            return Standard_False;
+        }
+        Bnd_Box aRebuiltBox, aStoredBox;
+        BRepBndLib::AddOptimal(
+            theRebuilt, aRebuiltBox, Standard_False, Standard_False);
+        BRepBndLib::AddOptimal(
+            theStored, aStoredBox, Standard_False, Standard_False);
+        if (aRebuiltBox.IsVoid() || aStoredBox.IsVoid()
+            || aRebuiltBox.IsOpen() || aStoredBox.IsOpen()) {
+            return Standard_False;
+        }
+        Standard_Real aRebuiltMin[3], aRebuiltMax[3];
+        Standard_Real aStoredMin[3], aStoredMax[3];
+        aRebuiltBox.Get(
+            aRebuiltMin[0], aRebuiltMin[1], aRebuiltMin[2],
+            aRebuiltMax[0], aRebuiltMax[1], aRebuiltMax[2]);
+        aStoredBox.Get(
+            aStoredMin[0], aStoredMin[1], aStoredMin[2],
+            aStoredMax[0], aStoredMax[1], aStoredMax[2]);
+        Standard_Real aScale = 1.0;
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            aScale = std::max(
+                aScale, std::abs(aStoredMax[anAxis] - aStoredMin[anAxis]));
+        }
+        const Standard_Real aTolerance = 1e-7 * aScale;
+        const gp_Pnt aRebuiltCentre = aRebuiltVolume.CentreOfMass();
+        const gp_Pnt aStoredCentre = aStoredVolume.CentreOfMass();
+        if (aRebuiltCentre.Distance(aStoredCentre) > aTolerance) {
+            return Standard_False;
+        }
+        for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
+            if (std::abs(aRebuiltMin[anAxis] - aStoredMin[anAxis])
+                    > aTolerance
+                || std::abs(aRebuiltMax[anAxis] - aStoredMax[anAxis])
+                    > aTolerance) {
+                return Standard_False;
+            }
+        }
+        TopTools_IndexedMapOfShape aRebuiltFaces, aStoredFaces;
+        TopTools_IndexedMapOfShape aRebuiltEdges, aStoredEdges;
+        TopExp::MapShapes(theRebuilt, TopAbs_FACE, aRebuiltFaces);
+        TopExp::MapShapes(theStored, TopAbs_FACE, aStoredFaces);
+        TopExp::MapShapes(theRebuilt, TopAbs_EDGE, aRebuiltEdges);
+        TopExp::MapShapes(theStored, TopAbs_EDGE, aStoredEdges);
+        return aRebuiltFaces.Extent() == aStoredFaces.Extent()
+            && aRebuiltEdges.Extent() == aStoredEdges.Extent();
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean PlainProfilePlacementsMatch(
+    const gp_Trsf& theLeft,
+    const gp_Trsf& theRight) noexcept
+{
+    try {
+        for (Standard_Integer aRow = 1; aRow <= 3; ++aRow) {
+            for (Standard_Integer aColumn = 1; aColumn <= 4; ++aColumn) {
+                const Standard_Real aLeft = theLeft.Value(aRow, aColumn);
+                const Standard_Real aRight = theRight.Value(aRow, aColumn);
+                if (!std::isfinite(aLeft) || !std::isfinite(aRight)
+                    || std::abs(aLeft - aRight) > Precision::Confusion()) {
+                    return Standard_False;
+                }
+            }
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+} // namespace
+
+Standard_Boolean OcctDocument::CapturePlainProfileOperationSource(
+    const TDF_Label& label,
+    OcctPlainProfileOperationCapture& output) const noexcept
+{
+    output = OcctPlainProfileOperationCapture{};
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || RetainedRecipeCoverageForLabel(label)
+                != OcctRetainedRecipeCoverage::CurrentProfile
+            || !IsEditableFreeSimpleDefinitionLabel(label)) {
+            return Standard_False;
+        }
+        // A well-formed, current plain profile: the co-owner census above
+        // already refused composite/retained-solid/sweep/loft/enclosure
+        // records; the empty shell tail and the non-revolve extrusion family
+        // are the remaining admitted signature.
+        core3d::profile::Record aRecord;
+        if (!core3d::profile::Read(myOcafDoc, label, aRecord)
+            || aRecord.label.IsNull()
+            || !aRecord.parameters.shells.empty()
+            || aRecord.parameters.definition.revolve
+            || !aRecord.IsCurrent(myOcafDoc, label)) {
+            return Standard_False;
+        }
+        OcctPlainProfileOperationCapture aCapture;
+        aCapture.label = label;
+        aCapture.recordLabel = aRecord.label;
+        aCapture.entityIdentifier = EntityIdentifierForLabel(label);
+        aCapture.definitionIdentifier = DefinitionIdentifierForLabel(label);
+        aCapture.featureIdentifier = aRecord.identifier;
+        aCapture.recipeValues = aRecord.values;
+        aCapture.metersPerUnit = aRecord.parameters.metersPerUnit;
+        if (aCapture.entityIdentifier.empty()
+            || aCapture.definitionIdentifier.empty()
+            || aCapture.featureIdentifier.empty()
+            || aCapture.recipeValues.empty()
+            || !std::isfinite(aCapture.metersPerUnit)
+            || aCapture.metersPerUnit <= 0
+            || !TryObjectTransformForLabel(label, aCapture.placement)) {
+            output = OcctPlainProfileOperationCapture{};
+            return Standard_False;
+        }
+        const TopoDS_Shape aRoot = XCAFDoc_ShapeTool::GetShape(label);
+        if (aRoot.IsNull() || aRoot.ShapeType() != TopAbs_SOLID
+            || aRecord.boundShape.IsNull()
+            || !aRecord.boundShape.IsEqual(aRoot)
+            || !BRepCheck_Analyzer(aRoot, Standard_True).IsValid()) {
+            output = OcctPlainProfileOperationCapture{};
+            return Standard_False;
+        }
+        aCapture.boundRoot = aRoot;
+        // Independent rebuild correspondence: the recipe alone must reproduce
+        // the captured root before any edge treatment may commit over it.
+        const TopoDS_Shape aRebuilt =
+            BuildPlainProfileOperationSolid(aRecord.parameters);
+        if (!PlainProfileRebuildCorresponds(aRebuilt, aRoot)) {
+            output = OcctPlainProfileOperationCapture{};
+            return Standard_False;
+        }
+        output = std::move(aCapture);
+        return Standard_True;
+    } catch (...) {
+        output = OcctPlainProfileOperationCapture{};
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::PlainProfileOperationSourceCurrent(
+    const OcctPlainProfileOperationCapture& capture) const noexcept
+{
+    try {
+        OcctPlainProfileOperationCapture aLive;
+        if (capture.label.IsNull()
+            || !CapturePlainProfileOperationSource(capture.label, aLive)
+            || aLive.recordLabel.IsNull() || capture.recordLabel.IsNull()
+            || !aLive.recordLabel.IsEqual(capture.recordLabel)
+            || aLive.entityIdentifier != capture.entityIdentifier
+            || aLive.definitionIdentifier != capture.definitionIdentifier
+            || aLive.featureIdentifier != capture.featureIdentifier
+            || aLive.recipeValues != capture.recipeValues
+            || aLive.metersPerUnit != capture.metersPerUnit
+            || aLive.boundRoot.IsNull() || capture.boundRoot.IsNull()
+            || !aLive.boundRoot.IsEqual(capture.boundRoot)
+            || !PlainProfilePlacementsMatch(
+                aLive.placement, capture.placement)) {
+            return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::VerifyPlainProfileOperationReplacement(
+    const OcctPlainProfileOperationCapture& capture,
+    const TopoDS_Shape& newRoot) const noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || capture.label.IsNull()
+            || capture.label.Data() != myOcafDoc->GetData()
+            || newRoot.IsNull() || newRoot.ShapeType() != TopAbs_SOLID) {
+            return Standard_False;
+        }
+        const TopoDS_Shape aStored =
+            XCAFDoc_ShapeTool::GetShape(capture.label);
+        core3d::profile::Record aRecord;
+        Standard_Real aUnit = 0.0;
+        gp_Trsf aPlacement;
+        if (aStored.IsNull() || !aStored.IsEqual(newRoot)
+            || !core3d::profile::Read(myOcafDoc, capture.label, aRecord)
+            || aRecord.label.IsNull() || capture.recordLabel.IsNull()
+            || !aRecord.label.IsEqual(capture.recordLabel)
+            || aRecord.identifier != capture.featureIdentifier
+            || aRecord.values != capture.recipeValues
+            || aRecord.boundShape.IsNull() || capture.boundRoot.IsNull()
+            // The old record keeps its original bound shape; only the root
+            // changed, so the retained recipe is now stale, never erased,
+            // rebound, or silently current again.
+            || !aRecord.boundShape.IsEqual(capture.boundRoot)
+            || aRecord.IsCurrent(myOcafDoc, capture.label)
+            || EntityIdentifierForLabel(capture.label)
+                != capture.entityIdentifier
+            || DefinitionIdentifierForLabel(capture.label)
+                != capture.definitionIdentifier
+            || !XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, aUnit)
+            || aUnit != capture.metersPerUnit
+            || !TryObjectTransformForLabel(capture.label, aPlacement)
+            || !PlainProfilePlacementsMatch(aPlacement, capture.placement)) {
+            return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
     }
 }
 
@@ -13784,7 +14231,8 @@ bool N1CompositeBinaryDriverControls(const Handle(TDocStd_Document)& document,
             new BinMNaming_NamedShapeDriver(messenger);
         writerShapes->EnableQuickPart(direct);
         composite_recipe::BinaryDriver writer(messenger, writerShapes,
-            std::make_shared<composite_recipe::ReadBudget>());
+            std::make_shared<composite_recipe::ReadBudget>(),
+            std::make_shared<bounded_curve::ReadBudget>());
         BinObjMgt_Persistent target;
         target.SetTypeId(7); target.SetId(1);
         std::ostringstream wire(std::ios::out | std::ios::binary);
@@ -13821,7 +14269,8 @@ bool N1CompositeBinaryDriverControls(const Handle(TDocStd_Document)& document,
             const auto shapes = makeShapes();
             if (shapes.IsNull()) return false;
             budget = std::make_shared<composite_recipe::ReadBudget>();
-            composite_recipe::BinaryDriver reader(messenger, shapes, budget);
+            composite_recipe::BinaryDriver reader(messenger, shapes, budget,
+                std::make_shared<bounded_curve::ReadBudget>());
             std::istringstream input(data, std::ios::in | std::ios::binary);
             BinObjMgt_Persistent source; source.SetIStream(input); source.Read(input);
             BinObjMgt_RRelocationTable relocation;

@@ -23,9 +23,11 @@ public:
     BinaryDriver(const Handle(Message_Messenger)& messenger,
                  Handle(BinMNaming_NamedShapeDriver) shapes,
                  std::shared_ptr<ReadBudget> budget,
+                 std::shared_ptr<bounded_curve::ReadBudget> curveBudget,
                  void (*reject)() noexcept = nullptr)
         : BinMDF_ADriver(messenger, STANDARD_TYPE(Attribute)->Name()),
-          shapes_(std::move(shapes)), budget_(std::move(budget)), reject_(reject) {}
+          shapes_(std::move(shapes)), budget_(std::move(budget)),
+          curveBudget_(std::move(curveBudget)), reject_(reject) {}
     Handle(TDF_Attribute) NewEmpty() const override { return new Attribute(); }
     const Handle(Standard_Type)& SourceType() const override { return STANDARD_TYPE(Attribute); }
 
@@ -34,7 +36,7 @@ public:
                            BinObjMgt_RRelocationTable& relocation) const override {
         try {
             const auto attribute = Handle(Attribute)::DownCast(target);
-            if (attribute.IsNull() || attribute->value_ || shapes_.IsNull() || !budget_
+            if (attribute.IsNull() || attribute->value_ || shapes_.IsNull() || !budget_ || !curveBudget_
                 || budget_->rejected || relocation.GetHeaderData().IsNull()) return Refuse();
             const auto version = relocation.GetHeaderData()->StorageVersion();
             if (!version.IsIntegerValue() || version.IntegerValue() < TDocStd_FormatVersion_VERSION_10
@@ -67,6 +69,15 @@ public:
                     SourceShapeKind expected = SourceShapeKind::Unknown;
                     if (!ExpectedShapeKind(definition, sourceNode->recipe, expected)) return Refuse();
                     expectedShapeTypes[sourceNode->shapeSlot] = TopologyKind(expected);
+                    if (sourceNode->recipe.kind == RecipeKind::BoundedCurvePath) {
+                        if (curveBudget_->limit > bounded_curve::MaximumDocumentAggregateBytes
+                            || curveBudget_->definitionBytes > curveBudget_->limit
+                            || curveBudget_->records >= bounded_curve::MaximumRecordsPerDocument
+                            || sourceNode->recipe.bytes.size()
+                                > curveBudget_->limit - curveBudget_->definitionBytes) return Refuse();
+                        curveBudget_->definitionBytes += sourceNode->recipe.bytes.size();
+                        ++curveBudget_->records;
+                    }
                 }
             if (expectedSources != std::size_t(shapeCount)) return Refuse();
             auto* shared = shapes_->ShapeSet(Standard_True); if (!shared) return Refuse();
@@ -186,21 +197,31 @@ public:
     }
 private:
     Standard_Boolean Refuse() const noexcept {
-        if (budget_) budget_->rejected = true; if (reject_) reject_(); return Standard_False;
+        if (budget_) budget_->rejected = true;
+        if (curveBudget_) curveBudget_->rejected = true;
+        if (reject_) reject_(); return Standard_False;
     }
     const Handle(BinMNaming_NamedShapeDriver) shapes_;
     const std::shared_ptr<ReadBudget> budget_;
+    const std::shared_ptr<bounded_curve::ReadBudget> curveBudget_;
     void (*reject_)() noexcept;
 };
 
 inline void Register(const Handle(BinMDF_ADriverTable)& table,
                      const Handle(Message_Messenger)& messenger,
                      const std::shared_ptr<ReadBudget>& budget,
+                     const std::shared_ptr<bounded_curve::ReadBudget>& curveBudget,
                      void (*reject)() noexcept = nullptr) {
     Handle(BinMDF_ADriver) found; table->GetDriver(STANDARD_TYPE(TNaming_NamedShape), found);
     const auto shapes = Handle(BinMNaming_NamedShapeDriver)::DownCast(found);
     if (shapes.IsNull()) Standard_Failure::Raise("Composite recipe shared driver missing");
-    table->AddDriver(new BinaryDriver(messenger, shapes, budget, reject));
+    table->AddDriver(new BinaryDriver(messenger, shapes, budget, curveBudget, reject));
+}
+inline void Register(const Handle(BinMDF_ADriverTable)& table,
+                     const Handle(Message_Messenger)& messenger,
+                     const std::shared_ptr<ReadBudget>& budget,
+                     void (*reject)() noexcept = nullptr) {
+    Register(table, messenger, budget, std::make_shared<bounded_curve::ReadBudget>(), reject);
 }
 
 template<class Base> class StorageDriver : public Base {

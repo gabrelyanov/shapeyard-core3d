@@ -1,9 +1,14 @@
 #pragma once
 #include "CompositeRecipeDefinition.hxx"
+#include "BoundedCurveCodec.hxx"
 #include "PartBooleanPersistence.hxx"
 #include "RetainedBooleanProgram.hxx"
 #include "RetainedFeatureRegistry.hxx"
 #include "RetainedSourceRegistry.hxx"
+#include "SpatialSweepPersistence.hxx"
+// Dedicated SYCR/4 plain-profile cut codec (FIX-SPEC H1). Recognised only by
+// the closed v4 validator below; never added to either production registry.
+#include "PlainProfileCutPersistence.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <cstring>
@@ -14,6 +19,8 @@ namespace core3d::composite_recipe {
 inline constexpr std::uint32_t PartBooleanFeatureKind = part_boolean::FeatureKind;
 inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCodecVersion;
 inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
+inline constexpr std::uint32_t SpatialCircleSweepFeatureKind = spatial_sweep::SpatialCircleSweepFeatureKind;
+inline constexpr std::uint32_t SpatialCircleSweepFeatureCodec = spatial_sweep::SpatialCircleSweepFeatureCodec;
 
 class Writer {
 public:
@@ -72,7 +79,9 @@ inline bool EncodeScalarRecipe(RecipeKind kind, std::uint32_t schema,
                                std::vector<std::uint8_t>& output) noexcept {
     output.clear();
     try {
-        if (kind == RecipeKind::RetainedBoolean || schema == 0 || values.empty()
+        if ((kind != RecipeKind::Profile && kind != RecipeKind::Enclosure
+                && kind != RecipeKind::RectangularLoft)
+            || schema == 0 || values.empty()
             || values.size() > std::size_t(profile::MaximumScalars)) return false;
         Writer writer; writer.raw(reinterpret_cast<const std::uint8_t*>("SYLV"), 4);
         writer.integer(1, 1); writer.integer(std::uint8_t(kind), 1);
@@ -105,6 +114,14 @@ inline bool DecodeScalarRecipe(const SourceRecipe& recipe, std::vector<double>& 
 inline bool ValidRecipe(const SourceRecipe& recipe) noexcept {
     try {
         if (recipe.bytes.empty() || recipe.bytes.size() > MaximumEnvelopeBytes) return false;
+        if (recipe.kind == RecipeKind::BoundedCurvePath) {
+            bounded_curve::Value decoded;
+            std::vector<std::uint8_t> exact;
+            return recipe.schema == bounded_curve::Schema
+                && bounded_curve::Decode(recipe.bytes, decoded)
+                && decoded.definition.domain == bounded_curve::Domain::Path3D
+                && bounded_curve::Encode(decoded, exact) && exact == recipe.bytes;
+        }
         if (recipe.kind == RecipeKind::RetainedBoolean) {
             retained_boolean::Recipe decoded;
             std::vector<std::uint8_t> exact;
@@ -129,6 +146,56 @@ inline bool ValidRecipe(const SourceRecipe& recipe) noexcept {
                 && loft_persistence::Decode(values, decoded);
         }
         return false;
+    } catch (...) { return false; }
+}
+
+// Profile-family leaf proof for the dedicated v4 cut chain (FIX-SPEC H1). The
+// scalar-recipe wrapper that needs DecodeScalarRecipe lives here, not in the
+// values-only persistence header. Source recipe bytes remain the exact
+// EncodeScalarRecipe(Profile, SchemaFor(parameters), capture.recipeValues)
+// result: decode, verify the schema, re-encode and compare byte-for-byte so
+// every original scalar's bits are preserved. The recipe meters-per-unit bits
+// must equal the leaf's source-units bits. Subject = one polygon (points
+// valid; no circle, curves, preexisting holes, revolve or shell tail); tools =
+// disk profiles (circle present, inner radius exactly zero, no
+// polygon/curve/hole/revolve/shell ambiguity). Geometry/placement
+// qualification follows in H2.
+inline bool ValidPlainProfileCutSourceRecipe(const SourceNode& source, bool subject) noexcept {
+    try {
+        std::vector<double> values;
+        profile::Parameters decoded;
+        if (!DecodeScalarRecipe(source.recipe, values) || !profile::Decode(values, decoded)
+            || profile::SchemaFor(decoded) != int(source.recipe.schema)) return false;
+        std::vector<std::uint8_t> exact;
+        if (!EncodeScalarRecipe(source.recipe.kind, source.recipe.schema, values, exact)
+            || exact != source.recipe.bytes) return false;
+        if (std::memcmp(&decoded.metersPerUnit, &source.inputToCarrier.sourceMetersPerUnit,
+                        sizeof(double)) != 0) return false;
+        const auto& definition = decoded.definition;
+        if (!decoded.shells.empty() || definition.curves || definition.revolve
+            || !definition.holes.empty()) return false;
+        if (subject) return !definition.circle && definition.points.size() >= 3;
+        return definition.circle && definition.circle->innerRadius == 0
+            && definition.points.empty();
+    } catch (...) { return false; }
+}
+
+// Closed whole-chain validator for the dedicated SYCR/4 cut-only graph. There
+// is no registry override or general graph fallback: version 4 has precisely
+// N+1 Profile sources (one polygon subject, then N disk tools) and N
+// Solid-to-Solid binary ConsumeCreate cuts chained subject-first. ValidateChain
+// independently enforces owner/source/feature identities, shape slots, bounds,
+// input links, contribution/reachability (the chain consumes every node) and
+// exact step/witness bytes; this wrapper adds the per-leaf profile proof.
+inline bool ValidCutV4(const Definition& definition) noexcept {
+    try {
+        if (!plain_profile_cut::ValidateChain(definition).valid()) return false;
+        const std::size_t sources = (definition.nodes.size() + 1) / 2;
+        for (std::size_t index = 0; index < sources; ++index) {
+            const auto& source = std::get<SourceNode>(definition.nodes[index].value);
+            if (!ValidPlainProfileCutSourceRecipe(source, index == 0)) return false;
+        }
+        return true;
     } catch (...) { return false; }
 }
 
@@ -320,6 +387,7 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
         std::set<UUID> sourceEntities, sourceDefinitions;
         std::set<std::uint32_t> shapeSlots;
         std::vector<std::size_t> depths;
+        std::vector<bool> wireOutputs;
         std::size_t sources = 0;
         std::uint64_t maximumLocalID = 0;
         for (const Node& node : definition.nodes) {
@@ -334,10 +402,14 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
                     || !sourceEntities.insert(source->original.entity).second
                     || !sourceDefinitions.insert(source->original.definition).second
                     || !ValidRecipe(source->recipe) || !ValidPlacement(source->inputToCarrier)
-                    || !Valid(source->commitments) || !shapeSlots.insert(source->shapeSlot).second) return false;
+                    || !Valid(source->commitments) || !shapeSlots.insert(source->shapeSlot).second
+                    || (definition.schemaVersion == 1
+                        && source->recipe.kind == RecipeKind::BoundedCurvePath)) return false;
                 Digest recipeDigest;
                 if (!Hash(source->recipe.bytes, recipeDigest) || recipeDigest != source->commitments.recipe) return false;
-                depths.push_back(1); continue;
+                depths.push_back(1);
+                wireOutputs.push_back(source->recipe.kind == RecipeKind::BoundedCurvePath);
+                continue;
             }
             const auto& feature = std::get<FeatureNode>(node.value);
             const bool legacyPartBoolean = definition.schemaVersion == 1
@@ -356,9 +428,13 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
                     [&](const Node& prior) { return NodeID(prior) == input; });
                 if (found == definition.nodes.begin() + depths.size()) return false;
                 const auto index = std::size_t(std::distance(definition.nodes.begin(), found));
+                // C1 G0 reserves canonical WIRE storage but does not install a
+                // consuming C2 feature. Existing v1/v2 booleans remain SOLID-only.
+                if (wireOutputs[index]) return false;
                 depth = std::max(depth, depths[index] + 1);
             }
-            if (depth > MaximumDepth) return false; depths.push_back(depth);
+            if (depth > MaximumDepth) return false;
+            depths.push_back(depth); wireOutputs.push_back(false);
         }
         if (sources == 0 || maximumLocalID >= definition.issuance.nextLocalID
             || definition.outputNode != NodeID(definition.nodes.back())
@@ -376,6 +452,7 @@ inline bool Valid(const Definition& definition) noexcept {
     if (definition.schemaVersion == 3)
         return ValidateV3(definition, retained_feature::EffectiveRegistry(),
                           retained_source::ProductionRegistry()).valid();
+    if (definition.schemaVersion == 4) return ValidCutV4(definition);
     return false;
 }
 
@@ -388,7 +465,7 @@ inline bool EncodeVersion(const Definition& definition, std::uint32_t version,
         const bool valid = version == 3 && registry && sources
             ? ValidateV3(definition, *registry, *sources).valid() : Valid(definition);
         if (!valid || definition.schemaVersion != version
-            || (version != 1 && version != 2 && version != 3)) return false;
+            || (version != 1 && version != 2 && version != 3 && version != 4)) return false;
         Writer writer; writer.raw(reinterpret_cast<const std::uint8_t*>("SYCR"), 4);
         writer.integer(version, 1); writer.integer(0, 1); writer.integer(0, 2);
         writer.raw(definition.owner.document); writer.raw(definition.owner.entity); writer.raw(definition.owner.definition);
@@ -443,10 +520,16 @@ inline bool EncodeV3(const Definition& definition, std::vector<std::uint8_t>& ou
     return EncodeVersion(definition, 3, output, &retained_feature::EffectiveRegistry(),
                          &retained_source::ProductionRegistry());
 }
+// Shared graph wire-field routines; the closed cut grammar is enforced by
+// ValidCutV4 through EncodeVersion's Valid dispatch.
+inline bool EncodeV4(const Definition& definition, std::vector<std::uint8_t>& output) noexcept {
+    return EncodeVersion(definition, 4, output);
+}
 inline bool Encode(const Definition& definition, std::vector<std::uint8_t>& output) noexcept {
     if (definition.schemaVersion == 1) return EncodeV1(definition, output);
     if (definition.schemaVersion == 2) return EncodeV2(definition, output);
     if (definition.schemaVersion == 3) return EncodeV3(definition, output);
+    if (definition.schemaVersion == 4) return EncodeV4(definition, output);
     output.clear(); return false;
 }
 
@@ -456,7 +539,7 @@ inline bool DecodeVersion(const std::vector<std::uint8_t>& bytes, std::uint32_t 
                           const retained_source::RegistryView* sources = nullptr) noexcept {
     output = {};
     try {
-        if ((version != 1 && version != 2 && version != 3) || bytes.size() < 8 + 64 + 12 + 32
+        if ((version != 1 && version != 2 && version != 3 && version != 4) || bytes.size() < 8 + 64 + 12 + 32
             || bytes.size() > MaximumEnvelopeBytes || std::memcmp(bytes.data(), "SYCR", 4) != 0
             || bytes[4] != std::uint8_t(version) || bytes[5] != 0
             || bytes[6] != 0 || bytes[7] != 0) return false;
@@ -539,12 +622,18 @@ inline bool DecodeV3(const std::vector<std::uint8_t>& bytes, Definition& output)
     return DecodeVersion(bytes, 3, output, &retained_feature::EffectiveRegistry(),
                          &retained_source::ProductionRegistry());
 }
+// Shared graph wire-field routines; the closed cut grammar is enforced by
+// ValidCutV4 through DecodeVersion's canonical re-encode check.
+inline bool DecodeV4(const std::vector<std::uint8_t>& bytes, Definition& output) noexcept {
+    return DecodeVersion(bytes, 4, output);
+}
 inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) noexcept {
     output = {};
     if (bytes.size() < 5) return false;
     if (bytes[4] == 1) return DecodeV1(bytes, output);
     if (bytes[4] == 2) return DecodeV2(bytes, output);
     if (bytes[4] == 3) return DecodeV3(bytes, output);
+    if (bytes[4] == 4) return DecodeV4(bytes, output);
     return false;
 }
 } // namespace core3d::composite_recipe
@@ -568,7 +657,7 @@ inline const RegistryView& ProductionRegistry() noexcept {
 namespace core3d::retained_source {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Descriptor, 9> entries{{
+    static const std::array<Descriptor, 10> entries{{
         {{std::uint8_t(RecipeKind::Profile), 1}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{std::uint8_t(RecipeKind::Profile), 2}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{std::uint8_t(RecipeKind::Profile), 3}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
@@ -578,6 +667,8 @@ inline const RegistryView& ProductionRegistry() noexcept {
         {{std::uint8_t(RecipeKind::Enclosure), 2}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{std::uint8_t(RecipeKind::RectangularLoft), std::uint32_t(loft_persistence::Schema)}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{std::uint8_t(RecipeKind::RetainedBoolean), 1}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
+        {{BoundedCurvePathKind, bounded_curve::Schema}, SourceShapeKind::Wire,
+         bounded_curve::MaximumDefinitionBytes, CanonicalLegacySource},
     }};
     static const RegistryView registry(entries.data(), entries.size());
     return registry;

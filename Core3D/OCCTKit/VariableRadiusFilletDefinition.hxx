@@ -20,7 +20,7 @@ inline constexpr std::uint32_t CodecVersion = 1;
 inline constexpr std::size_t MaximumEdges = 16;
 inline constexpr std::size_t MaximumPayloadBytes = 4096;
 
-enum class LawKind : std::uint8_t { LinearStartEnd = 1 };
+enum class LawKind : std::uint8_t { LinearStartEnd = 1, MultiStation = 2 };
 enum class ParameterConvention : std::uint8_t { OrientedNormalizedArcLength = 1 };
 enum class CurveKind : std::uint8_t { Line = 1 };
 enum class Orientation : std::uint8_t { Forward = 1, Reversed = 2 };
@@ -325,6 +325,237 @@ inline bool CanonicalPayload(const composite_recipe::FeatureNode& feature,
     });
     if (input == prior.end()) return false;
     Definition definition; std::vector<std::uint8_t> exact;
+    return Decode(feature.parameters, definition) && Encode(definition, exact)
+        && exact == feature.parameters;
+}
+
+// ===== Stage 2: multi-station law. Everything above remains the stage-1 =====
+// ===== linear-law contract; nothing here edits its bytes or admission.   =====
+
+inline constexpr std::uint32_t MultiStationCodecVersion = 2;
+inline constexpr std::size_t MinimumStations = 3;
+inline constexpr std::size_t MaximumStations = 16;
+
+// A stage-2 definition carries three to sixteen stations on the same oriented
+// normalized arc-length convention as stage 1. Station parameters are strictly
+// increasing, the first is exactly t=0 and the last exactly t=1, and every
+// station keeps its own stable UUID so a single-station radius re-edit never
+// rebinds identity. The law between stations is piecewise linear.
+struct MultiStationDefinition final {
+    std::uint32_t schema = MultiStationCodecVersion;
+    LawKind law = LawKind::MultiStation;
+    ParameterConvention convention = ParameterConvention::OrientedNormalizedArcLength;
+    double metersPerLocalUnit = 0;
+    std::vector<Station> stations;
+    std::vector<OrientedEdgeAnchor> edges;
+    bool operator==(const MultiStationDefinition&) const noexcept = default;
+};
+
+inline bool RadiusAt(const MultiStationDefinition& definition, double parameter,
+                     double& radiusLocal) noexcept {
+    radiusLocal = 0;
+    if (!std::isfinite(parameter) || parameter < 0 || parameter > 1) return false;
+    const auto& stations = definition.stations;
+    if (stations.size() < MinimumStations) return false;
+    for (std::size_t index = 1; index < stations.size(); ++index) {
+        if (parameter > stations[index].parameter) continue;
+        const double span = stations[index].parameter - stations[index - 1].parameter;
+        if (!(span > 0)) return false;
+        const double local = (parameter - stations[index - 1].parameter) / span;
+        radiusLocal = stations[index - 1].radiusLocal
+            + (stations[index].radiusLocal - stations[index - 1].radiusLocal) * local;
+        return std::isfinite(radiusLocal) && radiusLocal > 0;
+    }
+    return false;
+}
+
+inline bool MaximumRadiusLocal(const MultiStationDefinition& definition,
+                               double& radiusLocal) noexcept {
+    radiusLocal = 0;
+    if (definition.stations.empty()) return false;
+    for (const auto& station : definition.stations) {
+        if (!std::isfinite(station.radiusLocal) || station.radiusLocal <= 0) return false;
+        radiusLocal = std::max(radiusLocal, station.radiusLocal);
+    }
+    return true;
+}
+
+inline bool Validate(const MultiStationDefinition& value, Refusal& refusal) noexcept {
+    refusal = Refusal::MalformedPayload;
+    try {
+        if (value.schema != MultiStationCodecVersion) { refusal = Refusal::UnsupportedVersion; return false; }
+        if (value.law != LawKind::MultiStation
+            || value.convention != ParameterConvention::OrientedNormalizedArcLength) {
+            refusal = Refusal::UnsupportedLaw; return false;
+        }
+        if (!std::isfinite(value.metersPerLocalUnit) || value.metersPerLocalUnit <= 0
+            || value.metersPerLocalUnit > 1) { refusal = Refusal::InvalidUnit; return false; }
+        if (value.stations.size() < MinimumStations) {
+            refusal = Refusal::InvalidStationIdentity; return false;
+        }
+        if (value.stations.size() > MaximumStations) { refusal = Refusal::Budget; return false; }
+        std::set<UUID> stationIdentifiers;
+        double previousParameter = 0;
+        for (std::size_t index = 0; index < value.stations.size(); ++index) {
+            const auto& station = value.stations[index];
+            if (!retained_recipe::Nonzero(station.identifier)
+                || !stationIdentifiers.insert(station.identifier).second
+                || !std::isfinite(station.parameter)) {
+                refusal = Refusal::InvalidStationIdentity; return false;
+            }
+            if (index == 0) {
+                if (!detail::exact(station.parameter, 0.0)) {
+                    refusal = Refusal::InvalidStationIdentity; return false;
+                }
+            } else {
+                if (!(station.parameter > previousParameter)) {
+                    refusal = Refusal::InvalidStationIdentity; return false;
+                }
+                if (index == value.stations.size() - 1
+                    && !detail::exact(station.parameter, 1.0)) {
+                    refusal = Refusal::InvalidStationIdentity; return false;
+                }
+            }
+            previousParameter = station.parameter;
+            const double radiusMM = station.radiusLocal * value.metersPerLocalUnit * 1000.0;
+            if (!std::isfinite(station.radiusLocal) || station.radiusLocal <= 0
+                || !std::isfinite(radiusMM) || radiusMM < 0.001 || radiusMM > 1e6) {
+                refusal = Refusal::InvalidRadius; return false;
+            }
+        }
+        double midpoint = 0;
+        if (!RadiusAt(value, 0.5, midpoint)) { refusal = Refusal::InvalidRadius; return false; }
+        if (value.edges.empty() || value.edges.size() > MaximumEdges) {
+            refusal = Refusal::Budget; return false;
+        }
+        std::set<UUID> identifiers;
+        for (const auto& edge : value.edges) {
+            if (!retained_recipe::Nonzero(edge.identifier)
+                || !identifiers.insert(edge.identifier).second
+                || !retained_recipe::Nonzero(edge.selectorProof)) {
+                refusal = Refusal::InvalidEdgeIdentity; return false;
+            }
+            if (edge.curve != CurveKind::Line) { refusal = Refusal::ClosedLoop; return false; }
+            if ((edge.orientation != Orientation::Forward
+                 && edge.orientation != Orientation::Reversed)
+                || !detail::finiteVector(edge.pointLocal)
+                || !detail::unit(edge.tangent) || !detail::unit(edge.normalA)
+                || !detail::unit(edge.normalB) || !detail::finiteVector(edge.startLocal)
+                || !detail::finiteVector(edge.endLocal)) {
+                refusal = Refusal::InvalidEdgeIdentity; return false;
+            }
+            const auto direction = detail::delta(edge.startLocal, edge.endLocal);
+            const double length = std::sqrt(detail::dot(direction, direction));
+            if (!std::isfinite(length) || length <= 0) { refusal = Refusal::ClosedLoop; return false; }
+            const double signedAlignment = detail::dot(direction, edge.tangent) / length;
+            const double expected = edge.orientation == Orientation::Forward ? 1.0 : -1.0;
+            if (std::abs(signedAlignment - expected) > 1e-10
+                || std::abs(detail::dot(edge.normalA, edge.normalB)) > 1.0 - 1e-8) {
+                refusal = Refusal::OrientationDrift; return false;
+            }
+            const auto fromStart = detail::delta(edge.startLocal, edge.pointLocal);
+            const double along = detail::dot(fromStart, direction) / (length * length);
+            const std::array<double, 3> projected{{
+                edge.startLocal[0] + direction[0] * along,
+                edge.startLocal[1] + direction[1] * along,
+                edge.startLocal[2] + direction[2] * along}};
+            const auto offset = detail::delta(projected, edge.pointLocal);
+            if (along <= 0 || along >= 1 || std::sqrt(detail::dot(offset, offset)) > 1e-9) {
+                refusal = Refusal::InvalidEdgeIdentity; return false;
+            }
+        }
+        refusal = Refusal::None; return true;
+    } catch (...) { refusal = Refusal::MalformedPayload; return false; }
+}
+
+inline bool Encode(const MultiStationDefinition& definition,
+                   std::vector<std::uint8_t>& output) noexcept {
+    output.clear();
+    Refusal refusal;
+    if (!Validate(definition, refusal)) return false;
+    try {
+        detail::Writer writer;
+        writer.raw("SYVF", 4); writer.integer(MultiStationCodecVersion, 1);
+        writer.integer(std::uint8_t(definition.law), 1);
+        writer.integer(std::uint8_t(definition.convention), 1); writer.integer(0, 1);
+        writer.scalar(definition.metersPerLocalUnit);
+        writer.integer(definition.stations.size(), 2); writer.integer(0, 2);
+        for (const auto& station : definition.stations) {
+            writer.raw(station.identifier); writer.scalar(station.parameter);
+            writer.scalar(station.radiusLocal);
+        }
+        writer.integer(definition.edges.size(), 2); writer.integer(0, 2);
+        for (const auto& edge : definition.edges) {
+            writer.raw(edge.identifier); writer.integer(std::uint8_t(edge.curve), 1);
+            writer.integer(std::uint8_t(edge.orientation), 1); writer.integer(0, 2);
+            for (double value : edge.pointLocal) writer.scalar(value);
+            for (double value : edge.tangent) writer.scalar(value);
+            for (double value : edge.normalA) writer.scalar(value);
+            for (double value : edge.normalB) writer.scalar(value);
+            for (double value : edge.startLocal) writer.scalar(value);
+            for (double value : edge.endLocal) writer.scalar(value);
+            writer.raw(edge.selectorProof);
+        }
+        if (!writer.valid || writer.bytes.size() > MaximumPayloadBytes) return false;
+        output = std::move(writer.bytes); return true;
+    } catch (...) { output.clear(); return false; }
+}
+
+inline bool Decode(const std::vector<std::uint8_t>& bytes,
+                   MultiStationDefinition& output) noexcept {
+    output = {};
+    try {
+        if (bytes.size() < 16 + 4 + MinimumStations * 32 + 4
+            || bytes.size() > MaximumPayloadBytes
+            || std::memcmp(bytes.data(), "SYVF", 4) != 0) return false;
+        detail::Reader reader{bytes}; std::array<std::uint8_t, 4> magic{};
+        std::uint64_t schema = 0, law = 0, convention = 0, reserved = 0, count = 0;
+        MultiStationDefinition decoded;
+        if (!reader.raw(magic) || !reader.integer(1, schema) || !reader.integer(1, law)
+            || !reader.integer(1, convention) || !reader.integer(1, reserved) || reserved != 0
+            || !reader.scalar(decoded.metersPerLocalUnit)) return false;
+        decoded.schema = std::uint32_t(schema); decoded.law = LawKind(law);
+        decoded.convention = ParameterConvention(convention);
+        if (!reader.integer(2, count) || !reader.integer(2, reserved) || reserved != 0
+            || count < MinimumStations || count > MaximumStations) return false;
+        decoded.stations.resize(std::size_t(count));
+        for (auto& station : decoded.stations)
+            if (!reader.raw(station.identifier) || !reader.scalar(station.parameter)
+                || !reader.scalar(station.radiusLocal)) return false;
+        if (!reader.integer(2, count) || !reader.integer(2, reserved) || reserved != 0
+            || count == 0 || count > MaximumEdges) return false;
+        decoded.edges.resize(std::size_t(count));
+        for (auto& edge : decoded.edges) {
+            std::uint64_t curve = 0, orientation = 0;
+            if (!reader.raw(edge.identifier) || !reader.integer(1, curve)
+                || !reader.integer(1, orientation) || !reader.integer(2, reserved)
+                || reserved != 0) return false;
+            edge.curve = CurveKind(curve); edge.orientation = Orientation(orientation);
+            for (double& value : edge.pointLocal) if (!reader.scalar(value)) return false;
+            for (double& value : edge.tangent) if (!reader.scalar(value)) return false;
+            for (double& value : edge.normalA) if (!reader.scalar(value)) return false;
+            for (double& value : edge.normalB) if (!reader.scalar(value)) return false;
+            for (double& value : edge.startLocal) if (!reader.scalar(value)) return false;
+            for (double& value : edge.endLocal) if (!reader.scalar(value)) return false;
+            if (!reader.raw(edge.selectorProof)) return false;
+        }
+        Refusal refusal; std::vector<std::uint8_t> exact;
+        if (!reader.complete() || !Validate(decoded, refusal) || !Encode(decoded, exact)
+            || exact != bytes) return false;
+        output = std::move(decoded); return true;
+    } catch (...) { output = {}; return false; }
+}
+
+inline bool CanonicalPayloadMultiStation(
+    const composite_recipe::FeatureNode& feature,
+    const std::vector<composite_recipe::Node>& prior) noexcept {
+    if (feature.kind != FeatureKind || feature.codecVersion != MultiStationCodecVersion
+        || feature.inputs.size() != 1) return false;
+    const auto input = std::find_if(prior.begin(), prior.end(), [&](const auto& node) {
+        return composite_recipe::NodeID(node) == feature.inputs[0];
+    });
+    if (input == prior.end()) return false;
+    MultiStationDefinition definition; std::vector<std::uint8_t> exact;
     return Decode(feature.parameters, definition) && Encode(definition, exact)
         && exact == feature.parameters;
 }

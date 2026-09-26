@@ -84,4 +84,74 @@ inline retained_feature::Entry DraftRegistryEntry() noexcept {
     return RegistryEntry(false, false);
 }
 
+// ===== Stage 2: multi-station law. The stage-1 descriptor above keeps    =====
+// ===== codec key {0x00002003, 1}; this adds the separate {0x00002003, 2} =====
+// ===== descriptor and changes no stage-1 admission or install flags.     =====
+
+namespace detail {
+inline bool buildDetachedMultiStation(
+    const composite_recipe::FeatureNode& feature,
+    const std::vector<retained_feature::ReplayValue>& inputs,
+    retained_feature::ReplayBudget& budget,
+    retained_feature::ReplayValue& output) noexcept {
+    output = {};
+    try {
+        if (inputs.size() != 1 || inputs[0].shape != retained_feature::ShapeKind::Solid
+            || !budget.consume(1, feature.inputs.size() + 2, feature.parameters.size())) return false;
+        MultiStationDefinition definition; TopoDS_Shape source;
+        if (!Decode(feature.parameters, definition) || !readShape(inputs[0].detachedShape, source)) return false;
+        const std::atomic_bool cancelled{false};
+        BuildResult built = BuildMultiStationDeterministically(source, definition, cancelled);
+        if (!built.built() || !exactShapeBytes(built.solid, output.detachedShape)
+            || !composite_recipe::Hash(output.detachedShape, output.geometry)) return false;
+        std::vector<std::uint8_t> proof;
+        proof.reserve(feature.parameters.size() + output.detachedShape.size());
+        proof.insert(proof.end(), feature.parameters.begin(), feature.parameters.end());
+        proof.insert(proof.end(), output.geometry.begin(), output.geometry.end());
+        if (!composite_recipe::Hash(proof, output.familyProof)) return false;
+        output.shape = retained_feature::ShapeKind::Solid; return output.valid();
+    } catch (...) { output = {}; return false; }
+}
+
+inline bool proveFamilyMultiStation(
+    const composite_recipe::FeatureNode& feature,
+    const std::vector<retained_feature::ReplayValue>& inputs,
+    const retained_feature::ReplayValue& output,
+    retained_feature::ReplayBudget& budget) noexcept {
+    retained_feature::ReplayValue rebuilt;
+    if (!buildDetachedMultiStation(feature, inputs, budget, rebuilt)) return false;
+    return rebuilt.detachedShape == output.detachedShape
+        && rebuilt.geometry == output.geometry && rebuilt.familyProof == output.familyProof;
+}
+
+inline bool verifyFixedPointMultiStation(
+    const composite_recipe::FeatureNode& feature,
+    const std::vector<retained_feature::ReplayValue>& inputs,
+    const retained_feature::ReplayValue& output,
+    retained_feature::ReplayBudget& budget) noexcept {
+    return proveFamilyMultiStation(feature, inputs, output, budget);
+}
+} // namespace detail
+
+inline retained_feature::Entry MultiStationRegistryEntry(
+    bool editorRouteInstalled, bool dependencyRouteInstalled) noexcept {
+    retained_feature::CodecDescriptor codec;
+    codec.key = {FeatureKind, MultiStationCodecVersion}; codec.graphMajor = 3;
+    codec.maximumPayloadBytes = MaximumPayloadBytes;
+    codec.orderedInputs[0] = retained_feature::ShapeKind::Solid;
+    codec.inputCount = 1; codec.output = retained_feature::ShapeKind::Solid;
+    codec.canonicalPayload = CanonicalPayloadMultiStation;
+    retained_feature::ExecutionDescriptor execution;
+    execution.buildDetached = detail::buildDetachedMultiStation;
+    execution.proveFamily = detail::proveFamilyMultiStation;
+    execution.verifyFixedPoint = detail::verifyFixedPointMultiStation;
+    execution.editorRouteInstalled = editorRouteInstalled;
+    execution.dependencyRouteInstalled = dependencyRouteInstalled;
+    return {codec, execution};
+}
+
+inline retained_feature::Entry DraftMultiStationRegistryEntry() noexcept {
+    return MultiStationRegistryEntry(false, false);
+}
+
 } // namespace core3d::variable_radius_fillet

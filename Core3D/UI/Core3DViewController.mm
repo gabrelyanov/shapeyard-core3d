@@ -85,6 +85,9 @@
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
+#include "../OCCTKit/BoundedCurveEditProbe.hxx"
+#include "../OCCTKit/BoundedCurvePersistenceProbe.hxx"
+#include "../OCCTKit/SpatialSweepProbe.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceiptLegacyDebug.hxx"
 #include "../OCCTKit/ReceiptCatalogProbe.hxx"
@@ -7730,6 +7733,62 @@ struct NativeModelingPermitIssuer final {
     if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
     try {
         const auto checks = Core3DDebugSavedBooleanProgramProbe();
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurveEditProbe {
+    if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
+    try {
+        const auto checks = Core3DDebugBoundedCurveEditProbe();
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurvePersistenceProbe:(NSUInteger)scenario {
+    if (![NSThread isMainThread] || scenario > 5) return @{ @"invalidScenario": @NO };
+    try {
+        const auto checks = Core3DDebugBoundedCurvePersistenceProbe((unsigned)scenario);
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepK0K1Probe {
+    if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
+    try {
+        const auto checks = Core3DDebugSpatialSweepK0K1Probe();
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepK2Probe {
+    if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
+    try {
+        const auto checks = Core3DDebugSpatialSweepK2Probe();
         NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
         for (const auto& check : checks) {
             NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
@@ -16813,6 +16872,40 @@ struct NativeModelingPermitIssuer final {
     (NSString *)entityIdentifier {
     return [self core3d_matchesDebugPartBooleanFixtureEntityIdentifier:entityIdentifier]
         ? [self core3d_openPartBooleanEditorForEntityIdentifier:entityIdentifier] : nil;
+}
+
+- (NSData *)debugPartBooleanCarrierBytesForEntityIdentifier:(NSString *)entityIdentifier
+    redrawBeforeRead:(BOOL)redrawBeforeRead {
+    if (![self core3d_matchesDebugPartBooleanFixtureEntityIdentifier:entityIdentifier]
+        || !_isSetuped || _isLoading.load()
+        || !GLController.viewer->canBeginCommittedEdit()
+        || GLController.viewer->hasUnresolvedOrdinaryEdit()) return nil;
+    try {
+        const Handle(OcctDocument) document=GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return nil;
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+        if (shapes.IsNull()) return nil;
+        TDF_LabelSequence roots;shapes->GetFreeShapes(roots);
+        if (roots.Length()>50000) return nil;
+        TDF_Label carrier;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index=1;index<=roots.Length();++index)
+            if (document->EntityIdentifierForLabel(roots.Value(index))==entity) {
+                if (!carrier.IsNull()) return nil;carrier=roots.Value(index);
+            }
+        if (carrier.IsNull()) return nil;
+        if (redrawBeforeRead) {
+            if (!GLController.viewer->redrawDocument()) return nil;
+            [GLController refreshSelectionState];[GLController requestRender];
+            [self viewDidInvalidateSceneSnapshot];
+        }
+        std::string bytes;
+        if (!core3d::retained_part_boolean::ExactShapeBytes(
+                XCAFDoc_ShapeTool::GetShape(carrier),bytes)) return nil;
+        return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+    } catch (...) { return nil; }
 }
 #endif
 

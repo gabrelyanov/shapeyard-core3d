@@ -2,7 +2,9 @@
 #include "RetainedRecipeSnapshot.hxx"
 
 namespace core3d::retained_recipe {
-enum class OperationKind : std::uint8_t { PartBoolean = 1, EditInput = 2, EditFeature = 3 };
+enum class OperationKind : std::uint8_t {
+    PartBoolean = 1, EditInput = 2, EditFeature = 3, SpatialCircleSweep = 4
+};
 enum class Refusal : std::uint8_t {
     None = 0,
     SnapshotNotCurrent,
@@ -39,12 +41,14 @@ inline AdmissionDecision Evaluate(const OwnerSnapshot& snapshot,
         if (snapshot.status != OwnerStatus::CurrentEditable) { result.refusal = Refusal::SnapshotNotCurrent; return result; }
         if (!rule.nativeBuilderInstalled || !rule.nativeProofInstalled
             || !rule.nativeOwnerInstalled || !rule.retainedInputsPersistenceInstalled) return result;
-        if (rule.featureKind != composite_recipe::PartBooleanFeatureKind
-            || (rule.featureCodecVersion != composite_recipe::PartBooleanFeatureCodec
-                && rule.featureCodecVersion
-                    != composite_recipe::PartBooleanShellFeatureCodec)
-            || (rule.featureCodecVersion == composite_recipe::PartBooleanShellFeatureCodec
-                && rule.operation == OperationKind::PartBoolean)) {
+        const bool partBoolean = rule.featureKind == composite_recipe::PartBooleanFeatureKind
+            && (rule.featureCodecVersion == composite_recipe::PartBooleanFeatureCodec
+                || (rule.featureCodecVersion == composite_recipe::PartBooleanShellFeatureCodec
+                    && rule.operation != OperationKind::PartBoolean));
+        const bool spatialSweep = rule.operation == OperationKind::SpatialCircleSweep
+            && rule.featureKind == composite_recipe::SpatialCircleSweepFeatureKind
+            && rule.featureCodecVersion == composite_recipe::SpatialCircleSweepFeatureCodec;
+        if (!partBoolean && !spatialSweep) {
             result.refusal = Refusal::FeatureKind; return result;
         }
         if (rule.selectorVersion == 0) { result.refusal = Refusal::SelectorVersion; return result; }

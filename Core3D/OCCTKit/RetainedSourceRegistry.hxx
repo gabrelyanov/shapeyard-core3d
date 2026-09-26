@@ -8,6 +8,10 @@
 namespace core3d::retained_source {
 
 inline constexpr std::uint8_t ReservedPlanarSplineProfileKind = 0x10;
+inline constexpr std::uint8_t BoundedCurvePathKind =
+    std::uint8_t(composite_recipe::RecipeKind::BoundedCurvePath);
+static_assert(BoundedCurvePathKind == 0x11,
+              "D65/D67 frozen bounded-curve source allocation changed");
 
 struct Key final {
     std::uint8_t kind = 0;

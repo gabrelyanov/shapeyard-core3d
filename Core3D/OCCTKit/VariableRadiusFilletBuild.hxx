@@ -349,4 +349,177 @@ inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
     return first;
 }
 
+// ===== Stage 2: multi-station law. Everything above remains the stage-1 =====
+// ===== linear-law build; nothing here edits its gates or evidence.       =====
+
+#include <TColgp_Array1OfPnt2d.hxx>
+
+// Stage 2 routes the authored stations through the OCCT-native
+// BRepFilletAPI_MakeFillet::Add(TColgp_Array1OfPnt2d, E) interpolating law.
+// The generic Add(Law_Function, E) entry point throws Standard_NoSuchObject
+// for every law object in this OCCT build (verified locally with OCCT's own
+// Law_Linear and Law_Interpol), so no custom Law_Function subclass is used.
+// The authored contract pins the exact radius at every station and lets the
+// kernel interpolate between stations; the build re-reads the realized law
+// below and refuses any drift from the authored piecewise-linear envelope.
+
+inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
+                                     const MultiStationDefinition& definition,
+                                     const std::atomic_bool& cancelled) noexcept {
+    BuildResult output;
+    const auto decline = [&](Refusal refusal) {
+        BuildResult result; result.refusal = cancelled.load() ? Refusal::Cancelled : refusal; return result;
+    };
+    try {
+        if (cancelled.load()) return decline(Refusal::Cancelled);
+        Refusal refusal = Refusal::KernelFailure;
+        if (source.IsNull()) return decline(Refusal::KernelFailure);
+        if (!Validate(definition, refusal)) return decline(refusal);
+        BRepBuilderAPI_Copy detached(source, Standard_True, Standard_False);
+        if (!detached.IsDone()) return decline(Refusal::KernelFailure);
+        const TopoDS_Shape input = detached.Shape();
+        const double tolerance = std::max(Precision::Confusion() * 32,
+            1e-7 / definition.metersPerLocalUnit);
+        std::vector<TopoDS_Edge> edges; edges.reserve(definition.edges.size());
+        double minimumClearance = INFINITY;
+        for (const auto& anchor : definition.edges) {
+            if (cancelled.load()) return decline(Refusal::Cancelled);
+            TopoDS_Edge edge;
+            if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
+            if (BRep_Tool::IsClosed(edge)) return decline(Refusal::ClosedLoop);
+            double clearance = 0;
+            if (!detail::continuousClearance(input, edge, tolerance, clearance))
+                return decline(Refusal::Clearance);
+            minimumClearance = std::min(minimumClearance, clearance);
+            edges.push_back(edge); output.evidence.consumedEdges.push_back(anchor.identifier);
+        }
+        double maximumRadius = 0;
+        if (!MaximumRadiusLocal(definition, maximumRadius)
+            || !std::isfinite(minimumClearance) || maximumRadius >= minimumClearance / 2)
+            return decline(Refusal::Clearance);
+
+        BRepFilletAPI_MakeFillet fillet(input);
+        std::set<int> contours;
+        for (const auto& edge : edges) {
+            TColgp_Array1OfPnt2d lawPoints(1, Standard_Integer(definition.stations.size()));
+            for (std::size_t index = 0; index < definition.stations.size(); ++index)
+                lawPoints.SetValue(Standard_Integer(index) + 1,
+                    gp_Pnt2d(definition.stations[index].parameter,
+                             definition.stations[index].radiusLocal));
+            fillet.Add(lawPoints, edge);
+            const int contour = fillet.Contour(edge);
+            if (contour <= 0 || fillet.NbEdges(contour) != 1 || !contours.insert(contour).second)
+                return decline(Refusal::ContourExpansion);
+        }
+        if (fillet.NbContours() != int(edges.size())) return decline(Refusal::ContourExpansion);
+        fillet.Build();
+        if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
+        for (const auto& edge : edges) {
+            const int contour = fillet.Contour(edge);
+            const Handle(Law_Function) law = fillet.GetLaw(contour, edge);
+            if (law.IsNull()) return decline(Refusal::EndpointMismatch);
+            BRepAdaptor_Curve spine(edge);
+            const double first = spine.FirstParameter(), last = spine.LastParameter();
+            if (!std::isfinite(first) || !std::isfinite(last) || !(last > first))
+                return decline(Refusal::EndpointMismatch);
+            const auto lawAt = [&](double parameter) {
+                return law->Value(first + (last - first) * parameter);
+            };
+            // The realized kernel law must pin every authored station, not only
+            // the endpoints; a law that misses a station refuses here.
+            for (const auto& station : definition.stations) {
+                if (!std::isfinite(lawAt(station.parameter))
+                    || std::abs(lawAt(station.parameter) - station.radiusLocal) > tolerance)
+                    return decline(Refusal::EndpointMismatch);
+            }
+            // Between stations the kernel interpolates; the realized law must
+            // not drift from the authored piecewise-linear envelope. Fixed
+            // deterministic samples per segment are bounded like a measured
+            // section and kept inside the admitted whole-law clearance.
+            for (std::size_t segment = 1; segment < definition.stations.size(); ++segment) {
+                const double from = definition.stations[segment - 1].parameter;
+                const double to = definition.stations[segment].parameter;
+                for (int sample = 1; sample <= 3; ++sample) {
+                    const double parameter = from + (to - from) * double(sample) / 4;
+                    double envelope = 0;
+                    if (!RadiusAt(definition, parameter, envelope))
+                        return decline(Refusal::EndpointMismatch);
+                    const double realized = lawAt(parameter);
+                    if (!std::isfinite(realized) || realized <= 0
+                        || realized < envelope * .5 || realized > envelope * 2)
+                        return decline(Refusal::EndpointMismatch);
+                    if (realized >= minimumClearance / 2)
+                        return decline(Refusal::Clearance);
+                }
+            }
+        }
+        const TopoDS_Shape candidate = fillet.Shape();
+        if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::KernelFailure);
+        if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
+
+        GProp_GProps before, after; BRepGProp::VolumeProperties(input, before);
+        BRepGProp::VolumeProperties(candidate, after);
+        const double removed = before.Mass() - after.Mass();
+        if (!std::isfinite(removed) || removed <= std::max(1e-12, before.Mass() * 1e-10))
+            return decline(Refusal::NonRemoving);
+
+        // Independent section proof: one measured normal-plane section at every
+        // interior station parameter. Endpoint sections are proved by the exact
+        // kernel-law check above; a plane through an endpoint vertex is not a
+        // reliable independent measurement. Consecutive interior sections must
+        // follow the authored segment direction, exactly as in stage 1.
+        for (std::size_t edgeIndex = 0; edgeIndex < definition.edges.size(); ++edgeIndex) {
+            double previousMeasured = 0; double previousAuthored = 0;
+            for (std::size_t stationIndex = 1; stationIndex + 1 < definition.stations.size();
+                 ++stationIndex) {
+                const auto& station = definition.stations[stationIndex];
+                double expected = 0, measured = 0;
+                if (!RadiusAt(definition, station.parameter, expected)
+                    || !detail::measuredSection(candidate, definition.edges[edgeIndex],
+                                                station.parameter, expected, tolerance, measured))
+                    return decline(Refusal::SectionMismatch);
+                output.evidence.sections.push_back({definition.edges[edgeIndex].identifier,
+                                                    station.parameter, expected, measured});
+                if (previousMeasured > 0) {
+                    const double delta = station.radiusLocal - previousAuthored;
+                    if ((delta > 0 && measured <= previousMeasured)
+                        || (delta < 0 && measured >= previousMeasured)
+                        || (delta == 0 && std::abs(measured - previousMeasured) > tolerance))
+                        return decline(Refusal::SectionMismatch);
+                }
+                previousMeasured = measured; previousAuthored = station.radiusLocal;
+            }
+        }
+        output.refusal = Refusal::None; output.solid = candidate;
+        output.evidence.minimumClearanceLocal = minimumClearance;
+        output.evidence.removedVolumeLocal3 = removed;
+        return output;
+    } catch (...) { return decline(Refusal::KernelFailure); }
+}
+
+inline BuildResult BuildMultiStationDeterministically(
+    const TopoDS_Shape& source, const MultiStationDefinition& definition,
+    const std::atomic_bool& cancelled) noexcept {
+    BuildResult first = BuildMultiStation(source, definition, cancelled);
+    if (!first.built()) return first;
+    BuildResult second = BuildMultiStation(source, definition, cancelled);
+    if (!second.built()) return second;
+    std::vector<std::uint8_t> a, b;
+    if (!detail::exactShapeBytes(first.solid, a) || !detail::exactShapeBytes(second.solid, b)
+        || a != b || first.evidence.consumedEdges != second.evidence.consumedEdges
+        || first.evidence.sections.size() != second.evidence.sections.size()) {
+        BuildResult mismatch; mismatch.refusal = Refusal::ReplayMismatch; return mismatch;
+    }
+    for (std::size_t index = 0; index < first.evidence.sections.size(); ++index) {
+        const auto& lhs = first.evidence.sections[index];
+        const auto& rhs = second.evidence.sections[index];
+        if (lhs.edge != rhs.edge || lhs.parameter != rhs.parameter
+            || lhs.expectedRadiusLocal != rhs.expectedRadiusLocal
+            || lhs.measuredRadiusLocal != rhs.measuredRadiusLocal) {
+            BuildResult mismatch; mismatch.refusal = Refusal::ReplayMismatch; return mismatch;
+        }
+    }
+    return first;
+}
+
 } // namespace core3d::variable_radius_fillet

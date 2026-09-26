@@ -196,6 +196,14 @@ __attribute__((objc_subclassing_restricted))
 //! Public opening still requires the isolated shell activation candidate.
 - (NSString *_Nullable)debugInstallShellBooleanEditorFixtureMetersPerUnit:(double)metersPerUnit
     NS_SWIFT_NAME(debugInstallShellBooleanEditorFixture(metersPerUnit:));
+//! DEBUG-only exact byte readback of the installed fixture carrier. Accepts
+//! only the installer-bound viewer/document/owner/entity; with redrawBeforeRead
+//! performs exactly one redrawDocument() and the installer's notifications,
+//! without document mutation or history changes.
+- (NSData *_Nullable)debugPartBooleanCarrierBytesForEntityIdentifier:
+    (NSString *)entityIdentifier
+    redrawBeforeRead:(BOOL)redrawBeforeRead
+    NS_SWIFT_NAME(debugPartBooleanCarrierBytes(entityIdentifier:redrawBeforeRead:));
 #endif
 
 //! Change camera projection without changing target-plane scale or the model.
@@ -1232,6 +1240,22 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSavedCutResultCorrespondenceProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanProgramProbe
     NS_SWIFT_NAME(debugSavedBooleanProgramProbe());
+//! C1b DEBUG evidence for UUID-addressed retained curve edits. This advertises
+//! no production or AI command and never touches the active document.
++ (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurveEditProbe
+    NS_SWIFT_NAME(debugBoundedCurveEditProbe());
+//! C2-K0/K1 detached value/admission evidence. No document mutation, carrier
+//! registration, catalog capability, or spatial-sweep builder is installed.
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepK0K1Probe
+    NS_SWIFT_NAME(debugSpatialSweepK0K1Probe());
+//! C2-K2 detached surface/fixed-point policy evidence. The carrier remains
+//! fail-closed while the canonical C1 codec and real G0 transaction are absent.
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepK2Probe
+    NS_SWIFT_NAME(debugSpatialSweepK2Probe());
+//! C1 canonical SYCV/1 + owner-receipt persistence scenarios. Detached from
+//! the active document and unavailable outside DEBUG.
++ (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurvePersistenceProbe:(NSUInteger)scenario
+    NS_SWIFT_NAME(debugBoundedCurvePersistenceProbe(_:));
 //! Detached A1a evidence only; reports that the document command stayed closed.
 - (NSDictionary<NSString *, NSNumber *> *)debugRetainedPartBooleanProbe
     NS_SWIFT_NAME(debugRetainedPartBooleanProbe());

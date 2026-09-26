@@ -26,6 +26,9 @@ enum class RecipeKind : std::uint8_t {
     Enclosure = 2,
     RectangularLoft = 3,
     RetainedBoolean = 4,
+    // D65/D67 frozen source-kind block. Do not reuse the historical draft's
+    // raw low-numbered kind 5.
+    BoundedCurvePath = 0x11,
     // Reserved wire value only. P1 deliberately does not install a codec,
     // source builder, editor, or family proof for it.
     ReservedPlanarSplineProfile = 0x10,
@@ -73,6 +76,8 @@ inline SourceShapeKind ExpectedSourceShapeKind(const SourceRecipe& recipe) noexc
     case RecipeKind::RectangularLoft:
     case RecipeKind::RetainedBoolean:
         return SourceShapeKind::Solid;
+    case RecipeKind::BoundedCurvePath:
+        return SourceShapeKind::Wire;
     default:
         return SourceShapeKind::Unknown;
     }
