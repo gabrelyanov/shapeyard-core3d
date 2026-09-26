@@ -417,6 +417,11 @@ struct OcctPlainProfileOperationCapture {
     Standard_Real metersPerUnit = 0.0;
 };
 
+// Immutable, document-bound H2/H4 values. Definitions stay private to the
+// native document implementation so callers cannot manufacture archive proof.
+struct OcctPlainProfileCutPreparation;
+struct OcctPlainProfileCutReceipt;
+
 //! Scans every label, including hidden/unbound/orphan records and foreign arrays.
 //! This validates frame ownership, not the rest of the document schema. Callers
 //! must combine it with their existing geometry/material admission and budgets.
@@ -590,6 +595,26 @@ public:
   Standard_EXPORT Standard_Boolean VerifyPlainProfileOperationReplacement(
       const OcctPlainProfileOperationCapture& capture,
       const TopoDS_Shape& newRoot) const noexcept;
+  //! Detached H2 proof. This performs no OCAF command, label allocation, or
+  //! identity write. Ordered tools are actor order, never label order.
+  Standard_EXPORT Standard_Boolean PreparePlainProfileCut(
+      const OcctPlainProfileOperationCapture& subjectCapture,
+      const std::vector<OcctPlainProfileOperationCapture>& orderedToolCaptures,
+      const TopoDS_Shape& canonicalCandidate,
+      const gp_Trsf& resultOccurrence,
+      std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept;
+  Standard_EXPORT Standard_Boolean PlainProfileCutSourcesCurrent(
+      const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept;
+  //! H4 paired write inside the caller's already-open measured command.
+  Standard_EXPORT Standard_Boolean StagePlainProfileCutResult(
+      const TDF_Label& resultLabel,
+      const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared,
+      std::shared_ptr<const OcctPlainProfileCutReceipt>& receipt) noexcept;
+  Standard_EXPORT Standard_Boolean VerifyPlainProfileCutResult(
+      const TDF_Label& resultLabel,
+      const std::shared_ptr<const OcctPlainProfileCutReceipt>& receipt) const noexcept;
+  Standard_EXPORT Standard_Boolean VerifyPlainProfileCutSourcesRestored(
+      const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept;
   // Benchmark assets need more than 40 steps; 1000 keeps memory bounded on
   // device while preserving a long editable native session.
   static constexpr Standard_Integer kNativeSessionUndoLimit = 1000;

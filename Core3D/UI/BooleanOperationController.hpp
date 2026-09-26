@@ -176,6 +176,9 @@ private:
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
         OcctObjectNameState expectedName;
+        // H4: populated only by the narrow plain-profile cut route.
+        std::shared_ptr<const OcctPlainProfileCutPreparation>
+            plainProfileCutPreparation;
     };
     struct PendingResult {
         TDF_Label label;
@@ -187,6 +190,9 @@ private:
             OcctReferenceAxisReadState::Invalid;
         OcctReferenceAxis expectedReferenceAxis;
         OcctObjectNameState expectedName;
+        Standard_Boolean requiresPlainProfileCut = Standard_False;
+        std::shared_ptr<const OcctPlainProfileCutReceipt>
+            plainProfileCutReceipt;
     };
 
     Standard_Boolean actionMatches(BooleanAction action) const noexcept;
@@ -245,6 +251,10 @@ private:
     std::vector<TDF_Label> _subjectSelectionOrder;
     std::vector<PendingSource> _pendingSources;
     std::vector<PendingResult> _pendingResults;
+    // Package C's H3 dispatch installs this only after canonicalisation and
+    // successful detached H2 preparation. Legacy operations leave it null.
+    std::shared_ptr<const OcctPlainProfileCutPreparation>
+        _plainProfileCutPreparation;
     OcctSavedGroupState _pendingGroupsBefore;
     OcctSavedGroupState _pendingGroupsAfter;
     Handle(AIS_Shape) _singleTrialResult;

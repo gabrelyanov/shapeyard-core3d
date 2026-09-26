@@ -134,8 +134,11 @@ struct Cut475Scope {
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepLib.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -4480,6 +4483,12 @@ struct GeometryDocumentUsage
     Standard_Size featureRecords = 0;
 };
 
+Standard_Boolean RebuildAndValidatePlainProfileCut(
+    const Handle(TDocStd_Document)& document,
+    const core3d::composite_recipe::Record& record,
+    Standard_Size& topologyVisits,
+    Standard_Boolean requireConsumedSources) noexcept;
+
 Standard_Boolean ValidateGeometryDocument(
     const Handle(TDocStd_Document)& document,
     GeometryDocumentUsage* output)
@@ -4598,6 +4607,7 @@ Standard_Boolean ValidateGeometryDocument(
         TDF_LabelMap aVisitedGraphLabels;
         TDF_LabelMap aDefinitionLabels;
         GeometryValidationBudget aBudget;
+        Standard_Size aPlainProfileCutTopologyVisits = 0;
         // Current bindings share the already-budgeted root geometry. Stale
         // definitions can retain older solids and must account for them too.
         for (const auto& profile : profiles) {
@@ -4660,6 +4670,21 @@ Standard_Boolean ValidateGeometryDocument(
                 // they cannot inherit positive-volume solid admission.
                 if(expected!=core3d::composite_recipe::SourceShapeKind::Solid
                     ||!validCompositeSolid(source))return Standard_False;
+            }
+            const auto& definition = record.value->definition;
+            const bool isPlainProfileCut = definition.schemaVersion
+                == core3d::plain_profile_cut::GraphVersion
+                || std::any_of(definition.nodes.begin(), definition.nodes.end(),
+                    [](const core3d::composite_recipe::Node& node) {
+                        const auto* feature = std::get_if<
+                            core3d::composite_recipe::FeatureNode>(&node.value);
+                        return feature != nullptr && feature->kind
+                            == core3d::plain_profile_cut::PlainProfileCutKind;
+                    });
+            if (isPlainProfileCut && !RebuildAndValidatePlainProfileCut(
+                    document, record, aPlainProfileCutTopologyVisits,
+                    Standard_True)) {
+                return Standard_False;
             }
         }
 
@@ -5249,6 +5274,517 @@ Standard_Boolean PlainProfilePlacementsMatch(
 
 } // namespace
 
+struct OcctPlainProfileCutPreparation final {
+    const OcctDocument* owner = nullptr;
+    Handle(TDF_Data) documentData;
+    core3d::retained_recipe::UUID documentIdentifier{};
+    std::vector<OcctPlainProfileOperationCapture> sources;
+    std::vector<core3d::profile::Parameters> parameters;
+    std::vector<std::vector<std::uint8_t>> recipeBytes;
+    std::vector<TopoDS_Shape> sourceSlots;
+    std::vector<core3d::plain_profile_cut::SourceWitness> witnesses;
+    std::vector<std::vector<std::uint8_t>> witnessBytes;
+    std::vector<core3d::retained_recipe::UUID> sourceNodes;
+    std::vector<core3d::retained_recipe::UUID> featureNodes;
+    std::vector<core3d::retained_recipe::UUID> featureIdentifiers;
+    std::vector<core3d::composite_recipe::InputPlacement> placements;
+    TopoDS_Shape expectedRoot;
+    gp_Trsf resultOccurrence;
+    core3d::retained_recipe::Digest resultDigest{};
+};
+
+struct OcctPlainProfileCutReceipt final {
+    Handle(TDF_Data) documentData;
+    TDF_Label ownerLabel;
+    std::shared_ptr<const core3d::composite_recipe::Payload> payload;
+    core3d::retained_recipe::Digest resultDigest{};
+};
+
+namespace {
+
+constexpr Standard_Size kPlainProfileCutMaximumValidationVisits = 262144;
+constexpr Standard_Size kPlainProfileCutMaximumShapeVisits = 32768;
+
+core3d::retained_recipe::UUID NewPlainProfileCutUUID() {
+    core3d::retained_recipe::UUID value{};
+    [[NSUUID UUID] getUUIDBytes:value.data()];
+    return value;
+}
+
+bool PlainProfileCutUTF8(
+    const TCollection_ExtendedString& value,
+    std::string& output) noexcept
+{
+    output.clear();
+    @autoreleasepool {
+        @try {
+            NSString* string = [[NSString alloc]
+                initWithCharacters:
+                    reinterpret_cast<const unichar*>(value.ToExtString())
+                length:static_cast<NSUInteger>(value.Length())];
+            NSData* data = [string dataUsingEncoding:NSUTF8StringEncoding
+                                allowLossyConversion:NO];
+            if (data == nil || data.length
+                    > core3d::plain_profile_cut::MaximumNameBytes) {
+                return false;
+            }
+            output.assign(static_cast<const char*>(data.bytes), data.length);
+            return true;
+        } @catch (NSException*) {
+            output.clear(); return false;
+        }
+    }
+}
+
+bool PlainProfileCutTopologyBudget(
+    const TopoDS_Shape& shape,
+    Standard_Size& aggregate) noexcept
+{
+    try {
+        if (shape.IsNull()) return false;
+        std::vector<std::pair<TopoDS_Shape, Standard_Size>> pending{{shape, 0}};
+        Standard_Size local = 0;
+        while (!pending.empty()) {
+            const auto current = std::move(pending.back()); pending.pop_back();
+            if (++local > kPlainProfileCutMaximumShapeVisits
+                || current.second > 64
+                || aggregate >= kPlainProfileCutMaximumValidationVisits) {
+                return false;
+            }
+            ++aggregate;
+            for (TopoDS_Iterator child(current.first, Standard_True,
+                                       Standard_True);
+                 child.More(); child.Next()) {
+                if (pending.size() >= kPlainProfileCutMaximumShapeVisits)
+                    return false;
+                pending.emplace_back(child.Value(), current.second + 1);
+            }
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool PlainProfileCutMatrix(
+    const gp_Trsf& transform,
+    core3d::composite_recipe::InputPlacement& placement,
+    double sourceUnits,
+    double carrierUnits) noexcept
+{
+    try {
+        placement = {};
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 4; ++column)
+                placement.matrix[std::size_t(row * 4 + column)] =
+                    transform.Value(row + 1, column + 1);
+        placement.matrix[12] = placement.matrix[13] =
+            placement.matrix[14] = 0;
+        placement.matrix[15] = 1;
+        placement.sourceMetersPerUnit = sourceUnits;
+        placement.carrierMetersPerUnit = carrierUnits;
+        return core3d::composite_recipe::ValidPlacement(placement);
+    } catch (...) { placement = {}; return false; }
+}
+
+bool PlainProfileCutTransform(
+    const core3d::composite_recipe::InputPlacement& placement,
+    gp_Trsf& output) noexcept
+{
+    try {
+        if (!core3d::composite_recipe::ValidPlacement(placement)) return false;
+        const auto& m = placement.matrix;
+        output.SetValues(m[0], m[1], m[2], m[3],
+                         m[4], m[5], m[6], m[7],
+                         m[8], m[9], m[10], m[11]);
+        return true;
+    } catch (...) { output = gp_Trsf(); return false; }
+}
+
+bool PlainProfileCutDeepCopy(
+    const TopoDS_Shape& source,
+    TopoDS_Shape& output) noexcept
+{
+    output.Nullify();
+    try {
+        BRepBuilderAPI_Copy copy(source, Standard_True, Standard_False);
+        if (!copy.IsDone() || copy.Shape().IsNull()) return false;
+        output = copy.Shape(); return true;
+    } catch (...) { output.Nullify(); return false; }
+}
+
+bool PlainProfileCutCanonicalCandidate(
+    const TopoDS_Shape& source,
+    TopoDS_Shape& output,
+    Standard_Size& visits) noexcept
+{
+    output.Nullify();
+    try {
+        TopoDS_Shape candidate;
+        if (source.IsNull()) return false;
+        if (source.ShapeType() == TopAbs_SOLID) candidate = source;
+        else if (source.ShapeType() == TopAbs_COMPOUND
+                 && source.Orientation() == TopAbs_FORWARD) {
+            Standard_Size children = 0;
+            for (TopoDS_Iterator child(source, Standard_True, Standard_True);
+                 child.More(); child.Next()) {
+                if (++children != 1) return false;
+                candidate = child.Value();
+            }
+            if (children != 1) return false;
+        } else return false;
+        if (candidate.IsNull() || candidate.ShapeType() != TopAbs_SOLID
+            || candidate.Orientation() != TopAbs_FORWARD
+            || !PlainProfileCutTopologyBudget(candidate, visits)
+            || !BRepCheck_Analyzer(candidate, Standard_True).IsValid()) {
+            return false;
+        }
+        BRepClass3d_SolidClassifier classifier(candidate);
+        classifier.PerformInfinitePoint(Precision::Confusion());
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(candidate, properties, Standard_True,
+                                    Standard_False, Standard_False);
+        if (classifier.State() != TopAbs_OUT
+            || !std::isfinite(properties.Mass()) || properties.Mass() <= 0)
+            return false;
+        output = candidate; return true;
+    } catch (...) { output.Nullify(); return false; }
+}
+
+bool PlainProfileCutFrame(
+    const core3d::profile::Parameters& parameters,
+    gp_Trsf& frame) noexcept
+{
+    frame = gp_Trsf();
+    return !parameters.constructionFrame
+        || parameters.constructionFrame->Transform(frame);
+}
+
+bool PlainProfileCutWitness(
+    const OcctDocument& owner,
+    const OcctPlainProfileOperationCapture& capture,
+    core3d::retained_recipe::UUID documentIdentifier,
+    core3d::retained_recipe::UUID node,
+    core3d::plain_profile_cut::SourceWitness& output,
+    std::vector<std::uint8_t>& exact) noexcept
+{
+    output = {}; exact.clear();
+    try {
+        namespace p = core3d::plain_profile_cut;
+        p::SourceWitness witness;
+        witness.node = node;
+        witness.original.document = documentIdentifier;
+        if (!core3d::receipt::ParseUUID(capture.entityIdentifier,
+                                       witness.original.entity)
+            || !core3d::receipt::ParseUUID(capture.definitionIdentifier,
+                                           witness.original.definition)
+            || !core3d::receipt::ParseUUID(capture.featureIdentifier,
+                                           witness.original.sourceFeature))
+            return false;
+        OcctObjectNameState named;
+        if (!owner.CaptureObjectNameStateForLabel(capture.label, named))
+            return false;
+        witness.hasName = named.namePresent;
+        if (witness.hasName && !PlainProfileCutUTF8(named.name, witness.name))
+            return false;
+        OcctScalarAppearanceState appearance;
+        if (!owner.CaptureScalarAppearanceForSavedCut(capture.label, appearance)
+            || appearance.visualValues.size() !=
+                (appearance.materialLabel.IsNull() ? 0
+                    : p::VisualValueCount)) return false;
+        witness.appearance.legacyPresent = appearance.legacyPresent;
+        for (std::size_t index = 0; index < 2; ++index)
+            witness.appearance.legacyValues[index] = appearance.legacyValues[index];
+        witness.appearance.materialPresent = !appearance.materialLabel.IsNull();
+        witness.appearance.localPBR = appearance.localPBR;
+        if (witness.appearance.materialPresent)
+            std::copy(appearance.visualValues.begin(),
+                      appearance.visualValues.end(),
+                      witness.appearance.visualValues.begin());
+        OcctSavedGroupState groups;
+        if (!owner.CaptureSavedGroups(groups)) return false;
+        witness.hasGroups = !groups.container.IsNull();
+        for (const OcctSavedGroup& group : groups.groups) {
+            for (std::size_t ordinal = 0; ordinal < group.members.size();
+                 ++ordinal) {
+                if (!group.members[ordinal].IsEqual(capture.label)) continue;
+                p::GroupMembershipWitness member;
+                if (!core3d::receipt::ParseUUID(group.identifier, member.group)
+                    || ordinal > std::numeric_limits<std::uint32_t>::max()
+                    || !PlainProfileCutUTF8(group.name, member.name)) return false;
+                member.ordinal = static_cast<std::uint32_t>(ordinal);
+                member.hasName = true;
+                witness.groups.push_back(std::move(member));
+            }
+        }
+        std::sort(witness.groups.begin(), witness.groups.end(),
+            [](const auto& left, const auto& right) {
+                return left.group < right.group;
+            });
+        if (!p::EncodeSourceWitness(witness, exact)) return false;
+        output = std::move(witness); return true;
+    } catch (...) { output = {}; exact.clear(); return false; }
+}
+
+bool ProvePlainProfileCutFamily(
+    const std::vector<core3d::profile::Parameters>& parameters,
+    const std::vector<gp_Trsf>& sourceOccurrences,
+    std::vector<core3d::ProfileCircularHole>& holes) noexcept
+{
+    holes.clear();
+    try {
+        if (parameters.size() < 2
+            || parameters.size() >
+                core3d::plain_profile_cut::MaximumSourcesPerChain
+            || parameters.size() != sourceOccurrences.size()) return false;
+        const auto& subject = parameters.front();
+        const auto& outline = subject.definition;
+        double signedArea = 0;
+        if (!subject.shells.empty() || outline.curves || outline.circle
+            || outline.revolve || !outline.holes.empty()
+            || !core3d::ValidateProfileOutline(
+                outline.points, outline.plane, outline.depth, signedArea))
+            return false;
+        gp_Trsf subjectFrame;
+        if (!PlainProfileCutFrame(subject, subjectFrame)) return false;
+        gp_Trsf subjectAuthored = sourceOccurrences.front();
+        subjectAuthored.Multiply(subjectFrame);
+        gp_Trsf resultToSubject = subjectAuthored.Inverted();
+        const auto axial = [plane = outline.plane](const gp_Pnt& point) {
+            return plane == 0 ? point.Z() : plane == 1 ? point.Y() : point.X();
+        };
+        const auto planar = [plane = outline.plane](const gp_Pnt& point) {
+            return plane == 0 ? gp_Pnt2d(point.X(), point.Y())
+                 : plane == 1 ? gp_Pnt2d(point.X(), point.Z())
+                              : gp_Pnt2d(point.Y(), point.Z());
+        };
+        for (std::size_t index = 1; index < parameters.size(); ++index) {
+            const auto& tool = parameters[index];
+            const auto& definition = tool.definition;
+            if (!tool.shells.empty() || definition.curves || definition.revolve
+                || !definition.holes.empty() || !definition.points.empty()
+                || !definition.circle
+                || definition.circle->innerRadius != 0) return false;
+            gp_Trsf toolFrame;
+            if (!PlainProfileCutFrame(tool, toolFrame)) return false;
+            gp_Trsf toolToSubject = resultToSubject;
+            toolToSubject.Multiply(sourceOccurrences[index]);
+            toolToSubject.Multiply(toolFrame);
+            const gp_Pnt start = core3d::ProfilePointInPlane(
+                definition.circle->center, definition.plane)
+                .Transformed(toolToSubject);
+            gp_Pnt endLocal = core3d::ProfilePointInPlane(
+                definition.circle->center, definition.plane);
+            if (definition.plane == 0) endLocal.SetZ(definition.depth);
+            else if (definition.plane == 1) endLocal.SetY(definition.depth);
+            else endLocal.SetX(definition.depth);
+            const gp_Pnt end = endLocal.Transformed(toolToSubject);
+            const gp_Vec axis(start, end);
+            const gp_Vec subjectAxis = outline.plane == 0 ? gp_Vec(0,0,1)
+                : outline.plane == 1 ? gp_Vec(0,1,0) : gp_Vec(1,0,0);
+            if (axis.SquareMagnitude() <= gp::Resolution()
+                || std::abs(axis.Normalized().Dot(subjectAxis)) < 1 - 1e-12
+                || std::min(axial(start), axial(end)) > Precision::Confusion()
+                || std::max(axial(start), axial(end))
+                    < outline.depth - Precision::Confusion()) return false;
+            const double radius = definition.circle->outerRadius
+                * std::abs(toolToSubject.ScaleFactor());
+            holes.push_back({planar(start), radius});
+        }
+        double holeArea = 0;
+        return core3d::ProfileHolesArea(outline.points, holes, holeArea);
+    } catch (...) { holes.clear(); return false; }
+}
+
+TopoDS_Shape BuildPlainProfileCutExpectedPrefix(
+    const core3d::profile::Parameters& subject,
+    const std::vector<core3d::ProfileCircularHole>& holes,
+    std::size_t prefix,
+    const gp_Trsf& sourceToCarrier) noexcept
+{
+    try {
+        if (prefix == 0 || prefix > holes.size()) return {};
+        core3d::profile::Parameters expected = subject;
+        expected.definition.holes.assign(holes.begin(), holes.begin() + prefix);
+        double area = 0;
+        if (!core3d::ProfileHolesArea(expected.definition.points,
+                                      expected.definition.holes, area)) return {};
+        TopoDS_Shape shape = BuildPlainProfileOperationSolid(expected);
+        if (shape.IsNull()) return {};
+        BRepBuilderAPI_Transform transformed(
+            shape, sourceToCarrier, Standard_True, Standard_False);
+        return transformed.IsDone() ? transformed.Shape() : TopoDS_Shape();
+    } catch (...) { return {}; }
+}
+
+bool ProvePlainProfileCutBoundary(
+    const TopoDS_Shape& candidate,
+    std::size_t polygonEdges,
+    std::size_t holeCount) noexcept
+{
+    try {
+        if (candidate.IsNull() || candidate.ShapeType() != TopAbs_SOLID
+            || candidate.Orientation() != TopAbs_FORWARD
+            || !BRepCheck_Analyzer(candidate, Standard_True).IsValid())
+            return false;
+        std::size_t planes = 0, cylinders = 0, faces = 0;
+        for (TopExp_Explorer explorer(candidate, TopAbs_FACE);
+             explorer.More(); explorer.Next()) {
+            const TopoDS_Face face = TopoDS::Face(explorer.Current());
+            if (face.Orientation() != TopAbs_FORWARD
+                && face.Orientation() != TopAbs_REVERSED) return false;
+            BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() == GeomAbs_Plane) ++planes;
+            else if (surface.GetType() == GeomAbs_Cylinder) ++cylinders;
+            else return false;
+            ++faces;
+        }
+        return cylinders == holeCount && planes == polygonEdges + 2
+            && faces == polygonEdges + holeCount + 2;
+    } catch (...) { return false; }
+}
+
+bool ReplayPlainProfileCut(
+    const std::vector<TopoDS_Shape>& localSources,
+    const std::vector<core3d::composite_recipe::InputPlacement>& placements,
+    const core3d::profile::Parameters& subject,
+    const std::vector<core3d::ProfileCircularHole>& holes,
+    const TopoDS_Shape& expected,
+    Standard_Size& visits) noexcept
+{
+    try {
+        if (localSources.size() < 2 || localSources.size() != placements.size()
+            || holes.size() + 1 != localSources.size()) return false;
+        std::vector<TopoDS_Shape> carrierSources;
+        carrierSources.reserve(localSources.size());
+        for (std::size_t index = 0; index < localSources.size(); ++index) {
+            gp_Trsf transform;
+            if (!PlainProfileCutTransform(placements[index], transform)) return false;
+            BRepBuilderAPI_Transform moved(
+                localSources[index], transform, Standard_True, Standard_False);
+            if (!moved.IsDone() || moved.Shape().IsNull()) return false;
+            carrierSources.push_back(moved.Shape());
+        }
+        gp_Trsf subjectToCarrier;
+        if (!PlainProfileCutTransform(placements.front(), subjectToCarrier))
+            return false;
+        TopoDS_Shape prefix = carrierSources.front();
+        for (std::size_t index = 1; index < carrierSources.size(); ++index) {
+            TopTools_ListOfShape arguments, tools;
+            arguments.Append(prefix); tools.Append(carrierSources[index]);
+            BRepAlgoAPI_Cut cut;
+            cut.SetRunParallel(Standard_False);
+            cut.SetNonDestructive(Standard_True);
+            cut.SetArguments(arguments); cut.SetTools(tools);
+            cut.SetFuzzyValue(core3d::plain_profile_cut::FuzzyValue);
+            cut.SetUseOBB(Standard_True); cut.SetCheckInverted(Standard_True);
+            cut.Build();
+            if (!cut.IsDone()) return false;
+            cut.SimplifyResult();
+            TopoDS_Shape canonical;
+            if (!PlainProfileCutCanonicalCandidate(cut.Shape(), canonical, visits))
+                return false;
+            const TopoDS_Shape oracle = BuildPlainProfileCutExpectedPrefix(
+                subject, holes, index, subjectToCarrier);
+            if (oracle.IsNull()
+                || !PlainProfileRebuildCorresponds(canonical, oracle)) return false;
+            prefix = canonical;
+        }
+        return PlainProfileRebuildCorresponds(prefix, expected)
+            && ProvePlainProfileCutBoundary(expected,
+                subject.definition.points.size(), holes.size());
+    } catch (...) { return false; }
+}
+
+Standard_Boolean RebuildAndValidatePlainProfileCut(
+    const Handle(TDocStd_Document)& document,
+    const core3d::composite_recipe::Record& record,
+    Standard_Size& topologyVisits,
+    Standard_Boolean requireConsumedSources) noexcept
+{
+    try {
+        namespace c = core3d::composite_recipe;
+        namespace p = core3d::plain_profile_cut;
+        if (document.IsNull() || document->GetData().IsNull()
+            || !record.value || record.owner.IsNull()
+            || record.owner.Data() != document->GetData()
+            || record.value->definition.schemaVersion != p::GraphVersion
+            || !c::ValidCutV4(record.value->definition)
+            || !p::ValidateChain(record.value->definition).valid())
+            return Standard_False;
+        const c::Definition& definition = record.value->definition;
+        const std::size_t sourceCount = (definition.nodes.size() + 1) / 2;
+        if (sourceCount != record.value->sourceShapes.size()) return Standard_False;
+        std::vector<core3d::profile::Parameters> parameters;
+        std::vector<TopoDS_Shape> rebuilt;
+        std::vector<c::InputPlacement> placements;
+        std::vector<gp_Trsf> occurrences;
+        parameters.reserve(sourceCount); rebuilt.reserve(sourceCount);
+        for (std::size_t index = 0; index < sourceCount; ++index) {
+            const auto* source = std::get_if<c::SourceNode>(
+                &definition.nodes[index].value);
+            std::vector<double> values;
+            core3d::profile::Parameters decoded;
+            if (source == nullptr
+                || !c::DecodeScalarRecipe(source->recipe, values)
+                || !core3d::profile::Decode(values, decoded)
+                || core3d::profile::SchemaFor(decoded)
+                    != int(source->recipe.schema)) return Standard_False;
+            TopoDS_Shape shape = BuildPlainProfileOperationSolid(decoded);
+            core3d::retained_recipe::Digest digest{};
+            if (shape.IsNull()
+                || !PlainProfileRebuildCorresponds(
+                    shape, record.value->sourceShapes[index])
+                || !core3d::receipt::GeometryDigestForPolicy(
+                    record.value->sourceShapes[index], digest, false)
+                || digest != source->commitments.geometry
+                || !PlainProfileCutTopologyBudget(
+                    record.value->sourceShapes[index], topologyVisits))
+                return Standard_False;
+            gp_Trsf occurrence;
+            if (!PlainProfileCutTransform(source->inputToCarrier, occurrence))
+                return Standard_False;
+            parameters.push_back(std::move(decoded)); rebuilt.push_back(shape);
+            placements.push_back(source->inputToCarrier);
+            occurrences.push_back(occurrence);
+        }
+        std::vector<core3d::ProfileCircularHole> holes;
+        if (!ProvePlainProfileCutFamily(parameters, occurrences, holes)
+            || !ReplayPlainProfileCut(rebuilt, placements, parameters.front(),
+                                     holes, record.current, topologyVisits))
+            return Standard_False;
+        core3d::retained_recipe::Digest resultDigest{};
+        if (!core3d::receipt::GeometryDigestForPolicy(
+                record.current, resultDigest, false)) return Standard_False;
+        p::Step finalStep;
+        const auto& finalFeature = std::get<c::FeatureNode>(
+            definition.nodes.back().value);
+        if (!p::DecodeStep(finalFeature.parameters, finalStep)
+            || finalStep.resultBinding != resultDigest) return Standard_False;
+        if (requireConsumedSources) {
+            const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapeTool.IsNull()) return Standard_False;
+            TDF_LabelSequence freeShapes; shapeTool->GetFreeShapes(freeShapes);
+            for (int labelIndex = 1; labelIndex <= freeShapes.Length(); ++labelIndex) {
+                core3d::retained_recipe::UUID entity{}, definitionID{};
+                if (!core3d::retained_solid::ReadUUID(
+                        freeShapes.Value(labelIndex), EntityIdentifierAttributeID(), entity)
+                    || !core3d::retained_solid::ReadUUID(
+                        freeShapes.Value(labelIndex), DefinitionIdentifierAttributeID(),
+                        definitionID)) return Standard_False;
+                for (std::size_t index = 0; index < sourceCount; ++index) {
+                    const auto& source = std::get<c::SourceNode>(
+                        definition.nodes[index].value);
+                    if (entity == source.original.entity
+                        || definitionID == source.original.definition)
+                        return Standard_False;
+                }
+            }
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+} // namespace
+
 Standard_Boolean OcctDocument::CapturePlainProfileOperationSource(
     const TDF_Label& label,
     OcctPlainProfileOperationCapture& output) const noexcept
@@ -5387,6 +5923,335 @@ Standard_Boolean OcctDocument::VerifyPlainProfileOperationReplacement(
     } catch (...) {
         return Standard_False;
     }
+}
+
+Standard_Boolean OcctDocument::PreparePlainProfileCut(
+    const OcctPlainProfileOperationCapture& subjectCapture,
+    const std::vector<OcctPlainProfileOperationCapture>& orderedToolCaptures,
+    const TopoDS_Shape& canonicalCandidate,
+    const gp_Trsf& resultOccurrence,
+    std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept
+{
+    prepared.reset();
+    try {
+        OCC_CATCH_SIGNALS
+        namespace c = core3d::composite_recipe;
+        namespace p = core3d::plain_profile_cut;
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()
+            || myOcafDoc->HasOpenCommand() || orderedToolCaptures.empty()
+            || orderedToolCaptures.size() > p::MaximumCuts
+            || !PlainProfileOperationSourceCurrent(subjectCapture))
+            return Standard_False;
+        auto state = std::make_shared<OcctPlainProfileCutPreparation>();
+        state->owner = this;
+        state->documentData = myOcafDoc->GetData();
+        if (!core3d::retained_solid::ReadUUID(
+                myOcafDoc->Main(), DocumentIdentifierAttributeID(),
+                state->documentIdentifier)) return Standard_False;
+        state->sources.push_back(subjectCapture);
+        state->sources.insert(state->sources.end(), orderedToolCaptures.begin(),
+                              orderedToolCaptures.end());
+        TDF_LabelMap distinctLabels;
+        std::set<core3d::retained_recipe::UUID> identities;
+        double carrierUnits = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, carrierUnits)
+            || !std::isfinite(carrierUnits) || carrierUnits <= 0)
+            return Standard_False;
+        Standard_Size visits = 0;
+        if (!PlainProfileCutCanonicalCandidate(
+                canonicalCandidate, state->expectedRoot, visits)
+            || !state->expectedRoot.IsEqual(canonicalCandidate))
+            return Standard_False;
+        c::InputPlacement resultPlacement;
+        if (!PlainProfileCutMatrix(resultOccurrence, resultPlacement,
+                                   carrierUnits, carrierUnits))
+            return Standard_False;
+        state->resultOccurrence = resultOccurrence;
+        gp_Trsf carrierInverse = resultOccurrence.Inverted();
+        std::vector<gp_Trsf> sourceOccurrences;
+        for (const auto& source : state->sources) {
+            if (source.label.IsNull() || !distinctLabels.Add(source.label)
+                || !PlainProfileOperationSourceCurrent(source))
+                return Standard_False;
+            core3d::profile::Parameters parameters;
+            if (!core3d::profile::Decode(source.recipeValues, parameters))
+                return Standard_False;
+            std::vector<std::uint8_t> recipe;
+            if (!c::EncodeScalarRecipe(c::RecipeKind::Profile,
+                    std::uint32_t(core3d::profile::SchemaFor(parameters)),
+                    source.recipeValues, recipe)) return Standard_False;
+            core3d::retained_recipe::UUID entity{}, definition{}, feature{};
+            if (!core3d::receipt::ParseUUID(source.entityIdentifier, entity)
+                || !core3d::receipt::ParseUUID(
+                    source.definitionIdentifier, definition)
+                || !core3d::receipt::ParseUUID(source.featureIdentifier, feature)
+                || !identities.insert(entity).second
+                || !identities.insert(definition).second
+                || !identities.insert(feature).second) return Standard_False;
+            TopoDS_Shape slot;
+            if (!PlainProfileCutDeepCopy(source.boundRoot, slot)
+                || !PlainProfileCutTopologyBudget(slot, visits))
+                return Standard_False;
+            gp_Trsf sourceToCarrier = carrierInverse;
+            sourceToCarrier.Multiply(source.placement);
+            c::InputPlacement placement;
+            if (!PlainProfileCutMatrix(sourceToCarrier, placement,
+                                       source.metersPerUnit, carrierUnits))
+                return Standard_False;
+            const auto node = NewPlainProfileCutUUID();
+            p::SourceWitness witness;
+            std::vector<std::uint8_t> witnessBytes;
+            if (!core3d::retained_recipe::Nonzero(node)
+                || !PlainProfileCutWitness(*this, source,
+                    state->documentIdentifier, node, witness, witnessBytes))
+                return Standard_False;
+            state->parameters.push_back(std::move(parameters));
+            state->recipeBytes.push_back(std::move(recipe));
+            state->sourceSlots.push_back(std::move(slot));
+            state->placements.push_back(placement);
+            state->sourceNodes.push_back(node);
+            state->witnesses.push_back(std::move(witness));
+            state->witnessBytes.push_back(std::move(witnessBytes));
+            sourceOccurrences.push_back(source.placement);
+        }
+        std::vector<core3d::ProfileCircularHole> holes;
+        if (!ProvePlainProfileCutFamily(
+                state->parameters, sourceOccurrences, holes)
+            || !ReplayPlainProfileCut(state->sourceSlots, state->placements,
+                    state->parameters.front(), holes, state->expectedRoot, visits)
+            || !core3d::receipt::GeometryDigestForPolicy(
+                state->expectedRoot, state->resultDigest, false))
+            return Standard_False;
+        for (std::size_t index = 0; index < orderedToolCaptures.size(); ++index) {
+            const auto node = NewPlainProfileCutUUID();
+            const auto feature = NewPlainProfileCutUUID();
+            if (!core3d::retained_recipe::Nonzero(node)
+                || !core3d::retained_recipe::Nonzero(feature)
+                || !identities.insert(node).second
+                || !identities.insert(feature).second)
+                return Standard_False;
+            state->featureNodes.push_back(node);
+            state->featureIdentifiers.push_back(feature);
+        }
+        prepared = std::move(state);
+        return Standard_True;
+    } catch (...) { prepared.reset(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::PlainProfileCutSourcesCurrent(
+    const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept
+{
+    try {
+        if (!prepared || prepared->owner != this || myOcafDoc.IsNull()
+            || prepared->documentData != myOcafDoc->GetData()
+            || prepared->sources.size() != prepared->sourceNodes.size()
+            || prepared->sources.size() != prepared->witnessBytes.size())
+            return Standard_False;
+        core3d::retained_recipe::UUID document{};
+        if (!core3d::retained_solid::ReadUUID(
+                myOcafDoc->Main(), DocumentIdentifierAttributeID(), document)
+            || document != prepared->documentIdentifier) return Standard_False;
+        for (std::size_t index = 0; index < prepared->sources.size(); ++index) {
+            const auto& source = prepared->sources[index];
+            core3d::plain_profile_cut::SourceWitness witness;
+            std::vector<std::uint8_t> exact;
+            if (!PlainProfileOperationSourceCurrent(source)
+                || !PlainProfileCutWitness(*this, source, document,
+                    prepared->sourceNodes[index], witness, exact)
+                || exact != prepared->witnessBytes[index]) return Standard_False;
+            core3d::retained_recipe::Digest digest{};
+            if (!core3d::receipt::GeometryDigestForPolicy(
+                    source.boundRoot, digest, false)
+                || digest != ([&] {
+                    core3d::retained_recipe::Digest expected{};
+                    core3d::receipt::GeometryDigestForPolicy(
+                        prepared->sourceSlots[index], expected, false);
+                    return expected;
+                })()) return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StagePlainProfileCutResult(
+    const TDF_Label& resultLabel,
+    const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared,
+    std::shared_ptr<const OcctPlainProfileCutReceipt>& receipt) noexcept
+{
+    receipt.reset();
+    try {
+        OCC_CATCH_SIGNALS
+        namespace c = core3d::composite_recipe;
+        namespace p = core3d::plain_profile_cut;
+        if (!prepared || prepared->owner != this || myOcafDoc.IsNull()
+            || !myOcafDoc->HasOpenCommand()
+            || prepared->documentData != myOcafDoc->GetData()
+            || resultLabel.IsNull() || resultLabel.Data() != myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(resultLabel)
+            || !PlainProfileCutSourcesCurrent(prepared)) return Standard_False;
+        const TopoDS_Shape resultRoot = XCAFDoc_ShapeTool::GetShape(resultLabel);
+        gp_Trsf storedOccurrence;
+        if (resultRoot.IsNull() || !resultRoot.IsEqual(prepared->expectedRoot)
+            || resultRoot.ShapeType() != TopAbs_SOLID
+            || resultRoot.Orientation() != TopAbs_FORWARD
+            || !TryObjectTransformForLabel(resultLabel, storedOccurrence)
+            || !PlainProfilePlacementsMatch(
+                storedOccurrence, prepared->resultOccurrence)) return Standard_False;
+        c::Record existingComposite;
+        core3d::profile::Record existingProfile;
+        core3d::retained_solid::Record existingRetained;
+        core3d::enclosure::Record existingEnclosure;
+        core3d::sweep_persistence::Record existingSweep;
+        core3d::loft_persistence::Record existingLoft;
+        if (!c::Read(myOcafDoc, resultLabel, existingComposite)
+            || !core3d::profile::Read(myOcafDoc, resultLabel, existingProfile)
+            || !core3d::retained_solid::Read(
+                myOcafDoc, resultLabel, existingRetained)
+            || !core3d::enclosure::Read(myOcafDoc, resultLabel, existingEnclosure)
+            || !core3d::sweep_persistence::Read(
+                myOcafDoc, resultLabel, existingSweep)
+            || !core3d::loft_persistence::Read(
+                myOcafDoc, resultLabel, existingLoft)
+            || existingComposite.value || existingRetained.value
+            || !existingProfile.label.IsNull() || !existingEnclosure.label.IsNull()
+            || !existingSweep.label.IsNull() || !existingLoft.label.IsNull())
+            return Standard_False;
+        c::Definition definition;
+        definition.schemaVersion = p::GraphVersion;
+        definition.owner.document = prepared->documentIdentifier;
+        if (!core3d::retained_solid::ReadUUID(
+                resultLabel, EntityIdentifierAttributeID(),
+                definition.owner.entity)
+            || !core3d::retained_solid::ReadUUID(
+                resultLabel, DefinitionIdentifierAttributeID(),
+                definition.owner.definition)) return Standard_False;
+        const std::size_t sourceCount = prepared->sources.size();
+        const std::size_t cutCount = sourceCount - 1;
+        if (sourceCount < 2 || cutCount != prepared->featureNodes.size()
+            || sourceCount != prepared->sourceSlots.size()) return Standard_False;
+        definition.nodes.reserve(sourceCount + cutCount);
+        for (std::size_t index = 0; index < sourceCount; ++index) {
+            c::SourceNode source;
+            source.node = prepared->sourceNodes[index];
+            source.localID = index + 1;
+            source.original = prepared->witnesses[index].original;
+            source.recipe.kind = c::RecipeKind::Profile;
+            source.recipe.schema = std::uint32_t(
+                core3d::profile::SchemaFor(prepared->parameters[index]));
+            source.recipe.bytes = prepared->recipeBytes[index];
+            source.inputToCarrier = prepared->placements[index];
+            source.shapeSlot = std::uint32_t(index);
+            if (!core3d::receipt::GeometryDigestForPolicy(
+                    prepared->sourceSlots[index],
+                    source.commitments.geometry, false)
+                || !p::HashBytes(source.recipe.bytes,
+                                 source.commitments.recipe)
+                || !p::PlacementCommitment(source.inputToCarrier,
+                                           source.commitments.placement)
+                || !p::MaterialCommitment(
+                    prepared->witnesses[index].appearance,
+                    source.commitments.material)
+                || !p::GroupsCommitment(
+                    prepared->witnesses[index].hasGroups,
+                    prepared->witnesses[index].groups,
+                    source.commitments.groups)) return Standard_False;
+            definition.nodes.push_back({std::move(source)});
+        }
+        for (std::size_t index = 0; index < cutCount; ++index) {
+            c::FeatureNode feature;
+            feature.node = prepared->featureNodes[index];
+            feature.feature = prepared->featureIdentifiers[index];
+            feature.localID = sourceCount + index + 1;
+            feature.kind = p::PlainProfileCutKind;
+            feature.codecVersion = p::CodecVersion;
+            feature.inputs = {
+                index == 0 ? prepared->sourceNodes[0]
+                           : prepared->featureNodes[index - 1],
+                prepared->sourceNodes[index + 1],
+            };
+            p::Step step;
+            step.ordinal = std::uint32_t(index + 1);
+            step.total = std::uint32_t(cutCount);
+            if (index + 1 == cutCount) {
+                step.resultBinding = prepared->resultDigest;
+                step.witnesses = prepared->witnesses;
+            }
+            if (!p::EncodeStep(step, feature.parameters)) return Standard_False;
+            definition.nodes.push_back({std::move(feature)});
+        }
+        definition.outputNode = prepared->featureNodes.back();
+        definition.issuance.nextLocalID = definition.nodes.size() + 1;
+        if (!c::ValidCutV4(definition)) return Standard_False;
+        std::vector<std::uint8_t> encoded;
+        if (!c::Encode(definition, encoded)) return Standard_False;
+        auto payload = std::make_shared<c::Payload>();
+        payload->definition = definition;
+        payload->bytes = encoded;
+        payload->sourceShapes.reserve(prepared->sourceSlots.size());
+        for (const TopoDS_Shape& source : prepared->sourceSlots) {
+            TopoDS_Shape copied;
+            if (!PlainProfileCutDeepCopy(source, copied)) return Standard_False;
+            payload->sourceShapes.push_back(std::move(copied));
+        }
+        Standard_Integer tag = c::MinimumRecordTag;
+        for (; tag < std::numeric_limits<Standard_Integer>::max(); ++tag) {
+            if (resultLabel.FindChild(tag, Standard_False).IsNull()) break;
+        }
+        if (tag == std::numeric_limits<Standard_Integer>::max())
+            return Standard_False;
+        const TDF_Label recordLabel = resultLabel.FindChild(tag, Standard_True);
+        TNaming_Builder(recordLabel).Select(resultRoot, resultRoot);
+        Handle(c::Attribute) attribute = new c::Attribute();
+        recordLabel.AddAttribute(attribute);
+        attribute->value_ = payload;
+        c::Record readback;
+        Standard_Size validationVisits = 0;
+        if (!c::Read(myOcafDoc, resultLabel, readback) || !readback.value
+            || readback.label.IsNull() || !readback.label.IsEqual(recordLabel)
+            || readback.value->bytes != encoded
+            || !readback.current.IsEqual(resultRoot)
+            || !RebuildAndValidatePlainProfileCut(
+                myOcafDoc, readback, validationVisits, Standard_False))
+            return Standard_False;
+        auto staged = std::make_shared<OcctPlainProfileCutReceipt>();
+        staged->documentData = myOcafDoc->GetData();
+        staged->ownerLabel = resultLabel;
+        staged->payload = readback.value;
+        staged->resultDigest = prepared->resultDigest;
+        receipt = std::move(staged);
+        return Standard_True;
+    } catch (...) { receipt.reset(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::VerifyPlainProfileCutResult(
+    const TDF_Label& resultLabel,
+    const std::shared_ptr<const OcctPlainProfileCutReceipt>& receipt) const noexcept
+{
+    try {
+        if (!receipt || !receipt->payload || myOcafDoc.IsNull()
+            || receipt->documentData != myOcafDoc->GetData()
+            || resultLabel.IsNull() || !resultLabel.IsEqual(receipt->ownerLabel))
+            return Standard_False;
+        core3d::composite_recipe::Record record;
+        Standard_Size visits = 0;
+        core3d::retained_recipe::Digest digest{};
+        return core3d::composite_recipe::Read(
+                myOcafDoc, resultLabel, record)
+            && record.value
+            && record.value->bytes == receipt->payload->bytes
+            && record.current.IsEqual(XCAFDoc_ShapeTool::GetShape(resultLabel))
+            && core3d::receipt::GeometryDigestForPolicy(
+                record.current, digest, false)
+            && digest == receipt->resultDigest
+            && RebuildAndValidatePlainProfileCut(
+                myOcafDoc, record, visits, Standard_False);
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::VerifyPlainProfileCutSourcesRestored(
+    const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept
+{
+    return PlainProfileCutSourcesCurrent(prepared);
 }
 
 Standard_Boolean OcctDocument::ValidateGeometryRepresentations(

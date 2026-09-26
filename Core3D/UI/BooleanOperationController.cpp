@@ -1378,6 +1378,11 @@ BooleanOperationController::inspectPendingTransaction() const noexcept
             OcctObjectNameState aName;
             if (!myDoc->CaptureObjectNameStateForLabel(aSource.label, aName)
                 || !aSource.expectedName.IsEqual(aName)) return DocumentState::PartialOrMismatched;
+            if (aSource.plainProfileCutPreparation
+                && !myDoc->VerifyPlainProfileCutSourcesRestored(
+                    aSource.plainProfileCutPreparation)) {
+                return DocumentState::PartialOrMismatched;
+            }
             ++aPresentSourceCount;
         }
 
@@ -1425,6 +1430,12 @@ BooleanOperationController::inspectPendingTransaction() const noexcept
             OcctObjectNameState aName;
             if (!myDoc->CaptureObjectNameStateForLabel(aResult.label, aName)
                 || !aResult.expectedName.IsEqual(aName)) return DocumentState::PartialOrMismatched;
+            if (aResult.requiresPlainProfileCut
+                && (!aResult.plainProfileCutReceipt
+                    || !myDoc->VerifyPlainProfileCutResult(
+                        aResult.label, aResult.plainProfileCutReceipt))) {
+                return DocumentState::PartialOrMismatched;
+            }
             ++aPresentResultCount;
         }
 
@@ -2998,6 +3009,11 @@ BooleanApplyResult BooleanOperationController::apply(
             }
             aPendingSources.push_back(std::move(aPending));
         }
+        if (_plainProfileCutPreparation) {
+            for (PendingSource& pending : aPendingSources)
+                pending.plainProfileCutPreparation =
+                    _plainProfileCutPreparation;
+        }
         _pendingSources = std::move(aPendingSources);
         _pendingResults.clear();
         _pendingResults.reserve(aResults.size());
@@ -3006,6 +3022,14 @@ BooleanApplyResult BooleanOperationController::apply(
         std::vector<boolean_metadata::BooleanLabelReplacement> aMetadataReplacements;
         aMetadataReplacements.reserve(aResults.size());
 
+        // H2's all-source fence is the final operation before the measured
+        // command. Package C's H3 dispatch is the sole producer of this
+        // preparation; legacy operations retain their original route.
+        if (_plainProfileCutPreparation
+            && !myDoc->PlainProfileCutSourcesCurrent(
+                _plainProfileCutPreparation)) {
+            return failWithoutMutation();
+        }
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
             return failWithoutMutation();
@@ -3058,6 +3082,9 @@ BooleanApplyResult BooleanOperationController::apply(
                 anExpectedReferenceAxis,
                 anExpectedName,
             });
+            PendingResult& aStagedPending = _pendingResults.back();
+            aStagedPending.requiresPlainProfileCut =
+                _plainProfileCutPreparation != nullptr;
             aMetadataReplacements.push_back({aResult.second.documentLabel, aResultLabel});
             const PendingResult& aPending = _pendingResults.back();
             if (aPending.entityIdentifier.empty()
@@ -3065,6 +3092,20 @@ BooleanApplyResult BooleanOperationController::apply(
                 || TransformDiffers(
                     myDoc->ObjectTransformForLabel(aResultLabel),
                     aPending.expectedTransform)) {
+                rollbackFailedTransaction(aDocument);
+                return BooleanApplyResult::NoChange;
+            }
+        }
+        // Retention is paired with the fresh result while every original
+        // source owner is still present. A missing receipt can never be
+        // reconciled as committed success.
+        if (_plainProfileCutPreparation) {
+            if (_pendingResults.size() != 1
+                || !myDoc->StagePlainProfileCutResult(
+                    _pendingResults.front().label,
+                    _plainProfileCutPreparation,
+                    _pendingResults.front().plainProfileCutReceipt)
+                || !_pendingResults.front().plainProfileCutReceipt) {
                 rollbackFailedTransaction(aDocument);
                 return BooleanApplyResult::NoChange;
             }
@@ -3099,6 +3140,15 @@ BooleanApplyResult BooleanOperationController::apply(
         if (!myDoc->ValidateGeometryRepresentations()) {
             rollbackFailedTransaction(aDocument);
             return BooleanApplyResult::NoChange;
+        }
+        for (const PendingResult& pending : _pendingResults) {
+            if (pending.requiresPlainProfileCut
+                && (!pending.plainProfileCutReceipt
+                    || !myDoc->VerifyPlainProfileCutResult(
+                        pending.label, pending.plainProfileCutReceipt))) {
+                rollbackFailedTransaction(aDocument);
+                return BooleanApplyResult::NoChange;
+            }
         }
         try {
             (void)aDocument->CommitCommand();
@@ -3255,6 +3305,7 @@ void BooleanOperationController::clearOperationState() noexcept
     _subjectSelectionOrder.clear();
     _pendingSources.clear();
     _pendingResults.clear();
+    _plainProfileCutPreparation.reset();
     _pendingGroupsBefore = {}; _pendingGroupsAfter = {};
     _ownedPresentations.clear();
     _singleTrialResult.Nullify();
