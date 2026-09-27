@@ -12,9 +12,12 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepLib.hxx>
+#include <BRepLib_CheckCurveOnSurface.hxx>
 #include <BRep_Tool.hxx>
 #include <BinTools.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
@@ -22,6 +25,8 @@
 #include <GeomAdaptor_Surface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <ShapeConstruct_ProjectCurveOnSurface.hxx>
+#include <TColgp_Array2OfPnt.hxx>
 #include <GeomFill_CurveAndTrihedron.hxx>
 #include <GeomFill_EvolvedSection.hxx>
 #include <GeomFill_Sweep.hxx>
@@ -82,6 +87,62 @@ inline bool HashShape(const TopoDS_Shape& shape,Digest& digest){std::ostringstre
 inline Vector3 WorldSeed(const bounded_curve::Definition& curve,const Vector3& local){Vector3 out{};for(int c=0;c<3;++c)out[c]=curve.frame.xAxis[c]*local[0]+curve.frame.yAxis[c]*local[1]+curve.frame.zAxis[c]*local[2];return out;}
 inline Vector3 RetainedTangent(const bounded_curve::Definition& curve,const gp_Vec& world){return {{world.X()*curve.frame.xAxis[0]+world.Y()*curve.frame.xAxis[1]+world.Z()*curve.frame.xAxis[2],world.X()*curve.frame.yAxis[0]+world.Y()*curve.frame.yAxis[1]+world.Z()*curve.frame.yAxis[2],world.X()*curve.frame.zAxis[0]+world.Y()*curve.frame.zAxis[1]+world.Z()*curve.frame.zAxis[2]}};}
 inline TopoDS_Shell OneShell(const TopoDS_Shape& shape){if(shape.ShapeType()==TopAbs_SHELL)return TopoDS::Shell(shape);TopExp_Explorer it(shape,TopAbs_SHELL);if(!it.More())return {};TopoDS_Shell shell=TopoDS::Shell(it.Current());it.Next();return it.More()?TopoDS_Shell():shell;}
+inline bool ExactAffinePlane(const Handle(Geom_BSplineSurface)& surface){
+    if(surface.IsNull()||surface->IsURational()||surface->IsVRational()
+        ||surface->UDegree()!=1||surface->VDegree()!=1
+        ||surface->NbUPoles()!=2||surface->NbVPoles()!=2)return false;
+    using proof_producer::detail::Rational;
+    try{
+        const gp_Pnt p00=surface->Pole(1,1),p10=surface->Pole(2,1),p01=surface->Pole(1,2),p11=surface->Pole(2,2);
+        for(int axis=1;axis<=3;++axis){
+            const Rational mixed=Rational::FromDouble(p11.Coord(axis))-Rational::FromDouble(p10.Coord(axis))-Rational::FromDouble(p01.Coord(axis))+Rational::FromDouble(p00.Coord(axis));
+            if(!mixed.zero())return false;
+        }
+        const gp_Vec du(p00,p10),dv(p00,p01);return du.Crossed(dv).SquareMagnitude()>0;
+    }catch(...){return false;}
+}
+// Preserve the plane's UV map, including every edge pcurve, but persist it as
+// a bounded affine control net. Unlike gp_Ax3, its coefficients are serialized
+// verbatim and do not undergo direction renormalization on read.
+inline bool SerializerStableCap(const TopoDS_Wire& wire,TopoDS_Face& face){
+    BRepBuilderAPI_MakeFace planar(wire,Standard_True);if(!planar.IsDone())return false;
+    TopLoc_Location location;Handle(Geom_Surface) plane=BRep_Tool::Surface(planar.Face(),location);
+    if(plane.IsNull()||!location.IsIdentity())return false;
+    double u0=0,u1=0,v0=0,v1=0;BRepTools::UVBounds(planar.Face(),u0,u1,v0,v1);
+    if(!std::isfinite(u0)||!std::isfinite(u1)||!std::isfinite(v0)||!std::isfinite(v1)||!(u0<u1)||!(v0<v1))return false;
+    gp_Pnt centre;gp_Vec du,dv;plane->D1((u0+u1)/2,(v0+v1)/2,centre,du,dv);
+    du*=0.55*(u1-u0);dv*=0.55*(v1-v0);
+    constexpr int gridBits=30;const double gridScale=std::ldexp(1.0,gridBits);
+    const double gridLimit=double(std::numeric_limits<std::int64_t>::max()/4)/gridScale;
+    for(double value:{centre.X(),centre.Y(),centre.Z(),du.X(),du.Y(),du.Z(),dv.X(),dv.Y(),dv.Z()})if(std::abs(value)>gridLimit)return false;
+    auto snapped=[&](double value){return std::int64_t(std::llround(value*gridScale));};
+    std::array<std::int64_t,3> c{{snapped(centre.X()),snapped(centre.Y()),snapped(centre.Z())}};
+    std::array<std::int64_t,3> a{{snapped(du.X()),snapped(du.Y()),snapped(du.Z())}};
+    std::array<std::int64_t,3> b{{snapped(dv.X()),snapped(dv.Y()),snapped(dv.Z())}};
+    TColgp_Array2OfPnt poles(1,2,1,2);auto point=[&](int sa,int sb){return gp_Pnt(
+        std::ldexp(double(c[0]+sa*a[0]+sb*b[0]),-gridBits),
+        std::ldexp(double(c[1]+sa*a[1]+sb*b[1]),-gridBits),
+        std::ldexp(double(c[2]+sa*a[2]+sb*b[2]),-gridBits));};
+    poles(1,1)=point(-1,-1);poles(2,1)=point(1,-1);poles(1,2)=point(-1,1);poles(2,2)=point(1,1);
+    TColStd_Array1OfReal uKnots(1,2),vKnots(1,2);TColStd_Array1OfInteger uMults(1,2),vMults(1,2);
+    uKnots(1)=vKnots(1)=0;uKnots(2)=vKnots(2)=1;uMults(1)=uMults(2)=vMults(1)=vMults(2)=2;
+    Handle(Geom_BSplineSurface) affine=new Geom_BSplineSurface(poles,uKnots,vKnots,uMults,vMults,1,1);
+    if(!ExactAffinePlane(affine))return false;
+    BRep_Builder builder;ShapeConstruct_ProjectCurveOnSurface projector;projector.Init(affine,PositionalEpsilonMM/8);
+    for(TopExp_Explorer it(wire,TopAbs_EDGE);it.More();it.Next()){
+        const TopoDS_Edge edge=TopoDS::Edge(it.Current());double first=0,last=0;
+        Handle(Geom_Curve) curve3d=BRep_Tool::Curve(edge,first,last);Handle(Geom2d_Curve) pcurve;
+        if(curve3d.IsNull()||!projector.Perform(curve3d,first,last,pcurve)||pcurve.IsNull())return false;
+        builder.UpdateEdge(edge,pcurve,affine,TopLoc_Location(),PositionalEpsilonMM/8);
+    }
+    BRepBuilderAPI_MakeFace make(affine,wire,Standard_True);if(!make.IsDone())return false;
+    face=make.Face();if(!BRepCheck_Analyzer(face,Standard_True).IsValid())return false;
+    for(TopExp_Explorer it(face,TopAbs_EDGE);it.More();it.Next()){
+        BRepLib_CheckCurveOnSurface check(TopoDS::Edge(it.Current()),face);check.SetParallel(Standard_False);check.Perform();
+        if(!check.IsDone()||!std::isfinite(check.MaxDistance())||check.MaxDistance()>PositionalEpsilonMM/8)return false;
+    }
+    return true;
+}
 // FIX-SPEC step 4: measured evidence from the four returned rational
 // surfaces. Every interval below derives from the actual homogeneous control
 // net geometry (sampled points and partials of the returned surfaces),
@@ -194,8 +255,15 @@ inline bool CapPlanarAndOutward(const TopoDS_Face& face,const gp_Vec& outward){
     if(face.IsNull()||!(outward.Magnitude()>0))return false;
     TopLoc_Location location;const Handle(Geom_Surface)& surface=BRep_Tool::Surface(face,location);
     if(surface.IsNull())return false;
-    GeomAdaptor_Surface adaptor(surface);if(adaptor.GetType()!=GeomAbs_Plane)return false;
-    gp_Dir normal=adaptor.Plane().Axis().Direction();if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();
+    GeomAdaptor_Surface adaptor(surface);gp_Dir normal;
+    if(adaptor.GetType()==GeomAbs_Plane)normal=adaptor.Plane().Axis().Direction();
+    else{
+        const Handle(Geom_BSplineSurface) affine=Handle(Geom_BSplineSurface)::DownCast(surface);
+        if(!ExactAffinePlane(affine))return false;
+        double u0=0,u1=0,v0=0,v1=0;affine->Bounds(u0,u1,v0,v1);gp_Pnt p;gp_Vec du,dv;
+        affine->D1((u0+u1)/2,(v0+v1)/2,p,du,dv);normal=gp_Dir(du.Crossed(dv));
+    }
+    if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();
     return normal.Dot(gp_Dir(outward))>=1-1e-6;
 }
 // Every authored local section must be present in the sewn topology: the
@@ -228,7 +296,7 @@ inline GeomFillBuildResult BuildGeomFillSweep(const bounded_curve::Definition& c
         auto table=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),definition.orientation.phaseRadians,output.admission.correctedTotalSpin,frameTolerance,&cancelled);if(!table){output.status=GeomFillBuildStatus::TransportRefused;return output;}Handle(BishopTrihedronLaw) trihedron=new BishopTrihedronLaw(table,definition.orientation.phaseRadians,output.admission.correctedTotalSpin);Handle(GeomFill_CurveAndTrihedron) location=new GeomFill_CurveAndTrihedron(trihedron);if(!location->SetCurve(adaptor)){output.status=GeomFillBuildStatus::TransportRefused;return output;}Handle(ArcLengthRadiusLaw) radius=new ArcLengthRadiusLaw(table,r0,r1);
         std::array<TopoDS_Face,4> sides;std::array<Handle(Geom_Surface),4> surfaces;std::array<bool,4> exchange{};BRepBuilderAPI_Sewing sewing(PositionalEpsilonMM/8,Standard_True,Standard_True,Standard_True,Standard_False);double fitting=0;
         for(unsigned q=0;q<4;++q){if(cancelled.load()){output.status=GeomFillBuildStatus::Cancelled;return output;}Handle(GeomFill_EvolvedSection) section=new GeomFill_EvolvedSection(geomfill_detail::Quarter(q),radius);GeomFill_Sweep sweep(location,Standard_False);sweep.SetDomain(table->first,table->last,table->first,table->last);sweep.SetTolerance(PositionalEpsilonMM/4,PositionalEpsilonMM/8,PositionalEpsilonMM/8,frameTolerance);sweep.SetForceApproxC1(Standard_False);sweep.Build(section,GeomFill_Section,GeomAbs_C1,12,256);if(!sweep.IsDone()||!std::isfinite(sweep.ErrorOnSurface())||sweep.ErrorOnSurface()>PositionalEpsilonMM/4){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}surfaces[q]=sweep.Surface();exchange[q]=sweep.ExchangeUV();if(sweep.UReversed()||sweep.VReversed()||!geomfill_detail::PositiveReturnedSurface(surfaces[q])){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}BRepBuilderAPI_MakeFace face(surfaces[q],PositionalEpsilonMM/8);if(!face.IsDone()){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}sides[q]=face.Face();sewing.Add(sides[q]);fitting=std::max(fitting,sweep.ErrorOnSurface());}
-        auto cap=[&](double u,bool reverse,TopoDS_Face& face)->bool{BRepBuilderAPI_MakeWire wire;for(unsigned q=0;q<4;++q){BRepBuilderAPI_MakeEdge edge(geomfill_detail::PathBoundary(surfaces[q],exchange[q],u));if(!edge.IsDone())return false;wire.Add(edge.Edge());}if(!wire.IsDone())return false;BRepBuilderAPI_MakeFace make(wire.Wire(),Standard_True);if(!make.IsDone())return false;face=make.Face();if(reverse)face.Reverse();return true;};
+        auto cap=[&](double u,bool reverse,TopoDS_Face& face)->bool{BRepBuilderAPI_MakeWire wire;for(unsigned q=0;q<4;++q){BRepBuilderAPI_MakeEdge edge(geomfill_detail::PathBoundary(surfaces[q],exchange[q],u));if(!edge.IsDone())return false;wire.Add(edge.Edge());}if(!wire.IsDone()||!geomfill_detail::SerializerStableCap(wire.Wire(),face))return false;if(reverse)face.Reverse();return true;};
         TopoDS_Face firstCap,lastCap;
         if(definition.closure==ClosureKind::OpenFlatCaps){if(!cap(table->first,true,firstCap)||!cap(table->last,false,lastCap)){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}sewing.Add(firstCap);sewing.Add(lastCap);}sewing.Perform();if(sewing.NbFreeEdges()!=0||sewing.NbMultipleEdges()!=0){output.status=GeomFillBuildStatus::SewingRefused;return output;}TopoDS_Shell shell=geomfill_detail::OneShell(sewing.SewedShape());if(shell.IsNull()){output.status=GeomFillBuildStatus::SewingRefused;return output;}BRepBuilderAPI_MakeSolid makeSolid(shell);if(!makeSolid.IsDone()){output.status=GeomFillBuildStatus::SolidRefused;return output;}TopoDS_Solid solid=makeSolid.Solid();if(!BRepLib::OrientClosedSolid(solid)||!BRepCheck_Analyzer(solid,Standard_True).IsValid()||!BRep_Tool::IsClosed(shell)){output.status=GeomFillBuildStatus::SolidRefused;return output;}
         // FIX-SPEC step 4: coverage flags, per-cell intervals, station radii

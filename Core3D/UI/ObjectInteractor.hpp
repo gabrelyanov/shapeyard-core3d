@@ -14,6 +14,7 @@
 #include "BooleanOperationController.hpp"
 #include "LinearArrayOperationController.hpp"
 #include "RadialArrayOperationController.hpp"
+#include "../OCCTKit/PatternRecipeClone.hxx"
 
 #include <cstddef>
 #include <array>
@@ -534,6 +535,10 @@ namespace core3d {
             std::string preparedEnclosureIdentifier;
             enclosure::Record candidateEnclosure;
             bool enclosureCandidateSealed = false;
+            pattern_recipe_clone::Source originalSweepLoft;
+            pattern_recipe_clone::Prepared preparedSweepLoft;
+            pattern_recipe_clone::Candidate candidateSweepLoft;
+            bool sweepLoftCandidateSealed = false;
 		};
 		std::vector<DuplicatePendingResult> _pendingDuplicateResults;
 		bool _duplicateOwnsDocumentCommand = false;
@@ -565,6 +570,8 @@ namespace core3d {
             Standard_Size retainedEnclosureTopologyNodes = 0;
             TopoDS_Shape preparedEnclosureBinding;
             std::string enclosureIdentifier;
+            pattern_recipe_clone::Source sweepLoft;
+            pattern_recipe_clone::Prepared preparedSweepLoft;
 		};
 		struct MirrorPendingResult {
 			TDF_Label label;
@@ -579,6 +586,8 @@ namespace core3d {
             Standard_Boolean expectedProfileCurrent = Standard_False;
             Standard_Boolean profileCandidateSealed = Standard_False;
             Standard_Boolean expectedEnclosureCurrent = Standard_False;
+            pattern_recipe_clone::Candidate expectedSweepLoft;
+            Standard_Boolean sweepLoftCandidateSealed = Standard_False;
 		};
 		struct MirrorPlaneReferenceSnapshot {
 			Handle(TDocStd_Document) document;

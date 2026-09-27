@@ -13,8 +13,15 @@
 #if DEBUG
 #include "RetainedFeatureRegistryProbe.hxx"
 #endif
+#include "RetainedProgramSuffixBuild.hxx"
+#if DEBUG
+#include "RetainedProgramSuffixProbe.hxx"
+#endif
 #include <TNaming_Builder.hxx>
 #include <BRepTools.hxx>
+#include <BinTools_ShapeReader.hxx>
+#include <BinTools_ShapeSet.hxx>
+#include <BinTools_ShapeWriter.hxx>
 #include <TDF_Delta.hxx>
 #include <TDF_DeltaList.hxx>
 
@@ -97,6 +104,7 @@ struct Cut475Scope {
 #endif
 
 #include "OcctDocument.h"
+#include "PatternRecipeClone.hxx"
 #include "NativeDocumentSession.hxx"
 #include <Standard_ProgramError.hxx>
 #include "SavedCutSourceDetachedWork.hxx"
@@ -119,6 +127,7 @@ struct Cut475Scope {
 #include "RetainedSolidBinaryDriver.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
 #include "SpatialSweepG0Transaction.hxx"
+#include "SpatialSweepEditor.hxx"
 #include "BoundedCurveBinaryDriver.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -4650,7 +4659,55 @@ Standard_Boolean ValidateGeometryDocument(
             GProp_GProps volume;BRepGProp::VolumeProperties(source,volume,Standard_True,Standard_False,Standard_False);
             return classifier.State()==TopAbs_OUT&&std::isfinite(volume.Mass())&&volume.Mass()>0;
         };
+        const auto validSpatialSweepWire = [&](const core3d::composite_recipe::Record& record) {
+            const auto& definition=record.value->definition;
+            if(definition.nodes.empty())return false;
+            const auto* sourceNode=std::get_if<core3d::composite_recipe::SourceNode>(
+                &definition.nodes.front().value);
+            core3d::composite_recipe::SourceShapeKind expected=
+                core3d::composite_recipe::SourceShapeKind::Unknown;
+            if(!sourceNode||sourceNode->shapeSlot>=record.value->sourceShapes.size()
+                ||!core3d::composite_recipe::ExpectedShapeKind(
+                    definition,sourceNode->recipe,expected)
+                ||expected!=core3d::composite_recipe::SourceShapeKind::Wire)return false;
+            const TopoDS_Shape& source=record.value->sourceShapes[sourceNode->shapeSlot];
+            core3d::bounded_curve::Value curve;
+            if(source.IsNull()||source.ShapeType()!=TopAbs_WIRE
+                ||source.Orientation()!=TopAbs_FORWARD
+                ||!core3d::bounded_curve::Decode(sourceNode->recipe.bytes,curve)
+                ||curve.definition.domain!=core3d::bounded_curve::Domain::Path3D
+                ||ClassifyDefinitionGeometry(source,&aBudget)!=DefinitionGeometryClass::BRep
+                ||!BRepCheck_Analyzer(source,Standard_True).IsValid())return false;
+            unsigned edgeCount=0;
+            for(TopExp_Explorer edges(source,TopAbs_EDGE);edges.More();edges.Next()){
+                if(++edgeCount!=1)return false;
+                Standard_Real first=0,last=0;
+                const Handle(Geom_Curve) geometry=
+                    BRep_Tool::Curve(TopoDS::Edge(edges.Current()),first,last);
+                if(geometry.IsNull()||!std::isfinite(first)||!std::isfinite(last)
+                    ||!(first<last)||first!=curve.definition.knots.front().value
+                    ||last!=curve.definition.knots.back().value)return false;
+                const gp_Pnt firstPoint=geometry->Value(first);
+                const gp_Pnt lastPoint=geometry->Value(last);
+                if(!std::isfinite(firstPoint.X())||!std::isfinite(firstPoint.Y())
+                    ||!std::isfinite(firstPoint.Z())||!std::isfinite(lastPoint.X())
+                    ||!std::isfinite(lastPoint.Y())||!std::isfinite(lastPoint.Z()))return false;
+            }
+            TopoDS_Shape expectedWire;
+            core3d::composite_recipe::Digest expectedDigest{},sourceDigest{};
+            return edgeCount==1
+                &&core3d::spatial_sweep::editor::MakeNativeWire(
+                    curve.definition,expectedWire,expectedDigest)
+                &&core3d::spatial_sweep::geomfill_detail::HashShape(source,sourceDigest)
+                &&expectedDigest==sourceNode->commitments.geometry
+                &&sourceDigest==sourceNode->commitments.geometry;
+        };
         for(const auto& record:composites){
+            if(core3d::composite_recipe::ValidSpatialSweepEnvelope(
+                    record.value->definition)){
+                if(!validSpatialSweepWire(record))return Standard_False;
+                continue;
+            }
             if(record.value->definition.schemaVersion<3){
                 // Frozen v1/v2 domain: retain the exact historic closed-solid gate.
                 for(const auto& source:record.value->sourceShapes)
@@ -5304,6 +5361,8 @@ namespace {
 
 constexpr Standard_Size kPlainProfileCutMaximumValidationVisits = 262144;
 constexpr Standard_Size kPlainProfileCutMaximumShapeVisits = 32768;
+constexpr Standard_Size kPlainProfileCutMaximumPreparationBytes =
+    core3d::composite_recipe::MaximumDocumentAggregateBytes;
 
 core3d::retained_recipe::UUID NewPlainProfileCutUUID() {
     core3d::retained_recipe::UUID value{};
@@ -5409,6 +5468,144 @@ bool PlainProfileCutDeepCopy(
         if (!copy.IsDone() || copy.Shape().IsNull()) return false;
         output = copy.Shape(); return true;
     } catch (...) { output.Nullify(); return false; }
+}
+
+class PlainProfileCutBoundedStream final : public std::streambuf {
+public:
+    explicit PlainProfileCutBoundedStream(Standard_Size maximum)
+        : maximum_(maximum) { bytes_.reserve(std::min<Standard_Size>(maximum, 4096)); }
+    const std::vector<char>& bytes() const noexcept { return bytes_; }
+private:
+    std::streamsize xsputn(const char* source, std::streamsize count) override {
+        if (count < 0 || static_cast<Standard_Size>(count) > maximum_ - bytes_.size())
+            return 0;
+        bytes_.insert(bytes_.end(), source, source + count);
+        return count;
+    }
+    int_type overflow(int_type value) override {
+        if (traits_type::eq_int_type(value, traits_type::eof()))
+            return traits_type::not_eof(value);
+        const char byte = traits_type::to_char_type(value);
+        return xsputn(&byte, 1) == 1 ? value : traits_type::eof();
+    }
+    Standard_Size maximum_ = 0;
+    std::vector<char> bytes_;
+};
+
+bool PlainProfileCutNativeRoundTrip(
+    const TopoDS_Shape& source,
+    bool direct,
+    TopoDS_Shape& output,
+    Standard_Size& serializedBytes) noexcept
+{
+    output.Nullify();
+    try {
+        if (source.IsNull()
+            || serializedBytes >= kPlainProfileCutMaximumPreparationBytes)
+            return false;
+        PlainProfileCutBoundedStream buffer(
+            kPlainProfileCutMaximumPreparationBytes - serializedBytes);
+        std::ostream stream(&buffer);
+        stream.imbue(std::locale::classic());
+        Standard_Integer shapeID = 0;
+        if (direct) {
+            BinTools_ShapeWriter writer;
+            writer.Write(source, stream);
+        } else {
+            BinTools_ShapeSet writer;
+            shapeID = writer.Add(source);
+            if (shapeID <= 0) return false;
+            writer.Write(stream);
+        }
+        if (!stream.good() || buffer.bytes().empty()
+            || buffer.bytes().size()
+                > kPlainProfileCutMaximumPreparationBytes - serializedBytes)
+            return false;
+        serializedBytes += buffer.bytes().size();
+        const std::string storage(buffer.bytes().begin(), buffer.bytes().end());
+        std::istringstream input(storage, std::ios::in | std::ios::binary);
+        input.imbue(std::locale::classic());
+        if (direct) {
+            BinTools_ShapeReader reader;
+            reader.Read(input, output);
+        } else {
+            BinTools_ShapeSet reader;
+            reader.Read(input);
+            if (!input || shapeID > reader.NbShapes()) return false;
+            output = reader.Shape(shapeID);
+        }
+        if (!input || output.IsNull()) return false;
+        input.peek();
+        if (!input.eof()) return false;
+        // The shared document driver stores the root's placement/orientation
+        // separately in indexed mode. Preserve those values explicitly in
+        // this detached preparation as well.
+        output.Location(source.Location(), Standard_False);
+        output.Orientation(source.Orientation());
+        return true;
+    } catch (...) { output.Nullify(); return false; }
+}
+
+bool PlainProfileCutStorageEquivalent(
+    const TopoDS_Shape& source,
+    const TopoDS_Shape& prepared) noexcept
+{
+    try {
+        core3d::retained_recipe::Digest sourceAnalytic{}, preparedAnalytic{};
+        return !source.IsNull() && !prepared.IsNull()
+            && source.ShapeType() == TopAbs_SOLID
+            && prepared.ShapeType() == TopAbs_SOLID
+            && source.Orientation() == prepared.Orientation()
+            && source.Location() == prepared.Location()
+            && PlainProfileRebuildCorresponds(source, prepared)
+            // The typed analytic policy removes only the demonstrated signed
+            // zero fields. Equality therefore refuses every other canonical
+            // representation change.
+            && core3d::receipt::GeometryDigestForPolicy(
+                source, sourceAnalytic, true)
+            && core3d::receipt::GeometryDigestForPolicy(
+                prepared, preparedAnalytic, true)
+            && sourceAnalytic == preparedAnalytic;
+    } catch (...) { return false; }
+}
+
+bool PreparePlainProfileCutStorageStableShape(
+    const TopoDS_Shape& source,
+    TopoDS_Shape& stable,
+    Standard_Size& visits,
+    Standard_Size& serializedBytes) noexcept
+{
+    stable.Nullify();
+    try {
+        TopoDS_Shape directFixed, indexedFixed;
+        if (!PlainProfileCutNativeRoundTrip(
+                source, true, stable, serializedBytes)
+            || !PlainProfileCutStorageEquivalent(source, stable)
+            || stable.Orientation() != TopAbs_FORWARD
+            || !BRepCheck_Analyzer(stable, Standard_True).IsValid()
+            || !PlainProfileCutTopologyBudget(stable, visits)
+            || !PlainProfileCutNativeRoundTrip(
+                stable, true, directFixed, serializedBytes)
+            || !PlainProfileCutNativeRoundTrip(
+                stable, false, indexedFixed, serializedBytes)
+            || !PlainProfileCutTopologyBudget(directFixed, visits)
+            || !PlainProfileCutTopologyBudget(indexedFixed, visits)
+            || !PlainProfileCutStorageEquivalent(stable, directFixed)
+            || !PlainProfileCutStorageEquivalent(stable, indexedFixed)) {
+            stable.Nullify(); return false;
+        }
+        core3d::retained_recipe::Digest stableDigest{}, directDigest{}, indexedDigest{};
+        if (!core3d::receipt::GeometryDigestForPolicy(
+                stable, stableDigest, false)
+            || !core3d::receipt::GeometryDigestForPolicy(
+                directFixed, directDigest, false)
+            || !core3d::receipt::GeometryDigestForPolicy(
+                indexedFixed, indexedDigest, false)
+            || stableDigest != directDigest || stableDigest != indexedDigest) {
+            stable.Nullify(); return false;
+        }
+        return true;
+    } catch (...) { stable.Nullify(); return false; }
 }
 
 bool PlainProfileCutCanonicalCandidate(
@@ -5928,7 +6125,7 @@ Standard_Boolean OcctDocument::VerifyPlainProfileOperationReplacement(
 Standard_Boolean OcctDocument::PreparePlainProfileCut(
     const OcctPlainProfileOperationCapture& subjectCapture,
     const std::vector<OcctPlainProfileOperationCapture>& orderedToolCaptures,
-    const TopoDS_Shape& canonicalCandidate,
+    TopoDS_Shape& canonicalCandidate,
     const gp_Trsf& resultOccurrence,
     std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept
 {
@@ -5958,9 +6155,11 @@ Standard_Boolean OcctDocument::PreparePlainProfileCut(
             || !std::isfinite(carrierUnits) || carrierUnits <= 0)
             return Standard_False;
         Standard_Size visits = 0;
+        Standard_Size serializedBytes = 0;
+        TopoDS_Shape admittedCandidate;
         if (!PlainProfileCutCanonicalCandidate(
-                canonicalCandidate, state->expectedRoot, visits)
-            || !state->expectedRoot.IsEqual(canonicalCandidate))
+                canonicalCandidate, admittedCandidate, visits)
+            || !admittedCandidate.IsEqual(canonicalCandidate))
             return Standard_False;
         c::InputPlacement resultPlacement;
         if (!PlainProfileCutMatrix(resultOccurrence, resultPlacement,
@@ -5988,9 +6187,11 @@ Standard_Boolean OcctDocument::PreparePlainProfileCut(
                 || !identities.insert(entity).second
                 || !identities.insert(definition).second
                 || !identities.insert(feature).second) return Standard_False;
-            TopoDS_Shape slot;
+            TopoDS_Shape slot, storageStableSlot;
             if (!PlainProfileCutDeepCopy(source.boundRoot, slot)
-                || !PlainProfileCutTopologyBudget(slot, visits))
+                || !PlainProfileCutTopologyBudget(slot, visits)
+                || !PreparePlainProfileCutStorageStableShape(
+                    slot, storageStableSlot, visits, serializedBytes))
                 return Standard_False;
             gp_Trsf sourceToCarrier = carrierInverse;
             sourceToCarrier.Multiply(source.placement);
@@ -6007,7 +6208,7 @@ Standard_Boolean OcctDocument::PreparePlainProfileCut(
                 return Standard_False;
             state->parameters.push_back(std::move(parameters));
             state->recipeBytes.push_back(std::move(recipe));
-            state->sourceSlots.push_back(std::move(slot));
+            state->sourceSlots.push_back(std::move(storageStableSlot));
             state->placements.push_back(placement);
             state->sourceNodes.push_back(node);
             state->witnesses.push_back(std::move(witness));
@@ -6015,13 +6216,19 @@ Standard_Boolean OcctDocument::PreparePlainProfileCut(
             sourceOccurrences.push_back(source.placement);
         }
         std::vector<core3d::ProfileCircularHole> holes;
+        TopoDS_Shape storageStableResult;
         if (!ProvePlainProfileCutFamily(
                 state->parameters, sourceOccurrences, holes)
             || !ReplayPlainProfileCut(state->sourceSlots, state->placements,
-                    state->parameters.front(), holes, state->expectedRoot, visits)
+                    state->parameters.front(), holes, admittedCandidate, visits)
+            || !PreparePlainProfileCutStorageStableShape(
+                admittedCandidate, storageStableResult, visits, serializedBytes)
+            || !ReplayPlainProfileCut(state->sourceSlots, state->placements,
+                    state->parameters.front(), holes, storageStableResult, visits)
             || !core3d::receipt::GeometryDigestForPolicy(
-                state->expectedRoot, state->resultDigest, false))
+                storageStableResult, state->resultDigest, false))
             return Standard_False;
+        state->expectedRoot = storageStableResult;
         for (std::size_t index = 0; index < orderedToolCaptures.size(); ++index) {
             const auto node = NewPlainProfileCutUUID();
             const auto feature = NewPlainProfileCutUUID();
@@ -6033,6 +6240,7 @@ Standard_Boolean OcctDocument::PreparePlainProfileCut(
             state->featureNodes.push_back(node);
             state->featureIdentifiers.push_back(feature);
         }
+        canonicalCandidate = storageStableResult;
         prepared = std::move(state);
         return Standard_True;
     } catch (...) { prepared.reset(); return Standard_False; }
@@ -6059,15 +6267,9 @@ Standard_Boolean OcctDocument::PlainProfileCutSourcesCurrent(
                 || !PlainProfileCutWitness(*this, source, document,
                     prepared->sourceNodes[index], witness, exact)
                 || exact != prepared->witnessBytes[index]) return Standard_False;
-            core3d::retained_recipe::Digest digest{};
-            if (!core3d::receipt::GeometryDigestForPolicy(
-                    source.boundRoot, digest, false)
-                || digest != ([&] {
-                    core3d::retained_recipe::Digest expected{};
-                    core3d::receipt::GeometryDigestForPolicy(
-                        prepared->sourceSlots[index], expected, false);
-                    return expected;
-                })()) return Standard_False;
+            if (!PlainProfileCutStorageEquivalent(
+                    source.boundRoot, prepared->sourceSlots[index]))
+                return Standard_False;
         }
         return Standard_True;
     } catch (...) { return Standard_False; }
@@ -6129,6 +6331,21 @@ Standard_Boolean OcctDocument::StagePlainProfileCutResult(
         const std::size_t cutCount = sourceCount - 1;
         if (sourceCount < 2 || cutCount != prepared->featureNodes.size()
             || sourceCount != prepared->sourceSlots.size()) return Standard_False;
+        std::vector<TopoDS_Shape> stagedSourceSlots;
+        stagedSourceSlots.reserve(sourceCount);
+        Standard_Size stagingVisits = 0;
+        for (const TopoDS_Shape& source : prepared->sourceSlots) {
+            TopoDS_Shape copied;
+            core3d::retained_recipe::Digest sourceDigest{}, copiedDigest{};
+            if (!PlainProfileCutDeepCopy(source, copied)
+                || !PlainProfileCutTopologyBudget(copied, stagingVisits)
+                || !core3d::receipt::GeometryDigestForPolicy(
+                    source, sourceDigest, false)
+                || !core3d::receipt::GeometryDigestForPolicy(
+                    copied, copiedDigest, false)
+                || sourceDigest != copiedDigest) return Standard_False;
+            stagedSourceSlots.push_back(std::move(copied));
+        }
         definition.nodes.reserve(sourceCount + cutCount);
         for (std::size_t index = 0; index < sourceCount; ++index) {
             c::SourceNode source;
@@ -6142,7 +6359,7 @@ Standard_Boolean OcctDocument::StagePlainProfileCutResult(
             source.inputToCarrier = prepared->placements[index];
             source.shapeSlot = std::uint32_t(index);
             if (!core3d::receipt::GeometryDigestForPolicy(
-                    prepared->sourceSlots[index],
+                    stagedSourceSlots[index],
                     source.commitments.geometry, false)
                 || !p::HashBytes(source.recipe.bytes,
                                  source.commitments.recipe)
@@ -6187,12 +6404,7 @@ Standard_Boolean OcctDocument::StagePlainProfileCutResult(
         auto payload = std::make_shared<c::Payload>();
         payload->definition = definition;
         payload->bytes = encoded;
-        payload->sourceShapes.reserve(prepared->sourceSlots.size());
-        for (const TopoDS_Shape& source : prepared->sourceSlots) {
-            TopoDS_Shape copied;
-            if (!PlainProfileCutDeepCopy(source, copied)) return Standard_False;
-            payload->sourceShapes.push_back(std::move(copied));
-        }
+        payload->sourceShapes = std::move(stagedSourceSlots);
         Standard_Integer tag = c::MinimumRecordTag;
         for (; tag < std::numeric_limits<Standard_Integer>::max(); ++tag) {
             if (resultLabel.FindChild(tag, Standard_False).IsNull()) break;
@@ -6203,7 +6415,15 @@ Standard_Boolean OcctDocument::StagePlainProfileCutResult(
         TNaming_Builder(recordLabel).Select(resultRoot, resultRoot);
         Handle(c::Attribute) attribute = new c::Attribute();
         recordLabel.AddAttribute(attribute);
-        attribute->value_ = payload;
+        // Use the existing OCAF-aware payload writer.  Directly assigning the
+        // private shared_ptr after AddAttribute bypasses Backup(), so the
+        // command delta can retain an empty attribute across Undo/Redo and a
+        // later save/copy boundary even though immediate in-memory readback
+        // sees the pointer.  StagePartBooleanPayload records the populated
+        // value in the same measured command used by every existing composite
+        // owner.
+        if (!StagePartBooleanPayload(recordLabel, payload))
+            return Standard_False;
         c::Record readback;
         Standard_Size validationVisits = 0;
         if (!c::Read(myOcafDoc, resultLabel, readback) || !readback.value
@@ -6253,6 +6473,188 @@ Standard_Boolean OcctDocument::VerifyPlainProfileCutSourcesRestored(
 {
     return PlainProfileCutSourcesCurrent(prepared);
 }
+
+#if DEBUG
+Standard_Boolean OcctDocument::DebugPlainProfileCutRetention(
+    const std::string& entityIdentifier,
+    OcctPlainProfileCutDebugEvidence& output) const noexcept
+{
+    output = {};
+    try {
+        OCC_CATCH_SIGNALS
+        namespace c = core3d::composite_recipe;
+        namespace p = core3d::plain_profile_cut;
+        if (entityIdentifier.empty() || entityIdentifier.size() > 128
+            || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapeTool.IsNull()) return Standard_False;
+        TDF_LabelSequence roots;
+        shapeTool->GetFreeShapes(roots);
+        if (roots.Length() <= 0
+            || roots.Length() > kMaximumGeometryDefinitionLabels) {
+            return Standard_False;
+        }
+        TDF_Label carrier;
+        Standard_Size matches = 0;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (EntityIdentifierForLabel(roots.Value(index))
+                    == entityIdentifier) {
+                carrier = roots.Value(index);
+                ++matches;
+            }
+        }
+        if (matches != 1 || carrier.IsNull()) return Standard_False;
+
+        c::Record record;
+        Standard_Size visits = 0;
+        if (!c::Read(myOcafDoc, carrier, record) || !record.value
+            || record.value->definition.schemaVersion != p::GraphVersion
+            || !c::ValidCutV4(record.value->definition)
+            || !RebuildAndValidatePlainProfileCut(
+                myOcafDoc, record, visits, Standard_True)
+            || !ValidateGeometryDocument(myOcafDoc, nullptr)) {
+            return Standard_False;
+        }
+
+        OcctPlainProfileCutDebugEvidence observed;
+        observed.bytes["envelope"] = record.value->bytes;
+        const auto append = [](std::vector<std::uint8_t>& destination,
+                               const auto& value) {
+            destination.insert(destination.end(), value.begin(), value.end());
+        };
+        const c::Definition& definition = record.value->definition;
+        append(observed.bytes["owner-document"], definition.owner.document);
+        append(observed.bytes["owner-entity"], definition.owner.entity);
+        append(observed.bytes["owner-definition"], definition.owner.definition);
+        observed.numbers["topologyVisits"] = double(visits);
+
+        Standard_Size sourceCount = 0;
+        Standard_Size cutCount = 0;
+        for (const c::Node& node : definition.nodes) {
+            if (const auto* source = std::get_if<c::SourceNode>(&node.value)) {
+                const std::string prefix = "source-" +
+                    std::to_string(sourceCount);
+                std::vector<std::uint8_t>& identity =
+                    observed.bytes[prefix + "-original-identifiers"];
+                append(identity, source->original.document);
+                append(identity, source->original.entity);
+                append(identity, source->original.definition);
+                append(identity, source->original.sourceFeature);
+                observed.bytes[prefix + "-profile-scalars"] =
+                    source->recipe.bytes;
+                observed.numbers[prefix + "-profile-schema"] =
+                    double(source->recipe.schema);
+                if (source->shapeSlot >= record.value->sourceShapes.size())
+                    return Standard_False;
+                core3d::retained_recipe::Digest localDigest{};
+                if (!core3d::receipt::GeometryDigestForPolicy(
+                        record.value->sourceShapes[source->shapeSlot],
+                        localDigest, false)
+                    || localDigest != source->commitments.geometry) {
+                    return Standard_False;
+                }
+                append(observed.bytes[prefix + "-shape-slot-digest"],
+                       localDigest);
+                p::PayloadWriter placement;
+                for (double value : source->inputToCarrier.matrix)
+                    placement.scalar(value);
+                placement.scalar(source->inputToCarrier.sourceMetersPerUnit);
+                placement.scalar(source->inputToCarrier.carrierMetersPerUnit);
+                if (!placement.valid) return Standard_False;
+                observed.bytes[prefix + "-matrix-and-units"] =
+                    std::move(placement.bytes);
+                observed.numbers[prefix + "-source-meters-per-unit"] =
+                    source->inputToCarrier.sourceMetersPerUnit;
+                observed.numbers[prefix + "-carrier-meters-per-unit"] =
+                    source->inputToCarrier.carrierMetersPerUnit;
+                ++sourceCount;
+            } else if (const auto* feature =
+                           std::get_if<c::FeatureNode>(&node.value)) {
+                const std::string prefix = "cut-" +
+                    std::to_string(cutCount);
+                std::vector<std::uint8_t>& edge =
+                    observed.bytes[prefix + "-ordered-edge"];
+                if (feature->inputs.size() != 2) return Standard_False;
+                append(edge, feature->inputs[0]);
+                append(edge, feature->inputs[1]);
+                p::Step step;
+                if (!p::DecodeStep(feature->parameters, step))
+                    return Standard_False;
+                observed.bytes[prefix + "-step"] = feature->parameters;
+                if (step.ordinal == step.total) {
+                    append(observed.bytes["final-binding-digest"],
+                           step.resultBinding);
+                    for (Standard_Size witnessIndex = 0;
+                         witnessIndex < step.witnesses.size();
+                         ++witnessIndex) {
+                        core3d::retained_recipe::Digest material{}, groups{};
+                        const p::SourceWitness& witness =
+                            step.witnesses[witnessIndex];
+                        if (!p::MaterialCommitment(
+                                witness.appearance, material)
+                            || !p::GroupsCommitment(
+                                witness.hasGroups, witness.groups, groups)) {
+                            return Standard_False;
+                        }
+                        std::vector<std::uint8_t>& digests = observed.bytes[
+                            "source-" + std::to_string(witnessIndex)
+                            + "-metadata-witness-digests"];
+                        append(digests, material);
+                        append(digests, groups);
+                    }
+                }
+                ++cutCount;
+            } else {
+                return Standard_False;
+            }
+        }
+        if (sourceCount < 2 || sourceCount > 8
+            || cutCount + 1 != sourceCount
+            || record.value->sourceShapes.size() != sourceCount
+            || observed.bytes["final-binding-digest"].size() != 32) {
+            return Standard_False;
+        }
+
+        TopoDS_Shape measured;
+        if (!PlainProfileCutDeepCopy(record.current, measured))
+            return Standard_False;
+        GProp_GProps volumeProperties;
+        BRepGProp::VolumeProperties(measured, volumeProperties);
+        const Standard_Real volume = volumeProperties.Mass();
+        Bnd_Box bounds;
+        BRepBndLib::Add(measured, bounds, Standard_False);
+        Standard_Real xMin = 0, yMin = 0, zMin = 0;
+        Standard_Real xMax = 0, yMax = 0, zMax = 0;
+        if (!std::isfinite(volume) || volume <= 0 || bounds.IsVoid())
+            return Standard_False;
+        bounds.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+        for (const auto& coordinate : {
+                 xMin, yMin, zMin, xMax, yMax, zMax}) {
+            if (!std::isfinite(coordinate)) return Standard_False;
+        }
+        observed.numbers["sourceCount"] = double(sourceCount);
+        observed.numbers["cutCount"] = double(cutCount);
+        observed.numbers["volume"] = volume;
+        observed.numbers["boundsMinX"] = xMin;
+        observed.numbers["boundsMinY"] = yMin;
+        observed.numbers["boundsMinZ"] = zMin;
+        observed.numbers["boundsMaxX"] = xMax;
+        observed.numbers["boundsMaxY"] = yMax;
+        observed.numbers["boundsMaxZ"] = zMax;
+        observed.checks["canonicalV4"] = true;
+        observed.checks["fullValidatorPassed"] = true;
+        observed.checks["measuredReconstructionPassed"] = true;
+        output = std::move(observed);
+        return Standard_True;
+    } catch (...) {
+        output = {};
+        return Standard_False;
+    }
+}
+#endif
 
 Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
     const Handle(TDocStd_Document)& document) const
@@ -6369,8 +6771,14 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                         64U * 1024U * 1024U)) return Standard_False;
             }
 
-            // No independent-copy/baked-copy policy for saved sweeps yet.
-            if (!HasNoSavedSweepForTopology(source)) return Standard_False;
+            core3d::pattern_recipe_clone::Source sourceRecipe;
+            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe)
+                || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
+                        || sourceRecipe.family == core3d::pattern_recipe_clone::Family::Loft)
+                    && !request.preservesSweepLoftRecipe)
+                || (sourceRecipe.family
+                        == core3d::pattern_recipe_clone::Family::AnalyticBoolean
+                    && !request.preservesAnalyticBooleanRecipe)) return Standard_False;
             core3d::enclosure::Record sourceEnclosure;
             if (!core3d::enclosure::Read(myOcafDoc, source, sourceEnclosure)
                 || (!sourceEnclosure.label.IsNull()
@@ -6416,11 +6824,43 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                 }
             }
 
+            Standard_Size sweepLoftLabels = 0;
+            if (sourceRecipe.family != core3d::pattern_recipe_clone::Family::None) {
+                if (!AddMultipliedWithinLimit(projectedFeatures, 1U,
+                        destinationCount, core3d::profile::MaximumRecords)) return Standard_False;
+                const bool isSweep = sourceRecipe.family
+                    == core3d::pattern_recipe_clone::Family::Sweep;
+                const std::size_t scalarCount = isSweep
+                    ? sourceRecipe.sweep.values.size() : sourceRecipe.loft.values.size();
+                const bool hasFrame = isSweep
+                    ? bool(sourceRecipe.sweep.definition.constructionFrame)
+                    : bool(sourceRecipe.loft.definition.constructionFrame);
+                sweepLoftLabels = 1U + static_cast<Standard_Size>(scalarCount);
+                if (request.requiresSweepLoftConstructionFrame && !hasFrame)
+                    sweepLoftLabels += 8U;
+            }
+
+            Standard_Size analyticBooleanLabels = 0;
+            if (sourceRecipe.family
+                    == core3d::pattern_recipe_clone::Family::AnalyticBoolean) {
+                const auto& value = sourceRecipe.analyticBoolean.value;
+                if (!value || value->definition.nodes.size() != 3
+                    || value->sourceShapes.size() != 2) return Standard_False;
+                // One record label, its NamedShape and attribute, plus the
+                // complete bounded graph. AddShape's owner/transform labels
+                // are charged below as before.
+                analyticBooleanLabels = 2U
+                    + static_cast<Standard_Size>(value->definition.nodes.size());
+                if (!AddMultipliedWithinLimit(projectedFeatures, 1U,
+                        destinationCount, core3d::profile::MaximumRecords)) return Standard_False;
+            }
+
             // AddShape creates one definition label and eight transform
             // children. CopyObjectAppearance creates the legacy material and
             // color children only when a local PBR assignment is not
             // authoritative; visual-material/texture definitions are shared.
-            Standard_Size destinationLabels = 9U + profileLabels + enclosureLabels;
+            Standard_Size destinationLabels = 9U + profileLabels + enclosureLabels
+                + sweepLoftLabels + analyticBooleanLabels;
             Handle(TDataStd_Integer) localPBRMarker;
             const Standard_Boolean hasLocalPBR =
                 source.FindAttribute(
@@ -13253,6 +13693,410 @@ HistoryWitness ObserveHistory(const Handle(TDocStd_Document)& document,
 retained_part_boolean::OperandReadSet Reads(const retained_recipe::OwnerSnapshot& snapshot) {
     return {snapshot.fence.dependencies.at(0), snapshot.fence.dependencies.at(1)};
 }
+bool CanonicalSuffixDisplay(cut_display::Settings& settings) noexcept {
+    try {
+        Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
+        return cut_display::Capture(drawer, settings);
+    } catch (...) { settings = {}; return false; }
+}
+struct AnalyticFeatureChain final {
+    const composite_recipe::FeatureNode* base = nullptr;
+    const composite_recipe::FeatureNode* output = nullptr;
+    bool hasSuffix = false;
+    retained_program_suffix::Definition suffix;
+};
+bool ResolveAnalyticFeatureChain(const composite_recipe::Definition& graph,
+                                 AnalyticFeatureChain& chain) noexcept {
+    chain = {};
+    try {
+        if (!composite_recipe::Valid(graph)
+            || graph.nodes.size() < 3 || graph.nodes.size() > 4) return false;
+        chain.output = std::get_if<composite_recipe::FeatureNode>(&graph.nodes.back().value);
+        if (!chain.output) return false;
+        if (graph.schemaVersion == 1
+            && chain.output->kind == composite_recipe::PartBooleanFeatureKind
+            && chain.output->codecVersion == composite_recipe::PartBooleanFeatureCodec
+            && graph.nodes.size() == 3) {
+            chain.base = chain.output;
+            return true;
+        }
+        if (graph.schemaVersion != 3 || graph.nodes.size() != 4
+            || chain.output->kind != composite_recipe::RetainedProgramSuffixFeatureKind
+            || chain.output->codecVersion != composite_recipe::RetainedProgramSuffixFeatureCodec
+            || chain.output->inputs.size() != 1
+            || !retained_program_suffix::Decode(chain.output->parameters, chain.suffix)) return false;
+        chain.base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
+        chain.hasSuffix = chain.base
+            && chain.base->kind == composite_recipe::PartBooleanFeatureKind
+            && chain.base->codecVersion == composite_recipe::PartBooleanFeatureCodec
+            && chain.output->inputs.front() == chain.base->node
+            && chain.suffix.baseFeature == chain.base->node;
+        return chain.hasSuffix;
+    } catch (...) { chain = {}; return false; }
+}
+bool PrefixGraph(const composite_recipe::Definition& graph,
+                 composite_recipe::Definition& prefix) noexcept {
+    AnalyticFeatureChain chain;
+    if (!ResolveAnalyticFeatureChain(graph, chain)) return false;
+    prefix = graph;
+    if (chain.hasSuffix) {
+        prefix.nodes.pop_back();
+        prefix.outputNode = chain.base->node;
+    }
+    return composite_recipe::Valid(prefix);
+}
+
+// Execution remains absent from ProductionRegistry(). The document owner uses
+// this closed registry only with an explicit, call-bound execution context.
+// The validation callbacks fail closed when invoked without that context; the
+// paired owner callbacks below perform all real builds and proofs.
+
+bool ReadReplayShape(const std::vector<std::uint8_t>& bytes,
+                     TopoDS_Shape& shape) noexcept {
+    shape.Nullify();
+    try {
+        if (bytes.empty()) return false;
+        std::istringstream input(std::string(bytes.begin(), bytes.end()));
+        input.imbue(std::locale::classic());
+        BRep_Builder builder;
+        BRepTools::Read(shape, input, builder);
+        return !shape.IsNull() && retained_part_boolean::IsOneValidForwardSolid(shape);
+    } catch (...) { shape.Nullify(); return false; }
+}
+
+bool OwnerFeatureProof(const composite_recipe::FeatureNode& feature,
+                       const std::vector<retained_feature::ReplayValue>& inputs,
+                       const retained_feature::ReplayValue& output,
+                       retained_recipe::Digest& digest) noexcept {
+    std::vector<std::uint8_t> bytes = feature.parameters;
+    for (const auto& input : inputs) {
+        bytes.insert(bytes.end(), input.geometry.begin(), input.geometry.end());
+        bytes.insert(bytes.end(), input.familyProof.begin(), input.familyProof.end());
+    }
+    bytes.insert(bytes.end(), output.geometry.begin(), output.geometry.end());
+    return HashBytes(bytes, digest);
+}
+
+retained_recipe::DependencyRead OwnerRead(
+    const retained_recipe::OwnerKey& owner,
+    const AnalyticPrismInput& input) noexcept {
+    return {{owner, input.rootNode, input.originalSourceFeature},
+        input.commitments.geometry, input.commitments.recipe,
+        input.commitments.placement, input.commitments.material,
+        input.commitments.groups};
+}
+
+bool OwnerAnalyticBuild(const retained_feature::OwnerExecutionContext& context,
+                        const composite_recipe::FeatureNode& feature,
+                        const std::vector<retained_feature::ReplayValue>& inputs,
+                        retained_feature::ReplayBudget& budget,
+                        retained_feature::ReplayValue& output) noexcept {
+    output = {};
+    try {
+        const auto* graph = context.graph;
+        if (!graph || inputs.size() != 2
+            || feature.inputs.size() != 2
+            || !budget.consume(1, 4, feature.parameters.size())) return false;
+        AnalyticDefinition definition;
+        if (!DecodeAnalytic(feature.parameters, definition)) return false;
+        double unit = 0;
+        std::size_t matchedSources = 0;
+        for (const auto& node : graph->nodes) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            if (matchedSources >= definition.inputs.size()
+                || source->node != definition.inputs[matchedSources].rootNode
+                || source->original.sourceFeature
+                    != definition.inputs[matchedSources].originalSourceFeature) return false;
+            if (matchedSources == 0) unit = source->inputToCarrier.carrierMetersPerUnit;
+            else if (source->inputToCarrier.carrierMetersPerUnit != unit) return false;
+            ++matchedSources;
+        }
+        if (matchedSources != definition.inputs.size()
+            || !std::isfinite(unit) || unit <= 0) return false;
+        retained_part_boolean::OperandReadSet reads{
+            OwnerRead(graph->owner, definition.inputs[0]),
+            OwnerRead(graph->owner, definition.inputs[1])};
+        const auto built = build::BuildAnalytic(definition, unit, reads, reads);
+        if (!built.complete) return false;
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            retained_recipe::Digest geometry;
+            if (!HashBytes(inputs[index].detachedShape, geometry)
+                || geometry != definition.inputs[index].commitments.geometry
+                || Bytes(built.sourceBytes[index]) != inputs[index].detachedShape)
+                return false;
+        }
+        if (!ShapeBytes(built.candidate.solid, output.detachedShape)
+            || !budget.consume(0, 0, output.detachedShape.size())
+            || !HashBytes(output.detachedShape, output.geometry)) return false;
+        output.shape = retained_feature::ShapeKind::Solid;
+        return OwnerFeatureProof(feature, inputs, output, output.familyProof)
+            && output.valid();
+    } catch (...) { output = {}; return false; }
+}
+
+bool OwnerSuffixBuild(const retained_feature::OwnerExecutionContext& context,
+                      const composite_recipe::FeatureNode& feature,
+                      const std::vector<retained_feature::ReplayValue>& inputs,
+                      retained_feature::ReplayBudget& budget,
+                      retained_feature::ReplayValue& output) noexcept {
+    output = {};
+    try {
+        const auto* graph = context.graph;
+        const auto* display = static_cast<const cut_display::Settings*>(context.settings);
+        if (!graph || !display || inputs.size() != 1
+            || feature.inputs.size() != 1
+            || !budget.consume(1, 3, feature.parameters.size())) return false;
+        retained_program_suffix::Definition program;
+        composite_recipe::Definition prefix;
+        TopoDS_Shape base;
+        if (!retained_program_suffix::Decode(feature.parameters, program)
+            || !PrefixGraph(*graph, prefix)
+            || feature.inputs.front() != prefix.outputNode
+            || !ReadReplayShape(inputs.front().detachedShape, base)) return false;
+        const std::atomic_bool stop(false);
+        const auto built = retained_program_suffix::build::Build(
+            base, prefix, program, *display, stop);
+        if (built.status != retained_program_suffix::build::Status::Built
+            || !ShapeBytes(built.solid, output.detachedShape)
+            || !budget.consume(0, 0, output.detachedShape.size())
+            || !HashBytes(output.detachedShape, output.geometry)) return false;
+        output.shape = retained_feature::ShapeKind::Solid;
+        return OwnerFeatureProof(feature, inputs, output, output.familyProof)
+            && output.valid();
+    } catch (...) { output = {}; return false; }
+}
+
+template <bool (*Build)(const retained_feature::OwnerExecutionContext&,
+                        const composite_recipe::FeatureNode&,
+                        const std::vector<retained_feature::ReplayValue>&,
+                        retained_feature::ReplayBudget&,
+                        retained_feature::ReplayValue&) noexcept>
+bool OwnerFeatureProve(const retained_feature::OwnerExecutionContext& context,
+                       const composite_recipe::FeatureNode& feature,
+                       const std::vector<retained_feature::ReplayValue>& inputs,
+                       const retained_feature::ReplayValue& output,
+                       retained_feature::ReplayBudget& budget) noexcept {
+    retained_feature::ReplayValue independent;
+    return Build(context, feature, inputs, budget, independent)
+        && independent.detachedShape == output.detachedShape
+        && independent.geometry == output.geometry
+        && independent.familyProof == output.familyProof;
+}
+
+bool OwnerContextRequiredBuild(const composite_recipe::FeatureNode&,
+                               const std::vector<retained_feature::ReplayValue>&,
+                               retained_feature::ReplayBudget&,
+                               retained_feature::ReplayValue&) noexcept {
+    return false;
+}
+bool OwnerContextRequiredProof(const composite_recipe::FeatureNode&,
+                               const std::vector<retained_feature::ReplayValue>&,
+                               const retained_feature::ReplayValue&,
+                               retained_feature::ReplayBudget&) noexcept {
+    return false;
+}
+
+struct OwnerAnalyticRegistry final {
+    std::array<retained_feature::Entry, 2> validationEntries;
+    retained_feature::RegistryView validation;
+    std::array<retained_feature::OwnerExecutionEntry, 2> executionEntries;
+    retained_feature::OwnerExecutionRegistryView execution;
+
+    OwnerAnalyticRegistry() noexcept
+        : validationEntries{{
+            {{{composite_recipe::PartBooleanFeatureKind,
+               composite_recipe::PartBooleanFeatureCodec}, 3,
+              composite_recipe::MaximumFeaturePayloadBytes,
+              {retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid,
+               retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid},
+              2, retained_feature::ShapeKind::Solid,
+              composite_recipe::CanonicalAnalyticFeature},
+             {OwnerContextRequiredBuild, OwnerContextRequiredProof,
+              OwnerContextRequiredProof, true, true}},
+            {{{composite_recipe::RetainedProgramSuffixFeatureKind,
+               composite_recipe::RetainedProgramSuffixFeatureCodec}, 3,
+              retained_program_suffix::MaximumPayloadBytes,
+              {retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid,
+               retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid},
+              1, retained_feature::ShapeKind::Solid,
+              composite_recipe::CanonicalRetainedProgramSuffixFeature},
+             {OwnerContextRequiredBuild, OwnerContextRequiredProof,
+              OwnerContextRequiredProof, true, true}},
+          }},
+          validation(validationEntries.data(), validationEntries.size()),
+          executionEntries{{
+            {{composite_recipe::PartBooleanFeatureKind,
+              composite_recipe::PartBooleanFeatureCodec},
+             {&validationEntries[0].execution, OwnerAnalyticBuild,
+              OwnerFeatureProve<OwnerAnalyticBuild>,
+              OwnerFeatureProve<OwnerAnalyticBuild>}},
+            {{composite_recipe::RetainedProgramSuffixFeatureKind,
+              composite_recipe::RetainedProgramSuffixFeatureCodec},
+             {&validationEntries[1].execution, OwnerSuffixBuild,
+              OwnerFeatureProve<OwnerSuffixBuild>,
+              OwnerFeatureProve<OwnerSuffixBuild>}},
+          }},
+          execution(executionEntries.data(), executionEntries.size()) {}
+};
+
+bool OwnerRevisionFence(const composite_recipe::Definition& graph,
+                        const DocumentSnapshot& native,
+                        std::uint64_t ownerNonce,
+                        retained_recipe::RevisionFence& fence) noexcept {
+    fence = {};
+    try {
+        if (native.scopes.size() < 6 || ownerNonce == 0) return false;
+        fence.documentGeneration = ownerNonce;
+        fence.modelRevision = native.modelRevision ? native.modelRevision : 1;
+        std::uint64_t unitBits = 0;
+        if (native.scopes[5].size() < sizeof(unitBits)) return false;
+        const auto start = native.scopes[5].end() - sizeof(unitBits);
+        for (unsigned index = 0; index < sizeof(unitBits); ++index)
+            unitBits |= std::uint64_t(*(start + index)) << (index * 8);
+        std::memcpy(&fence.effectiveMetersPerUnit, &unitBits, sizeof(unitBits));
+        if (!std::isfinite(fence.effectiveMetersPerUnit)
+            || fence.effectiveMetersPerUnit <= 0
+            || !HashBytes(native.scopes[1], fence.ownerShape)
+            || !HashBytes(native.scopes[0], fence.ownerRecipe)
+            || !HashBytes(native.scopes[5], fence.ownerPlacement)
+            || !HashBytes(native.scopes[5], fence.ownerMaterial)) return false;
+        for (const auto& node : graph.nodes) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            fence.dependencies.push_back({{graph.owner, source->node,
+                source->original.sourceFeature}, source->commitments.geometry,
+                source->commitments.recipe, source->commitments.placement,
+                source->commitments.material, source->commitments.groups});
+        }
+        return retained_recipe::Valid(fence);
+    } catch (...) { fence = {}; return false; }
+}
+
+bool SameGraphCurrentness(const retained_recipe::GraphCurrentnessFacts& left,
+                          const retained_recipe::GraphCurrentnessFacts& right) noexcept {
+    if (!(left.owner == right.owner) || left.outputNode != right.outputNode
+        || left.graph != right.graph || left.outputShape != right.outputShape
+        || left.readSet != right.readSet || left.sourceMetadata != right.sourceMetadata
+        || left.units != right.units || left.dependencyFence != right.dependencyFence
+        || left.ownerNonce != right.ownerNonce
+        || left.persistenceInstalled != right.persistenceInstalled
+        || left.orderedNodes.size() != right.orderedNodes.size()) return false;
+    for (std::size_t index = 0; index < left.orderedNodes.size(); ++index) {
+        const auto& a = left.orderedNodes[index];
+        const auto& b = right.orderedNodes[index];
+        if (a.node != b.node || a.feature != b.feature || a.kind != b.kind
+            || a.codecVersion != b.codecVersion || a.orderedInputs != b.orderedInputs
+            || a.payload != b.payload || a.output != b.output
+            || a.familyProof != b.familyProof) return false;
+    }
+    return true;
+}
+
+/* The owner registry is intentionally constructed per operation. It contains
+   no captured graph, settings, mutable process state, or production override. */
+bool ValidOwnerFacts(const retained_recipe::GraphCurrentnessFacts& facts,
+                     const composite_recipe::Definition& graph) noexcept {
+    OwnerAnalyticRegistry registry;
+    return retained_recipe::Valid(facts, graph, registry.validation);
+}
+
+bool BuildOwnerGraphCurrentness(
+    const composite_recipe::Definition& graph,
+    const std::vector<TopoDS_Shape>& sourceShapes,
+    const TopoDS_Shape& storedOutput,
+    const retained_recipe::RevisionFence& fence,
+    const DocumentSnapshot& native,
+    std::uint64_t ownerNonce,
+    retained_recipe::GraphCurrentnessFacts& facts) noexcept {
+    facts = {};
+    try {
+        if (graph.schemaVersion != 3 || sourceShapes.size() != 2
+            || native.scopes.size() < 6 || ownerNonce == 0) return false;
+        std::vector<retained_feature::SourceValue> sources;
+        std::size_t sourceIndex = 0;
+        for (const auto& node : graph.nodes) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            if (sourceIndex >= sourceShapes.size()) return false;
+            retained_feature::SourceValue value;
+            value.node = source->node;
+            if (!ShapeBytes(sourceShapes[sourceIndex++], value.value.detachedShape)
+                || !HashBytes(value.value.detachedShape, value.value.geometry)
+                || value.value.geometry != source->commitments.geometry) return false;
+            std::vector<std::uint8_t> sourceProof = source->recipe.bytes;
+            sourceProof.insert(sourceProof.end(), value.value.geometry.begin(),
+                               value.value.geometry.end());
+            if (!HashBytes(sourceProof, value.value.familyProof)) return false;
+            value.value.shape = retained_feature::ShapeKind::Solid;
+            sources.push_back(std::move(value));
+        }
+        if (sourceIndex != sourceShapes.size()) return false;
+        cut_display::Settings display;
+        if (!CanonicalSuffixDisplay(display)) return false;
+        OwnerAnalyticRegistry registry;
+        const retained_feature::OwnerExecutionContext context{&graph, &display};
+        retained_feature::ReplayBudget budget;
+        const auto replay = retained_feature::ReplayOwnerDetached(
+            graph, registry.validation, registry.execution,
+            retained_source::ProductionRegistry(), sources, context, budget);
+        std::vector<std::uint8_t> outputBytes;
+        if (!replay.replayed() || !ShapeBytes(storedOutput, outputBytes)
+            || replay.output.detachedShape != outputBytes) return false;
+
+        facts.owner = graph.owner;
+        facts.outputNode = graph.outputNode;
+        facts.ownerNonce = ownerNonce;
+        facts.persistenceInstalled = true;
+        if (!HashBytes(native.scopes[0], facts.graph)
+            || !HashBytes(outputBytes, facts.outputShape)) return false;
+        std::vector<std::uint8_t> readSet, sourceMetadata, dependencyFence;
+        for (const auto& dependency : fence.dependencies) {
+            Append(readSet, dependency.locator.node);
+            for (const auto* digest : {&dependency.geometry, &dependency.recipe,
+                    &dependency.placement, &dependency.material, &dependency.groups})
+                readSet.insert(readSet.end(), digest->begin(), digest->end());
+        }
+        sourceMetadata.insert(sourceMetadata.end(), native.scopes[2].begin(), native.scopes[2].end());
+        sourceMetadata.insert(sourceMetadata.end(), native.scopes[3].begin(), native.scopes[3].end());
+        sourceMetadata.insert(sourceMetadata.end(), native.scopes[4].begin(), native.scopes[4].end());
+        sourceMetadata.insert(sourceMetadata.end(), native.scopes[5].begin(), native.scopes[5].end());
+        const auto generation = Bytes(fence.documentGeneration);
+        const auto revision = Bytes(fence.modelRevision);
+        dependencyFence.insert(dependencyFence.end(), generation.begin(), generation.end());
+        dependencyFence.insert(dependencyFence.end(), revision.begin(), revision.end());
+        for (const auto* digest : {&fence.ownerShape, &fence.ownerRecipe,
+                &fence.ownerPlacement, &fence.ownerMaterial})
+            dependencyFence.insert(dependencyFence.end(), digest->begin(), digest->end());
+        dependencyFence.insert(dependencyFence.end(), readSet.begin(), readSet.end());
+        std::vector<std::uint8_t> units;
+        Append(units, fence.effectiveMetersPerUnit);
+        dependencyFence.insert(dependencyFence.end(), units.begin(), units.end());
+        if (!HashBytes(readSet, facts.readSet)
+            || !HashBytes(sourceMetadata, facts.sourceMetadata)
+            || !HashBytes(units, facts.units)
+            || !HashBytes(dependencyFence, facts.dependencyFence)) return false;
+        for (const auto& observed : replay.observations)
+            facts.orderedNodes.push_back({observed.node, observed.feature,
+                observed.key.kind, observed.key.codecVersion, observed.inputs,
+                observed.payload, observed.output, observed.proof});
+        return retained_recipe::Valid(facts, graph, registry.validation);
+    } catch (...) { facts = {}; return false; }
+}
+
+bool BuildRecordGraphCurrentness(
+    const composite_recipe::Record& record,
+    const DocumentSnapshot& native,
+    std::uint64_t ownerNonce,
+    retained_recipe::GraphCurrentnessFacts& facts) noexcept {
+    facts = {};
+    retained_recipe::RevisionFence fence;
+    return record.value && record.value->definition.schemaVersion == 3
+        && OwnerRevisionFence(record.value->definition, native, ownerNonce, fence)
+        && BuildOwnerGraphCurrentness(record.value->definition,
+            record.value->sourceShapes, record.current, fence, native,
+            ownerNonce, facts);
+}
 } // namespace
 
 PartBooleanOwner::PartBooleanOwner(OcctDocument& owner) noexcept
@@ -13372,32 +14216,17 @@ bool PartBooleanOwner::captureNativeState(const TDF_Label& carrier,
 bool PartBooleanOwner::resolveAnalytic(
     const TDF_Label& carrier, composite_recipe::Record& record,
     retained_recipe::OwnerSnapshot& snapshot, AnalyticDefinition& analytic,
-    retained_recipe::NativeCurrentnessFacts& facts) const noexcept {
+    retained_recipe::NativeCurrentnessFacts& facts,
+    retained_recipe::GraphCurrentnessFacts& graphFacts) const noexcept {
     try {
         DocumentSnapshot native;
         if (!captureNativeState(carrier, native, &record)
-            || record.value->definition.nodes.size() != 3) return false;
-        const auto* feature = std::get_if<composite_recipe::FeatureNode>(
-            &record.value->definition.nodes.back().value);
-        if (!feature || feature->kind != composite_recipe::PartBooleanFeatureKind
-            || feature->codecVersion != composite_recipe::PartBooleanFeatureCodec
-            || !DecodeAnalytic(feature->parameters, analytic)) return false;
+            || record.value->definition.nodes.size() < 3) return false;
+        AnalyticFeatureChain chain;
+        if (!ResolveAnalyticFeatureChain(record.value->definition, chain)
+            || !DecodeAnalytic(chain.base->parameters, analytic)) return false;
         retained_recipe::RevisionFence fence;
-        fence.documentGeneration = nonce_;
-        fence.modelRevision = native.modelRevision ? native.modelRevision : 1;
-        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, fence.effectiveMetersPerUnit)
-            || !HashBytes(native.scopes[1], fence.ownerShape)
-            || !HashBytes(native.scopes[0], fence.ownerRecipe)
-            || !HashBytes(native.scopes[5], fence.ownerPlacement)
-            || !HashBytes(native.scopes[5], fence.ownerMaterial)) return false;
-        for (const auto& node : record.value->definition.nodes) {
-            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
-            if (!source) continue;
-            fence.dependencies.push_back({{record.value->definition.owner, source->node,
-                source->original.sourceFeature}, source->commitments.geometry,
-                source->commitments.recipe, source->commitments.placement,
-                source->commitments.material, source->commitments.groups});
-        }
+        if (!OwnerRevisionFence(record.value->definition, native, nonce_, fence)) return false;
         retained_recipe::OwnerSnapshot structural = retained_recipe::Snapshot(
             record.value->definition, fence);
         if (structural.sources.size() != 2) return false;
@@ -13406,16 +14235,36 @@ bool PartBooleanOwner::resolveAnalytic(
         const auto proof = correspondence::ProveAnalytic(
             analytic, built, fence.effectiveMetersPerUnit);
         const auto fixed = rebuild::CheckAnalytic(analytic, fence.effectiveMetersPerUnit, reads);
+        TopoDS_Shape rebuiltResult = built.candidate.solid;
+        bool dependentBuilt = true, dependentProven = true;
+        if (chain.hasSuffix) {
+            composite_recipe::Definition prefix;
+            cut_display::Settings display;
+            const std::atomic_bool stop(false);
+            const auto secondPrefix = build::BuildAnalytic(
+                analytic, fence.effectiveMetersPerUnit, reads, reads);
+            if (!PrefixGraph(record.value->definition, prefix)
+                || !CanonicalSuffixDisplay(display) || !secondPrefix.complete) return false;
+            auto suffix = retained_program_suffix::build::Build(
+                built.candidate.solid, prefix, chain.suffix, display, stop);
+            const auto suffixFixed = retained_program_suffix::build::CheckFixedPoint(
+                built.candidate.solid, secondPrefix.candidate.solid,
+                prefix, chain.suffix, display, stop);
+            dependentBuilt = suffix.status == retained_program_suffix::build::Status::Built;
+            dependentProven = suffixFixed.fixedPoint();
+            if (!dependentBuilt || !dependentProven) return false;
+            rebuiltResult = suffix.solid;
+        }
         std::vector<std::uint8_t> rebuilt;
-        if (!proof.proven() || !fixed.fixedPoint()
-            || !ShapeBytes(built.candidate.solid, rebuilt)
+        if (!proof.proven() || !fixed.fixedPoint() || !dependentBuilt || !dependentProven
+            || !ShapeBytes(rebuiltResult, rebuilt)
             || rebuilt != native.scopes[1]) return false;
         facts.owner = record.value->definition.owner;
         facts.outputNode = record.value->definition.outputNode;
-        facts.feature = feature->feature;
+        facts.feature = chain.output->feature;
         facts.ownerNonce = nonce_;
-        facts.builderInstalled = built.complete;
-        facts.proofInstalled = proof.proven() && fixed.fixedPoint();
+        facts.builderInstalled = built.complete && dependentBuilt;
+        facts.proofInstalled = proof.proven() && fixed.fixedPoint() && dependentProven;
         facts.ownerInstalled = boundTo(document_);
         facts.persistenceInstalled = record.value->bytes == native.scopes[0]
             && record.value->sourceShapes.size() == 2;
@@ -13431,14 +14280,28 @@ bool PartBooleanOwner::resolveAnalytic(
             readSet.insert(readSet.end(), dependency.groups.begin(), dependency.groups.end());
         }
         if (!HashBytes(readSet, facts.readSet)) return false;
-        snapshot = retained_recipe::Snapshot(record.value->definition, fence, &facts);
+        if (record.value->definition.schemaVersion == 3) {
+            if (!BuildOwnerGraphCurrentness(record.value->definition,
+                    record.value->sourceShapes, record.current, fence, native,
+                    nonce_, graphFacts)) return false;
+            OwnerAnalyticRegistry registry;
+            snapshot = retained_recipe::Snapshot(record.value->definition, fence,
+                nullptr, &graphFacts, &registry.validation);
+        } else {
+            graphFacts = {};
+            snapshot = retained_recipe::Snapshot(record.value->definition, fence, &facts);
+        }
         retained_recipe::AdmissionRule rule;
         rule.operation = retained_recipe::OperationKind::EditInput;
         rule.featureKind = composite_recipe::PartBooleanFeatureKind;
         rule.featureCodecVersion = composite_recipe::PartBooleanFeatureCodec;
         rule.selectorVersion = analytic.versions.selector;
         rule.proofProfile = analytic.versions.proof;
-        HashBytes(feature->parameters, rule.parameterBounds);
+        std::vector<std::uint8_t> parameterBounds = chain.base->parameters;
+        if (chain.hasSuffix)
+            parameterBounds.insert(parameterBounds.end(), chain.output->parameters.begin(),
+                                   chain.output->parameters.end());
+        HashBytes(parameterBounds, rule.parameterBounds);
         rule.nativeBuilderInstalled = facts.builderInstalled;
         rule.nativeProofInstalled = facts.proofInstalled;
         rule.nativeOwnerInstalled = facts.ownerInstalled;
@@ -13548,11 +14411,13 @@ CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
         AnalyticDefinition analytic;
         ShellEditDefinition shell;
         retained_recipe::NativeCurrentnessFacts facts;
+        retained_recipe::GraphCurrentnessFacts graphFacts;
         DocumentSnapshot before, after;
         bool isShell = false;
-        bool resolved = resolveAnalytic(carrier, record, snapshot, analytic, facts);
+        bool resolved = resolveAnalytic(
+            carrier, record, snapshot, analytic, facts, graphFacts);
         if (!resolved) {
-            record = {}; snapshot = {}; facts = {};
+            record = {}; snapshot = {}; facts = {}; graphFacts = {};
             isShell = resolveShell(carrier, record, snapshot, shell, facts);
             resolved = isShell;
         }
@@ -13570,6 +14435,7 @@ CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
         value->analytic = std::move(analytic); value->sourceShapes = record.value->sourceShapes;
         value->shell = isShell; value->shellEdit = std::move(shell);
         value->baseline = std::move(before); value->currentness = facts;
+        value->graphCurrentness = std::move(graphFacts);
         activeSession_ = value->session; output.handle = std::move(value);
         output.receipt = result(Outcome::Unchanged, "captured", activeSession_);
         return output;
@@ -13582,8 +14448,10 @@ bool PartBooleanOwner::describe(const TDF_Label& carrier, AnalyticDefinition& ou
             || document_.IsNull() || document_->HasOpenCommand()) return false;
         DocumentSnapshot before,after;composite_recipe::Record record;
         retained_recipe::OwnerSnapshot snapshot;retained_recipe::NativeCurrentnessFacts currentness;
+        retained_recipe::GraphCurrentnessFacts graphCurrentness;
         AnalyticDefinition value;
-        if (!captureNativeState(carrier,before) || !resolveAnalytic(carrier,record,snapshot,value,currentness)
+        if (!captureNativeState(carrier,before)
+            || !resolveAnalytic(carrier,record,snapshot,value,currentness,graphCurrentness)
             || !captureNativeState(carrier,after) || !(before==after)) return false;
         output=std::move(value);return true;
     } catch (...) { return false; }
@@ -13625,11 +14493,14 @@ bool PartBooleanOwner::buildPrepared(
         prepared.analytic = requested;
         prepared.graph = capture.graph;
         prepared.sources.assign(built.sources.begin(), built.sources.end());
-        prepared.result = built.candidate.solid;
+        AnalyticFeatureChain chain;
+        if (!ResolveAnalyticFeatureChain(prepared.graph, chain)) return false;
+        const retained_recipe::UUID baseNode = chain.base->node;
         std::size_t sourceIndex = 0;
         for (auto& node : prepared.graph.nodes) {
             auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
             if (!source) continue;
+            if (sourceIndex >= built.sourceBytes.size()) return false;
             retained_recipe::Digest geometry;
             const std::vector<std::uint8_t> bytes = Bytes(built.sourceBytes[sourceIndex]);
             if (!HashBytes(bytes, geometry)) return false;
@@ -13637,8 +14508,34 @@ bool PartBooleanOwner::buildPrepared(
             prepared.analytic.inputs[sourceIndex].commitments.geometry = geometry;
             ++sourceIndex;
         }
-        auto* feature = std::get_if<composite_recipe::FeatureNode>(&prepared.graph.nodes.back().value);
-        if (!feature || !EncodeAnalytic(prepared.analytic, feature->parameters)) return false;
+        if (sourceIndex != built.sourceBytes.size()) return false;
+        composite_recipe::FeatureNode* mutableBase = nullptr;
+        for (auto& node : prepared.graph.nodes) {
+            auto* candidate = std::get_if<composite_recipe::FeatureNode>(&node.value);
+            if (candidate && candidate->node == baseNode) { mutableBase = candidate; break; }
+        }
+        if (!mutableBase || !EncodeAnalytic(prepared.analytic, mutableBase->parameters)) return false;
+        prepared.result = built.candidate.solid;
+        bool dependentBuilt = true, dependentProven = true;
+        if (chain.hasSuffix) {
+            AnalyticFeatureChain refreshed;
+            composite_recipe::Definition prefix;
+            cut_display::Settings display;
+            const std::atomic_bool stop(false);
+            const auto secondPrefix = build::BuildAnalytic(requested, unit, reads, reads);
+            if (!ResolveAnalyticFeatureChain(prepared.graph, refreshed)
+                || !refreshed.hasSuffix || !PrefixGraph(prepared.graph, prefix)
+                || !CanonicalSuffixDisplay(display) || !secondPrefix.complete) return false;
+            const auto suffix = retained_program_suffix::build::Build(
+                built.candidate.solid, prefix, refreshed.suffix, display, stop);
+            const auto suffixFixed = retained_program_suffix::build::CheckFixedPoint(
+                built.candidate.solid, secondPrefix.candidate.solid,
+                prefix, refreshed.suffix, display, stop);
+            dependentBuilt = suffix.status == retained_program_suffix::build::Status::Built;
+            dependentProven = suffixFixed.fixedPoint();
+            if (!dependentBuilt || !dependentProven) return false;
+            prepared.result = suffix.solid;
+        }
         std::vector<std::uint8_t> graph, resultBytes;
         if (!composite_recipe::Encode(prepared.graph, graph)
             || !ShapeBytes(prepared.result, resultBytes)) return false;
@@ -13648,12 +14545,30 @@ bool PartBooleanOwner::buildPrepared(
         prepared.expected.scopes[2] = Bytes(built.sourceBytes[0]);
         prepared.expected.scopes[3] = Bytes(built.sourceBytes[1]);
         prepared.expected.scopes.back() = Bytes(capture.session);
-        prepared.currentness = capture.currentness;
-        prepared.currentness.ownerNonce = nonce_;
-        prepared.currentness.builderInstalled = built.complete;
-        prepared.currentness.proofInstalled = proof.proven() && fixed.fixedPoint();
-        if (!HashBytes(prepared.expected.scopes[0], prepared.currentness.graph)
-            || !HashBytes(prepared.expected.scopes[1], prepared.currentness.outputShape)) return false;
+        if (prepared.graph.schemaVersion == 3) {
+            if (prepared.expected.modelRevision
+                    == std::numeric_limits<std::uint64_t>::max()) return false;
+            ++prepared.expected.modelRevision;
+            retained_recipe::RevisionFence candidateFence;
+            if (!OwnerRevisionFence(prepared.graph, prepared.expected,
+                    nonce_, candidateFence)
+                || !BuildOwnerGraphCurrentness(prepared.graph, prepared.sources,
+                    prepared.result, candidateFence, prepared.expected, nonce_,
+                    prepared.graphCurrentness)
+                || !ValidOwnerFacts(prepared.graphCurrentness, prepared.graph)) return false;
+            // Schema-3 authority is the newly replayed candidate graph only.
+            prepared.currentness = {};
+        } else {
+            prepared.graphCurrentness = {};
+            prepared.currentness = capture.currentness;
+            prepared.currentness.ownerNonce = nonce_;
+            prepared.currentness.builderInstalled = built.complete && dependentBuilt;
+            prepared.currentness.proofInstalled = proof.proven()
+                && fixed.fixedPoint() && dependentProven;
+            if (!HashBytes(prepared.expected.scopes[0], prepared.currentness.graph)
+                || !HashBytes(prepared.expected.scopes[1],
+                              prepared.currentness.outputShape)) return false;
+        }
         return true;
     } catch (...) { return false; }
 }
@@ -13917,9 +14832,14 @@ bool PartBooleanOwner::exactlyOneOwnedDelta(const HistoryWitness& before,
 bool PartBooleanOwner::abortRestored(
     const PreparedBooleanDocumentChange& prepared) const noexcept {
     DocumentSnapshot restored;
-    return !document_->HasOpenCommand()
-        && captureNativeState(prepared.capture->carrier, restored)
-        && restored == prepared.capture->baseline;
+    composite_recipe::Record record;
+    if (document_->HasOpenCommand()
+        || !captureNativeState(prepared.capture->carrier, restored, &record)
+        || !(restored == prepared.capture->baseline)) return false;
+    if (!record.value || record.value->definition.schemaVersion != 3) return true;
+    retained_recipe::GraphCurrentnessFacts reminted;
+    return BuildRecordGraphCurrentness(record, restored, nonce_, reminted)
+        && SameGraphCurrentness(reminted, prepared.capture->graphCurrentness);
 }
 
 Receipt PartBooleanOwner::apply(
@@ -13928,14 +14848,28 @@ Receipt PartBooleanOwner::apply(
         || prepared->capture->session != activeSession_ || prepared->request == 0)
         return refuse("apply-foreign-handle");
     DocumentSnapshot current;
+    composite_recipe::Record currentRecord;
     try {
-        if (document_->HasOpenCommand() || !captureNativeState(prepared->capture->carrier, current)
+        if (document_->HasOpenCommand()
+            || !captureNativeState(prepared->capture->carrier, current, &currentRecord)
             || !(current == prepared->capture->baseline)
             || !owner_.myNativeAuthority
             || !owner_.myNativeAuthority->Matches(
                 prepared->capture->opening, documentIdentity_, true, false)
             || prepared->fault == FaultPoint::F2FinalFence)
             return refuse("apply-stale-final-fence");
+        if (prepared->graph.schemaVersion == 3) {
+            retained_recipe::GraphCurrentnessFacts remintedCapture;
+            if (!currentRecord.value
+                || currentRecord.value->definition.schemaVersion != 3
+                || !ValidOwnerFacts(prepared->capture->graphCurrentness,
+                    currentRecord.value->definition)
+                || !ValidOwnerFacts(prepared->graphCurrentness, prepared->graph)
+                || !BuildRecordGraphCurrentness(currentRecord, current, nonce_, remintedCapture)
+                || !SameGraphCurrentness(
+                    remintedCapture, prepared->capture->graphCurrentness))
+                return refuse("apply-stale-graph-currentness");
+        }
         if (prepared->fault == FaultPoint::F3Stop)
             return retire(Outcome::Cancelled, "cancelled-before-command");
         recoveryHistoryBefore_ = current.history;
@@ -13944,9 +14878,21 @@ Receipt PartBooleanOwner::apply(
         if (prepared->fault == FaultPoint::F4AfterOpen) throw std::runtime_error("F4");
         if (!stagePrepared(*prepared)) throw std::runtime_error("stage");
         DocumentSnapshot staged;
-        if (!captureNativeState(prepared->capture->carrier, staged)
+        composite_recipe::Record stagedRecord;
+        if (!captureNativeState(prepared->capture->carrier, staged, &stagedRecord)
             || !staged.preparedSemanticEquals(prepared->expected))
             throw std::runtime_error("readback");
+        if (prepared->graph.schemaVersion == 3) {
+            retained_recipe::GraphCurrentnessFacts stagedFacts;
+            DocumentSnapshot prospective = staged;
+            prospective.modelRevision = prepared->expected.modelRevision;
+            if (!stagedRecord.value
+                || stagedRecord.value->definition.schemaVersion != 3
+                || !BuildRecordGraphCurrentness(
+                    stagedRecord, prospective, nonce_, stagedFacts)
+                || !SameGraphCurrentness(stagedFacts, prepared->graphCurrentness))
+                throw std::runtime_error("graph-currentness-readback");
+        }
         if (prepared->fault == FaultPoint::F7BeforeClose) throw std::runtime_error("F7");
         const Standard_Boolean added = document_->CommitCommand();
         recoveryBaseline_ = prepared->capture->baseline;
@@ -13954,6 +14900,10 @@ Receipt PartBooleanOwner::apply(
         recoverySession_ = activeSession_; activeSession_ = 0;
         if (document_->HasOpenCommand() || !added)
             return result(Outcome::RecoveryRequired, "close-outcome-unproved", recoverySession_);
+        // Graph authority is single-transaction evidence. Once native commit
+        // succeeds, neither capture-time nor prepared facts remain reusable.
+        prepared->capture->graphCurrentness = {};
+        prepared->graphCurrentness = {};
         if (prepared->fault == FaultPoint::F9Reconcile)
             return result(Outcome::RecoveryRequired, "native-inspection-unavailable", recoverySession_);
         if (prepared->fault == FaultPoint::F8AfterClose) return reconcile(recoverySession_);
@@ -15756,6 +16706,14 @@ std::map<std::string,bool> Core3DDebugRetainedFeatureRegistryProbe(Standard_Inte
         auto result=owner.debugLifecycle(scenario==0?0.001:1.0);
         result[scenario==0?"millimetres":"metres"]=true;return result;
     }catch(...){return {{"setup-exception",false}};}
+}
+std::map<std::string,bool> Core3DDebugRetainedProgramSuffixProbe(Standard_Integer scenario){
+#if DEBUG
+    return core3d::retained_program_suffix::Probe::Run(scenario);
+#else
+    (void)scenario;
+    return {{"debug-only",false}};
+#endif
 }
 #include "SavedBooleanWedgeProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario){

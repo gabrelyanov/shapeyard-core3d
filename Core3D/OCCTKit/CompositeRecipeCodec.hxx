@@ -9,6 +9,7 @@
 // Dedicated SYCR/4 plain-profile cut codec (FIX-SPEC H1). Recognised only by
 // the closed v4 validator below; never added to either production registry.
 #include "PlainProfileCutPersistence.hxx"
+#include "RetainedProgramSuffix.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <cstring>
@@ -21,6 +22,8 @@ inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCod
 inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureKind = spatial_sweep::SpatialCircleSweepFeatureKind;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureCodec = spatial_sweep::SpatialCircleSweepFeatureCodec;
+inline constexpr std::uint32_t RetainedProgramSuffixFeatureKind = retained_program_suffix::FeatureKind;
+inline constexpr std::uint32_t RetainedProgramSuffixFeatureCodec = retained_program_suffix::FeatureCodec;
 
 class Writer {
 public:
@@ -236,6 +239,33 @@ inline bool ValidShellFeature(const FeatureNode& feature,
     } catch (...) { return false; }
 }
 
+inline bool ValidSpatialSweepEnvelope(const Definition& definition) noexcept {
+    try {
+        if (definition.schemaVersion != 2 || definition.nodes.size() != 2) return false;
+        const auto* source = std::get_if<SourceNode>(&definition.nodes[0].value);
+        const auto* feature = std::get_if<FeatureNode>(&definition.nodes[1].value);
+        if (!source || !feature || definition.outputNode != feature->node
+            || feature->kind != SpatialCircleSweepFeatureKind
+            || feature->codecVersion != SpatialCircleSweepFeatureCodec
+            || feature->inputs.size() != 1 || feature->inputs.front() != source->node
+            || source->recipe.kind != RecipeKind::BoundedCurvePath
+            || source->recipe.schema != bounded_curve::Schema
+            || source->original.document != definition.owner.document
+            || source->original.entity != definition.owner.entity
+            || source->original.definition != definition.owner.definition) return false;
+        bounded_curve::Value curve;
+        spatial_sweep::Definition payload;
+        return bounded_curve::Decode(source->recipe.bytes, curve)
+            && spatial_sweep::Decode(feature->parameters, payload)
+            && curve.feature == source->original.sourceFeature
+            && curve.feature == payload.path.curveFeature
+            && payload.path.inputNode == source->node
+            && payload.path.sourceRecipeDigest == source->commitments.recipe
+            && payload.path.ownerState.canonicalDefinitionDigest
+                == source->commitments.recipe;
+    } catch (...) { return false; }
+}
+
 inline bool CanonicalAnalyticFeature(const FeatureNode& feature,
                                      const std::vector<Node>&) noexcept {
     try {
@@ -255,6 +285,31 @@ inline bool CanonicalShellFeature(const FeatureNode& feature,
     part_boolean::Definition decoded; std::vector<std::uint8_t> exact;
     return part_boolean::Decode(feature.parameters, decoded)
         && part_boolean::Encode(decoded, exact) && exact == feature.parameters;
+}
+
+// A3/P2 is a normal SYCR/3 registry feature. Its payload is canonical and its
+// single ordered input must be an earlier PartBoolean feature. No SYCR/1 or
+// SYCR/2 validation branch is widened.
+inline bool CanonicalRetainedProgramSuffixFeature(
+    const FeatureNode& feature, const std::vector<Node>& priorNodes) noexcept {
+    try {
+        if (feature.kind != RetainedProgramSuffixFeatureKind
+            || feature.codecVersion != RetainedProgramSuffixFeatureCodec
+            || feature.inputs.size() != 1) return false;
+        retained_program_suffix::Definition decoded;
+        std::vector<std::uint8_t> exact;
+        if (!retained_program_suffix::Decode(feature.parameters, decoded)
+            || decoded.baseFeature != feature.inputs[0]
+            || !retained_program_suffix::Encode(decoded, exact)
+            || exact != feature.parameters) return false;
+        const auto found = std::find_if(priorNodes.begin(), priorNodes.end(),
+            [&](const Node& node) { return NodeID(node) == feature.inputs[0]; });
+        if (found == priorNodes.end()) return false;
+        const auto* base = std::get_if<FeatureNode>(&found->value);
+        return base && base->kind == PartBooleanFeatureKind
+            && (base->codecVersion == PartBooleanFeatureCodec
+                || base->codecVersion == PartBooleanShellFeatureCodec);
+    } catch (...) { return false; }
 }
 
 inline bool CanonicalLegacySource(const SourceRecipe& recipe) noexcept {
@@ -390,6 +445,7 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
         std::vector<bool> wireOutputs;
         std::size_t sources = 0;
         std::uint64_t maximumLocalID = 0;
+        const bool spatialSweepEnvelope = ValidSpatialSweepEnvelope(definition);
         for (const Node& node : definition.nodes) {
             const UUID& id = NodeID(node); const std::uint64_t local = LocalID(node);
             if (!retained_recipe::Nonzero(id) || !nodeIDs.insert(id).second || local == 0
@@ -419,8 +475,9 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
             const bool shellPartBoolean = definition.schemaVersion == 2
                 && ValidShellFeature(feature,
                     std::vector<Node>(definition.nodes.begin(), definition.nodes.begin() + depths.size()));
+            const bool spatialCircleSweep = spatialSweepEnvelope;
             if (!retained_recipe::Nonzero(feature.feature) || !featureIDs.insert(feature.feature).second
-                || (!legacyPartBoolean && !shellPartBoolean)
+                || (!legacyPartBoolean && !shellPartBoolean && !spatialCircleSweep)
                 || feature.parameters.size() > MaximumFeaturePayloadBytes) return false;
             std::size_t depth = 1;
             for (const UUID& input : feature.inputs) {
@@ -428,9 +485,10 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
                     [&](const Node& prior) { return NodeID(prior) == input; });
                 if (found == definition.nodes.begin() + depths.size()) return false;
                 const auto index = std::size_t(std::distance(definition.nodes.begin(), found));
-                // C1 G0 reserves canonical WIRE storage but does not install a
-                // consuming C2 feature. Existing v1/v2 booleans remain SOLID-only.
-                if (wireOutputs[index]) return false;
+                // SYCR/2 admits a wire only for the installed, exactly bound
+                // BoundedCurvePath -> SpatialCircleSweep pairing above.
+                // Existing v1/v2 booleans and every other consumer remain SOLID-only.
+                if (wireOutputs[index] && !spatialCircleSweep) return false;
                 depth = std::max(depth, depths[index] + 1);
             }
             if (depth > MaximumDepth) return false;
@@ -641,13 +699,17 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
 namespace core3d::retained_feature {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Entry, 2> entries{{
+    static const std::array<Entry, 3> entries{{
         {{{PartBooleanFeatureKind, PartBooleanFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalAnalyticFeature}, {}},
         {{{PartBooleanFeatureKind, PartBooleanShellFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalShellFeature}, {}},
+        {{{RetainedProgramSuffixFeatureKind, RetainedProgramSuffixFeatureCodec}, 3,
+          retained_program_suffix::MaximumPayloadBytes,
+          {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 1,
+          ShapeKind::Solid, CanonicalRetainedProgramSuffixFeature}, {}},
     }};
     static const RegistryView registry(entries.data(), entries.size());
     return registry;

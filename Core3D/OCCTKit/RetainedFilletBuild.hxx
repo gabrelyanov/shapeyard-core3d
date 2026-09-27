@@ -329,4 +329,50 @@ inline Result Build(const TopoDS_Shape& input,const retained_boolean::Program& p
         out.outcome=Outcome::Built;out.solid=current;return out;
     }catch(...){return fail(Outcome::DeclinedOcctFailure);}
 }
+// A3/P2: retained fillet tail on a proven COMPOSITE prefix result. There is no
+// analytic or transverse host expectation for a composite carrier, so every
+// round uses the transverse-strength certificate unconditionally: an
+// independent kernel round with exact empty-difference containment, then
+// complete census and exact V3 byte identity between candidate and
+// expectation, plus the measured volume-loss agreement. The legacy SYRS Build
+// above is untouched; a composite host never enters it.
+inline Result BuildComposite(const TopoDS_Shape& input,const Program& fillet,double metersPerUnit,
+    const std::atomic_bool& stop,
+    const std::function<bool(const TopoDS_Shape&)>& charge={},std::size_t* aggregateStreamBytes=nullptr) noexcept {
+    std::size_t localStreamBytes=0;auto& streamBytes=aggregateStreamBytes?*aggregateStreamBytes:localStreamBytes;
+    Result out;const auto fail=[&](Outcome why){Result r;r.outcome=stop.load()?Outcome::Cancelled:why;CORE3D_CUT_NOTE(Reason(r.outcome));return r;};
+    try {
+        if(stop.load())return fail(Outcome::Cancelled);
+        const double mm=metersPerUnit*1000;
+        if(!Valid(fillet,mm)||input.IsNull())return fail(Outcome::DeclinedOcctFailure);
+        BRepBuilderAPI_Copy copy(input,Standard_True,Standard_False);if(!copy.IsDone())return fail(Outcome::DeclinedOcctFailure);
+        TopoDS_Shape current=copy.Shape();
+        for(const auto& step:fillet.filletSteps){
+            if(stop.load())return fail(Outcome::Cancelled);
+            std::vector<TopoDS_Edge> selected;
+            for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge);
+                if(resolved!=Outcome::Built)return fail(resolved);selected.push_back(edge);}
+            BRepBuilderAPI_Copy expectation(current,Standard_True,Standard_False);
+            if(!expectation.IsDone())return fail(Outcome::DeclinedOcctFailure);
+            TopoDS_Shape expected;
+            const auto expectedOutcome=Round(expectation.Shape(),step,mm,stop,expected,true);
+            if(expectedOutcome!=Outcome::Built)return fail(expectedOutcome);
+            if(charge&&!charge(expected))return fail(Outcome::DeclinedBudget);
+            const double loss=Volume(expectation.Shape())-Volume(expected);
+            const Interval interval{loss,loss,0};
+#if DEBUG
+            if(ConsumeFailure())return fail(Outcome::DeclinedOcctFailure);
+#endif
+            TopoDS_Shape solid;const auto outcome=Round(current,step,mm,stop,solid,true);
+            if(outcome!=Outcome::Built)return fail(outcome);
+            const double removed=Volume(current)-Volume(solid);
+            const auto contains=[&](const Interval& i){return removed>=i.lower-std::abs(i.lower)*1e-6
+                &&removed<=i.upper+std::abs(i.upper)*1e-6;};
+            if(!contains(interval)||!SameBoundary(solid,expected,stop,streamBytes))return fail(Outcome::DeclinedOcctFailure);
+            if(charge&&!charge(solid))return fail(Outcome::DeclinedBudget);
+            current=solid;out.intervals.push_back(interval);
+        }
+        out.outcome=Outcome::Built;out.solid=current;return out;
+    }catch(...){return fail(Outcome::DeclinedOcctFailure);}
+}
 }

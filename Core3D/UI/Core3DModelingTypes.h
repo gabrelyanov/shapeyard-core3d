@@ -151,6 +151,25 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! Opaque, one-opening authority for the native C2 Objects editor. `descriptor`
+//! is a complete immutable human-readable value; it cannot recreate permission.
+//! Apply accepts only this exact live object and re-reads its native fence.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSpatialSweepEditorContext : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Stops only detached work started by this exact context. It cannot cancel,
+//! execute, retry or replace a later editor operation.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSpatialSweepEditOperation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (BOOL)cancel;
+@end
+
 //! Values use source-recipe millimetres, BEFORE construction-frame and occurrence
 //! scaling. They do not change the bore, source plane, construction frame or IDs.
 typedef NS_ENUM(NSInteger, Core3DSavedCutSourceFamily) { Core3DSavedCutSourceFamilyPolygon NS_SWIFT_NAME(polygon)=1, Core3DSavedCutSourceFamilyEnclosure NS_SWIFT_NAME(enclosure)=2, Core3DSavedCutSourceFamilyCircle NS_SWIFT_NAME(circle)=3, Core3DSavedCutSourceFamilyLoft NS_SWIFT_NAME(loft)=4 };

@@ -11,6 +11,10 @@ namespace core3d::retained_feature {
 // D67 reserves these persisted kind values without installing descriptors.
 inline constexpr std::uint32_t ReservedD67FeatureKind1001 = 0x00001001;
 inline constexpr std::uint32_t ReservedD67FeatureKind3001 = 0x00003001;
+// D67 family-banded T-A allocation, now named for A3/P2. Persisted code must
+// consume this registry-owned symbol; the historical raw draft value 3 is not
+// a registered key.
+inline constexpr std::uint32_t RetainedProgramSuffixKind = ReservedD67FeatureKind1001;
 inline constexpr std::uint32_t ExistingChamferAdapterKind = 0x00002001;
 inline constexpr std::uint32_t ExistingConstantFilletAdapterKind = 0x00002002;
 inline constexpr std::uint32_t VariableRadiusFilletKind = 0x00002003;

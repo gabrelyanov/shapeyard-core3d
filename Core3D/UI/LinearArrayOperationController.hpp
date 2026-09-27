@@ -8,6 +8,7 @@
 
 #include "Core3DContext.hpp"
 #include "OcctDocument.h"
+#include "../OCCTKit/PatternRecipeClone.hxx"
 
 #include <AIS_Shape.hxx>
 
@@ -150,6 +151,7 @@ private:
         Standard_Boolean enclosureCurrent = Standard_False;
         Standard_Size retainedEnclosureTopologyNodes = 0;
         Standard_Size retainedProfileTopologyNodes = 0;
+        pattern_recipe_clone::Source sweepLoft;
         Standard_Integer documentTime = 0;
         Standard_Size topologyNodeCount = 0;
         Standard_Real metersPerUnit = 0.0;
@@ -170,6 +172,8 @@ private:
         OcctReferenceAxis expectedReferenceAxis;
         profile::Record expectedProfile;
         enclosure::Record expectedEnclosure;
+        pattern_recipe_clone::Candidate expectedSweepLoft;
+        Standard_Boolean sweepLoftCandidateSealed = Standard_False;
         Standard_Boolean profileCandidateSealed = Standard_False;
     };
 

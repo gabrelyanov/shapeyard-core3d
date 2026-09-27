@@ -82,12 +82,14 @@
 #include "../OCCTKit/NativeModelingRequest.hxx"
 #include "../OCCTKit/NativeModelingTombstone.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
+#include "../OCCTKit/SpatialSweepEditor.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
 #include "../OCCTKit/BoundedCurveEditProbe.hxx"
 #include "../OCCTKit/BoundedCurvePersistenceProbe.hxx"
 #include "../OCCTKit/SpatialSweepProbe.hxx"
+#include "../OCCTKit/SpatialSweepColdOpenFixture.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceiptLegacyDebug.hxx"
 #include "../OCCTKit/ReceiptCatalogProbe.hxx"
@@ -1505,6 +1507,216 @@ static Core3DRetainedFilletOutcome Core3DFilletOutcome(core3d::retained_fillet::
 }
 - (core3d::StoredSweepSnapshot)nativeSnapshot {return _native;}
 @end
+
+static NSString *Core3DSpatialUUID(const core3d::retained_recipe::UUID& value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    char text[33];
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        text[index * 2] = hex[value[index] >> 4];
+        text[index * 2 + 1] = hex[value[index] & 15];
+    }
+    text[32] = 0;
+    return [NSString stringWithUTF8String:text];
+}
+
+static NSArray<NSNumber *> *Core3DSpatialVector(const std::array<double, 3>& value,
+                                                 double scale) {
+    return @[@(value[0] * scale), @(value[1] * scale), @(value[2] * scale)];
+}
+
+static NSDictionary<NSString *, id> *Core3DSpatialDescriptor(
+    const core3d::composite_recipe::spatial_g0::CaptureResult& opening) {
+    const auto& curve = opening.curve.definition;
+    const auto& sweep = opening.sweep;
+    const double factor = sweep.dimensionMetersPerUnit * 1000.0;
+    NSMutableArray *poles = [NSMutableArray arrayWithCapacity:curve.controlPoints.size()];
+    for (const auto& pole : curve.controlPoints) {
+        [poles addObject:@{@"identifier": Core3DSpatialUUID(pole.identifier),
+            @"xMM": @(pole.local[0] * factor), @"yMM": @(pole.local[1] * factor),
+            @"zMM": @(pole.local[2] * factor)}];
+    }
+    NSMutableArray *knots = [NSMutableArray arrayWithCapacity:curve.knots.size()];
+    for (const auto& knot : curve.knots)
+        [knots addObject:@{@"value": @(knot.value), @"multiplicity": @(knot.multiplicity)}];
+    id weights = NSNull.null;
+    if (!curve.weights.empty()) {
+        NSMutableArray *values = [NSMutableArray arrayWithCapacity:curve.weights.size()];
+        for (double value : curve.weights) [values addObject:@(value)];
+        weights = values;
+    }
+    NSDictionary *frame = @{
+        @"originMM": Core3DSpatialVector(curve.frame.origin, factor),
+        @"xAxis": Core3DSpatialVector(curve.frame.xAxis, 1),
+        @"yAxis": Core3DSpatialVector(curve.frame.yAxis, 1),
+        @"zAxis": Core3DSpatialVector(curve.frame.zAxis, 1),
+    };
+    NSString *radiusLaw = sweep.radius.kind == core3d::spatial_sweep::RadiusLawKind::Constant
+        ? @"constant" : @"linearArcLength";
+    NSString *twistLaw = sweep.twist.kind == core3d::spatial_sweep::TwistLawKind::LinearArcLength
+        ? @"linearArcLength" : @"closeFrame";
+    NSString *closure = sweep.closure == core3d::spatial_sweep::ClosureKind::OpenFlatCaps
+        ? @"openFlatCaps" : @"closedNoCaps";
+    return @{
+        @"poles": poles, @"degree": @(curve.degree), @"knots": knots, @"weights": weights,
+        @"frame": frame,
+        @"seed": Core3DSpatialVector(sweep.orientation.authoredSeed, 1),
+        @"phaseDegrees": @(sweep.orientation.phaseRadians * 180.0 / core3d::spatial_sweep::Pi),
+        @"radiusLaw": radiusLaw,
+        @"startRadiusMM": @(sweep.radius.startRadius * factor),
+        @"endRadiusMM": @(sweep.radius.endRadius * factor),
+        @"twistLaw": twistLaw,
+        @"totalTwistDegrees": @(sweep.twist.totalRadians * 180.0 / core3d::spatial_sweep::Pi),
+        @"windingTurns": @(sweep.twist.windingTurns), @"closure": closure,
+        @"section": @"solidCircle", @"sectionCenter": @"path",
+        @"sectionNormal": @"forwardTangent", @"transport": @"bishop.v1",
+        @"parameterization": @"normalizedArcLength.v1",
+        @"dimensionMetersPerUnit": @(sweep.dimensionMetersPerUnit),
+        @"curveFeatureIdentifier": Core3DSpatialUUID(opening.fence.curveFeature),
+        @"sweepFeatureIdentifier": Core3DSpatialUUID(opening.fence.sweepFeature),
+        @"sectionIdentifier": Core3DSpatialUUID(opening.fence.section),
+        @"definitionRevision": @(opening.fence.curveRevision),
+        @"buildProfile": @{@"algorithm": @(sweep.profile.algorithm),
+            @"tolerance": @(sweep.profile.tolerance), @"proof": @(sweep.profile.proof),
+            @"serializer": @(sweep.profile.serializer)},
+        @"pathControlMode": @"uuid-poles-and-handles",
+    };
+}
+
+@interface Core3DSpatialSweepEditorContext ()
+- (instancetype)initWithOwner:(Core3DViewController *)owner
+    opening:(const core3d::composite_recipe::spatial_g0::CaptureResult&)opening
+    scene:(Core3DSceneSnapshot *)scene;
+@end
+@implementation Core3DSpatialSweepEditorContext {
+@public
+    __weak Core3DViewController *_owner;
+    core3d::composite_recipe::spatial_g0::CaptureResult _opening;
+    Core3DSceneSnapshot *_scene;
+    BOOL _consumed;
+}
+- (instancetype)initWithOwner:(Core3DViewController *)owner
+    opening:(const core3d::composite_recipe::spatial_g0::CaptureResult&)opening
+    scene:(Core3DSceneSnapshot *)scene {
+    self = [super init];
+    if (self) {
+        _owner = owner; _opening = opening; _scene = scene;
+        _descriptor = [Core3DSpatialDescriptor(opening) copy];
+        if (!_descriptor) return nil;
+    }
+    return self;
+}
+@end
+
+@interface Core3DSpatialSweepEditOperation ()
+- (instancetype)initWithCancellation:(const std::shared_ptr<std::atomic_bool>&)cancellation;
+@end
+@implementation Core3DSpatialSweepEditOperation {
+    std::shared_ptr<std::atomic_bool> _cancellation;
+}
+- (instancetype)initWithCancellation:(const std::shared_ptr<std::atomic_bool>&)cancellation {
+    self = [super init]; if (self) _cancellation = cancellation; return self;
+}
+- (BOOL)cancel {
+    if (![NSThread isMainThread] || !_cancellation) return NO;
+    bool expected = false;
+    return _cancellation->compare_exchange_strong(expected, true);
+}
+@end
+
+static bool Core3DSpatialNumber(id value, double& output) {
+    if (![value isKindOfClass:NSNumber.class]
+        || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return false;
+    output = [value doubleValue]; return std::isfinite(output);
+}
+
+static bool Core3DSpatialVectorValue(id value, std::array<double, 3>& output,
+                                     double divisor) {
+    if (![value isKindOfClass:NSArray.class] || [value count] != 3
+        || !std::isfinite(divisor) || divisor <= 0) return false;
+    for (NSUInteger index = 0; index < 3; ++index) {
+        double component = 0;
+        if (!Core3DSpatialNumber(value[index], component)) return false;
+        output[index] = component / divisor;
+    }
+    return true;
+}
+
+static bool Core3DSpatialCandidate(NSDictionary<NSString *, id> *value,
+    const core3d::composite_recipe::spatial_g0::CaptureResult& opening,
+    core3d::spatial_sweep::editor::Candidate& output) {
+    static NSSet<NSString *> *keys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ keys = [NSSet setWithArray:@[@"poles", @"degree", @"knots", @"weights",
+        @"frame", @"seed", @"phaseDegrees", @"radiusLaw", @"startRadiusMM", @"endRadiusMM",
+        @"twistLaw", @"totalTwistDegrees", @"windingTurns", @"closure"]]; });
+    if (![value isKindOfClass:NSDictionary.class]
+        || ![[NSSet setWithArray:value.allKeys] isEqualToSet:keys]) return false;
+    try {
+        output.curve = opening.curve.definition; output.sweep = opening.sweep;
+        const double factor = opening.sweep.dimensionMetersPerUnit * 1000.0;
+        NSArray *poles = value[@"poles"];
+        if (![poles isKindOfClass:NSArray.class]
+            || poles.count != output.curve.controlPoints.size()) return false;
+        for (NSUInteger index = 0; index < poles.count; ++index) {
+            NSDictionary *pole = poles[index];
+            if (![pole isKindOfClass:NSDictionary.class]
+                || ![pole[@"identifier"] isEqualToString:Core3DSpatialUUID(output.curve.controlPoints[index].identifier)]) return false;
+            for (NSString *key in @[@"xMM", @"yMM", @"zMM"]) if (!pole[key]) return false;
+            if (!Core3DSpatialNumber(pole[@"xMM"], output.curve.controlPoints[index].local[0])
+                || !Core3DSpatialNumber(pole[@"yMM"], output.curve.controlPoints[index].local[1])
+                || !Core3DSpatialNumber(pole[@"zMM"], output.curve.controlPoints[index].local[2])) return false;
+            for (double& component : output.curve.controlPoints[index].local) component /= factor;
+        }
+        double degree = 0;
+        if (!Core3DSpatialNumber(value[@"degree"], degree) || degree != std::floor(degree)
+            || degree < 1 || degree > 7) return false;
+        output.curve.degree = std::uint8_t(degree);
+        NSArray *knots = value[@"knots"];
+        if (![knots isKindOfClass:NSArray.class] || knots.count < 2 || knots.count > 128) return false;
+        output.curve.knots.clear();
+        for (NSDictionary *knot in knots) {
+            double scalar = 0, multiplicity = 0;
+            if (![knot isKindOfClass:NSDictionary.class]
+                || !Core3DSpatialNumber(knot[@"value"], scalar)
+                || !Core3DSpatialNumber(knot[@"multiplicity"], multiplicity)
+                || multiplicity != std::floor(multiplicity) || multiplicity < 1 || multiplicity > 8) return false;
+            output.curve.knots.push_back({scalar, std::uint8_t(multiplicity)});
+        }
+        id weights = value[@"weights"]; output.curve.weights.clear();
+        if (weights != NSNull.null) {
+            if (![weights isKindOfClass:NSArray.class] || [weights count] != poles.count) return false;
+            for (id item in weights) { double weight = 0; if (!Core3DSpatialNumber(item, weight)) return false; output.curve.weights.push_back(weight); }
+        }
+        NSDictionary *frame = value[@"frame"];
+        if (![frame isKindOfClass:NSDictionary.class]
+            || !Core3DSpatialVectorValue(frame[@"originMM"], output.curve.frame.origin, factor)
+            || !Core3DSpatialVectorValue(frame[@"xAxis"], output.curve.frame.xAxis, 1)
+            || !Core3DSpatialVectorValue(frame[@"yAxis"], output.curve.frame.yAxis, 1)
+            || !Core3DSpatialVectorValue(frame[@"zAxis"], output.curve.frame.zAxis, 1)
+            || !Core3DSpatialVectorValue(value[@"seed"], output.sweep.orientation.authoredSeed, 1)) return false;
+        double phase = 0, start = 0, end = 0, total = 0, winding = 0;
+        if (!Core3DSpatialNumber(value[@"phaseDegrees"], phase)
+            || !Core3DSpatialNumber(value[@"startRadiusMM"], start)
+            || !Core3DSpatialNumber(value[@"endRadiusMM"], end)
+            || !Core3DSpatialNumber(value[@"totalTwistDegrees"], total)
+            || !Core3DSpatialNumber(value[@"windingTurns"], winding)
+            || winding != std::floor(winding)) return false;
+        output.sweep.orientation.phaseRadians = phase * core3d::spatial_sweep::Pi / 180.0;
+        output.sweep.radius.startRadius = start / factor; output.sweep.radius.endRadius = end / factor;
+        if ([value[@"radiusLaw"] isEqual:@"constant"]) output.sweep.radius.kind = core3d::spatial_sweep::RadiusLawKind::Constant;
+        else if ([value[@"radiusLaw"] isEqual:@"linearArcLength"]) output.sweep.radius.kind = core3d::spatial_sweep::RadiusLawKind::LinearArcLength;
+        else return false;
+        output.sweep.twist.totalRadians = total * core3d::spatial_sweep::Pi / 180.0;
+        output.sweep.twist.windingTurns = std::int32_t(winding);
+        if ([value[@"twistLaw"] isEqual:@"linearArcLength"]) output.sweep.twist.kind = core3d::spatial_sweep::TwistLawKind::LinearArcLength;
+        else if ([value[@"twistLaw"] isEqual:@"closeFrame"]) output.sweep.twist.kind = core3d::spatial_sweep::TwistLawKind::CloseFrame;
+        else return false;
+        if ([value[@"closure"] isEqual:@"openFlatCaps"]) output.sweep.closure = core3d::spatial_sweep::ClosureKind::OpenFlatCaps;
+        else if ([value[@"closure"] isEqual:@"closedNoCaps"]) output.sweep.closure = core3d::spatial_sweep::ClosureKind::ClosedNoCaps;
+        else return false;
+        return true;
+    } catch (...) { return false; }
+}
 
 @interface Core3DStoredEnclosureSnapshot ()
 - (instancetype)initWithNativeSnapshot:(const core3d::StoredEnclosureSnapshot&)snapshot;
@@ -7644,6 +7856,196 @@ struct NativeModelingPermitIssuer final {
         out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
     return [out copy];
 }
+#if DEBUG
+- (NSDictionary<NSString *, id> *)debugPlainProfileCutRetention:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr || GLController == nil
+        || GLController.viewer == nullptr
+        || GLController.viewer->hasUnresolvedOrdinaryEdit()) return nil;
+    try {
+        const Handle(OcctDocument) document = GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return nil;
+        OcctPlainProfileCutDebugEvidence evidence;
+        if (!document->DebugPlainProfileCutRetention(
+                entityIdentifier.UTF8String, evidence)) return nil;
+        NSMutableDictionary<NSString *, NSData *> *bytes = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *numbers = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *checks = [NSMutableDictionary dictionary];
+        for (const auto& row : evidence.bytes) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || row.second.empty() || bytes[key] != nil) return nil;
+            bytes[key] = [NSData dataWithBytes:row.second.data() length:row.second.size()];
+        }
+        for (const auto& row : evidence.numbers) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || !std::isfinite(row.second) || numbers[key] != nil) return nil;
+            numbers[key] = @(row.second);
+        }
+        for (const auto& row : evidence.checks) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || checks[key] != nil) return nil;
+            checks[key] = @(row.second);
+        }
+        return @{ @"bytes": [bytes copy], @"numbers": [numbers copy],
+                  @"checks": [checks copy] };
+    } catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *, id> *)debugPlainProfileCutPersistenceProbe:(NSInteger)scenario {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 3
+        || GLController == nil || GLController.viewer == nullptr
+        || GLController.viewer->hasUnresolvedOrdinaryEdit()) return @{};
+    try {
+        namespace c = core3d::composite_recipe;
+        namespace p = core3d::plain_profile_cut;
+        const Handle(OcctDocument) owner = GLController.viewer->getDocument();
+        const Handle(TDocStd_Document) document = owner.IsNull()
+            ? Handle(TDocStd_Document)() : owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @{};
+        std::vector<c::Record> records;
+        if (!c::ReadAll(document, records)) return @{};
+        const c::Record *record = nullptr;
+        for (const c::Record& candidate : records) {
+            if (!candidate.value
+                || candidate.value->definition.schemaVersion != p::GraphVersion)
+                continue;
+            if (record != nullptr) return @{};
+            record = &candidate;
+        }
+        if (record == nullptr || !record->value) return @{};
+
+        std::map<std::string, bool> controls;
+        c::Definition decoded;
+        std::vector<std::uint8_t> canonical;
+        controls["production-v4-decode"] =
+            c::Decode(record->value->bytes, decoded);
+        controls["canonical-reencode-exact"] = controls["production-v4-decode"]
+            && c::Encode(decoded, canonical)
+            && canonical == record->value->bytes;
+        std::vector<std::uint8_t> truncated = record->value->bytes;
+        if (!truncated.empty()) truncated.pop_back();
+        c::Definition refused;
+        controls["truncation-refused"] = !c::Decode(truncated, refused);
+        std::vector<std::uint8_t> unknownVersion = record->value->bytes;
+        if (unknownVersion.size() > 4) unknownVersion[4] = 0xff;
+        controls["unknown-version-refused"] = !c::Decode(unknownVersion, refused);
+        std::vector<std::uint8_t> oversized(
+            c::MaximumEnvelopeBytes + 1, std::uint8_t(0));
+        controls["oversize-refused"] = !c::Decode(oversized, refused);
+
+        c::Definition reordered = decoded;
+        if (!reordered.nodes.empty()) {
+            auto *feature = std::get_if<c::FeatureNode>(
+                &reordered.nodes.back().value);
+            if (feature && feature->inputs.size() == 2)
+                std::swap(feature->inputs[0], feature->inputs[1]);
+        }
+        std::vector<std::uint8_t> invalid;
+        controls["reordered-edge-refused"] = !c::Encode(reordered, invalid);
+        c::Definition changedScalar = decoded;
+        for (c::Node& node : changedScalar.nodes) {
+            auto *source = std::get_if<c::SourceNode>(&node.value);
+            if (!source || source->recipe.bytes.empty()) continue;
+            source->recipe.bytes.back() ^= 0x80;
+            break;
+        }
+        controls["changed-scalar-refused"] = !c::Encode(changedScalar, invalid);
+        c::Definition wrongOrdinal = decoded;
+        if (!wrongOrdinal.nodes.empty()) {
+            auto *feature = std::get_if<c::FeatureNode>(
+                &wrongOrdinal.nodes.back().value);
+            p::Step step;
+            if (feature && p::DecodeStep(feature->parameters, step)) {
+                ++step.ordinal;
+                p::EncodeStep(step, feature->parameters);
+            }
+        }
+        controls["wrong-ordinal-refused"] = !c::Encode(wrongOrdinal, invalid);
+        const auto& registry = core3d::retained_feature::ProductionRegistry();
+        const auto* suffix = registry.find({
+            c::RetainedProgramSuffixFeatureKind,
+            c::RetainedProgramSuffixFeatureCodec});
+        controls["production-registry-has-three-closed-codecs"] = registry.size() == 3;
+        controls["a3p2-codec-present-execution-disabled"] =
+            suffix != nullptr && !suffix->execution.installed();
+        controls["plain-profile-cut-key-not-in-production-registry"] = registry.find({
+            p::PlainProfileCutKind, p::CodecVersion}) == nullptr;
+
+        const TopoDS_Shape direct = BRepPrimAPI_MakeBox(10, 8, 6).Shape();
+        TopoDS_Shape canonicalCandidate;
+        controls["direct-solid"] =
+            core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    direct, 32768, canonicalCandidate)
+            && canonicalCandidate.IsSame(direct);
+        BRep_Builder builder;
+        TopoDS_Compound singleton;
+        builder.MakeCompound(singleton);
+        gp_Trsf translation;
+        translation.SetTranslation(gp_Vec(3, 4, 5));
+        const TopoDS_Shape located = direct.Moved(TopLoc_Location(translation));
+        builder.Add(singleton, located);
+        controls["located-singleton-compound"] =
+            core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    singleton, 32768, canonicalCandidate)
+            && canonicalCandidate.IsSame(located)
+            && canonicalCandidate.Location().IsEqual(located.Location());
+        TopoDS_Compound empty;
+        builder.MakeCompound(empty);
+        controls["empty-refused"] =
+            !core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    empty, 32768, canonicalCandidate);
+        TopoDS_Compound aliased;
+        builder.MakeCompound(aliased);
+        builder.Add(aliased, direct);
+        builder.Add(aliased, direct);
+        controls["aliased-two-child-refused"] =
+            !core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    aliased, 32768, canonicalCandidate);
+        TopoDS_Compound nested;
+        builder.MakeCompound(nested);
+        builder.Add(nested, singleton);
+        controls["nested-refused"] =
+            !core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    nested, 32768, canonicalCandidate);
+        TopoDS_CompSolid compSolid;
+        builder.MakeCompSolid(compSolid);
+        builder.Add(compSolid, direct);
+        controls["compsolid-refused"] =
+            !core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    compSolid, 32768, canonicalCandidate);
+        controls["reversed-refused"] =
+            !core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    direct.Reversed(), 32768, canonicalCandidate);
+        controls["budget-refused"] =
+            !core3d::BooleanOperationController::
+                debugCanonicalPlainProfileBooleanCandidate(
+                    direct, 1, canonicalCandidate);
+
+        NSMutableDictionary<NSString *, NSNumber *> *checks =
+            [NSMutableDictionary dictionary];
+        for (const auto& row : controls) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || checks[key] != nil) return @{};
+            checks[key] = @(row.second);
+        }
+        NSData *envelope = [NSData dataWithBytes:record->value->bytes.data()
+                                          length:record->value->bytes.size()];
+        NSData *canonicalData = [NSData dataWithBytes:canonical.data()
+                                               length:canonical.size()];
+        return @{ @"scenario": @(scenario), @"checks": [checks copy],
+                  @"envelope": envelope, @"canonicalEnvelope": canonicalData };
+    } catch (...) { return @{}; }
+}
+#endif
 + (NSDictionary<NSString *, NSData *> *)debugLegacyCorpusCapture {
     if (![NSThread isMainThread]) return @{};
     try {
@@ -7661,6 +8063,16 @@ struct NativeModelingPermitIssuer final {
     for(const auto& row:Core3DDebugRetainedFeatureRegistryProbe(static_cast<Standard_Integer>(scenario)))
         out[[NSString stringWithUTF8String:row.first.c_str()]]=@(row.second);
     return [out copy];
+}
++ (NSDictionary<NSString *, NSNumber *> *)debugRetainedProgramSuffixProbe:(NSInteger)scenario {
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    for (const auto& check : Core3DDebugRetainedProgramSuffixProbe(
+            static_cast<Standard_Integer>(scenario))) {
+        NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+        if (key == nil) return @{ @"invalidKey": @NO };
+        result[key] = @(check.second);
+    }
+    return [result copy];
 }
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe {
     NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
@@ -7743,6 +8155,20 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return @{ @"setupException": @NO }; }
 }
 
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepEditorProbe:(NSUInteger)scenario {
+    if (![NSThread isMainThread] || scenario > 2) return @{ @"invalidScenario": @NO };
+    try {
+        const auto checks = Core3DDebugSpatialSweepEditorProbe((unsigned)scenario);
+        NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
 + (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurveEditProbe {
     if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
     try {
@@ -7797,6 +8223,113 @@ struct NativeModelingPermitIssuer final {
         }
         return result;
     } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepDocumentAdmissionProbe {
+    if (![NSThread isMainThread]) return @{ @"invalidThread": @NO };
+    try {
+        using Fixture = core3d::composite_recipe::SpatialSweepColdOpenFixture;
+        const auto checks = Fixture::DocumentAdmissionChecks(
+            [](const Handle(TDocStd_Document)& document) {
+                return Core3DValidateCompositeRecipeDocument(document) == Standard_True;
+            });
+        NSMutableDictionary<NSString *, NSNumber *> *result =
+            [NSMutableDictionary dictionaryWithCapacity:checks.size()];
+        for (const auto& check : checks) {
+            NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+            if (key == nil) return @{ @"invalidKey": @NO };
+            result[key] = @(check.second);
+        }
+        return result;
+    } catch (...) { return @{ @"setupException": @NO }; }
+}
+
++ (NSData *)debugSpatialSweepColdOpenFixtureDataWithMetersPerUnit:(double)metersPerUnit {
+    if (![NSThread isMainThread]
+        || (metersPerUnit != 0.001 && metersPerUnit != 1.0)) return nil;
+    return Core3DCreateDebugBinXCAFFixture(
+        metersPerUnit == 0.001 ? @"c2-spatial-sweep-mm" : @"c2-spatial-sweep-m",
+        [metersPerUnit](const Handle(TDocStd_Document)& document) {
+            if (!core3d::composite_recipe::SpatialSweepColdOpenFixture::StageSpatialSweepColdOpenFixture(
+                    document, metersPerUnit)) {
+                throw Standard_Failure("Unable to stage C2 retained spatial sweep fixture");
+            }
+        });
+}
+
++ (NSData *)debugB10SpatialSweepFixtureDataWithMetersPerUnit:(double)metersPerUnit {
+    if (![NSThread isMainThread]
+        || (metersPerUnit != 0.001 && metersPerUnit != 1.0)) return nil;
+    return Core3DCreateDebugBinXCAFFixture(
+        metersPerUnit == 0.001 ? @"c2-b10-post-v1-mm" : @"c2-b10-post-v1-m",
+        [metersPerUnit](const Handle(TDocStd_Document)& document) {
+            using Fixture = core3d::composite_recipe::SpatialSweepColdOpenFixture;
+            if (!Fixture::StageSpatialSweepColdOpenFixture(
+                    document, metersPerUnit, Fixture::Variant::b10PostV1)) {
+                throw Standard_Failure("Unable to stage B10 Lantern.Post spatial sweep fixture");
+            }
+        });
+}
+
+- (NSDictionary<NSString *, id> *)debugSpatialSweepDurabilityEvidence:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128) return nil;
+    try {
+        const Handle(OcctDocument) owner = GLController.viewer->getDocument();
+        const auto document = owner.IsNull()
+            ? Handle(TDocStd_Document)() : owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return nil;
+        const Handle(XCAFDoc_ShapeTool) shapes =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull() || entityIdentifier.UTF8String == nullptr) return nil;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        TDF_Label label; unsigned matches = 0;
+        const std::string target(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == target) {
+                label = roots.Value(index); ++matches;
+            }
+        }
+        if (matches != 1 || label.IsNull()) return nil;
+        const auto opening = core3d::composite_recipe::spatial_g0::Capture(
+            document, label);
+        if (!opening.admitted() || opening.fence.sourceCommitments.size() != 1)
+            return nil;
+        const auto data = [](const auto& bytes) -> NSData * {
+            return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+        };
+        NSMutableArray<NSString *> *poles = [NSMutableArray arrayWithCapacity:
+            opening.curve.definition.controlPoints.size()];
+        for (const auto& pole : opening.curve.definition.controlPoints)
+            [poles addObject:Core3DSpatialUUID(pole.identifier)];
+        const auto& commitments = opening.fence.sourceCommitments.front();
+        return @{
+            @"compositeBytes": data(opening.fence.compositeBytes),
+            @"curveBytes": data(opening.fence.curveBytes),
+            @"featureBytes": data(opening.fence.featureBytes),
+            @"ownerBRep": data(opening.fence.ownerGeometry),
+            @"sourceBRep": data(opening.fence.sourceGeometry),
+            @"geometryCommitment": data(commitments.geometry),
+            @"recipeCommitment": data(commitments.recipe),
+            @"placementCommitment": data(commitments.placement),
+            @"materialCommitment": data(commitments.material),
+            @"groupsCommitment": data(commitments.groups),
+            @"ownerDocument": Core3DSpatialUUID(opening.fence.owner.document),
+            @"ownerEntity": Core3DSpatialUUID(opening.fence.owner.entity),
+            @"ownerDefinition": Core3DSpatialUUID(opening.fence.owner.definition),
+            @"outputNode": Core3DSpatialUUID(opening.fence.outputNode),
+            @"sourceNode": Core3DSpatialUUID(opening.fence.sourceNode),
+            @"curveFeature": Core3DSpatialUUID(opening.fence.curveFeature),
+            @"sweepFeature": Core3DSpatialUUID(opening.fence.sweepFeature),
+            @"section": Core3DSpatialUUID(opening.fence.section),
+            @"poleIdentifiers": poles,
+            @"curveRevision": @(opening.fence.curveRevision),
+            @"curveNextLocalID": @(opening.fence.curveNextLocalID),
+            @"metersPerUnit": @(opening.fence.metersPerUnit),
+        };
+    } catch (...) { return nil; }
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)debugRetainedPartBooleanProbe {
@@ -15363,6 +15896,450 @@ struct NativeModelingPermitIssuer final {
             static_cast<std::uint32_t>(std::llround(size.width)),static_cast<std::uint32_t>(std::llround(size.height)));
         return result ? [[Core3DStoredSweepSnapshot alloc] initWithNativeSnapshot:*result] : nil;
     } catch (...) { return nil; }
+}
+
+static bool Core3DDoubleBitsEqual(const double first, const double second) noexcept {
+    return std::memcmp(&first, &second, sizeof(double)) == 0;
+}
+
+static bool Core3DSpatialSceneAuthorityMatches(Core3DSceneSnapshot *current,
+                                                Core3DSceneSnapshot *authority) {
+    if (![current isKindOfClass:Core3DSceneSnapshot.class]
+        || ![authority isKindOfClass:Core3DSceneSnapshot.class]
+        || current.schemaVersion == 0 || current.schemaVersion != authority.schemaVersion
+        || current.publicationSourceIdentifier.length == 0
+        || current.publicationSourceIdentifier.length > 128
+        || authority.publicationSourceIdentifier.length == 0
+        || authority.publicationSourceIdentifier.length > 128
+        || ![current.publicationSourceIdentifier
+            isEqualToString:authority.publicationSourceIdentifier]
+        || authority.revisions.snapshotRevision == 0
+        || current.revisions.snapshotRevision == 0
+        || current.revisions.snapshotRevision <= authority.revisions.snapshotRevision
+        || current.revisions.documentGeneration != authority.revisions.documentGeneration
+        || current.revisions.modelRevision != authority.revisions.modelRevision
+        || current.revisions.presentationRevision != authority.revisions.presentationRevision
+        || current.revisions.cameraRevision != authority.revisions.cameraRevision
+        || !Core3DDoubleBitsEqual(current.metersPerUnit, authority.metersPerUnit)
+        || current.selectionMode != Core3DSceneElementKindObject
+        || authority.selectionMode != Core3DSceneElementKindObject
+        || current.selection.selectedElements.count != 1
+        || authority.selection.selectedElements.count != 1) return false;
+    Core3DSceneElementIdentifier *a = current.selection.selectedElements.firstObject;
+    Core3DSceneElementIdentifier *b = authority.selection.selectedElements.firstObject;
+    return a.kind == Core3DSceneElementKindObject && b.kind == Core3DSceneElementKindObject
+        && a.topologyIndex == b.topologyIndex
+        && a.geometryRevision == b.geometryRevision
+        && a.entityIdentifier.length != 0 && a.entityIdentifier.length <= 128
+        && [a.entityIdentifier isEqualToString:b.entityIdentifier];
+}
+
+#if DEBUG
+static unsigned long long Core3DDoubleDebugBits(const double value) noexcept {
+    unsigned long long bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static NSString *Core3DSpatialSnapshotDebugValues(id candidate) {
+    if (![candidate isKindOfClass:Core3DSceneSnapshot.class]) {
+        return [NSString stringWithFormat:@"valid=0 class=%@", candidate
+            ? NSStringFromClass([candidate class]) : @"nil"];
+    }
+    Core3DSceneSnapshot *snapshot = candidate;
+    Core3DSceneElementIdentifier *selected = snapshot.selection.selectedElements.firstObject;
+    return [NSString stringWithFormat:
+        @"valid=1 schema=%llu publicationSource=%@ publicationSourceLength=%llu "
+        @"snapshotRevision=%llu documentGeneration=%llu modelRevision=%llu "
+        @"presentationRevision=%llu cameraRevision=%llu metersPerUnitBits=0x%016llx "
+        @"selectionMode=%ld selectionCount=%llu selectedKind=%ld selectedTopologyIndex=%u "
+        @"selectedGeometryRevision=%llu selectedEntity=%@",
+        (unsigned long long)snapshot.schemaVersion,
+        snapshot.publicationSourceIdentifier ?: @"nil",
+        (unsigned long long)snapshot.publicationSourceIdentifier.length,
+        (unsigned long long)snapshot.revisions.snapshotRevision,
+        (unsigned long long)snapshot.revisions.documentGeneration,
+        (unsigned long long)snapshot.revisions.modelRevision,
+        (unsigned long long)snapshot.revisions.presentationRevision,
+        (unsigned long long)snapshot.revisions.cameraRevision,
+        Core3DDoubleDebugBits(snapshot.metersPerUnit),
+        (long)snapshot.selectionMode,
+        (unsigned long long)snapshot.selection.selectedElements.count,
+        (long)selected.kind,
+        (unsigned int)selected.topologyIndex,
+        (unsigned long long)selected.geometryRevision,
+        selected.entityIdentifier ?: @"nil"];
+}
+
+static NSString *Core3DSpatialSceneAuthorityMismatch(Core3DSceneSnapshot *current,
+                                                      Core3DSceneSnapshot *authority) {
+    NSString *reason = nil;
+    if (![current isKindOfClass:Core3DSceneSnapshot.class]) reason = @"current.snapshot.invalid";
+    else if (![authority isKindOfClass:Core3DSceneSnapshot.class]) reason = @"opening.snapshot.invalid";
+    else if (current.schemaVersion == 0) reason = @"current.schema.zero";
+    else if (current.schemaVersion != authority.schemaVersion) reason = @"schema.mismatch";
+    else if (current.publicationSourceIdentifier.length == 0) reason = @"current.publication-source.empty";
+    else if (current.publicationSourceIdentifier.length > 128) reason = @"current.publication-source.overlong";
+    else if (authority.publicationSourceIdentifier.length == 0) reason = @"opening.publication-source.empty";
+    else if (authority.publicationSourceIdentifier.length > 128) reason = @"opening.publication-source.overlong";
+    else if (![current.publicationSourceIdentifier isEqualToString:authority.publicationSourceIdentifier])
+        reason = @"publication-source.mismatch";
+    else if (authority.revisions.snapshotRevision == 0) reason = @"opening.snapshot-revision.zero";
+    else if (current.revisions.snapshotRevision == 0) reason = @"current.snapshot-revision.zero";
+    else if (current.revisions.snapshotRevision <= authority.revisions.snapshotRevision)
+        reason = @"snapshot-revision.not-advanced";
+    else if (current.revisions.documentGeneration != authority.revisions.documentGeneration)
+        reason = @"document-generation.mismatch";
+    else if (current.revisions.modelRevision != authority.revisions.modelRevision)
+        reason = @"model-revision.mismatch";
+    else if (current.revisions.presentationRevision != authority.revisions.presentationRevision)
+        reason = @"presentation-revision.mismatch";
+    else if (current.revisions.cameraRevision != authority.revisions.cameraRevision)
+        reason = @"camera-revision.mismatch";
+    else if (!Core3DDoubleBitsEqual(current.metersPerUnit, authority.metersPerUnit))
+        reason = @"meters-per-unit-bits.mismatch";
+    else if (current.selectionMode != Core3DSceneElementKindObject) reason = @"current.selection-mode.not-object";
+    else if (authority.selectionMode != Core3DSceneElementKindObject) reason = @"opening.selection-mode.not-object";
+    else if (current.selection.selectedElements.count != 1) reason = @"current.selection-count.not-one";
+    else if (authority.selection.selectedElements.count != 1) reason = @"opening.selection-count.not-one";
+    else {
+        Core3DSceneElementIdentifier *a = current.selection.selectedElements.firstObject;
+        Core3DSceneElementIdentifier *b = authority.selection.selectedElements.firstObject;
+        if (a.kind != Core3DSceneElementKindObject) reason = @"current.selected-kind.not-object";
+        else if (b.kind != Core3DSceneElementKindObject) reason = @"opening.selected-kind.not-object";
+        else if (a.topologyIndex != b.topologyIndex) reason = @"selected-topology-index.mismatch";
+        else if (a.geometryRevision != b.geometryRevision) reason = @"selected-geometry-revision.mismatch";
+        else if (a.entityIdentifier.length == 0) reason = @"current.selected-entity.empty";
+        else if (a.entityIdentifier.length > 128) reason = @"current.selected-entity.overlong";
+        else if (![a.entityIdentifier isEqualToString:b.entityIdentifier]) reason = @"selected-entity.mismatch";
+    }
+    return [NSString stringWithFormat:@"firstFailed=%@ current={%@} opening={%@}",
+        reason ?: @"none", Core3DSpatialSnapshotDebugValues(current),
+        Core3DSpatialSnapshotDebugValues(authority)];
+}
+#endif
+
+static NSString *Core3DSpatialSweepDebugDetail(NSString *detail, NSString *branch,
+                                                Core3DProfileConstructionResult result,
+                                                NSString *diagnostic) {
+#if DEBUG
+    return [NSString stringWithFormat:@"%@ [DEBUG branch=%@ result.rawValue=%ld%@]", detail,
+        branch, (long)result, diagnostic.length
+            ? [NSString stringWithFormat:@" %@", diagnostic] : @""];
+#else
+    (void)branch; (void)result; (void)diagnostic;
+    return detail;
+#endif
+}
+
+static NSString *Core3DSpatialSweepPrepareDebugDetail(NSString *detail, NSString *branch,
+                                                       Core3DProfileConstructionResult result,
+                                                       NSInteger status, bool admitted,
+                                                       NSString *diagnostic) {
+#if DEBUG
+    NSString *values = [NSString stringWithFormat:@"prepared.status=%ld prepared.admitted=%d%@",
+        (long)status, admitted, diagnostic.length
+            ? [NSString stringWithFormat:@" %@", diagnostic] : @""];
+    return Core3DSpatialSweepDebugDetail(detail, branch, result, values);
+#else
+    (void)branch; (void)result; (void)status; (void)admitted; (void)diagnostic;
+    return detail;
+#endif
+}
+
+static NSString *Core3DSpatialSweepApplyDebugDetail(NSString *detail,
+                                                     Core3DProfileConstructionResult result,
+                                                     NSInteger outcome,
+                                                     bool openedExactlyOneCommand) {
+#if DEBUG
+    return Core3DSpatialSweepDebugDetail(detail, @"apply", result,
+        [NSString stringWithFormat:@"applied.outcome=%ld applied.openedExactlyOneCommand=%d",
+            (long)outcome, openedExactlyOneCommand]);
+#else
+    (void)result; (void)outcome; (void)openedExactlyOneCommand;
+    return detail;
+#endif
+}
+
+- (Core3DSpatialSweepEditorContext *)spatialSweepEditorWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || _nativeSolidWork || _isLoading.load() || !_isSetuped || _isPreviewMode
+        || GLController == nil || GLController.viewer == nullptr
+        || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || ![expected isKindOfClass:Core3DSceneSnapshot.class]
+        || expected.selectionMode != Core3DSceneElementKindObject
+        || expected.selection.selectedElements.count != 1
+        || expected.selection.selectedElements.firstObject.kind != Core3DSceneElementKindObject
+        || ![expected.selection.selectedElements.firstObject.entityIdentifier isEqualToString:entityIdentifier]) return nil;
+    try {
+        const Handle(OcctDocument) owner = GLController.viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand()) return nil;
+        TDF_LabelSequence roots;
+        const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+        if (shapes.IsNull()) return nil;
+        shapes->GetFreeShapes(roots);
+        TDF_Label label; unsigned matches = 0;
+        const std::string target(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (owner->EntityIdentifierForLabel(roots.Value(index)) == target) {
+                label = roots.Value(index); ++matches;
+            }
+        }
+        if (matches != 1 || label.IsNull()) return nil;
+        const auto opening = core3d::composite_recipe::spatial_g0::Capture(owner->Document(), label);
+        if (!opening.admitted()) return nil;
+        Core3DSceneSnapshot *after = [self captureSceneSnapshot];
+        if (!Core3DSpatialSceneAuthorityMatches(after, expected)
+            || ![after.selection.selectedElements.firstObject.entityIdentifier
+                isEqualToString:entityIdentifier]) return nil;
+        return [[Core3DSpatialSweepEditorContext alloc] initWithOwner:self opening:opening scene:expected];
+    } catch (...) { return nil; }
+}
+
+static bool Core3DSpatialContextSceneIsCurrent(Core3DViewController *owner,
+                                                Core3DSpatialSweepEditorContext *context,
+                                                bool requireUnconsumed = true,
+                                                NSString **diagnostic = nullptr) {
+    if (!owner || !context || context->_owner != owner || !context->_scene
+        || (requireUnconsumed && context->_consumed)) {
+#if DEBUG
+        if (diagnostic) {
+            if (!owner || !context || context->_owner != owner) *diagnostic = @"firstFailed=context.owner-mismatch";
+            else if (!context->_scene) *diagnostic = @"firstFailed=context.opening-scene-missing";
+            else *diagnostic = @"firstFailed=context.consumed";
+        }
+#else
+        (void)diagnostic;
+#endif
+        return false;
+    }
+    Core3DSceneSnapshot *current = [owner captureSceneSnapshot];
+    const bool matches = Core3DSpatialSceneAuthorityMatches(current, context->_scene);
+#if DEBUG
+    if (!matches && diagnostic) *diagnostic = Core3DSpatialSceneAuthorityMismatch(current, context->_scene);
+#endif
+    return matches;
+}
+
+static bool Core3DPublishCommittedSpatialSweep(
+    Core3DViewController *ownerController,
+    GLViewController *glController,
+    const std::shared_ptr<core3d::Core3DViewer>& viewer,
+    const Handle(OcctDocument)& documentOwner,
+    const core3d::composite_recipe::spatial_g0::Prepared& prepared) noexcept {
+    struct PreservedShapeFlags final {
+        TopoDS_Shape root;
+        Standard_Boolean rootFree = Standard_False;
+        std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> faces;
+        bool restored = false;
+        void restore() noexcept {
+            if (restored) return;
+            for (auto& entry : faces) {
+                if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+            }
+            if (!root.IsNull()) root.Free(rootFree);
+            restored = true;
+        }
+        ~PreservedShapeFlags() { restore(); }
+    } preserved;
+    try {
+        const Handle(OcctDocument) currentDocument = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (!ownerController || !glController || !viewer || documentOwner.IsNull()
+            || currentDocument.IsNull() || documentOwner != currentDocument
+            || documentOwner->Document().IsNull()
+            || prepared.captured.ownerLabel.IsNull()) return false;
+        const Handle(XCAFDoc_ShapeTool) shapes =
+            XCAFDoc_DocumentTool::ShapeTool(documentOwner->Document()->Main());
+        if (shapes.IsNull()) return false;
+        preserved.root = XCAFDoc_ShapeTool::GetShape(prepared.captured.ownerLabel);
+        if (preserved.root.IsNull()) return false;
+        preserved.rootFree = preserved.root.Free();
+        std::unordered_set<const TopoDS_TShape *> distinctFaces;
+        for (TopExp_Explorer face(preserved.root, TopAbs_FACE); face.More(); face.Next()) {
+            const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+            if (tshape.IsNull()) return false;
+            if (!distinctFaces.insert(tshape.get()).second) continue;
+            if (distinctFaces.size() > core3d::spatial_sweep::MaximumSpatialSweepFaces)
+                return false;
+            preserved.faces.emplace_back(tshape, tshape->Checked());
+        }
+        if (distinctFaces.empty()) return false;
+        const std::string entity = documentOwner->EntityIdentifierForLabel(
+            prepared.captured.ownerLabel);
+        if (entity.empty() || entity.size() > 128) return false;
+        NSString *entityIdentifier = [[NSString alloc] initWithBytes:entity.data()
+            length:entity.size() encoding:NSUTF8StringEncoding];
+        if (entityIdentifier.length == 0) return false;
+        GLView *renderView = glController.isViewLoaded
+            && [glController.view isKindOfClass:GLView.class]
+            ? (GLView *)glController.view : nil;
+        if (!renderView) return false;
+        __block bool rebuilt = false;
+        const BOOL hadRenderingContext = [renderView performWithRenderingContext:^{
+            rebuilt = viewer->redrawDocument();
+        }];
+        preserved.restore();
+        if (!hadRenderingContext || !rebuilt || glController.viewer != viewer
+            || viewer->getDocument() != documentOwner) return false;
+        core3d::composite_recipe::spatial_g0::GeometryBytes geometry;
+        const TopoDS_Shape published = XCAFDoc_ShapeTool::GetShape(
+            prepared.captured.ownerLabel);
+        if (!core3d::composite_recipe::spatial_g0::Geometry(published, geometry)
+            || geometry != prepared.canonicalGeometry) return false;
+        Core3DSceneSnapshot *scene = [ownerController captureSceneSnapshot];
+        if (!scene || glController.viewer != viewer
+            || viewer->getDocument() != documentOwner) return false;
+        for (Core3DSceneRenderItemSnapshot *item in scene.renderItems) {
+            if ([item.entityIdentifier isEqualToString:entityIdentifier]) return true;
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+- (Core3DSpatialSweepEditOperation *)beginSpatialSweepEdit:(Core3DSpatialSweepEditorContext *)context
+    candidate:(NSDictionary<NSString *, id> *)candidate
+    completion:(void(^)(Core3DProfileConstructionResult result, NSString *detail))completion {
+    if (!completion) return nil;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected,
+            @"Spatial sweep edits must start on the model thread."); });
+        return nil;
+    }
+    NSString *authorityDiagnostic = nil;
+    const bool validContext = [context isMemberOfClass:Core3DSpatialSweepEditorContext.class];
+    if (!validContext
+        || !Core3DSpatialContextSceneIsCurrent(self, context, true, &authorityDiagnostic)) {
+#if DEBUG
+        if (!validContext) authorityDiagnostic = @"firstFailed=context.invalid-type";
+#endif
+        NSString *detail = @"The model, units, frame or selection changed. Reopen Edit Sweep.";
+        completion(Core3DProfileConstructionResultRejected,
+            Core3DSpatialSweepDebugDetail(detail, @"pre-dispatch-authority",
+                Core3DProfileConstructionResultRejected, authorityDiagnostic));
+        return nil;
+    }
+    core3d::spatial_sweep::editor::Candidate nativeCandidate;
+    if (!Core3DSpatialCandidate(candidate, context->_opening, nativeCandidate)) {
+        NSString *detail = @"The complete retained values are malformed or outside the bounded editor contract.";
+        completion(Core3DProfileConstructionResultRejected,
+            Core3DSpatialSweepDebugDetail(detail, @"candidate-conversion",
+                Core3DProfileConstructionResultRejected, nil));
+        return nil;
+    }
+    context->_consumed = YES;
+    const auto cancellation = std::make_shared<std::atomic_bool>(false);
+    Core3DSpatialSweepEditOperation *operation = [[Core3DSpatialSweepEditOperation alloc]
+        initWithCancellation:cancellation];
+    const auto opening = context->_opening;
+    __weak Core3DViewController *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        const auto prepared = core3d::spatial_sweep::editor::Prepare(opening, nativeCandidate, *cancellation);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Core3DViewController *ownerController = weakSelf;
+            if (!ownerController) {
+                NSString *detail = @"The editor closed.";
+                completion(Core3DProfileConstructionResultCancelled,
+                    Core3DSpatialSweepDebugDetail(detail, @"owner-release",
+                        Core3DProfileConstructionResultCancelled, nil));
+                return;
+            }
+            using Status = core3d::spatial_sweep::editor::Status;
+            const bool preparedAdmitted = prepared.admitted();
+            if (prepared.status == Status::Cancelled || cancellation->load()) {
+                NSString *detail = @"Stopped before commit. The model is unchanged.";
+                completion(Core3DProfileConstructionResultCancelled,
+                    Core3DSpatialSweepPrepareDebugDetail(detail, @"cancellation",
+                        Core3DProfileConstructionResultCancelled, (NSInteger)prepared.status,
+                        preparedAdmitted, nil));
+                return;
+            }
+            if (prepared.status == Status::Unchanged) {
+                NSString *detail = @"These are already the retained values.";
+                completion(Core3DProfileConstructionResultUnchanged,
+                    Core3DSpatialSweepPrepareDebugDetail(detail, @"unchanged",
+                        Core3DProfileConstructionResultUnchanged, (NSInteger)prepared.status,
+                        preparedAdmitted, nil));
+                return;
+            }
+            if (!preparedAdmitted) {
+                NSString *detail = prepared.status == Status::UnsupportedDescendant
+                    ? @"A downstream topology feature is not replayable; the whole edit was refused."
+                    : @"The candidate failed native proof or the opening became stale. No prefix was applied.";
+                completion(Core3DProfileConstructionResultRejected,
+                    Core3DSpatialSweepPrepareDebugDetail(detail, @"prepare",
+                        Core3DProfileConstructionResultRejected, (NSInteger)prepared.status,
+                        preparedAdmitted, nil));
+                return;
+            }
+            NSString *postDispatchDiagnostic = nil;
+            if (!Core3DSpatialContextSceneIsCurrent(ownerController, context, false,
+                                                     &postDispatchDiagnostic)) {
+                NSString *detail = @"The candidate failed native proof or the opening became stale. No prefix was applied.";
+                completion(Core3DProfileConstructionResultRejected,
+                    Core3DSpatialSweepPrepareDebugDetail(detail, @"post-dispatch-authority",
+                        Core3DProfileConstructionResultRejected, (NSInteger)prepared.status,
+                        preparedAdmitted, postDispatchDiagnostic));
+                return;
+            }
+            GLViewController *const glController =
+                (GLViewController *)ownerController.glController;
+            const auto viewer = glController.viewer;
+            const Handle(OcctDocument) documentOwner = viewer
+                ? viewer->getDocument() : Handle(OcctDocument)();
+            if (documentOwner.IsNull() || documentOwner->Document().IsNull()) {
+                NSString *detail = @"The document closed before commit.";
+                completion(Core3DProfileConstructionResultRejected,
+                    Core3DSpatialSweepDebugDetail(detail, @"document-unavailable",
+                        Core3DProfileConstructionResultRejected, nil));
+                return;
+            }
+            const auto applied = core3d::composite_recipe::spatial_g0::Transaction::Apply(
+                documentOwner->Document(), prepared.prepared);
+            using Outcome = core3d::composite_recipe::spatial_g0::ApplyOutcome;
+            if (applied.outcome == Outcome::Committed) {
+                bool published = Core3DPublishCommittedSpatialSweep(ownerController,
+                    glController, viewer, documentOwner, prepared.prepared);
+                try { documentOwner->NotifyChanges(); } catch (...) { published = false; }
+                [glController refreshSelectionState];
+                [ownerController viewDidChangeViewportPresentationState];
+                [ownerController viewDidInvalidateSceneSnapshot];
+                [glController requestRender];
+                [ownerController sendNotifyUIState:UIStateChangingSelection | UIStateChangingGizmo
+                    | UIStateChangingDelete | UIStateChangingDuplicate | UIStateChangingApply
+                    | UIStateChangingApplyMaterial | UIStateChangingHistory];
+                if (published) {
+                    NSString *detail = @"Applied one retained spatial sweep edit. Undo is available.";
+                    completion(Core3DProfileConstructionResultCommitted,
+                        Core3DSpatialSweepApplyDebugDetail(detail,
+                            Core3DProfileConstructionResultCommitted, (NSInteger)applied.outcome,
+                            applied.openedExactlyOneCommand));
+                } else {
+                    NSString *detail = @"The edit committed, but viewport publication failed and must be recovered.";
+                    completion(Core3DProfileConstructionResultRecoveryRequired,
+                        Core3DSpatialSweepApplyDebugDetail(detail,
+                            Core3DProfileConstructionResultRecoveryRequired, (NSInteger)applied.outcome,
+                            applied.openedExactlyOneCommand));
+                }
+            } else if (applied.outcome == Outcome::OutcomeUnknown) {
+                NSString *detail = @"The commit outcome is unknown. It was not retried or published; inspect recovery state.";
+                completion(Core3DProfileConstructionResultRecoveryRequired,
+                    Core3DSpatialSweepApplyDebugDetail(detail,
+                        Core3DProfileConstructionResultRecoveryRequired, (NSInteger)applied.outcome,
+                        applied.openedExactlyOneCommand));
+            } else {
+                NSString *detail = @"The complete edit was refused or aborted with the prior state exact.";
+                completion(Core3DProfileConstructionResultRejected,
+                    Core3DSpatialSweepApplyDebugDetail(detail,
+                        Core3DProfileConstructionResultRejected, (NSInteger)applied.outcome,
+                        applied.openedExactlyOneCommand));
+            }
+        });
+    });
+    return operation;
 }
 
 - (void)rebuildStoredSweep:(Core3DStoredSweepSnapshot *)original

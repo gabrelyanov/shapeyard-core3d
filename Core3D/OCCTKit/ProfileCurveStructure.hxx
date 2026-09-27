@@ -20,7 +20,10 @@ struct ProfileCurveVertex {
     ProfileCurveID identifier = 0;
     gp_Pnt2d point;
 };
-enum class ProfileCurveKind { Line = 0, CircularArc = 1 };
+// Spline segments carry their payload in a SplineProfileSpec keyed by the
+// segment identifier (SplineCurveDefinition.hxx, T-C C4); the legacy line/arc
+// inspection, face builder and codecs keep rejecting kind 2 unchanged.
+enum class ProfileCurveKind { Line = 0, CircularArc = 1, Spline = 2 };
 struct ProfileCurveSegment {
     ProfileCurveID identifier = 0;
     ProfileCurveID startVertex = 0, endVertex = 0;

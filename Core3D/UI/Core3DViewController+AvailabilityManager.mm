@@ -303,12 +303,13 @@ Core3DModelCapability DocumentExportCapabilities(
                     static_cast<std::uint64_t>(definitionCapabilities)&~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities);
             }
             if (!sweep.label.IsNull() || !loft.label.IsNull()) {
-                // These tools lack a recipe-preserving sweep/loft operation yet.
+                // Translation/local-transform copies stage an exact recipe on
+                // every destination; Mirror still lacks a reflection-frame policy.
                 definitionCapabilities=static_cast<Core3DModelCapability>(definitionCapabilities
                     & ~(Core3DModelCapabilitySubshapeSelection|Core3DModelCapabilityNonuniformScale
-                        |Core3DModelCapabilityDuplicate|Core3DModelCapabilityMirror|Core3DModelCapabilityBoolean
+                        |Core3DModelCapabilityMirror|Core3DModelCapabilityBoolean
                         |Core3DModelCapabilityChamfer|Core3DModelCapabilityExtrusion|Core3DModelCapabilityShell
-                        |Core3DModelCapabilityLinearArray|Core3DModelCapabilityRadialArray));
+                        ));
             }
             if (definitionCapabilities == Core3DModelCapabilityNone) {
                 return Core3DModelCapabilityNone;

@@ -41,6 +41,8 @@ public:
     cpp_int()=default;
     cpp_int(std::int64_t value){if(value<0){negative_=true;const std::uint64_t magnitude=std::uint64_t(-(value+1))+1;words_[0]=std::uint32_t(magnitude);words_[1]=std::uint32_t(magnitude>>32);}else{const auto magnitude=std::uint64_t(value);words_[0]=std::uint32_t(magnitude);words_[1]=std::uint32_t(magnitude>>32);}used_=2;normalize();}
     std::uint32_t bitCount()const{if(used_==0)return 1;return std::uint32_t((used_-1)*32+(32-__builtin_clz(words_[used_-1])));}
+    bool powerOfTwo()const{bool found=false;for(std::size_t i=0;i<used_;++i){if(!words_[i])continue;if(found||(words_[i]&(words_[i]-1)))return false;found=true;}return found;}
+    std::uint32_t trailingZeroCount()const{if(!used_)return 0;std::size_t i=0;while(words_[i]==0)++i;return std::uint32_t(i*32+__builtin_ctz(words_[i]));}
     long double toLongDouble()const{long double value=0;for(std::size_t i=used_;i>0;--i)value=value*4294967296.0L+words_[i-1];return negative_?-value:value;}
     explicit operator bool()const{return used_!=0;}
     friend bool operator==(const cpp_int&a,const cpp_int&b){if(a.used_==0&&b.used_==0)return true;if(a.negative_!=b.negative_||a.used_!=b.used_)return false;for(std::size_t i=0;i<a.used_;++i)if(a.words_[i]!=b.words_[i])return false;return true;}
@@ -71,7 +73,32 @@ private:
     static cpp_int addAbs(const cpp_int&a,const cpp_int&b){cpp_int out;const std::size_t n=std::max(a.used_,b.used_);std::uint64_t carry=0;for(std::size_t i=0;i<n;++i){const std::uint64_t value=std::uint64_t(i<a.used_?a.words_[i]:0)+std::uint64_t(i<b.used_?b.words_[i]:0)+carry;out.words_[i]=std::uint32_t(value);carry=value>>32;}out.used_=n;if(carry){if(n>=Words)throw Budget();out.words_[out.used_++]=std::uint32_t(carry);}return out;}
     static cpp_int subAbs(const cpp_int&a,const cpp_int&b){cpp_int out;std::uint64_t borrow=0;for(std::size_t i=0;i<a.used_;++i){const std::uint64_t av=a.words_[i],bv=(i<b.used_?b.words_[i]:0)+borrow;out.words_[i]=std::uint32_t(av-bv);borrow=av<bv;}out.used_=a.used_;out.normalize();return out;}
     static void setBit(cpp_int&v,std::uint32_t bit){const std::size_t word=bit/32;if(word>=Words)throw Budget();v.words_[word]|=std::uint32_t(1)<<(bit%32);v.used_=std::max(v.used_,word+1);}
-    static void divmod(const cpp_int&a,const cpp_int&b,cpp_int&q,cpp_int&r){if(!b.used_)throw Budget();cpp_int dividend=a;dividend.negative_=false;cpp_int divisor=b;divisor.negative_=false;if(compareAbs(dividend,divisor)<0){r=dividend;r.negative_=a.negative_;return;}const std::uint32_t bits=dividend.bitCount();for(std::uint32_t bit=bits;bit>0;--bit){r<<=1;if((dividend.words_[(bit-1)/32]>>((bit-1)%32))&1)setBit(r,0);r.normalize();if(compareAbs(r,divisor)>=0){r=subAbs(r,divisor);setBit(q,bit-1);}}q.negative_=a.negative_!=b.negative_;r.negative_=a.negative_;q.normalize();r.normalize();}
+    // Base-2^32 Knuth division.  The previous bit-at-a-time loop repeatedly
+    // shifted and normalized a 128-limb remainder for every input bit.  This
+    // keeps the same fixed capacity and quotient/remainder signs, but works a
+    // limb at a time; Words+1 is only the algorithm's normalized carry limb,
+    // never a representable 4097-bit cpp_int.
+    static void divmod(const cpp_int&a,const cpp_int&b,cpp_int&q,cpp_int&r){
+        if(!b.used_)throw Budget();cpp_int dividend=a;dividend.negative_=false;cpp_int divisor=b;divisor.negative_=false;
+        if(compareAbs(dividend,divisor)<0){r=dividend;r.negative_=a.negative_;return;}
+        if(divisor.used_==1){
+            const std::uint64_t d=divisor.words_[0];std::uint64_t remainder=0;q.used_=dividend.used_;
+            for(std::size_t i=dividend.used_;i>0;--i){const std::uint64_t value=(remainder<<32)|dividend.words_[i-1];q.words_[i-1]=std::uint32_t(value/d);remainder=value%d;}
+            r=cpp_int(std::int64_t(remainder));q.negative_=a.negative_!=b.negative_;r.negative_=a.negative_&&r.used_;q.normalize();return;
+        }
+        const std::size_t n=divisor.used_,m=dividend.used_-n;const unsigned shift=__builtin_clz(divisor.words_[n-1]);
+        std::array<std::uint32_t,Words> v{};std::array<std::uint32_t,Words+1> u{};std::uint64_t carry=0;
+        for(std::size_t i=0;i<n;++i){const std::uint64_t value=(std::uint64_t(divisor.words_[i])<<shift)|carry;v[i]=std::uint32_t(value);carry=value>>32;}
+        carry=0;for(std::size_t i=0;i<dividend.used_;++i){const std::uint64_t value=(std::uint64_t(dividend.words_[i])<<shift)|carry;u[i]=std::uint32_t(value);carry=value>>32;}u[dividend.used_]=std::uint32_t(carry);q.used_=m+1;
+        constexpr std::uint64_t Base=std::uint64_t(1)<<32;
+        for(std::size_t jj=m+1;jj>0;--jj){const std::size_t j=jj-1;const std::uint64_t top=(std::uint64_t(u[j+n])<<32)|u[j+n-1];std::uint64_t guess=top/v[n-1],rem=top%v[n-1];
+            while(guess==Base||(guess*v[n-2]>(rem<<32)+u[j+n-2])){--guess;rem+=v[n-1];if(rem>=Base)break;}
+            std::uint64_t borrow=0;for(std::size_t i=0;i<n;++i){const std::uint64_t product=guess*v[i]+borrow;const std::uint32_t low=std::uint32_t(product);borrow=product>>32;if(u[j+i]<low)++borrow;u[j+i]-=low;}
+            const bool under=u[j+n]<borrow;u[j+n]-=std::uint32_t(borrow);if(under){--guess;std::uint64_t addCarry=0;for(std::size_t i=0;i<n;++i){const std::uint64_t sum=std::uint64_t(u[j+i])+v[i]+addCarry;u[j+i]=std::uint32_t(sum);addCarry=sum>>32;}u[j+n]+=std::uint32_t(addCarry);}q.words_[j]=std::uint32_t(guess);
+        }
+        r.used_=n;if(shift==0){for(std::size_t i=0;i<n;++i)r.words_[i]=u[i];}else{for(std::size_t i=0;i<n;++i)r.words_[i]=(u[i]>>shift)|(std::uint64_t(u[i+1])<<(32-shift));}
+        q.negative_=a.negative_!=b.negative_;r.negative_=a.negative_;q.normalize();r.normalize();
+    }
     void normalize(){while(used_&&words_[used_-1]==0)--used_;if(!used_)negative_=false;}
     std::array<std::uint32_t,Words> words_{};std::size_t used_=0;bool negative_=false;
 };
@@ -79,8 +106,11 @@ private:
 inline cpp_int Abs(cpp_int value) { return value < 0 ? -value : value; }
 inline cpp_int Gcd(cpp_int a, cpp_int b) {
     a = Abs(a); b = Abs(b);
+    if(a == 0) return b == 0 ? cpp_int(1) : b;
+    if(b == 0) return a;
+    if(a.powerOfTwo()||b.powerOfTwo()){cpp_int out(1);out<<=std::min(a.trailingZeroCount(),b.trailingZeroCount());return out;}
     while (b != 0) { cpp_int r = a % b; a = b; b = r; }
-    return a == 0 ? cpp_int(1) : a;
+    return a;
 }
 inline std::uint32_t Bits(const cpp_int& value) { return value.bitCount(); }
 

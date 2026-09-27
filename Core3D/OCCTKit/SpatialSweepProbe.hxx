@@ -4,6 +4,7 @@
 #include "SpatialSweepPersistence.hxx"
 #include "SpatialSweepRebuild.hxx"
 #include "SpatialSweepG0Transaction.hxx"
+#include "SpatialSweepEditor.hxx"
 #include <map>
 #include <string>
 
@@ -319,6 +320,36 @@ inline std::map<std::string, bool> Probe() {
     const auto& real=RealKernelChecks();checks.insert(real.begin(),real.end());return checks;
 }
 
+// Shared editor/G0 policy checks. These fixtures require no geometry build.
+inline std::map<std::string, bool> RetainedReplayChecks() {
+    std::map<std::string, bool> checks;
+    ReplayPreparation replay;
+    replay.captured = Fence(); replay.reread = replay.captured;
+    replay.allDescendantsSupported = true; replay.detachedCandidateAdmitted = true;
+    replay.stageWouldSucceed = true; replay.bindingVerificationWouldSucceed = true;
+    checks["composite-missing-c1-codec-refuses-before-command"] =
+        PrepareRetainedReplay(replay).refusal == ReplayRefusal::MissingCanonicalRecipe
+        && !PrepareRetainedReplay(replay).mayOpenOneOwnedCommand;
+    replay.canonicalC1AndCompositeBytesAvailable = true;
+    auto foreign = replay; foreign.reread.sourceDigest = Hash(99);
+    checks["composite-foreign-source-refuses-atomically"] =
+        PrepareRetainedReplay(foreign).refusal == ReplayRefusal::Stale
+        && PrepareRetainedReplay(foreign).oldStateMustRemainExact;
+    auto unsupported = replay; unsupported.allDescendantsSupported = false;
+    checks["composite-unsupported-descendant-refuses-atomically"] =
+        PrepareRetainedReplay(unsupported).refusal == ReplayRefusal::UnsupportedDependent
+        && !PrepareRetainedReplay(unsupported).mayOpenOneOwnedCommand;
+    checks["composite-ready-plan-is-one-command"] =
+        PrepareRetainedReplay(replay).admitted()
+        && PrepareRetainedReplay(replay).mayOpenOneOwnedCommand;
+    checks["g0-unsupported-descendant-is-precommand"] =
+        PrepareRetainedReplay(unsupported).refusal == ReplayRefusal::UnsupportedDependent
+        && !PrepareRetainedReplay(unsupported).mayOpenOneOwnedCommand;
+    checks["g0-transaction-type-opens-one-owned-command"] =
+        std::is_same_v<decltype(composite_recipe::spatial_g0::ApplyResult{}.openedExactlyOneCommand), bool>;
+    return checks;
+}
+
 inline std::map<std::string, bool> K2Probe() {
     std::map<std::string, bool> checks;
     Definition sweep = Sweep();
@@ -433,6 +464,38 @@ inline std::map<std::string, bool> K2Probe() {
         composite_recipe::spatial_g0::PinnedProfile);
     checks["fixed-point-metres"] = metreFirst.built() && metreSecond.built()
         && metreFixed.admitted();
+    // The cold-open F6 curve and both authored edit states are exercised in
+    // each persisted unit system. BuildGeomFillSweep admits only after all
+    // curve-proof, returned-surface, cap, topology and solid gates pass;
+    // PrepareFixedPoint then proves independent canonical equality and exact
+    // stability of the one permitted subsequent BinTools read/write.
+    auto polynomialFixedPoint=[&](double metersPerUnit,unsigned editState){
+        auto curve=SpatialPolynomialCurve();const double nativePerMM=0.001/metersPerUnit;
+        for(auto& pole:curve.controlPoints)for(double& scalar:pole.local)scalar*=nativePerMM;
+        auto definition=Sweep();definition.dimensionMetersPerUnit=metersPerUnit;
+        definition.radius={RadiusLawKind::Constant,2*nativePerMM,2*nativePerMM};
+        if(editState>=1){
+            curve.controlPoints[1].local[2]+=6*nativePerMM;
+            definition.radius={RadiusLawKind::LinearArcLength,2*nativePerMM,3*nativePerMM};
+            definition.orientation.phaseRadians=7*Pi/180;
+        }
+        if(editState>=2)curve.controlPoints[2].local[1]+=4*nativePerMM;
+        const auto first=BuildGeomFillSweep(curve,definition,cancelled);
+        const auto second=BuildGeomFillSweep(curve,definition,cancelled);
+        if(!first.built()||!second.built()
+            ||!first.receipt.surface.openCapsPlanarAndOriented
+            ||!second.receipt.surface.openCapsPlanarAndOriented
+            ||!BRepCheck_Analyzer(first.solid,Standard_True).IsValid()
+            ||!BRepCheck_Analyzer(second.solid,Standard_True).IsValid())return false;
+        return composite_recipe::spatial_g0::PrepareFixedPoint(
+            first.solid,second.solid,composite_recipe::spatial_g0::PinnedProfile).admitted();
+    };
+    checks["fixed-point-spatial-polynomial-baseline-millimetres"]=polynomialFixedPoint(0.001,0);
+    checks["fixed-point-spatial-polynomial-baseline-metres"]=polynomialFixedPoint(1.0,0);
+    checks["fixed-point-spatial-polynomial-first-edit-millimetres"]=polynomialFixedPoint(0.001,1);
+    checks["fixed-point-spatial-polynomial-first-edit-metres"]=polynomialFixedPoint(1.0,1);
+    checks["fixed-point-spatial-polynomial-later-edit-millimetres"]=polynomialFixedPoint(0.001,2);
+    checks["fixed-point-spatial-polynomial-later-edit-metres"]=polynomialFixedPoint(1.0,2);
     const auto mismatch = composite_recipe::spatial_g0::PrepareFixedPoint(
         realCylinder.solid, realTaper.solid,
         composite_recipe::spatial_g0::PinnedProfile);
@@ -456,33 +519,11 @@ inline std::map<std::string, bool> K2Probe() {
         sweep.path.inputNode, SpatialCircleSweepFeatureKind,
         SpatialCircleSweepFeatureCodec) == Refusal::NonCanonicalEncoding;
 
-    ReplayPreparation replay;
-    replay.captured = Fence(); replay.reread = replay.captured;
-    replay.allDescendantsSupported = true; replay.detachedCandidateAdmitted = true;
-    replay.stageWouldSucceed = true; replay.bindingVerificationWouldSucceed = true;
-    checks["composite-missing-c1-codec-refuses-before-command"] =
-        PrepareRetainedReplay(replay).refusal == ReplayRefusal::MissingCanonicalRecipe
-        && !PrepareRetainedReplay(replay).mayOpenOneOwnedCommand;
-    replay.canonicalC1AndCompositeBytesAvailable = true;
-    auto foreign = replay; foreign.reread.sourceDigest = Hash(99);
-    checks["composite-foreign-source-refuses-atomically"] =
-        PrepareRetainedReplay(foreign).refusal == ReplayRefusal::Stale
-        && PrepareRetainedReplay(foreign).oldStateMustRemainExact;
-    auto unsupported = replay; unsupported.allDescendantsSupported = false;
-    checks["composite-unsupported-descendant-refuses-atomically"] =
-        PrepareRetainedReplay(unsupported).refusal == ReplayRefusal::UnsupportedDependent
-        && !PrepareRetainedReplay(unsupported).mayOpenOneOwnedCommand;
-    checks["composite-ready-plan-is-one-command"] =
-        PrepareRetainedReplay(replay).admitted()
-        && PrepareRetainedReplay(replay).mayOpenOneOwnedCommand;
+    const auto replayChecks = RetainedReplayChecks();
+    checks.insert(replayChecks.begin(), replayChecks.end());
     checks["g0-pinned-occt-platform-fp-profile"] =
         composite_recipe::spatial_g0::RuntimeProfileIsPinned(
             composite_recipe::spatial_g0::PinnedProfile);
-    checks["g0-unsupported-descendant-is-precommand"] =
-        PrepareRetainedReplay(unsupported).refusal == ReplayRefusal::UnsupportedDependent
-        && !PrepareRetainedReplay(unsupported).mayOpenOneOwnedCommand;
-    checks["g0-transaction-type-opens-one-owned-command"] =
-        std::is_same_v<decltype(composite_recipe::spatial_g0::ApplyResult{}.openedExactlyOneCommand), bool>;
     checks["legacy-golden-fixtures-not-candidate-derived"] = false;
     checks["production-save-destroy-cold-open-twice-not-exercised"] = false;
     const auto& real=RealKernelChecks();checks.insert(real.begin(),real.end());return checks;
@@ -496,4 +537,38 @@ inline std::map<std::string, bool> Core3DDebugSpatialSweepK0K1Probe() {
 
 inline std::map<std::string, bool> Core3DDebugSpatialSweepK2Probe() {
     return core3d::spatial_sweep::debug::K2Probe();
+}
+
+inline std::map<std::string, bool> Core3DDebugSpatialSweepEditorProbe(unsigned scenario) {
+    using namespace core3d;
+    using namespace spatial_sweep;
+    std::map<std::string, bool> checks;
+    if (scenario == 0) {
+        checks["closed-authored-field-set"] = sizeof(Definition) > sizeof(PathBinding)
+            && MaximumPayloadBytes == 16 * 1024;
+        checks["c1-uuid-pole-capacity"] = bounded_curve::MaximumControlPoints == 128;
+        checks["fixed-policy-is-read-only"] = TransportKind::BishopV1 != TransportKind(0)
+            && ParameterizationKind::NormalizedArcLengthV1 != ParameterizationKind(0);
+    } else if (scenario == 1) {
+        checks["stale-distinct-from-cancel"] = editor::Status::StaleAuthority != editor::Status::Cancelled;
+        checks["unknown-distinct-from-abort"] = composite_recipe::spatial_g0::ApplyOutcome::OutcomeUnknown
+            != composite_recipe::spatial_g0::ApplyOutcome::AbortedExact;
+        checks["candidate-cannot-carry-authority"] = !std::is_same_v<editor::Candidate,
+            composite_recipe::spatial_g0::CaptureResult>;
+    } else if (scenario == 2) {
+        checks["unsupported-descendant-is-precommand"] =
+            composite_recipe::spatial_g0::CaptureRefusal::UnsupportedDescendant
+                != composite_recipe::spatial_g0::CaptureRefusal::None;
+        checks["apply-rereads-complete-fence"] = std::is_same_v<decltype(
+            composite_recipe::spatial_g0::Prepared{}.captured),
+            composite_recipe::spatial_g0::Fence>;
+        checks["stable-logical-identities-in-fence"] = sizeof(decltype(composite_recipe::spatial_g0::Fence{}.curveFeature)) == 16
+            && sizeof(decltype(composite_recipe::spatial_g0::Fence{}.sweepFeature)) == 16
+            && sizeof(decltype(composite_recipe::spatial_g0::Fence{}.section)) == 16;
+    } else checks["invalid-scenario"] = false;
+    if (scenario == 1 || scenario == 2) {
+        const auto replayChecks = core3d::spatial_sweep::debug::RetainedReplayChecks();
+        checks.insert(replayChecks.begin(), replayChecks.end());
+    }
+    return checks;
 }

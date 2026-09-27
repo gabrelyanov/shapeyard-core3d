@@ -6,6 +6,7 @@
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelMap.hxx>
 #include <TNaming_NamedShape.hxx>
+#include <TNaming_Builder.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <memory>
@@ -16,6 +17,7 @@ namespace spatial_g0 { struct Transaction; }
 class BinaryDriver;
 #if DEBUG
 struct Probe;
+struct SpatialSweepColdOpenFixture;
 #endif
 
 inline const Standard_GUID& AttributeID() {
@@ -46,12 +48,37 @@ public:
         if (destination.IsNull() || !value_) Standard_Failure::Raise("Composite recipe paste type");
         destination->Backup(); destination->value_ = value_;
     }
+    // Internal D1-C staging seam. The caller owns the already-open OCAF
+    // command and must reconcile source and destination again before commit.
+    static bool StageIndependentClone(
+        const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+        const TopoDS_Shape& binding,
+        const std::shared_ptr<const Payload>& payload) noexcept {
+        try {
+            if (document.IsNull() || !document->HasOpenCommand()
+                || owner.IsNull() || owner.Data() != document->GetData()
+                || binding.IsNull() || !binding.IsEqual(XCAFDoc_ShapeTool::GetShape(owner))
+                || !payload || payload->sourceShapes.size() != 2
+                || owner.IsAttribute(AttributeID())) return false;
+            for (TDF_ChildIterator child(owner, Standard_False); child.More(); child.Next())
+                if (child.Value().IsAttribute(AttributeID())) return false;
+            std::vector<std::uint8_t> canonical;
+            if (!Encode(payload->definition, canonical) || canonical != payload->bytes) return false;
+            const TDF_Label record = owner.FindChild(MinimumRecordTag, Standard_True);
+            if (record.IsNull() || record.HasAttribute()) return false;
+            Handle(Core3D_CompositeRecipe) attribute = new Core3D_CompositeRecipe();
+            attribute->value_ = payload; record.AddAttribute(attribute);
+            TNaming_Builder(record).Select(binding, binding);
+            return true;
+        } catch (...) { return false; }
+    }
 private:
     friend class BinaryDriver;
     friend class ::OcctDocument;
     friend struct spatial_g0::Transaction;
 #if DEBUG
     friend struct Probe;
+    friend struct SpatialSweepColdOpenFixture;
 #endif
     std::shared_ptr<const Payload> value_;
 };

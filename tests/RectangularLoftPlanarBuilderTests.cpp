@@ -2,12 +2,15 @@
 #include "RectangularLoftSolid.hxx"
 #include "DetachedRectangularLoftProbe.hxx"
 #include "SavedCutEnclosureExtractor.hxx"
+#include "GeneralLoftProof.hxx"
+#include "RetainedRecipeProbe.hxx"
 #include <TopExp_Explorer.hxx>
 #include <iostream>
 #include <stdexcept>
 
 namespace loft=core3d::rectangular_loft;
 namespace reader=core3d::enclosure_correspondence;
+namespace c3=core3d::general_loft;
 static void require(bool value,const char* reason) {
     if (!value) throw std::runtime_error(reason);
 }
@@ -104,6 +107,93 @@ static void check(const loft::Definition& d) {
     stop=true;require(loft::Build(prepared,stop,out)==loft::BuildStatus::Cancelled && out.solid.IsNull() && out.volume==0,"cancel clears prior result");
     stop=false;require(loft::Build({},stop,out)==loft::BuildStatus::InvalidDefinition && out.solid.IsNull(),"invalid clears output");
 }
+
+static core3d::retained_recipe::UUID c3id(std::uint8_t seed) {
+    return core3d::retained_recipe::Probe::ID(seed);
+}
+static c3::Definition c3Fixture(double unit,bool curved,bool oblique=false) {
+    c3::Definition d;d.owner={c3id(1),c3id(2),c3id(3)};d.feature=c3id(4);
+    d.definitionRevision=1;d.recipeDigest=core3d::retained_recipe::Probe::HashValue(5);
+    d.dimensionMetersPerUnit=unit;
+    const double ca=std::cos(0.37),sa=std::sin(0.37),cb=std::cos(0.61),sb=std::sin(0.61);
+    const std::array<double,3> x=oblique?std::array<double,3>{{ca,sa,0}}:std::array<double,3>{{1,0,0}};
+    const std::array<double,3> y=oblique?std::array<double,3>{{-sa*cb,ca*cb,sb}}:std::array<double,3>{{0,1,0}};
+    const std::array<double,3> z=oblique?std::array<double,3>{{sa*sb,-ca*sb,cb}}:std::array<double,3>{{0,0,1}};
+    d.orderAxis=z;
+    for(std::size_t si=0;si<3;++si) {
+        c3::Station station;station.identifier=c3id(std::uint8_t(10+si));
+        station.orderParameter=double(si)*20;station.twistFromPreviousRadians=0;
+        station.frame.identifier=c3id(std::uint8_t(20+si));station.frame.revision=1;
+        station.frame.xAxis=x;station.frame.yAxis=y;station.frame.zAxis=z;
+        const std::array<double,3> base{{3,-7,11}};
+        for(int c=0;c<3;++c)station.frame.origin[c]=base[c]+z[c]*station.orderParameter;
+        const double width=20+(curved?double(si)*5:0),depth=12+(curved?double(si%2)*4:0);
+        const std::array<std::array<double,2>,4> points{{{{-width/2,-depth/2}},{{width/2,-depth/2}},{{width/2,depth/2}},{{-width/2,depth/2}}}};
+        for(std::size_t i=0;i<4;++i) {
+            c3::Junction j;j.identifier=c3id(std::uint8_t(30+si*4+i));
+            j.correspondence=c3id(std::uint8_t(60+i));j.local=points[i];station.junctions.push_back(j);
+        }
+        for(std::size_t i=0;i<4;++i) {
+            const auto& a=points[i];const auto& b=points[(i+1)%4];
+            c3::Segment segment;segment.identifier=c3id(std::uint8_t(80+si*4+i));
+            segment.correspondence=c3id(std::uint8_t(120+i));
+            segment.startJunction=station.junctions[i].identifier;
+            segment.endJunction=station.junctions[(i+1)%4].identifier;
+            auto& state=segment.curveState;state.authority.owner=d.owner;
+            state.authority.feature=segment.identifier;state.authority.definitionRevision=1;
+            state.authority.frame=station.frame.identifier;state.authority.frameRevision=1;
+            state.authority.recipeDigest=core3d::retained_recipe::Probe::HashValue(std::uint8_t(140+si*4+i));
+            state.nextLocalID=4;state.definition.frame=station.frame;
+            state.definition.domain=core3d::bounded_curve::Domain::Sketch2D;
+            const double dx=b[0]-a[0],dy=b[1]-a[1],length=std::hypot(dx,dy);
+            const double bulge=curved?(1.5+0.25*si):0;
+            state.definition.degree=2;
+            state.definition.controlPoints={
+                {c3id(std::uint8_t(160+si*12+i*3)),{{a[0],a[1],0}}},
+                {c3id(std::uint8_t(161+si*12+i*3)),{{(a[0]+b[0])/2+bulge*dy/length,(a[1]+b[1])/2-bulge*dx/length,0}}},
+                {c3id(std::uint8_t(162+si*12+i*3)),{{b[0],b[1],0}}}};
+            state.definition.knots={{0,3},{1,3}};
+            station.segments.push_back(segment);
+        }
+        d.stations.push_back(station);
+    }
+    return d;
+}
+static c3::AdmittedSolid c3Build(const c3::Definition& d) {
+    require(c3::Validate(d)==c3::Admission::Accepted,"C3 fixture admission");
+    std::atomic_bool stop{false};const auto built=c3::BuildDetached(d,stop);
+    require(built.status==c3::KernelBuildStatus::BuiltUnproven,"C3 kernel build");
+    const auto admitted=c3::ProveDetached(d,built,stop);
+    require(admitted.admitted(),"C3 independent proof");return admitted;
+}
+static void testC3StraightAnalyticAndUnitScaling() {
+    const auto mm=c3Build(c3Fixture(.001,false));const auto m=c3Build(c3Fixture(1,false));
+    require(std::abs(mm.proof.volume*1e-9-m.proof.volume)<1e-9,"C3 mm/m physical volume");
+    require(std::abs(mm.proof.volume-20*12*40)<1e-7,"C3 straight analytic volume");
+}
+static void testC3CurvedNonhomotheticCorrespondence() {
+    const auto admitted=c3Build(c3Fixture(.001,true));
+    require(admitted.proof.sideCount==8&&admitted.proof.seamCount==12,"C3 exact sides/seams");
+    require(admitted.proof.sectionSamples==120,"C3 authored reference equations");
+}
+static void testC3D43ObliqueFixedPointGeometry() {
+    const auto a=c3Build(c3Fixture(.001,true,true));const auto b=c3Build(c3Fixture(.001,true,true));
+    require(std::abs(a.proof.volume-b.proof.volume)<1e-10,"C3 D43 detached fixed point");
+    require(a.proof.sideCount==b.proof.sideCount&&a.proof.seamCount==b.proof.seamCount,"C3 D43 topology fixed point");
+}
+static void testC3MissingReorderedSideAndSeamRefuse() {
+    const auto d=c3Fixture(.001,true);std::atomic_bool stop{false};auto built=c3::BuildDetached(d,stop);
+    built.generatedSides[0].pop_back();require(c3::ProveDetached(d,built,stop).proof.status==c3::ProofStatus::MissingSide,"C3 missing face refusal");
+    built=c3::BuildDetached(d,stop);std::swap(built.generatedSides[0][0],built.generatedSides[0][1]);
+    require(!c3::ProveDetached(d,built,stop).admitted(),"C3 reordered side refusal");
+    built=c3::BuildDetached(d,stop);built.stationEdges[1][0]=TopoDS_Edge();
+    require(c3::ProveDetached(d,built,stop).proof.status==c3::ProofStatus::MissingSeam,"C3 missing seam refusal");
+}
+static void testC3MissingCapAndInconclusiveRefuse() {
+    const auto d=c3Fixture(.001,true);std::atomic_bool stop{false};auto built=c3::BuildDetached(d,stop);
+    built.firstCap=TopoDS_Face();require(c3::ProveDetached(d,built,stop).proof.status==c3::ProofStatus::MissingCap,"C3 missing cap refusal");
+    stop=true;require(c3::ProveDetached(d,built,stop).proof.status==c3::ProofStatus::Cancelled,"C3 uncertainty refusal");
+}
 int main() {
     try {
         int cases=0;
@@ -142,6 +232,11 @@ int main() {
             stop=true;out=good;
             require(loft::detail::Verify(good.solid,prepared->inspection,stop,out)==loft::BuildStatus::Cancelled && out.solid.IsNull(),"late cancellation clears output");
         }
+        testC3StraightAnalyticAndUnitScaling();
+        testC3CurvedNonhomotheticCorrespondence();
+        testC3D43ObliqueFixedPointGeometry();
+        testC3MissingReorderedSideAndSeamRefuse();
+        testC3MissingCapAndInconclusiveRefuse();
         std::cout<<"PASS "<<cases<<" loft cases; planes/lines, topology, exact metrics, retained-cut readers, cancellation; 26 admission rejections; prior tiny-metre InvalidSolid preserved\n";
     }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}
 }

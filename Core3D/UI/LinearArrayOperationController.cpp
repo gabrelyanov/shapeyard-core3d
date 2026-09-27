@@ -538,8 +538,10 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
         }
 
         OcctObjectNameState aProfileOwner;
+        pattern_recipe_clone::Source aSweepLoft;
         Standard_Size aRetainedProfileTopology = 0;
-        if (!_document->CaptureObjectNameStateForLabel(aLabel, aProfileOwner)) {
+        if (!_document->CaptureObjectNameStateForLabel(aLabel, aProfileOwner)
+            || !pattern_recipe_clone::Capture(aDocument, aLabel, aSweepLoft)) {
             return Standard_False;
         }
         const profile::Record& aProfile = aProfileOwner.object.profile;
@@ -564,6 +566,7 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
         theSource.profileOwner = std::move(aProfileOwner);
         theSource.profileCurrent = theSource.profileOwner.object.profile.IsCurrent(aDocument, aLabel);
         theSource.retainedProfileTopologyNodes = aRetainedProfileTopology;
+        theSource.sweepLoft = std::move(aSweepLoft);
         theSource.enclosureCurrent = theSource.profileOwner.object.enclosure.IsCurrent(aDocument, aLabel);
         theSource.retainedEnclosureTopologyNodes = aRetainedEnclosureTopology;
         theSource.document = aDocument;
@@ -618,8 +621,11 @@ Standard_Boolean LinearArrayOperationController::sourceIsCurrent(
             return Standard_False;
         }
         OcctObjectNameState aProfileOwner;
+        pattern_recipe_clone::Source aSweepLoft;
         if (!_document->CaptureObjectNameStateForLabel(theSource.label, aProfileOwner)
             || !aProfileOwner.IsEqual(theSource.profileOwner)
+            || !pattern_recipe_clone::Capture(aDocument, theSource.label, aSweepLoft)
+            || !pattern_recipe_clone::IsEqual(aSweepLoft, theSource.sweepLoft)
             || aProfileOwner.object.profile.IsCurrent(aDocument, theSource.label)
                 != theSource.profileCurrent
             || aProfileOwner.object.enclosure.IsCurrent(aDocument, theSource.label)
@@ -732,7 +738,7 @@ Standard_Boolean LinearArrayOperationController::canAdmitCount(
         const std::vector<OcctGeometryDuplicationRequest> aRequests = {{
             theSource.label,
             static_cast<Standard_Size>(theCount - 1),
-            false, true, // Local-transform copies preserve the enclosure frame verbatim.
+            false, true, false, true, false, // Local-transform copies preserve recipe frames verbatim.
         }};
         return _document->CanDuplicateGeometryDefinitions(aRequests);
     } catch (...) {
@@ -1289,9 +1295,12 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
             return DocumentState::None;
         }
         OcctObjectNameState aSourceProfileOwner;
+        pattern_recipe_clone::Source aSourceSweepLoft;
         if (!_source.has_value() || aDocument != _source->document
             || !_document->CaptureObjectNameStateForLabel(_source->label, aSourceProfileOwner)
             || !aSourceProfileOwner.IsEqual(_source->profileOwner)
+            || !pattern_recipe_clone::Capture(aDocument, _source->label, aSourceSweepLoft)
+            || !pattern_recipe_clone::IsEqual(aSourceSweepLoft, _source->sweepLoft)
             || aSourceProfileOwner.object.profile.IsCurrent(aDocument, _source->label)
                 != _source->profileCurrent
             || aSourceProfileOwner.object.enclosure.IsCurrent(aDocument, _source->label)
@@ -1326,6 +1335,7 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
                     aResult.label, aReferenceAxis);
             OcctObjectNameState aName;
             if (!aResult.profileCandidateSealed
+                || !aResult.sweepLoftCandidateSealed
                 || !aProfile.IsEqual(aResult.expectedProfile)
                 || !anEnclosure.IsEqual(aResult.expectedEnclosure)
                 || anEnclosure.IsCurrent(aDocument, aResult.label) != _source->enclosureCurrent
@@ -1354,7 +1364,9 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
                     == OcctReferenceAxisReadState::Invalid
                 || ReferenceAxisDiffers(
                     aReferenceAxis,
-                    aResult.expectedReferenceAxis)) {
+                    aResult.expectedReferenceAxis)
+                || !pattern_recipe_clone::ReadCandidate(aDocument,
+                    aResult.label, aResult.expectedSweepLoft)) {
                 return DocumentState::PartialOrMismatched;
             }
             ++aCommittedCount;
@@ -1476,6 +1488,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
         std::string profileIdentifier;
         TopoDS_Shape enclosureBinding;
         std::string enclosureIdentifier;
+        pattern_recipe_clone::Prepared sweepLoft;
     };
     std::vector<PreparedResult> aPrepared;
     try {
@@ -1619,7 +1632,21 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     }
                 }
             }
-            aPrepared.push_back({aPresentation, aTransform, aProfileBinding, aProfileIdentifier, anEnclosureBinding, anEnclosureIdentifier});
+            pattern_recipe_clone::Prepared aSweepLoft;
+            const std::string aSweepLoftIdentifier = _source->sweepLoft.family
+                == pattern_recipe_clone::Family::None
+                ? std::string() : OcctDocument::NewProfileIdentifier();
+            if (!pattern_recipe_clone::Prepare(_source->sweepLoft,
+                    aPresentation->Shape(), aSweepLoftIdentifier,
+                    std::nullopt, aSweepLoft)) return LinearArrayApplyResult::NoChange;
+            for (const PreparedResult& anExisting : aPrepared)
+                if (!aSweepLoft.featureIdentifier.empty()
+                    && aSweepLoft.featureIdentifier
+                        == anExisting.sweepLoft.featureIdentifier)
+                    return LinearArrayApplyResult::NoChange;
+            aPrepared.push_back({aPresentation, aTransform, aProfileBinding,
+                aProfileIdentifier, anEnclosureBinding, anEnclosureIdentifier,
+                aSweepLoft});
         }
     } catch (...) {
         return LinearArrayApplyResult::NoChange;
@@ -1779,6 +1806,12 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 throw Standard_Failure("Injected invalid array enclosure unexpectedly read back");
             }
 #endif
+            if (!pattern_recipe_clone::Stage(aDocument, _source->sweepLoft,
+                    aLabel, _source->entityIdentifier,
+                    _source->definitionIdentifier, aPending.entityIdentifier,
+                    aPending.definitionIdentifier, aResult.sweepLoft,
+                    aPending.expectedSweepLoft)) return retainRetryableOrUnknown();
+            aPending.sweepLoftCandidateSealed = Standard_True;
             aPending.profileCandidateSealed = Standard_True;
             _document->LoadObjectMeterial(
                 aLabel, aResult.presentation);

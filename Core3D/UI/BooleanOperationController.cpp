@@ -15,6 +15,8 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <gp_Vec.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -300,6 +302,68 @@ Standard_Boolean AccumulateBoundedTopology(
         }
     }
     return Standard_True;
+}
+
+//! D81-compatible canonical boundary for the narrow retained profile-cut
+//! route. Count direct child occurrences (including aliases) and preserve the
+//! cumulatively located child. This deliberately performs no repair or
+//! flattening and is not used by the general Boolean preview admission.
+Standard_Boolean CanonicalPlainProfileBooleanCandidate(
+    const TopoDS_Shape& theResult,
+    const Standard_Size theMaximumNodes,
+    TopoDS_Shape& theCandidate) noexcept
+{
+    theCandidate.Nullify();
+    if (theResult.IsNull() || theMaximumNodes == 0) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        TopoDS_Shape aCandidate;
+        if (theResult.ShapeType() == TopAbs_SOLID) {
+            if (theResult.Orientation() != TopAbs_FORWARD) {
+                return Standard_False;
+            }
+            aCandidate = theResult;
+        } else if (theResult.ShapeType() == TopAbs_COMPOUND) {
+            if (theResult.Orientation() != TopAbs_FORWARD) {
+                return Standard_False;
+            }
+            Standard_Size aChildCount = 0;
+            for (TopoDS_Iterator aChild(
+                     theResult, Standard_True, Standard_True);
+                 aChild.More(); aChild.Next()) {
+                if (++aChildCount > 1) {
+                    return Standard_False;
+                }
+                aCandidate = aChild.Value();
+            }
+            if (aChildCount != 1 || aCandidate.IsNull()
+                || aCandidate.ShapeType() != TopAbs_SOLID
+                || aCandidate.Orientation() != TopAbs_FORWARD) {
+                return Standard_False;
+            }
+        } else {
+            return Standard_False;
+        }
+        Standard_Size aNodeCount = 0;
+        if (!AccumulateBoundedTopology(
+                aCandidate, theMaximumNodes, theMaximumNodes, aNodeCount)
+            || !BRepCheck_Analyzer(aCandidate, Standard_True).IsValid()) {
+            return Standard_False;
+        }
+        GProp_GProps aVolumeProperties;
+        BRepGProp::VolumeProperties(aCandidate, aVolumeProperties);
+        const Standard_Real aVolume = aVolumeProperties.Mass();
+        if (!std::isfinite(aVolume) || aVolume <= 0.0) {
+            return Standard_False;
+        }
+        theCandidate = aCandidate;
+        return Standard_True;
+    } catch (...) {
+        theCandidate.Nullify();
+        return Standard_False;
+    }
 }
 
 Standard_Boolean HasOnlySolidBooleanResultBranches(
@@ -1074,6 +1138,16 @@ Standard_Boolean BooleanOperationController::debugValidateSolidResult(
         kMaxResultSolids,
         anAggregateTopologyNodes,
         anAggregateSolidCount);
+}
+
+Standard_Boolean
+BooleanOperationController::debugCanonicalPlainProfileBooleanCandidate(
+    const TopoDS_Shape& theShape,
+    const Standard_Size theMaximumNodes,
+    TopoDS_Shape& theCandidate) noexcept
+{
+    return CanonicalPlainProfileBooleanCandidate(
+        theShape, theMaximumNodes, theCandidate);
 }
 
 BooleanPreviewDebugState
@@ -2895,9 +2969,12 @@ BooleanApplyResult BooleanOperationController::apply(
     }
 
     const auto failWithoutMutation = [&]() {
-        _canApply = Standard_False;
-        _previewState = BooleanPreviewState::Failed;
-        notifyPreviewStateChanged();
+        // Qualification failures are terminal refusals, not a recoverable
+        // command-close outcome.  Retiring the untouched controller lets the
+        // public operation wrapper distinguish Failed from RetryableFailure.
+        // If presentation cleanup itself fails, cancelImpl deliberately keeps
+        // the controller alive and fail-closed for a genuine retry.
+        (void)cancelImpl();
         return BooleanApplyResult::NoChange;
     };
     Standard_Boolean hasCurrentFingerprint = Standard_False;
@@ -2915,15 +2992,121 @@ BooleanApplyResult BooleanOperationController::apply(
         || aSourceLabels.size() > kMaxSourceOperands) {
         return failWithoutMutation();
     }
-	// P4 has no admitted retained two-input Boolean builder/proof. The preview
-	// is intentionally allowed, but this final authority check is before
-	// NewCommand, so no label, history entry or metadata can half-apply.
+	// Preserve the original all-Absent route. The only retained exception is a
+	// Subtract with one subject and 1..7 CurrentProfile actors. Mixed coverage,
+	// stale/malformed records, other actions, and every unsupported signature
+	// still hit the unchanged fail-closed outcome before NewCommand.
+    Standard_Boolean allAbsent = Standard_True;
+    Standard_Boolean allCurrentProfiles = Standard_True;
 	for (const TDF_Label& source : aSourceLabels) {
-		if (myDoc->RetainedRecipeCoverageForLabel(source)
-			!= OcctRetainedRecipeCoverage::Absent) {
-			return failWithoutMutation();
-		}
+        const OcctRetainedRecipeCoverage coverage =
+            myDoc->RetainedRecipeCoverageForLabel(source);
+        allAbsent = allAbsent
+            && coverage == OcctRetainedRecipeCoverage::Absent;
+        allCurrentProfiles = allCurrentProfiles
+            && coverage == OcctRetainedRecipeCoverage::CurrentProfile;
 	}
+
+    if (!allAbsent) {
+        Standard_Size subjectCount = 0;
+        Standard_Size actorCount = 0;
+        Handle(AIS_Shape) subjectPreview;
+        TDF_Label subjectLabel;
+        std::vector<TDF_Label> orderedToolLabels;
+        try {
+            for (const auto& selection : _selectionMap) {
+                if (selection.second.selectionType
+                    == BooleanSelectionType::Subject) {
+                    ++subjectCount;
+                    subjectPreview =
+                        Handle(AIS_Shape)::DownCast(selection.first);
+                    subjectLabel = selection.second.documentLabel;
+                } else if (selection.second.selectionType
+                           == BooleanSelectionType::Actor) {
+                    ++actorCount;
+                } else {
+                    return failWithoutMutation();
+                }
+            }
+            if (theAction != BooleanAction::BooleanSubtract
+                || !allCurrentProfiles || subjectCount != 1
+                || actorCount < 1 || actorCount > 7
+                || subjectPreview.IsNull() || subjectPreview->Shape().IsNull()
+                || subjectLabel.IsNull()) {
+                return failWithoutMutation();
+            }
+
+            // orderedSourceLabels is actors sorted by stable entity UUID then
+            // subjects. Preserve that actor order, but pass the detached proof
+            // its explicit subject/tool roles.
+            orderedToolLabels.reserve(actorCount);
+            for (const TDF_Label& label : aSourceLabels) {
+                if (!label.IsEqual(subjectLabel)) {
+                    orderedToolLabels.push_back(label);
+                }
+            }
+            if (orderedToolLabels.size() != actorCount
+                || !aSourceLabels.back().IsEqual(subjectLabel)) {
+                return failWithoutMutation();
+            }
+
+            OcctPlainProfileOperationCapture subjectCapture;
+            std::vector<OcctPlainProfileOperationCapture> toolCaptures;
+            toolCaptures.reserve(orderedToolLabels.size());
+            if (!myDoc->CapturePlainProfileOperationSource(
+                    subjectLabel, subjectCapture)) {
+                return failWithoutMutation();
+            }
+            for (const TDF_Label& label : orderedToolLabels) {
+                OcctPlainProfileOperationCapture capture;
+                if (!myDoc->CapturePlainProfileOperationSource(
+                        label, capture)) {
+                    return failWithoutMutation();
+                }
+                toolCaptures.push_back(std::move(capture));
+            }
+
+#ifdef DEBUG
+            const Standard_Size candidateNodeBudget =
+                _debugMaximumResultTopologyNodes;
+#else
+            const Standard_Size candidateNodeBudget =
+                kMaxResultTopologyNodes;
+#endif
+            TopoDS_Shape canonicalCandidate;
+            if (!CanonicalPlainProfileBooleanCandidate(
+                    subjectPreview->Shape(), candidateNodeBudget,
+                    canonicalCandidate)) {
+                return failWithoutMutation();
+            }
+            std::shared_ptr<const OcctPlainProfileCutPreparation> prepared;
+            if (!myDoc->PreparePlainProfileCut(
+                    subjectCapture, toolCaptures, canonicalCandidate,
+                    subjectPreview->LocalTransformation(), prepared)
+                || !prepared) {
+                return failWithoutMutation();
+            }
+
+            // Adopt the exact prepared root on the same owned preview handle,
+            // preserving its transformation and style before the transaction.
+            if (!canonicalCandidate.IsSame(subjectPreview->Shape())) {
+                subjectPreview->SetShape(canonicalCandidate);
+                // Storage preparation replaces the TShapes without mesh caches.
+                // SetShape alone leaves the displayed presentation and selection
+                // cached for the old topology. Rebuild them before publication.
+                myContext->Redisplay(subjectPreview, Standard_False);
+                myContext->RecomputeSelectionOnly(subjectPreview);
+            }
+            if (subjectPreview->Shape().IsNull()
+                || subjectPreview->Shape().ShapeType() != TopAbs_SOLID
+                || !subjectPreview->Shape().IsSame(canonicalCandidate)) {
+                return failWithoutMutation();
+            }
+            _plainProfileCutPreparation = std::move(prepared);
+        } catch (...) {
+            return failWithoutMutation();
+        }
+    }
 	for (const auto& aSelection : _selectionMap) {
 		if (!IsCurrentBRepSelection(myDoc, aSelection.second)) {
 			return failWithoutMutation();
@@ -3284,7 +3467,15 @@ void BooleanOperationController::cancel(
     const BooleanAction theAction) noexcept
 {
     if (actionMatches(theAction)) {
-        cancelImpl();
+        // Explicit Cancel is the user's recovery action.  Give a closed,
+        // unresolved command one additional bounded read-only inspection;
+        // lifecycle cancelActive() intentionally retains its single attempt.
+        // This cannot replay or open a command, and cancelImpl clears the
+        // operation immediately once the committed/aborted state is proved.
+        if (!cancelImpl() && actionMatches(theAction)
+            && _documentCommandUnresolved && !_pendingResults.empty()) {
+            (void)cancelImpl();
+        }
     }
 }
 

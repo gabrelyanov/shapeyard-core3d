@@ -66,6 +66,7 @@ namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedRes
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
+namespace core3d::retained_program_suffix { struct Probe; }
 
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
@@ -421,6 +422,16 @@ struct OcctPlainProfileOperationCapture {
 // native document implementation so callers cannot manufacture archive proof.
 struct OcctPlainProfileCutPreparation;
 struct OcctPlainProfileCutReceipt;
+#if DEBUG
+//! Immutable, read-only H6 evidence. Indexed keys keep every original source,
+//! edge, scalar recipe and commitment separately observable without exposing
+//! OCAF labels or mutable native handles.
+struct OcctPlainProfileCutDebugEvidence {
+    std::map<std::string, std::vector<std::uint8_t>> bytes;
+    std::map<std::string, double> numbers;
+    std::map<std::string, bool> checks;
+};
+#endif
 
 //! Scans every label, including hidden/unbound/orphan records and foreign arrays.
 //! This validates frame ownership, not the rest of the document schema. Callers
@@ -497,6 +508,16 @@ struct OcctGeometryDuplicationRequest
     // Baked enclosure copies compose an eight-scalar construction frame.
     // Charge the additional labels only when the source has no frame yet.
     bool requiresEnclosureConstructionFrame = false;
+    // D1a callers opt in to preserving a complete current sweep/loft recipe.
+    // Other duplication paths remain fail-closed for these owners.
+    bool preservesSweepLoftRecipe = false;
+    // Mirror bakes geometry and must compose a new recipe construction frame;
+    // local-transform Duplicate/arrays preserve the authored frame verbatim.
+    bool requiresSweepLoftConstructionFrame = false;
+    // D1-C typed handshake. Production callers leave this false until the
+    // native promotion guard is retained; false keeps every composite owner
+    // on the established fail-closed path.
+    bool preservesAnalyticBooleanRecipe = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
@@ -538,6 +559,9 @@ Standard_EXPORT std::map<std::string, std::vector<std::uint8_t>>
 Core3DDebugLegacyCorpusCapture();
 //! P1 internal synthetic registry/OCAF evidence. No product feature is installed.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedFeatureRegistryProbe(Standard_Integer scenario);
+//! A3/P2 DEBUG retained-program-suffix evidence; no edit authority and no
+//! public append route.
+Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedProgramSuffixProbe(Standard_Integer scenario);
 //! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
 Standard_EXPORT std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario);
@@ -600,7 +624,7 @@ public:
   Standard_EXPORT Standard_Boolean PreparePlainProfileCut(
       const OcctPlainProfileOperationCapture& subjectCapture,
       const std::vector<OcctPlainProfileOperationCapture>& orderedToolCaptures,
-      const TopoDS_Shape& canonicalCandidate,
+      TopoDS_Shape& canonicalCandidate,
       const gp_Trsf& resultOccurrence,
       std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept;
   Standard_EXPORT Standard_Boolean PlainProfileCutSourcesCurrent(
@@ -615,6 +639,13 @@ public:
       const std::shared_ptr<const OcctPlainProfileCutReceipt>& receipt) const noexcept;
   Standard_EXPORT Standard_Boolean VerifyPlainProfileCutSourcesRestored(
       const std::shared_ptr<const OcctPlainProfileCutPreparation>& prepared) const noexcept;
+#if DEBUG
+  //! Read-only H6 observer. Missing, invalid, non-v4 or unreconstructible data
+  //! returns false and clears output; it performs no repair or write-on-read.
+  Standard_EXPORT Standard_Boolean DebugPlainProfileCutRetention(
+      const std::string& entityIdentifier,
+      OcctPlainProfileCutDebugEvidence& output) const noexcept;
+#endif
   // Benchmark assets need more than 40 steps; 1000 keeps memory bounded on
   // device while preserving a long editable native session.
   static constexpr Standard_Integer kNativeSessionUndoLimit = 1000;
@@ -1164,6 +1195,9 @@ private:
   friend class core3d::NativeDocumentSession;
   friend class core3d::part_boolean::owner::PartBooleanOwner;
   friend class core3d::retained_feature::OcafOwnerService;
+  // A3/P2 DEBUG probe: save/reopen byte evidence for the retained program
+  // suffix. No production staging authority is granted by this friendship.
+  friend struct core3d::retained_program_suffix::Probe;
   bool StagePartBooleanPayload(
       const TDF_Label&, const std::shared_ptr<const core3d::composite_recipe::Payload>&) noexcept;
   void CloseNativeSession() noexcept;

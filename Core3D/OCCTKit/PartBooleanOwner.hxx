@@ -137,6 +137,9 @@ private:
     std::vector<TopoDS_Shape> sourceShapes;
     DocumentSnapshot baseline;
     retained_recipe::NativeCurrentnessFacts currentness;
+    // Nonserializable proof minted by this document owner. Schema-3 captures
+    // never manufacture this through an editor-facing request or DTO.
+    mutable retained_recipe::GraphCurrentnessFacts graphCurrentness;
 };
 
 class PreparedBooleanDocumentChange final {
@@ -160,6 +163,7 @@ private:
     std::vector<PreparedFaceMaterial> faceMaterials;
     DocumentSnapshot expected;
     retained_recipe::NativeCurrentnessFacts currentness;
+    mutable retained_recipe::GraphCurrentnessFacts graphCurrentness;
     FaultPoint fault = FaultPoint::None;
 };
 
@@ -221,7 +225,8 @@ private:
                             composite_recipe::Record* = nullptr) const noexcept;
     bool resolveAnalytic(const TDF_Label&, composite_recipe::Record&,
                          retained_recipe::OwnerSnapshot&, AnalyticDefinition&,
-                         retained_recipe::NativeCurrentnessFacts&) const noexcept;
+                         retained_recipe::NativeCurrentnessFacts&,
+                         retained_recipe::GraphCurrentnessFacts&) const noexcept;
     bool resolveShell(const TDF_Label&, composite_recipe::Record&,
                       retained_recipe::OwnerSnapshot&, ShellEditDefinition&,
                       retained_recipe::NativeCurrentnessFacts&) const noexcept;

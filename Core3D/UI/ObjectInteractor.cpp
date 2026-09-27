@@ -7,6 +7,7 @@
 
 #include "ObjectInteractor.hpp"
 #include "OrdinaryEditController.hpp"
+#include "../OCCTKit/ReceiptRecord.hxx"
 #include "../Scene/SceneSnapshot.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include <BRepAlgoAPI_Cut.hxx>
@@ -1322,12 +1323,15 @@ namespace core3d {
 				 _pendingDuplicateResults) {
                 profile::Record sourceProfile;
                 OcctObjectNameState sourceName;
+                pattern_recipe_clone::Source sourceSweepLoft;
                 if (duplicate.sourceLabel.IsNull()
                     || duplicate.sourceLabel.Data() != document->GetData()
                     || duplicate.originalOwnerShape.IsNull()
                     || !duplicate.originalOwnerShape.IsEqual(XCAFDoc_ShapeTool::GetShape(duplicate.sourceLabel))
                     || !profile::Read(document, duplicate.sourceLabel, sourceProfile)
                     || !sourceProfile.IsEqual(duplicate.originalProfile)
+                    || !pattern_recipe_clone::Capture(document, duplicate.sourceLabel, sourceSweepLoft)
+                    || !pattern_recipe_clone::IsEqual(sourceSweepLoft, duplicate.originalSweepLoft)
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.sourceLabel, sourceName)
                     || !sourceName.IsEqual(duplicate.originalName)
                     || sourceProfile.IsCurrent(document, duplicate.sourceLabel) != duplicate.originalProfileCurrent
@@ -1363,6 +1367,7 @@ namespace core3d {
                 OcctObjectNameState actualName;
 				if (!duplicate.profileCandidateSealed
                     || !duplicate.enclosureCandidateSealed
+                    || !duplicate.sweepLoftCandidateSealed
                     || !actualEnclosure.IsEqual(duplicate.candidateEnclosure)
                     || actualEnclosure.IsCurrent(document, duplicate.resultLabel) != duplicate.originalEnclosureCurrent
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.resultLabel, actualName)
@@ -1395,7 +1400,9 @@ namespace core3d {
 						== OcctReferenceAxisReadState::Invalid
 					|| ReferenceAxisDiffers(
 						storedReferenceAxis,
-						duplicate.expectedReferenceAxis)) {
+						duplicate.expectedReferenceAxis)
+                    || !pattern_recipe_clone::ReadCandidate(document,
+                        duplicate.resultLabel, duplicate.candidateSweepLoft)) {
 					return DuplicateDocumentState::PartialOrMismatched;
 				}
 				++committedCount;
@@ -1549,6 +1556,10 @@ namespace core3d {
 	}
 
     void ObjectInteractor::duplicateSelected() {
+        // Promotion is deliberately a native guarded change, not part of this
+        // source-bound draft. The complete typed path below remains unreachable
+        // from the public Duplicate action while this is false.
+        static constexpr bool kAdmitAnalyticBooleanDuplicate = false;
         if (blocksForOrdinaryEdit()) { return; }
         auto doc = myDoc->ChangeDocument();
 		if (doc.IsNull()) { return; }
@@ -1586,6 +1597,7 @@ namespace core3d {
             OcctObjectNameState name;
             TopoDS_Shape ownerShape;
             bool profileCurrent = false;
+            pattern_recipe_clone::Source sweepLoft;
         };
         std::vector<DuplicateSource> sources;
         for (myContext->InitSelected(); myContext->MoreSelected();
@@ -1634,11 +1646,13 @@ namespace core3d {
 			if (!isDuplicateLabel) {
                 profile::Record savedProfile;
                 OcctObjectNameState name;
+                pattern_recipe_clone::Source sweepLoft;
                 if (!profile::Read(doc, label, savedProfile)
-                    || !myDoc->CaptureObjectNameStateForLabel(label, name)) { return; }
+                    || !myDoc->CaptureObjectNameStateForLabel(label, name)
+                    || !pattern_recipe_clone::Capture(doc, label, sweepLoft)) { return; }
 				sources.push_back({shape, label, destinationRepresentation,
                     referenceAxisState, referenceAxis, savedProfile, name, storedShape,
-                    savedProfile.IsCurrent(doc, label)});
+                    savedProfile.IsCurrent(doc, label), sweepLoft});
             }
         }
         if (sources.empty()) { return; }
@@ -1649,7 +1663,9 @@ namespace core3d {
 		}
         std::vector<OcctGeometryDuplicationRequest> duplicationRequests;
         duplicationRequests.reserve(sourceLabels.size());
-        for (const auto& label : sourceLabels) duplicationRequests.push_back({label, 1U, false, true});
+        for (const auto& label : sourceLabels)
+            duplicationRequests.push_back({label, 1U, false, true, false, true, false,
+                                            kAdmitAnalyticBooleanDuplicate});
 		if (!myDoc->CanDuplicateGeometryDefinitions(duplicationRequests)) {
 			return;
 		}
@@ -1739,6 +1755,9 @@ namespace core3d {
 				}
 				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
                 const gp_Trsf sourceTransform = source.presentation->LocalTransformation();
+                if (source.sweepLoft.family
+                        == pattern_recipe_clone::Family::AnalyticBoolean
+                    && !pattern_recipe_clone::IsProperRigidPlacement(sourceTransform)) return;
                 // A complete saved group is one assembly operation: apply the
                 // admitted bounds displacement in document/world space so
                 // heterogeneous member transforms preserve their layout.
@@ -1759,6 +1778,7 @@ namespace core3d {
                 duplicate.originalName = source.name;
                 duplicate.originalOwnerShape = source.ownerShape;
                 duplicate.originalProfileCurrent = source.profileCurrent;
+                duplicate.originalSweepLoft = source.sweepLoft;
                 if (!source.savedProfile.label.IsNull()) {
                     duplicate.preparedProfileIdentifier = OcctDocument::NewProfileIdentifier();
                     if (!profile::IsIdentifier(duplicate.preparedProfileIdentifier)
@@ -1792,6 +1812,19 @@ namespace core3d {
                             || !IsTopologicallyValid(retainedCopy.Shape())) return;
                         duplicate.preparedEnclosureBinding = retainedCopy.Shape();
                     }
+                }
+                if (source.sweepLoft.family
+                        == pattern_recipe_clone::Family::AnalyticBoolean) {
+                    if (!kAdmitAnalyticBooleanDuplicate) return;
+                    // Preparation needs AddShape's freshly issued owner IDs and
+                    // therefore occurs inside the same owned command below.
+                } else {
+                    const std::string sweepLoftIdentifier = source.sweepLoft.family
+                        == pattern_recipe_clone::Family::None
+                        ? std::string() : OcctDocument::NewProfileIdentifier();
+                    if (!pattern_recipe_clone::Prepare(source.sweepLoft, copy->Shape(),
+                            sweepLoftIdentifier, std::nullopt,
+                            duplicate.preparedSweepLoft)) return;
                 }
                 duplicates.push_back(std::move(duplicate));
 			}
@@ -1896,6 +1929,21 @@ namespace core3d {
 					myDoc->EntityIdentifierForLabel(label);
 				duplicate.definitionIdentifier =
 					myDoc->DefinitionIdentifierForLabel(label);
+				if (duplicate.originalSweepLoft.family
+						== pattern_recipe_clone::Family::AnalyticBoolean) {
+					retained_recipe::OwnerKey destinationOwner;
+					const auto issue = [](retained_recipe::UUID& value) noexcept {
+						return receipt::ParseUUID(OcctDocument::NewProfileIdentifier(), value);
+					};
+					if (!receipt::ParseUUID(myDoc->DocumentIdentifier(), destinationOwner.document)
+						|| !receipt::ParseUUID(duplicate.entityIdentifier, destinationOwner.entity)
+						|| !receipt::ParseUUID(duplicate.definitionIdentifier, destinationOwner.definition)
+						|| !pattern_recipe_clone::PrepareAnalyticBoolean(
+							duplicate.originalSweepLoft, duplicate.expectedShape,
+							destinationOwner, issue, duplicate.preparedSweepLoft)) {
+						retainRetryableOrUnknown(); return;
+					}
+				}
 				OcctReferenceAxis storedReferenceAxis;
 				const OcctReferenceAxisReadState storedReferenceAxisState =
 					myDoc->ReadReferenceAxisForLabel(
@@ -1980,6 +2028,22 @@ namespace core3d {
                 }
 #endif
                 duplicate.enclosureCandidateSealed = true;
+                const bool recipeStaged = duplicate.originalSweepLoft.family
+                        == pattern_recipe_clone::Family::AnalyticBoolean
+                    ? pattern_recipe_clone::StageAnalyticBoolean(
+                        doc, duplicate.originalSweepLoft, label,
+                        duplicate.preparedSweepLoft, duplicate.candidateSweepLoft)
+                    : pattern_recipe_clone::Stage(doc, duplicate.originalSweepLoft,
+                        label,
+                        myDoc->EntityIdentifierForLabel(duplicate.sourceLabel),
+                        myDoc->DefinitionIdentifierForLabel(duplicate.sourceLabel),
+                        duplicate.entityIdentifier, duplicate.definitionIdentifier,
+                        duplicate.preparedSweepLoft,
+                        duplicate.candidateSweepLoft);
+                if (!recipeStaged) {
+                    retainRetryableOrUnknown(); return;
+                }
+                duplicate.sweepLoftCandidateSealed = true;
                 // Preserve authored names and their absence on each independent
                 // part. Closed-commit recovery compares this exact source state.
                 if (duplicate.originalName.namePresent) {
@@ -4638,7 +4702,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 projectedTopology += cost;
             }
             profileRequests.push_back({source->second, 1, !profile.label.IsNull(),
-                                       !enclosure.label.IsNull(), !enclosure.label.IsNull()});
+                                       !enclosure.label.IsNull(), !enclosure.label.IsNull(),
+                                       true, true});
         }
         if (!myDoc->CanDuplicateGeometryDefinitions(profileRequests)) return Standard_False;
 
@@ -4702,7 +4767,10 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			}
 			anAggregateTopologyNodes += sourceNodeCount;
             OcctObjectNameState profileOwner;
-            if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)) return Standard_False;
+            pattern_recipe_clone::Source sweepLoft;
+            if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)
+                || !pattern_recipe_clone::Capture(aSourceDocument, sourceLabel, sweepLoft))
+                return Standard_False;
             const auto& originalProfile = profileOwner.object.profile;
             const auto& originalEnclosure = profileOwner.object.enclosure;
             double documentMetersPerUnit = 0;
@@ -4758,7 +4826,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			BRepBuilderAPI_Transform aBRepTrsf(
 				shape->Shape(),
 				aBakedTransform,
-                originalProfile.label.IsNull() && originalEnclosure.label.IsNull() ? Standard_False : Standard_True,
+                originalProfile.label.IsNull() && originalEnclosure.label.IsNull()
+                    && sweepLoft.family == pattern_recipe_clone::Family::None
+                    ? Standard_False : Standard_True,
 				Standard_False);
 			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
 			Standard_Size resultNodeCount = 0;
@@ -4824,6 +4894,16 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                             && preparedEnclosureBinding.IsPartner(previous.preparedEnclosureBinding))) return Standard_False;
                 }
             }
+            pattern_recipe_clone::Prepared preparedSweepLoft;
+            const std::string sweepLoftIdentifier = sweepLoft.family
+                == pattern_recipe_clone::Family::None
+                ? std::string() : OcctDocument::NewProfileIdentifier();
+            if (!pattern_recipe_clone::Prepare(sweepLoft, aShapePrs->Shape(),
+                    sweepLoftIdentifier, aBakedTransform, preparedSweepLoft)) return Standard_False;
+            for (const auto& previous : replacementSources)
+                if (!preparedSweepLoft.featureIdentifier.empty()
+                    && preparedSweepLoft.featureIdentifier
+                        == previous.preparedSweepLoft.featureIdentifier) return Standard_False;
 			myDoc->LoadObjectMeterial(sourceLabel, aShapePrs);
 			replacementObjects.push_back(aShapePrs);
 			replacementSources.push_back({
@@ -4847,6 +4927,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 retainedEnclosureNodes,
                 preparedEnclosureBinding,
                 enclosureIdentifier,
+                sweepLoft,
+                preparedSweepLoft,
 			});
 		}
 		std::vector<OcctGeometryDuplicationRequest> aSourceLabels;
@@ -4854,7 +4936,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		for (const MirrorSourceSnapshot& aSource : replacementSources) {
 			aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
-                                        !aSource.profileOwner.object.enclosure.label.IsNull()});
+                                        !aSource.profileOwner.object.enclosure.label.IsNull(),
+                                        true, true});
 		}
 		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
 			return Standard_False;
@@ -6142,6 +6225,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				Standard_Size aSourceNodes = 0;
 				Standard_Size aResultNodes = 0;
                 OcctObjectNameState profileOwner;
+                pattern_recipe_clone::Source currentSweepLoft;
                 double documentMetersPerUnit = 0;
                 bool documentLengthUnitPresent = false;
                 if (!ReadMirrorDocumentUnits(aDocument, documentMetersPerUnit, documentLengthUnitPresent)
@@ -6149,6 +6233,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || documentMetersPerUnit != aSource.documentMetersPerUnit
                     || !myDoc->CaptureObjectNameStateForLabel(aSource.label, profileOwner)
                     || !profileOwner.IsEqual(aSource.profileOwner)
+                    || !pattern_recipe_clone::Capture(aDocument, aSource.label, currentSweepLoft)
+                    || !pattern_recipe_clone::IsEqual(currentSweepLoft, aSource.sweepLoft)
                     || profileOwner.object.profile.IsCurrent(aDocument, aSource.label) != aSource.profileCurrent
                     || profileOwner.object.enclosure.IsCurrent(aDocument, aSource.label) != aSource.enclosureCurrent)
                     return Standard_False;
@@ -6277,10 +6363,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 return MirrorDocumentState::Unavailable;
             for (const auto& source : _trialMirrorSources) {
                 OcctObjectNameState current;
+                pattern_recipe_clone::Source currentSweepLoft;
                 if (documentLengthUnitPresent != source.documentLengthUnitPresent
                     || documentMetersPerUnit != source.documentMetersPerUnit
                     || !myDoc->CaptureObjectNameStateForLabel(source.label, current)
                     || !current.IsEqual(source.profileOwner)
+                    || !pattern_recipe_clone::Capture(aDocument, source.label, currentSweepLoft)
+                    || !pattern_recipe_clone::IsEqual(currentSweepLoft, source.sweepLoft)
                     || current.object.profile.IsCurrent(aDocument, source.label) != source.profileCurrent
                     || current.object.enclosure.IsCurrent(aDocument, source.label) != source.enclosureCurrent)
                     return MirrorDocumentState::PartialOrMismatched;
@@ -6310,6 +6399,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 						aResult.label, aReferenceAxis);
                 OcctObjectNameState candidateOwner;
                 if (!aResult.profileCandidateSealed
+                    || !aResult.sweepLoftCandidateSealed
                     || !myDoc->CaptureObjectNameStateForLabel(aResult.label, candidateOwner)
                     || !candidateOwner.IsEqual(aResult.expectedProfileOwner)
                     || storedProfile.IsCurrent(aDocument, aResult.label) != aResult.expectedProfileCurrent
@@ -6335,7 +6425,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 						== OcctReferenceAxisReadState::Invalid
 					|| ReferenceAxisDiffers(
 						aReferenceAxis,
-						aResult.expectedReferenceAxis)) {
+						aResult.expectedReferenceAxis)
+                    || !pattern_recipe_clone::ReadCandidate(aDocument,
+                        aResult.label, aResult.expectedSweepLoft)) {
 					return MirrorDocumentState::PartialOrMismatched;
 				}
 				++aCommittedCount;
@@ -6475,7 +6567,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			for (const MirrorSourceSnapshot& aSource : _trialMirrorSources) {
 				aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
-                                        !aSource.profileOwner.object.enclosure.label.IsNull()});
+                                        !aSource.profileOwner.object.enclosure.label.IsNull(),
+                                        true, true});
 			}
 		} catch (...) {
 			return MirrorApplyResult::NoChange;
@@ -6631,6 +6724,12 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 #endif
                 if (aSource.profileOwner.namePresent) TDataStd_Name::Set(aLabel, aSource.profileOwner.name);
                 else aLabel.ForgetAttribute(TDataStd_Name::GetID());
+                if (!pattern_recipe_clone::Stage(aDocument, aSource.sweepLoft,
+                        aLabel, aSource.entityIdentifier,
+                        aSource.definitionIdentifier, aPending.entityIdentifier,
+                        aPending.definitionIdentifier, aSource.preparedSweepLoft,
+                        aPending.expectedSweepLoft)) return retainRetryableOrUnknown();
+                aPending.sweepLoftCandidateSealed = Standard_True;
                 if (!myDoc->CaptureObjectNameStateForLabel(aLabel, aPending.expectedProfileOwner)
                     || !aPending.expectedProfileOwner.object.profile.IsEqual(candidateProfile)
                     || !aPending.expectedProfileOwner.object.enclosure.IsEqual(candidateEnclosure)

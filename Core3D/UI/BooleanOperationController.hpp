@@ -144,6 +144,11 @@ public:
     //! Production result validator exposed only for deterministic fixtures.
     static Standard_Boolean debugValidateSolidResult(
         const TopoDS_Shape& shape) noexcept;
+    //! H6 fixture seam over the exact H3/D81 canonical helper.
+    static Standard_Boolean debugCanonicalPlainProfileBooleanCandidate(
+        const TopoDS_Shape& shape,
+        Standard_Size maximumNodes,
+        TopoDS_Shape& candidate) noexcept;
     BooleanPreviewDebugState debugPreviewState() const noexcept;
     void debugSetWorkerBlocked(Standard_Boolean blocked) noexcept;
     void debugSetMaximumCaptureTopologyNodes(Standard_Size limit) noexcept;

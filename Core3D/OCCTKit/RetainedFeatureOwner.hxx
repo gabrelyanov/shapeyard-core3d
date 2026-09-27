@@ -56,6 +56,167 @@ inline bool InstallCapturedRevision(double effectiveMetersPerUnit,
     return true;
 }
 
+// A document owner may need immutable execution inputs which are deliberately
+// absent from persisted feature payloads (for example, the complete captured
+// graph and captured display settings).  They travel as an explicit argument
+// through this owner-only callback table.  Nothing here changes the production
+// RegistryView or makes a codec-only production descriptor executable.
+struct OwnerExecutionContext final {
+    const composite_recipe::Definition* graph = nullptr;
+    const void* settings = nullptr;
+};
+
+using OwnerBuildDetached = bool (*)(const OwnerExecutionContext&,
+                                    const composite_recipe::FeatureNode&,
+                                    const std::vector<ReplayValue>&,
+                                    ReplayBudget&, ReplayValue&) noexcept;
+using OwnerProveFamily = bool (*)(const OwnerExecutionContext&,
+                                  const composite_recipe::FeatureNode&,
+                                  const std::vector<ReplayValue>&,
+                                  const ReplayValue&, ReplayBudget&) noexcept;
+using OwnerVerifyFixedPoint = bool (*)(const OwnerExecutionContext&,
+                                       const composite_recipe::FeatureNode&,
+                                       const std::vector<ReplayValue>&,
+                                       const ReplayValue&, ReplayBudget&) noexcept;
+
+struct OwnerExecutionDescriptor final {
+    const ExecutionDescriptor* validation = nullptr;
+    OwnerBuildDetached buildDetached = nullptr;
+    OwnerProveFamily proveFamily = nullptr;
+    OwnerVerifyFixedPoint verifyFixedPoint = nullptr;
+    bool installed() const noexcept {
+        return validation && validation->installed() && buildDetached
+            && proveFamily && verifyFixedPoint;
+    }
+};
+
+struct OwnerExecutionEntry final { Key key; OwnerExecutionDescriptor execution; };
+
+class OwnerExecutionRegistryView final {
+public:
+    constexpr OwnerExecutionRegistryView(const OwnerExecutionEntry* entries,
+                                         std::size_t count) noexcept
+        : entries_(entries), count_(count) {}
+    const OwnerExecutionEntry* find(Key key) const noexcept {
+        for (std::size_t index = 0; index < count_; ++index)
+            if (entries_[index].key == key) return entries_ + index;
+        return nullptr;
+    }
+private:
+    const OwnerExecutionEntry* entries_ = nullptr;
+    std::size_t count_ = 0;
+};
+
+inline ReplayResult ReplayOwnerDetached(
+    const composite_recipe::Definition& definition,
+    const RegistryView& validationRegistry,
+    const OwnerExecutionRegistryView& ownerRegistry,
+    const retained_source::RegistryView& sources,
+    const std::vector<SourceValue>& sourceValues,
+    const OwnerExecutionContext& context,
+    ReplayBudget& budget) noexcept {
+    ReplayResult result;
+    try {
+        if (context.graph != &definition) {
+            result.reason = "foreign-owner-execution-context"; return result;
+        }
+        const auto validity = composite_recipe::ValidateV3(
+            definition, validationRegistry, sources);
+        if (!validity.valid()) { result.reason = validity.reason; return result; }
+        std::map<retained_recipe::UUID, ReplayValue> values;
+        for (const SourceValue& source : sourceValues)
+            if (!retained_recipe::Nonzero(source.node) || !source.value.valid()
+                || !values.emplace(source.node, source.value).second) {
+                result.refusal = ReplayRefusal::MissingSource;
+                result.reason = "invalid-source-values"; return result;
+            }
+        for (const auto& node : definition.nodes) {
+            if (!budget.consume(1, 1, 0)) {
+                result.refusal = ReplayRefusal::BudgetExceeded;
+                result.reason = "replay-budget"; return result;
+            }
+            if (const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value)) {
+                const auto found = values.find(source->node);
+                const auto* sourceCodec = sources.find(
+                    {std::uint8_t(source->recipe.kind), source->recipe.schema});
+                if (found == values.end()) {
+                    result.refusal = ReplayRefusal::MissingSource;
+                    result.reason = "missing-source"; return result;
+                }
+                if (!sourceCodec || found->second.shape
+                        != ShapeKind(std::uint8_t(sourceCodec->shape))) {
+                    result.refusal = ReplayRefusal::ShapeMismatch;
+                    result.reason = "source-shape-kind"; return result;
+                }
+                continue;
+            }
+            const auto& feature = std::get<composite_recipe::FeatureNode>(node.value);
+            const Key key{feature.kind, feature.codecVersion};
+            const auto* validation = validationRegistry.find(key);
+            const auto* entry = ownerRegistry.find(key);
+            if (!validation || !entry || !entry->execution.installed()
+                || entry->execution.validation != &validation->execution) {
+                result.refusal = validation && entry
+                    ? ReplayRefusal::ExecutionNotInstalled : ReplayRefusal::UnknownCodec;
+                result.reason = validation && entry
+                    ? "owner-execution-not-installed" : "unknown-feature-codec";
+                return result;
+            }
+            std::vector<ReplayValue> inputs;
+            inputs.reserve(feature.inputs.size());
+            for (std::size_t index = 0; index < feature.inputs.size(); ++index) {
+                const auto found = values.find(feature.inputs[index]);
+                if (found == values.end()) {
+                    result.refusal = ReplayRefusal::MissingSource;
+                    result.reason = "missing-feature-input"; return result;
+                }
+                if (found->second.shape != validation->codec.orderedInputs[index]) {
+                    result.refusal = ReplayRefusal::ShapeMismatch;
+                    result.reason = "feature-input-shape"; return result;
+                }
+                inputs.push_back(found->second);
+            }
+            ReplayValue output;
+            output.shape = validation->codec.output;
+            if (!entry->execution.buildDetached(
+                    context, feature, inputs, budget, output) || !output.valid()) {
+                result.refusal = budget.exhausted
+                    ? ReplayRefusal::BudgetExceeded : ReplayRefusal::BuildFailed;
+                result.reason = budget.exhausted ? "replay-budget" : "detached-build";
+                return result;
+            }
+            if (!entry->execution.proveFamily(
+                    context, feature, inputs, output, budget)) {
+                result.refusal = budget.exhausted
+                    ? ReplayRefusal::BudgetExceeded : ReplayRefusal::FamilyProofFailed;
+                result.reason = budget.exhausted ? "replay-budget" : "family-proof";
+                return result;
+            }
+            if (!entry->execution.verifyFixedPoint(
+                    context, feature, inputs, output, budget)) {
+                result.refusal = budget.exhausted
+                    ? ReplayRefusal::BudgetExceeded : ReplayRefusal::FixedPointFailed;
+                result.reason = budget.exhausted ? "replay-budget" : "fixed-point";
+                return result;
+            }
+            retained_recipe::Digest payload{};
+            if (!composite_recipe::Hash(feature.parameters, payload)) {
+                result.refusal = ReplayRefusal::NonCanonicalOutput;
+                result.reason = "payload-commitment"; return result;
+            }
+            result.observations.push_back({feature.node, feature.feature, key,
+                feature.inputs, payload, output.geometry, output.familyProof});
+            values.emplace(feature.node, std::move(output));
+        }
+        const auto found = values.find(definition.outputNode);
+        if (found == values.end()) { result.reason = "missing-output"; return result; }
+        result.output = found->second;
+        result.refusal = ReplayRefusal::None;
+        result.reason = "owner-detached-replay-proven";
+        return result;
+    } catch (...) { result = {}; result.reason = "owner-replay-exception"; return result; }
+}
+
 struct PreparedChange final {
     std::uint64_t ownerNonce = 0, session = 0;
     MutationRequest request;

@@ -366,6 +366,16 @@ __attribute__((objc_subclassing_restricted))
 //! Creates one saved native sweep through the existing ordinary worker/history path.
 - (nullable Core3DStoredSweepSnapshot *)storedSweepWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedSweep(entityIdentifier:expected:));
+//! Opens only an exact current retained curve -> spatial-sweep owner. The
+//! returned descriptor is complete but carries no authority by value.
+- (nullable Core3DSpatialSweepEditorContext *)spatialSweepEditorWithEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(spatialSweepEditor(entityIdentifier:expected:));
+//! Prepares detached, then re-reads the complete native fence before the sole
+//! owned command. Unsupported descendants and stale openings refuse atomically.
+- (nullable Core3DSpatialSweepEditOperation *)beginSpatialSweepEdit:(Core3DSpatialSweepEditorContext *)context
+    candidate:(NSDictionary<NSString *, id> *)candidate
+    completion:(void(^)(Core3DProfileConstructionResult result, NSString *detail))completion
+    NS_SWIFT_NAME(beginSpatialSweepEdit(_:candidate:completion:));
 - (void)rebuildStoredSweep:(Core3DStoredSweepSnapshot *)original
     definition:(Core3DSweepDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
@@ -1217,11 +1227,22 @@ __attribute__((objc_subclassing_restricted))
 + (void)debugSetRetainedFilletFailureCount:(NSInteger)count NS_SWIFT_NAME(debugSetRetainedFilletFailureCount(_:));
 //! N1 internal owner evidence. This does not expose or enable a product route.
 + (NSDictionary<NSString *, NSNumber *> *)debugNativeBooleanOwnerProbe:(NSInteger)scenario NS_SWIFT_NAME(debugNativeBooleanOwnerProbe(_:));
+//! H6 read-only observation of one validated committed SYCR/4 cut carrier.
+- (NSDictionary<NSString *, id> *_Nullable)debugPlainProfileCutRetention:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugPlainProfileCutRetention(entityIdentifier:));
+//! H6 production-codec corruption and exact D81 boundary controls. It never
+//! installs a registry entry or creates a product edit route.
+- (NSDictionary<NSString *, id> *)debugPlainProfileCutPersistenceProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugPlainProfileCutPersistenceProbe(_:));
 //! Canonical pre-G0 writer capture; keys are stable attachment names.
 + (NSDictionary<NSString *, NSData *> *)debugLegacyCorpusCapture
     NS_SWIFT_NAME(debugLegacyCorpusCapture());
 //! P1 synthetic registry/OCAF evidence; never a product modeling route.
 + (NSDictionary<NSString *, NSNumber *> *)debugRetainedFeatureRegistryProbe:(NSInteger)scenario NS_SWIFT_NAME(debugRetainedFeatureRegistryProbe(_:));
+//! A3/P2 retained-program suffix codec, typed-refusal, replay and durability
+//! evidence. DEBUG-only evidence; it grants no product append authority.
++ (NSDictionary<NSString *, NSNumber *> *)debugRetainedProgramSuffixProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugRetainedProgramSuffixProbe(_:));
 //! Pure DEBUG codec/history evidence; never observes or mutates the live document.
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe
     NS_SWIFT_NAME(debugPartBooleanCodecProbe());
@@ -1252,6 +1273,24 @@ __attribute__((objc_subclassing_restricted))
 //! fail-closed while the canonical C1 codec and real G0 transaction are absent.
 + (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepK2Probe
     NS_SWIFT_NAME(debugSpatialSweepK2Probe());
+//! C2-N complete editor surface, refusal, replay and two-unit durability probes.
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepEditorProbe:(NSUInteger)scenario
+    NS_SWIFT_NAME(debugSpatialSweepEditorProbe(_:));
+//! Direct C2 document-admission boundary evidence. Every isolated fixture is
+//! evaluated by the same validator used by save and safe fresh retrieval.
++ (NSDictionary<NSString *, NSNumber *> *)debugSpatialSweepDocumentAdmissionProbe
+    NS_SWIFT_NAME(debugSpatialSweepDocumentAdmissionProbe());
+//! Saved retained-sweep fixture for C2 rows 16/17. The native source
+//! document is closed before these exact BinXCAF bytes are returned.
++ (NSData *_Nullable)debugSpatialSweepColdOpenFixtureDataWithMetersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugSpatialSweepColdOpenFixtureData(metersPerUnit:));
+//! Public B10 Lantern.Post component baseline. No held-out edit is accepted.
++ (NSData *_Nullable)debugB10SpatialSweepFixtureDataWithMetersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugB10SpatialSweepFixtureData(metersPerUnit:));
+//! Exact SYCR/SYCV/SCSW, identity, commitment and BRep evidence read from the
+//! currently open production document. This does not mutate document state.
+- (NSDictionary<NSString *, id> *_Nullable)debugSpatialSweepDurabilityEvidence:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugSpatialSweepDurabilityEvidence(entityIdentifier:));
 //! C1 canonical SYCV/1 + owner-receipt persistence scenarios. Detached from
 //! the active document and unavailable outside DEBUG.
 + (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurvePersistenceProbe:(NSUInteger)scenario

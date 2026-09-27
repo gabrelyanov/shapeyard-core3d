@@ -220,6 +220,23 @@
 		C0A100070000000000000007 /* RetainedRecipeSnapshot.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C0A100170000000000000017 /* RetainedRecipeSnapshot.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C0A100080000000000000008 /* RetainedRecipeProbe.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C0A100180000000000000018 /* RetainedRecipeProbe.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		2E70B1881BA94908AECBA472 /* RectangularLoftPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D1A100010000000000000001 /* PatternRecipeClone.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D1A100110000000000000011 /* PatternRecipeClone.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D2A100010000000000000001 /* PatternBuild.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D2A100110000000000000011 /* PatternBuild.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D2A100020000000000000002 /* PatternDefinition.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D2A100120000000000000012 /* PatternDefinition.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D2A100030000000000000003 /* PatternPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D2A100130000000000000013 /* PatternPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D2B100010000000000000001 /* PatternOwnerBridge.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D2B100110000000000000011 /* PatternOwnerBridge.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D3A100010000000000000001 /* BoundedCurveEvaluation.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D3A100110000000000000011 /* BoundedCurveEvaluation.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D3A100020000000000000002 /* PathArrayBuild.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D3A100120000000000000012 /* PathArrayBuild.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D3A100030000000000000003 /* PathArrayDefinition.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D3A100130000000000000013 /* PathArrayDefinition.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D3A100040000000000000004 /* PathArrayPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D3A100140000000000000014 /* PathArrayPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D3B100010000000000000001 /* PathArrayOwnerBridge.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D3B100110000000000000011 /* PathArrayOwnerBridge.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4A100010000000000000001 /* FeaturePatternBuild.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4A100110000000000000011 /* FeaturePatternBuild.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4A100020000000000000002 /* FeaturePatternDefinition.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4A100120000000000000012 /* FeaturePatternDefinition.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4A100030000000000000003 /* FeaturePatternPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4A100130000000000000013 /* FeaturePatternPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4B100010000000000000001 /* FeaturePatternOwnerBridge.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4B100110000000000000011 /* FeaturePatternOwnerBridge.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C3C300010000000000000001 /* GeneralLoftProof.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3C300110000000000000011 /* GeneralLoftProof.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C3C300020000000000000002 /* GeneralLoftSolid.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3C300120000000000000012 /* GeneralLoftSolid.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1F100110000000000000011 /* BoundedCurveOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -454,6 +471,23 @@
 		C0A100170000000000000017 /* RetainedRecipeSnapshot.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedRecipeSnapshot.hxx; sourceTree = "<group>"; };
 		C0A100180000000000000018 /* RetainedRecipeProbe.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedRecipeProbe.hxx; sourceTree = "<group>"; };
 		E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RectangularLoftPersistence.hxx; sourceTree = "<group>"; };
+		D1A100110000000000000011 /* PatternRecipeClone.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PatternRecipeClone.hxx; sourceTree = "<group>"; };
+		D2A100110000000000000011 /* PatternBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PatternBuild.hxx; sourceTree = "<group>"; };
+		D2A100120000000000000012 /* PatternDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PatternDefinition.hxx; sourceTree = "<group>"; };
+		D2A100130000000000000013 /* PatternPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PatternPersistence.hxx; sourceTree = "<group>"; };
+		D2B100110000000000000011 /* PatternOwnerBridge.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PatternOwnerBridge.hxx; sourceTree = "<group>"; };
+		D3A100110000000000000011 /* BoundedCurveEvaluation.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BoundedCurveEvaluation.hxx; sourceTree = "<group>"; };
+		D3A100120000000000000012 /* PathArrayBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PathArrayBuild.hxx; sourceTree = "<group>"; };
+		D3A100130000000000000013 /* PathArrayDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PathArrayDefinition.hxx; sourceTree = "<group>"; };
+		D3A100140000000000000014 /* PathArrayPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PathArrayPersistence.hxx; sourceTree = "<group>"; };
+		D3B100110000000000000011 /* PathArrayOwnerBridge.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PathArrayOwnerBridge.hxx; sourceTree = "<group>"; };
+		D4A100110000000000000011 /* FeaturePatternBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternBuild.hxx; sourceTree = "<group>"; };
+		D4A100120000000000000012 /* FeaturePatternDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternDefinition.hxx; sourceTree = "<group>"; };
+		D4A100130000000000000013 /* FeaturePatternPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternPersistence.hxx; sourceTree = "<group>"; };
+		D4B100110000000000000011 /* FeaturePatternOwnerBridge.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternOwnerBridge.hxx; sourceTree = "<group>"; };
+		C3C300110000000000000011 /* GeneralLoftProof.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftProof.hxx; sourceTree = "<group>"; };
+		C3C300120000000000000012 /* GeneralLoftSolid.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftSolid.hxx; sourceTree = "<group>"; };
+		C1F100110000000000000011 /* BoundedCurveOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BoundedCurveOwner.hxx; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -730,6 +764,23 @@
 				C0A100160000000000000016 /* RetainedRecipeAdmission.hxx */,
 				C0A100170000000000000017 /* RetainedRecipeSnapshot.hxx */,
 				C0A100180000000000000018 /* RetainedRecipeProbe.hxx */,
+				D1A100110000000000000011 /* PatternRecipeClone.hxx */,
+				D2A100110000000000000011 /* PatternBuild.hxx */,
+				D2A100120000000000000012 /* PatternDefinition.hxx */,
+				D2A100130000000000000013 /* PatternPersistence.hxx */,
+				D2B100110000000000000011 /* PatternOwnerBridge.hxx */,
+				D3A100110000000000000011 /* BoundedCurveEvaluation.hxx */,
+				D3A100120000000000000012 /* PathArrayBuild.hxx */,
+				D3A100130000000000000013 /* PathArrayDefinition.hxx */,
+				D3A100140000000000000014 /* PathArrayPersistence.hxx */,
+				D3B100110000000000000011 /* PathArrayOwnerBridge.hxx */,
+				D4A100110000000000000011 /* FeaturePatternBuild.hxx */,
+				D4A100120000000000000012 /* FeaturePatternDefinition.hxx */,
+				D4A100130000000000000013 /* FeaturePatternPersistence.hxx */,
+				D4B100110000000000000011 /* FeaturePatternOwnerBridge.hxx */,
+				C3C300110000000000000011 /* GeneralLoftProof.hxx */,
+				C3C300120000000000000012 /* GeneralLoftSolid.hxx */,
+				C1F100110000000000000011 /* BoundedCurveOwner.hxx */,
 				322185702BB5CC1400040E84 /* OcctDocument.h */,
 				3221856A2BB5CC1300040E84 /* OcctDocument.mm */,
 				3221856D2BB5CC1400040E84 /* OcctViewer.h */,
@@ -967,6 +1018,23 @@
 				C0A100060000000000000006 /* RetainedRecipeAdmission.hxx in Headers */,
 				C0A100070000000000000007 /* RetainedRecipeSnapshot.hxx in Headers */,
 				C0A100080000000000000008 /* RetainedRecipeProbe.hxx in Headers */,
+				D1A100010000000000000001 /* PatternRecipeClone.hxx in Headers */,
+				D2A100010000000000000001 /* PatternBuild.hxx in Headers */,
+				D2A100020000000000000002 /* PatternDefinition.hxx in Headers */,
+				D2A100030000000000000003 /* PatternPersistence.hxx in Headers */,
+				D2B100010000000000000001 /* PatternOwnerBridge.hxx in Headers */,
+				D3A100010000000000000001 /* BoundedCurveEvaluation.hxx in Headers */,
+				D3A100020000000000000002 /* PathArrayBuild.hxx in Headers */,
+				D3A100030000000000000003 /* PathArrayDefinition.hxx in Headers */,
+				D3A100040000000000000004 /* PathArrayPersistence.hxx in Headers */,
+				D3B100010000000000000001 /* PathArrayOwnerBridge.hxx in Headers */,
+				D4A100010000000000000001 /* FeaturePatternBuild.hxx in Headers */,
+				D4A100020000000000000002 /* FeaturePatternDefinition.hxx in Headers */,
+				D4A100030000000000000003 /* FeaturePatternPersistence.hxx in Headers */,
+				D4B100010000000000000001 /* FeaturePatternOwnerBridge.hxx in Headers */,
+				C3C300010000000000000001 /* GeneralLoftProof.hxx in Headers */,
+				C3C300020000000000000002 /* GeneralLoftSolid.hxx in Headers */,
+				C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */,
 				3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */,
 				18A006332BD2B306004931B1 /* ShapeInteractor.hpp in Headers */,
 				329B2ECF2C1AF53900F3A763 /* kdtree.h in Headers */,

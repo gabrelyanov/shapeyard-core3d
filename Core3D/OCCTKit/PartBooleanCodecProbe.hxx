@@ -201,6 +201,24 @@ struct Probe final {
         return value;
     }
 
+    // DEBUG payload replacement for persistence probes (e.g. the A3/P2 suffix
+    // cold-reopen evidence). No production caller may use this; it refuses
+    // unless the payload re-encodes to its exact bytes.
+    static bool ReplaceStored(const TDF_Label& record,
+                              const std::shared_ptr<const Payload>& payload) noexcept {
+        try {
+            Handle(Attribute) attribute;
+            if (record.IsNull() || !payload
+                || !record.FindAttribute(AttributeID(), attribute) || attribute.IsNull()
+                || !attribute->value_) return false;
+            std::vector<std::uint8_t> exact;
+            if (!Encode(payload->definition, exact) || exact != payload->bytes) return false;
+            attribute->Backup();
+            attribute->value_ = payload;
+            return true;
+        } catch (...) { return false; }
+    }
+
     static Checks Run() noexcept {
         Checks checks;
         try {

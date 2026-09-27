@@ -6,6 +6,19 @@ set -euo pipefail
 mkdir -p "$1"
 output_dir=$(cd "$1" && pwd)
 tests_dir=$(cd "$(dirname "$0")" && pwd)
+# T-C C4 spline profile admission, central registry allocation, explicit-axis
+# revolve and seam proofs. This is a standalone Core3D C++ target.
+if [[ "${3:-}" == "SplineProfileRevolveTests" ]]; then
+    : "${2:?focused spline revolve tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/SplineProfileRevolveTests.cpp" -L "$2" \
+        -lTKFillet -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKV3d -lTKService -lTKMesh -o "$output_dir/SplineProfileRevolveTests"
+    "$output_dir/SplineProfileRevolveTests"
+    exit
+fi
 # P1 closed SYCR/3 registry/codec/replay contract. The retained library path is
 # explicit so this runner never selects an iOS archive for a macOS host test.
 if [[ "${3:-}" == "RetainedFeatureRegistryTests" ]]; then
@@ -97,6 +110,20 @@ run_sweep_tests() {
 if [[ "${3:-}" == "PlanarSweepSolidTests" ]]; then
     : "${2:?focused sweep tests require retained host OCCT libraries}"
     run_sweep_tests "$2"
+    exit
+fi
+# D1a independent sweep/loft recipe clone, history, mirror-frame and reopen proof.
+if [[ "${3:-}" == "RetainedPatternTests" ]]; then
+    : "${2:?focused retained-pattern tests require retained host OCCT libraries}"
+    /usr/bin/clang++ -std=c++17 -DDEBUG=1 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 \
+        -I "$tests_dir/../Core3D/OCCTKit" -isystem "$tests_dir/../Core3D/occt/inc" \
+        "$tests_dir/RetainedPatternTests.cpp" -L "$2" \
+        -lTKOffset -lTKBool -lTKBO -lTKPrim -lTKShHealing -lTKTopAlgo -lTKGeomAlgo \
+        -lTKBRep -lTKGeomBase -lTKG3d -lTKG2d -lTKMath -lTKernel \
+        -lTKXCAF -lTKCAF -lTKLCAF -lTKCDF -lTKBinXCAF -lTKBin -lTKBinL \
+        -lTKV3d -lTKService -lTKMesh -framework Security \
+        -o "$output_dir/RetainedPatternTests"
+    "$output_dir/RetainedPatternTests"
     exit
 fi
 for name in CurvedMeshUVPrototypeTests ToroidalMeshUVPrototypeTests CurvedUVPackerTests CurvedFaceUVUnwrapTests; do

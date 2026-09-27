@@ -42,6 +42,12 @@ inline constexpr bool RetainedInputsPersistenceInstalled = false;
 inline constexpr bool AnalyticNativeAdmissionEnabled = false;
 inline constexpr bool AnalyticBooleanRouteInstalled = false;
 
+// A3/P2 retained program suffix facts. They are false until the guarded P2
+// qualification receipt promotes an isolated delta; the suffix admission
+// evaluator refuses with AdmissionDisabled while the route flag stays false.
+inline constexpr bool RetainedProgramSuffixInstalled = false;
+inline constexpr bool RetainedProgramSuffixRouteInstalled = false;
+
 inline bool EvidenceOperationInstalled(Operation operation) noexcept {
     const std::uint8_t bit = operation == Operation::Union ? UnionMask
         : operation == Operation::Subtract ? SubtractMask

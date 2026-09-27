@@ -18,6 +18,7 @@
 #include "../OCCTKit/RectangularLoftSolid.hxx"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/ProfileCurveFace.hxx"
+#include "../OCCTKit/SplineProfileFace.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
 
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -1743,6 +1744,11 @@ struct ProfileSolidGeometry : ProfileDefinition {
     std::optional<profile::ConstructionFrame> constructionFrame;
     std::vector<profile::ShellStep> shells;
     double shellMetersPerUnit = 0;
+    // T-C C4: spline payloads, explicit revolve axis and inner-loop policy for
+    // sections carrying ProfileCurveKind::Spline segments. Absent for every
+    // legacy polygon/circle/line-arc profile; their bytes and routes are
+    // unchanged.
+    std::optional<SplineProfileSpec> spline;
     TopoDS_Shape solid;
     std::array<double, 6> bounds{};
     bool built = false;
@@ -1754,9 +1760,19 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     try {
         OCC_CATCH_SIGNALS
         double signedArea = 0, expected = 0;
-        if (!ProfileDefinitionExpectedVolume(*geometry, signedArea, expected)) { return false; }
+        if (geometry->spline) {
+            if (!geometry->curves
+                || !SplineProfileExpectedVolume(*geometry->curves, *geometry->spline,
+                    geometry->plane, geometry->depth, geometry->revolve,
+                    [&] { return geometry->cancelled.load(); }, signedArea, expected)) { return false; }
+        } else if (!ProfileDefinitionExpectedVolume(*geometry, signedArea, expected)) { return false; }
         TopoDS_Face profileFace;
-        if (geometry->curves) {
+        if (geometry->spline) {
+            SplineProfileFaceResult built;
+            if (!BuildSplineProfileFace(*geometry->curves, *geometry->spline, geometry->plane,
+                    geometry->cancelled, built)) { return false; }
+            profileFace = built.face;
+        } else if (geometry->curves) {
             ProfileCurveFaceResult built;
             if (!BuildProfileCurveFace(*geometry->curves,geometry->plane,geometry->cancelled,built)) return false;
             profileFace=built.face;
@@ -1814,7 +1830,13 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             || !BRepCheck_Analyzer(profileFace, Standard_True).IsValid()) { return false; }
         TopoDS_Shape result;
         if (geometry->revolve) {
-            const gp_Ax1 axis(gp::Origin(), geometry->plane == 0 ? gp::DY() : gp::DZ());
+            gp_Ax1 axis(gp::Origin(), geometry->plane == 0 ? gp::DY() : gp::DZ());
+            if (geometry->spline) {
+                // The explicit authored axis replaces the legacy implicit one;
+                // SplineProfileExpectedVolume has already admitted it.
+                if (!geometry->spline->revolveAxis) { return false; }
+                axis = SplineRevolveAxis3D(*geometry->spline->revolveAxis, geometry->plane);
+            }
             if (geometry->depth == 360.0) {
                 BRepPrimAPI_MakeRevol sweep(profileFace, axis, Standard_True);
                 if (!sweep.IsDone()) { return false; }
@@ -1849,8 +1871,14 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         if (!BRepLib::OrientClosedSolid(solid) || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) { return false; }
         GProp_GProps properties;
         BRepGProp::VolumeProperties(solid, properties);
+        const double volumeTolerance = geometry->spline ? 1e-6 : 1e-8;
         if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
-            || std::abs(properties.Mass() - expected) > std::max(1e-8, expected * 1e-8)) { return false; }
+            || std::abs(properties.Mass() - expected) > std::max(1e-8, expected * volumeTolerance)) { return false; }
+        if (geometry->spline && geometry->revolve) {
+            int seamFaces = 0;
+            if (!ProveSplineRevolveSeam(solid, SplineRevolveAxis3D(*geometry->spline->revolveAxis,
+                    geometry->plane), geometry->depth, seamFaces)) { return false; }
+        }
         if (!geometry->shells.empty()) {
             profile::Parameters parameters{static_cast<const ProfileDefinition&>(*geometry), geometry->shellMetersPerUnit};
             parameters.constructionFrame = geometry->constructionFrame;
