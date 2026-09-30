@@ -128,11 +128,25 @@ public:
                 for (TDF_ChildIterator record(payload->host, Standard_False);
                      record.More(); record.Next()) {
                     Handle(feature_pattern_child::Attribute) attribute;
-                    if (record.Value().FindAttribute(
-                            feature_pattern_child::AttributeID(), attribute)
-                        && !attribute.IsNull() && attribute->value() == payload) {
-                        child.recordLabel = record.Value(); break;
-                    }
+                    if (!record.Value().FindAttribute(
+                            feature_pattern_child::AttributeID(), attribute)) continue;
+                    // Binary load leaves cross-record links pending. Read()
+                    // validates them and can return a resolved payload copy,
+                    // so shared-pointer identity is not a native receipt.
+                    std::shared_ptr<const feature_pattern_child::Payload> resolved;
+                    if (attribute.IsNull()
+                        || !feature_pattern_child::Read(record.Value(), resolved)
+                        || !resolved) return false;
+                    if (resolved->canonicalBytes != payload->canonicalBytes
+                        || !resolved->host.IsEqual(payload->host)
+                        || !resolved->baselineRecipe.IsEqual(payload->baselineRecipe)
+                        || !resolved->source.IsEqual(payload->source)
+                        || !resolved->patternRecord.IsEqual(payload->patternRecord))
+                        continue;
+                    // Require exactly one current native record for this
+                    // validated receipt; never select a child by its index.
+                    if (!child.recordLabel.IsNull()) return false;
+                    child.recordLabel = record.Value();
                 }
                 if (child.recordLabel.IsNull()) return false;
                 child.persisted = payload->receipt;
