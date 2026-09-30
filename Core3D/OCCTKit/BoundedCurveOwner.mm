@@ -13,6 +13,7 @@
 #include <set>
 
 #if DEBUG
+#include <cstdio>
 #include "NativeOpeningFactories.hxx"
 #include "NativeOpeningSurfaceProbe.hxx"
 #include "../UI/Core3DViewer.h"
@@ -68,6 +69,10 @@ bool UUIDFromText(const std::string& text, UUID& output) noexcept {
 
 Receipt Refusal(const SceneFence& scene, Outcome outcome,
                 const char* reason) noexcept {
+#if DEBUG
+    std::fprintf(stderr, "R179_CURVE_REFUSED outcome=%d reason=%.64s\n",
+                 int(outcome), reason ? reason : "");
+#endif
     Receipt receipt;
     receipt.outcome = outcome;
     receipt.scene = scene;
@@ -224,14 +229,28 @@ std::shared_ptr<const Opening> OcafOwner::capture(
     const SceneFence& expectedScene) noexcept {
     if (![NSThread isMainThread] || !state_ || !state_->bound()
         || !SameScene(expectedScene, state_->context->openingFence())
-        || !state_->preparations.empty() || state_->nextSession == UINT64_MAX)
+        || !state_->preparations.empty() || state_->nextSession == UINT64_MAX) {
+#if DEBUG
+        std::fprintf(stderr, "R179_CURVE_REFUSED stage=capture reason=precondition\n");
+#endif
         return {};
+    }
     try {
         OcctBoundedCurveCapture exact;
         if (!state_->owner->CaptureBoundedCurveExact(
-                entityIdentifier, *state_->context, exact)) return {};
+                entityIdentifier, *state_->context, exact)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=capture reason=capture-exact-refused\n");
+#endif
+            return {};
+        }
         RetainedState retained;
-        if (!FromPersistedValue(exact.persisted, retained)) return {};
+        if (!FromPersistedValue(exact.persisted, retained)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=capture reason=retained-read-refused\n");
+#endif
+            return {};
+        }
         auto opening = std::make_shared<Opening>();
         opening->scene = expectedScene;
         opening->ownerLabel = exact.record.owner;
@@ -241,7 +260,12 @@ std::shared_ptr<const Opening> OcafOwner::capture(
         state_->captures.emplace(opening->session,
             State::Captured{opening, std::move(exact)});
         return opening;
-    } catch (...) { return {}; }
+    } catch (...) {
+#if DEBUG
+        std::fprintf(stderr, "R179_CURVE_REFUSED stage=capture reason=capture-exception\n");
+#endif
+        return {};
+    }
 }
 
 std::shared_ptr<const Prepared> OcafOwner::prepare(
@@ -250,17 +274,30 @@ std::shared_ptr<const Prepared> OcafOwner::prepare(
     receipt = Refusal(opening ? opening->scene : SceneFence{},
                       Outcome::refused, "prepare-refused");
     if (![NSThread isMainThread] || !state_ || !state_->bound() || !opening
-        || state_->nextPreparation == UINT64_MAX) return {};
+        || state_->nextPreparation == UINT64_MAX) {
+#if DEBUG
+        std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=precondition\n");
+#endif
+        return {};
+    }
     try {
         const auto found = state_->captures.find(opening->session);
         if (found == state_->captures.end()
-            || found->second.publicValue != opening) return {};
+            || found->second.publicValue != opening) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=capture-not-current\n");
+#endif
+            return {};
+        }
         OcctBoundedCurveCapture current;
         if (!state_->owner->ReadBoundedCurveExact(
                 found->second.exact.persisted.ownerState.owner, current)
             || !found->second.exact.IsEqual(current)) {
             receipt.outcome = Outcome::staleOwner;
             receipt.reason = "capture-no-longer-current";
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=capture-no-longer-current\n");
+#endif
             return {};
         }
 
@@ -273,23 +310,43 @@ std::shared_ptr<const Prepared> OcafOwner::prepare(
         PreparedEdit provisional = PrepareEdit(opening->retained, normalized);
         if (provisional.refusal != EditRefusal::None
             || !SameDefinition(provisional.candidate.definition,
-                               candidate.completeDefinition)) return {};
+                               candidate.completeDefinition)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=proposal-refused\n");
+#endif
+            return {};
+        }
         Value replacement;
         replacement.feature = provisional.candidate.authority.feature;
         replacement.definition = provisional.candidate.definition;
         std::vector<std::uint8_t> canonical;
         if (!Encode(replacement, canonical)
             || !Hash(canonical, MaximumDefinitionBytes,
-                     normalized.replacementRecipeDigest)) return {};
+                     normalized.replacementRecipeDigest)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=digest-refused\n");
+#endif
+            return {};
+        }
         const PreparedEdit values = PrepareEdit(opening->retained, normalized);
         PersistedValue persisted;
         if (values.refusal != EditRefusal::None
             || !SameDefinition(values.candidate.definition,
                                candidate.completeDefinition)
-            || !ToPersistedValue(values.candidate, persisted)) return {};
+            || !ToPersistedValue(values.candidate, persisted)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=persist-refused\n");
+#endif
+            return {};
+        }
         DetachedWire detached;
         if (BuildWire(persisted, detached) != BuildRefusal::None
-            || !MatchesPersistedValue(detached, persisted)) return {};
+            || !MatchesPersistedValue(detached, persisted)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=wire-refused\n");
+#endif
+            return {};
+        }
         auto prepared = std::make_shared<Prepared>();
         prepared->opening = *opening;
         prepared->values = values;
@@ -301,6 +358,9 @@ std::shared_ptr<const Prepared> OcafOwner::prepare(
                 state_->context, prepared, dependents)) {
             receipt.outcome = Outcome::unsupportedDependent;
             receipt.reason = "dependent-path-array-prepare-refused";
+#if DEBUG
+            std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=dependent-replay-refused\n");
+#endif
             return {};
         }
         state_->preparations.emplace(prepared->preparation,
@@ -313,7 +373,13 @@ std::shared_ptr<const Prepared> OcafOwner::prepare(
         receipt.session = opening->session;
         receipt.preparation = prepared->preparation;
         return prepared;
-    } catch (...) { receipt.reason = "prepare-exception"; return {}; }
+    } catch (...) {
+        receipt.reason = "prepare-exception";
+#if DEBUG
+        std::fprintf(stderr, "R179_CURVE_REFUSED stage=prepare reason=prepare-exception\n");
+#endif
+        return {};
+    }
 }
 
 Receipt OcafOwner::apply(
@@ -332,6 +398,14 @@ Receipt OcafOwner::apply(
                 found->second.exact.persisted.ownerState.owner, before)
             || !found->second.exact.IsEqual(before))
             return Refusal(scene, Outcome::staleDefinition, "opening-changed");
+        // Freeze all affected native identities before opening the one command.
+        // A replacement must reconcile the selected AIS wire as well as OCAF.
+        native_opening::CommittedEditPublication publication;
+        publication.replaced.push_back({retained_solid::UUIDText(
+            found->second.exact.persisted.ownerState.owner.entity), {}});
+        if (!path_array_owner::AppendDependentReplayPublication(
+                found->second.dependents, publication))
+            return Refusal(scene, Outcome::refused, "publication-plan-refused");
         const int undoBefore = state_->owner->Document()->GetAvailableUndos();
         auto lease = state_->context->beginCommandLease(
             state_->context->openingFence(), kFenceWidth, kFenceHeight);
@@ -351,8 +425,10 @@ Receipt OcafOwner::apply(
             return Refusal(scene, exact ? Outcome::refused : Outcome::recoveryRequired,
                            exact ? "stage-failed-state-restored" : "abort-proof-failed");
         }
-        if (!lease->commit())
+        if (!lease->commit()) {
+            state_->context->retainUnprovenEdit(publication);
             return Refusal(scene, Outcome::outcomeUnknown, "close-unknown");
+        }
         OcctBoundedCurveCapture after;
         const int historyDelta = state_->owner->Document()->GetAvailableUndos() - undoBefore;
         if (historyDelta != 1
@@ -362,6 +438,8 @@ Receipt OcafOwner::apply(
             || !path_array_owner::VerifyDependentReplayAfterCommit(
                 *state_->owner, found->second.dependents))
             return Refusal(scene, Outcome::outcomeUnknown, "post-close-proof-failed");
+        if (!state_->context->publishCommittedEdit(publication))
+            return Refusal(scene, Outcome::recoveryRequired, "publication-unproven");
         Receipt receipt;
         receipt.outcome = Outcome::committed;
         receipt.reason = "committed";

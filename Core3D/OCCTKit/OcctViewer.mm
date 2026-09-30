@@ -23,6 +23,7 @@
 #include "OcctDocument.h"
 #include "Core3DSTEPExchangeLock.h"
 #include "Core3DNativeTangentBuffers.hxx"
+#include "PatternAllLabelAuthority.hxx"
 
 #import <TargetConditionals.h>
 #if defined(TARGET_OS_OSX) && TARGET_OS_OSX
@@ -666,6 +667,13 @@ bool OcctViewer::displayWithChildren (
             return false;
         }
 
+        core3d::pattern_owner::RetainedPresentationIndex aRetainedPresentation;
+        if (!core3d::pattern_owner::CaptureRetainedPresentationIndex(
+                theDocument, aRetainedPresentation))
+        {
+            return false;
+        }
+
         XCAFPrs_DocumentExplorer anExplorer;
         anExplorer.Init(theDocument,
                         aUniqueRoots,
@@ -724,8 +732,13 @@ bool OcctViewer::displayWithChildren (
             {
                 return false;
             }
-            const bool isVisible = aNode.Style.IsVisible()
-                && IsExplorerPathVisible(anExplorer, aLayerTool);
+            const auto aRetainedState =
+                core3d::pattern_owner::StateForEntityIdentifier(
+                    aRetainedPresentation,
+                    myDoc->EntityIdentifierForLabel(aDefinition));
+            const bool isVisible = core3d::pattern_owner::EffectiveVisibility(
+                aNode.Style.IsVisible(),
+                IsExplorerPathVisible(anExplorer, aLayerTool), aRetainedState);
 
             const TopoDS_Shape aShape =
                 XCAFDoc_ShapeTool::GetShape(aDefinition);

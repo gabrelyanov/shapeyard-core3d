@@ -18091,22 +18091,30 @@ static bool Core3DPublishCommittedSpatialSweep(
 
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
                               expected:(Core3DSceneSnapshot *)expected {
-    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
-        || GLController.viewer == nullptr || expected == nil
-        || expected.selectionMode != Core3DSceneElementKindObject
-        || entityIdentifier.length == 0 || entityIdentifier.length > 128
-        || expected.publicationSourceIdentifier.length == 0
-        || expected.publicationSourceIdentifier.length > 128) {
+    const auto traceSelectionRefusal = [](const char* predicate, bool failed) noexcept {
+#if DEBUG
+        if (failed) NSLog(@"R4_C3N_SELECT_BRIDGE refused=%s", predicate);
+#else
+        (void)predicate;
+#endif
+        return failed;
+    };
+    if (traceSelectionRefusal("main-thread", ![NSThread isMainThread]) || traceSelectionRefusal("not-setup", !_isSetuped) || traceSelectionRefusal("gl-controller-null", GLController == nil)
+        || traceSelectionRefusal("viewer-null", GLController.viewer == nullptr) || traceSelectionRefusal("expected-null", expected == nil)
+        || traceSelectionRefusal("expected-selection-mode", expected.selectionMode != Core3DSceneElementKindObject)
+        || traceSelectionRefusal("entity-length", entityIdentifier.length == 0 || entityIdentifier.length > 128)
+        || traceSelectionRefusal("publication-empty", expected.publicationSourceIdentifier.length == 0)
+        || traceSelectionRefusal("publication-length", expected.publicationSourceIdentifier.length > 128)) {
         return NO;
     }
     const CGSize size = GLController.drawableSize;
-    if (!std::isfinite(size.width) || !std::isfinite(size.height)
-        || size.width < 1 || size.height < 1
-        || size.width > std::numeric_limits<std::uint32_t>::max()
-        || size.height > std::numeric_limits<std::uint32_t>::max()) { return NO; }
+    if (traceSelectionRefusal("viewport-finite", !std::isfinite(size.width) || !std::isfinite(size.height))
+        || traceSelectionRefusal("viewport-minimum", size.width < 1 || size.height < 1)
+        || traceSelectionRefusal("viewport-width-maximum", size.width > std::numeric_limits<std::uint32_t>::max())
+        || traceSelectionRefusal("viewport-height-maximum", size.height > std::numeric_limits<std::uint32_t>::max())) { return NO; }
     const char* entity = entityIdentifier.UTF8String;
     const char* publication = expected.publicationSourceIdentifier.UTF8String;
-    if (entity == nullptr || publication == nullptr) { return NO; }
+    if (traceSelectionRefusal("identifier-utf8", entity == nullptr || publication == nullptr)) { return NO; }
     try {
         core3d::ObjectFrameIdentity identity;
         identity.entityIdentifier.assign(entity,
@@ -18125,7 +18133,10 @@ static bool Core3DPublishCommittedSpatialSweep(
             [self viewDidInvalidateSceneSnapshot];
         }
         return selected;
-    } catch (...) { return NO; }
+    } catch (...) {
+        (void)traceSelectionRefusal("exception", true);
+        return NO;
+    }
 }
 
 - (Core3DPartBooleanEditingSession *)core3d_openPartBooleanEditorForEntityIdentifier:

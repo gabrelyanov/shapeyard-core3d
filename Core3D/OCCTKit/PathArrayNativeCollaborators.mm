@@ -888,6 +888,43 @@ bool PrepareDependentReplay(OcctDocument& owner,
     } catch (...) { output = {}; return false; }
 }
 
+bool AppendDependentReplayPublication(const DependentReplayPlan& plan,
+    native_opening::CommittedEditPublication& publication) noexcept {
+    try {
+        if (!plan.admitted || !plan.c1Seal) return false;
+        native_opening::CommittedEditPublication staged;
+        std::set<std::string> identities;
+        const auto append = [&](const auto& source, auto& destination) {
+            for (const auto& item : source) {
+                // Preserve the viewer's existing aggregate publication ceiling
+                // and identity checks, before there can be a committed edit.
+                if (identities.size() >= 4096 || item.entityIdentifier.empty()
+                    || item.entityIdentifier.size() > 128
+                    || item.entityIdentifier.find('\0') != std::string::npos
+                    || !identities.insert(item.entityIdentifier).second) return false;
+                destination.push_back(item);
+            }
+            return true;
+        };
+        const auto appendPlan = [&](const auto& value) {
+            return append(value.created, staged.created)
+                && append(value.replaced, staged.replaced)
+                && append(value.removed, staged.removed);
+        };
+        if (!appendPlan(publication)) return false;
+        for (const auto& dependent : plan.arrays) {
+            if (!dependent.admitted() || !dependent.native
+                || !dependent.prospectivePath
+                || dependent.prospectivePath->seal != plan.c1Seal) return false;
+            if (!appendPlan(native_opening::PublicationFromAllLabelPlan(
+                    dependent.native->labels))) return false;
+        }
+        if (identities.empty()) return false;
+        publication = std::move(staged);
+        return true;
+    } catch (...) { return false; }
+}
+
 bool StageDependentReplayInsideOwnedCommand(OcctDocument& owner,
     native_opening::CommandLease& lease,
     const DependentReplayPlan& plan) noexcept {

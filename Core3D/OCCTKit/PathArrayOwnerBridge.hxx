@@ -432,6 +432,11 @@ bool PrepareDependentReplay(OcctDocument&,
     const std::shared_ptr<const c1_owner::Prepared>&,
     DependentReplayPlan&) noexcept;
 
+//! Adds affected identities from the sealed native all-label plans.
+//! Call before acquiring the command; output is unchanged on refusal.
+bool AppendDependentReplayPublication(const DependentReplayPlan&,
+    native_opening::CommittedEditPublication&) noexcept;
+
 //! Called only after the C1 replacement has staged in the caller-owned lease.
 //! It uses StageInsideOwnedCommand directly and never calls Apply.
 bool StageDependentReplayInsideOwnedCommand(OcctDocument&,

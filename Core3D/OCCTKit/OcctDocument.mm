@@ -15575,6 +15575,27 @@ void TraceGeneralLoftTransientBytes(const char* side, const char* phase,
 #endif
 }
 
+// D236: the transient Modified/Checked bits are cleared in place on the
+// operand itself for the duration of the byte-exact serialisation, instead
+// of auditing a private BRepBuilderAPI_Copy (whose re-serialisation is not
+// byte-stable; D235 evidence: Curve2ds 50 vs 40). This guard snapshots
+// exactly those two bits of every TShape found by the bounded traversal and
+// restores them on every exit path, including exceptions. Free, Orientable,
+// Closed, Infinite, Convex and all geometry stay untouched. No locking is
+// added: a concurrent redraw may only cause a mismatch (fail-closed), never
+// an admission.
+struct GeneralLoftTransientFlagGuard final {
+    std::vector<std::pair<Handle(TopoDS_TShape),
+                          std::pair<Standard_Boolean, Standard_Boolean>>> saved;
+    ~GeneralLoftTransientFlagGuard() {
+        for (auto& entry : saved)
+            if (!entry.first.IsNull()) {
+                entry.first->Modified(entry.second.first);
+                entry.first->Checked(entry.second.second);
+            }
+    }
+};
+
 // C3-only policy: use only after retained traces establish that the raw
 // mismatch is confined to Modified/Checked bookkeeping on valid shapes.
 // Keep Free, Orientable, Closed, Infinite, Convex and all geometry exact.
@@ -15612,58 +15633,39 @@ bool GeneralLoftTransientFlagBytes(const TopoDS_Shape& source,
             }
         }
         phase = "deep-copy";
+        // A private copy is still required for the validity check only:
+        // BRepCheck_Analyzer sets Checked bits on the shapes it examines,
+        // and those bits must never leak into the document shape. There is
+        // no byte round-trip requirement on this copy; the old
+        // copy-preservation refusal assumed BRepBuilderAPI_Copy re-serialises
+        // byte-identically, which OCCT does not guarantee (D235).
         BRepBuilderAPI_Copy copied(source, Standard_True, Standard_False);
         if (!copied.IsDone()) return refused("copy-not-done");
         if (copied.Shape().IsNull()) return refused("null-copy");
         if (copied.Shape().ShapeType() != TopAbs_SOLID) return refused("copy-not-solid");
-        const TopoDS_Shape detached = copied.Shape();
-        std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> pairs;
-        pairs.reserve(originals.Extent());
-        phase = "copy-map-and-flags";
+        phase = "private-validation";
+        if (!BRepCheck_Analyzer(copied.Shape(), Standard_True).IsValid())
+            return refused("invalid-private-copy");
+        phase = "inplace-normalise";
+        GeneralLoftTransientFlagGuard guard;
+        std::unordered_set<const TopoDS_TShape*> seen;
         for (Standard_Integer i = 1; i <= originals.Extent(); ++i) {
             shapeIndex = i;
-            const TopoDS_Shape original = originals(i);
-            TopoDS_Shape copy = copied.ModifiedShape(original);
-            if (copy.IsNull()) return refused("null-counterpart");
-            if (copy.IsPartner(original)) return refused("shared-counterpart");
-            if (copy.ShapeType() != original.ShapeType()) return refused("counterpart-type");
-            // Preserve source flags except Checked: validate private topology
-            // afresh, then restore the candidate pair for the byte audit.
-            copy.Free(original.Free());
-            copy.Modified(original.Modified());
-            copy.Checked(Standard_False);
-            copy.Orientable(original.Orientable());
-            copy.Closed(original.Closed());
-            copy.Infinite(original.Infinite());
-            copy.Convex(original.Convex());
-            pairs.emplace_back(original, copy);
+            const Handle(TopoDS_TShape)& tshape = originals(i).TShape();
+            if (tshape.IsNull()) return refused("null-tshape");
+            if (!seen.insert(tshape.get()).second) continue;
+            guard.saved.emplace_back(tshape,
+                std::make_pair(tshape->Modified(), tshape->Checked()));
+            tshape->Modified(Standard_False);
+            tshape->Checked(Standard_False);
         }
         shapeIndex = 0;
-        phase = "private-validation";
-        if (!BRepCheck_Analyzer(detached, Standard_True).IsValid())
-            return refused("invalid-private-copy");
-        phase = "restore-source-flags";
-        for (auto& pair : pairs) {
-            pair.second.Modified(pair.first.Modified());
-            pair.second.Checked(pair.first.Checked());
-        }
-        // Refuse if copying/checking changed ANY other serialized field,
-        // including a number, location, orientation, sharing or record order.
-        std::string preserved;
-        phase = "copy-preservation";
-        if (!core3d::retained_part_boolean::ExactShapeBytes(detached, preserved))
-            return refused("copy-serialization");
-        if (preserved != sourceBytes) {
-            TraceGeneralLoftTransientBytes(side, phase, preserved, sourceBytes);
-            return refused("copy-bytes-changed");
-        }
-        phase = "clear-transient-flags";
-        for (auto& pair : pairs) {
-            pair.second.Modified(Standard_False);
-            pair.second.Checked(Standard_False);
-        }
+#if DEBUG
+        NSLog(@"R4_C3N transient side=%s phase=%s tshapes=%zu",
+              side, phase, guard.saved.size());
+#endif
         phase = "normalized-serialization";
-        if (!core3d::retained_part_boolean::ExactShapeBytes(detached, bytes))
+        if (!core3d::retained_part_boolean::ExactShapeBytes(source, bytes))
             return refused("normalized-serialization");
 #if DEBUG
         NSLog(@"R4_C3N transient side=%s result=serialized bytes=%zu", side, bytes.size());
@@ -15990,28 +15992,83 @@ bool CompleteSplineProfileCapture(const Handle(TDocStd_Document)& document,
     OcctSplineProfileCapture& output) noexcept {
     output = {};
     try {
-        if (document.IsNull() || hint.owner.IsNull()) return false;
+        if (document.IsNull() || hint.owner.IsNull()) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=thread-or-document\n");
+#endif
+            return false;
+        }
         std::vector<core3d::spline_profile::Record> records;
-        if (!core3d::spline_profile::ReadAll(document, records)) return false;
+        if (!core3d::spline_profile::ReadAll(document, records)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=read-all\n");
+#endif
+            return false;
+        }
         const core3d::spline_profile::Record* exact = nullptr;
         for (const auto& record : records) {
             if (record.attribute->definition().owner
                     == hint.attribute->definition().owner) {
-                if (exact) return false;
+                if (exact) {
+#if DEBUG
+                    std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=multi-match\n");
+#endif
+                    return false;
+                }
                 exact = &record;
             }
         }
-        if (!exact || exact->owner.IsNull() || !exact->label.Father().IsEqual(exact->owner)
-            || !XCAFDoc_ShapeTool::IsFree(exact->owner)
-            || XCAFDoc_ShapeTool::GetShape(exact->owner).ShapeType() != TopAbs_SOLID)
+        if (!exact) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=no-match\n");
+#endif
             return false;
+        }
+        if (exact->owner.IsNull() || !exact->label.Father().IsEqual(exact->owner)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=record-father\n");
+#endif
+            return false;
+        }
+        if (!XCAFDoc_ShapeTool::IsFree(exact->owner)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=not-free\n");
+#endif
+            return false;
+        }
+        if (XCAFDoc_ShapeTool::GetShape(exact->owner).ShapeType() != TopAbs_SOLID) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=not-solid\n");
+#endif
+            return false;
+        }
         core3d::spline_profile::DetachedSolid rebuilt;
-        if (!core3d::spline_profile::Build(exact->attribute->definition(), rebuilt)
-            || !PlainProfileRebuildCorresponds(rebuilt.solid, exact->shape)) return false;
+        if (!core3d::spline_profile::Build(exact->attribute->definition(), rebuilt)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=rebuild\n");
+#endif
+            return false;
+        }
+        if (!PlainProfileRebuildCorresponds(rebuilt.solid, exact->shape)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=rebuild-correspondence\n");
+#endif
+            return false;
+        }
         OcctExactLabelReceipt receipt;
-        if (!owner.CaptureObjectVisibilityStateForLabel(exact->owner, receipt.visibility)
-            || !CaptureWholeObjectScalarAppearance(document, exact->owner,
-                                                    receipt.appearance)) return false;
+        if (!owner.CaptureObjectVisibilityStateForLabel(exact->owner, receipt.visibility)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=visibility\n");
+#endif
+            return false;
+        }
+        if (!CaptureWholeObjectScalarAppearance(document, exact->owner,
+                                                receipt.appearance)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=appearance\n");
+#endif
+            return false;
+        }
         receipt.documentData = document->GetData();
         receipt.documentIdentifier = owner.DocumentIdentifier();
         OcctSplineProfileCapture captured;
@@ -16022,7 +16079,12 @@ bool CompleteSplineProfileCapture(const Handle(TDocStd_Document)& document,
         captured.definition = exact->attribute->definition();
         captured.solid = TopoDS::Solid(exact->shape);
         output = std::move(captured); return true;
-    } catch (...) { output = {}; return false; }
+    } catch (...) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=exception\n");
+#endif
+        output = {}; return false;
+    }
 }
 }
 
@@ -16052,20 +16114,55 @@ Standard_Boolean OcctDocument::CaptureSplineProfileExact(
     capture = {};
     try {
         const auto& fence = context.openingFence();
-        if (![NSThread isMainThread] || myOcafDoc.IsNull()
-            || !core3d::profile::IsIdentifier(entityIdentifier)
-            || fence.document() != myOcafDoc || fence.data() != myOcafDoc->GetData())
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=thread-or-document\n");
+#endif
             return Standard_False;
+        }
+        if (!core3d::profile::IsIdentifier(entityIdentifier)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=identifier\n");
+#endif
+            return Standard_False;
+        }
+        if (fence.document() != myOcafDoc || fence.data() != myOcafDoc->GetData()) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=fence\n");
+#endif
+            return Standard_False;
+        }
         std::vector<core3d::spline_profile::Record> records;
-        if (!core3d::spline_profile::ReadAll(myOcafDoc, records)) return Standard_False;
+        if (!core3d::spline_profile::ReadAll(myOcafDoc, records)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=read-all\n");
+#endif
+            return Standard_False;
+        }
         const core3d::spline_profile::Record* match = nullptr;
         for (const auto& record : records)
             if (EntityIdentifierForLabel(record.owner) == entityIdentifier) {
-                if (match) return Standard_False;
+                if (match) {
+#if DEBUG
+                    std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=multi-match\n");
+#endif
+                    return Standard_False;
+                }
                 match = &record;
             }
-        return match && CompleteSplineProfileCapture(myOcafDoc, *match, *this, capture);
-    } catch (...) { capture = {}; return Standard_False; }
+        if (!match) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=no-match\n");
+#endif
+            return Standard_False;
+        }
+        return CompleteSplineProfileCapture(myOcafDoc, *match, *this, capture);
+    } catch (...) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SPLINE_CAPTURE_REFUSED stage=exception\n");
+#endif
+        capture = {}; return Standard_False;
+    }
 }
 
 Standard_Boolean OcctDocument::StageSplineProfileCreate(

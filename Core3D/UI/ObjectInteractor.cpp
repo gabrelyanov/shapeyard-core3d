@@ -10,6 +10,9 @@
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../Scene/SceneSnapshot.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
+#ifdef DEBUG
+#include <cstdio>
+#endif
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -2951,10 +2954,18 @@ namespace core3d {
                 || (_manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeNone
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
+#ifdef DEBUG
+                std::fprintf(stderr, "R179_SELECT_REFUSED stage=precondition\n");
+#endif
                 return false;
             }
             const auto document = myDoc->Document();
-            if (document.IsNull() || document->HasOpenCommand()) { return false; }
+            if (document.IsNull() || document->HasOpenCommand()) {
+#ifdef DEBUG
+                std::fprintf(stderr, "R179_SELECT_REFUSED stage=open-command\n");
+#endif
+                return false;
+            }
             const auto isCommittedPresentation = [this](
                 const Handle(AIS_InteractiveObject)& object) {
                 const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(object);
@@ -2972,17 +2983,41 @@ namespace core3d {
             };
             std::unordered_set<const AIS_InteractiveObject*> targetSet;
             for (const auto& target : targets) {
-                if (!isCommittedPresentation(target) || !targetSet.insert(target.get()).second
-                    || target->GlobalSelOwner().IsNull()) { return false; }
+                if (!isCommittedPresentation(target)) {
+#ifdef DEBUG
+                    std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-committed\n");
+#endif
+                    return false;
+                }
+                if (!targetSet.insert(target.get()).second) {
+#ifdef DEBUG
+                    std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-duplicate\n");
+#endif
+                    return false;
+                }
+                if (target->GlobalSelOwner().IsNull()) {
+#ifdef DEBUG
+                    std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-owner\n");
+#endif
+                    return false;
+                }
             }
             std::unordered_set<const AIS_InteractiveObject*> previousPresentations;
             for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
                 const auto owner = myContext->SelectedOwner();
                 const auto object = myContext->SelectedInteractive();
                 if (previousOwners.size() >= 50000 || owner.IsNull()
-                    || !isCommittedPresentation(object)
-                    || !previousOwnerSet.insert(owner.get()).second
+                    || !isCommittedPresentation(object)) {
+#ifdef DEBUG
+                    std::fprintf(stderr, "R179_SELECT_REFUSED stage=previous-committed\n");
+#endif
+                    return false;
+                }
+                if (!previousOwnerSet.insert(owner.get()).second
                     || !previousPresentations.insert(object.get()).second) {
+#ifdef DEBUG
+                    std::fprintf(stderr, "R179_SELECT_REFUSED stage=previous-duplicate\n");
+#endif
                     return false;
                 }
                 previousOwners.push_back(owner);
@@ -3112,7 +3147,12 @@ namespace core3d {
             myContext->UpdateCurrentViewer();
             return true;
         } catch (...) {
-            if (!selectionWasTouched) { return false; }
+            if (!selectionWasTouched) {
+#ifdef DEBUG
+                std::fprintf(stderr, "R179_SELECT_REFUSED stage=exception\n");
+#endif
+                return false;
+            }
         }
         try {
             OCC_CATCH_SIGNALS
@@ -3166,6 +3206,9 @@ namespace core3d {
             try { myContext->ClearSelected(Standard_False); } catch (...) {}
             try { myContext->UpdateCurrentViewer(); } catch (...) {}
         }
+#ifdef DEBUG
+        std::fprintf(stderr, "R179_SELECT_REFUSED stage=rollback\n");
+#endif
         return false;
     }
 

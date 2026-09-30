@@ -465,7 +465,7 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
         }
         // Renderer authority: persistent identity -> displayed presentation.
         // Presentations without a resolvable document label are stale
-        // candidates, matched to removals only by their exact previous shape.
+        // candidates, matched to replacements/removals by exact previous shape.
         AIS_ListOfInteractive objects;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
         if (traceRefusal("displayed-bounds", objects.Extent() > 50000))
@@ -502,19 +502,88 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                 if (!created) {
                     presentation = current->second;
                     const bool wasSelected = myContext->IsSelected(presentation);
+                    // Redisplay/RecomputeSelectionOnly rebuild the selection
+                    // primitives, so an owner selected now is stale afterwards
+                    // but remains held by the context selection. Remove this
+                    // presentation's selected owner(s) while they are still
+                    // valid, recompute, then select the new global owner
+                    // exactly once iff the presentation was selected.
+                    std::size_t selectedBefore = 0;
+                    std::vector<Handle(SelectMgr_EntityOwner)> staleOwners;
+                    for (myContext->InitSelected(); myContext->MoreSelected();
+                         myContext->NextSelected()) {
+                        if (selectedBefore >= 50000) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+                        ++selectedBefore;
+                        const auto selectedOwner = myContext->SelectedOwner();
+                        if (!selectedOwner.IsNull()
+                            && selectedOwner->Selectable() == presentation) {
+                            staleOwners.push_back(selectedOwner);
+                        }
+                    }
+                    for (const auto& staleOwner : staleOwners) {
+                        myContext->AddOrRemoveSelected(staleOwner, Standard_False);
+                    }
                     presentation->SetShape(shape);
                     presentation->SetLocalTransformation(state.transform);
                     myContext->Redisplay(presentation, Standard_False);
                     myContext->RecomputeSelectionOnly(presentation);
-                    if (wasSelected && !myContext->IsSelected(presentation)) {
+                    if (wasSelected) {
                         const auto owner = presentation->GlobalSelOwner();
                         if (owner.IsNull() || owner->Selectable() != presentation) {
                             (void)traceRefusal("selection-owner", true);
                             return false;
                         }
-                        myContext->AddOrRemoveSelected(owner, Standard_False);
+                        if (!myContext->IsSelected(owner)) {
+                            myContext->AddOrRemoveSelected(owner, Standard_False);
+                        }
+                    }
+                    // Postcondition: the same number of selected owners as
+                    // before, exactly one of them for this presentation iff it
+                    // was selected, and IsSelected agreeing with wasSelected.
+                    std::size_t selectedAfter = 0;
+                    std::size_t ownersForPresentation = 0;
+                    for (myContext->InitSelected(); myContext->MoreSelected();
+                         myContext->NextSelected()) {
+                        if (selectedAfter >= 50000) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+                        ++selectedAfter;
+                        const auto selectedOwner = myContext->SelectedOwner();
+                        if ((!selectedOwner.IsNull()
+                                && selectedOwner->Selectable() == presentation)
+                            || myContext->SelectedInteractive() == presentation) {
+                            ++ownersForPresentation;
+                        }
+                    }
+                    if (selectedAfter != selectedBefore
+                        || ownersForPresentation
+                            != (wasSelected ? std::size_t(1) : std::size_t(0))
+                        || myContext->IsSelected(presentation) != wasSelected) {
+                        (void)traceRefusal("selection-owner", true);
+                        return false;
                     }
                 } else {
+                    // SetShape can retire the label of a plain AIS_Shape.
+                    // Only the stager's exact previous shape may identify it.
+                    auto previous = stale.end();
+                    if (!item.previousShape.IsNull()) {
+                        for (auto candidate = stale.begin();
+                             candidate != stale.end(); ++candidate) {
+                            if (!(*candidate)->Shape().IsEqual(item.previousShape))
+                                continue;
+                            if (previous != stale.end()) {
+                                (void)traceRefusal("replacement-stale-ambiguous", true);
+                                return false;
+                            }
+                            previous = candidate;
+                        }
+                    }
+                    const bool wasSelected = previous != stale.end()
+                        && myContext->IsSelected(*previous);
                     presentation = new AIS_Shape(shape);
                     presentation->SetLocalTransformation(state.transform);
                     myDoc->LoadObjectMeterial(label, presentation);
@@ -522,6 +591,38 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                         presentation, AIS_Shaded, 0, Standard_False);
                     if (!myContext->IsDisplayed(presentation)) {
                         (void)traceRefusal("display-created", true); return false;
+                    }
+                    if (!myDoc->ShapeLabel(presentation).IsEqual(label)) {
+                        (void)traceRefusal("created-label", true); return false;
+                    }
+                    const auto owner = presentation->GlobalSelOwner();
+                    if (wasSelected
+                        && (owner.IsNull() || owner->Selectable() != presentation)) {
+                        (void)traceRefusal("replacement-selection-owner", true);
+                        return false;
+                    }
+                    if (previous != stale.end()) {
+                        if (wasSelected)
+                            myContext->AddOrRemoveSelected(*previous, Standard_False);
+                        if (myContext->IsSelected(*previous)) {
+                            (void)traceRefusal("deselect-replaced-stale", true);
+                            return false;
+                        }
+                        myContext->Remove(*previous, Standard_False);
+                        if (myContext->IsDisplayed(*previous)
+                            || myContext->IsSelected(*previous)) {
+                            (void)traceRefusal("remove-replaced-stale", true);
+                            return false;
+                        }
+                        stale.erase(previous);
+                    }
+                    if (wasSelected) {
+                        if (!myContext->IsSelected(presentation))
+                            myContext->AddOrRemoveSelected(owner, Standard_False);
+                        if (!myContext->IsSelected(presentation)) {
+                            (void)traceRefusal("select-replacement", true);
+                            return false;
+                        }
                     }
                     displayed.emplace(item.entityIdentifier, presentation);
                 }
@@ -6719,17 +6820,7 @@ bool Core3DViewer::traverseLabel (const Handle(TDocStd_Document)& theDoc,
     (void)theNamePrefix;
     (void)theLoc;
     (void)theMapOfShapes;
-    core3d::pattern_owner::RetainedPresentationIndex retained;
-    if (!core3d::pattern_owner::CaptureRetainedPresentationIndex(
-            theDoc, retained)) return true;
-    retained_recipe::UUID entity{};
-    static const Standard_GUID entityIdentifierAttribute(
-        "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
-    if (retained_solid::ReadUUID(theLabel, entityIdentifierAttribute, entity)
-        && retained.StateFor(entity)
-            == pattern_owner::RetainedPresentationState::Suppressed) {
-        return false;
-    }
+    // Common display admission prepares hidden geometry without publishing it.
     XCAFPrs_Style aDefStyle;
     aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
     aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
@@ -6746,25 +6837,9 @@ bool Core3DViewer::traverseDocument (const Handle(TDocStd_Document)& theDoc)
     XCAFPrs_Style aDefStyle;
     aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
     aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
-    core3d::pattern_owner::RetainedPresentationIndex retained;
-    if (!core3d::pattern_owner::CaptureRetainedPresentationIndex(
-            theDoc, retained)) return true;
-    static const Standard_GUID entityIdentifierAttribute(
-        "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
-    TDF_LabelSequence effectivelyVisibleLabels;
-    for (Standard_Integer index = 1; index <= aLabels.Length(); ++index) {
-        retained_recipe::UUID entity{};
-        const TDF_Label& label = aLabels.Value(index);
-        const auto state = retained_solid::ReadUUID(
-            label, entityIdentifierAttribute, entity)
-            ? retained.StateFor(entity)
-            : pattern_owner::RetainedPresentationState::Unretained;
-        if (state != pattern_owner::RetainedPresentationState::Suppressed)
-            effectivelyVisibleLabels.Append(label);
-    }
-    return effectivelyVisibleLabels.IsEmpty()
-        ? false
-        : !displayWithChildren(theDoc, effectivelyVisibleLabels, aDefStyle);
+    // Keep suppressed roots in the bounded load walk. The common leaf
+    // admission projects suppression and prepares their hidden BRep caches.
+    return !displayWithChildren(theDoc, aLabels, aDefStyle);
 }
 
 #if DEBUG
@@ -7741,32 +7816,59 @@ bool Core3DViewer::selectObjectFromBrowser(
         || _objectInteractor->isManipulatorGestureActive()
         || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
         || !_shapeInteractor->selectionModeAuthorityIsExact()) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SELECT_REFUSED stage=precondition\n");
+#endif
         return false;
     }
     try {
         OCC_CATCH_SIGNALS
         const auto snapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
-        if (snapshot == nullptr || snapshot->selectionMode != scene::ElementKind::Object
-            || identity.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
+        if (snapshot == nullptr
+            || snapshot->selectionMode != scene::ElementKind::Object) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SELECT_REFUSED stage=snapshot\n");
+#endif
+            return false;
+        }
+        if (identity.publicationSourceIdentifier != snapshot->publicationSourceIdentifier
             || identity.documentGeneration != snapshot->revisions.documentGeneration
             || identity.modelRevision != snapshot->revisions.model) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SELECT_REFUSED stage=snapshot-identity\n");
+#endif
             return false;
         }
         std::size_t matchingInstances = 0;
         for (const auto& instance : snapshot->instances) {
             if (instance.entityIdentifier == identity.entityIdentifier) {
                 if (instance.role != scene::RenderRole::Model || !instance.visible
-                    || !instance.selectable) { return false; }
+                    || !instance.selectable) {
+#if DEBUG
+                    std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance\n");
+#endif
+                    return false;
+                }
                 ++matchingInstances;
             }
         }
-        if (matchingInstances != 1) { return false; }
+        if (matchingInstances != 1) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance-count\n");
+#endif
+            return false;
+        }
         Handle(AIS_InteractiveObject) target;
         AIS_ListOfInteractive displayed;
         myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
         std::size_t inspected = 0;
         for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
-            if (++inspected > 50000) { return false; }
+            if (++inspected > 50000) {
+#if DEBUG
+                std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-bounds\n");
+#endif
+                return false;
+            }
             const auto candidate = item.Value();
             const TDF_Label label = myDoc->ShapeLabel(candidate);
             if (label.IsNull() || myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) {
@@ -7774,12 +7876,31 @@ bool Core3DViewer::selectObjectFromBrowser(
             }
             // Assembly occurrences must never resolve to their shared definition.
             if (!target.IsNull() || !myDoc->IsPresentationEditable(candidate)
-                || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) { return false; }
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) {
+#if DEBUG
+                std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-editable\n");
+#endif
+                return false;
+            }
             target = candidate;
         }
-        return !target.IsNull()
-            && _objectInteractor->replaceSelectedObjectForBrowser(target, selectionWasTouched);
+        if (target.IsNull()) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-lookup\n");
+#endif
+            return false;
+        }
+        if (!_objectInteractor->replaceSelectedObjectForBrowser(target, selectionWasTouched)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SELECT_REFUSED stage=interactor-busy\n");
+#endif
+            return false;
+        }
+        return true;
     } catch (...) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SELECT_REFUSED stage=exception\n");
+#endif
         return false;
     }
 }

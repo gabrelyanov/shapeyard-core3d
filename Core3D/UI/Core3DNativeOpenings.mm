@@ -15,6 +15,7 @@
 #include "../OCCTKit/PatternOwnerBridge.hxx"
 #include <XCAFDoc_DocumentTool.hxx>
 #if DEBUG
+#include <cstdio>
 #include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
 // The R179 fixture bridge at the end of this file implements a
 // Core3DViewController category. These imports must land before the anonymous
@@ -956,6 +957,12 @@ void Deliver(void (^completion)(Core3DProfileConstructionResult, NSString *),
 
 void DeliverBounded(void (^completion)(Core3DBoundedCurvePreparationResult, NSString *),
                     Core3DBoundedCurvePreparationResult result, NSString *detail) {
+#if DEBUG
+    if (result != Core3DBoundedCurvePreparationResultPrepared) {
+        std::fprintf(stderr, "R179_CURVE_RESULT stage=prepare result=%d detail=%.96s\n",
+                     int(result), detail ? detail.UTF8String : "");
+    }
+#endif
     if (!completion) return;
     if (NSThread.isMainThread) completion(result, detail);
     else dispatch_async(dispatch_get_main_queue(), ^{ completion(result, detail); });
@@ -1143,6 +1150,11 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     State expected = State::Prepared;
     if (!_state.compare_exchange_strong(expected, State::Applying)
         || !_service || !_prepared) {
+#if DEBUG
+        std::fprintf(stderr, "R179_CURVE_RESULT stage=apply result=%d detail=%.96s\n",
+                     int(Core3DProfileConstructionResultRejected),
+                     "No current bounded-curve preparation.");
+#endif
         Deliver(completion, Core3DProfileConstructionResultRejected,
                 @"No current bounded-curve preparation.");
         return;
@@ -1163,10 +1175,17 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     if (result != Core3DProfileConstructionResultRecoveryRequired) {
         _prepared.reset(); _opening.reset(); _service.reset(); _context.reset();
     }
-    Deliver(completion, result, result == Core3DProfileConstructionResultCommitted
+    NSString *applyDetail = result == Core3DProfileConstructionResultCommitted
         ? @"Bounded curve committed." : result == Core3DProfileConstructionResultRecoveryRequired
             ? @"Bounded-curve close is unknown; native recovery ownership is retained."
-            : @"Bounded-curve edit refused without retry.");
+            : @"Bounded-curve edit refused without retry.";
+#if DEBUG
+    if (result != Core3DProfileConstructionResultCommitted) {
+        std::fprintf(stderr, "R179_CURVE_RESULT stage=apply result=%d detail=%.96s\n",
+                     int(result), applyDetail.UTF8String);
+    }
+#endif
+    Deliver(completion, result, applyDetail);
 }
 - (BOOL)cancel {
     State value = _state.load();
@@ -1342,6 +1361,11 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
 - (void)applyWithCompletion:(void (^)(Core3DProfileConstructionResult, NSString *))completion {
     State expected = State::Prepared;
     if (!_state.compare_exchange_strong(expected, State::Applying) || !_service || !_prepared) {
+#if DEBUG
+        std::fprintf(stderr, "R179_CURVE_RESULT stage=apply result=%d detail=%.96s\n",
+                     int(Core3DProfileConstructionResultRejected),
+                     "No current ruled-loft preparation.");
+#endif
         Deliver(completion, Core3DProfileConstructionResultRejected,
                 @"No current ruled-loft preparation."); return;
     }
@@ -1359,11 +1383,18 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     if (result != Core3DProfileConstructionResultRecoveryRequired) {
         _prepared.reset(); _opening.reset(); _service.reset(); _context.reset();
     }
-    Deliver(completion, result, result == Core3DProfileConstructionResultCommitted
+    NSString *applyDetail = result == Core3DProfileConstructionResultCommitted
         ? @"Ruled loft committed in one history command."
         : result == Core3DProfileConstructionResultRecoveryRequired
             ? @"The native close outcome is unknown; recovery ownership is retained."
-            : @"Ruled-loft apply was refused without partial replacement.");
+            : @"Ruled-loft apply was refused without partial replacement.";
+#if DEBUG
+    if (result != Core3DProfileConstructionResultCommitted) {
+        std::fprintf(stderr, "R179_CURVE_RESULT stage=apply result=%d detail=%.96s\n",
+                     int(result), applyDetail.UTF8String);
+    }
+#endif
+    Deliver(completion, result, applyDetail);
 }
 - (BOOL)cancel {
     State value = _state.load();
@@ -2284,9 +2315,20 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
 }
 - (Core3DSplineProfileEditingOpening *)openSplineProfileEditor {
     ControllerOpeningInput input;
-    if (!CaptureControllerOpeningInput(self, input)) return nil;
+    if (!CaptureControllerOpeningInput(self, input)) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SPLINE_OPEN_REFUSED stage=controller-input\n");
+#endif
+        return nil;
+    }
     auto service = std::make_unique<C4Owner>(*input.owner, input.context);
-    auto opening = service->capture(input.selected); if (!opening) return nil;
+    auto opening = service->capture(input.selected);
+    if (!opening) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SPLINE_OPEN_REFUSED stage=capture\n");
+#endif
+        return nil;
+    }
     return [[Core3DSplineProfileEditingOpening alloc] initWithDocument:input.owner
         context:input.context service:std::move(service) opening:std::move(opening) creating:NO];
 }

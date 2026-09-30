@@ -1,3 +1,7 @@
+#if DEBUG
+#include <cstdio>
+#endif
+
 #include "MikkTangentSpace.hpp"
 //
 //  OcctSceneSnapshotBuilder.mm
@@ -1858,6 +1862,14 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
             || !aTriangulation->HasGeometry()
             || aTriangulation->NbNodes() <= 0
             || aTriangulation->NbTriangles() <= 0) {
+#if DEBUG
+            std::fprintf(stderr,
+                "R265_WARM_SNAPSHOT predicate=face-triangulation definition=%.128s "
+                "null=%d nodes=%d triangles=%d\n",
+                theDefinitionIdentifier.c_str(), int(aTriangulation.IsNull()),
+                aTriangulation.IsNull() ? 0 : aTriangulation->NbNodes(),
+                aTriangulation.IsNull() ? 0 : aTriangulation->NbTriangles());
+#endif
             return false;
         }
         const Handle(Poly_TriangulationParameters)& aParameters =

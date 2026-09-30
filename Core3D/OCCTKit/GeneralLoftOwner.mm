@@ -232,8 +232,13 @@ std::shared_ptr<const Prepared> OcafOwner::prepare(
         || state_->nextPreparation == UINT64_MAX) return {};
     try {
         const auto found = state_->sessions.find(opening->session);
-        if (found == state_->sessions.end() || found->second.opening != opening
-            || !SameScene(opening->scene, state_->context->openingFence())) return {};
+        if (found == state_->sessions.end() || found->second.opening != opening)
+            return {};
+        const auto currentScene = state_->context->recapture(FenceWidth, FenceHeight);
+        if (!currentScene || !SameScene(opening->scene, *currentScene)) {
+            receipt = Refusal(opening->scene, Outcome::staleOwner, "scene-not-current");
+            return {};
+        }
         Definition next = candidate.descriptive;
         // Swift-projected owner/revision/digest are fences only. The native
         // opening is the mutation authority and computes the replacement hash.
@@ -311,9 +316,11 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared) noexce
         const auto s = p == state_->preparations.end() ? state_->sessions.end()
             : state_->sessions.find(p->second.session);
         if (p == state_->preparations.end() || p->second.prepared != prepared
-            || s == state_->sessions.end()
-            || !SameScene(scene, state_->context->openingFence()))
+            || s == state_->sessions.end())
             return Refusal(scene, Outcome::staleOwner, "preparation-not-current");
+        const auto currentScene = state_->context->recapture(FenceWidth, FenceHeight);
+        if (!currentScene || !SameScene(scene, *currentScene))
+            return Refusal(scene, Outcome::staleOwner, "scene-not-current");
         if (!prepared->opening.creating) {
             OcctGeneralLoftCapture current;
             if (!state_->document->ReadGeneralLoftExact(
