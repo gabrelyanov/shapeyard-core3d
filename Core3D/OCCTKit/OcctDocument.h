@@ -27,6 +27,11 @@
 #include "SavedCutSourceEdit.hxx"
 #include "RetainedBooleanEditValues.hxx"
 #include "RetainedRecipeSnapshot.hxx"
+#include "BoundedCurveAttribute.hxx"
+#include "BoundedCurveBuild.hxx"
+#include "GeneralLoftPersistence.hxx"
+#include "FeaturePatternChildAttribute.hxx"
+#include "RetainedFinishingRecord.hxx"
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -52,6 +57,7 @@
 #include <array>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <optional>
 #include <map>
@@ -63,6 +69,18 @@ class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
 namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
+namespace core3d::native_opening { class CommandLease; }
+namespace core3d::native_opening { class Context; }
+namespace core3d::bounded_curve::owner { class OcafOwner; }
+namespace core3d::pattern_owner { struct AllLabelSnapshot; }
+namespace core3d::dependent_replay {
+class Plan;
+class Preparer;
+class SourceMutation;
+struct Limits;
+enum class Mutation : std::uint8_t;
+enum class Refusal : std::uint8_t;
+}
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
@@ -116,6 +134,21 @@ struct OcctMeshUVAtlasOptions {
     // Explicit retained native source for live D5 reads. Null keeps planar behavior.
     // Carried by OrdinaryTransformChange through validation and Mark in one Undo.
     TDF_Label curvedSource = {};
+};
+
+struct OcctRetainedFinishingSettings final {
+    int unwrapPolicy = 0;
+    int resolutionTexels = 1024;
+    int gutterTexels = 2;
+};
+
+enum class OcctRetainedFinishingOutcome : int {
+    Committed = 0, Refused, StaleSource, UnsupportedSurface,
+    OwnerMismatch, Busy, Malformed, PersistenceFailure, Absent
+};
+
+enum class OcctRetainedFinishingCurrentness : int {
+    Absent = 0, Current = 1, Stale = 2
 };
 
 //! Read-only resolved region. Ordinals are session-local and never persistent IDs.
@@ -235,6 +268,77 @@ struct OcctObjectVisibilityState {
     Standard_EXPORT Standard_Boolean HasSameObjectAndLayers(const OcctObjectVisibilityState& other) const noexcept;
     Standard_EXPORT Standard_Boolean IsEqual(const OcctObjectVisibilityState& other) const noexcept;
     Standard_EXPORT Standard_Boolean IsEffectivelyVisible() const noexcept;
+};
+
+//! Immutable exact authority for one editable free definition. Presence of
+//! authored name, visibility, layers and scalar appearance is significant.
+struct OcctExactLabelReceipt {
+    Handle(TDF_Data) documentData;
+    std::string documentIdentifier;
+    OcctObjectVisibilityState visibility;
+    OcctScalarAppearanceState appearance;
+    Standard_EXPORT Standard_Boolean IsEqual(
+        const OcctExactLabelReceipt& other) const noexcept;
+};
+
+//! An identity reservation minted only by the owning OcctDocument. UUIDs are
+//! values to install, never caller assertions about existing OCAF state.
+class OcctIssuedLabelIdentity final {
+public:
+    const std::string& EntityIdentifier() const noexcept { return entityIdentifier_; }
+    const std::string& DefinitionIdentifier() const noexcept { return definitionIdentifier_; }
+private:
+    friend class OcctDocument;
+    Handle(TDF_Data) documentData_;
+    std::string documentIdentifier_;
+    std::string entityIdentifier_;
+    std::string definitionIdentifier_;
+    std::uint64_t reservation_ = 0;
+};
+
+//! Detached geometry plus an exact source policy. The document re-reads the
+//! source before copying name, visibility, transform and admitted appearance.
+struct OcctPreparedLabelClone {
+    OcctExactLabelReceipt source;
+    TopoDS_Shape detachedShape;
+    OcctGeometryRepresentation representation = OcctGeometryRepresentation::Invalid;
+};
+
+//! One preflightable all-label mutation. Later D2/D3 authorities may retain
+//! this plan without receiving access to identity attributes or transactions.
+struct OcctAllLabelPlan {
+    struct Create { OcctIssuedLabelIdentity identity; OcctPreparedLabelClone clone; };
+    struct Replace { OcctExactLabelReceipt expected; OcctPreparedLabelClone clone; };
+    std::vector<Create> creates;
+    std::vector<Replace> replacements;
+    std::vector<OcctExactLabelReceipt> removals;
+    std::vector<std::string> retainedRemovalLedger;
+};
+
+//! Exact C1 authority read from one free owner and its unique record label.
+//! This is an in-process capture only: labels and data handles are never
+//! serialized and cannot be reconstructed by a caller.
+struct OcctBoundedCurveCapture {
+    Handle(TDF_Data) documentData;
+    std::string documentIdentifier;
+    OcctExactLabelReceipt ownerReceipt;
+    core3d::bounded_curve::Record record;
+    core3d::bounded_curve::PersistedValue persisted;
+    TopoDS_Wire wire;
+    Standard_EXPORT Standard_Boolean IsEqual(
+        const OcctBoundedCurveCapture& other) const noexcept;
+};
+
+//! Exact C3-N authority: one canonical SYGL record bound to one admitted solid.
+//! The labels are in-process receipts and cannot be reconstructed from Swift.
+struct OcctGeneralLoftCapture {
+    Handle(TDF_Data) documentData;
+    std::string documentIdentifier;
+    OcctExactLabelReceipt ownerReceipt;
+    core3d::general_loft::persistence::Record record;
+    TopoDS_Solid solid;
+    Standard_EXPORT Standard_Boolean IsEqual(
+        const OcctGeneralLoftCapture& other) const noexcept;
 };
 
 //! A bounded nonempty Unicode object name. Display names are never identity.
@@ -388,6 +492,9 @@ Standard_EXPORT OcctAuthoredFrameReadState Core3DReadAuthoredFrameOwner(
 //! Full existing document admission, including retained owner and shape budgets.
 Standard_EXPORT Standard_Boolean Core3DValidateRetainedSolidDocument(const Handle(TDocStd_Document)& document);
 Standard_EXPORT Standard_Boolean Core3DValidateCompositeRecipeDocument(const Handle(TDocStd_Document)& document);
+//! Retained finishing receipt admission: exact owner bindings, canonical
+//! SYEF/1 bytes, aggregate budget, and an admitted retained carrier owner.
+Standard_EXPORT Standard_Boolean Core3DValidateRetainedFinishingDocument(const Handle(TDocStd_Document)& document);
 
 //! Read-only classification used by destructive native operation gates. A
 //! malformed/unknown record is deliberately not collapsed to legacy absence.
@@ -434,8 +541,11 @@ struct OcctPlainProfileCutDebugEvidence {
 #endif
 
 //! Scans every label, including hidden/unbound/orphan records and foreign arrays.
-//! This validates frame ownership, not the rest of the document schema. Callers
-//! must combine it with their existing geometry/material admission and budgets.
+//! Byte arrays are limited to geometry-owned authored frames and exact canonical
+//! retained-pattern records beneath the marker-bearing tag-71 document root.
+//! The pattern exception is identity/placement validated and has its own 8 MiB
+//! budget; it never contributes to or weakens native frame accounting. Callers
+//! must combine this with their existing geometry/material admission and budgets.
 //! A smaller cap supports exact-limit checks; a cap above 64 MiB is rejected.
 Standard_EXPORT Standard_Boolean Core3DValidateAuthoredFrameOwners(
     const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
@@ -450,8 +560,9 @@ Standard_EXPORT Standard_Integer Core3DNormalTextureBasisForLabel(
 Standard_EXPORT Standard_Boolean Core3DValidateNormalTextureBinding(
     const Handle(TDocStd_Document)& document, const TDF_Label& label,
     Standard_Size* additionalNativeBytes = nullptr) noexcept;
-//! Complete supplied-owner plus owned-normal usage, including hidden bindings
-//! and orphan recipe rejection. Legacy unowned/no-frame materials remain separate.
+//! Complete supplied-owner plus owned-normal usage, including hidden bindings,
+//! exact retained-pattern placement, and orphan recipe rejection. Legacy
+//! unowned/no-frame materials remain separate.
 Standard_EXPORT Standard_Boolean Core3DValidateOwnedFrameUsage(
     const Handle(TDocStd_Document)& document, Standard_Size& nativeBytes,
     Standard_Size maximumBytes = 64U * 1024U * 1024U) noexcept;
@@ -522,6 +633,8 @@ struct OcctGeometryDuplicationRequest
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
 //! fail-closed attribute schema and bounded visual-material/string readers.
+//! Retrieval additionally admits only LayerRef graph nodes with validated
+//! layer/shape roles and the two exact byte-array roles documented above.
 //! This is defense in depth for trusted Shapeyard project packages; raw XBF/CBF
 //! remains a private persistence format and must not be exposed as an arbitrary
 //! untrusted import surface without a separately hardened OCCT shape parser.
@@ -565,11 +678,16 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedProgramSuffixProbe
 //! DEBUG archive-rounding and adversarial trim-domain checks; no edit authority.
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe();
 Standard_EXPORT std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Standard_Integer scenario);
+//! E1 DEBUG native persistence evidence only; no finishing edit authority.
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProbe(std::int32_t scenario) noexcept;
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProducerProbe(
+    std::int32_t scenario) noexcept;
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
-//! Isolated tests with a custom wire budget and no final geometry-owner gate.
-//! Production registration always validates owner association after retrieval.
+//! Isolated tests with a custom wire budget and no final frame geometry-owner
+//! gate. Pattern placement and bounded LayerRef graph roles remain mandatory;
+//! production registration always validates all owner associations after read.
 Standard_EXPORT void Core3DDebugDefineFrameBinXCAFFormat(
     const Handle(TDocStd_Application)& application,
     const std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget>& budget);
@@ -644,6 +762,13 @@ public:
   //! returns false and clears output; it performs no repair or write-on-read.
   Standard_EXPORT Standard_Boolean DebugPlainProfileCutRetention(
       const std::string& entityIdentifier,
+      OcctPlainProfileCutDebugEvidence& output) const noexcept;
+  //! DEBUG-only, read-only proof that the committed source slots and result
+  //! remain strict-digest fixed points through the selected native BinTools
+  //! writer/reader. False clears output; no cached evidence is substituted.
+  Standard_EXPORT Standard_Boolean DebugPlainProfileCutNativeRoundTrip(
+      const std::string& entityIdentifier,
+      Standard_Boolean direct,
       OcctPlainProfileCutDebugEvidence& output) const noexcept;
 #endif
   // Benchmark assets need more than 40 steps; 1000 keeps memory bounded on
@@ -907,6 +1032,126 @@ public:
     Standard_EXPORT Standard_Boolean StageSavedGroups(const std::vector<OcctSavedGroup>& groups) noexcept;
     Standard_EXPORT Standard_Boolean CaptureObjectNameStateForLabel(
         const TDF_Label& label, OcctObjectNameState& state) const noexcept;
+    Standard_EXPORT Standard_Boolean CaptureExactFreeLabel(
+        const TDF_Label& label, OcctExactLabelReceipt& receipt) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadExactFreeLabel(
+        const OcctExactLabelReceipt& expected,
+        OcctExactLabelReceipt& receipt) const noexcept;
+    //! UUID generation and collision checks occur here without an OCAF write.
+    Standard_EXPORT Standard_Boolean ReserveExactLabelIdentities(
+        Standard_Size count, const std::vector<std::string>& retainedRemovalLedger,
+        std::vector<OcctIssuedLabelIdentity>& identities) noexcept;
+    Standard_EXPORT Standard_Boolean StageCreateExactFreeLabel(
+        core3d::native_opening::CommandLease& lease,
+        const OcctIssuedLabelIdentity& identity,
+        const OcctPreparedLabelClone& clone,
+        OcctExactLabelReceipt& receipt) noexcept;
+    Standard_EXPORT Standard_Boolean StageReplaceExactFreeLabel(
+        core3d::native_opening::CommandLease& lease,
+        const OcctExactLabelReceipt& expected,
+        const OcctPreparedLabelClone& clone,
+        OcctExactLabelReceipt& receipt) noexcept;
+    Standard_EXPORT Standard_Boolean StageRemoveExactFreeLabel(
+        core3d::native_opening::CommandLease& lease,
+        const OcctExactLabelReceipt& expected) noexcept;
+    Standard_EXPORT Standard_Boolean StageAllLabels(
+        core3d::native_opening::CommandLease& lease,
+        const OcctAllLabelPlan& plan,
+        std::vector<OcctExactLabelReceipt>& receipts) noexcept;
+    Standard_EXPORT Standard_Boolean ReadBackAllLabels(
+        const OcctAllLabelPlan& plan,
+        const std::vector<OcctExactLabelReceipt>& receipts) const noexcept;
+    //! Capture tag-71 D2 authority from every actual free source/member label.
+    //! The returned immutable snapshot includes exact presentation, oriented
+    //! shape bytes, retained family recipes and measured bounded costs.
+    Standard_EXPORT Standard_Boolean CapturePatternAllLabelSnapshot(
+        const std::string& selectedEntityIdentifier,
+        std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot) const noexcept;
+    //! Recapture the same feature and require byte/identity/recipe/appearance/
+    //! shape exactness. Valid both outside and inside the caller-owned command.
+    Standard_EXPORT Standard_Boolean ReadPatternAllLabelSnapshot(
+        const core3d::pattern_owner::AllLabelSnapshot& expected,
+        std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot) const noexcept;
+    //! Stage the tag-73 SYFP record and every host-owned SYFC receipt under the
+    //! same caller-owned lease. Host/base/source labels are actual OCAF labels;
+    //! exact paired readback is required before success is returned.
+    Standard_EXPORT Standard_Boolean StageFeaturePatternPair(
+        core3d::native_opening::CommandLease& lease,
+        const TDF_Label& host,
+        const TDF_Label& baselineRecipe,
+        const TDF_Label& source,
+        const core3d::feature_pattern::Definition& definition,
+        const std::vector<core3d::feature_pattern_child::Receipt>& children,
+        core3d::feature_pattern_child::PairedRecord& paired) noexcept;
+    //! Read-only exact authority. Legacy tag-73-only state and any partial,
+    //! mixed or foreign pair are deliberately not editor authority.
+    Standard_EXPORT Standard_Boolean ReadFeaturePatternPair(
+        const core3d::feature_pattern::UUID& feature,
+        core3d::feature_pattern_child::PairedRecord& paired) const noexcept;
+    //! Enumerate the complete transitive D2/D3/D4 closure and ask the real
+    //! family collaborators to prepare every detached replay before a command.
+    //! The returned plan is document-owned evidence: callers cannot construct,
+    //! append, omit, or reorder its retained records.
+    Standard_EXPORT core3d::dependent_replay::Refusal PrepareDependentReplayPlan(
+        const OcctExactLabelReceipt& target,
+        core3d::dependent_replay::Mutation mutation,
+        const core3d::dependent_replay::Limits& limits,
+        core3d::dependent_replay::Preparer& preparer,
+        std::shared_ptr<const core3d::dependent_replay::Plan>& plan) noexcept;
+    //! Stage the source mutation and every prepared descendant under the
+    //! caller's one lease. This method does not commit or begin nested work.
+    Standard_EXPORT core3d::dependent_replay::Refusal StageDependentReplayPlan(
+        core3d::native_opening::CommandLease& lease,
+        const core3d::dependent_replay::Plan& plan,
+        core3d::dependent_replay::SourceMutation& sourceMutation) noexcept;
+    //! Exact post-stage/post-commit proof. Every prepared family collaborator
+    //! must reread its record, recipe, labels, and stable child/member IDs.
+    Standard_EXPORT core3d::dependent_replay::Refusal ReadDependentReplayPlan(
+        const core3d::dependent_replay::Plan& plan) const noexcept;
+    //! Capture requires a viewer-issued context for this exact document. The
+    //! reader below intentionally remains usable inside an owned command.
+    Standard_EXPORT Standard_Boolean CaptureBoundedCurveExact(
+        const std::string& entityIdentifier,
+        const core3d::native_opening::Context& context,
+        OcctBoundedCurveCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadBoundedCurveExact(
+        const core3d::retained_recipe::OwnerKey& owner,
+        OcctBoundedCurveCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean StageBoundedCurveCreate(
+        core3d::native_opening::CommandLease& lease,
+        const OcctIssuedLabelIdentity& identity,
+        const core3d::bounded_curve::PersistedValue& persisted,
+        const core3d::bounded_curve::DetachedWire& detached,
+        const std::string& requestedName,
+        OcctBoundedCurveCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean StageBoundedCurveReplacement(
+        core3d::native_opening::CommandLease& lease,
+        const OcctBoundedCurveCapture& opening,
+        const core3d::bounded_curve::PersistedValue& persisted,
+        const core3d::bounded_curve::DetachedWire& detached,
+        OcctBoundedCurveCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean CaptureGeneralLoftExact(
+        const std::string& entityIdentifier,
+        const core3d::native_opening::Context& context,
+        OcctGeneralLoftCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadGeneralLoftExact(
+        const core3d::retained_recipe::OwnerKey& owner,
+        OcctGeneralLoftCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean HasUnsupportedGeneralLoftDependent(
+        const OcctGeneralLoftCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean StageGeneralLoftCreate(
+        core3d::native_opening::CommandLease& lease,
+        const OcctIssuedLabelIdentity& identity,
+        const core3d::general_loft::Definition& definition,
+        const core3d::general_loft::AdmittedSolid& admitted,
+        const std::string& requestedName,
+        OcctGeneralLoftCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean StageGeneralLoftReplacement(
+        core3d::native_opening::CommandLease& lease,
+        const OcctGeneralLoftCapture& opening,
+        const core3d::general_loft::Definition& definition,
+        const core3d::general_loft::AdmittedSolid& admitted,
+        OcctGeneralLoftCapture& capture) noexcept;
     //! Stage only the name in the caller's open command; verify exact readback
     //! and unchanged geometry/identity/transform. Never commit or notify here.
     Standard_EXPORT Standard_Boolean SetObjectNameForLabel(
@@ -1029,6 +1274,17 @@ public:
         OcctGeometryRepresentation representation);
     //! Read the stored v2 atlas without regenerating it; images remain readable.
     Standard_EXPORT Standard_Boolean CaptureMeshUVAtlasPreview(const TDF_Label& label, OcctMeshUVAtlasPreview& preview) const noexcept;
+    Standard_EXPORT Standard_Boolean CaptureRetainedFinishingSource(
+        const core3d::retained_recipe::OwnerKey& owner,
+        core3d::retained_finishing::SourceRevision& output) noexcept;
+    Standard_EXPORT OcctRetainedFinishingOutcome ProduceRetainedFinishing(
+        const core3d::retained_recipe::OwnerKey& owner,
+        const OcctRetainedFinishingSettings& settings) noexcept;
+    Standard_EXPORT OcctRetainedFinishingOutcome RegenerateRetainedFinishing(
+        const core3d::retained_recipe::OwnerKey& owner) noexcept;
+    Standard_EXPORT OcctRetainedFinishingCurrentness RetainedFinishingCurrentness(
+        const core3d::retained_recipe::OwnerKey& owner,
+        core3d::retained_finishing::Definition* record = nullptr) const noexcept;
     //! Additive curved-layout presence, used to distinguish a planar v2 atlas migration.
     Standard_EXPORT Standard_Boolean HasCurvedUVLayoutForLabel(const TDF_Label& label) const noexcept;
     //! Same v2/prefix payload and ordinary MeshUVAtlas transaction as planar.
@@ -1157,6 +1413,8 @@ public:
     Standard_Boolean ReplaceShape(
         const TDF_Label& label,
         Handle(AIS_Shape) aisShape);
+    Standard_Boolean HasUnroutedRetainedDependent(
+        const TDF_Label& label) const noexcept;
     
     void RemoveShape(TopoDS_Shape object);
     void RemoveShape(Handle(AIS_Shape) object);
@@ -1192,6 +1450,7 @@ public:
     void NotifyChanges();
 
 private:
+  friend class core3d::bounded_curve::owner::OcafOwner;
   friend class core3d::NativeDocumentSession;
   friend class core3d::part_boolean::owner::PartBooleanOwner;
   friend class core3d::retained_feature::OcafOwnerService;
@@ -1268,6 +1527,13 @@ private:
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;
+  std::uint64_t myNextExactIdentityReservation = 0;
+  std::unordered_map<std::uint64_t, std::pair<std::string, std::string>>
+      myExactIdentityReservations;
+  std::unordered_set<std::string> myExactIdentityIssuanceLedger;
+  // Nonempty only during synchronous StageDependentReplayPlan. Direct legacy
+  // ReplaceShape/RemoveShape calls remain fail-closed for retained dependents.
+  std::unordered_set<std::string> myDependentReplayAuthorization;
 };
 
 #endif // OcctDocument_h

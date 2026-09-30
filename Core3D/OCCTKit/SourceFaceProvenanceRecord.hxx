@@ -35,6 +35,7 @@
 //   then reports Stale and consumers must ignore the record. There is no
 //   silent fallback and no source-to-copy link.
 #include "CurrentTessellationMeshCopy.hxx"
+#include "CurvedFaceUVUnwrap.hpp"
 #include <CommonCrypto/CommonDigest.h>
 #include <Poly_Triangulation.hxx>
 #include <cmath>
@@ -167,6 +168,32 @@ inline bool EntriesFromSourceFaces(const std::vector<core3d::meshcopy::SourceFac
         }
         output = std::move(entries);
         return true;
+    } catch (...) { output.clear(); return false; }
+}
+
+// Additive E1b adapter: preserve the exact analytic N1 values while projecting
+// them into the existing unwrap input. A caller must replace toleranceMM with
+// the corresponding live BRep face tolerance before claiming verified quality.
+inline bool FinishingFaceInputs(
+    const std::vector<core3d::meshcopy::SourceFaceRecord>& source,
+    std::vector<shapeyard::uv::curved::FaceInput>& output) noexcept {
+    output.clear();
+    std::vector<SourceFaceProvenanceEntry> entries;
+    if (!EntriesFromSourceFaces(source, entries)) return false;
+    try {
+        output.reserve(entries.size());
+        for (const auto& entry : entries) {
+            shapeyard::uv::curved::FaceInput face;
+            face.surfaceType = entry.surfaceType;
+            face.firstTriangle = entry.firstTriangle;
+            face.triangleCount = entry.triangleCount;
+            face.reversed = entry.reversed;
+            face.params = entry.params;
+            if (entry.params.size() >= 9)
+                face.xDirection = {entry.params[6], entry.params[7], entry.params[8]};
+            output.push_back(std::move(face));
+        }
+        return !output.empty();
     } catch (...) { output.clear(); return false; }
 }
 

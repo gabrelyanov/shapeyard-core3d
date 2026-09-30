@@ -18,7 +18,9 @@
 #include <memory>
 #include <functional>
 #include <TopoDS_Shape.hxx>
+#include <array>
 #include <optional>
+#include <string>
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +30,31 @@ class OcctDocument;
 class V3d_View;
 
 namespace core3d::scene {
+
+#ifdef DEBUG
+//! Value-only observation of the bounded-curve input used by one successful
+//! full-scene publication. This test seam is armed explicitly for one
+//! synchronous DEBUG capture and never retains labels, document handles or
+//! edit authority.
+struct DebugBoundedCurvePublicationObservation final {
+    std::string entityIdentifier;
+    std::string definitionIdentifier;
+    std::string publicationSourceIdentifier;
+    std::vector<std::uint8_t> canonicalDefinitionBytes;
+    std::vector<std::uint8_t> canonicalOwnerBytes;
+    std::array<std::uint8_t, 32> canonicalDefinitionDigest{};
+    std::uint64_t modelRevision = 0;
+    std::uint32_t edgeCount = 0;
+    std::uint32_t vertexCount = 0;
+};
+
+//! Arm/reset, consume, or cancel the one-shot publication observation. Only a
+//! fully validated and committed Build can publish a consumable value.
+void DebugBeginBoundedCurvePublicationObservation() noexcept;
+bool DebugTakeBoundedCurvePublicationObservation(
+    DebugBoundedCurvePublicationObservation& theObservation) noexcept;
+void DebugCancelBoundedCurvePublicationObservation() noexcept;
+#endif
 
 class OcctSceneSnapshotBuilder final {
 public:

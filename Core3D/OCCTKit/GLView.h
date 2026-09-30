@@ -68,6 +68,12 @@
 - (void)endInteractiveRendering;
 - (BOOL)performWithRenderingContext:(void (^)(void))work;
 #ifdef DEBUG
+//! Prepare this detached, controller-free view as a fixed 64x64 offscreen
+//! probe host without creating or presenting an application drawable.
+- (BOOL)debugPrepareProbeFramebuffer;
+//! Run bounded probe work with the verified offscreen framebuffer and viewport
+//! bound, containing C++ failures and restoring the caller's GL state/context.
+- (BOOL)debugPerformWithProbeFramebuffer:(void (^)(void))work;
 - (void)debugSkipNextPresentation;
 //! Draw the existing viewport once and read a bounded center crop before the
 //! non-retained renderbuffer is presented. Test-only renderer truth.

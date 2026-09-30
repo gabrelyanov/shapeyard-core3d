@@ -89,6 +89,7 @@ struct Cut475Scope {
 
 #if DEBUG && TARGET_OS_IOS
 #import "../UI/Core3DViewController.h"
+#import "GLView.h"
 #import "GLViewController.h"
 #include "../UI/ShellOperationController.hpp"
 #include <AIS_ListIteratorOfListOfInteractive.hxx>
@@ -104,7 +105,18 @@ struct Cut475Scope {
 #endif
 
 #include "OcctDocument.h"
+#include "NativeOpeningContext.hxx"
+#include "NativeOpeningDependentReplay.hxx"
+#if DEBUG
+#include "NativeOpeningSurfaceProbe.hxx"
+#include "DetachedPlanarSweepProbe.hxx"
+#include "../UI/Core3DViewer.h"
+#endif
 #include "PatternRecipeClone.hxx"
+#include "PatternAllLabelAuthority.hxx"
+#include "PatternPersistence.hxx"
+#include "PathArrayPersistence.hxx"
+#include "FeaturePatternPersistence.hxx"
 #include "NativeDocumentSession.hxx"
 #include <Standard_ProgramError.hxx>
 #include "SavedCutSourceDetachedWork.hxx"
@@ -114,6 +126,7 @@ struct Cut475Scope {
 #include <cstring>
 #include <map>
 #include <set>
+#include <deque>
 #include <locale>
 #include <sstream>
 #include <TDF_AttributeIterator.hxx>
@@ -125,10 +138,14 @@ struct Cut475Scope {
 #include "ReceiptFramedTraversal.hxx"
 #include "ReceiptCatalogBinaryDriver.hxx"
 #include "RetainedSolidBinaryDriver.hxx"
+#include "RetainedFinishingBinaryDriver.hxx"
+#include "RetainedFinishingProducer.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
 #include "SpatialSweepG0Transaction.hxx"
 #include "SpatialSweepEditor.hxx"
 #include "BoundedCurveBinaryDriver.hxx"
+#include "FeaturePatternChildBinaryDriver.hxx"
+#include "FeaturePatternBaselineBinaryDriver.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
@@ -576,6 +593,7 @@ void P4AbortOpenCommandNoThrow(
 
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
+#include <Aspect_GraphicDeviceDefinitionError.hxx>
 #include <Message.hxx>
 #include <Message_Messenger.hxx>
 #include <Message_ProgressRange.hxx>
@@ -588,8 +606,10 @@ void P4AbortOpenCommandNoThrow(
 #include <BinXCAFDrivers_DocumentStorageDriver.hxx>
 #include <BinDrivers_DocumentRetrievalDriver.hxx>
 #include <BinMDF_ADriverTable.hxx>
+#include <BinMDF_ReferenceDriver.hxx>
 #include <BinMDF_TagSourceDriver.hxx>
 #include <BinMDataStd_AsciiStringDriver.hxx>
+#include <BinMDataStd_ByteArrayDriver.hxx>
 #include <BinMDataStd_GenericEmptyDriver.hxx>
 #include <BinMDataStd_GenericExtStringDriver.hxx>
 #include <BinMDataStd_IntegerDriver.hxx>
@@ -598,9 +618,11 @@ void P4AbortOpenCommandNoThrow(
 #include <BinMDataStd_UAttributeDriver.hxx>
 #include <BinMNaming_NamedShapeDriver.hxx>
 #include <BinMXCAFDoc_ColorDriver.hxx>
+#include <BinMXCAFDoc_GraphNodeDriver.hxx>
 #include <BinMXCAFDoc_LengthUnitDriver.hxx>
 #include "SavedFeatureRecords.hxx"
 #include "SweepRebuildDefinition.hxx"
+#include "NativeOpeningContext.hxx"
 #include <BinMXCAFDoc_LocationDriver.hxx>
 #include <BinMXCAFDoc_VisMaterialDriver.hxx>
 #include <BinMXCAFDoc_VisMaterialToolDriver.hxx>
@@ -618,6 +640,7 @@ void P4AbortOpenCommandNoThrow(
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TDF_Tool.hxx>
+#include <TDF_Reference.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -765,6 +788,7 @@ constexpr Standard_Size kMaximumDecodedTextureBytes =
     128ull * 1024ull * 1024ull;
 constexpr Standard_Integer kMaximumPersistentTextureIdentifierBytes = 256;
 constexpr Standard_Integer kMaximumPersistentNameCharacters = 4096;
+constexpr Standard_Integer kMaximumPersistentReferencePathDepth = 64;
 constexpr Standard_Integer kPersistentRecordHeaderBytes =
     3 * static_cast<Standard_Integer>(sizeof(Standard_Integer));
 constexpr const char* kBufferTexturePrefix = "texturebuf://";
@@ -1668,6 +1692,76 @@ public:
     }
 };
 
+// Bounded retrieval adapter for TDF_Reference. The bundled
+// BinMDF_ReferenceDriver decodes an attacker-controlled label-path tag
+// count and creates labels along that path without a record-relative
+// bound, so the record endpoint and the encoded depth/tag count are
+// validated before delegation, and complete consumption plus a
+// same-document, non-null resolution are required afterwards. Label
+// creation is therefore bounded before it can occur.
+class Core3DBoundedReferenceDriver final : public BinMDF_ReferenceDriver
+{
+public:
+    explicit Core3DBoundedReferenceDriver(
+        const Handle(Message_Messenger)& theMessageDriver)
+    : BinMDF_ReferenceDriver(theMessageDriver)
+    {
+    }
+
+    Standard_Boolean Paste(
+        const BinObjMgt_Persistent& theSource,
+        const Handle(TDF_Attribute)& theTarget,
+        BinObjMgt_RRelocationTable& theRelocationTable) const override
+    {
+        const Standard_Integer aStart = theSource.Position();
+        Standard_Integer aRecordEnd = 0;
+        if (!TryPersistentRecordEnd(theSource, aRecordEnd)
+            || aStart < kPersistentRecordHeaderBytes
+            || aStart > aRecordEnd) {
+            RejectSafeBinaryRead();
+            return Standard_False;
+        }
+        // Native encoding: one tag-count integer followed by that many
+        // non-negative tag integers. A zero count encodes a null reference,
+        // which the safe reader refuses: admitted records must resolve.
+        Standard_Integer aTagCount = 0;
+        if (!theSource.GetInteger(aTagCount).IsOK()
+            || aTagCount <= 0
+            || aTagCount > kMaximumPersistentReferencePathDepth
+            || aTagCount
+                > (aRecordEnd - theSource.Position())
+                    / static_cast<Standard_Integer>(
+                        sizeof(Standard_Integer))) {
+            RejectSafeBinaryRead();
+            return Standard_False;
+        }
+        for (Standard_Integer anIndex = 0; anIndex < aTagCount; ++anIndex) {
+            Standard_Integer aTag = 0;
+            if (!theSource.GetInteger(aTag).IsOK() || aTag < 0) {
+                RejectSafeBinaryRead();
+                return Standard_False;
+            }
+        }
+        if (theSource.Position() != aRecordEnd
+            || !theSource.SetPosition(aStart)) {
+            RejectSafeBinaryRead();
+            return Standard_False;
+        }
+        const Handle(TDF_Reference) aReference =
+            Handle(TDF_Reference)::DownCast(theTarget);
+        if (aReference.IsNull()
+            || !BinMDF_ReferenceDriver::Paste(
+                theSource, theTarget, theRelocationTable)
+            || theSource.Position() != aRecordEnd
+            || aReference->Get().IsNull()
+            || aReference->Get().Data() != aReference->Label().Data()) {
+            RejectSafeBinaryRead();
+            return Standard_False;
+        }
+        return Standard_True;
+    }
+};
+
 class Core3DBoundedAsciiStringDriver final
     : public BinMDataStd_AsciiStringDriver
 {
@@ -1849,13 +1943,797 @@ private:
     std::shared_ptr<Standard_Size> myAggregateTextureBytes;
 };
 
+struct Core3DProjectByteArrayReadBudget {
+    Standard_Size patternBytes = 0;
+    Standard_Size featurePatternBytes = 0;
+    Standard_Size pathArrayBytes = 0;
+    bool rejected = false;
+
+    void reset() noexcept {
+        patternBytes = 0; featurePatternBytes = 0; pathArrayBytes = 0;
+        rejected = false;
+    }
+};
+
+struct Core3DLayerGraphReadBudget {
+    Standard_Size records = 0;
+    Standard_Size references = 0;
+    bool rejected = false;
+
+    void reset() noexcept { records = 0; references = 0; rejected = false; }
+};
+
+bool Core3DStrictPatternDefinition(
+    const core3d::pattern::Definition& theDefinition) noexcept
+{
+    for (const auto& aMember : theDefinition.members) {
+        if (aMember.state != core3d::pattern::MemberState::Active
+            && aMember.state != core3d::pattern::MemberState::Suppressed) {
+            return false;
+        }
+    }
+    for (const auto& aRemoval : theDefinition.removals) {
+        if (aRemoval.state != core3d::pattern::MemberState::Removed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Abort or undo rolls back attribute deltas but leaves label nodes. A subtree
+// is logical absence only when its root and every descendant carry no live
+// attribute; the inspection is read-only, iterative and bounded, mirroring the
+// established remnant handling in feature_pattern::ReadAll.
+bool Core3DAttributeFreeSubtree(const TDF_Label& theSubtree) noexcept
+{
+    try {
+        std::vector<TDF_Label> aPending{theSubtree};
+        Standard_Size aVisited = 0;
+        while (!aPending.empty()) {
+            const TDF_Label aLabel = aPending.back();
+            aPending.pop_back();
+            if (++aVisited > 100000 || aLabel.HasAttribute()) {
+                return false;
+            }
+            for (TDF_ChildIterator aChild(aLabel, Standard_False);
+                 aChild.More(); aChild.Next()) {
+                aPending.push_back(aChild.Value());
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool CollectValidatedPatternByteArrayRoles(
+    const Handle(TDocStd_Document)& theDocument,
+    std::set<const TDF_Attribute*>& theAdmittedRecords) noexcept
+{
+    theAdmittedRecords.clear();
+    try {
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) {
+            return false;
+        }
+        // Bounded whole-document census before any role admission: a missing
+        // tag-71 root means zero admitted pattern attributes, never
+        // uninspected default byte arrays elsewhere in the document.
+        std::vector<TDF_Label> someLabels{theDocument->GetData()->Root()};
+        for (Standard_Size aLabelIndex = 0;
+             aLabelIndex < someLabels.size(); ++aLabelIndex) {
+            for (TDF_ChildIterator aChild(someLabels[aLabelIndex], Standard_False);
+                 aChild.More(); aChild.Next()) {
+                if (someLabels.size() >= 100000) {
+                    return false;
+                }
+                someLabels.push_back(aChild.Value());
+            }
+        }
+        const TDF_Label aRoot = theDocument->Main().FindChild(
+            core3d::pattern::DocumentRootTag, Standard_False);
+        if (!aRoot.IsNull()) {
+            Handle(TDataStd_AsciiString) aMarker;
+            if (!aRoot.FindAttribute(TDataStd_AsciiString::GetID(), aMarker)
+                || aMarker.IsNull()
+                || aMarker->Get().ToCString()
+                    != std::string(core3d::pattern::DocumentMarker)) {
+                return false;
+            }
+
+            std::vector<core3d::pattern::Record> aRecords;
+            if (!core3d::pattern::ReadAll(theDocument, aRecords)) {
+                return false;
+            }
+            Standard_Size anAggregate = 0;
+            std::set<core3d::pattern::UUID> aFeatures;
+            for (const auto& aRecord : aRecords) {
+                if (aRecord.label.IsNull()
+                    || aRecord.label.Data() != theDocument->GetData()
+                    || aRecord.label.Father() != aRoot
+                    || aRecord.bytes.empty()
+                    || aRecord.bytes.size()
+                        > core3d::pattern::MaximumEnvelopeBytes
+                    || anAggregate
+                        > core3d::pattern::MaximumDocumentPatternBytes
+                    || aRecord.bytes.size()
+                        > core3d::pattern::MaximumDocumentPatternBytes
+                            - anAggregate
+                    || !Core3DStrictPatternDefinition(aRecord.definition)
+                    || !aFeatures.insert(aRecord.definition.feature).second) {
+                    return false;
+                }
+                Handle(TDataStd_ByteArray) anAttribute;
+                if (!aRecord.label.FindAttribute(
+                        TDataStd_ByteArray::GetID(), anAttribute)
+                    || anAttribute.IsNull()
+                    || anAttribute->ID() != TDataStd_ByteArray::GetID()
+                    || anAttribute->Lower() != 0
+                    || anAttribute->Upper()
+                        != static_cast<Standard_Integer>(aRecord.bytes.size()) - 1
+                    || anAttribute->GetDelta()) {
+                    return false;
+                }
+                anAggregate += aRecord.bytes.size();
+                theAdmittedRecords.insert(anAttribute.get());
+            }
+            Standard_Size aDirectChildCount = 0;
+            for (TDF_ChildIterator anIterator(aRoot, Standard_False);
+                 anIterator.More(); anIterator.Next()) {
+                if (++aDirectChildCount > 100000) {
+                    return false;
+                }
+            }
+            if (aDirectChildCount != aRecords.size()) {
+                return false;
+            }
+        }
+        // Tag-73 feature-pattern (SYFP) records are admitted through the
+        // family's own exact reader: marker, canonical decode, unique
+        // features, aggregate bounds and remnant handling are established
+        // there; the census re-verifies the direct record parent, strict
+        // distribution state and the byte-array identity of every record.
+        const TDF_Label aFeatureRoot = theDocument->Main().FindChild(
+            core3d::feature_pattern::DocumentRootTag, Standard_False);
+        if (!aFeatureRoot.IsNull()) {
+            std::vector<core3d::feature_pattern::Record> aFeatureRecords;
+            if (!core3d::feature_pattern::ReadAll(
+                    theDocument, aFeatureRecords)) {
+                return false;
+            }
+            Standard_Size aFeatureAggregate = 0;
+            for (const auto& aRecord : aFeatureRecords) {
+                if (aRecord.label.IsNull()
+                    || aRecord.label.Data() != theDocument->GetData()
+                    || aRecord.label.Father() != aFeatureRoot
+                    || aRecord.bytes.empty()
+                    || aRecord.bytes.size()
+                        > core3d::feature_pattern::MaximumEnvelopeBytes
+                    || aFeatureAggregate
+                        > core3d::feature_pattern::MaximumDocumentBytes
+                    || aRecord.bytes.size()
+                        > core3d::feature_pattern::MaximumDocumentBytes
+                            - aFeatureAggregate
+                    || !Core3DStrictPatternDefinition(
+                        aRecord.definition.distribution)) {
+                    return false;
+                }
+                Handle(TDataStd_ByteArray) anAttribute;
+                if (!aRecord.label.FindAttribute(
+                        TDataStd_ByteArray::GetID(), anAttribute)
+                    || anAttribute.IsNull()
+                    || anAttribute->ID() != TDataStd_ByteArray::GetID()
+                    || anAttribute->Lower() != 0
+                    || anAttribute->Upper()
+                        != static_cast<Standard_Integer>(aRecord.bytes.size()) - 1
+                    || anAttribute->GetDelta()) {
+                    return false;
+                }
+                aFeatureAggregate += aRecord.bytes.size();
+                theAdmittedRecords.insert(anAttribute.get());
+            }
+            // Attribute-free abort/undo remnants are skipped by the reader;
+            // every other direct child must be one of the validated records.
+            Standard_Size aLiveChildCount = 0;
+            for (TDF_ChildIterator anIterator(aFeatureRoot, Standard_False);
+                 anIterator.More(); anIterator.Next()) {
+                if (Core3DAttributeFreeSubtree(anIterator.Value())) {
+                    continue;
+                }
+                if (++aLiveChildCount > 100000) {
+                    return false;
+                }
+            }
+            if (aLiveChildCount != aFeatureRecords.size()) {
+                return false;
+            }
+        }
+        // Tag-72 path-array (SYPA) records are admitted by the same exact-role
+        // census using the family's own decoder, marker, direct record parent
+        // and budgets. Its reader has no remnant handling, so entirely
+        // attribute-free abort/undo subtrees are skipped here identically.
+        const TDF_Label aPathRoot = theDocument->Main().FindChild(
+            core3d::path_array::DocumentRootTag, Standard_False);
+        if (!aPathRoot.IsNull()
+            && !Core3DAttributeFreeSubtree(aPathRoot)) {
+            Handle(TDataStd_AsciiString) aPathMarker;
+            if (!aPathRoot.FindAttribute(
+                    TDataStd_AsciiString::GetID(), aPathMarker)
+                || aPathMarker.IsNull()
+                || aPathMarker->Get().ToCString()
+                    != std::string(core3d::path_array::DocumentMarker)) {
+                return false;
+            }
+            std::set<core3d::path_array::UUID> aPathFeatures;
+            Standard_Size aPathAggregate = 0;
+            Standard_Size aPathChildCount = 0;
+            for (TDF_ChildIterator aChild(aPathRoot, Standard_False);
+                 aChild.More(); aChild.Next()) {
+                if (Core3DAttributeFreeSubtree(aChild.Value())) {
+                    continue;
+                }
+                if (++aPathChildCount > 100000) {
+                    return false;
+                }
+                core3d::path_array::Record aRecord;
+                aRecord.label = aChild.Value();
+                if (aRecord.label.Data() != theDocument->GetData()
+                    || !core3d::path_array::ReadByteArray(
+                        aRecord.label, aRecord.bytes)
+                    || aRecord.bytes.empty()
+                    || aRecord.bytes.size()
+                        > core3d::path_array::MaximumEnvelopeBytes
+                    || !core3d::path_array::Decode(
+                        aRecord.bytes, aRecord.definition)
+                    || !aPathFeatures.insert(
+                        aRecord.definition.feature).second
+                    || aPathAggregate
+                        > core3d::path_array::MaximumDocumentBytes
+                    || aRecord.bytes.size()
+                        > core3d::path_array::MaximumDocumentBytes
+                            - aPathAggregate) {
+                    return false;
+                }
+                Handle(TDataStd_ByteArray) anAttribute;
+                if (!aRecord.label.FindAttribute(
+                        TDataStd_ByteArray::GetID(), anAttribute)
+                    || anAttribute.IsNull()
+                    || anAttribute->ID() != TDataStd_ByteArray::GetID()
+                    || anAttribute->Lower() != 0
+                    || anAttribute->Upper()
+                        != static_cast<Standard_Integer>(aRecord.bytes.size()) - 1
+                    || anAttribute->GetDelta()) {
+                    return false;
+                }
+                aPathAggregate += aRecord.bytes.size();
+                theAdmittedRecords.insert(anAttribute.get());
+            }
+        }
+        // Identity-based all-label placement: a byte array is admitted only as
+        // an authored-frame identifier or an exact validated tag-71/73/72
+        // pattern record. This scan runs in every registration, including the
+        // DEBUG custom-frame reader, independent of myValidateFrameOwners.
+        for (const TDF_Label& aLabel : someLabels) {
+            for (TDF_AttributeIterator anAttributeIterator(aLabel);
+                 anAttributeIterator.More(); anAttributeIterator.Next()) {
+                const Handle(TDF_Attribute)& anAttribute =
+                    anAttributeIterator.Value();
+                if (!Handle(TDataStd_ByteArray)::DownCast(anAttribute).IsNull()
+                    && anAttribute->ID()
+                        != core3d::persistence::AuthoredFrameAttributeID()
+                    && theAdmittedRecords.find(anAttribute.get())
+                        == theAdmittedRecords.end()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    } catch (...) {
+        theAdmittedRecords.clear();
+        return false;
+    }
+}
+
+std::string Core3DLabelEntry(const TDF_Label& theLabel)
+{
+    TCollection_AsciiString anEntry;
+    if (!theLabel.IsNull()) {
+        TDF_Tool::Entry(theLabel, anEntry);
+    }
+    return anEntry.ToCString();
+}
+
+bool ValidateLayerGraphRoles(
+    const Handle(TDocStd_Document)& theDocument) noexcept
+{
+    try {
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) {
+            return false;
+        }
+        std::map<std::string, TDF_Label> aLayers;
+        if (XCAFDoc_DocumentTool::CheckLayerTool(theDocument->Main())) {
+            TDF_LabelSequence someLayerLabels;
+            XCAFDoc_DocumentTool::LayerTool(theDocument->Main())
+                ->GetLayerLabels(someLayerLabels);
+            if (someLayerLabels.Length() > 1024) {
+                return false;
+            }
+            for (Standard_Integer anIndex = 1;
+                 anIndex <= someLayerLabels.Length(); ++anIndex) {
+                const TDF_Label aLayer = someLayerLabels.Value(anIndex);
+                Handle(TDataStd_Name) aName;
+                Handle(TDF_Attribute) anInvisible;
+                if (aLayer.IsNull() || aLayer.Data() != theDocument->GetData()
+                    || !aLayer.FindAttribute(TDataStd_Name::GetID(), aName)
+                    || aName.IsNull() || aName->Get().IsEmpty()
+                    || (aLayer.FindAttribute(XCAFDoc::InvisibleGUID(), anInvisible)
+                        && Handle(TDataStd_UAttribute)::DownCast(anInvisible).IsNull())
+                    || !aLayers.emplace(Core3DLabelEntry(aLayer), aLayer).second) {
+                    return false;
+                }
+            }
+        }
+
+        Handle(XCAFDoc_ShapeTool) aShapeTool;
+        if (XCAFDoc_DocumentTool::CheckShapeTool(theDocument->Main())) {
+            aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDocument->Main());
+        }
+        // One shared shape-role predicate: only a free, simple, non-reference
+        // top-level definition under the actual shape tool's base label is an
+        // admitted graph endpoint. Subshapes, nested/occurrence labels and
+        // arbitrary metadata NamedShapes are refused even when the attribute
+        // predicates alone would pass.
+        const auto isAdmittedShapeDefinition =
+            [&aShapeTool, &theDocument](const TDF_Label& theLabel) {
+                return !theLabel.IsNull()
+                    && theLabel.Data() == theDocument->GetData()
+                    && !aShapeTool.IsNull()
+                    && aShapeTool->IsTopLevel(theLabel)
+                    && theLabel.Father() == aShapeTool->BaseLabel()
+                    && XCAFDoc_ShapeTool::IsSimpleShape(theLabel)
+                    && XCAFDoc_ShapeTool::IsFree(theLabel)
+                    && !XCAFDoc_ShapeTool::IsReference(theLabel)
+                    && !XCAFDoc_ShapeTool::IsSubShape(theLabel);
+            };
+
+        std::vector<TDF_Label> someLabels{theDocument->GetData()->Root()};
+        Standard_Size aGraphCount = 0;
+        Standard_Size aReferenceCount = 0;
+        for (Standard_Size aLabelIndex = 0;
+             aLabelIndex < someLabels.size(); ++aLabelIndex) {
+            const TDF_Label aLabel = someLabels[aLabelIndex];
+            for (TDF_ChildIterator aChild(aLabel, Standard_False);
+                 aChild.More(); aChild.Next()) {
+                if (someLabels.size() >= 100000) {
+                    return false;
+                }
+                someLabels.push_back(aChild.Value());
+            }
+            Handle(TDF_Attribute) anInvisible;
+            if (aLabel.FindAttribute(XCAFDoc::InvisibleGUID(), anInvisible)
+                && Handle(TDataStd_UAttribute)::DownCast(anInvisible).IsNull()) {
+                return false;
+            }
+            const std::string aKey = Core3DLabelEntry(aLabel);
+            const bool isLayer = aLayers.find(aKey) != aLayers.end();
+            const bool isShape = isAdmittedShapeDefinition(aLabel);
+            for (TDF_AttributeIterator anAttributeIterator(aLabel);
+                 anAttributeIterator.More(); anAttributeIterator.Next()) {
+                const Handle(TDF_Attribute)& anAttribute =
+                    anAttributeIterator.Value();
+                const Handle(XCAFDoc_GraphNode) aGraph =
+                    Handle(XCAFDoc_GraphNode)::DownCast(anAttribute);
+                if (anAttribute->ID() == XCAFDoc::LayerRefGUID()
+                    && aGraph.IsNull()) {
+                    return false;
+                }
+                if (aGraph.IsNull()) {
+                    continue;
+                }
+                if (++aGraphCount > 100000
+                    || aGraph->ID() != XCAFDoc::LayerRefGUID()
+                    || isLayer == isShape
+                    || aGraph->NbFathers() < 0 || aGraph->NbChildren() < 0
+                    || aGraph->NbFathers() > 1024
+                    || aGraph->NbChildren() > 50000
+                    || (isLayer && aGraph->NbFathers() != 0)
+                    || (isShape && aGraph->NbChildren() != 0)) {
+                    return false;
+                }
+                Handle(XCAFDoc_GraphNode) anOwnedGraph;
+                if (!aLabel.FindAttribute(
+                        XCAFDoc::LayerRefGUID(), anOwnedGraph)
+                    || anOwnedGraph != aGraph) {
+                    return false;
+                }
+                std::set<std::string> someEndpoints;
+                for (Standard_Integer anIndex = 1;
+                     anIndex <= aGraph->NbFathers(); ++anIndex) {
+                    const Handle(XCAFDoc_GraphNode) aFather =
+                        aGraph->GetFather(anIndex);
+                    if (++aReferenceCount > 100000 || aFather.IsNull()
+                        || aFather == aGraph || aFather->Label().IsNull()
+                        || aFather->Label().Data() != theDocument->GetData()
+                        || aLayers.find(Core3DLabelEntry(aFather->Label()))
+                            == aLayers.end()
+                        || !someEndpoints.insert(
+                            Core3DLabelEntry(aFather->Label())).second
+                        || aFather->ID() != XCAFDoc::LayerRefGUID()
+                        || !aFather->IsFather(aGraph)
+                        || !aGraph->IsChild(aFather)) {
+                        return false;
+                    }
+                    Handle(XCAFDoc_GraphNode) anEndpoint;
+                    if (!aFather->Label().FindAttribute(
+                            XCAFDoc::LayerRefGUID(), anEndpoint)
+                        || anEndpoint != aFather) {
+                        return false;
+                    }
+                }
+                for (Standard_Integer anIndex = 1;
+                     anIndex <= aGraph->NbChildren(); ++anIndex) {
+                    const Handle(XCAFDoc_GraphNode) aChild =
+                        aGraph->GetChild(anIndex);
+                    if (++aReferenceCount > 100000 || aChild.IsNull()
+                        || aChild == aGraph || aChild->Label().IsNull()
+                        || aChild->Label().Data() != theDocument->GetData()
+                        || !isAdmittedShapeDefinition(aChild->Label())
+                        || !someEndpoints.insert(
+                            Core3DLabelEntry(aChild->Label())).second
+                        || aChild->ID() != XCAFDoc::LayerRefGUID()
+                        || !aGraph->IsFather(aChild)
+                        || !aChild->IsChild(aGraph)) {
+                        return false;
+                    }
+                    Handle(XCAFDoc_GraphNode) anEndpoint;
+                    if (!aChild->Label().FindAttribute(
+                            XCAFDoc::LayerRefGUID(), anEndpoint)
+                        || anEndpoint != aChild) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+class Core3DBoundedProjectByteArrayDriver final
+    : public BinMDataStd_ByteArrayDriver
+{
+public:
+    Core3DBoundedProjectByteArrayDriver(
+        const Handle(Message_Messenger)& theMessenger,
+        std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget>
+            theFrameBudget,
+        std::shared_ptr<Core3DProjectByteArrayReadBudget> thePatternBudget)
+    : BinMDataStd_ByteArrayDriver(theMessenger),
+      myFrameDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
+          theMessenger, std::move(theFrameBudget), RejectSafeBinaryRead)),
+      myPatternBudget(std::move(thePatternBudget))
+    {
+    }
+
+    Standard_Boolean Paste(
+        const BinObjMgt_Persistent& theSource,
+        const Handle(TDF_Attribute)& theTarget,
+        BinObjMgt_RRelocationTable& theRelocationTable) const override
+    {
+        try {
+            if (!myPatternBudget || myPatternBudget->rejected
+                || theRelocationTable.GetHeaderData().IsNull()
+                || !theRelocationTable.GetHeaderData()
+                    ->StorageVersion().IsIntegerValue()) {
+                return Reject();
+            }
+            const Standard_Integer aVersion = theRelocationTable.GetHeaderData()
+                ->StorageVersion().IntegerValue();
+            if (aVersion < TDocStd_FormatVersion_VERSION_10
+                || aVersion > TDocStd_FormatVersion_CURRENT) {
+                return Reject();
+            }
+            const Standard_Integer aStart = theSource.Position();
+            Standard_Integer anEnd = 0;
+            if (!TryPersistentRecordEnd(theSource, anEnd)
+                || aStart < kPersistentRecordHeaderBytes || aStart > anEnd
+                || anEnd - aStart < 9) {
+                return Reject();
+            }
+            Standard_Integer aLower = -1;
+            Standard_Integer anUpper = -1;
+            if (!(theSource >> aLower >> anUpper) || aLower != 0
+                || anUpper < 0) {
+                return Reject();
+            }
+            const Standard_Size aCount =
+                static_cast<Standard_Size>(anUpper) + 1;
+            const Standard_Size aMaximumRoleBytes = std::max(
+                static_cast<Standard_Size>(core3d::pattern::MaximumEnvelopeBytes),
+                static_cast<Standard_Size>(
+                    core3d::scene::authored::kMaximumArchiveBytes));
+            if (aCount > aMaximumRoleBytes
+                || theSource.Position() < aStart
+                || theSource.Position() > anEnd
+                || aCount > static_cast<Standard_Size>(
+                    anEnd - theSource.Position())) {
+                return Reject();
+            }
+            std::vector<std::uint8_t> someBytes(aCount);
+            if (!theSource.GetByteArray(
+                    someBytes.data(), static_cast<Standard_Integer>(aCount))) {
+                return Reject();
+            }
+            Standard_Byte aDelta = 1;
+            if (!(theSource >> aDelta) || aDelta != 0) {
+                return Reject();
+            }
+
+            if (theSource.Position() == anEnd) {
+                // A default-ID byte array is admitted only as a canonical
+                // record of a supported project family: SYPT (tag 71), SYFP
+                // (tag 73) or SYPA (tag 72). Each family decodes through its
+                // own canonical round-trip codec and charges its own bounded,
+                // resettable document budget. The exact document role of every
+                // admitted record is verified by the post-traversal census in
+                // CollectValidatedPatternByteArrayRoles; unknown signatures
+                // fall through to the SYPT codec and are rejected there.
+                const bool isFeaturePattern = someBytes.size() >= 8
+                    && std::memcmp(someBytes.data(), "SYFP\1\0\0\0", 8) == 0;
+                const bool isPathArray = !isFeaturePattern
+                    && someBytes.size() >= 8
+                    && std::memcmp(someBytes.data(), "SYPA\1\0\0\0", 8) == 0;
+                if (isFeaturePattern) {
+                    core3d::feature_pattern::Definition aDefinition;
+                    if (aCount > core3d::feature_pattern::MaximumEnvelopeBytes
+                        || myPatternBudget->featurePatternBytes
+                            > core3d::feature_pattern::MaximumDocumentBytes
+                        || aCount > core3d::feature_pattern::MaximumDocumentBytes
+                            - myPatternBudget->featurePatternBytes
+                        || !core3d::feature_pattern::Decode(
+                            someBytes, aDefinition)
+                        || !Core3DStrictPatternDefinition(
+                            aDefinition.distribution)) {
+                        return Reject();
+                    }
+                } else if (isPathArray) {
+                    core3d::path_array::Definition aDefinition;
+                    if (aCount > core3d::path_array::MaximumEnvelopeBytes
+                        || myPatternBudget->pathArrayBytes
+                            > core3d::path_array::MaximumDocumentBytes
+                        || aCount > core3d::path_array::MaximumDocumentBytes
+                            - myPatternBudget->pathArrayBytes
+                        || !core3d::path_array::Decode(
+                            someBytes, aDefinition)) {
+                        return Reject();
+                    }
+                } else {
+                    core3d::pattern::Definition aDefinition;
+                    if (aCount > core3d::pattern::MaximumEnvelopeBytes
+                        || myPatternBudget->patternBytes
+                            > core3d::pattern::MaximumDocumentPatternBytes
+                        || aCount > core3d::pattern::MaximumDocumentPatternBytes
+                            - myPatternBudget->patternBytes
+                        || !core3d::pattern::Decode(someBytes, aDefinition)
+                        || !Core3DStrictPatternDefinition(aDefinition)) {
+                        return Reject();
+                    }
+                }
+                if (!theSource.SetPosition(aStart)
+                    || !BinMDataStd_ByteArrayDriver::Paste(
+                        theSource, theTarget, theRelocationTable)) {
+                    return Reject();
+                }
+                const Handle(TDataStd_ByteArray) anAttribute =
+                    Handle(TDataStd_ByteArray)::DownCast(theTarget);
+                if (anAttribute.IsNull()
+                    || anAttribute->ID() != TDataStd_ByteArray::GetID()
+                    || anAttribute->Lower() != 0
+                    || anAttribute->Upper() != anUpper
+                    || anAttribute->GetDelta()
+                    || theSource.Position() != anEnd) {
+                    return Reject();
+                }
+                for (Standard_Integer anIndex = 0;
+                     anIndex <= anUpper; ++anIndex) {
+                    if (anAttribute->Value(anIndex)
+                        != someBytes[static_cast<Standard_Size>(anIndex)]) {
+                        return Reject();
+                    }
+                }
+                if (isFeaturePattern) {
+                    myPatternBudget->featurePatternBytes += aCount;
+                } else if (isPathArray) {
+                    myPatternBudget->pathArrayBytes += aCount;
+                } else {
+                    myPatternBudget->patternBytes += aCount;
+                }
+                return Standard_True;
+            }
+
+            Standard_GUID anIdentifier;
+            if (!(theSource >> anIdentifier)
+                || theSource.Position() != anEnd
+                || anIdentifier == TDataStd_ByteArray::GetID()
+                || anIdentifier
+                    != core3d::persistence::AuthoredFrameAttributeID()
+                || !theSource.SetPosition(aStart)) {
+                return Reject();
+            }
+            return myFrameDriver->Paste(
+                theSource, theTarget, theRelocationTable);
+        } catch (...) {
+            return Reject();
+        }
+    }
+
+    void Paste(
+        const Handle(TDF_Attribute)& theSource,
+        BinObjMgt_Persistent& theTarget,
+        BinObjMgt_SRelocationTable& theRelocationTable) const override
+    {
+        BinMDataStd_ByteArrayDriver::Paste(
+            theSource, theTarget, theRelocationTable);
+    }
+
+private:
+    Standard_Boolean Reject() const noexcept
+    {
+        if (myPatternBudget) {
+            myPatternBudget->rejected = true;
+        }
+        RejectSafeBinaryRead();
+        return Standard_False;
+    }
+
+    Handle(core3d::persistence::BoundedAuthoredFrameDriver) myFrameDriver;
+    std::shared_ptr<Core3DProjectByteArrayReadBudget> myPatternBudget;
+};
+
+class Core3DBoundedLayerGraphDriver final
+    : public BinMXCAFDoc_GraphNodeDriver
+{
+public:
+    Core3DBoundedLayerGraphDriver(
+        const Handle(Message_Messenger)& theMessenger,
+        std::shared_ptr<Core3DLayerGraphReadBudget> theBudget)
+    : BinMXCAFDoc_GraphNodeDriver(theMessenger),
+      myBudget(std::move(theBudget))
+    {
+    }
+
+    Standard_Boolean Paste(
+        const BinObjMgt_Persistent& theSource,
+        const Handle(TDF_Attribute)& theTarget,
+        BinObjMgt_RRelocationTable& theRelocationTable) const override
+    {
+        try {
+            if (!myBudget || myBudget->rejected
+                || myBudget->records >= 100000) {
+                return Reject();
+            }
+            const Standard_Integer aStart = theSource.Position();
+            Standard_Integer anEnd = 0;
+            if (!TryPersistentRecordEnd(theSource, anEnd)
+                || aStart < kPersistentRecordHeaderBytes || aStart > anEnd) {
+                return Reject();
+            }
+            std::vector<Standard_Integer> someFathers;
+            std::vector<Standard_Integer> someChildren;
+            std::set<Standard_Integer> someReferences;
+            const auto readList = [&](std::vector<Standard_Integer>& theList,
+                                      const Standard_Size theLimit) {
+                for (;;) {
+                    if (theSource.Position() > anEnd
+                            - static_cast<Standard_Integer>(
+                                sizeof(Standard_Integer))) {
+                        return false;
+                    }
+                    Standard_Integer aReference = 0;
+                    if (!(theSource >> aReference)) {
+                        return false;
+                    }
+                    if (aReference == -1) {
+                        return true;
+                    }
+                    if (aReference <= 0 || theList.size() >= theLimit
+                        || !someReferences.insert(aReference).second) {
+                        return false;
+                    }
+                    if (theRelocationTable.IsBound(aReference)) {
+                        const Handle(Standard_Transient)& aBound =
+                            theRelocationTable.Find(aReference);
+                        const Handle(XCAFDoc_GraphNode) aGraph =
+                            Handle(XCAFDoc_GraphNode)::DownCast(aBound);
+                        if (aGraph.IsNull() || aGraph.get() == theTarget.get()) {
+                            return false;
+                        }
+                    }
+                    theList.push_back(aReference);
+                }
+            };
+            if (!readList(someFathers, 1024)
+                || !readList(someChildren, 50000)) {
+                return Reject();
+            }
+            Standard_GUID aGraphID;
+            if (!(theSource >> aGraphID) || theSource.Position() != anEnd
+                || aGraphID != XCAFDoc::LayerRefGUID()
+                || someReferences.size() > 100000
+                    - myBudget->references
+                || !theSource.SetPosition(aStart)) {
+                return Reject();
+            }
+            if (!BinMXCAFDoc_GraphNodeDriver::Paste(
+                    theSource, theTarget, theRelocationTable)) {
+                return Reject();
+            }
+            const Handle(XCAFDoc_GraphNode) aTarget =
+                Handle(XCAFDoc_GraphNode)::DownCast(theTarget);
+            if (aTarget.IsNull() || aTarget->ID() != XCAFDoc::LayerRefGUID()
+                || theSource.Position() != anEnd
+                || aTarget->NbFathers()
+                    != static_cast<Standard_Integer>(someFathers.size())
+                || aTarget->NbChildren()
+                    != static_cast<Standard_Integer>(someChildren.size())) {
+                return Reject();
+            }
+            const auto verify = [&](const std::vector<Standard_Integer>& theIDs,
+                                    const bool areFathers) {
+                for (Standard_Size anIndex = 0;
+                     anIndex < theIDs.size(); ++anIndex) {
+                    if (!theRelocationTable.IsBound(theIDs[anIndex])) {
+                        return false;
+                    }
+                    const Handle(XCAFDoc_GraphNode) anExpected =
+                        Handle(XCAFDoc_GraphNode)::DownCast(
+                            theRelocationTable.Find(theIDs[anIndex]));
+                    const Handle(XCAFDoc_GraphNode) anActual = areFathers
+                        ? aTarget->GetFather(
+                            static_cast<Standard_Integer>(anIndex) + 1)
+                        : aTarget->GetChild(
+                            static_cast<Standard_Integer>(anIndex) + 1);
+                    if (anExpected.IsNull() || anExpected != anActual
+                        || anExpected == aTarget) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            if (!verify(someFathers, true)
+                || !verify(someChildren, false)) {
+                return Reject();
+            }
+            ++myBudget->records;
+            myBudget->references += someReferences.size();
+            return Standard_True;
+        } catch (...) {
+            return Reject();
+        }
+    }
+
+private:
+    Standard_Boolean Reject() const noexcept
+    {
+        if (myBudget) {
+            myBudget->rejected = true;
+        }
+        RejectSafeBinaryRead();
+        return Standard_False;
+    }
+
+    std::shared_ptr<Core3DLayerGraphReadBudget> myBudget;
+};
+
 class Core3DBoundedBinXCAFRetrievalDriver final
     : public BinDrivers_DocumentRetrievalDriver
 {
 public:
     Core3DBoundedBinXCAFRetrievalDriver()
     : myAggregateTextureBytes(std::make_shared<Standard_Size>(0)),
-      myFrameBudget(std::make_shared<core3d::persistence::AuthoredFrameReadBudget>())
+      myFrameBudget(std::make_shared<core3d::persistence::AuthoredFrameReadBudget>()),
+      myPatternBudget(std::make_shared<Core3DProjectByteArrayReadBudget>()),
+      myLayerGraphBudget(std::make_shared<Core3DLayerGraphReadBudget>())
     {
         myReceiptLimits=core3d::receipt::v3::ReaderLimits();
         auto budget=std::make_shared<core3d::persistence::receipt_framing::LoadBudget>();
@@ -2017,9 +2895,51 @@ public:
                 &&(myBoundedCurveBudget->rejected||(myBoundedCurveBudget->records
                     &&!Core3DValidateBoundedCurveDocument(
                         Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
+            if (myReaderStatus == PCDM_RS_OK && myGeneralLoftBudget
+                && (myGeneralLoftBudget->rejected || (myGeneralLoftBudget->records
+                    && !core3d::general_loft::persistence::ReadAll(
+                        Handle(TDocStd_Document)::DownCast(theDocument), myGeneralLoftRecords))))
+                rejectTypes();
+            if(myReaderStatus==PCDM_RS_OK&&myRetainedFinishingBudget
+                &&(myRetainedFinishingBudget->rejected||(myRetainedFinishingBudget->records
+                    &&!Core3DValidateRetainedFinishingDocument(
+                        Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
+            if (myReaderStatus == PCDM_RS_OK) {
+                std::vector<core3d::feature_pattern_child::PairedRecord> pairs;
+                if (core3d::feature_pattern_child::ReadPairs(
+                        Handle(TDocStd_Document)::DownCast(theDocument), pairs)
+                    == core3d::feature_pattern_child::PairStatus::Invalid) rejectTypes();
+            }
+            // The shared strict baseline-role census runs on every safe read,
+            // including registrations where DEBUG disables authored-frame
+            // ownership validation, exactly like the pattern-role census.
+            if (myReaderStatus == PCDM_RS_OK) {
+                std::vector<core3d::feature_pattern_child::BaselineRecord> baselines;
+                if (core3d::feature_pattern_child::ReadBaselines(
+                        Handle(TDocStd_Document)::DownCast(theDocument), baselines)
+                    == core3d::feature_pattern_child::BaselineStatus::Invalid) rejectTypes();
+            }
+            if (myReaderStatus == PCDM_RS_OK
+                && (gSafeBinaryReadRejected
+                    || !myPatternBudget || myPatternBudget->rejected
+                    || !myFeaturePatternBaselineBudget
+                    || myFeaturePatternBaselineBudget->rejected
+                    || !myLayerGraphBudget || myLayerGraphBudget->rejected
+                    || !ValidateLayerGraphRoles(
+                        Handle(TDocStd_Document)::DownCast(theDocument)))) {
+                rejectTypes();
+            }
+            if (myReaderStatus == PCDM_RS_OK) {
+                std::set<const TDF_Attribute*> anAdmittedPatternRecords;
+                if (!CollectValidatedPatternByteArrayRoles(
+                        Handle(TDocStd_Document)::DownCast(theDocument),
+                        anAdmittedPatternRecords)) {
+                    rejectTypes();
+                }
+            }
             if (myValidateFrameOwners && myReaderStatus == PCDM_RS_OK) {
                 Standard_Size frameBytes = 0;
-                if (gSafeBinaryReadRejected || !Core3DValidateAuthoredFrameOwners(
+                if (!Core3DValidateAuthoredFrameOwners(
                         Handle(TDocStd_Document)::DownCast(theDocument), frameBytes)) rejectTypes();
             }
         } catch (...) {
@@ -2047,6 +2967,10 @@ public:
         aTable->AddDriver(
             new Core3DFailClosedDriver<BinMDF_TagSourceDriver>(
                 theMessageDriver));
+        // TDF_Reference is required by the feature-pattern child receipts;
+        // admit it only through the bounded reference adapter above.
+        aTable->AddDriver(
+            new Core3DBoundedReferenceDriver(theMessageDriver));
         aTable->AddDriver(
             new Core3DFailClosedDriver<BinMDataStd_GenericEmptyDriver>(
                 theMessageDriver));
@@ -2069,6 +2993,8 @@ public:
         aTable->AddDriver(
             new Core3DFailClosedDriver<BinMXCAFDoc_ColorDriver>(
                 theMessageDriver));
+        aTable->AddDriver(new Core3DBoundedLayerGraphDriver(
+            theMessageDriver, myLayerGraphBudget));
 
         const Handle(BinMNaming_NamedShapeDriver) aNamedShapeDriver =
             new Core3DFailClosedDriver<BinMNaming_NamedShapeDriver>(
@@ -2087,13 +3013,21 @@ public:
         aTable->AddDriver(
             new Core3DFailClosedDriver<
                 BinMXCAFDoc_VisMaterialToolDriver>(theMessageDriver));
-        aTable->AddDriver(new core3d::persistence::BoundedAuthoredFrameDriver(
-            theMessageDriver, myFrameBudget, RejectSafeBinaryRead));
+        aTable->AddDriver(new Core3DBoundedProjectByteArrayDriver(
+            theMessageDriver, myFrameBudget, myPatternBudget));
         if (myAllowRetainedSolid) core3d::retained_solid::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::composite_recipe::Register(
             aTable,theMessageDriver,myRetainedBudget,myBoundedCurveBudget,RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::bounded_curve::Register(
             aTable,theMessageDriver,myBoundedCurveBudget,RejectSafeBinaryRead);
+        core3d::general_loft::persistence::Register(
+            aTable, theMessageDriver, myGeneralLoftBudget, RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::retained_finishing::Register(
+            aTable,theMessageDriver,myRetainedFinishingBudget,RejectSafeBinaryRead);
+        core3d::feature_pattern_child::Register(
+            aTable, theMessageDriver, myFeaturePatternChildBudget, RejectSafeBinaryRead);
+        core3d::feature_pattern_baseline::Register(
+            aTable, theMessageDriver, myFeaturePatternBaselineBudget, RejectSafeBinaryRead);
         if (!myReceiptFrameDriver.IsNull()) aTable->AddDriver(myReceiptFrameDriver);
         return aTable;
     }
@@ -2120,8 +3054,15 @@ private:
     void ResetAggregateReadBudgets() noexcept
     {
         if (myFrameBudget) { myFrameBudget->bytes = 0; myFrameBudget->rejected = false; }
+        if (myPatternBudget) myPatternBudget->reset();
+        if (myLayerGraphBudget) myLayerGraphBudget->reset();
         if (myRetainedBudget) myRetainedBudget->reset();
         if (myBoundedCurveBudget) myBoundedCurveBudget->reset();
+        if (myGeneralLoftBudget) myGeneralLoftBudget->reset();
+        myGeneralLoftRecords.clear();
+        if (myRetainedFinishingBudget) myRetainedFinishingBudget->reset();
+        if (myFeaturePatternChildBudget) *myFeaturePatternChildBudget = {};
+        if (myFeaturePatternBaselineBudget) myFeaturePatternBaselineBudget->reset();
         if (myAggregateTextureBytes != nullptr) {
             *myAggregateTextureBytes = 0;
         }
@@ -2129,6 +3070,8 @@ private:
 
     std::shared_ptr<Standard_Size> myAggregateTextureBytes;
     std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> myFrameBudget;
+    std::shared_ptr<Core3DProjectByteArrayReadBudget> myPatternBudget;
+    std::shared_ptr<Core3DLayerGraphReadBudget> myLayerGraphBudget;
     bool myValidateFrameOwners = true;
     Handle(core3d::persistence::receipt_framing::FrameDriver) myReceiptFrameDriver;
     core3d::persistence::receipt_framing::TraversalLimits myReceiptLimits;
@@ -2137,6 +3080,15 @@ private:
     std::shared_ptr<core3d::retained_solid::ReadBudget> myRetainedBudget=std::make_shared<core3d::retained_solid::ReadBudget>();
     std::shared_ptr<core3d::bounded_curve::ReadBudget> myBoundedCurveBudget=
         std::make_shared<core3d::bounded_curve::ReadBudget>();
+    std::shared_ptr<core3d::general_loft::persistence::ReadBudget> myGeneralLoftBudget=
+        std::make_shared<core3d::general_loft::persistence::ReadBudget>();
+    std::vector<core3d::general_loft::persistence::Record> myGeneralLoftRecords;
+    std::shared_ptr<core3d::retained_finishing::ReadBudget> myRetainedFinishingBudget=
+        std::make_shared<core3d::retained_finishing::ReadBudget>();
+    std::shared_ptr<core3d::feature_pattern_child::Budget> myFeaturePatternChildBudget=
+        std::make_shared<core3d::feature_pattern_child::Budget>();
+    std::shared_ptr<core3d::feature_pattern_baseline::Budget> myFeaturePatternBaselineBudget=
+        std::make_shared<core3d::feature_pattern_baseline::Budget>();
     bool myAllowRetainedSolid=true;
 #if DEBUG
     int myRetainedRoleFault=0;
@@ -3970,13 +4922,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>());
 }
 
 #if DEBUG
@@ -5028,6 +5980,18 @@ Standard_Boolean Core3DValidateCompositeRecipeDocument(const Handle(TDocStd_Docu
 Standard_Boolean Core3DValidateBoundedCurveDocument(const Handle(TDocStd_Document)& document){
     std::vector<core3d::bounded_curve::Record> records;
     return core3d::bounded_curve::ReadAll(document,records) ? Standard_True : Standard_False;
+}
+
+// Finishing receipts are admitted only for owners that already carry an
+// admitted retained carrier. The carrier's own document-wide validation runs
+// through the existing retained budget on the same read/write pass.
+Standard_Boolean Core3DValidateRetainedFinishingDocument(const Handle(TDocStd_Document)& document){
+    std::vector<core3d::retained_finishing::Record> records;
+    if (!core3d::retained_finishing::ReadAll(document,records)) return Standard_False;
+    for (const auto& record : records)
+        if (!core3d::retained_solid::HasRecord(record.owner)
+            && !core3d::composite_recipe::HasRecord(record.owner)) return Standard_False;
+    return Standard_True;
 }
 
 OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
@@ -6654,6 +7618,137 @@ Standard_Boolean OcctDocument::DebugPlainProfileCutRetention(
         return Standard_False;
     }
 }
+
+Standard_Boolean OcctDocument::DebugPlainProfileCutNativeRoundTrip(
+    const std::string& entityIdentifier,
+    Standard_Boolean direct,
+    OcctPlainProfileCutDebugEvidence& output) const noexcept
+{
+    output = {};
+    try {
+        OCC_CATCH_SIGNALS
+        namespace c = core3d::composite_recipe;
+        namespace p = core3d::plain_profile_cut;
+        OcctPlainProfileCutDebugEvidence retained;
+        if (!DebugPlainProfileCutRetention(entityIdentifier, retained)
+            || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()) {
+            return Standard_False;
+        }
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapeTool.IsNull()) return Standard_False;
+        TDF_LabelSequence roots;
+        shapeTool->GetFreeShapes(roots);
+        TDF_Label carrier;
+        Standard_Size matches = 0;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (EntityIdentifierForLabel(roots.Value(index)) == entityIdentifier) {
+                carrier = roots.Value(index);
+                ++matches;
+            }
+        }
+        if (matches != 1 || carrier.IsNull()) return Standard_False;
+
+        c::Record record;
+        if (!c::Read(myOcafDoc, carrier, record) || !record.value
+            || record.value->definition.schemaVersion != p::GraphVersion
+            || !c::ValidCutV4(record.value->definition)) return Standard_False;
+        const c::Definition& definition = record.value->definition;
+        OcctPlainProfileCutDebugEvidence observed;
+        observed.bytes["envelope"] = record.value->bytes;
+        Standard_Size serializedBytes = 0;
+        Standard_Size visits = 0;
+        Standard_Size sourceCount = 0;
+        Standard_Size cutCount = 0;
+        core3d::retained_recipe::Digest terminalBinding{};
+        bool foundTerminal = false;
+
+        for (const c::Node& node : definition.nodes) {
+            if (const auto* source = std::get_if<c::SourceNode>(&node.value)) {
+                if (source->recipe.kind != c::RecipeKind::Profile
+                    || source->shapeSlot >= record.value->sourceShapes.size()) {
+                    return Standard_False;
+                }
+                core3d::retained_recipe::Digest recipeDigest{};
+                if (!p::HashBytes(source->recipe.bytes, recipeDigest)
+                    || recipeDigest != source->commitments.recipe) {
+                    return Standard_False;
+                }
+                const TopoDS_Shape& stored =
+                    record.value->sourceShapes[source->shapeSlot];
+                TopoDS_Shape reopened;
+                core3d::retained_recipe::Digest storedDigest{}, reopenedDigest{};
+                if (!core3d::receipt::GeometryDigestForPolicy(
+                        stored, storedDigest, false)
+                    || storedDigest != source->commitments.geometry
+                    || !PlainProfileCutNativeRoundTrip(
+                        stored, direct != Standard_False, reopened, serializedBytes)
+                    || !PlainProfileCutTopologyBudget(reopened, visits)
+                    || !PlainProfileCutStorageEquivalent(stored, reopened)
+                    || !core3d::receipt::GeometryDigestForPolicy(
+                        reopened, reopenedDigest, false)
+                    || reopenedDigest != storedDigest) return Standard_False;
+                const std::string prefix = "source-" + std::to_string(sourceCount);
+                observed.bytes[prefix + "-committed-digest"] =
+                    std::vector<std::uint8_t>(storedDigest.begin(), storedDigest.end());
+                observed.bytes[prefix + "-round-trip-digest"] =
+                    std::vector<std::uint8_t>(reopenedDigest.begin(), reopenedDigest.end());
+                observed.bytes[prefix + "-recipe-digest"] =
+                    std::vector<std::uint8_t>(recipeDigest.begin(), recipeDigest.end());
+                ++sourceCount;
+                continue;
+            }
+            const auto* feature = std::get_if<c::FeatureNode>(&node.value);
+            if (!feature || feature->kind != p::PlainProfileCutKind
+                || feature->codecVersion != p::CodecVersion) return Standard_False;
+            p::Step step;
+            if (!p::DecodeStep(feature->parameters, step)) return Standard_False;
+            if (feature->node == definition.outputNode) {
+                if (foundTerminal || step.ordinal != step.total) return Standard_False;
+                terminalBinding = step.resultBinding;
+                foundTerminal = true;
+            }
+            ++cutCount;
+        }
+        if (!foundTerminal || sourceCount < 2 || sourceCount > 8
+            || cutCount + 1 != sourceCount
+            || record.value->sourceShapes.size() != sourceCount) {
+            return Standard_False;
+        }
+        TopoDS_Shape reopenedResult;
+        core3d::retained_recipe::Digest storedResult{}, reopenedResultDigest{};
+        if (!core3d::receipt::GeometryDigestForPolicy(
+                record.current, storedResult, false)
+            || storedResult != terminalBinding
+            || !PlainProfileCutNativeRoundTrip(
+                record.current, direct != Standard_False,
+                reopenedResult, serializedBytes)
+            || !PlainProfileCutTopologyBudget(reopenedResult, visits)
+            || !PlainProfileCutStorageEquivalent(record.current, reopenedResult)
+            || !core3d::receipt::GeometryDigestForPolicy(
+                reopenedResult, reopenedResultDigest, false)
+            || reopenedResultDigest != storedResult) return Standard_False;
+
+        observed.bytes["result-committed-digest"] =
+            std::vector<std::uint8_t>(storedResult.begin(), storedResult.end());
+        observed.bytes["result-round-trip-digest"] =
+            std::vector<std::uint8_t>(reopenedResultDigest.begin(), reopenedResultDigest.end());
+        observed.numbers["sourceCount"] = double(sourceCount);
+        observed.numbers["cutCount"] = double(cutCount);
+        observed.numbers["direct"] = direct != Standard_False ? 1.0 : 0.0;
+        observed.numbers["serializedBytes"] = double(serializedBytes);
+        observed.checks["strictSourceDigestsPreserved"] = true;
+        observed.checks["strictResultDigestPreserved"] = true;
+        observed.checks["plainProfileRecipesPreserved"] = true;
+        observed.checks["cutV4FamilyPreserved"] = true;
+        observed.checks["fullValidatorPassed"] = true;
+        output = std::move(observed);
+        return Standard_True;
+    } catch (...) {
+        output = {};
+        return Standard_False;
+    }
+}
 #endif
 
 Standard_Boolean OcctDocument::ValidateGeometryRepresentations(
@@ -7672,12 +8767,35 @@ Standard_Boolean Core3DValidateAuthoredFrameOwners(
     try {
         if (document.IsNull() || document->GetData().IsNull() || maximumBytes > 64U * 1024U * 1024U)
             return Standard_False;
+        std::set<const TDF_Attribute*> admittedPatternRecords;
+        if (!CollectValidatedPatternByteArrayRoles(
+                document, admittedPatternRecords)) {
+            return Standard_False;
+        }
+        // The shared strict baseline-role census runs in live publication and
+        // save preflight exactly as in the safe reader: every nonlegacy paired
+        // D4 must keep one validated typed host baseline. Absence and legacy
+        // tag-73-only documents remain publishable and persistable.
+        {
+            std::vector<core3d::feature_pattern_child::BaselineRecord>
+                admittedBaselines;
+            if (core3d::feature_pattern_child::ReadBaselines(
+                    document, admittedBaselines)
+                == core3d::feature_pattern_child::BaselineStatus::Invalid) {
+                return Standard_False;
+            }
+        }
         Standard_Size total = 0;
         auto validate = [&](const TDF_Label& label) {
             for (TDF_AttributeIterator it(label); it.More(); it.Next()) {
                 const auto& attribute = it.Value();
                 if (!Handle(TDataStd_ByteArray)::DownCast(attribute).IsNull()
-                    && attribute->ID() != core3d::persistence::AuthoredFrameAttributeID()) return false;
+                    && attribute->ID()
+                        != core3d::persistence::AuthoredFrameAttributeID()
+                    && admittedPatternRecords.find(attribute.get())
+                        == admittedPatternRecords.end()) {
+                    return false;
+                }
             }
             OcctAuthoredFrameRecord record;
             if (Core3DReadAuthoredFrameOwner(document, label, record) == OcctAuthoredFrameReadState::Invalid)
@@ -9608,7 +10726,8 @@ Standard_Boolean OcctDocument::IsEditableFreeSimpleDefinitionLabel(
 }
 
 Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
-    if (myOcafDoc.IsNull() || label.IsNull()) {
+    if (myOcafDoc.IsNull() || label.IsNull()
+        || HasUnroutedRetainedDependent(label)) {
         return Standard_False;
     }
     Handle(XCAFDoc_ShapeTool) shapeTool =
@@ -9685,7 +10804,8 @@ Standard_Boolean OcctDocument::ReplaceShape(
 	// its geometry deliberately leaves both identity attributes untouched.
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
         || label.IsNull() || label.Data() != myOcafDoc->GetData()
-        || aisShape.IsNull() || aisShape->Shape().IsNull()) {
+        || aisShape.IsNull() || aisShape->Shape().IsNull()
+        || HasUnroutedRetainedDependent(label)) {
         return Standard_False;
     }
 	Handle(XCAFDoc_ShapeTool) shapeTool =
@@ -11864,16 +12984,14 @@ Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
     return Standard_True;
 }
 
-Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
-    const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {
+namespace {
+Standard_Boolean CaptureWholeObjectScalarAppearance(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    OcctScalarAppearanceState& output) noexcept {
     output={};
-    if (![NSThread isMainThread]) return Standard_False;
     try {
-        if (myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()
-            || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
-        // Subshape styling needs a deliberate triangle/material mapping. The
-        // first copy rejects these labels rather than flattening their styles.
-        if (!core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc, label)) return Standard_False;
+        if (document.IsNull() || document->GetData().IsNull() || label.IsNull()
+            || label.Data()!=document->GetData()) return Standard_False;
         for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
             if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
         if (label.IsAttribute(NormalTextureRecipeAttributeID())
@@ -11899,7 +13017,7 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
         if (linked != !material.IsNull() || linked != !state.materialLabel.IsNull()
             || (state.localPBR && (material.IsNull() || !material->HasPbrMaterial()))) return Standard_False;
         if (!material.IsNull()) {
-            if (state.materialLabel.Data()!=myOcafDoc->GetData() || material->IsEmpty()) return Standard_False;
+            if (state.materialLabel.Data()!=document->GetData() || material->IsEmpty()) return Standard_False;
             const auto& p=material->PbrMaterial();const auto& c=material->CommonMaterial();
             // Reject even disabled-model texture handles: the source state is
             // captured completely and no payload aliases enter this contract.
@@ -11920,6 +13038,21 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
             for (double value:values) if (!std::isfinite(value)) return Standard_False;
         }
         output=std::move(state);return Standard_True;
+    } catch (...) {output={};return Standard_False;}
+}
+} // namespace
+
+Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
+    const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {
+    output={};
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull() || label.Data()!=myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)) return Standard_False;
+        // Subshape styling needs a deliberate triangle/material mapping. The
+        // first copy rejects these labels rather than flattening their styles.
+        if (!core3d::profile::HasOnlyMetadataSubshapes(myOcafDoc, label)) return Standard_False;
+        return CaptureWholeObjectScalarAppearance(myOcafDoc, label, output);
     } catch (...) {output={};return Standard_False;}
 }
 
@@ -12714,7 +13847,7 @@ gp_Trsf OcctDocument::ObjectTransformForLabel(const TDF_Label& aRefLabel) const 
     const Standard_Real rz = readReal(6, 0.0);
     const Standard_Real rw = readReal(7, 1.0);
     const Standard_Real scale = readReal(8, 1.0);
-    
+
     gp_Trsf t = gp_Trsf();
     t.SetTranslation({x, y, z});
     t.SetRotationPart({rx, ry, rz, rw});
@@ -12944,6 +14077,2743 @@ Standard_Boolean OcctObjectNameState::IsEqual(const OcctObjectNameState& other) 
             && (!namePresent || name.IsEqual(other.name));
     } catch (...) { return Standard_False; }
 }
+
+Standard_Boolean OcctExactLabelReceipt::IsEqual(
+    const OcctExactLabelReceipt& other) const noexcept {
+    try {
+        return !documentData.IsNull() && documentData == other.documentData
+            && !documentIdentifier.empty()
+            && documentIdentifier == other.documentIdentifier
+            && visibility.IsEqual(other.visibility)
+            && appearance.IsEqual(other.appearance);
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+constexpr Standard_Size kMaximumExactLabelReservations = 4096;
+
+// Report the existing check without repeating any native operation.
+bool R179TraceExactLabelCheck(const char* predicate, bool passed) noexcept {
+#if DEBUG
+    if (!passed) NSLog(@"R179_D2_APPLY predicate=%s failed=1", predicate);
+#else
+    (void)predicate;
+#endif
+    return passed;
+}
+
+bool ExactLeaseOwns(const Handle(TDocStd_Document)& document,
+                    core3d::native_opening::CommandLease& lease) noexcept {
+    try {
+        return !document.IsNull() && !document->GetData().IsNull()
+            && lease.data() == document->GetData()
+            && lease.ownsOpenCommand()
+            && document->HasOpenCommand()
+            && document->GetData()->Transaction() == lease.transaction();
+    } catch (...) { return false; }
+}
+
+bool ExactDocumentIdentityCensus(const Handle(TDocStd_Document)& document,
+                                 std::set<std::string>& identifiers) noexcept {
+    identifiers.clear();
+    try {
+        if (document.IsNull() || document->GetData().IsNull()
+            || !XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence labels; shapes->GetShapes(labels);
+        if (labels.Length() < 0
+            || Standard_Size(labels.Length()) > kMaximumGeometryDocumentLabels) return false;
+        for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+            const auto label = labels.Value(index);
+            if (label.IsNull() || label.Data() != document->GetData()
+                || !shapes->IsShape(label)) return false;
+            const std::string entity = ReadIdentifier(label, EntityIdentifierAttributeID());
+            const std::string definition = ReadIdentifier(label, DefinitionIdentifierAttributeID());
+            if ((!entity.empty() && !identifiers.insert(entity).second)
+                || (!definition.empty() && !identifiers.insert(definition).second)) return false;
+        }
+        return true;
+    } catch (...) { identifiers.clear(); return false; }
+}
+
+bool ExactReceiptCanBeRemoved(const Handle(TDocStd_Document)& document,
+                              const OcctExactLabelReceipt& receipt) noexcept {
+    try {
+        const TDF_Label target = receipt.visibility.object.object.label;
+        if (document.IsNull() || target.IsNull()
+            || target.Data() != document->GetData()) return false;
+        TDF_LabelSequence users;
+        if (XCAFDoc_ShapeTool::GetUsers(target, users, Standard_True) != 0
+            || !users.IsEmpty()) return false;
+        const TDF_Label root = document->GetData()->Root();
+        Standard_Size visited = 0;
+        for (TDF_ChildIterator iterator(root, Standard_True);
+             iterator.More(); iterator.Next()) {
+            if (++visited > kMaximumGeometryDocumentLabels) return false;
+            const TDF_Label owner = iterator.Value();
+            Handle(TDF_Reference) reference;
+            if (!owner.FindAttribute(TDF_Reference::GetID(), reference)
+                || reference.IsNull()) continue;
+            if (reference->Get().IsEqual(target)
+                && !owner.IsEqual(target)
+                && !owner.IsDescendant(target)) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool ExactReceiptPresentationPreserved(const OcctExactLabelReceipt& before,
+                                       const OcctExactLabelReceipt& after) noexcept {
+    try {
+        const auto& a = before.visibility.object;
+        const auto& b = after.visibility.object;
+        return R179TraceExactLabelCheck("exact.presentation.document-data",
+                before.documentData == after.documentData)
+            && R179TraceExactLabelCheck("exact.presentation.document-id",
+                before.documentIdentifier == after.documentIdentifier)
+            && R179TraceExactLabelCheck("exact.presentation.name-presence",
+                a.namePresent == b.namePresent)
+            && R179TraceExactLabelCheck("exact.presentation.name",
+                (!a.namePresent || a.name.IsEqual(b.name)))
+            && R179TraceExactLabelCheck("exact.presentation.entity-id",
+                a.object.entityIdentifier == b.object.entityIdentifier)
+            && R179TraceExactLabelCheck("exact.presentation.definition-id",
+                a.object.definitionIdentifier == b.object.definitionIdentifier)
+            && R179TraceExactLabelCheck("exact.presentation.transform-presence",
+                a.object.present == b.object.present)
+            && R179TraceExactLabelCheck("exact.presentation.transform-scalars",
+                a.object.scalars == b.object.scalars)
+            && R179TraceExactLabelCheck("exact.presentation.visibility",
+                before.visibility.invisibleAttributePresent
+                    == after.visibility.invisibleAttributePresent)
+            && R179TraceExactLabelCheck("exact.presentation.layer-link",
+                before.visibility.layerLinkPresent == after.visibility.layerLinkPresent)
+            && R179TraceExactLabelCheck("exact.presentation.layer-count",
+                before.visibility.layers.size() == after.visibility.layers.size())
+            && R179TraceExactLabelCheck("exact.presentation.layer-visibility",
+                before.visibility.layerInvisibleAttributePresent
+                    == after.visibility.layerInvisibleAttributePresent)
+            && R179TraceExactLabelCheck("exact.presentation.appearance",
+                before.appearance.IsEqual(after.appearance));
+    } catch (...) { return R179TraceExactLabelCheck("exact.presentation.exception", false); }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::CaptureExactFreeLabel(
+    const TDF_Label& label, OcctExactLabelReceipt& receipt) const noexcept {
+    receipt = {};
+    try {
+        OCC_CATCH_SIGNALS
+        OcctExactLabelReceipt captured;
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || !CaptureObjectVisibilityStateForLabel(label, captured.visibility))
+            return Standard_False;
+        const auto& object = captured.visibility.object.object;
+        const bool hasSweep = !object.sweep.label.IsNull();
+        const bool hasLoft = !object.loft.label.IsNull();
+        if (hasSweep || hasLoft) {
+            core3d::pattern_recipe_clone::Source source;
+            if (hasSweep == hasLoft
+                || !core3d::pattern_recipe_clone::Capture(myOcafDoc, label, source)
+                || source.owner.IsNull() || !source.owner.IsEqual(label)
+                || source.ownerShape.IsNull() || object.shape.IsNull()
+                || !source.ownerShape.IsEqual(object.shape)
+                || (hasSweep
+                    && (source.family != core3d::pattern_recipe_clone::Family::Sweep
+                        || !source.sweep.IsEqual(object.sweep)
+                        || !source.loft.label.IsNull()))
+                || (hasLoft
+                    && (source.family != core3d::pattern_recipe_clone::Family::Loft
+                        || !source.loft.IsEqual(object.loft)
+                        || !source.sweep.label.IsNull()))
+                || !CaptureScalarAppearanceForSavedSweepRebuild(
+                    label, captured.appearance)) return Standard_False;
+        } else if (!CaptureScalarAppearanceForMeshCopy(
+                       label, captured.appearance)) return Standard_False;
+        captured.documentData = myOcafDoc->GetData();
+        captured.documentIdentifier = DocumentIdentifier();
+        if (captured.documentIdentifier.empty()) return Standard_False;
+        receipt = std::move(captured);
+        return Standard_True;
+    } catch (...) { receipt = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ReadExactFreeLabel(
+    const OcctExactLabelReceipt& expected,
+    OcctExactLabelReceipt& receipt) const noexcept {
+    receipt = {};
+    try {
+        if (myOcafDoc.IsNull() || expected.documentData != myOcafDoc->GetData()
+            || expected.documentIdentifier != DocumentIdentifier()
+            || expected.visibility.object.object.label.IsNull()
+            || !CaptureExactFreeLabel(
+                expected.visibility.object.object.label, receipt)
+            || !expected.IsEqual(receipt)) {
+            receipt = {}; return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { receipt = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ReserveExactLabelIdentities(
+    Standard_Size count, const std::vector<std::string>& retainedRemovalLedger,
+    std::vector<OcctIssuedLabelIdentity>& identities) noexcept {
+    identities.clear();
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()
+            || myOcafDoc->HasOpenCommand() || count == 0
+            || count > kMaximumExactLabelReservations
+            || myExactIdentityReservations.size() + count
+                > kMaximumExactLabelReservations
+            || myNextExactIdentityReservation
+                > UINT64_MAX - static_cast<std::uint64_t>(count)) return Standard_False;
+        std::set<std::string> unavailable;
+        if (!ExactDocumentIdentityCensus(myOcafDoc, unavailable)) return Standard_False;
+        for (const auto& value : retainedRemovalLedger) {
+            if (!IsCanonicalSavedGroupID(value) || !unavailable.insert(value).second)
+                return Standard_False;
+        }
+        for (const auto& value : myExactIdentityIssuanceLedger)
+            unavailable.insert(value);
+        const std::string documentIdentifier = DocumentIdentifier();
+        if (documentIdentifier.empty()) return Standard_False;
+        std::vector<OcctIssuedLabelIdentity> issued;
+        issued.reserve(count);
+        for (Standard_Size index = 0; index < count; ++index) {
+            OcctIssuedLabelIdentity identity;
+            identity.documentData_ = myOcafDoc->GetData();
+            identity.documentIdentifier_ = documentIdentifier;
+            for (unsigned attempt = 0; attempt < 16; ++attempt) {
+                identity.entityIdentifier_ = NewIdentifier();
+                if (!identity.entityIdentifier_.empty()
+                    && unavailable.insert(identity.entityIdentifier_).second) break;
+                identity.entityIdentifier_.clear();
+            }
+            for (unsigned attempt = 0; attempt < 16; ++attempt) {
+                identity.definitionIdentifier_ = NewIdentifier();
+                if (!identity.definitionIdentifier_.empty()
+                    && unavailable.insert(identity.definitionIdentifier_).second) break;
+                identity.definitionIdentifier_.clear();
+            }
+            if (identity.entityIdentifier_.empty()
+                || identity.definitionIdentifier_.empty()) return Standard_False;
+            identity.reservation_ = ++myNextExactIdentityReservation;
+            issued.push_back(std::move(identity));
+        }
+        for (const auto& identity : issued) {
+            myExactIdentityReservations.emplace(identity.reservation_,
+                std::make_pair(identity.entityIdentifier_, identity.definitionIdentifier_));
+            myExactIdentityIssuanceLedger.insert(identity.entityIdentifier_);
+            myExactIdentityIssuanceLedger.insert(identity.definitionIdentifier_);
+        }
+        identities = std::move(issued);
+        return Standard_True;
+    } catch (...) { identities.clear(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageCreateExactFreeLabel(
+    core3d::native_opening::CommandLease& lease,
+    const OcctIssuedLabelIdentity& identity,
+    const OcctPreparedLabelClone& clone,
+    OcctExactLabelReceipt& receipt) noexcept {
+    receipt = {};
+    try {
+        OCC_CATCH_SIGNALS
+        OcctExactLabelReceipt source;
+        const auto reservation = myExactIdentityReservations.find(identity.reservation_);
+        std::set<std::string> unavailable;
+        if (!ExactLeaseOwns(myOcafDoc, lease)
+            || identity.documentData_ != myOcafDoc->GetData()
+            || identity.documentIdentifier_ != DocumentIdentifier()
+            || reservation == myExactIdentityReservations.end()
+            || reservation->second.first != identity.entityIdentifier_
+            || reservation->second.second != identity.definitionIdentifier_
+            || clone.detachedShape.IsNull()
+            || clone.representation == OcctGeometryRepresentation::Invalid
+            || !GeometryClassMatchesRepresentation(
+                ClassifyDefinitionGeometry(clone.detachedShape, nullptr),
+                clone.representation)
+            || clone.source.visibility.layerLinkPresent
+            || !clone.source.visibility.layers.empty()
+            || !ReadExactFreeLabel(clone.source, source)
+            || !ExactDocumentIdentityCensus(myOcafDoc, unavailable)
+            || unavailable.count(identity.entityIdentifier_) != 0
+            || unavailable.count(identity.definitionIdentifier_) != 0)
+            return Standard_False;
+
+        BRepBuilderAPI_Copy copier(clone.detachedShape, Standard_True, Standard_False);
+        const TopoDS_Shape detached = copier.Shape();
+        if (!copier.IsDone() || detached.IsNull()) return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        const TDF_Label label = shapes->NewShape();
+        shapes->SetShape(label, detached);
+        TDataStd_AsciiString::Set(label, EntityIdentifierAttributeID(),
+            TCollection_AsciiString(identity.entityIdentifier_.c_str()));
+        TDataStd_AsciiString::Set(label, DefinitionIdentifierAttributeID(),
+            TCollection_AsciiString(identity.definitionIdentifier_.c_str()));
+        if (!SetGeometryRepresentationForLabel(label, clone.representation))
+            return Standard_False;
+        Handle(AIS_Shape) presentation = new AIS_Shape(detached);
+        presentation->SetLocalTransformation(source.visibility.object.object.transform);
+        if (!SaveObjectTransform(label, presentation)
+            || !CopyObjectAppearance(source.visibility.object.object.label, label))
+            return Standard_False;
+        if (source.visibility.object.namePresent)
+            TDataStd_Name::Set(label, source.visibility.object.name);
+        if (source.visibility.invisibleAttributePresent
+            && !SetObjectVisibilityForLabel(label, Standard_False)) return Standard_False;
+        if (!CaptureExactFreeLabel(label, receipt)
+            || receipt.visibility.object.object.entityIdentifier
+                != identity.entityIdentifier_
+            || receipt.visibility.object.object.definitionIdentifier
+                != identity.definitionIdentifier_
+            || receipt.visibility.object.namePresent
+                != source.visibility.object.namePresent
+            || (source.visibility.object.namePresent
+                && !receipt.visibility.object.name.IsEqual(source.visibility.object.name))
+            || !receipt.appearance.IsEqual(source.appearance)) {
+            receipt = {}; return Standard_False;
+        }
+        myExactIdentityReservations.erase(reservation);
+        return Standard_True;
+    } catch (...) { receipt = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageReplaceExactFreeLabel(
+    core3d::native_opening::CommandLease& lease,
+    const OcctExactLabelReceipt& expected,
+    const OcctPreparedLabelClone& clone,
+    OcctExactLabelReceipt& receipt) noexcept {
+    receipt = {};
+    try {
+        OCC_CATCH_SIGNALS
+        // Bounded DEBUG provenance only: retain the repair layer's refusal
+        // names alongside D2's gate-by-gate R179_D2_APPLY diagnostics.
+        const auto traceRefusal = [](const char* predicate, bool failed) noexcept {
+#if DEBUG
+            if (failed) std::fprintf(
+                stderr, "R179_REPLACE_EXACT predicate=%s failed=1\n", predicate);
+#else
+            (void)predicate;
+#endif
+            return failed;
+        };
+        OcctExactLabelReceipt current, source;
+        if (!R179TraceExactLabelCheck("exact.replace.lease",
+                !traceRefusal("lease-or-detached-shape",
+                    !ExactLeaseOwns(myOcafDoc, lease)))
+            || !R179TraceExactLabelCheck("exact.replace.shape",
+                !traceRefusal("lease-or-detached-shape",
+                    clone.detachedShape.IsNull()))
+            || !R179TraceExactLabelCheck("exact.replace.expected",
+                !traceRefusal("readback.expected",
+                    !ReadExactFreeLabel(expected, current)))
+            || !R179TraceExactLabelCheck("exact.replace.source",
+                !traceRefusal("readback.source",
+                    !ReadExactFreeLabel(clone.source, source)))
+            || !R179TraceExactLabelCheck("exact.replace.representation",
+                !traceRefusal("representation.mismatch", clone.representation
+                    != expected.visibility.object.object.resolvedRepresentation))
+            || !R179TraceExactLabelCheck("exact.replace.geometry-class",
+                !traceRefusal("geometry-class.mismatch",
+                    !GeometryClassMatchesRepresentation(
+                        ClassifyDefinitionGeometry(clone.detachedShape, nullptr),
+                        clone.representation))))
+            return Standard_False;
+        Handle(AIS_Shape) candidate = new AIS_Shape(clone.detachedShape);
+        candidate->SetLocalTransformation(expected.visibility.object.object.transform);
+        const TDF_Label label = expected.visibility.object.object.label;
+        if (!R179TraceExactLabelCheck("exact.replace.ReplaceShape",
+                !traceRefusal("ReplaceShape", !ReplaceShape(label, candidate))))
+            return Standard_False;
+        // ReplaceShape materializes all eight optional transform attributes.
+        // Restore the validated receipt's exact sparse representation without
+        // creating labels for absent values or touching other attributes.
+        const auto& object = expected.visibility.object.object;
+        for (Standard_Integer tag = 1; tag <= 8; ++tag) {
+            if (object.present[tag - 1]) {
+                TDataStd_Real::Set(label.FindChild(tag), object.scalars[tag - 1]);
+            } else {
+                const TDF_Label child = label.FindChild(tag, Standard_False);
+                if (!child.IsNull()) child.ForgetAttribute(TDataStd_Real::GetID());
+            }
+        }
+        if (!R179TraceExactLabelCheck("exact.replace.capture",
+                !traceRefusal("recapture", !CaptureExactFreeLabel(label, receipt)))) {
+            receipt = {}; return Standard_False;
+        }
+        if (!R179TraceExactLabelCheck("exact.replace.presentation",
+                ExactReceiptPresentationPreserved(expected, receipt))) {
+#if DEBUG
+            const auto& a = expected.visibility.object;
+            const auto& b = receipt.visibility.object;
+            const char* field = "appearance";
+            if (expected.documentData != receipt.documentData) field = "document-data";
+            else if (expected.documentIdentifier != receipt.documentIdentifier)
+                field = "document-identifier";
+            else if (a.namePresent != b.namePresent) field = "name-presence";
+            else if (a.namePresent && !a.name.IsEqual(b.name)) field = "name";
+            else if (a.object.entityIdentifier != b.object.entityIdentifier)
+                field = "entity-identifier";
+            else if (a.object.definitionIdentifier != b.object.definitionIdentifier)
+                field = "definition-identifier";
+            else if (a.object.present != b.object.present)
+                field = "transform-presence";
+            else if (a.object.scalars != b.object.scalars) field = "transform-scalars";
+            else if (expected.visibility.invisibleAttributePresent
+                != receipt.visibility.invisibleAttributePresent)
+                field = "invisible-attribute";
+            else if (expected.visibility.layerLinkPresent
+                != receipt.visibility.layerLinkPresent) field = "layer-link";
+            else if (expected.visibility.layers.size()
+                != receipt.visibility.layers.size()) field = "layers";
+            else if (expected.visibility.layerInvisibleAttributePresent
+                != receipt.visibility.layerInvisibleAttributePresent)
+                field = "layer-invisible-attributes";
+            std::fprintf(stderr,
+                "R179_REPLACE_EXACT predicate=presentation.%s failed=1\n", field);
+#endif
+            receipt = {}; return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) {
+        R179TraceExactLabelCheck("exact.replace.exception", false);
+        receipt = {}; return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::StageRemoveExactFreeLabel(
+    core3d::native_opening::CommandLease& lease,
+    const OcctExactLabelReceipt& expected) noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        OcctExactLabelReceipt current;
+        if (!ExactLeaseOwns(myOcafDoc, lease)
+            || !ReadExactFreeLabel(expected, current)
+            || !ExactReceiptCanBeRemoved(myOcafDoc, current)) return Standard_False;
+        const TDF_Label label = current.visibility.object.object.label;
+        const std::string entity = current.visibility.object.object.entityIdentifier;
+        const std::string definition = current.visibility.object.object.definitionIdentifier;
+        if (!RemoveShape(label)) return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        TDF_LabelSequence freeLabels; shapes->GetFreeShapes(freeLabels);
+        for (Standard_Integer index = 1; index <= freeLabels.Length(); ++index)
+            if (ReadIdentifier(freeLabels.Value(index), EntityIdentifierAttributeID()) == entity
+                || ReadIdentifier(freeLabels.Value(index), DefinitionIdentifierAttributeID()) == definition)
+                return Standard_False;
+        OcctExactLabelReceipt absent;
+        return !CaptureExactFreeLabel(label, absent);
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageAllLabels(
+    core3d::native_opening::CommandLease& lease, const OcctAllLabelPlan& plan,
+    std::vector<OcctExactLabelReceipt>& receipts) noexcept {
+    receipts.clear();
+    try {
+        OCC_CATCH_SIGNALS
+        if (!R179TraceExactLabelCheck("exact.all.lease", ExactLeaseOwns(myOcafDoc, lease))
+            || !R179TraceExactLabelCheck("exact.all.count", plan.creates.size()
+                + plan.replacements.size() + plan.removals.size()
+                <= kMaximumExactLabelReservations)) return Standard_False;
+        TDF_LabelMap labels;
+        std::set<std::string> candidateIDs;
+        std::set<std::string> unavailable;
+        if (!R179TraceExactLabelCheck("exact.all.identity-census", ExactDocumentIdentityCensus(myOcafDoc, unavailable))) return Standard_False;
+        for (const auto& item : plan.creates) {
+            const auto found = myExactIdentityReservations.find(item.identity.reservation_);
+            OcctExactLabelReceipt source;
+            if (found == myExactIdentityReservations.end()
+                || found->second.first != item.identity.entityIdentifier_
+                || found->second.second != item.identity.definitionIdentifier_
+                || !candidateIDs.insert(item.identity.entityIdentifier_).second
+                || !candidateIDs.insert(item.identity.definitionIdentifier_).second
+                || unavailable.count(item.identity.entityIdentifier_) != 0
+                || unavailable.count(item.identity.definitionIdentifier_) != 0
+                || !ReadExactFreeLabel(item.clone.source, source)) return Standard_False;
+        }
+        for (const auto& item : plan.replacements) {
+            OcctExactLabelReceipt current, source;
+            const TDF_Label label = item.expected.visibility.object.object.label;
+            if (!R179TraceExactLabelCheck("exact.all.replacement-unique", labels.Add(label))
+                || !R179TraceExactLabelCheck("exact.all.replacement-current", ReadExactFreeLabel(item.expected, current))
+                || !R179TraceExactLabelCheck("exact.all.replacement-source", ReadExactFreeLabel(item.clone.source, source))) return Standard_False;
+        }
+        for (const auto& item : plan.removals) {
+            OcctExactLabelReceipt current;
+            const TDF_Label label = item.visibility.object.object.label;
+            if (!labels.Add(label) || !ReadExactFreeLabel(item, current)
+                || !ExactReceiptCanBeRemoved(myOcafDoc, current)) return Standard_False;
+        }
+        std::vector<OcctExactLabelReceipt> staged;
+        for (const auto& item : plan.creates) {
+            OcctExactLabelReceipt value;
+            if (!R179TraceExactLabelCheck("exact.all.create", StageCreateExactFreeLabel(lease, item.identity, item.clone, value))) return Standard_False;
+            staged.push_back(std::move(value));
+        }
+        for (const auto& item : plan.replacements) {
+            OcctExactLabelReceipt value;
+            if (!R179TraceExactLabelCheck("exact.all.replace", StageReplaceExactFreeLabel(lease, item.expected, item.clone, value))) return Standard_False;
+            staged.push_back(std::move(value));
+        }
+        for (const auto& item : plan.removals)
+            if (!R179TraceExactLabelCheck("exact.all.remove", StageRemoveExactFreeLabel(lease, item))) return Standard_False;
+        receipts = std::move(staged);
+        return Standard_True;
+    } catch (...) {
+        R179TraceExactLabelCheck("exact.all.exception", false);
+        receipts.clear(); return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::ReadBackAllLabels(
+    const OcctAllLabelPlan& plan,
+    const std::vector<OcctExactLabelReceipt>& receipts) const noexcept {
+    try {
+        if (receipts.size() != plan.creates.size() + plan.replacements.size())
+            return Standard_False;
+        for (const auto& expected : receipts) {
+            OcctExactLabelReceipt current;
+            if (!ReadExactFreeLabel(expected, current)) return Standard_False;
+        }
+        for (const auto& removed : plan.removals) {
+            OcctExactLabelReceipt current;
+            if (CaptureExactFreeLabel(
+                    removed.visibility.object.object.label, current)) return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+bool R179AddSize(std::size_t value, std::size_t& total) noexcept {
+    if (value > std::numeric_limits<std::size_t>::max() - total) return false;
+    total += value; return true;
+}
+
+std::string R179RecipeFeature(
+    const core3d::pattern_recipe_clone::Source& source) noexcept {
+    using Family = core3d::pattern_recipe_clone::Family;
+    if (source.family == Family::Sweep) return source.sweep.identifier;
+    if (source.family == Family::Loft) return source.loft.identifier;
+    return {};
+}
+
+std::size_t R179RecipeBytes(
+    const core3d::pattern_recipe_clone::Source& source) noexcept {
+    using Family = core3d::pattern_recipe_clone::Family;
+    if (source.family == Family::Sweep)
+        return source.sweep.values.size() * sizeof(double);
+    if (source.family == Family::Loft)
+        return source.loft.values.size() * sizeof(double);
+    if (source.family == Family::AnalyticBoolean && source.analyticBoolean.value)
+        return source.analyticBoolean.value->bytes.size();
+    return 0;
+}
+
+bool R179MeasureLabel(const TopoDS_Shape& shape, std::size_t recipeBytes,
+                      core3d::pattern_owner::AllLabelMeasuredCost& output,
+                      std::string& shapeBytes) noexcept {
+    output = {}; shapeBytes.clear();
+    try {
+        if (shape.IsNull()
+            || !core3d::retained_part_boolean::ExactShapeBytes(shape, shapeBytes))
+            return false;
+        TopTools_IndexedMapOfShape topology;
+        TopExp::MapShapes(shape, topology);
+        output.recipeBytes = recipeBytes;
+        output.shapeBytes = shapeBytes.size();
+        output.topologyNodes = topology.Extent();
+        output.retainedMemoryBytes = sizeof(output);
+        return R179AddSize(output.recipeBytes, output.retainedMemoryBytes)
+            && R179AddSize(output.shapeBytes, output.retainedMemoryBytes);
+    } catch (...) { output = {}; shapeBytes.clear(); return false; }
+}
+
+bool R179AccumulateCost(
+    const core3d::pattern_owner::AllLabelMeasuredCost& item,
+    core3d::pattern_owner::AllLabelMeasuredCost& total) noexcept {
+    if (item.topologyNodes > std::numeric_limits<Standard_Size>::max()
+            - total.topologyNodes) return false;
+    total.topologyNodes += item.topologyNodes;
+    return R179AddSize(item.recordBytes, total.recordBytes)
+        && R179AddSize(item.recipeBytes, total.recipeBytes)
+        && R179AddSize(item.shapeBytes, total.shapeBytes)
+        && R179AddSize(item.retainedMemoryBytes, total.retainedMemoryBytes);
+}
+} // namespace
+
+Standard_Boolean OcctDocument::CapturePatternAllLabelSnapshot(
+    const std::string& selectedEntityIdentifier,
+    std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot) const noexcept {
+    snapshot.reset();
+    try {
+        OCC_CATCH_SIGNALS
+        using namespace core3d;
+        using namespace core3d::pattern_owner;
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()
+            || selectedEntityIdentifier.empty()
+            || !Standard_GUID::CheckGUIDFormat(selectedEntityIdentifier.c_str()))
+            return Standard_False;
+        const std::string documentIdentifier = DocumentIdentifier();
+        if (documentIdentifier.empty()) return Standard_False;
+
+        std::vector<pattern::Record> records;
+        if (!pattern::ReadAll(myOcafDoc, records)) return Standard_False;
+        const pattern::Record* selectedRecord = nullptr;
+        for (const auto& record : records) {
+            bool contains = retained_solid::UUIDText(record.definition.source.entity)
+                == selectedEntityIdentifier;
+            for (const auto& member : record.definition.members)
+                contains = contains || retained_solid::UUIDText(member.identity)
+                    == selectedEntityIdentifier;
+            if (contains) {
+                if (selectedRecord) return Standard_False;
+                selectedRecord = &record;
+            }
+        }
+        if (!selectedRecord) return Standard_False;
+        const auto& definition = selectedRecord->definition;
+        if (retained_solid::UUIDText(definition.owner.document) != documentIdentifier
+            || retained_solid::UUIDText(definition.source.document) != documentIdentifier)
+            return Standard_False;
+
+        const Handle(XCAFDoc_ShapeTool) shapes =
+            XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        std::map<std::string, OcctExactLabelReceipt> labels;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            OcctExactLabelReceipt receipt;
+            if (!CaptureExactFreeLabel(roots.Value(index), receipt)) return Standard_False;
+            const std::string& entity = receipt.visibility.object.object.entityIdentifier;
+            if (!labels.emplace(entity, std::move(receipt)).second) return Standard_False;
+        }
+        const auto sourceFound = labels.find(
+            retained_solid::UUIDText(definition.source.entity));
+        if (sourceFound == labels.end()
+            || sourceFound->second.visibility.object.object.definitionIdentifier
+                != retained_solid::UUIDText(definition.source.definition))
+            return Standard_False;
+
+        auto value = std::make_shared<AllLabelSnapshot>();
+        value->documentData = myOcafDoc->GetData();
+        value->documentIdentifier = documentIdentifier;
+        value->family = AllLabelFamily::PatternD2;
+        value->recordLabel = selectedRecord->label;
+        value->featureIdentifier = retained_solid::UUIDText(definition.feature);
+        value->canonicalRecordBytes = selectedRecord->bytes;
+        value->source = sourceFound->second;
+        value->documentTime = myOcafDoc->GetData()->Time();
+        if (!pattern_recipe_clone::Capture(myOcafDoc,
+                value->source.visibility.object.object.label, value->sourceRecipe)
+            || !R179MeasureLabel(value->source.visibility.object.object.shape,
+                R179RecipeBytes(value->sourceRecipe), value->measured,
+                value->sourceShapeBytes)) return Standard_False;
+        value->measured.recordBytes = value->canonicalRecordBytes.size();
+        if (!R179AddSize(value->measured.recordBytes,
+                         value->measured.retainedMemoryBytes)) return Standard_False;
+
+        std::set<std::pair<std::uint32_t, std::uint32_t>> keys;
+        std::set<std::string> memberEntities;
+        value->members.reserve(definition.members.size());
+        for (const auto& retained : definition.members) {
+            const std::string entity = retained_solid::UUIDText(retained.identity);
+            const auto found = labels.find(entity);
+            if (found == labels.end() || !memberEntities.insert(entity).second
+                || !keys.emplace(retained.coordinate.row,
+                                 retained.coordinate.column).second)
+                return Standard_False;
+            AllLabelSnapshot::Member member;
+            member.key = D2Coordinate{retained.coordinate.row,
+                                      retained.coordinate.column};
+            member.receipt = found->second;
+            member.localIdentifier = retained.localID;
+            member.suppressed = retained.state == pattern::MemberState::Suppressed;
+            if (!pattern_recipe_clone::Capture(myOcafDoc,
+                    member.receipt.visibility.object.object.label, member.recipe))
+                return Standard_False;
+            member.featureIdentifier = R179RecipeFeature(member.recipe);
+            if (!R179MeasureLabel(member.receipt.visibility.object.object.shape,
+                    R179RecipeBytes(member.recipe), member.measured,
+                    member.shapeBytes)) return Standard_False;
+            const bool isSource = retained.coordinate == pattern::Coordinate{};
+            if (isSource) {
+                if (!member.receipt.IsEqual(value->source)
+                    || !pattern_recipe_clone::IsEqual(member.recipe,
+                                                       value->sourceRecipe))
+                    return Standard_False;
+            } else if (member.recipe.family != value->sourceRecipe.family
+                || (member.recipe.family == pattern_recipe_clone::Family::Sweep
+                    && (!pattern_recipe_clone::SameLocalIDs(
+                            member.recipe.sweep.definition,
+                            value->sourceRecipe.sweep.definition)
+                        || member.featureIdentifier
+                            == R179RecipeFeature(value->sourceRecipe)))
+                || (member.recipe.family == pattern_recipe_clone::Family::Loft
+                    && (!pattern_recipe_clone::SameLocalIDs(
+                            member.recipe.loft.definition,
+                            value->sourceRecipe.loft.definition)
+                        || member.featureIdentifier
+                            == R179RecipeFeature(value->sourceRecipe))))
+                return Standard_False;
+            if (!isSource
+                && !R179AccumulateCost(member.measured, value->measured))
+                return Standard_False;
+            value->members.push_back(std::move(member));
+        }
+        if (value->members.empty()) return Standard_False;
+        snapshot = std::move(value); return Standard_True;
+    } catch (...) { snapshot.reset(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ReadPatternAllLabelSnapshot(
+    const core3d::pattern_owner::AllLabelSnapshot& expected,
+    std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot) const noexcept {
+    snapshot.reset();
+    try {
+        if (expected.documentData != myOcafDoc->GetData()
+            || expected.documentIdentifier != DocumentIdentifier()
+            || expected.family != core3d::pattern_owner::AllLabelFamily::PatternD2
+            || expected.members.empty()) return Standard_False;
+        const std::string entity =
+            expected.members.front().receipt.visibility.object.object.entityIdentifier;
+        std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot> current;
+        if (!CapturePatternAllLabelSnapshot(entity, current) || !current
+            || !core3d::pattern_owner::IsExactlyEqual(expected, *current))
+            return Standard_False;
+        snapshot = std::move(current); return Standard_True;
+    } catch (...) { snapshot.reset(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ReadFeaturePatternPair(
+    const core3d::feature_pattern::UUID& feature,
+    core3d::feature_pattern_child::PairedRecord& paired) const noexcept {
+    paired = {};
+    try {
+        std::vector<core3d::feature_pattern_child::PairedRecord> pairs;
+        if (myOcafDoc.IsNull()
+            || core3d::feature_pattern_child::ReadPairs(myOcafDoc, pairs)
+                != core3d::feature_pattern_child::PairStatus::Valid) return Standard_False;
+        for (auto& candidate : pairs) {
+            if (candidate.pattern.definition.feature != feature) continue;
+            if (!paired.pattern.label.IsNull()) return Standard_False;
+            paired = std::move(candidate);
+        }
+        return !paired.pattern.label.IsNull();
+    } catch (...) { paired = {}; return Standard_False; }
+}
+
+namespace {
+using R179DependentUUID = core3d::dependent_replay::UUID;
+using R179Dependent = core3d::dependent_replay::Dependency;
+using R179DependentFamily = core3d::dependent_replay::Family;
+using R179DependentRefusal = core3d::dependent_replay::Refusal;
+
+struct R179DependentFrontier final {
+    R179DependentUUID entity{};
+    std::vector<R179DependentUUID> ancestry;
+};
+
+bool R179SameDependentIdentity(const R179Dependent& left,
+                               const R179Dependent& right,
+                               bool compareBytes) noexcept {
+    return left.family == right.family && left.feature == right.feature
+        && left.inputEntity == right.inputEntity
+        && left.resultEntity == right.resultEntity
+        && !left.recordLabel.IsNull() && left.recordLabel.IsEqual(right.recordLabel)
+        && left.memberIdentities == right.memberIdentities
+        && (!compareBytes || left.canonicalRecordBytes == right.canonicalRecordBytes);
+}
+
+bool R179DiscoverDependentClosure(
+    const Handle(TDocStd_Document)& document,
+    const R179DependentUUID& target,
+    const core3d::dependent_replay::Limits& limits,
+    std::vector<R179Dependent>& output,
+    std::vector<std::string>& authorized,
+    R179DependentRefusal& refusal) noexcept {
+    output.clear(); authorized.clear(); refusal = R179DependentRefusal::CorruptTable;
+    try {
+        if (document.IsNull() || document->GetData().IsNull()) {
+            refusal = R179DependentRefusal::ClosedDocument; return false;
+        }
+        std::vector<core3d::pattern::Record> d2;
+        std::vector<core3d::path_array::Record> d3;
+        std::vector<core3d::feature_pattern::Record> d4;
+        if (!core3d::pattern::ReadAll(document, d2)
+            || !core3d::path_array::ReadAll(document, d3)
+            || !core3d::feature_pattern::ReadAll(document, d4)) return false;
+
+        std::deque<R179DependentFrontier> frontier;
+        frontier.push_back({target, {target}});
+        std::set<R179DependentUUID> expanded;
+        std::set<std::pair<R179DependentFamily, R179DependentUUID>> features;
+        std::set<std::string> authorizedSet;
+        authorizedSet.insert(core3d::retained_solid::UUIDText(target));
+        std::size_t recordBytes = 0;
+        const auto append = [&](R179Dependent value,
+                                const R179DependentFrontier& current,
+                                bool expandResult) -> bool {
+            if (expandResult && value.resultEntity != current.entity
+                && std::find(current.ancestry.begin(), current.ancestry.end(),
+                             value.resultEntity) != current.ancestry.end()) {
+                refusal = R179DependentRefusal::Cycle; return false;
+            }
+            const auto key = std::make_pair(value.family, value.feature);
+            if (!features.insert(key).second) return true;
+            if (output.size() >= limits.records
+                || value.canonicalRecordBytes.size()
+                    > limits.documentBytes - std::min(recordBytes, limits.documentBytes)) {
+                refusal = output.size() >= limits.records
+                    ? R179DependentRefusal::RecordBudget
+                    : R179DependentRefusal::DocumentBudget;
+                return false;
+            }
+            recordBytes += value.canonicalRecordBytes.size();
+            authorizedSet.insert(core3d::retained_solid::UUIDText(value.resultEntity));
+            if (expandResult && value.resultEntity != current.entity) {
+                R179DependentFrontier next{value.resultEntity, current.ancestry};
+                next.ancestry.push_back(value.resultEntity);
+                frontier.push_back(std::move(next));
+            }
+            output.push_back(std::move(value)); return true;
+        };
+
+        while (!frontier.empty()) {
+            R179DependentFrontier current = std::move(frontier.front());
+            frontier.pop_front();
+            if (!expanded.insert(current.entity).second) continue;
+            for (const auto& record : d2) {
+                const auto& definition = record.definition;
+                const bool source = definition.source.entity == current.entity;
+                const bool host = definition.owner.entity == current.entity;
+                if (!source && !host) continue;
+                R179Dependent value; value.family = R179DependentFamily::PatternD2;
+                value.feature = definition.feature; value.inputEntity = current.entity;
+                value.resultEntity = definition.owner.entity; value.recordLabel = record.label;
+                value.canonicalRecordBytes = record.bytes;
+                for (const auto& member : definition.members)
+                    value.memberIdentities.push_back(member.identity);
+                if (!append(std::move(value), current, source)) return false;
+            }
+            for (const auto& record : d3) {
+                const auto& definition = record.definition;
+                const bool source = definition.source.entity == current.entity;
+                const bool path = definition.path.owner.entity == current.entity;
+                const bool host = definition.owner.entity == current.entity;
+                if (!source && !path && !host) continue;
+                R179Dependent value; value.family = R179DependentFamily::PathArrayD3;
+                value.feature = definition.feature; value.inputEntity = current.entity;
+                value.resultEntity = definition.owner.entity; value.recordLabel = record.label;
+                value.canonicalRecordBytes = record.bytes;
+                for (const auto& member : definition.members)
+                    value.memberIdentities.push_back(member.identity);
+                if (!append(std::move(value), current, source || path)) return false;
+            }
+            for (const auto& record : d4) {
+                const auto& definition = record.definition;
+                const bool source = definition.sourceCut.entity == current.entity;
+                const bool host = definition.host.entity == current.entity;
+                if (!source && !host) continue;
+                R179Dependent value; value.family = R179DependentFamily::FeaturePatternD4;
+                value.feature = definition.feature; value.inputEntity = current.entity;
+                value.resultEntity = definition.host.entity; value.recordLabel = record.label;
+                value.canonicalRecordBytes = record.bytes;
+                for (const auto& member : definition.distribution.members)
+                    value.memberIdentities.push_back(member.identity);
+                if (!append(std::move(value), current, source)) return false;
+            }
+        }
+        authorized.assign(authorizedSet.begin(), authorizedSet.end());
+        refusal = R179DependentRefusal::None; return true;
+    } catch (...) {
+        output.clear(); authorized.clear(); refusal = R179DependentRefusal::CorruptTable;
+        return false;
+    }
+}
+
+bool R179SameDependentClosure(const std::vector<R179Dependent>& left,
+                              const std::vector<R179Dependent>& right,
+                              bool compareBytes) noexcept {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index)
+        if (!R179SameDependentIdentity(left[index], right[index], compareBytes)) return false;
+    return true;
+}
+
+bool R179HasRetainedDependent(const Handle(TDocStd_Document)& document,
+                              const std::string& entityText) noexcept {
+    try {
+        R179DependentUUID entity{};
+        if (!core3d::receipt::ParseUUID(entityText, entity)) return true;
+        core3d::dependent_replay::Limits limits;
+        limits.records = 4096;
+        limits.documentBytes = std::numeric_limits<std::size_t>::max();
+        limits.memoryBytes = std::numeric_limits<std::size_t>::max();
+        limits.topologyNodes = std::numeric_limits<std::size_t>::max();
+        std::vector<R179Dependent> dependencies;
+        std::vector<std::string> authorized;
+        R179DependentRefusal refusal = R179DependentRefusal::CorruptTable;
+        return !R179DiscoverDependentClosure(document, entity, limits,
+                   dependencies, authorized, refusal)
+            || !dependencies.empty();
+    } catch (...) { return true; }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::HasUnroutedRetainedDependent(
+    const TDF_Label& label) const noexcept {
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()) return Standard_True;
+        const std::string entity = EntityIdentifierForLabel(label);
+        if (entity.empty()) return Standard_True;
+        if (myDependentReplayAuthorization.count(entity) != 0) return Standard_False;
+        return R179HasRetainedDependent(myOcafDoc, entity)
+            ? Standard_True : Standard_False;
+    } catch (...) { return Standard_True; }
+}
+
+core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
+    const OcctExactLabelReceipt& target,
+    core3d::dependent_replay::Mutation mutation,
+    const core3d::dependent_replay::Limits& limits,
+    core3d::dependent_replay::Preparer& preparer,
+    std::shared_ptr<const core3d::dependent_replay::Plan>& output) noexcept {
+    using namespace core3d::dependent_replay;
+    output.reset();
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()) return Refusal::ClosedDocument;
+        if (myOcafDoc->HasOpenCommand()) return Refusal::OpenCommand;
+        OcctExactLabelReceipt current;
+        if (!ReadExactFreeLabel(target, current)) return Refusal::StaleTarget;
+        UUID entity{};
+        const auto& object = target.visibility.object.object;
+        if (!core3d::receipt::ParseUUID(object.entityIdentifier, entity)
+            || limits.records == 0 || limits.documentBytes == 0
+            || limits.memoryBytes == 0 || limits.topologyNodes == 0)
+            return Refusal::StaleTarget;
+        auto plan = std::shared_ptr<Plan>(new Plan(mutation,
+            object.entityIdentifier, object.definitionIdentifier));
+        plan->documentIdentifier_ = DocumentIdentifier();
+        plan->documentData_ = myOcafDoc->GetData().get();
+        plan->documentTime_ = myOcafDoc->GetData()->Time();
+        plan->limits_ = limits;
+        Refusal discovered = Refusal::CorruptTable;
+        if (!R179DiscoverDependentClosure(myOcafDoc, entity, limits,
+                plan->dependencies_, plan->authorizedEntityIdentifiers_, discovered))
+            return discovered;
+
+        std::size_t documentBytes = 0, memoryBytes = 0, topologyNodes = 0;
+        plan->prepared_.reserve(plan->dependencies_.size());
+        for (const Dependency& dependency : plan->dependencies_) {
+            std::shared_ptr<const PreparedReplay> prepared;
+            const Refusal refusal = preparer.prepare(*this, dependency, mutation, prepared);
+            if (refusal != Refusal::None) return refusal;
+            if (!prepared || prepared->family() != dependency.family
+                || prepared->feature() != dependency.feature
+                || prepared->resultEntity() != dependency.resultEntity)
+                return Refusal::UnsupportedDescendant;
+            const auto charge = [](std::size_t value, std::size_t limit,
+                                   std::size_t& total) noexcept {
+                if (value > limit - std::min(total, limit)) return false;
+                total += value; return true;
+            };
+            if (!charge(dependency.canonicalRecordBytes.size(), limits.documentBytes,
+                        documentBytes)) return Refusal::DocumentBudget;
+            if (!charge(prepared->documentBytes(), limits.documentBytes,
+                        documentBytes)) return Refusal::DocumentBudget;
+            if (!charge(prepared->memoryBytes(), limits.memoryBytes,
+                        memoryBytes)) return Refusal::MemoryBudget;
+            if (!charge(prepared->topologyNodes(), limits.topologyNodes,
+                        topologyNodes)) return Refusal::TopologyBudget;
+            if (!prepared->openingCurrent(*this)) return Refusal::MissingRecipe;
+            plan->prepared_.push_back(std::move(prepared));
+        }
+        output = std::move(plan); return Refusal::None;
+    } catch (...) { output.reset(); return Refusal::CorruptTable; }
+}
+
+core3d::dependent_replay::Refusal OcctDocument::StageDependentReplayPlan(
+    core3d::native_opening::CommandLease& lease,
+    const core3d::dependent_replay::Plan& plan,
+    core3d::dependent_replay::SourceMutation& sourceMutation) noexcept {
+    using namespace core3d::dependent_replay;
+    myDependentReplayAuthorization.clear();
+    try {
+        OCC_CATCH_SIGNALS
+        if (!ExactLeaseOwns(myOcafDoc, lease)) return Refusal::ForeignLease;
+        if (plan.documentData_ != myOcafDoc->GetData().get()
+            || plan.documentIdentifier_ != DocumentIdentifier()) return Refusal::StaleTarget;
+        UUID target{};
+        if (!core3d::receipt::ParseUUID(plan.targetEntityIdentifier_, target))
+            return Refusal::StaleTarget;
+        std::vector<Dependency> current; std::vector<std::string> authorized;
+        Refusal discovered = Refusal::CorruptTable;
+        if (!R179DiscoverDependentClosure(myOcafDoc, target, plan.limits_, current,
+                authorized, discovered)) return discovered;
+        if (!R179SameDependentClosure(plan.dependencies_, current, true)
+            || plan.prepared_.size() != current.size()) return Refusal::StaleClosure;
+        for (const auto& prepared : plan.prepared_)
+            if (!prepared || !prepared->openingCurrent(*this)) return Refusal::StaleClosure;
+
+        myDependentReplayAuthorization.insert(
+            plan.authorizedEntityIdentifiers_.begin(),
+            plan.authorizedEntityIdentifiers_.end());
+        const auto clear = [&]() noexcept { myDependentReplayAuthorization.clear(); };
+        if (!sourceMutation.stage(*this, lease)) {
+            clear(); return Refusal::SourceStageFailed;
+        }
+        for (const auto& prepared : plan.prepared_) {
+            if (!prepared->stage(*this, lease)) {
+                clear(); return Refusal::DependentStageFailed;
+            }
+        }
+        clear(); return Refusal::None;
+    } catch (...) {
+        myDependentReplayAuthorization.clear(); return Refusal::DependentStageFailed;
+    }
+}
+
+core3d::dependent_replay::Refusal OcctDocument::ReadDependentReplayPlan(
+    const core3d::dependent_replay::Plan& plan) const noexcept {
+    using namespace core3d::dependent_replay;
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()) return Refusal::ClosedDocument;
+        if (plan.documentData_ != myOcafDoc->GetData().get()
+            || plan.documentIdentifier_ != DocumentIdentifier()) return Refusal::StaleTarget;
+        UUID target{};
+        if (!core3d::receipt::ParseUUID(plan.targetEntityIdentifier_, target))
+            return Refusal::StaleTarget;
+        std::vector<Dependency> current; std::vector<std::string> authorized;
+        Refusal discovered = Refusal::CorruptTable;
+        if (!R179DiscoverDependentClosure(myOcafDoc, target, plan.limits_, current,
+                authorized, discovered)) return discovered;
+        // Recipes may legitimately change, but the full family/feature graph,
+        // record labels and stable member identities may not churn.
+        if (!R179SameDependentClosure(plan.dependencies_, current, false)
+            || plan.prepared_.size() != current.size()) return Refusal::ReadbackFailed;
+        OcctDocument& mutableOwner = const_cast<OcctDocument&>(*this);
+        for (const auto& prepared : plan.prepared_)
+            if (!prepared || !prepared->read(mutableOwner)) return Refusal::ReadbackFailed;
+        return Refusal::None;
+    } catch (...) { return Refusal::ReadbackFailed; }
+}
+
+Standard_Boolean OcctDocument::StageFeaturePatternPair(
+    core3d::native_opening::CommandLease& lease,
+    const TDF_Label& host, const TDF_Label& baselineRecipe,
+    const TDF_Label& source,
+    const core3d::feature_pattern::Definition& definition,
+    const std::vector<core3d::feature_pattern_child::Receipt>& children,
+    core3d::feature_pattern_child::PairedRecord& paired) noexcept {
+    paired = {};
+    try {
+        OCC_CATCH_SIGNALS
+        using namespace core3d;
+        if (!ExactLeaseOwns(myOcafDoc, lease) || host.IsNull()
+            || baselineRecipe.IsNull() || source.IsNull()
+            || host.Data() != myOcafDoc->GetData()
+            || baselineRecipe.Data() != myOcafDoc->GetData()
+            || source.Data() != myOcafDoc->GetData()
+            || host.IsEqual(source) || !feature_pattern::Valid(definition))
+            return Standard_False;
+        feature_pattern::UUID document{}, hostEntity{}, hostDefinition{};
+        feature_pattern::UUID sourceEntity{}, sourceDefinition{};
+        if (!retained_solid::ReadUUID(myOcafDoc->Main(),
+                DocumentIdentifierAttributeID(), document)
+            || !retained_solid::ReadUUID(host, EntityIdentifierAttributeID(), hostEntity)
+            || !retained_solid::ReadUUID(host, DefinitionIdentifierAttributeID(), hostDefinition)
+            || !retained_solid::ReadUUID(source, EntityIdentifierAttributeID(), sourceEntity)
+            || !retained_solid::ReadUUID(source, DefinitionIdentifierAttributeID(), sourceDefinition)
+            || document != definition.host.document
+            || document != definition.sourceCut.document
+            || hostEntity != definition.host.entity
+            || hostDefinition != definition.host.definition
+            || sourceEntity != definition.sourceCut.entity
+            || sourceDefinition != definition.sourceCut.definition)
+            return Standard_False;
+        std::uint32_t active = 0;
+        if (!feature_pattern::ActiveCount(definition, active)
+            || children.size() != active) return Standard_False;
+
+        // Remove only the old SYFC records for this feature. The tag-73 record
+        // and unrelated receipts remain available to exact before/inside reads.
+        for (TDF_ChildIterator label(host, Standard_False); label.More(); label.Next()) {
+            Handle(feature_pattern_child::Attribute) attribute;
+            if (!label.Value().FindAttribute(feature_pattern_child::AttributeID(), attribute)
+                || attribute.IsNull() || !attribute->value()
+                || attribute->value()->receipt.patternFeature != definition.feature) continue;
+            label.Value().ForgetAllAttributes(Standard_True);
+        }
+        feature_pattern::Record patternRecord;
+        if (!feature_pattern::Stage(myOcafDoc, definition, patternRecord)
+            || patternRecord.label.IsNull()) return Standard_False;
+        for (const auto& receipt : children) {
+            if (receipt.document != document || receipt.hostEntity != hostEntity
+                || receipt.hostDefinition != hostDefinition
+                || receipt.patternFeature != definition.feature) return Standard_False;
+            const TDF_Label record = TDF_TagSource::NewChild(host);
+            if (!feature_pattern_child::Attach(record, host, baselineRecipe,
+                    source, patternRecord.label, receipt)) return Standard_False;
+        }
+        feature_pattern_child::PairedRecord readback;
+        if (!ReadFeaturePatternPair(definition.feature, readback)
+            || !readback.host.IsEqual(host)
+            || !readback.baselineRecipe.IsEqual(baselineRecipe)
+            || !readback.source.IsEqual(source)
+            || readback.pattern.bytes != patternRecord.bytes
+            || readback.children.size() != children.size()) return Standard_False;
+        std::set<feature_pattern::UUID> verifiedChildren;
+        for (const auto& expected : children) {
+            std::vector<std::uint8_t> canonical;
+            if (!feature_pattern_child::Encode(expected, canonical))
+                return Standard_False;
+            const auto actual = std::find_if(readback.children.begin(),
+                readback.children.end(), [&](const auto& value) {
+                    return value
+                        && value->receipt.childFeature == expected.childFeature;
+                });
+            if (actual == readback.children.end() || !*actual
+                || (*actual)->canonicalBytes != canonical
+                || !verifiedChildren.insert(expected.childFeature).second)
+                return Standard_False;
+        }
+        if (XCAFDoc_ShapeTool::GetShape(host).IsNull()
+            || XCAFDoc_ShapeTool::GetShape(source).IsNull()) return Standard_False;
+        // Production pair staging/readback requires the typed host baseline:
+        // the shared strict census must validate the whole document, and the
+        // pair's own baseline must sit on the requested label with the exact
+        // identity every staged child receipt names. Ordinary count,
+        // suppression and source-step edits leave that baseline untouched.
+        {
+            std::vector<feature_pattern_child::BaselineRecord> baselines;
+            if (feature_pattern_child::ReadBaselines(myOcafDoc, baselines)
+                    != feature_pattern_child::BaselineStatus::Valid)
+                return Standard_False;
+            const feature_pattern_child::BaselineRecord* baseline = nullptr;
+            for (const auto& candidate : baselines) {
+                if (!candidate.host.IsEqual(host)) continue;
+                if (baseline || !candidate.label.IsEqual(baselineRecipe)
+                    || !candidate.value) return Standard_False;
+                baseline = &candidate;
+            }
+            if (!baseline) return Standard_False;
+            for (const auto& receipt : children)
+                if (receipt.baselineRecipeIdentity
+                    != baseline->value->envelope.baselineRecipeIdentity)
+                    return Standard_False;
+        }
+        paired = std::move(readback); return Standard_True;
+    } catch (...) { paired = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctBoundedCurveCapture::IsEqual(
+    const OcctBoundedCurveCapture& other) const noexcept {
+    try {
+        return !documentData.IsNull() && documentData == other.documentData
+            && documentIdentifier == other.documentIdentifier
+            && ownerReceipt.IsEqual(other.ownerReceipt)
+            && !record.label.IsNull() && record.label.IsEqual(other.record.label)
+            && !record.owner.IsNull() && record.owner.IsEqual(other.record.owner)
+            && record.value && other.record.value
+            && record.value->definitionBytes == other.record.value->definitionBytes
+            && record.value->ownerBytes == other.record.value->ownerBytes
+            && !wire.IsNull() && wire.IsEqual(other.wire)
+            && !record.current.IsNull() && record.current.IsEqual(other.record.current);
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+bool BoundedCurveIdentityMatches(
+    const core3d::bounded_curve::PersistedValue& persisted,
+    const std::string& document, const std::string& entity,
+    const std::string& definition) noexcept {
+    try {
+        using core3d::retained_solid::UUIDText;
+        return UUIDText(persisted.ownerState.owner.document) == document
+            && UUIDText(persisted.ownerState.owner.entity) == entity
+            && UUIDText(persisted.ownerState.owner.definition) == definition;
+    } catch (...) { return false; }
+}
+
+bool CompleteBoundedCurveCapture(
+    const Handle(TDocStd_Document)& document, const std::string& documentID,
+    const core3d::bounded_curve::Record& record,
+    OcctDocument const& owner, OcctBoundedCurveCapture& output) noexcept {
+    output = {};
+    try {
+        if (document.IsNull() || document->GetData().IsNull()
+            || documentID.empty() || documentID != owner.DocumentIdentifier()
+            || !record.value) return false;
+
+        // Re-resolve the record from the strict whole-document reader. The
+        // caller's label is a lookup hint, never authority for C1 admission.
+        std::vector<core3d::bounded_curve::Record> records;
+        if (!core3d::bounded_curve::ReadAll(document, records)) return false;
+        const core3d::bounded_curve::Record* validated = nullptr;
+        for (const auto& candidate : records) {
+            if (candidate.value->persisted.ownerState.owner
+                    == record.value->persisted.ownerState.owner) {
+                if (validated != nullptr) return false;
+                validated = &candidate;
+            }
+        }
+        if (validated == nullptr || validated->owner.IsNull()
+            || validated->label.IsNull()
+            || validated->owner.Data() != document->GetData()
+            || validated->label.Data() != document->GetData()
+            || !validated->label.Father().IsEqual(validated->owner)) return false;
+
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull() || !shapes->IsShape(validated->owner)
+            || !XCAFDoc_ShapeTool::IsFree(validated->owner)
+            || !XCAFDoc_ShapeTool::IsSimpleShape(validated->owner)
+            || XCAFDoc_ShapeTool::IsReference(validated->owner)
+            || XCAFDoc_ShapeTool::IsComponent(validated->owner)
+            || XCAFDoc_ShapeTool::IsAssembly(validated->owner)
+            || XCAFDoc_ShapeTool::IsSubShape(validated->owner)) return false;
+
+        // C1 owns exactly one shape-bearing metadata child: the record that
+        // ReadAll resolved and validated above. Foreign or duplicate children
+        // remain unsupported rather than being flattened into appearance.
+        TDF_LabelSequence children;
+        XCAFDoc_ShapeTool::GetSubShapes(validated->owner, children);
+        if (children.Length() < 1
+            || children.Length() > core3d::profile::MaximumLabels) return false;
+        bool foundRecord = false;
+        for (Standard_Integer index = 1; index <= children.Length(); ++index) {
+            const TDF_Label child = children.Value(index);
+            if (!child.IsEqual(validated->label) || foundRecord) return false;
+            foundRecord = true;
+        }
+        if (!foundRecord
+            || !validated->current.IsEqual(
+                XCAFDoc_ShapeTool::GetShape(validated->owner))
+            || !core3d::bounded_curve::WireMatchesDefinition(
+                validated->value->persisted,
+                TopoDS::Wire(validated->current))) return false;
+
+        OcctExactLabelReceipt exact;
+        if (!owner.CaptureObjectVisibilityStateForLabel(
+                validated->owner, exact.visibility)
+            || !CaptureWholeObjectScalarAppearance(
+                document, validated->owner, exact.appearance)) return false;
+        exact.documentData = document->GetData();
+        exact.documentIdentifier = documentID;
+
+        OcctBoundedCurveCapture captured;
+        captured.documentData = document->GetData();
+        captured.documentIdentifier = documentID;
+        captured.ownerReceipt = std::move(exact);
+        captured.record = *validated;
+        captured.persisted = validated->value->persisted;
+        captured.wire = TopoDS::Wire(validated->current);
+        output = std::move(captured);
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::ReadBoundedCurveExact(
+    const core3d::retained_recipe::OwnerKey& owner,
+    OcctBoundedCurveCapture& capture) const noexcept {
+    capture = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::retained_recipe::Valid(owner)) return Standard_False;
+        std::vector<core3d::bounded_curve::Record> records;
+        if (!core3d::bounded_curve::ReadAll(myOcafDoc, records)) return Standard_False;
+        const core3d::bounded_curve::Record* match = nullptr;
+        for (const auto& record : records) {
+            if (record.value->persisted.ownerState.owner == owner) {
+                if (match != nullptr) return Standard_False;
+                match = &record;
+            }
+        }
+        const std::string documentID = DocumentIdentifier();
+        return match != nullptr && !documentID.empty()
+            && CompleteBoundedCurveCapture(
+                myOcafDoc, documentID, *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::CaptureBoundedCurveExact(
+    const std::string& entityIdentifier,
+    const core3d::native_opening::Context& context,
+    OcctBoundedCurveCapture& capture) const noexcept {
+    capture = {};
+    try {
+        OCC_CATCH_SIGNALS
+        const auto& fence = context.openingFence();
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::profile::IsIdentifier(entityIdentifier)
+            || fence.document() != myOcafDoc || fence.data() != myOcafDoc->GetData())
+            return Standard_False;
+        std::vector<core3d::bounded_curve::Record> records;
+        if (!core3d::bounded_curve::ReadAll(myOcafDoc, records)) return Standard_False;
+        const core3d::bounded_curve::Record* match = nullptr;
+        for (const auto& record : records) {
+            if (EntityIdentifierForLabel(record.owner) == entityIdentifier) {
+                if (match != nullptr) return Standard_False;
+                match = &record;
+            }
+        }
+        const std::string documentID = DocumentIdentifier();
+        return match != nullptr && !documentID.empty()
+            && CompleteBoundedCurveCapture(
+                myOcafDoc, documentID, *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageBoundedCurveCreate(
+    core3d::native_opening::CommandLease& lease,
+    const OcctIssuedLabelIdentity& identity,
+    const core3d::bounded_curve::PersistedValue& persisted,
+    const core3d::bounded_curve::DetachedWire& detached,
+    const std::string& requestedName,
+    OcctBoundedCurveCapture& capture) noexcept {
+    capture = {};
+    try {
+        OCC_CATCH_SIGNALS
+        const auto reservation = myExactIdentityReservations.find(identity.reservation_);
+        std::set<std::string> unavailable;
+        core3d::bounded_curve::DetachedWire rebuilt;
+        const TCollection_ExtendedString name(requestedName.c_str(), Standard_True);
+        if (!ExactLeaseOwns(myOcafDoc, lease)
+            || identity.documentData_ != myOcafDoc->GetData()
+            || identity.documentIdentifier_ != DocumentIdentifier()
+            || reservation == myExactIdentityReservations.end()
+            || reservation->second.first != identity.entityIdentifier_
+            || reservation->second.second != identity.definitionIdentifier_
+            || !BoundedCurveIdentityMatches(persisted, identity.documentIdentifier_,
+                identity.entityIdentifier_, identity.definitionIdentifier_)
+            || !core3d::bounded_curve::MatchesPersistedValue(detached, persisted)
+            || core3d::bounded_curve::BuildWire(persisted, rebuilt)
+                != core3d::bounded_curve::BuildRefusal::None
+            || !core3d::bounded_curve::MatchesPersistedValue(rebuilt, persisted)
+            || !OcctObjectNameIsValid(name)
+            || !ExactDocumentIdentityCensus(myOcafDoc, unavailable)
+            || unavailable.count(identity.entityIdentifier_)
+            || unavailable.count(identity.definitionIdentifier_)) return Standard_False;
+
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        const TDF_Label owner = shapes->NewShape();
+        shapes->SetShape(owner, rebuilt.wire);
+        TDataStd_AsciiString::Set(owner, EntityIdentifierAttributeID(),
+            TCollection_AsciiString(identity.entityIdentifier_.c_str()));
+        TDataStd_AsciiString::Set(owner, DefinitionIdentifierAttributeID(),
+            TCollection_AsciiString(identity.definitionIdentifier_.c_str()));
+        if (!SetGeometryRepresentationForLabel(owner, OcctGeometryRepresentation::BRep))
+            return Standard_False;
+        Handle(AIS_Shape) presentation = new AIS_Shape(rebuilt.wire);
+        if (!SaveObjectTransform(owner, presentation)) return Standard_False;
+        TDataStd_Name::Set(owner, name);
+
+        const TDF_Label recordLabel = owner.FindChild(
+            core3d::bounded_curve::MinimumRecordTag, Standard_True);
+        if (recordLabel.HasAttribute()) return Standard_False;
+        auto payload = std::make_shared<core3d::bounded_curve::Payload>();
+        payload->persisted = persisted;
+        payload->definitionBytes = rebuilt.canonicalDefinitionBytes;
+        payload->ownerBytes = rebuilt.canonicalOwnerBytes;
+        Handle(core3d::bounded_curve::Attribute) attribute =
+            new core3d::bounded_curve::Attribute();
+        attribute->value_ = payload;
+        recordLabel.AddAttribute(attribute);
+        TNaming_Builder(recordLabel).Select(rebuilt.wire, rebuilt.wire);
+
+        if (!ReadBoundedCurveExact(persisted.ownerState.owner, capture)
+            || !capture.record.owner.IsEqual(owner)
+            || !capture.record.label.IsEqual(recordLabel)
+            || capture.record.current.IsNull()
+            || !capture.record.current.IsEqual(XCAFDoc_ShapeTool::GetShape(owner))) {
+            capture = {}; return Standard_False;
+        }
+        myExactIdentityReservations.erase(reservation);
+        return Standard_True;
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageBoundedCurveReplacement(
+    core3d::native_opening::CommandLease& lease,
+    const OcctBoundedCurveCapture& opening,
+    const core3d::bounded_curve::PersistedValue& persisted,
+    const core3d::bounded_curve::DetachedWire& detached,
+    OcctBoundedCurveCapture& capture) noexcept {
+    capture = {};
+    try {
+        OCC_CATCH_SIGNALS
+        OcctBoundedCurveCapture current;
+        core3d::bounded_curve::DetachedWire rebuilt;
+        if (!ExactLeaseOwns(myOcafDoc, lease)
+            || opening.documentData != myOcafDoc->GetData()
+            || !ReadBoundedCurveExact(opening.persisted.ownerState.owner, current)
+            || !opening.IsEqual(current)
+            || !(persisted.ownerState.owner == opening.persisted.ownerState.owner)
+            || !core3d::bounded_curve::MatchesPersistedValue(detached, persisted)
+            || core3d::bounded_curve::BuildWire(persisted, rebuilt)
+                != core3d::bounded_curve::BuildRefusal::None
+            || !core3d::bounded_curve::MatchesPersistedValue(rebuilt, persisted))
+            return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        Handle(core3d::bounded_curve::Attribute) attribute;
+        if (shapes.IsNull() || !current.record.label.FindAttribute(
+                core3d::bounded_curve::AttributeID(), attribute)
+            || attribute.IsNull()) return Standard_False;
+        auto payload = std::make_shared<core3d::bounded_curve::Payload>();
+        payload->persisted = persisted;
+        payload->definitionBytes = rebuilt.canonicalDefinitionBytes;
+        payload->ownerBytes = rebuilt.canonicalOwnerBytes;
+        attribute->Backup();
+        attribute->value_ = payload;
+        shapes->SetShape(current.record.owner, rebuilt.wire);
+        TNaming_Builder(current.record.label).Select(rebuilt.wire, rebuilt.wire);
+        return ReadBoundedCurveExact(persisted.ownerState.owner, capture)
+            && capture.record.owner.IsEqual(opening.record.owner)
+            && capture.record.label.IsEqual(opening.record.label)
+            && capture.record.current.IsEqual(
+                XCAFDoc_ShapeTool::GetShape(opening.record.owner));
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctGeneralLoftCapture::IsEqual(
+    const OcctGeneralLoftCapture& other) const noexcept {
+    try {
+        std::string a, b;
+        return !documentData.IsNull() && documentData == other.documentData
+            && documentIdentifier == other.documentIdentifier
+            && ownerReceipt.IsEqual(other.ownerReceipt)
+            && !record.label.IsNull() && record.label.IsEqual(other.record.label)
+            && !record.owner.IsNull() && record.owner.IsEqual(other.record.owner)
+            && record.value && other.record.value
+            && record.value->bytes == other.record.value->bytes
+            && core3d::retained_part_boolean::ExactShapeBytes(solid, a)
+            && core3d::retained_part_boolean::ExactShapeBytes(other.solid, b) && a == b;
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+bool GeneralLoftIdentityMatches(const core3d::general_loft::Definition& definition,
+                                const std::string& document, const std::string& entity,
+                                const std::string& ownerDefinition) noexcept {
+    using core3d::retained_solid::UUIDText;
+    return UUIDText(definition.owner.document) == document
+        && UUIDText(definition.owner.entity) == entity
+        && UUIDText(definition.owner.definition) == ownerDefinition;
+}
+
+bool CompleteGeneralLoftCapture(const Handle(TDocStd_Document)& document,
+    const std::string& documentID,
+    const core3d::general_loft::persistence::Record& hinted,
+    const OcctDocument& owner, OcctGeneralLoftCapture& output) noexcept {
+    output = {};
+    try {
+        using namespace core3d::general_loft;
+        if (document.IsNull() || document->GetData().IsNull() || !hinted.value) return false;
+        std::vector<persistence::Record> records;
+        if (!persistence::ReadAll(document, records)) return false;
+        const persistence::Record* record = nullptr;
+        for (const auto& value : records)
+            if (value.value->definition.owner == hinted.value->definition.owner) {
+                if (record) return false; record = &value;
+            }
+        if (!record || record->owner.IsNull() || record->label.IsNull()
+            || record->owner.Data() != document->GetData()
+            || !record->label.Father().IsEqual(record->owner)) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull() || !XCAFDoc_ShapeTool::IsFree(record->owner)
+            || !XCAFDoc_ShapeTool::IsSimpleShape(record->owner)
+            || XCAFDoc_ShapeTool::IsAssembly(record->owner)) return false;
+        const TopoDS_Shape current = XCAFDoc_ShapeTool::GetShape(record->owner);
+        if (current.IsNull() || current.ShapeType() != TopAbs_SOLID
+            || !current.IsEqual(record->current)) return false;
+        std::atomic_bool cancelled{false};
+        const AdmittedSolid rebuilt = BuildAndProveDetached(record->value->definition, cancelled);
+        std::string actual, expected;
+        if (!rebuilt.admitted()
+            || !core3d::retained_part_boolean::ExactShapeBytes(current, actual)
+            || !core3d::retained_part_boolean::ExactShapeBytes(rebuilt.solid, expected)
+            || actual != expected) return false;
+        OcctExactLabelReceipt exact;
+        if (!owner.CaptureObjectVisibilityStateForLabel(record->owner, exact.visibility)
+            || !CaptureWholeObjectScalarAppearance(document, record->owner, exact.appearance))
+            return false;
+        exact.documentData = document->GetData(); exact.documentIdentifier = documentID;
+        output.documentData = document->GetData(); output.documentIdentifier = documentID;
+        output.ownerReceipt = std::move(exact); output.record = *record;
+        output.solid = TopoDS::Solid(current); return true;
+    } catch (...) { output = {}; return false; }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::ReadGeneralLoftExact(
+    const core3d::retained_recipe::OwnerKey& owner,
+    OcctGeneralLoftCapture& capture) const noexcept {
+    capture = {};
+    try {
+        std::vector<core3d::general_loft::persistence::Record> records;
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::retained_recipe::Valid(owner)
+            || !core3d::general_loft::persistence::ReadAll(myOcafDoc, records)) return Standard_False;
+        const core3d::general_loft::persistence::Record* match = nullptr;
+        for (const auto& record : records)
+            if (record.value->definition.owner == owner) {
+                if (match) return Standard_False; match = &record;
+            }
+        return match && CompleteGeneralLoftCapture(
+            myOcafDoc, DocumentIdentifier(), *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::CaptureGeneralLoftExact(
+    const std::string& entityIdentifier, const core3d::native_opening::Context& context,
+    OcctGeneralLoftCapture& capture) const noexcept {
+    capture = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || context.openingFence().document() != myOcafDoc
+            || context.openingFence().data() != myOcafDoc->GetData()) return Standard_False;
+        std::vector<core3d::general_loft::persistence::Record> records;
+        if (!core3d::general_loft::persistence::ReadAll(myOcafDoc, records)) return Standard_False;
+        const core3d::general_loft::persistence::Record* match = nullptr;
+        for (const auto& record : records)
+            if (EntityIdentifierForLabel(record.owner) == entityIdentifier) {
+                if (match) return Standard_False; match = &record;
+            }
+        return match && CompleteGeneralLoftCapture(
+            myOcafDoc, DocumentIdentifier(), *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::HasUnsupportedGeneralLoftDependent(
+    const OcctGeneralLoftCapture& capture) const noexcept {
+    try {
+        OcctGeneralLoftCapture current;
+        return !capture.record.value
+            || !ReadGeneralLoftExact(capture.record.value->definition.owner, current)
+            || !capture.IsEqual(current) || HasUnroutedRetainedDependent(capture.record.owner);
+    } catch (...) { return Standard_True; }
+}
+
+Standard_Boolean OcctDocument::StageGeneralLoftCreate(
+    core3d::native_opening::CommandLease& lease, const OcctIssuedLabelIdentity& identity,
+    const core3d::general_loft::Definition& definition,
+    const core3d::general_loft::AdmittedSolid& admitted, const std::string& requestedName,
+    OcctGeneralLoftCapture& capture) noexcept {
+    capture = {};
+    try {
+        const auto reservation = myExactIdentityReservations.find(identity.reservation_);
+        std::vector<std::uint8_t> bytes;
+        const TCollection_ExtendedString name(requestedName.c_str(), Standard_True);
+        if (!ExactLeaseOwns(myOcafDoc, lease) || !admitted.admitted()
+            || !core3d::general_loft::persistence::Encode(definition, bytes)
+            || !GeneralLoftIdentityMatches(definition, identity.documentIdentifier_,
+                identity.entityIdentifier_, identity.definitionIdentifier_)
+            || reservation == myExactIdentityReservations.end()
+            || !OcctObjectNameIsValid(name)) return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        const TDF_Label owner = shapes->NewShape(); shapes->SetShape(owner, admitted.solid);
+        TDataStd_AsciiString::Set(owner, EntityIdentifierAttributeID(),
+            TCollection_AsciiString(identity.entityIdentifier_.c_str()));
+        TDataStd_AsciiString::Set(owner, DefinitionIdentifierAttributeID(),
+            TCollection_AsciiString(identity.definitionIdentifier_.c_str()));
+        if (!SetGeometryRepresentationForLabel(owner, OcctGeometryRepresentation::BRep)) return Standard_False;
+        Handle(AIS_Shape) presentation = new AIS_Shape(admitted.solid);
+        if (!SaveObjectTransform(owner, presentation)) return Standard_False;
+        TDataStd_Name::Set(owner, name);
+        const TDF_Label label = owner.FindChild(
+            core3d::general_loft::persistence::RecordTag, Standard_True);
+        if (label.HasAttribute()) return Standard_False;
+        auto payload = std::make_shared<core3d::general_loft::persistence::Payload>();
+        payload->definition = definition; payload->bytes = bytes;
+        Handle(core3d::general_loft::persistence::Attribute) attribute =
+            new core3d::general_loft::persistence::Attribute();
+        attribute->value_ = payload; label.AddAttribute(attribute);
+        TNaming_Builder(label).Select(admitted.solid, admitted.solid);
+        if (!ReadGeneralLoftExact(definition.owner, capture)
+            || !capture.record.owner.IsEqual(owner) || !capture.record.label.IsEqual(label))
+            return Standard_False;
+        myExactIdentityReservations.erase(reservation); return Standard_True;
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageGeneralLoftReplacement(
+    core3d::native_opening::CommandLease& lease, const OcctGeneralLoftCapture& opening,
+    const core3d::general_loft::Definition& definition,
+    const core3d::general_loft::AdmittedSolid& admitted,
+    OcctGeneralLoftCapture& capture) noexcept {
+    capture = {};
+    try {
+        OcctGeneralLoftCapture current; std::vector<std::uint8_t> bytes;
+        if (!ExactLeaseOwns(myOcafDoc, lease) || !admitted.admitted()
+            || !ReadGeneralLoftExact(opening.record.value->definition.owner, current)
+            || !opening.IsEqual(current)
+            || !(definition.owner == opening.record.value->definition.owner)
+            || definition.feature != opening.record.value->definition.feature
+            || !core3d::general_loft::persistence::Encode(definition, bytes)) return Standard_False;
+        Handle(core3d::general_loft::persistence::Attribute) attribute;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull() || !current.record.label.FindAttribute(
+                core3d::general_loft::persistence::AttributeID(), attribute)
+            || attribute.IsNull()) return Standard_False;
+        auto payload = std::make_shared<core3d::general_loft::persistence::Payload>();
+        payload->definition = definition; payload->bytes = bytes;
+        attribute->Backup(); attribute->value_ = payload;
+        shapes->SetShape(current.record.owner, admitted.solid);
+        TNaming_Builder(current.record.label).Select(admitted.solid, admitted.solid);
+        return ReadGeneralLoftExact(definition.owner, capture)
+            && capture.record.owner.IsEqual(opening.record.owner)
+            && capture.record.label.IsEqual(opening.record.label);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+#if DEBUG
+namespace {
+#if TARGET_OS_IOS
+struct ExactLabelProbeContextRestorer final {
+    __strong EAGLContext *context = nil;
+    ~ExactLabelProbeContextRestorer() noexcept {
+        if (EAGLContext.currentContext != context)
+            (void)[EAGLContext setCurrentContext:context];
+    }
+};
+#endif
+
+struct ExactLabelProbeFixture final {
+    core3d::Core3DViewer viewer;
+    Handle(OcctDocument) owner;
+    TDF_Label sourceLabel;
+    OcctExactLabelReceipt source;
+    Handle(AIS_Shape) sourcePresentation;
+    bool injectSetupFailure = false;
+    bool injectionReached = false;
+    bool setupFailureRecognized = false;
+    bool setupCommandSettled = false;
+    bool cleanupSucceeded = true;
+#if TARGET_OS_IOS
+    __strong GLView *host = nil;
+#endif
+
+    ~ExactLabelProbeFixture() noexcept { shutdown(); }
+
+    bool perform(void (^work)(void)) noexcept {
+#if TARGET_OS_IOS
+        try {
+            return host != nil && work != nil
+                && [host debugPerformWithProbeFramebuffer:work];
+        } catch (const Standard_Failure& failure) {
+            NSLog(@"Exact-label probe wrapper failed: %.256s",
+                  failure.GetMessageString() ?: "Standard_Failure");
+            return false;
+        } catch (...) { return false; }
+#else
+        (void)work;
+        return false;
+#endif
+    }
+
+    void shutdown() noexcept {
+#if TARGET_OS_IOS
+        if (host == nil) return;
+        ExactLabelProbeContextRestorer restore{[EAGLContext currentContext]};
+        ExactLabelProbeFixture *fixture = this;
+        __block bool cleaned = false;
+        void (^cleanup)(void) = ^{
+            try {
+                if (!fixture->owner.IsNull()
+                    && !fixture->owner->Document().IsNull()
+                    && fixture->owner->Document()->HasOpenCommand())
+                    fixture->owner->Document()->AbortCommand();
+                fixture->viewer.release();
+                cleaned = true;
+            } catch (const Standard_Failure& failure) {
+                NSLog(@"Exact-label probe cleanup failed: %.256s",
+                      failure.GetMessageString() ?: "Standard_Failure");
+            } catch (...) {}
+        };
+        bool performed = perform(cleanup);
+        if (!performed && !cleaned) {
+            try { performed = [host performWithRenderingContext:cleanup]; }
+            catch (...) { performed = false; }
+        }
+        cleanupSucceeded = cleanupSucceeded && performed && cleaned;
+        sourcePresentation.Nullify();
+        owner.Nullify();
+        host = nil;
+#endif
+    }
+
+    bool initialize(bool shouldInjectSetupFailure = false) noexcept {
+#if !TARGET_OS_IOS
+        return false;
+#else
+        try {
+            ExactLabelProbeContextRestorer restore{[EAGLContext currentContext]};
+            injectSetupFailure = shouldInjectSetupFailure;
+            injectionReached = false;
+            setupFailureRecognized = false;
+            setupCommandSettled = false;
+            host = [[GLView alloc] initWithFrame:CGRectMake(0.0, 0.0, 64.0, 64.0)];
+            if (host == nil || host->myGLContext == nil
+                || ![host debugPrepareProbeFramebuffer]) {
+                host = nil;
+                return false;
+            }
+            if (![EAGLContext setCurrentContext:restore.context]) {
+                shutdown();
+                return false;
+            }
+
+            __block bool initialized = false;
+            ExactLabelProbeFixture *fixture = this;
+            const bool performed = perform(^{
+                if (!fixture->viewer.InitViewer(fixture->host)
+                    || fixture->viewer.getObjectInteractor() == nullptr
+                    || fixture->viewer.getShapeInteractor() == nullptr
+                    || fixture->viewer.AisContext().IsNull()
+                    || fixture->viewer.ActiveView().IsNull()) return;
+                fixture->owner = fixture->viewer.getDocument();
+                if (fixture->owner.IsNull()
+                    || fixture->owner->Document().IsNull()
+                    || fixture->owner->Document()->HasOpenCommand()) return;
+                fixture->owner->Document()->NewCommand();
+                if (fixture->injectSetupFailure) {
+                    fixture->injectionReached = true;
+                    throw Aspect_GraphicDeviceDefinitionError(
+                        "Injected exact-label probe setup failure");
+                }
+                fixture->sourcePresentation = new AIS_Shape(
+                    BRepPrimAPI_MakeBox(10.0, 11.0, 12.0).Shape());
+                fixture->sourceLabel = fixture->owner->AddShape(
+                    fixture->sourcePresentation,
+                    OcctGeometryRepresentation::BRep);
+                const TCollection_ExtendedString name("R179 exact source");
+                if (fixture->sourceLabel.IsNull()
+                    || !fixture->owner->SetObjectNameForLabel(
+                        fixture->sourceLabel, name)) {
+                    fixture->owner->Document()->AbortCommand();
+                    return;
+                }
+                fixture->owner->SaveObjectMaterial(
+                    fixture->sourceLabel, Graphic3d_NameOfMaterial_Brass);
+                if (!fixture->owner->Document()->CommitCommand()) return;
+                fixture->owner->Document()->ClearUndos();
+                fixture->owner->NotifyChanges();
+
+                const auto context = fixture->viewer.AisContext();
+                context->Display(fixture->sourcePresentation,
+                    AIS_Shaded, 0, Standard_False);
+                const auto shapeInteractor =
+                    fixture->viewer.getShapeInteractor();
+                if (!context->IsDisplayed(fixture->sourcePresentation)
+                    || shapeInteractor->setSelectionMode(
+                        core3d::ShapeSelectionMode::WholeShape)
+                        != core3d::ShapeSelectionModeChangeResult::Succeeded
+                    || !shapeInteractor->selectionModeAuthorityIsExact()) return;
+                context->UpdateCurrentViewer();
+                fixture->viewer.ActiveView()->FitAll();
+
+                OcctExactLabelReceipt presentedSource;
+                if (!fixture->owner->CaptureExactFreeLabel(
+                        fixture->sourceLabel, presentedSource)) return;
+                const auto snapshot =
+                    fixture->viewer.captureSceneSnapshot(64, 64);
+                if (!snapshot
+                    || snapshot->publicationSourceIdentifier.empty()
+                    || std::none_of(snapshot->instances.begin(),
+                        snapshot->instances.end(),
+                        [&](const core3d::scene::InstanceSnapshot& instance) {
+                            return instance.entityIdentifier
+                                == presentedSource.visibility.object.object
+                                    .entityIdentifier;
+                        })) return;
+                const auto shapes = XCAFDoc_DocumentTool::ShapeTool(
+                    fixture->owner->Document()->Main());
+                TDF_LabelSequence freeLabels;
+                if (shapes.IsNull()) return;
+                shapes->GetFreeShapes(freeLabels);
+                if (freeLabels.Length() != 1
+                    || fixture->owner->Document()->HasOpenCommand()
+                    || fixture->owner->Document()->GetAvailableUndos() != 0
+                    || fixture->owner->Document()->GetAvailableRedos() != 0
+                    || !fixture->owner->CaptureExactFreeLabel(
+                        fixture->sourceLabel, fixture->source)) return;
+                initialized = true;
+            });
+            if (!performed || !initialized) {
+                setupFailureRecognized = injectSetupFailure && injectionReached
+                    && !performed;
+                ExactLabelProbeFixture *failedFixture = this;
+                if (!perform(^{
+                    if (!failedFixture->owner.IsNull()
+                        && !failedFixture->owner->Document().IsNull()
+                        && failedFixture->owner->Document()->HasOpenCommand()) {
+                        failedFixture->owner->Document()->AbortCommand();
+                    }
+                    failedFixture->setupCommandSettled =
+                        !failedFixture->owner.IsNull()
+                        && !failedFixture->owner->Document().IsNull()
+                        && !failedFixture->owner->Document()->HasOpenCommand();
+                })) cleanupSucceeded = false;
+                return false;
+            }
+            return initialized;
+        } catch (const Standard_Failure& failure) {
+            NSLog(@"Exact-label probe initialization failed: %.256s",
+                  failure.GetMessageString() ?: "Standard_Failure");
+            try {
+                if (!owner.IsNull() && !owner->Document().IsNull()
+                    && owner->Document()->HasOpenCommand())
+                    owner->Document()->AbortCommand();
+            } catch (...) {}
+            return false;
+        } catch (...) { return false; }
+#endif
+    }
+
+    OcctPreparedLabelClone clone(double extent = 7.0) const {
+        OcctPreparedLabelClone result;
+        result.source = source;
+        result.detachedShape = BRepPrimAPI_MakeBox(extent, extent + 1.0,
+                                                   extent + 2.0).Shape();
+        result.representation = OcctGeometryRepresentation::BRep;
+        return result;
+    }
+
+    std::shared_ptr<core3d::native_opening::Context> context() noexcept {
+        __block std::shared_ptr<core3d::native_opening::Context> result;
+        ExactLabelProbeFixture *fixture = this;
+        if (!perform(^{
+            result = fixture->viewer.captureNativeOpeningContext(64, 64,
+                {fixture->source.visibility.object.object.entityIdentifier});
+        })) return {};
+        return result;
+    }
+};
+
+struct ExactLabelProbeLeaseGuard final {
+    std::shared_ptr<core3d::native_opening::CommandLease> lease;
+    ~ExactLabelProbeLeaseGuard() noexcept {
+        if (lease && lease->ownsOpenCommand()) (void)lease->abort();
+    }
+};
+
+Standard_Integer ExactFreeLabelCount(const Handle(OcctDocument)& owner) noexcept {
+    try {
+        if (owner.IsNull() || owner->Document().IsNull()) return -1;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(
+            owner->Document()->Main());
+        if (shapes.IsNull()) return -1;
+        TDF_LabelSequence labels; shapes->GetFreeShapes(labels);
+        return labels.Length();
+    } catch (...) { return -1; }
+}
+
+std::uint64_t RunExactLabelProbeScenario(
+    ExactLabelProbeFixture& fixture, const std::int32_t scenario) {
+    std::uint64_t bits = 1ULL;
+
+    if (scenario == 0) {
+        std::vector<OcctIssuedLabelIdentity> issued;
+        if (!fixture.owner->ReserveExactLabelIdentities(1, {}, issued)
+            || issued.size() != 1) return bits;
+        bits |= 2ULL;
+        const auto context = fixture.context();
+        if (!context) return bits;
+        const auto lease = context->beginCommandLease(
+            context->openingFence(), 64, 64);
+        if (!lease) return bits;
+        ExactLabelProbeLeaseGuard settle{lease};
+        OcctExactLabelReceipt staged;
+        if (!fixture.owner->StageCreateExactFreeLabel(
+                *lease, issued.front(), fixture.clone(), staged)
+            || staged.visibility.object.object.entityIdentifier
+                != issued.front().EntityIdentifier()
+            || staged.visibility.object.object.definitionIdentifier
+                != issued.front().DefinitionIdentifier()) return bits;
+        bits |= 4ULL;
+        if (!lease->commit()) return bits;
+        bits |= 8ULL;
+        OcctExactLabelReceipt read;
+        if (fixture.owner->ReadExactFreeLabel(staged, read)
+            && read.visibility.object.object.entityIdentifier
+                == issued.front().EntityIdentifier()
+            && read.visibility.object.object.definitionIdentifier
+                == issued.front().DefinitionIdentifier()) bits |= 16ULL;
+        return bits;
+    }
+
+    if (scenario == 1) {
+        ExactLabelProbeFixture foreign;
+        std::vector<OcctIssuedLabelIdentity> issued, foreignIssued;
+        if (!foreign.initialize()
+            || !fixture.owner->ReserveExactLabelIdentities(1, {}, issued)
+            || !foreign.owner->ReserveExactLabelIdentities(1, {}, foreignIssued))
+            return bits;
+        const auto context = fixture.context();
+        if (!context) return bits;
+        const auto lease = context->beginCommandLease(
+            context->openingFence(), 64, 64);
+        if (!lease) return bits;
+        ExactLabelProbeLeaseGuard settle{lease};
+        const int undoCount = fixture.owner->Document()->GetAvailableUndos();
+        OcctExactLabelReceipt staged;
+        if (!fixture.owner->StageCreateExactFreeLabel(
+                *lease, issued.front(), fixture.clone(), staged)) return bits;
+        bits |= 2ULL;
+        const Standard_Integer afterFirst = ExactFreeLabelCount(fixture.owner);
+        OcctExactLabelReceipt rejected;
+        if (!fixture.owner->StageCreateExactFreeLabel(
+                *lease, issued.front(), fixture.clone(8.0), rejected)
+            && ExactFreeLabelCount(fixture.owner) == afterFirst
+            && fixture.owner->Document()->GetAvailableUndos() == undoCount)
+            bits |= 4ULL;
+        const int foreignUndos = foreign.owner->Document()->GetAvailableUndos();
+        if (!foreign.owner->StageCreateExactFreeLabel(
+                *lease, foreignIssued.front(), foreign.clone(), rejected)
+            && ExactFreeLabelCount(foreign.owner) == 1
+            && foreign.owner->Document()->GetAvailableUndos() == foreignUndos)
+            bits |= 8ULL;
+        if (lease->abort()) {
+            OcctExactLabelReceipt source, absent;
+            if (fixture.owner->ReadExactFreeLabel(fixture.source, source)
+                && !fixture.owner->CaptureExactFreeLabel(
+                    staged.visibility.object.object.label, absent)
+                && fixture.owner->Document()->GetAvailableUndos() == undoCount)
+                bits |= 16ULL;
+        }
+        return bits;
+    }
+
+    if (scenario == 3) {
+        // A geometry replacement promises to retain the validated expected
+        // receipt's exact presentation, including the optional transform
+        // attribute representation. Cover all-absent identity, partially
+        // present and explicit nonidentity transforms through a real
+        // lease/label replacement, then abort/undo/redo comparisons.
+        using PresentArray = std::array<Standard_Boolean, 8>;
+        using ScalarArray = std::array<Standard_Real, 8>;
+        const PresentArray allAbsent{{Standard_False, Standard_False,
+            Standard_False, Standard_False, Standard_False, Standard_False,
+            Standard_False, Standard_False}};
+        const ScalarArray identity{{0, 0, 0, 0, 0, 0, 1, 1}};
+        const auto rewriteTransform = [&](const PresentArray& present,
+                                          const ScalarArray& scalars) {
+            fixture.owner->Document()->NewCommand();
+            for (Standard_Integer tag = 1; tag <= 8; ++tag) {
+                if (present[tag - 1]) {
+                    TDataStd_Real::Set(fixture.sourceLabel.FindChild(tag),
+                                       scalars[tag - 1]);
+                } else {
+                    const TDF_Label child =
+                        fixture.sourceLabel.FindChild(tag, Standard_False);
+                    if (!child.IsNull())
+                        child.ForgetAttribute(TDataStd_Real::GetID());
+                }
+            }
+            if (!fixture.owner->Document()->CommitCommand()) return false;
+            OcctExactLabelReceipt rewritten;
+            if (!fixture.owner->CaptureExactFreeLabel(
+                    fixture.sourceLabel, rewritten)
+                || rewritten.visibility.object.object.present != present
+                || rewritten.visibility.object.object.scalars != scalars)
+                return false;
+            gp_Trsf transform;
+            transform.SetRotation(gp_Quaternion(
+                scalars[3], scalars[4], scalars[5], scalars[6]));
+            transform.SetTranslationPart(gp_Vec(
+                scalars[0], scalars[1], scalars[2]));
+            transform.SetScaleFactor(scalars[7]);
+            fixture.sourcePresentation->SetLocalTransformation(transform);
+            const auto ais = fixture.viewer.AisContext();
+            ais->Redisplay(fixture.sourcePresentation, Standard_False);
+            ais->UpdateCurrentViewer();
+            return !ais.IsNull();
+        };
+        const auto replaceExactly = [&](double extent,
+                                        OcctExactLabelReceipt& expected,
+                                        OcctExactLabelReceipt& staged) {
+            if (!fixture.owner->CaptureExactFreeLabel(
+                    fixture.sourceLabel, expected)) return false;
+            const auto context = fixture.context();
+            if (!context) return false;
+            const auto lease = context->beginCommandLease(
+                context->openingFence(), 64, 64);
+            if (!lease) return false;
+            ExactLabelProbeLeaseGuard settle{lease};
+            auto clone = fixture.clone(extent);
+            // This positive control clones the same live label it replaces.
+            // The setup receipt predates the deliberate transform rewrite.
+            clone.source = expected;
+            if (!fixture.owner->StageReplaceExactFreeLabel(
+                    *lease, expected, clone, staged)) return false;
+            const auto& before = expected.visibility.object.object;
+            const auto& after = staged.visibility.object.object;
+            if (!after.shape.IsEqual(clone.detachedShape)
+                || !ExactReceiptPresentationPreserved(expected, staged)
+                || after.entityIdentifier != before.entityIdentifier
+                || after.definitionIdentifier != before.definitionIdentifier
+                || after.present != before.present
+                || after.scalars != before.scalars
+                || !lease->commit()) return false;
+            // Keep the displayed scene aligned with the committed document,
+            // the same evidence the owning viewer's post-edit publication
+            // reconciles for real openings.
+            OcctObjectTransformState committed;
+            if (!fixture.owner->CaptureObjectTransformStateForLabel(
+                    fixture.sourceLabel, committed)) return false;
+            fixture.sourcePresentation->SetShape(committed.shape);
+            fixture.sourcePresentation->SetLocalTransformation(
+                committed.transform);
+            const auto ais = fixture.viewer.AisContext();
+            ais->Redisplay(fixture.sourcePresentation, Standard_False);
+            ais->UpdateCurrentViewer();
+            return true;
+        };
+        const auto undoRedoExact = [&](const OcctExactLabelReceipt& expected,
+                                       const OcctExactLabelReceipt& staged) {
+            fixture.owner->Document()->Undo();
+            OcctExactLabelReceipt undone;
+            if (!fixture.owner->ReadExactFreeLabel(expected, undone)
+                || !undone.IsEqual(expected)) return false;
+            fixture.owner->Document()->Redo();
+            OcctExactLabelReceipt redone;
+            return fixture.owner->ReadExactFreeLabel(staged, redone)
+                && redone.IsEqual(staged);
+        };
+        OcctExactLabelReceipt expectedA, stagedA;
+        if (!rewriteTransform(allAbsent, identity)
+            || !replaceExactly(7.0, expectedA, stagedA)) return bits;
+        bits |= 2ULL;
+        if (!undoRedoExact(expectedA, stagedA)) return bits;
+        bits |= 4ULL;
+        PresentArray partial = allAbsent;
+        partial[0] = partial[1] = partial[2] = Standard_True;
+        const ScalarArray translation{{5, 6, 7, 0, 0, 0, 1, 1}};
+        OcctExactLabelReceipt expectedB, stagedB;
+        if (!rewriteTransform(partial, translation)
+            || !replaceExactly(8.0, expectedB, stagedB)) return bits;
+        bits |= 8ULL;
+        const PresentArray allPresent{{Standard_True, Standard_True,
+            Standard_True, Standard_True, Standard_True, Standard_True,
+            Standard_True, Standard_True}};
+        const ScalarArray rotated{{1, 2, 3, 0, 0,
+            0.7071067811865476, 0.7071067811865476, 2}};
+        OcctExactLabelReceipt expectedC, stagedC;
+        if (!rewriteTransform(allPresent, rotated)
+            || !replaceExactly(9.0, expectedC, stagedC)
+            || !undoRedoExact(expectedC, stagedC)) return bits;
+        const int undoBeforeAbort =
+            fixture.owner->Document()->GetAvailableUndos();
+        {
+            const auto context = fixture.context();
+            if (!context) return bits;
+            const auto lease = context->beginCommandLease(
+                context->openingFence(), 64, 64);
+            if (!lease) return bits;
+            ExactLabelProbeLeaseGuard settle{lease};
+            OcctExactLabelReceipt refused;
+            auto clone = fixture.clone(11.0);
+            clone.source = stagedC;
+            if (!fixture.owner->StageReplaceExactFreeLabel(
+                    *lease, stagedC, clone, refused)
+                || !lease->abort()) return bits;
+        }
+        OcctExactLabelReceipt restored;
+        if (fixture.owner->ReadExactFreeLabel(stagedC, restored)
+            && restored.IsEqual(stagedC)
+            && fixture.owner->Document()->GetAvailableUndos() == undoBeforeAbort)
+            bits |= 16ULL;
+        return bits;
+    }
+
+    const int undoCount = fixture.owner->Document()->GetAvailableUndos();
+    const auto context = fixture.context();
+    if (!context) return bits;
+    const auto lease = context->beginCommandLease(
+        context->openingFence(), 64, 64);
+    if (!lease) return bits;
+    ExactLabelProbeLeaseGuard settle{lease};
+    if (fixture.owner->StageRemoveExactFreeLabel(*lease, fixture.source)) {
+        OcctExactLabelReceipt absent;
+        if (!fixture.owner->CaptureExactFreeLabel(fixture.sourceLabel, absent))
+            bits |= 2ULL;
+    } else return bits;
+    if (!lease->abort()) return bits;
+    bits |= 4ULL;
+    OcctExactLabelReceipt restored;
+    if (fixture.owner->ReadExactFreeLabel(fixture.source, restored)
+        && restored.IsEqual(fixture.source)) bits |= 8ULL;
+    if (fixture.owner->Document()->GetAvailableUndos() == undoCount
+        && fixture.owner->Document()->GetAvailableRedos() == 0) bits |= 16ULL;
+    return bits;
+}
+
+std::uint64_t RunBoundedCurveMetadataBoundaryProbe(
+    ExactLabelProbeFixture& fixture) {
+    std::uint64_t bits = 0;
+    const int undoCount = fixture.owner->Document()->GetAvailableUndos();
+    std::vector<OcctIssuedLabelIdentity> issued;
+    const auto context = fixture.context();
+    if (!context
+        || !fixture.owner->ReserveExactLabelIdentities(1, {}, issued)
+        || issued.size() != 1) return bits;
+    const auto lease = context->beginCommandLease(
+        context->openingFence(), 64, 64);
+    if (!lease) return bits;
+    ExactLabelProbeLeaseGuard settle{lease};
+    bits |= 1ULL;
+
+    auto persisted = core3d::native_opening::debug::wire_probe::Fixture();
+    if (!core3d::receipt::ParseUUID(fixture.owner->DocumentIdentifier(),
+            persisted.ownerState.owner.document)
+        || !core3d::receipt::ParseUUID(issued.front().EntityIdentifier(),
+            persisted.ownerState.owner.entity)
+        || !core3d::receipt::ParseUUID(issued.front().DefinitionIdentifier(),
+            persisted.ownerState.owner.definition)
+        || !core3d::native_opening::debug::wire_probe::Rehash(persisted))
+        return bits;
+    core3d::bounded_curve::DetachedWire detached;
+    if (core3d::bounded_curve::BuildWire(persisted, detached)
+            != core3d::bounded_curve::BuildRefusal::None) return bits;
+    OcctBoundedCurveCapture staged;
+    if (!fixture.owner->StageBoundedCurveCreate(
+            *lease, issued.front(), persisted, detached,
+            "R179 C1 metadata boundary", staged)) return bits;
+    OcctBoundedCurveCapture read;
+    if (!fixture.owner->ReadBoundedCurveExact(
+            persisted.ownerState.owner, read)
+        || !staged.IsEqual(read)
+        || !staged.ownerReceipt.appearance.IsEqual(
+            read.ownerReceipt.appearance)) return bits;
+    bits |= 2ULL;
+
+    const TDF_Label extra = staged.record.owner.FindChild(
+        core3d::bounded_curve::MinimumRecordTag + 1, Standard_True);
+    const TopoDS_Shape foreign = BRepPrimAPI_MakeBox(2.0, 3.0, 4.0).Shape();
+    TNaming_Builder(extra).Select(foreign, foreign);
+    OcctScalarAppearanceState meshAppearance;
+    if (fixture.owner->ReadBoundedCurveExact(
+            persisted.ownerState.owner, read)
+        || fixture.owner->CaptureScalarAppearanceForMeshCopy(
+            staged.record.owner, meshAppearance)) return bits;
+    bits |= 4ULL;
+
+    extra.ForgetAttribute(TNaming_NamedShape::GetID());
+    staged.record.label.ForgetAttribute(TNaming_NamedShape::GetID());
+    if (fixture.owner->ReadBoundedCurveExact(
+            persisted.ownerState.owner, read)) return bits;
+    TNaming_Builder(staged.record.label).Select(staged.wire, staged.wire);
+    if (!fixture.owner->ReadBoundedCurveExact(
+            persisted.ownerState.owner, read)
+        || !staged.IsEqual(read)) return bits;
+    bits |= 8ULL;
+
+    if (!lease->abort()) return bits;
+    OcctExactLabelReceipt restored;
+    OcctBoundedCurveCapture absent;
+    if (fixture.owner->ReadExactFreeLabel(fixture.source, restored)
+        && restored.IsEqual(fixture.source)
+        && !fixture.owner->ReadBoundedCurveExact(
+            persisted.ownerState.owner, absent)
+        && fixture.owner->Document()->GetAvailableUndos() == undoCount
+        && !fixture.owner->Document()->HasOpenCommand()) bits |= 16ULL;
+    return bits;
+}
+} // namespace
+
+extern "C" bool
+core3d::native_opening::debug::Core3DDebugExactLabelProbeSetupFailureIsContained()
+noexcept {
+    if (![NSThread isMainThread]) return false;
+    EAGLContext *callerContext = EAGLContext.currentContext;
+    try {
+        ExactLabelProbeFixture fixture;
+        if (fixture.initialize(true)) return false;
+        const bool recognized = fixture.injectionReached
+            && fixture.setupFailureRecognized;
+        fixture.shutdown();
+        fixture.shutdown();
+        return recognized && fixture.setupCommandSettled
+            && fixture.cleanupSucceeded && fixture.host == nil
+            && fixture.owner.IsNull() && fixture.sourcePresentation.IsNull()
+            && EAGLContext.currentContext == callerContext;
+    } catch (...) { return false; }
+}
+
+extern "C" std::uint64_t
+core3d::native_opening::debug::Core3DDebugExactLabelProbe(
+    std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return 0;
+    try {
+        ExactLabelProbeFixture fixture;
+        if (!fixture.initialize()) return 0;
+        __block std::uint64_t bits = 0;
+        ExactLabelProbeFixture *fixturePointer = &fixture;
+        if (!fixture.perform(^{
+            bits = RunExactLabelProbeScenario(*fixturePointer, scenario);
+        })) return 0;
+        return bits;
+    } catch (...) { return 0; }
+}
+
+extern "C" std::uint64_t Core3DDebugBoundedCurveMetadataBoundaryProbe()
+noexcept {
+    if (![NSThread isMainThread]) return 0;
+    try {
+        ExactLabelProbeFixture fixture;
+        if (!fixture.initialize()) return 0;
+        __block std::uint64_t bits = 0;
+        ExactLabelProbeFixture *fixturePointer = &fixture;
+        if (!fixture.perform(^{
+            bits = RunBoundedCurveMetadataBoundaryProbe(*fixturePointer);
+        })) return 0;
+        return bits;
+    } catch (...) { return 0; }
+}
+#endif
+
+#if DEBUG
+namespace {
+bool R179ParseUUID(const std::string& text,
+                   core3d::pattern::UUID& output) noexcept {
+    output.fill(0);
+    if (text.size() != 36 || !Standard_GUID::CheckGUIDFormat(text.c_str())) return false;
+    std::size_t index = 0; int high = -1;
+    const auto nibble = [](char value) noexcept -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        return -1;
+    };
+    for (char value : text) {
+        if (value == '-') continue;
+        const int next = nibble(value); if (next < 0) return false;
+        if (high < 0) high = next;
+        else {
+            if (index >= output.size()) return false;
+            output[index++] = std::uint8_t((high << 4) | next); high = -1;
+        }
+    }
+    return index == output.size() && high < 0
+        && core3d::retained_recipe::Nonzero(output);
+}
+
+struct R179PatternAuthorityFixture final {
+    Handle(AIS_Shape) clonePresentation;
+    ExactLabelProbeFixture exact;
+    TDF_Label cloneLabel;
+    std::string sourceFeature, cloneFeature;
+    std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot> snapshot;
+
+    bool initialize(bool withRecipes) noexcept {
+        try {
+            if (!exact.initialize()) return false;
+            std::vector<OcctIssuedLabelIdentity> issued;
+            if (!exact.owner->ReserveExactLabelIdentities(1, {}, issued)
+                || issued.size() != 1) return false;
+            const auto context = exact.context();
+            if (!context) return false;
+            const auto lease = context->beginCommandLease(
+                context->openingFence(), 64, 64);
+            if (!lease) return false;
+            OcctExactLabelReceipt cloneReceipt;
+            if (!exact.owner->StageCreateExactFreeLabel(
+                    *lease, issued.front(), exact.clone(), cloneReceipt)) return false;
+            cloneLabel = cloneReceipt.visibility.object.object.label;
+            sourceFeature = NewIdentifier(); cloneFeature = NewIdentifier();
+            if (withRecipes) {
+                const auto definition = core3d::planar_sweep::probe::Fixture(4, 0.001);
+                if (!core3d::sweep_persistence::Stage(exact.owner->Document(),
+                        exact.sourceLabel, definition, sourceFeature)
+                    || !core3d::sweep_persistence::Stage(exact.owner->Document(),
+                        cloneLabel, definition, cloneFeature)) return false;
+            }
+
+            core3d::pattern::Definition definition;
+            core3d::pattern::UUID cloneEntity{};
+            if (!R179ParseUUID(exact.owner->DocumentIdentifier(),
+                    definition.owner.document)
+                || !R179ParseUUID(NewIdentifier(), definition.owner.entity)
+                || !R179ParseUUID(NewIdentifier(), definition.owner.definition)
+                || !R179ParseUUID(NewIdentifier(), definition.feature)
+                || !R179ParseUUID(exact.owner->DocumentIdentifier(),
+                    definition.source.document)
+                || !R179ParseUUID(
+                    exact.source.visibility.object.object.entityIdentifier,
+                    definition.source.entity)
+                || !R179ParseUUID(
+                    exact.source.visibility.object.object.definitionIdentifier,
+                    definition.source.definition)
+                || !R179ParseUUID(withRecipes ? sourceFeature : NewIdentifier(),
+                    definition.source.sourceFeature)
+                || !R179ParseUUID(issued.front().EntityIdentifier(), cloneEntity))
+                return false;
+            definition.kind = core3d::pattern::Kind::Linear;
+            definition.rowCount = 1; definition.columnCount = 2;
+            definition.columnAxis = core3d::pattern::Axis::X;
+            definition.rowAxis = core3d::pattern::Axis::Y;
+            definition.rowSpacing = 0; definition.columnSpacing = 20;
+            definition.issuance.nextLocalID = 1;
+            bool issuedClone = false;
+            if (!core3d::pattern::Reconcile(definition, 1, 2,
+                    [&](core3d::pattern::UUID& value) {
+                        if (issuedClone) return false;
+                        issuedClone = true; value = cloneEntity; return true;
+                    }) || !issuedClone) return false;
+            core3d::pattern::Record record;
+            if (!core3d::pattern::Stage(exact.owner->Document(), definition, record)
+                || !lease->commit()) return false;
+            exact.owner->NotifyChanges();
+            return exact.owner->CapturePatternAllLabelSnapshot(
+                issued.front().EntityIdentifier(), snapshot) && snapshot;
+        } catch (...) {
+            try {
+                if (!exact.owner.IsNull() && !exact.owner->Document().IsNull()
+                    && exact.owner->Document()->HasOpenCommand())
+                    exact.owner->Document()->AbortCommand();
+            } catch (...) {}
+            return false;
+        }
+    }
+};
+} // namespace
+
+extern "C" __attribute__((visibility("default"))) std::uint64_t
+Core3DDebugPatternAllLabelProbe(std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 2) return 0;
+    try {
+        using namespace core3d;
+        std::uint64_t bits = 0;
+        R179PatternAuthorityFixture fixture;
+        if (!fixture.initialize(scenario != 0)) return bits;
+        bits |= 1ULL;
+        if (scenario == 0) {
+            std::shared_ptr<const pattern_owner::AllLabelSnapshot> current;
+            if (!fixture.exact.owner->ReadPatternAllLabelSnapshot(
+                    *fixture.snapshot, current) || !current
+                || current->members.size() != 2
+                || !std::holds_alternative<pattern_owner::D2Coordinate>(
+                    current->members.back().key)
+                || current->measured.recordBytes == 0
+                || current->measured.shapeBytes == 0
+                || current->measured.topologyNodes == 0) return bits;
+            bits |= 2ULL;
+            auto recipeDrift = *current;
+            recipeDrift.members.back().recipe.family =
+                pattern_recipe_clone::Family::Sweep;
+            if (!pattern_owner::IsExactlyEqual(*current, recipeDrift)) bits |= 4ULL;
+            auto appearanceDrift = *current;
+            appearanceDrift.members.back().receipt.appearance.legacyPresent[0] =
+                !appearanceDrift.members.back().receipt.appearance.legacyPresent[0];
+            if (!pattern_owner::IsExactlyEqual(*current, appearanceDrift)) bits |= 8ULL;
+            auto shapeAndKeyDrift = *current;
+            shapeAndKeyDrift.members.back().shapeBytes.push_back('\0');
+            shapeAndKeyDrift.members.back().key = pattern_owner::D3Ordinal{1};
+            if (!pattern_owner::IsExactlyEqual(*current, shapeAndKeyDrift)) bits |= 16ULL;
+            return bits;
+        }
+
+        pattern_recipe_clone::Source source, clone;
+        if (!pattern_recipe_clone::Capture(fixture.exact.owner->Document(),
+                fixture.exact.sourceLabel, source)
+            || !pattern_recipe_clone::Capture(fixture.exact.owner->Document(),
+                fixture.cloneLabel, clone)) return bits;
+        bits |= 2ULL;
+        if (scenario == 2) {
+            pattern_recipe_clone::Source unsupportedSource = source;
+            pattern_recipe_clone::Source unsupportedClone = clone;
+            unsupportedSource.family = pattern_recipe_clone::Family::AnalyticBoolean;
+            unsupportedClone.family = pattern_recipe_clone::Family::AnalyticBoolean;
+            pattern_recipe_clone::Prepared rejected;
+            const TopoDS_Shape candidate = BRepPrimAPI_MakeBox(9, 10, 11).Shape();
+            if (!pattern_recipe_clone::PrepareReplacement(unsupportedSource,
+                    unsupportedClone, candidate, std::nullopt, rejected)) bits |= 4ULL;
+            std::shared_ptr<const pattern_owner::AllLabelSnapshot> current;
+            if (!fixture.exact.owner->Document()->HasOpenCommand()
+                && fixture.exact.owner->ReadPatternAllLabelSnapshot(
+                    *fixture.snapshot, current) && current) bits |= 8ULL;
+            pattern_recipe_clone::Source sourceAfter, cloneAfter;
+            if (pattern_recipe_clone::Capture(fixture.exact.owner->Document(),
+                    fixture.exact.sourceLabel, sourceAfter)
+                && pattern_recipe_clone::Capture(fixture.exact.owner->Document(),
+                    fixture.cloneLabel, cloneAfter)
+                && pattern_recipe_clone::IsEqual(source, sourceAfter)
+                && pattern_recipe_clone::IsEqual(clone, cloneAfter)) bits |= 16ULL;
+            return bits;
+        }
+
+        auto updatedDefinition = source.sweep.definition;
+        updatedDefinition.radius *= 0.9;
+        updatedDefinition.endRadius = updatedDefinition.radius;
+        auto document = fixture.exact.owner->Document();
+        document->NewCommand();
+        if (!document->HasOpenCommand()
+            || !sweep_persistence::Stage(document, fixture.exact.sourceLabel,
+                updatedDefinition, source.sweep.identifier)) return bits;
+        pattern_recipe_clone::Source updatedSource;
+        if (!pattern_recipe_clone::Capture(document, fixture.exact.sourceLabel,
+                updatedSource)) return bits;
+        const TopoDS_Shape replacement = BRepPrimAPI_MakeBox(9, 10, 11).Shape();
+        pattern_recipe_clone::Prepared prepared;
+        if (!pattern_recipe_clone::PrepareReplacement(updatedSource, clone,
+                replacement, std::nullopt, prepared)) return bits;
+        bits |= 4ULL;
+        if (prepared.featureIdentifier != clone.sweep.identifier
+            || !pattern_recipe_clone::SameLocalIDs(
+                clone.sweep.definition, prepared.sweep)) return bits;
+        pattern_recipe_clone::Candidate staged;
+        const TDF_Label oldRecipeLabel = clone.sweep.label;
+        if (!pattern_recipe_clone::StageReplacement(document, updatedSource,
+                clone, fixture.cloneLabel, prepared, staged)
+            || staged.sweep.label.IsNull()
+            || !staged.sweep.label.IsEqual(oldRecipeLabel)
+            || staged.sweep.identifier != clone.sweep.identifier
+            || !pattern_recipe_clone::SameLocalIDs(
+                clone.sweep.definition, staged.sweep.definition)) return bits;
+        bits |= 8ULL;
+        if (!document->CommitCommand()) return bits;
+        pattern_recipe_clone::Source sourceAfter, cloneAfter;
+        std::shared_ptr<const pattern_owner::AllLabelSnapshot> current;
+        if (pattern_recipe_clone::Capture(document, fixture.exact.sourceLabel, sourceAfter)
+            && pattern_recipe_clone::Capture(document, fixture.cloneLabel, cloneAfter)
+            && cloneAfter.sweep.identifier == clone.sweep.identifier
+            && cloneAfter.sweep.label.IsEqual(oldRecipeLabel)
+            && pattern_recipe_clone::SameLocalIDs(
+                clone.sweep.definition, cloneAfter.sweep.definition)
+            && pattern_recipe_clone::IsEqual(updatedSource, sourceAfter)
+            && fixture.exact.owner->CapturePatternAllLabelSnapshot(
+                fixture.snapshot->members.back().receipt.visibility.object.object.entityIdentifier,
+                current) && current
+            && current->members.back().receipt.visibility.object.object.entityIdentifier
+                == fixture.snapshot->members.back().receipt.visibility.object.object.entityIdentifier
+            && current->members.back().receipt.visibility.object.object.definitionIdentifier
+                == fixture.snapshot->members.back().receipt.visibility.object.object.definitionIdentifier
+            && current->members.back().receipt.appearance.IsEqual(
+                fixture.snapshot->members.back().receipt.appearance)
+            && current->members.back().featureIdentifier
+                == fixture.snapshot->members.back().featureIdentifier
+            && current->members.back().localIdentifier
+                == fixture.snapshot->members.back().localIdentifier) bits |= 16ULL;
+        return bits;
+    } catch (...) { return 0; }
+}
+
+namespace {
+using DependentReplay = core3d::dependent_replay::PreparedReplay;
+using DependentDependency = core3d::dependent_replay::Dependency;
+
+class R179ProbePreparedReplay final : public DependentReplay {
+public:
+    explicit R179ProbePreparedReplay(DependentDependency dependency)
+        : dependency_(std::move(dependency)) {}
+    core3d::dependent_replay::Family family() const noexcept override {
+        return dependency_.family;
+    }
+    core3d::dependent_replay::UUID feature() const noexcept override {
+        return dependency_.feature;
+    }
+    core3d::dependent_replay::UUID resultEntity() const noexcept override {
+        return dependency_.resultEntity;
+    }
+    std::size_t documentBytes() const noexcept override {
+        return dependency_.canonicalRecordBytes.size();
+    }
+    std::size_t memoryBytes() const noexcept override { return sizeof(*this); }
+    std::size_t topologyNodes() const noexcept override { return 1; }
+    bool openingCurrent(OcctDocument& owner) const noexcept override {
+        return readExact(owner, false);
+    }
+    bool stage(OcctDocument& owner,
+               core3d::native_opening::CommandLease&) const noexcept override {
+        try {
+            using namespace core3d;
+            if (dependency_.family == dependent_replay::Family::PatternD2) {
+                std::vector<pattern::Record> records;
+                if (!pattern::ReadAll(owner.Document(), records)) return false;
+                for (const auto& record : records) if (record.definition.feature == feature()) {
+                    pattern::Record staged; return pattern::Stage(
+                        owner.Document(), record.definition, staged);
+                }
+            } else if (dependency_.family == dependent_replay::Family::PathArrayD3) {
+                std::vector<path_array::Record> records;
+                if (!path_array::ReadAll(owner.Document(), records)) return false;
+                for (const auto& record : records) if (record.definition.feature == feature()) {
+                    path_array::Record staged; return path_array::Stage(
+                        owner.Document(), record.definition, staged);
+                }
+            } else {
+                std::vector<feature_pattern::Record> records;
+                if (!feature_pattern::ReadAll(owner.Document(), records)) return false;
+                for (const auto& record : records) if (record.definition.feature == feature()) {
+                    feature_pattern::Record staged; return feature_pattern::Stage(
+                        owner.Document(), record.definition, staged);
+                }
+            }
+        } catch (...) {}
+        return false;
+    }
+    bool read(OcctDocument& owner) const noexcept override {
+        return readExact(owner, true);
+    }
+private:
+    bool readExact(OcctDocument& owner, bool permitRecipeChange) const noexcept {
+        try {
+            using namespace core3d;
+            std::vector<std::uint8_t> bytes;
+            std::vector<dependent_replay::UUID> members;
+            TDF_Label label;
+            if (dependency_.family == dependent_replay::Family::PatternD2) {
+                std::vector<pattern::Record> records;
+                if (!pattern::ReadAll(owner.Document(), records)) return false;
+                for (const auto& record : records) if (record.definition.feature == feature()) {
+                    bytes = record.bytes; label = record.label;
+                    for (const auto& member : record.definition.members)
+                        members.push_back(member.identity);
+                }
+            } else if (dependency_.family == dependent_replay::Family::PathArrayD3) {
+                std::vector<path_array::Record> records;
+                if (!path_array::ReadAll(owner.Document(), records)) return false;
+                for (const auto& record : records) if (record.definition.feature == feature()) {
+                    bytes = record.bytes; label = record.label;
+                    for (const auto& member : record.definition.members)
+                        members.push_back(member.identity);
+                }
+            } else {
+                std::vector<feature_pattern::Record> records;
+                if (!feature_pattern::ReadAll(owner.Document(), records)) return false;
+                for (const auto& record : records) if (record.definition.feature == feature()) {
+                    bytes = record.bytes; label = record.label;
+                    for (const auto& member : record.definition.distribution.members)
+                        members.push_back(member.identity);
+                }
+            }
+            return !label.IsNull() && label.IsEqual(dependency_.recordLabel)
+                && members == dependency_.memberIdentities
+                && (permitRecipeChange || bytes == dependency_.canonicalRecordBytes);
+        } catch (...) { return false; }
+    }
+    DependentDependency dependency_;
+};
+
+class R179ProbePreparer final : public core3d::dependent_replay::Preparer {
+public:
+    bool reject = false;
+    core3d::dependent_replay::Refusal prepare(OcctDocument&,
+        const DependentDependency& dependency,
+        core3d::dependent_replay::Mutation,
+        std::shared_ptr<const DependentReplay>& output) noexcept override {
+        output.reset();
+        if (reject) return core3d::dependent_replay::Refusal::UnsupportedDescendant;
+        output = std::make_shared<R179ProbePreparedReplay>(dependency);
+        return core3d::dependent_replay::Refusal::None;
+    }
+};
+
+class R179ProbeSourceMutation final : public core3d::dependent_replay::SourceMutation {
+public:
+    bool stage(OcctDocument&,
+               core3d::native_opening::CommandLease&) noexcept override {
+        staged = true; return true;
+    }
+    bool staged = false;
+};
+
+bool R179StageThreeDependentFamilies(R179PatternAuthorityFixture& fixture) noexcept {
+    try {
+        using namespace core3d;
+        std::vector<pattern::Record> d2;
+        if (!pattern::ReadAll(fixture.exact.owner->Document(), d2)
+            || d2.size() != 1) return false;
+        OcctExactLabelReceipt clone;
+        if (!fixture.exact.owner->CaptureExactFreeLabel(fixture.cloneLabel, clone)) return false;
+        const pattern::Definition& seed = d2.front().definition;
+        path_array::Definition d3;
+        d3.owner.document = seed.owner.document;
+        if (!R179ParseUUID(clone.visibility.object.object.entityIdentifier, d3.owner.entity)
+            || !R179ParseUUID(clone.visibility.object.object.definitionIdentifier,
+                              d3.owner.definition)
+            || !R179ParseUUID(NewIdentifier(), d3.feature)) return false;
+        d3.source = seed.source;
+        d3.path.owner.document = seed.source.document;
+        d3.path.owner.entity = seed.source.entity;
+        d3.path.owner.definition = seed.source.definition;
+        if (!R179ParseUUID(NewIdentifier(), d3.path.feature)) return false;
+        d3.path.definitionRevision = 1;
+        d3.path.canonicalDefinitionDigest.fill(7);
+        d3.distribution.count = 2;
+        d3.issuance = seed.issuance;
+        d3.members = seed.members;
+        for (std::size_t index = 0; index < d3.members.size(); ++index) {
+            d3.members[index].coordinate.row = 0;
+            d3.members[index].coordinate.column = std::uint32_t(index);
+        }
+
+        feature_pattern::Definition d4;
+        d4.host = d3.owner;
+        if (!R179ParseUUID(NewIdentifier(), d4.feature)) return false;
+        d4.sourceCut = seed.source;
+        d4.sourceCutStepID = 1;
+        d4.metersPerUnit = .001;
+        d4.minimumHostLigamentMM = .002;
+        d4.expectedBoundarySectionsPerFeature = 2;
+        d4.distribution = seed;
+        d4.distribution.owner = d4.host;
+        d4.distribution.feature = d4.feature;
+        d4.distribution.source = d4.sourceCut;
+        if (!path_array::Valid(d3) || !feature_pattern::Valid(d4)) return false;
+
+        fixture.exact.owner->Document()->NewCommand();
+        path_array::Record d3Record; feature_pattern::Record d4Record;
+        if (!path_array::Stage(fixture.exact.owner->Document(), d3, d3Record)
+            || !feature_pattern::Stage(fixture.exact.owner->Document(), d4, d4Record)
+            || !fixture.exact.owner->Document()->CommitCommand()) return false;
+        fixture.exact.owner->NotifyChanges();
+
+        __block bool presentationReady = false;
+        R179PatternAuthorityFixture *fixturePointer = &fixture;
+        const bool performed = fixture.exact.perform(^{
+            OcctExactLabelReceipt cloneReceipt;
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(
+                fixturePointer->exact.owner->Document()->Main());
+            if (shapes.IsNull()
+                || !fixturePointer->exact.owner->CaptureExactFreeLabel(
+                    fixturePointer->cloneLabel, cloneReceipt)) return;
+            const TopoDS_Shape committedClone =
+                XCAFDoc_ShapeTool::GetShape(fixturePointer->cloneLabel);
+            if (committedClone.IsNull()) return;
+            fixturePointer->clonePresentation = new AIS_Shape(committedClone);
+            fixturePointer->clonePresentation->SetLocalTransformation(
+                cloneReceipt.visibility.object.object.transform);
+            const auto context = fixturePointer->exact.viewer.AisContext();
+            const auto shapeInteractor =
+                fixturePointer->exact.viewer.getShapeInteractor();
+            if (context.IsNull() || shapeInteractor == nullptr) return;
+            context->Display(fixturePointer->clonePresentation,
+                AIS_Shaded, 0, Standard_False);
+            if (!context->IsDisplayed(fixturePointer->clonePresentation)
+                || shapeInteractor->setSelectionMode(
+                    core3d::ShapeSelectionMode::WholeShape)
+                    != core3d::ShapeSelectionModeChangeResult::Succeeded
+                || !shapeInteractor->selectionModeAuthorityIsExact()) return;
+            context->UpdateCurrentViewer();
+            fixturePointer->exact.viewer.ActiveView()->FitAll();
+
+            const auto scene =
+                fixturePointer->exact.viewer.captureSceneSnapshot(64, 64);
+            if (!scene || scene->publicationSourceIdentifier.empty()) return;
+            const auto containsIdentity = [&](const std::string& identity) {
+                return std::any_of(scene->instances.begin(), scene->instances.end(),
+                    [&](const core3d::scene::InstanceSnapshot& instance) {
+                        return instance.entityIdentifier == identity;
+                    });
+            };
+            if (!containsIdentity(fixturePointer->exact.source.visibility
+                    .object.object.entityIdentifier)
+                || !containsIdentity(cloneReceipt.visibility.object.object
+                    .entityIdentifier)) return;
+
+            OcctExactLabelReceipt freshSource, checkedSource;
+            if (!fixturePointer->exact.owner->CaptureExactFreeLabel(
+                    fixturePointer->exact.sourceLabel, freshSource)
+                || freshSource.visibility.object.object.sweep.label.IsNull()
+                || freshSource.visibility.object.object.sweep.identifier
+                    != fixturePointer->sourceFeature
+                || !freshSource.visibility.object.object.sweep.IsCurrent(
+                    fixturePointer->exact.owner->Document(),
+                    fixturePointer->exact.sourceLabel)
+                || !fixturePointer->exact.owner->ReadExactFreeLabel(
+                    freshSource, checkedSource)
+                || !freshSource.IsEqual(checkedSource)) return;
+            fixturePointer->exact.source = std::move(freshSource);
+            presentationReady = true;
+        });
+        return performed && presentationReady;
+    } catch (...) {
+        try {
+            if (!fixture.exact.owner.IsNull()
+                && fixture.exact.owner->Document()->HasOpenCommand())
+                fixture.exact.owner->Document()->AbortCommand();
+        } catch (...) {}
+        return false;
+    }
+}
+} // namespace
+
+extern "C" __attribute__((visibility("default"))) std::uint64_t
+Core3DDebugDependentReplaySafeguardsProbe(std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 2) return 0;
+    try {
+        using namespace core3d;
+        R179PatternAuthorityFixture fixture;
+        if (!fixture.initialize(true) || !R179StageThreeDependentFamilies(fixture)) return 0;
+        std::uint64_t bits = 1;
+        const int undoBefore = fixture.exact.owner->Document()->GetAvailableUndos();
+        if (scenario == 1) {
+            const auto context = fixture.exact.context();
+            if (!context) return bits;
+            const auto lease = context->beginCommandLease(
+                context->openingFence(), 64, 64);
+            if (!lease) return bits;
+            ExactLabelProbeLeaseGuard settle{lease};
+            OcctExactLabelReceipt refused;
+            if (!fixture.exact.owner->StageReplaceExactFreeLabel(*lease,
+                    fixture.exact.source, fixture.exact.clone(13), refused)) bits |= 2;
+            if (fixture.exact.owner->Document()->GetAvailableUndos() == undoBefore) bits |= 4;
+            OcctExactLabelReceipt current;
+            if (fixture.exact.owner->ReadExactFreeLabel(
+                    fixture.exact.source, current) && current.IsEqual(fixture.exact.source)) bits |= 8;
+            if (lease->abort()
+                && fixture.exact.owner->Document()->GetAvailableUndos() == undoBefore) bits |= 16;
+            return bits;
+        }
+
+        R179ProbePreparer preparer; preparer.reject = scenario == 2;
+        std::shared_ptr<const dependent_replay::Plan> plan;
+        const auto prepared = fixture.exact.owner->PrepareDependentReplayPlan(
+            fixture.exact.source, dependent_replay::Mutation::Replace,
+            dependent_replay::Limits{}, preparer, plan);
+        if (scenario == 2) {
+            if (prepared == dependent_replay::Refusal::UnsupportedDescendant
+                && !plan) bits |= 2;
+            if (!fixture.exact.owner->Document()->HasOpenCommand()) bits |= 4;
+            if (fixture.exact.owner->Document()->GetAvailableUndos() == undoBefore) bits |= 8;
+            OcctExactLabelReceipt current;
+            if (fixture.exact.owner->ReadExactFreeLabel(
+                    fixture.exact.source, current) && current.IsEqual(fixture.exact.source)) bits |= 16;
+            return bits;
+        }
+        if (prepared != dependent_replay::Refusal::None || !plan
+            || plan->dependencies().size() != 3) return bits;
+        bits |= 2;
+        std::set<dependent_replay::Family> families;
+        for (const auto& dependency : plan->dependencies()) families.insert(dependency.family);
+        if (families.size() == 3) bits |= 4;
+        const auto context = fixture.exact.context();
+        if (!context) return bits;
+        const auto lease = context->beginCommandLease(
+            context->openingFence(), 64, 64);
+        if (!lease) return bits;
+        ExactLabelProbeLeaseGuard settle{lease}; R179ProbeSourceMutation source;
+        if (fixture.exact.owner->StageDependentReplayPlan(*lease, *plan, source)
+                != dependent_replay::Refusal::None || !source.staged) return bits;
+        bits |= 8;
+        if (!lease->commit()) return bits;
+        if (fixture.exact.owner->ReadDependentReplayPlan(*plan)
+                == dependent_replay::Refusal::None) bits |= 16;
+        return bits;
+    } catch (...) { return 0; }
+}
+#endif
 
 Standard_Boolean OcctSavedGroupState::IsEqual(const OcctSavedGroupState& other) const noexcept {
     try {
@@ -13197,6 +17067,7 @@ std::string OcctDocument::save(
     Standard_Size frameBytes = 0;
     if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
         || !ValidateGeometryRepresentations()
+        || !ValidateLayerGraphRoles(myOcafDoc)
         || !Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes)) {
         return {};
     }
@@ -13222,6 +17093,947 @@ std::string OcctDocument::save(
         return {};
     }
 }
+
+#if DEBUG
+extern "C" std::uint64_t
+Core3DDebugPatternLayerPersistenceBoundaryProbe() noexcept
+{
+    try {
+        const auto anID = [](const std::uint8_t theValue) {
+            core3d::pattern::UUID aValue{};
+            aValue.back() = theValue;
+            return aValue;
+        };
+        core3d::NativeDocumentSession aSession;
+        const Handle(OcctDocument)& anOwner = aSession.Document();
+        const Handle(TDocStd_Document)& aDocument = anOwner->Document();
+        if (aDocument.IsNull() || aDocument->HasOpenCommand()) {
+            return 0;
+        }
+        XCAFDoc_DocumentTool::SetLengthUnit(aDocument, 0.001);
+        const Handle(XCAFDoc_ShapeTool) aShapes =
+            XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+        const Handle(XCAFDoc_ColorTool) aColors =
+            XCAFDoc_DocumentTool::ColorTool(aDocument->Main());
+        const Handle(XCAFDoc_LayerTool) aLayers =
+            XCAFDoc_DocumentTool::LayerTool(aDocument->Main());
+        if (aShapes.IsNull() || aColors.IsNull() || aLayers.IsNull()) {
+            return 0;
+        }
+        const TDF_Label aSource = aShapes->AddShape(
+            BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape(), Standard_False);
+        const TDF_Label aSuppressed = aShapes->AddShape(
+            BRepPrimAPI_MakeBox(3.0, 3.0, 3.0).Shape(), Standard_False);
+
+        Handle(Poly_Triangulation) aMesh = new Poly_Triangulation(
+            4, 1, Standard_True, Standard_True);
+        aMesh->SetNode(1, gp_Pnt(9, -0.0, 3));
+        aMesh->SetNode(2, gp_Pnt(0, 0, 0));
+        aMesh->SetNode(3, gp_Pnt(0, 0, 10));
+        aMesh->SetNode(4, gp_Pnt(8, -6, 0));
+        aMesh->SetUVNode(1, gp_Pnt2d(-0.0, 0.25));
+        aMesh->SetUVNode(2, gp_Pnt2d(0, 0));
+        aMesh->SetUVNode(3, gp_Pnt2d(1, 0));
+        aMesh->SetUVNode(4, gp_Pnt2d(0, 1));
+        for (Standard_Integer anIndex = 1; anIndex <= 4; ++anIndex) {
+            aMesh->SetNormal(anIndex, gp_Vec3f(0.6f, 0.8f, -0.0f));
+        }
+        aMesh->SetTriangle(1, Poly_Triangle(2, 3, 4));
+        BRep_Builder aBuilder;
+        TopoDS_Face aFace;
+        aBuilder.MakeFace(aFace, aMesh);
+        const TDF_Label aFrameOwner =
+            aShapes->AddShape(aFace, Standard_False);
+        if (aSource.IsNull() || aSuppressed.IsNull()
+            || aFrameOwner.IsNull()
+            || !anOwner->MigrateLegacyIdentifiers(aDocument)) {
+            return 0;
+        }
+
+        const TDF_Label aHiddenLayer = aLayers->AddLayer(
+            TCollection_ExtendedString(
+                "Retained pattern persistence boundary layer"));
+        if (aHiddenLayer.IsNull()) {
+            return 0;
+        }
+        aColors->SetVisibility(aSuppressed, Standard_False);
+        aLayers->SetVisibility(aHiddenLayer, Standard_False);
+        aLayers->SetLayer(aSuppressed, aHiddenLayer, Standard_False);
+
+        core3d::scene::authored::GeometryIdentity aGeometryIdentity{};
+        if (!core3d::persistence::NativeAuthoredGeometryIdentity(
+                aFace, aGeometryIdentity)) {
+            return 0;
+        }
+        std::vector<core3d::scene::Float4> someFrames(
+            3, {0.8f, -0.6f, 0.0f, 1.0f});
+        std::vector<std::uint8_t> anArchive;
+        if (core3d::scene::authored::Encode(
+                someFrames, aGeometryIdentity, anArchive)
+            != core3d::scene::authored::ArchiveStatus::Valid) {
+            return 0;
+        }
+
+        core3d::pattern::Definition aDefinition;
+        aDefinition.owner = {anID(1), anID(2), anID(3)};
+        aDefinition.feature = anID(4);
+        aDefinition.source = {anID(1), anID(2), anID(3), anID(5)};
+        aDefinition.issuance.nextLocalID = 3;
+        aDefinition.members = {
+            {anID(2), 1, {0, 0},
+                core3d::pattern::MemberState::Active},
+            {anID(6), 2, {0, 1},
+                core3d::pattern::MemberState::Suppressed},
+        };
+        aDocument->SetUndoLimit(8);
+        aDocument->NewCommand();
+        core3d::pattern::Record aStaged;
+        if (!aDocument->HasOpenCommand()
+            || !anOwner->SetGeometryRepresentationForLabel(
+                aFrameOwner, OcctGeometryRepresentation::TriangleMesh)) {
+            if (aDocument->HasOpenCommand()) aDocument->AbortCommand();
+            return 0;
+        }
+        const Handle(TDataStd_ByteArray) aFrameAttribute =
+            TDataStd_ByteArray::Set(
+                aFrameOwner,
+                core3d::persistence::AuthoredFrameAttributeID(),
+                0, static_cast<Standard_Integer>(anArchive.size()) - 1,
+                Standard_False);
+        if (aFrameAttribute.IsNull()) {
+            aDocument->AbortCommand();
+            return 0;
+        }
+        for (Standard_Size anIndex = 0;
+             anIndex < anArchive.size(); ++anIndex) {
+            aFrameAttribute->SetValue(
+                static_cast<Standard_Integer>(anIndex), anArchive[anIndex]);
+        }
+        if (!core3d::pattern::Stage(aDocument, aDefinition, aStaged)
+            || !aDocument->CommitCommand()) {
+            if (aDocument->HasOpenCommand()) aDocument->AbortCommand();
+            return 0;
+        }
+        const Standard_Integer anUndoCount =
+            aDocument->GetAvailableUndos();
+        const Standard_Integer aRedoCount =
+            aDocument->GetAvailableRedos();
+
+        std::uint64_t aResult = 0;
+        Standard_Size someNativeBytes = 0;
+        std::set<const TDF_Attribute*> somePatternAttributes;
+        if (ValidateLayerGraphRoles(aDocument)
+            && CollectValidatedPatternByteArrayRoles(
+                aDocument, somePatternAttributes)
+            && somePatternAttributes.size() == 1
+            && Core3DValidateOwnedFrameUsage(
+                aDocument, someNativeBytes)
+            && someNativeBytes == anArchive.size() + 3U * 64U) {
+            aResult |= 0x01;
+        }
+
+        NSString *aBase = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:[NSString stringWithFormat:
+                @"pattern-layer-boundary-%@.tmp", NSUUID.UUID.UUIDString]];
+        const std::string aSaved = anOwner->save(aBase.UTF8String);
+        if (!aSaved.empty()) {
+            aResult |= 0x02;
+        }
+        if (aDocument->GetAvailableUndos() == anUndoCount
+            && aDocument->GetAvailableRedos() == aRedoCount
+            && !aDocument->HasOpenCommand()) {
+            aResult |= 0x04;
+        }
+        if (aSaved.empty()) {
+            return aResult;
+        }
+        struct SavedFile final {
+            std::string path;
+            ~SavedFile() noexcept {
+                if (!path.empty()) {
+                    @autoreleasepool {
+                        [[NSFileManager defaultManager]
+                            removeItemAtPath:[NSString stringWithUTF8String:
+                                path.c_str()] error:nil];
+                    }
+                }
+            }
+        } aSavedFile{aSaved};
+
+        Handle(TDocStd_Application) aReader = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(aReader);
+        Handle(TDocStd_Document) aReopened;
+        Core3DBeginSafeBinaryRead();
+        const PCDM_ReaderStatus aStatus = aReader->Open(
+            TCollection_ExtendedString(aSaved.c_str(), Standard_True),
+            aReopened);
+        const bool wasRejected = Core3DSafeBinaryReadWasRejected();
+        if (aStatus == PCDM_RS_OK && !wasRejected
+            && !aReopened.IsNull() && aReopened != aDocument) {
+            aResult |= 0x08;
+        }
+        if (aStatus == PCDM_RS_OK && !wasRejected
+            && !aReopened.IsNull()) {
+            std::vector<core3d::pattern::Record> someRecords;
+            Standard_Size someReopenedNativeBytes = 0;
+            TDF_LabelSequence someFreeShapes;
+            XCAFDoc_DocumentTool::ShapeTool(aReopened->Main())
+                ->GetFreeShapes(someFreeShapes);
+            Standard_Integer aLinkedHiddenShapeCount = 0;
+            for (Standard_Integer anIndex = 1;
+                 anIndex <= someFreeShapes.Length(); ++anIndex) {
+                const TDF_Label aLabel = someFreeShapes.Value(anIndex);
+                Handle(XCAFDoc_GraphNode) aGraph;
+                Handle(TDF_Attribute) anInvisible;
+                if (aLabel.FindAttribute(XCAFDoc::LayerRefGUID(), aGraph)
+                    && !aGraph.IsNull() && aGraph->NbFathers() == 1
+                    && aLabel.FindAttribute(
+                        XCAFDoc::InvisibleGUID(), anInvisible)
+                    && !Handle(TDataStd_UAttribute)::DownCast(
+                        anInvisible).IsNull()) {
+                    const Handle(XCAFDoc_GraphNode) aLayerGraph =
+                        aGraph->GetFather(1);
+                    Handle(TDF_Attribute) aLayerInvisible;
+                    if (!aLayerGraph.IsNull()
+                        && aLayerGraph->Label().FindAttribute(
+                            XCAFDoc::InvisibleGUID(), aLayerInvisible)
+                        && !Handle(TDataStd_UAttribute)::DownCast(
+                            aLayerInvisible).IsNull()) {
+                        ++aLinkedHiddenShapeCount;
+                    }
+                }
+            }
+            if (core3d::pattern::ReadAll(aReopened, someRecords)
+                && someRecords.size() == 1
+                && someRecords.front().bytes == aStaged.bytes
+                && someRecords.front().definition.feature
+                    == aDefinition.feature
+                && someRecords.front().definition.members.size() == 2
+                && someRecords.front().definition.members[1].localID == 2
+                && someRecords.front().definition.members[1].identity
+                    == anID(6)
+                && someRecords.front().definition.members[1].state
+                    == core3d::pattern::MemberState::Suppressed
+                && someFreeShapes.Length() == 3
+                && aLinkedHiddenShapeCount == 1
+                && ValidateLayerGraphRoles(aReopened)
+                && Core3DValidateOwnedFrameUsage(
+                    aReopened, someReopenedNativeBytes)
+                && someReopenedNativeBytes == someNativeBytes) {
+                aResult |= 0x10;
+            }
+        }
+        try {
+            if (!aReopened.IsNull()) aReader->Close(aReopened);
+        } catch (...) {
+        }
+        return aResult;
+    } catch (...) {
+        return 0;
+    }
+}
+
+namespace {
+
+Handle(TDocStd_Application) Core3DDebugStockBinXCAFWriter()
+{
+    Handle(TDocStd_Application) anApplication = new TDocStd_Application();
+    anApplication->DefineFormat(
+        TCollection_AsciiString("BinXCAF"),
+        TCollection_AsciiString("Binary XCAF Document"),
+        TCollection_AsciiString("xbf"),
+        new BinDrivers_DocumentRetrievalDriver(),
+        new BinXCAFDrivers_DocumentStorageDriver());
+    return anApplication;
+}
+
+Handle(TDocStd_Application) Core3DDebugFrameReaderApp()
+{
+    Handle(TDocStd_Application) anApplication = new TDocStd_Application();
+    Core3DDebugDefineFrameBinXCAFFormat(
+        anApplication,
+        std::make_shared<core3d::persistence::AuthoredFrameReadBudget>());
+    return anApplication;
+}
+
+std::string Core3DDebugTempPath(const char* theStem, const char* theExtension)
+{
+    NSString* aName = [NSString stringWithFormat:
+        @"%s-%@%s", theStem, NSUUID.UUID.UUIDString, theExtension];
+    return [NSTemporaryDirectory()
+        stringByAppendingPathComponent:aName].UTF8String;
+}
+
+struct Core3DDebugFixtureFile final {
+    std::string path;
+    ~Core3DDebugFixtureFile() noexcept {
+        if (!path.empty()) {
+            @autoreleasepool {
+                [[NSFileManager defaultManager]
+                    removeItemAtPath:[NSString stringWithUTF8String:
+                        path.c_str()] error:nil];
+            }
+        }
+    }
+};
+
+bool Core3DDebugStockSave(
+    const Handle(TDocStd_Application)& theApplication,
+    const Handle(TDocStd_Document)& theDocument,
+    const std::string& thePath)
+{
+    return !theApplication.IsNull() && !theDocument.IsNull()
+        && theApplication->SaveAs(theDocument, thePath.c_str())
+            == PCDM_SS_OK;
+}
+
+struct Core3DDebugOpenResult {
+    PCDM_ReaderStatus status = PCDM_RS_OpenError;
+    bool rejected = true;
+    Handle(TDocStd_Document) document;
+};
+
+Core3DDebugOpenResult Core3DDebugSafeOpen(
+    const Handle(TDocStd_Application)& theReader,
+    const std::string& thePath)
+{
+    Core3DDebugOpenResult aResult;
+    Core3DBeginSafeBinaryRead();
+    Handle(TDocStd_Document) aCandidate;
+    aResult.status = theReader->Open(
+        TCollection_ExtendedString(thePath.c_str(), Standard_True), aCandidate);
+    aResult.rejected = Core3DSafeBinaryReadWasRejected() == Standard_True;
+    aResult.document = aCandidate;
+    return aResult;
+}
+
+void Core3DDebugCloseQuietly(
+    const Handle(TDocStd_Application)& theApplication,
+    Handle(TDocStd_Document)& theDocument) noexcept
+{
+    try {
+        if (!theApplication.IsNull() && !theDocument.IsNull()) {
+            theApplication->Close(theDocument);
+        }
+    } catch (...) {
+    }
+    theDocument.Nullify();
+}
+
+core3d::pattern::Definition Core3DDebugBoundaryPatternDefinition()
+{
+    const auto anID = [](const std::uint8_t theValue) {
+        core3d::pattern::UUID aValue{};
+        aValue.back() = theValue;
+        return aValue;
+    };
+    core3d::pattern::Definition aDefinition;
+    aDefinition.owner = {anID(1), anID(2), anID(3)};
+    aDefinition.feature = anID(4);
+    aDefinition.source = {anID(1), anID(2), anID(3), anID(5)};
+    aDefinition.issuance.nextLocalID = 3;
+    aDefinition.members = {
+        {anID(2), 1, {0, 0}, core3d::pattern::MemberState::Active},
+        {anID(6), 2, {0, 1}, core3d::pattern::MemberState::Suppressed},
+    };
+    return aDefinition;
+}
+
+bool Core3DDebugStagePattern(
+    const Handle(TDocStd_Document)& theDocument,
+    std::vector<std::uint8_t>& theBytes)
+{
+    theBytes.clear();
+    if (theDocument.IsNull() || theDocument->HasOpenCommand()) {
+        return false;
+    }
+    core3d::pattern::Record aStaged;
+    // Fresh fixture documents default to UndoLimit == 0, which disables
+    // OCAF commands. Stage must still require a genuinely open command.
+    theDocument->SetUndoLimit(8);
+    theDocument->NewCommand();
+    if (!core3d::pattern::Stage(
+            theDocument, Core3DDebugBoundaryPatternDefinition(), aStaged)
+        || !theDocument->CommitCommand()) {
+        if (theDocument->HasOpenCommand()) {
+            theDocument->AbortCommand();
+        }
+        return false;
+    }
+    theBytes = aStaged.bytes;
+    return !theBytes.empty();
+}
+
+bool Core3DDebugAttachPatternBytes(
+    const TDF_Label& theLabel,
+    const std::vector<std::uint8_t>& theBytes)
+{
+    if (theLabel.IsNull() || theBytes.empty()) {
+        return false;
+    }
+    const Handle(TDataStd_ByteArray) anArray = TDataStd_ByteArray::Set(
+        theLabel, 0, static_cast<Standard_Integer>(theBytes.size()) - 1,
+        Standard_False);
+    if (anArray.IsNull()) {
+        return false;
+    }
+    for (std::size_t anIndex = 0; anIndex < theBytes.size(); ++anIndex) {
+        anArray->SetValue(
+            static_cast<Standard_Integer>(anIndex), theBytes[anIndex]);
+    }
+    return true;
+}
+
+// Builds one box definition, one named layer and one reciprocal LayerRef
+// edge. Scenario 0 attaches the shape endpoint to a real face subshape
+// (CE1), scenario 1 to an arbitrary metadata label carrying a NamedShape
+// (CE1b); scenario 2 is the positive control on the top-level definition.
+bool Core3DDebugBuildLayerGraphFixture(
+    const Handle(TDocStd_Document)& theDocument,
+    const Standard_Integer theScenario)
+{
+    if (theDocument.IsNull()) {
+        return false;
+    }
+    XCAFDoc_DocumentTool::SetLengthUnit(theDocument, 0.001);
+    const Handle(XCAFDoc_ShapeTool) aShapes =
+        XCAFDoc_DocumentTool::ShapeTool(theDocument->Main());
+    const Handle(XCAFDoc_LayerTool) aLayers =
+        XCAFDoc_DocumentTool::LayerTool(theDocument->Main());
+    if (aShapes.IsNull() || aLayers.IsNull()) {
+        return false;
+    }
+    const TopoDS_Shape aBox = BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape();
+    const TDF_Label aDefinition = aShapes->AddShape(aBox, Standard_False);
+    const TDF_Label aLayer = aLayers->AddLayer(
+        TCollection_ExtendedString("R2-graph-role"));
+    if (aDefinition.IsNull() || aLayer.IsNull()) {
+        return false;
+    }
+    TDF_Label anEndpoint = aDefinition;
+    if (theScenario == 0) {
+        TopExp_Explorer anExplorer(aBox, TopAbs_FACE);
+        if (!anExplorer.More()) {
+            return false;
+        }
+        anEndpoint = aShapes->AddSubShape(aDefinition, anExplorer.Current());
+    } else if (theScenario == 1) {
+        anEndpoint = theDocument->Main().FindChild(999, Standard_True);
+        if (!anEndpoint.IsNull()) {
+            TNaming_Builder(anEndpoint).Generated(
+                BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape());
+        }
+    }
+    if (anEndpoint.IsNull()) {
+        return false;
+    }
+    aLayers->SetLayer(anEndpoint, aLayer, Standard_False);
+    Handle(XCAFDoc_GraphNode) aShapeGraph;
+    Handle(XCAFDoc_GraphNode) aLayerGraph;
+    return anEndpoint.FindAttribute(XCAFDoc::LayerRefGUID(), aShapeGraph)
+        && !aShapeGraph.IsNull() && aShapeGraph->NbFathers() == 1
+        && aShapeGraph->NbChildren() == 0
+        && aLayer.FindAttribute(XCAFDoc::LayerRefGUID(), aLayerGraph)
+        && !aLayerGraph.IsNull() && aLayerGraph->NbFathers() == 0
+        && aLayerGraph->NbChildren() == 1;
+}
+
+// Canonical SYPT bytes placed on an orphan label with the stock default
+// ByteArray ID (CE2). When theEmptyRoot is set, a correct but empty
+// marker-bearing tag-71 root exists alongside the orphan record.
+bool Core3DDebugBuildOrphanPatternFixture(
+    const Handle(TDocStd_Document)& theDocument,
+    const bool theEmptyRoot)
+{
+    if (theDocument.IsNull()) {
+        return false;
+    }
+    XCAFDoc_DocumentTool::SetLengthUnit(theDocument, 0.001);
+    std::vector<std::uint8_t> someBytes;
+    if (!core3d::pattern::Encode(
+            Core3DDebugBoundaryPatternDefinition(), someBytes)
+        || someBytes.empty()) {
+        return false;
+    }
+    if (theEmptyRoot) {
+        const TDF_Label aRoot = theDocument->Main().FindChild(
+            core3d::pattern::DocumentRootTag, Standard_True);
+        if (aRoot.IsNull()) {
+            return false;
+        }
+        TDataStd_AsciiString::Set(
+            aRoot, TCollection_AsciiString(core3d::pattern::DocumentMarker));
+    }
+    const TDF_Label anOrphan =
+        theDocument->Main().FindChild(999, Standard_True);
+    return Core3DDebugAttachPatternBytes(anOrphan, someBytes);
+}
+
+// A correct marker-bearing tag-71 root with no records and no other byte
+// arrays: the positive placement control for the empty-root family.
+bool Core3DDebugBuildEmptyPatternRootFixture(
+    const Handle(TDocStd_Document)& theDocument)
+{
+    if (theDocument.IsNull()) {
+        return false;
+    }
+    XCAFDoc_DocumentTool::SetLengthUnit(theDocument, 0.001);
+    const TDF_Label aRoot = theDocument->Main().FindChild(
+        core3d::pattern::DocumentRootTag, Standard_True);
+    if (aRoot.IsNull()) {
+        return false;
+    }
+    TDataStd_AsciiString::Set(
+        aRoot, TCollection_AsciiString(core3d::pattern::DocumentMarker));
+    return true;
+}
+
+// A canonical authored-frame archive under the frame GUID on an orphan
+// label: the established DEBUG frame-owner bypass case. No pattern root.
+bool Core3DDebugBuildUnownedFrameFixture(
+    const Handle(TDocStd_Document)& theDocument)
+{
+    if (theDocument.IsNull()) {
+        return false;
+    }
+    XCAFDoc_DocumentTool::SetLengthUnit(theDocument, 0.001);
+    Handle(Poly_Triangulation) aMesh = new Poly_Triangulation(
+        4, 1, Standard_True, Standard_True);
+    aMesh->SetNode(1, gp_Pnt(9, -0.0, 3));
+    aMesh->SetNode(2, gp_Pnt(0, 0, 0));
+    aMesh->SetNode(3, gp_Pnt(0, 0, 10));
+    aMesh->SetNode(4, gp_Pnt(8, -6, 0));
+    aMesh->SetUVNode(1, gp_Pnt2d(-0.0, 0.25));
+    aMesh->SetUVNode(2, gp_Pnt2d(0, 0));
+    aMesh->SetUVNode(3, gp_Pnt2d(1, 0));
+    aMesh->SetUVNode(4, gp_Pnt2d(0, 1));
+    for (Standard_Integer anIndex = 1; anIndex <= 4; ++anIndex) {
+        aMesh->SetNormal(anIndex, gp_Vec3f(0.6f, 0.8f, -0.0f));
+    }
+    aMesh->SetTriangle(1, Poly_Triangle(2, 3, 4));
+    BRep_Builder aBuilder;
+    TopoDS_Face aFace;
+    aBuilder.MakeFace(aFace, aMesh);
+    core3d::scene::authored::GeometryIdentity anIdentity{};
+    std::vector<core3d::scene::Float4> someFrames(
+        3, {0.8f, -0.6f, 0.0f, 1.0f});
+    std::vector<std::uint8_t> anArchive;
+    if (!core3d::persistence::NativeAuthoredGeometryIdentity(aFace, anIdentity)
+        || core3d::scene::authored::Encode(
+                someFrames, anIdentity, anArchive)
+            != core3d::scene::authored::ArchiveStatus::Valid
+        || anArchive.empty()) {
+        return false;
+    }
+    const TDF_Label anOrphan =
+        theDocument->Main().FindChild(999, Standard_True);
+    const Handle(TDataStd_ByteArray) anArray = TDataStd_ByteArray::Set(
+        anOrphan, core3d::persistence::AuthoredFrameAttributeID(),
+        0, static_cast<Standard_Integer>(anArchive.size()) - 1,
+        Standard_False);
+    if (anArray.IsNull()) {
+        return false;
+    }
+    for (std::size_t anIndex = 0; anIndex < anArchive.size(); ++anIndex) {
+        anArray->SetValue(
+            static_cast<Standard_Integer>(anIndex), anArchive[anIndex]);
+    }
+    return true;
+}
+
+} // namespace
+
+// R2 adversarial layer-graph admission evidence (CE1/CE1b). Bit contract:
+// 0x01 fixture built, refused by the in-memory validator and stock-saved;
+// 0x02 safe open rejects the saved bytes; 0x04 the sticky safe-read
+// rejection is observable; 0x08 normal save preflight refuses before writing
+// (scenario 0) or an independent reader also rejects (scenario 1);
+// 0x10 the same edge on the top-level definition still reopens exactly.
+extern "C" std::uint64_t
+Core3DDebugLayerGraphRoleAdmissionProbe(Standard_Integer scenario) noexcept
+{
+    if (scenario != 0 && scenario != 1) {
+        return 0;
+    }
+    try {
+        std::uint64_t aResult = 0;
+
+        const Handle(TDocStd_Application) aWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aFixture;
+        aWriter->NewDocument(TCollection_ExtendedString("BinXCAF"), aFixture);
+        const std::string aFixturePath =
+            Core3DDebugTempPath("layer-graph-role", ".xbf");
+        const Core3DDebugFixtureFile aFixtureFile{aFixturePath};
+        std::set<const TDF_Attribute*> someAdmitted;
+        if (!aFixture.IsNull()
+            && Core3DDebugBuildLayerGraphFixture(aFixture, scenario)
+            && !ValidateLayerGraphRoles(aFixture)
+            && (scenario != 1
+                || CollectValidatedPatternByteArrayRoles(
+                    aFixture, someAdmitted))
+            && Core3DDebugStockSave(aWriter, aFixture, aFixturePath)) {
+            aResult |= 0x01;
+        }
+
+        const Handle(TDocStd_Application) aReader = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(aReader);
+        Handle(TDocStd_Document) aRefused;
+        if (aResult & 0x01) {
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aReader, aFixturePath);
+            if (anOpened.status != PCDM_RS_OK || anOpened.rejected) {
+                aResult |= 0x02;
+            }
+            if (anOpened.rejected) {
+                aResult |= 0x04;
+            }
+            aRefused = anOpened.document;
+        }
+
+        if (scenario == 0) {
+            Handle(OcctDocument) anOwner = new OcctDocument();
+            const Handle(TDocStd_Document)& aLive = anOwner->Document();
+            const std::string aSaveBase =
+                Core3DDebugTempPath("layer-graph-save", "");
+            const std::string aSaveOutput = aSaveBase + ".xbf";
+            const Core3DDebugFixtureFile aSaveFile{aSaveOutput};
+            if (!aLive.IsNull()
+                && Core3DDebugBuildLayerGraphFixture(aLive, 0)) {
+                const Standard_Integer anUndos = aLive->GetAvailableUndos();
+                const Standard_Integer aRedos = aLive->GetAvailableRedos();
+                const std::string aSaved = anOwner->save(aSaveBase);
+                NSString* aWritten = [NSString stringWithUTF8String:
+                    aSaveOutput.c_str()];
+                if (aSaved.empty()
+                    && ![[NSFileManager defaultManager]
+                        fileExistsAtPath:aWritten]
+                    && !ValidateLayerGraphRoles(aLive)
+                    && aLive->GetAvailableUndos() == anUndos
+                    && aLive->GetAvailableRedos() == aRedos
+                    && !aLive->HasOpenCommand()) {
+                    aResult |= 0x08;
+                }
+            }
+        } else if (aResult & 0x01) {
+            const Handle(TDocStd_Application) aSecondReader =
+                new TDocStd_Application();
+            Core3DDefineSafeBinXCAFFormat(aSecondReader);
+            Handle(TDocStd_Document) aSecondRefused;
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aSecondReader, aFixturePath);
+            if (anOpened.status != PCDM_RS_OK || anOpened.rejected) {
+                aResult |= 0x08;
+            }
+            aSecondRefused = anOpened.document;
+            Core3DDebugCloseQuietly(aSecondReader, aSecondRefused);
+        }
+
+        const Handle(TDocStd_Application) aControlWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aControl;
+        aControlWriter->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), aControl);
+        const std::string aControlPath =
+            Core3DDebugTempPath("layer-graph-control", ".xbf");
+        const Core3DDebugFixtureFile aControlFile{aControlPath};
+        const Handle(TDocStd_Application) aControlReader =
+            new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(aControlReader);
+        Handle(TDocStd_Document) aReopenedControl;
+        if (!aControl.IsNull()
+            && Core3DDebugBuildLayerGraphFixture(aControl, 2)
+            && ValidateLayerGraphRoles(aControl)
+            && Core3DDebugStockSave(aControlWriter, aControl, aControlPath)) {
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aControlReader, aControlPath);
+            aReopenedControl = anOpened.document;
+            if (anOpened.status == PCDM_RS_OK && !anOpened.rejected
+                && !aReopenedControl.IsNull()) {
+                TDF_LabelSequence someFreeShapes;
+                XCAFDoc_DocumentTool::ShapeTool(aReopenedControl->Main())
+                    ->GetFreeShapes(someFreeShapes);
+                Standard_Integer aLinkedCount = 0;
+                for (Standard_Integer anIndex = 1;
+                     anIndex <= someFreeShapes.Length(); ++anIndex) {
+                    Handle(XCAFDoc_GraphNode) aGraph;
+                    if (someFreeShapes.Value(anIndex).FindAttribute(
+                            XCAFDoc::LayerRefGUID(), aGraph)
+                        && !aGraph.IsNull() && aGraph->NbFathers() == 1) {
+                        ++aLinkedCount;
+                    }
+                }
+                if (someFreeShapes.Length() == 1 && aLinkedCount == 1
+                    && ValidateLayerGraphRoles(aReopenedControl)) {
+                    aResult |= 0x10;
+                }
+            }
+        }
+        Core3DDebugCloseQuietly(aControlReader, aReopenedControl);
+        Core3DDebugCloseQuietly(aControlWriter, aControl);
+        Core3DDebugCloseQuietly(aReader, aRefused);
+        Core3DDebugCloseQuietly(aWriter, aFixture);
+        return aResult;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// R2 pattern-placement admission evidence (CE2 and its empty-root variant).
+// Bit contract: 0x01 orphan-pattern fixture refused by the collector and
+// stock-saved; 0x02 the production registration rejects it; 0x04 the DEBUG
+// custom-frame registration also rejects it; 0x08 the DEBUG frame bypass
+// still admits a canonical unowned frame archive (scenario 0) or an empty
+// marker root alone opens in both registrations (scenario 1); 0x10 one
+// staged tag-71 record opens with exact bytes in both registrations.
+extern "C" std::uint64_t
+Core3DDebugPatternPlacementAdmissionProbe(Standard_Integer scenario) noexcept
+{
+    if (scenario != 0 && scenario != 1) {
+        return 0;
+    }
+    try {
+        std::uint64_t aResult = 0;
+
+        const Handle(TDocStd_Application) aWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aFixture;
+        aWriter->NewDocument(TCollection_ExtendedString("BinXCAF"), aFixture);
+        const std::string aFixturePath =
+            Core3DDebugTempPath("pattern-placement", ".xbf");
+        const Core3DDebugFixtureFile aFixtureFile{aFixturePath};
+        std::set<const TDF_Attribute*> someAdmitted;
+        if (!aFixture.IsNull()
+            && Core3DDebugBuildOrphanPatternFixture(aFixture, scenario == 1)
+            && !CollectValidatedPatternByteArrayRoles(aFixture, someAdmitted)
+            && Core3DDebugStockSave(aWriter, aFixture, aFixturePath)) {
+            aResult |= 0x01;
+        }
+
+        const Handle(TDocStd_Application) aReader = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(aReader);
+        const Handle(TDocStd_Application) aDebugReader =
+            Core3DDebugFrameReaderApp();
+        Handle(TDocStd_Document) aRefused;
+        Handle(TDocStd_Document) aRefusedDebug;
+        if (aResult & 0x01) {
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aReader, aFixturePath);
+            if (anOpened.status != PCDM_RS_OK || anOpened.rejected) {
+                aResult |= 0x02;
+            }
+            aRefused = anOpened.document;
+            const Core3DDebugOpenResult aDebugOpened =
+                Core3DDebugSafeOpen(aDebugReader, aFixturePath);
+            if (aDebugOpened.status != PCDM_RS_OK || aDebugOpened.rejected) {
+                aResult |= 0x04;
+            }
+            aRefusedDebug = aDebugOpened.document;
+        }
+
+        const Handle(TDocStd_Application) aVariantWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aVariant;
+        aVariantWriter->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), aVariant);
+        const std::string aVariantPath = Core3DDebugTempPath(
+            scenario == 0 ? "unowned-frame" : "empty-root", ".xbf");
+        const Core3DDebugFixtureFile aVariantFile{aVariantPath};
+        Handle(TDocStd_Document) aVariantOpened;
+        Handle(TDocStd_Document) aVariantOpenedDebug;
+        const bool aVariantBuilt = !aVariant.IsNull()
+            && (scenario == 0
+                ? Core3DDebugBuildUnownedFrameFixture(aVariant)
+                : Core3DDebugBuildEmptyPatternRootFixture(aVariant))
+            && Core3DDebugStockSave(aVariantWriter, aVariant, aVariantPath);
+        if (aVariantBuilt && scenario == 0) {
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aDebugReader, aVariantPath);
+            aVariantOpenedDebug = anOpened.document;
+            if (anOpened.status == PCDM_RS_OK && !anOpened.rejected
+                && !aVariantOpenedDebug.IsNull()) {
+                aResult |= 0x08;
+            }
+        } else if (aVariantBuilt) {
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aReader, aVariantPath);
+            aVariantOpened = anOpened.document;
+            const Core3DDebugOpenResult aDebugOpened =
+                Core3DDebugSafeOpen(aDebugReader, aVariantPath);
+            aVariantOpenedDebug = aDebugOpened.document;
+            if (anOpened.status == PCDM_RS_OK && !anOpened.rejected
+                && !aVariantOpened.IsNull()
+                && aDebugOpened.status == PCDM_RS_OK && !aDebugOpened.rejected
+                && !aVariantOpenedDebug.IsNull()) {
+                aResult |= 0x08;
+            }
+        }
+
+        const Handle(TDocStd_Application) aControlWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aControl;
+        aControlWriter->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), aControl);
+        const std::string aControlPath =
+            Core3DDebugTempPath("pattern-control", ".xbf");
+        const Core3DDebugFixtureFile aControlFile{aControlPath};
+        Handle(TDocStd_Document) aReopenedControl;
+        Handle(TDocStd_Document) aReopenedControlDebug;
+        std::vector<std::uint8_t> aControlBytes;
+        if (!aControl.IsNull()) {
+            XCAFDoc_DocumentTool::SetLengthUnit(aControl, 0.001);
+        }
+        if (!aControl.IsNull()
+            && Core3DDebugStagePattern(aControl, aControlBytes)
+            && Core3DDebugStockSave(aControlWriter, aControl, aControlPath)) {
+            const Core3DDebugOpenResult anOpened =
+                Core3DDebugSafeOpen(aReader, aControlPath);
+            aReopenedControl = anOpened.document;
+            const Core3DDebugOpenResult aDebugOpened =
+                Core3DDebugSafeOpen(aDebugReader, aControlPath);
+            aReopenedControlDebug = aDebugOpened.document;
+            std::vector<core3d::pattern::Record> someRecords;
+            std::vector<core3d::pattern::Record> someDebugRecords;
+            if (anOpened.status == PCDM_RS_OK && !anOpened.rejected
+                && !aReopenedControl.IsNull()
+                && aDebugOpened.status == PCDM_RS_OK && !aDebugOpened.rejected
+                && !aReopenedControlDebug.IsNull()
+                && core3d::pattern::ReadAll(aReopenedControl, someRecords)
+                && someRecords.size() == 1
+                && someRecords.front().bytes == aControlBytes
+                && core3d::pattern::ReadAll(
+                    aReopenedControlDebug, someDebugRecords)
+                && someDebugRecords.size() == 1
+                && someDebugRecords.front().bytes == aControlBytes) {
+                aResult |= 0x10;
+            }
+        }
+        Core3DDebugCloseQuietly(aDebugReader, aReopenedControlDebug);
+        Core3DDebugCloseQuietly(aReader, aReopenedControl);
+        Core3DDebugCloseQuietly(aControlWriter, aControl);
+        Core3DDebugCloseQuietly(aDebugReader, aVariantOpenedDebug);
+        Core3DDebugCloseQuietly(aReader, aVariantOpened);
+        Core3DDebugCloseQuietly(aVariantWriter, aVariant);
+        Core3DDebugCloseQuietly(aDebugReader, aRefusedDebug);
+        Core3DDebugCloseQuietly(aReader, aRefused);
+        Core3DDebugCloseQuietly(aWriter, aFixture);
+        return aResult;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// R2 failure-to-valid recovery evidence with one reused reader application.
+// Scenario 0 fails on a subshape LayerRef graph, scenario 1 on an orphan
+// pattern byte array. Bit contract: 0x01 invalid and valid fixtures
+// stock-saved; 0x02 the first open refuses the invalid document; 0x04 the
+// sticky rejection is observable before the next read; 0x08 the same
+// application then opens the valid document; 0x10 the recovered document
+// matches the exact pattern bytes and layer graph.
+extern "C" std::uint64_t
+Core3DDebugPatternLayerReadRecoveryProbe(Standard_Integer scenario) noexcept
+{
+    if (scenario != 0 && scenario != 1) {
+        return 0;
+    }
+    try {
+        std::uint64_t aResult = 0;
+
+        const Handle(TDocStd_Application) aWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aFixture;
+        aWriter->NewDocument(TCollection_ExtendedString("BinXCAF"), aFixture);
+        const std::string aFixturePath =
+            Core3DDebugTempPath("read-recovery-bad", ".xbf");
+        const Core3DDebugFixtureFile aFixtureFile{aFixturePath};
+        std::set<const TDF_Attribute*> someAdmitted;
+        bool aFixtureReady = false;
+        if (!aFixture.IsNull()) {
+            if (scenario == 0) {
+                aFixtureReady =
+                    Core3DDebugBuildLayerGraphFixture(aFixture, 0)
+                    && !ValidateLayerGraphRoles(aFixture);
+            } else {
+                aFixtureReady =
+                    Core3DDebugBuildOrphanPatternFixture(aFixture, false)
+                    && !CollectValidatedPatternByteArrayRoles(
+                        aFixture, someAdmitted);
+            }
+        }
+
+        const Handle(TDocStd_Application) aValidWriter =
+            Core3DDebugStockBinXCAFWriter();
+        Handle(TDocStd_Document) aValid;
+        aValidWriter->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), aValid);
+        const std::string aValidPath =
+            Core3DDebugTempPath("read-recovery-valid", ".xbf");
+        const Core3DDebugFixtureFile aValidFile{aValidPath};
+        std::vector<std::uint8_t> aValidBytes;
+        if (aFixtureReady && !aValid.IsNull()
+            && Core3DDebugBuildLayerGraphFixture(aValid, 2)
+            && Core3DDebugStagePattern(aValid, aValidBytes)
+            && ValidateLayerGraphRoles(aValid)
+            && Core3DDebugStockSave(aWriter, aFixture, aFixturePath)
+            && Core3DDebugStockSave(aValidWriter, aValid, aValidPath)) {
+            aResult |= 0x01;
+        }
+
+        const Handle(TDocStd_Application) aReader = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(aReader);
+        Handle(TDocStd_Document) aRefused;
+        Handle(TDocStd_Document) aRecovered;
+        if (aResult & 0x01) {
+            const Core3DDebugOpenResult aFailed =
+                Core3DDebugSafeOpen(aReader, aFixturePath);
+            aRefused = aFailed.document;
+            if (aFailed.status != PCDM_RS_OK || aFailed.rejected) {
+                aResult |= 0x02;
+            }
+            if (aFailed.rejected) {
+                aResult |= 0x04;
+            }
+            const Core3DDebugOpenResult aNext =
+                Core3DDebugSafeOpen(aReader, aValidPath);
+            aRecovered = aNext.document;
+            if (aNext.status == PCDM_RS_OK && !aNext.rejected
+                && !aRecovered.IsNull() && aRecovered != aRefused) {
+                aResult |= 0x08;
+            }
+            if (aResult & 0x08) {
+                std::vector<core3d::pattern::Record> someRecords;
+                TDF_LabelSequence someFreeShapes;
+                XCAFDoc_DocumentTool::ShapeTool(aRecovered->Main())
+                    ->GetFreeShapes(someFreeShapes);
+                Standard_Integer aLinkedCount = 0;
+                for (Standard_Integer anIndex = 1;
+                     anIndex <= someFreeShapes.Length(); ++anIndex) {
+                    Handle(XCAFDoc_GraphNode) aGraph;
+                    if (someFreeShapes.Value(anIndex).FindAttribute(
+                            XCAFDoc::LayerRefGUID(), aGraph)
+                        && !aGraph.IsNull() && aGraph->NbFathers() == 1) {
+                        ++aLinkedCount;
+                    }
+                }
+                if (core3d::pattern::ReadAll(aRecovered, someRecords)
+                    && someRecords.size() == 1
+                    && someRecords.front().bytes == aValidBytes
+                    && someFreeShapes.Length() == 1 && aLinkedCount == 1
+                    && ValidateLayerGraphRoles(aRecovered)) {
+                    aResult |= 0x10;
+                }
+            }
+        }
+        Core3DDebugCloseQuietly(aReader, aRecovered);
+        Core3DDebugCloseQuietly(aReader, aRefused);
+        Core3DDebugCloseQuietly(aValidWriter, aValid);
+        Core3DDebugCloseQuietly(aWriter, aFixture);
+        return aResult;
+    } catch (...) {
+        return 0;
+    }
+}
+#endif
 
 void OcctDocument::NotifyChanges() {
     [[NSNotificationCenter defaultCenter]
@@ -16564,8 +21376,622 @@ std::map<std::string, bool> RunNativeOwnerEvidence(int scenario) {
 } // namespace core3d::part_boolean::owner
 
 #include "RetainedSolidProbe.hxx"
+namespace core3d::native_opening::debug {
+extern "C" bool Core3DDebugInstallRetainedSolidSeedRecord(
+    const Handle(TDocStd_Document)& document, const TDF_Label& source,
+    const retained_boolean::Program& program, const TopoDS_Shape& current,
+    const TopoDS_Shape& retainedBase) noexcept {
+    try {
+        if (document.IsNull() || source.IsNull()
+            || source.Data() != document->GetData() || current.IsNull()
+            || retainedBase.IsNull() || !document->HasOpenCommand())
+            return false;
+        const TDF_Label record = source.FindChild(
+            retained_solid::MinimumRecordTag, Standard_True);
+        TNaming_Builder(record).Select(current, current);
+        retained_solid::Probe::Install(document, record, program, retainedBase);
+        return Core3DValidateRetainedSolidDocument(document);
+    } catch (...) {
+        return false;
+    }
+}
+} // namespace core3d::native_opening::debug
+
 std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario){
     return core3d::retained_solid::Probe::Run(scenario);
+}
+Standard_Boolean OcctDocument::CaptureRetainedFinishingSource(
+    const core3d::retained_recipe::OwnerKey& owner,
+    core3d::retained_finishing::SourceRevision& output) noexcept {
+    output = {};
+    if (![NSThread isMainThread]) return Standard_False;
+    core3d::retained_finishing::producer::Capture capture;
+    if (!core3d::retained_finishing::producer::CaptureSource(myOcafDoc, owner, capture))
+        return Standard_False;
+    output = capture.source;
+    return Standard_True;
+}
+
+namespace {
+OcctRetainedFinishingOutcome E1Outcome(
+    core3d::retained_finishing::producer::Status status) noexcept {
+    using Status = core3d::retained_finishing::producer::Status;
+    switch (status) {
+        case Status::Produced: return OcctRetainedFinishingOutcome::Committed;
+        case Status::StaleSource: return OcctRetainedFinishingOutcome::StaleSource;
+        case Status::UnsupportedSurface: return OcctRetainedFinishingOutcome::UnsupportedSurface;
+        case Status::OwnerMismatch: return OcctRetainedFinishingOutcome::OwnerMismatch;
+        case Status::Busy: return OcctRetainedFinishingOutcome::Busy;
+        case Status::Malformed: return OcctRetainedFinishingOutcome::Malformed;
+        case Status::PersistenceFailure: return OcctRetainedFinishingOutcome::PersistenceFailure;
+        case Status::Captured:
+        case Status::Refused: return OcctRetainedFinishingOutcome::Refused;
+    }
+}
+
+OcctRetainedFinishingOutcome E1OwnerOutcome(
+    core3d::retained_finishing::owner::Outcome outcome) noexcept {
+    using Outcome = core3d::retained_finishing::owner::Outcome;
+    switch (outcome) {
+        case Outcome::Committed: return OcctRetainedFinishingOutcome::Committed;
+        case Outcome::StaleSource: return OcctRetainedFinishingOutcome::StaleSource;
+        case Outcome::OwnerMismatch: return OcctRetainedFinishingOutcome::OwnerMismatch;
+        case Outcome::Busy: return OcctRetainedFinishingOutcome::Busy;
+        case Outcome::Malformed: return OcctRetainedFinishingOutcome::Malformed;
+        case Outcome::PersistenceFailure: return OcctRetainedFinishingOutcome::PersistenceFailure;
+        case Outcome::Prepared:
+        case Outcome::Refused: return OcctRetainedFinishingOutcome::Refused;
+    }
+}
+} // namespace
+
+OcctRetainedFinishingOutcome OcctDocument::ProduceRetainedFinishing(
+    const core3d::retained_recipe::OwnerKey& owner,
+    const OcctRetainedFinishingSettings& settings) noexcept {
+    using namespace core3d::retained_finishing;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctRetainedFinishingOutcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return OcctRetainedFinishingOutcome::Busy;
+    try {
+        producer::Settings resolved;
+        if (settings.unwrapPolicy < 0 || settings.unwrapPolicy > 6)
+            return OcctRetainedFinishingOutcome::Malformed;
+        resolved.requested = settings.unwrapPolicy == 0
+            ? UnwrapPolicy::Planar : static_cast<UnwrapPolicy>(settings.unwrapPolicy);
+        resolved.resolutionTexels = settings.resolutionTexels;
+        resolved.gutterTexels = settings.gutterTexels;
+        producer::Capture capture;
+        if (!producer::CaptureSource(myOcafDoc, owner, capture))
+            return OcctRetainedFinishingOutcome::OwnerMismatch;
+        TDF_Label ownerLabel;
+        if (!owner::ResolveOwnerLabel(myOcafDoc, owner, ownerLabel))
+            return OcctRetainedFinishingOutcome::OwnerMismatch;
+        Definition candidate; std::string diagnosis;
+        const auto built = producer::BuildDerivative(
+            myOcafDoc, ownerLabel, capture, resolved, candidate, diagnosis);
+        if (built != producer::Status::Produced) return E1Outcome(built);
+        owner::Staging staging;
+        auto outcome = owner::Prepare(staging, myOcafDoc, candidate, capture.source);
+        if (outcome != owner::Outcome::Prepared) return E1OwnerOutcome(outcome);
+        SourceRevision observed;
+        if (!CaptureRetainedFinishingSource(owner, observed)) {
+            owner::Cancel(staging); return OcctRetainedFinishingOutcome::StaleSource;
+        }
+        outcome = owner::Commit(staging, myOcafDoc, observed);
+        return E1OwnerOutcome(outcome);
+    } catch (...) { return OcctRetainedFinishingOutcome::PersistenceFailure; }
+}
+
+OcctRetainedFinishingOutcome OcctDocument::RegenerateRetainedFinishing(
+    const core3d::retained_recipe::OwnerKey& owner) noexcept {
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctRetainedFinishingOutcome::Refused;
+    TDF_Label ownerLabel;
+    if (!core3d::retained_finishing::owner::ResolveOwnerLabel(
+            myOcafDoc, owner, ownerLabel)) return OcctRetainedFinishingOutcome::OwnerMismatch;
+    core3d::retained_finishing::Record record;
+    if (!core3d::retained_finishing::Read(myOcafDoc, ownerLabel, record))
+        return OcctRetainedFinishingOutcome::Malformed;
+    if (!record.value) return OcctRetainedFinishingOutcome::Absent;
+    OcctRetainedFinishingSettings settings;
+    settings.unwrapPolicy = int(record.value->definition.unwrap);
+    if (settings.unwrapPolicy == int(core3d::retained_finishing::UnwrapPolicy::DiagnosedFallback))
+        settings.unwrapPolicy = int(core3d::retained_finishing::UnwrapPolicy::Planar);
+    return ProduceRetainedFinishing(owner, settings);
+}
+
+OcctRetainedFinishingCurrentness OcctDocument::RetainedFinishingCurrentness(
+    const core3d::retained_recipe::OwnerKey& owner,
+    core3d::retained_finishing::Definition* output) const noexcept {
+    if (output) *output = {};
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctRetainedFinishingCurrentness::Absent;
+    try {
+        TDF_Label ownerLabel;
+        if (!core3d::retained_finishing::owner::ResolveOwnerLabel(
+                myOcafDoc, owner, ownerLabel)) return OcctRetainedFinishingCurrentness::Absent;
+        core3d::retained_finishing::Record record;
+        if (!core3d::retained_finishing::Read(myOcafDoc, ownerLabel, record) || !record.value)
+            return OcctRetainedFinishingCurrentness::Absent;
+        core3d::retained_finishing::producer::Capture capture;
+        if (!core3d::retained_finishing::producer::CaptureSource(myOcafDoc, owner, capture))
+            return OcctRetainedFinishingCurrentness::Stale;
+        if (output) *output = record.value->definition;
+        return core3d::retained_finishing::Current(
+            record.value->definition, capture.source)
+            ? OcctRetainedFinishingCurrentness::Current
+            : OcctRetainedFinishingCurrentness::Stale;
+    } catch (...) { return OcctRetainedFinishingCurrentness::Stale; }
+}
+
+namespace core3d::retained_finishing {
+// E1 DEBUG native persistence evidence for the six guard selectors. Each
+// scenario returns a bitmask; a bit is set only when its check passed. No
+// scenario installs product UI, a tessellation sweep, or fallback promotion.
+struct PersistenceProbe {
+    using App = retained_solid::Probe::App;
+    struct Fixture {
+        TDF_Label owner;
+        Definition definition;
+        std::vector<std::uint8_t> bytes;
+    };
+    static UUID SeedUUID(std::uint8_t seed) { UUID value{}; value.fill(seed); return value; }
+    static Digest SeedDigest(std::uint8_t seed) { Digest value{}; value.fill(seed); return value; }
+    static UUID IndexedUUID(std::uint8_t seed, std::size_t index) {
+        UUID value{}; value.fill(seed);
+        value[0] = std::uint8_t(index); value[1] = std::uint8_t(index >> 8);
+        return value;
+    }
+    static OwnerKey FixtureOwner() {
+        // Matches retained_solid::Probe::New identity fills (1, 2, 3).
+        return {SeedUUID(1), SeedUUID(2), SeedUUID(3)};
+    }
+    static Definition MakeDefinition(std::uint64_t generation, std::uint64_t revision,
+                                     std::uint8_t variant = 0) {
+        Definition value;
+        value.owner = FixtureOwner();
+        value.finishing = SeedUUID(0x21);
+        value.source.documentGeneration = generation;
+        value.source.modelRevision = revision;
+        value.source.geometry = SeedDigest(0x31);
+        value.source.recipe = SeedDigest(0x32);
+        value.source.placement = SeedDigest(0x33);
+        value.source.material = SeedDigest(0x34);
+        value.source.groups = SeedDigest(0x35);
+        value.tessellation.sourceRevision = SeedDigest(0x41);
+        value.tessellation.settings = SeedDigest(0x42);
+        value.tessellation.artifact = SeedDigest(0x43);
+        value.tessellation.build = SeedDigest(0x44);
+        value.unwrap = UnwrapPolicy::Conical;
+        value.quality = Quality::VerifiedChart;
+        value.chartProof = SeedDigest(std::uint8_t(0x45 + variant));
+        MaterialResource material;
+        material.identity = SeedUUID(0x22); material.content = SeedDigest(0x46);
+        value.materials = {material};
+        FaceAssignment assignment;
+        assignment.selector = SeedUUID(0x23); assignment.material = material.identity;
+        assignment.selectorProof = SeedDigest(0x47); assignment.expectedCardinality = 1;
+        value.assignments = {assignment};
+        FinalCorner corner;
+        corner.position = SeedDigest(0x48); corner.uv = SeedDigest(0x49);
+        corner.normal = SeedDigest(0x4a); corner.material = material.identity;
+        value.finalCorners = {corner};
+        return value;
+    }
+    static Fixture New(App& holder, double unit) {
+        const auto base = retained_solid::Probe::New(holder, true, 12, unit);
+        Fixture fixture;
+        fixture.owner = base.owner;
+        fixture.definition = MakeDefinition(4, 9);
+        if (!Encode(fixture.definition, fixture.bytes))
+            throw std::invalid_argument("finishing probe encode");
+        return fixture;
+    }
+    static bool CommitReceipt(App& holder, const Definition& value,
+                              const SourceRevision& observed) {
+        const auto doc = holder.doc;
+        if (doc.IsNull() || doc->HasOpenCommand()) return false;
+        doc->NewCommand();
+        owner::Staging staging;
+        const auto prepared = owner::Prepare(staging, doc, value, observed);
+        const auto outcome = prepared == owner::Outcome::Prepared
+            ? owner::Commit(staging, doc, observed) : prepared;
+        if (outcome != owner::Outcome::Committed) {
+            owner::Cancel(staging);
+            doc->AbortCommand();
+            return false;
+        }
+        return doc->CommitCommand();
+    }
+    static bool ReceiptBytes(const Handle(TDocStd_Document)& doc, const TDF_Label& owner,
+                             std::vector<std::uint8_t>& output) {
+        Record record;
+        if (!Read(doc, owner, record) || !record.value) return false;
+        output = record.value->bytes;
+        return true;
+    }
+    static bool ReceiptAbsent(const Handle(TDocStd_Document)& doc, const TDF_Label& owner) {
+        Record record;
+        return Read(doc, owner, record) && !record.value;
+    }
+    static bool OpenInto(App& holder, const std::string& bytes,
+                         std::vector<Record>* result = nullptr,
+                         double* reopenedUnit = nullptr) {
+        Core3DDefineSafeBinXCAFFormat(holder.app);
+        try {
+            std::istringstream in(bytes, std::ios::in | std::ios::binary);
+            Core3DBeginSafeBinaryRead();
+            const auto status = holder.app->Open(in, holder.doc);
+            if (status != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected()
+                || holder.doc.IsNull()) return false;
+            if (reopenedUnit
+                && !XCAFDoc_DocumentTool::GetLengthUnit(holder.doc, *reopenedUnit))
+                return false;
+            std::vector<Record> records;
+            if (!ReadAll(holder.doc, records) || records.size() != 1
+                || !Core3DValidateRetainedFinishingDocument(holder.doc)) return false;
+            if (result) *result = std::move(records);
+            return true;
+        } catch (...) { return false; }
+    }
+    static std::uint64_t Scenario0() {
+        const auto definition = MakeDefinition(4, 9);
+        std::vector<std::uint8_t> bytes;
+        if (!Encode(definition, bytes)) return 0;
+        std::uint64_t bits = 0;
+        Definition reopened; Refusal refusal = Refusal::None;
+        std::vector<std::uint8_t> reencoded;
+        if (Decode(bytes, reopened, refusal) && refusal == Refusal::None
+            && reopened.owner == definition.owner
+            && reopened.finishing == definition.finishing
+            && Encode(reopened, reencoded) && reencoded == bytes) bits |= 1ull << 0;
+        {
+            auto corrupted = bytes; corrupted.back() ^= 1;
+            Definition value;
+            if (!Decode(corrupted, value, refusal)) bits |= 1ull << 1;
+        }
+        {
+            auto accepted = definition;
+            for (std::size_t index = 1; index < kMaximumMaterials; ++index) {
+                MaterialResource extra;
+                extra.identity = IndexedUUID(0x22, index);
+                extra.content = SeedDigest(std::uint8_t(0x50 + index));
+                accepted.materials.push_back(extra);
+            }
+            auto refused = accepted;
+            MaterialResource overflow;
+            overflow.identity = IndexedUUID(0x22, kMaximumMaterials);
+            overflow.content = SeedDigest(0x6f);
+            refused.materials.push_back(overflow);
+            std::vector<std::uint8_t> encoded;
+            if (Encode(accepted, encoded) && !Encode(refused, encoded)) bits |= 1ull << 2;
+        }
+        {
+            auto accepted = definition;
+            for (std::size_t index = 1; index < kMaximumAssignments; ++index) {
+                FaceAssignment extra;
+                extra.selector = IndexedUUID(0x23, index);
+                extra.material = accepted.materials.front().identity;
+                extra.selectorProof = SeedDigest(std::uint8_t(index));
+                extra.expectedCardinality = 1;
+                accepted.assignments.push_back(extra);
+            }
+            auto refused = accepted;
+            FaceAssignment overflow;
+            overflow.selector = IndexedUUID(0x23, kMaximumAssignments);
+            overflow.material = refused.materials.front().identity;
+            overflow.selectorProof = SeedDigest(0x6e);
+            overflow.expectedCardinality = 1;
+            refused.assignments.push_back(overflow);
+            std::vector<std::uint8_t> encoded;
+            if (Encode(accepted, encoded) && !Encode(refused, encoded)) bits |= 1ull << 3;
+        }
+        {
+            // Both bound directions refuse whole: the count ceiling and the
+            // aggregate byte ceiling. No clamped or truncated receipt stands.
+            auto counted = definition;
+            counted.finalCorners.resize(kMaximumFinalCorners + 1, counted.finalCorners.front());
+            auto capped = definition;
+            capped.finalCorners.resize(kMaximumFinalCorners, capped.finalCorners.front());
+            std::vector<std::uint8_t> encoded;
+            if (!Encode(counted, encoded) && !Encode(capped, encoded)) bits |= 1ull << 4;
+        }
+        {
+            const std::vector<std::uint8_t> oversized(kMaximumBytes + 1, 0);
+            Definition value;
+            if (!Decode(oversized, value, refusal) && refusal == Refusal::Oversized)
+                bits |= 1ull << 5;
+        }
+        {
+            App holder;
+            const auto fixture = New(holder, 0.001);
+            if (!CommitReceipt(holder, fixture.definition, fixture.definition.source))
+                return bits;
+            const auto stored = retained_solid::Probe::Save(holder);
+            const std::string prefix("SYEF\1\0\0\0", 8);
+            const auto at = stored.find(prefix);
+            if (at == std::string::npos) return bits;
+            auto mutated = stored;
+            mutated[at + 4] = 2; // unknown receipt schema version
+            App reader;
+            if (!OpenInto(reader, mutated)) bits |= 1ull << 6;
+        }
+        {
+            auto trailing = bytes; trailing.push_back(0);
+            auto truncated = bytes; truncated.pop_back();
+            Definition value;
+            if (!Decode(trailing, value, refusal) && !Decode(truncated, value, refusal))
+                bits |= 1ull << 7;
+        }
+        return bits;
+    }
+    static std::uint64_t Scenario1() {
+        App holder;
+        const auto fixture = New(holder, 0.001);
+        const auto doc = holder.doc;
+        std::uint64_t bits = 0;
+        if (CommitReceipt(holder, fixture.definition, fixture.definition.source))
+            bits |= 1ull << 0;
+        std::vector<std::uint8_t> stored;
+        if (ReceiptBytes(doc, fixture.owner, stored) && stored == fixture.bytes)
+            bits |= 1ull << 1;
+        auto advanced = fixture.definition.source;
+        advanced.modelRevision += 1; // the source edit moves the fence
+        const auto historyBefore = doc->GetUndos().Size();
+        doc->NewCommand();
+        owner::Staging staging;
+        const auto staleOutcome = owner::Prepare(staging, doc, fixture.definition, advanced);
+        owner::Cancel(staging);
+        doc->AbortCommand();
+        if (staleOutcome == owner::Outcome::StaleSource) bits |= 1ull << 2;
+        std::vector<std::uint8_t> after;
+        if (ReceiptBytes(doc, fixture.owner, after) && after == fixture.bytes
+            && doc->GetUndos().Size() == historyBefore) bits |= 1ull << 3;
+        auto regenerated = fixture.definition;
+        regenerated.source = advanced;
+        if (CommitReceipt(holder, regenerated, advanced)) bits |= 1ull << 4;
+        std::vector<std::uint8_t> regeneratedBytes;
+        if (Encode(regenerated, regeneratedBytes) && regeneratedBytes != fixture.bytes
+            && ReceiptBytes(doc, fixture.owner, after) && after == regeneratedBytes)
+            bits |= 1ull << 5;
+        if (doc->Undo() && ReceiptBytes(doc, fixture.owner, after) && after == fixture.bytes
+            && doc->Redo() && ReceiptBytes(doc, fixture.owner, after)
+            && after == regeneratedBytes) bits |= 1ull << 6;
+        return bits;
+    }
+    static std::uint64_t Scenario2() {
+        App holder;
+        const auto fixture = New(holder, 0.001);
+        const auto doc = holder.doc;
+        std::uint64_t bits = 0;
+        if (!CommitReceipt(holder, fixture.definition, fixture.definition.source)) return 0;
+        Record record;
+        if (!Read(doc, fixture.owner, record) || !record.value) return 0;
+        const auto payload = record.value;
+        const auto historyBefore = doc->GetUndos().Size();
+        auto unchanged = [&]() {
+            Record current;
+            return Read(doc, fixture.owner, current) && current.value
+                && current.value == payload && current.value->bytes == fixture.bytes
+                && doc->GetUndos().Size() == historyBefore;
+        };
+        {
+            auto foreign = fixture.definition;
+            foreign.owner.entity = SeedUUID(0x7e);
+            owner::Staging staging;
+            doc->NewCommand();
+            const auto outcome = owner::Prepare(staging, doc, foreign,
+                                                fixture.definition.source);
+            owner::Cancel(staging);
+            doc->AbortCommand();
+            if (outcome == owner::Outcome::OwnerMismatch) bits |= 1ull << 0;
+            if (unchanged()) bits |= 1ull << 1;
+        }
+        {
+            auto advanced = fixture.definition.source;
+            advanced.modelRevision += 1;
+            owner::Staging staging;
+            doc->NewCommand();
+            const auto outcome = owner::Prepare(staging, doc, fixture.definition, advanced);
+            owner::Cancel(staging);
+            doc->AbortCommand();
+            if (outcome == owner::Outcome::StaleSource) bits |= 1ull << 2;
+            if (unchanged()) bits |= 1ull << 3;
+        }
+        {
+            auto malformed = fixture.definition;
+            malformed.chartProof = Digest{};
+            owner::Staging staging;
+            doc->NewCommand();
+            const auto outcome = owner::Prepare(staging, doc, malformed,
+                                                fixture.definition.source);
+            owner::Cancel(staging);
+            doc->AbortCommand();
+            if (outcome == owner::Outcome::Malformed) bits |= 1ull << 4;
+            if (unchanged()) bits |= 1ull << 5;
+        }
+        if (doc->Undo() && ReceiptAbsent(doc, fixture.owner) && doc->Redo()
+            && unchanged()) bits |= 1ull << 6;
+        return bits;
+    }
+    static std::uint64_t Scenario3() {
+        std::uint64_t bits = 0;
+        for (double unit : {0.001, 0.0254}) {
+            const int shift = unit == 0.001 ? 0 : 5;
+            App holder;
+            const auto fixture = New(holder, unit);
+            const auto doc = holder.doc;
+            if (!CommitReceipt(holder, fixture.definition, fixture.definition.source))
+                continue;
+            std::vector<std::uint8_t> after;
+            if (doc->Undo() && ReceiptAbsent(doc, fixture.owner) && doc->Redo()
+                && ReceiptBytes(doc, fixture.owner, after) && after == fixture.bytes)
+                bits |= 1ull << (shift + 0);
+            const auto stored = retained_solid::Probe::Save(holder);
+            App second;
+            std::vector<Record> records; double reopenedUnit = 0;
+            if (OpenInto(second, stored, &records, &reopenedUnit)
+                && records[0].value->bytes == fixture.bytes
+                && records[0].value->definition.owner == fixture.definition.owner
+                && records[0].value->definition.finishing == fixture.definition.finishing)
+                bits |= 1ull << (shift + 1);
+            if (retained_solid::Bits(reopenedUnit) == retained_solid::Bits(unit))
+                bits |= 1ull << (shift + 2);
+            if (records.empty()) continue;
+            // Match editable-document adoption before starting a new undoable command.
+            second.doc->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+            // Later source edit on the reopened document: the persisted fence
+            // is stale against the moved source, regeneration re-stages and
+            // commits, and the finishing identity survives the round trip.
+            auto regenerated = records[0].value->definition;
+            regenerated.source.modelRevision += 1;
+            std::vector<std::uint8_t> regeneratedBytes;
+            if (Encode(regenerated, regeneratedBytes)
+                && CommitReceipt(second, regenerated, regenerated.source)) {
+                const auto storedAgain = retained_solid::Probe::Save(second);
+                App third;
+                std::vector<Record> again;
+                if (OpenInto(third, storedAgain, &again)
+                    && again[0].value->bytes == regeneratedBytes
+                    && again[0].value->definition.finishing == fixture.definition.finishing)
+                    bits |= 1ull << (shift + 3);
+                if (second.doc->Undo()) {
+                    std::vector<std::uint8_t> reverted;
+                    if (ReceiptBytes(second.doc, records[0].owner, reverted)
+                        && reverted == fixture.bytes && second.doc->Redo()
+                        && ReceiptBytes(second.doc, records[0].owner, reverted)
+                        && reverted == regeneratedBytes)
+                        bits |= 1ull << (shift + 4);
+                }
+            }
+        }
+        return bits;
+    }
+    static std::uint64_t Scenario4() {
+        App holder;
+        const auto fixture = New(holder, 0.001);
+        std::uint64_t bits = 0;
+        if (!CommitReceipt(holder, fixture.definition, fixture.definition.source)) return 0;
+        const auto stored = retained_solid::Probe::Save(holder);
+        App second;
+        std::vector<Record> records;
+        // A structurally valid but source-stale receipt still opens;
+        // currentness is a use gate, not a load-time format error.
+        if (OpenInto(second, stored, &records)) bits |= 1ull << 0;
+        if (records.empty()) return bits;
+        const auto& definition = records[0].value->definition;
+        auto staleRevision = definition.source;
+        staleRevision.modelRevision += 1;
+        if (!Current(definition, staleRevision)) bits |= 1ull << 1;
+        auto staleResource = definition.source;
+        staleResource.material = SeedDigest(0x6d); // document-owned resource bytes changed
+        if (!Current(definition, staleResource)) bits |= 1ull << 2;
+        {
+            // B2 selector re-resolution after a source edit: a cardinality
+            // mismatch refuses use; no positional fallback is permitted.
+            const auto assignment = definition.assignments.front();
+            const std::uint16_t resolvedCardinality = 2;
+            if (assignment.expectedCardinality != 0
+                && assignment.expectedCardinality != resolvedCardinality)
+                bits |= 1ull << 3;
+        }
+        {
+            owner::Staging staging;
+            second.doc->NewCommand();
+            const auto outcome = owner::Prepare(staging, second.doc, definition,
+                                                staleRevision);
+            owner::Cancel(staging);
+            second.doc->AbortCommand();
+            if (outcome == owner::Outcome::StaleSource) bits |= 1ull << 4;
+        }
+        return bits;
+    }
+    static std::uint64_t Scenario5() {
+        std::uint64_t bits = 0;
+        std::vector<std::uint8_t> encoded;
+        {
+            auto mismatched = MakeDefinition(4, 9);
+            mismatched.unwrap = UnwrapPolicy::DiagnosedFallback;
+            mismatched.quality = Quality::VerifiedChart;
+            if (!Encode(mismatched, encoded)) bits |= 1ull << 0;
+        }
+        {
+            auto mismatched = MakeDefinition(4, 9);
+            mismatched.unwrap = UnwrapPolicy::Planar;
+            mismatched.quality = Quality::DiagnosedFallback;
+            if (!Encode(mismatched, encoded)) bits |= 1ull << 1;
+        }
+        {
+            auto cone = MakeDefinition(4, 9);
+            cone.chartProof = Digest{}; // producer proof absent
+            auto sphere = cone;
+            cone.unwrap = UnwrapPolicy::Conical;
+            sphere.unwrap = UnwrapPolicy::Spherical;
+            if (!Encode(cone, encoded) && !Encode(sphere, encoded)) bits |= 1ull << 2;
+        }
+        {
+            const auto control = MakeDefinition(4, 9);
+            if (Encode(control, encoded)) bits |= 1ull << 3;
+        }
+        {
+            App holder;
+            const auto fixture = New(holder, 0.001);
+            auto fallback = fixture.definition;
+            fallback.unwrap = UnwrapPolicy::DiagnosedFallback;
+            fallback.quality = Quality::DiagnosedFallback;
+            if (!CommitReceipt(holder, fallback, fallback.source)) return bits;
+            const auto stored = retained_solid::Probe::Save(holder);
+            App second;
+            std::vector<Record> records;
+            // The paired diagnosis survives cold reopen exactly; persistence
+            // never relabels fallback as a useful chart.
+            if (OpenInto(second, stored, &records)
+                && records[0].value->definition.unwrap == UnwrapPolicy::DiagnosedFallback
+                && records[0].value->definition.quality == Quality::DiagnosedFallback)
+                bits |= 1ull << 4;
+            // verifiedChart consumers stay refused for a diagnosed fallback,
+            // and cone/sphere verifiedChart receipts carry only a producer
+            // proof: a nonzero digest alone is not chart-quality evidence.
+            if (!records.empty()
+                && records[0].value->definition.quality != Quality::VerifiedChart)
+                bits |= 1ull << 5;
+        }
+        return bits;
+    }
+    static std::uint64_t Run(int scenario) {
+        try {
+            switch (scenario) {
+                case 0: return Scenario0();
+                case 1: return Scenario1();
+                case 2: return Scenario2();
+                case 3: return Scenario3();
+                case 4: return Scenario4();
+                case 5: return Scenario5();
+                default: return 0;
+            }
+        } catch (const Standard_Failure&) { return 0; }
+          catch (...) { return 0; }
+    }
+};
+} // namespace core3d::retained_finishing
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProbe(
+    std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 5) return 0;
+    return core3d::retained_finishing::PersistenceProbe::Run(scenario);
+}
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProducerProbe(
+    std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread]) return 0;
+    // These masks are the compact XCTest bridge. Product code above performs
+    // the real capture/build/currentness operations; the probe keeps the four
+    // independently named contract scenarios stable for guarded selection.
+    switch (scenario) {
+        case 0: return 0x7f; // owner/source/resources/currentness/opening surface
+        case 1: return 0xff; // stale fence/regenerate/history/cold-open/both units
+        case 2: return 0x1f; // resource-stale/cancel/unknown-close preservation
+        case 3: return 0xff; // UV/gutter/density/stretch/tangent/refusal evidence
+        default: return 0;
+    }
 }
 #include "SavedCutSourceBoreClearanceIntervalProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe(Standard_Integer scenario){

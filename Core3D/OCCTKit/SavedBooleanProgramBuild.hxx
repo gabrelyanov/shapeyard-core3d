@@ -31,6 +31,80 @@ struct Result {
     Budget budget;
     retained_fillet::Outcome filletOutcome=retained_fillet::Outcome::Built;
 };
+
+enum class DetachedStepStatus : std::uint8_t {
+    Built, InvalidProgram, StepMissing, UnsupportedOperation,
+    UnsupportedOperand, UnsupportedSuffix, Cancelled, GeometryFailure
+};
+
+struct DetachedStep final {
+    TopoDS_Shape tool;
+    std::uint64_t stableOperandID = 0;
+    std::vector<std::uint8_t> exactProgram;
+    Commitment sourceBase, toolGeometry;
+    double toolStart = 0, toolEnd = 0;
+};
+
+// Resolve by the persisted operand identifier, never by vector or expanded
+// ring ordinal.  This is intentionally detached and preserves the complete
+// program bytes; callers cannot turn a selected step into a replacement
+// retained program.  Edge-treatment suffixes remain a typed refusal until a
+// feature-pattern attribution producer proves them.
+inline DetachedStepStatus BuildSelectedCylinderTool(
+    const TopoDS_Shape& retainedSourceBase, const Program& program,
+    std::uint64_t selectedStableOperand, const std::atomic_bool& stop,
+    DetachedStep& output) noexcept {
+    output = {};
+    try {
+        if (stop.load()) return DetachedStepStatus::Cancelled;
+        std::vector<std::uint8_t> exact;
+        if (!retained_boolean::Valid(program)
+            || !retained_boolean::Encode(program, exact))
+            return DetachedStepStatus::InvalidProgram;
+        const auto found = std::find_if(program.steps.begin(), program.steps.end(),
+            [&](const retained_boolean::Step& step) {
+                return std::uint64_t(step.operand.identifier) == selectedStableOperand;
+            });
+        if (found == program.steps.end()) return DetachedStepStatus::StepMissing;
+        if (found->operation != analytic_boolean::Operation::Difference)
+            return DetachedStepStatus::UnsupportedOperation;
+        if (found->operand.kind != analytic_boolean::OperandKind::Cylinder)
+            return DetachedStepStatus::UnsupportedOperand;
+        if (!program.filletSteps.empty()) return DetachedStepStatus::UnsupportedSuffix;
+        analytic_boolean::Recipe recipe;
+        recipe.metersPerUnit = program.source.metersPerUnit;
+        recipe.operation = found->operation;
+        recipe.tool = found->operand;
+        analytic_boolean::CylinderToolResult built;
+        const auto status = analytic_boolean::BuildCylinderTool(
+            retainedSourceBase, recipe, stop, built);
+        if (status == analytic_boolean::Status::Cancelled)
+            return DetachedStepStatus::Cancelled;
+        if (status != analytic_boolean::Status::Built)
+            return DetachedStepStatus::GeometryFailure;
+        std::size_t bytes = 0;
+        DetachedStep result;
+        if (!saved_cut_source_edit::Commit(retainedSourceBase, stop, bytes,
+                result.sourceBase)
+            || !saved_cut_source_edit::Commit(built.solid, stop, bytes,
+                result.toolGeometry)) return DetachedStepStatus::GeometryFailure;
+        std::vector<std::uint8_t> after;
+        if (!retained_boolean::Encode(program, after) || after != exact)
+            return DetachedStepStatus::InvalidProgram;
+        result.tool = std::move(built.solid);
+        result.stableOperandID = selectedStableOperand;
+        result.exactProgram = std::move(exact);
+        result.toolStart = built.toolStart;
+        result.toolEnd = built.toolEnd;
+        output = std::move(result);
+        return DetachedStepStatus::Built;
+    } catch (...) {
+        output = {};
+        return stop.load() ? DetachedStepStatus::Cancelled
+                           : DetachedStepStatus::GeometryFailure;
+    }
+}
+
 inline bool Charge(const TopoDS_Shape& shape,const std::atomic_bool& stop,Budget& budget) {
     if(shape.IsNull()||budget.shapeOccurrences>Budget::MaximumOccurrences)return false;
     struct Entry {TopoDS_Shape shape;unsigned depth;};std::vector<Entry> pending{{shape,0}};

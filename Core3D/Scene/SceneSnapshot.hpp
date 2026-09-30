@@ -20,7 +20,7 @@
 namespace core3d::scene {
 
 //! Update the Swift Metal support and GLB export schema gates with this contract.
-inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 9;
+inline constexpr std::uint32_t kSceneSnapshotSchemaVersion = 10;
 inline constexpr std::uint32_t kPresentationOverlaySnapshotSchemaVersion = 10;
 
 struct Float2 {
@@ -242,10 +242,27 @@ struct TopologyCardinality {
     std::uint32_t vertexCount = 0;
 };
 
+enum class GeometryKind : std::uint8_t {
+    SurfaceTriangles = 0,
+    NativeC1Wire = 1,
+};
+
+//! Exact, immutable persisted C1 payload. These bytes are descriptive scene
+//! data only; they never carry a document handle, command lease, or authority.
+struct NativeC1WireSnapshot {
+    std::vector<std::uint8_t> canonicalDefinitionBytes;
+    std::vector<std::uint8_t> canonicalOwnerBytes;
+    std::array<std::uint8_t, 32> canonicalDefinitionDigest{};
+    std::uint64_t definitionRevision = 0;
+    std::uint64_t frameRevision = 0;
+};
+
 //! Basis provenance is independent of geometry revision and material presence.
 enum class TangentBasis : std::uint8_t { None = 0, MikkTSpace = 1, Authored = 2 };
 
 struct MeshSnapshot {
+    GeometryKind geometryKind = GeometryKind::SurfaceTriangles;
+    std::optional<NativeC1WireSnapshot> nativeC1Wire;
     std::string definitionIdentifier;
     std::uint64_t geometryRevision = 0;
     Bounds3d localBounds;
@@ -289,6 +306,9 @@ struct InstanceSnapshot {
     CoordinateSpace coordinateSpace = CoordinateSpace::World;
     DepthPolicy depthPolicy = DepthPolicy::Scene;
     RenderStyle renderStyle = RenderStyle::Shaded;
+    //! Resolved whole-object presentation for a native wire. Texture indices
+    //! must remain absent; this is not a fabricated face binding.
+    std::optional<MaterialSnapshot> nativeWirePresentation;
     std::vector<PrimitiveBinding> primitiveBindings;
 };
 

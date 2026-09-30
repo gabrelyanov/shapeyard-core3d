@@ -9,6 +9,13 @@
 #include "../OCCTKit/SweepPersistence.hxx"
 #include "../OCCTKit/EnclosureParameters.hxx"
 
+#if DEBUG
+#include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
+#include "Core3DViewer.h"
+
+#include <TDataStd_Integer.hxx>
+#endif
+
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -117,6 +124,99 @@ static bool Core3DPartBooleanFinite4(simd_double4 value) {
     return self;
 }
 @end
+
+#if DEBUG
+namespace core3d::native_opening::debug {
+
+SurfaceProbeEvidence RunSurfaceProbe(std::string_view scenario) noexcept {
+    SurfaceProbeEvidence evidence;
+    if (scenario != "actualDocumentIDsAndHistory") {
+        evidence.error = "unknownScenario";
+        return evidence;
+    }
+
+    try {
+        Handle(OcctDocument) documentFixture = new OcctDocument();
+        documentFixture->InitDoc();
+        core3d::Core3DViewer viewerFixture;
+        const Handle(OcctDocument) viewerDocument = viewerFixture.getDocument();
+        if (viewerDocument.IsNull() || viewerDocument->Document().IsNull()) {
+            evidence.error = "viewerDocumentUnavailable";
+            return evidence;
+        }
+
+        evidence.documentIdentifier = documentFixture->DocumentIdentifier();
+        evidence.viewerDocumentIdentifier = viewerDocument->DocumentIdentifier();
+        const Handle(TDocStd_Document)& history = viewerDocument->Document();
+        evidence.initialUndoCount = history->GetAvailableUndos();
+        evidence.initialRedoCount = history->GetAvailableRedos();
+
+        history->NewCommand();
+        if (!history->HasOpenCommand()) {
+            evidence.error = "historyCommandUnavailable";
+            return evidence;
+        }
+        const TDF_Label marker = history->Main().NewChild();
+        TDataStd_Integer::Set(marker, 179);
+        if (!history->CommitCommand() || history->HasOpenCommand()) {
+            if (history->HasOpenCommand()) history->AbortCommand();
+            evidence.error = "historyCommitFailed";
+            return evidence;
+        }
+        evidence.committedUndoCount = history->GetAvailableUndos();
+        evidence.committedRedoCount = history->GetAvailableRedos();
+
+        evidence.undoSucceeded = viewerDocument->undo();
+        evidence.undoUndoCount = history->GetAvailableUndos();
+        evidence.undoRedoCount = history->GetAvailableRedos();
+        evidence.redoSucceeded = viewerDocument->redo();
+        evidence.redoUndoCount = history->GetAvailableUndos();
+        evidence.redoRedoCount = history->GetAvailableRedos();
+
+        evidence.accepted = !evidence.documentIdentifier.empty()
+            && !evidence.viewerDocumentIdentifier.empty()
+            && evidence.documentIdentifier != evidence.viewerDocumentIdentifier
+            && evidence.initialUndoCount == 0 && evidence.initialRedoCount == 0
+            && evidence.committedUndoCount == 1 && evidence.committedRedoCount == 0
+            && evidence.undoSucceeded && evidence.undoUndoCount == 0
+            && evidence.undoRedoCount == 1 && evidence.redoSucceeded
+            && evidence.redoUndoCount == 1 && evidence.redoRedoCount == 0;
+        if (!evidence.accepted) evidence.error = "nativeEvidenceMismatch";
+    } catch (...) {
+        evidence.accepted = false;
+        evidence.error = "nativeFixtureException";
+    }
+    return evidence;
+}
+
+} // namespace core3d::native_opening::debug
+
+@implementation Core3DNativeOpeningSurfaceDiagnostic
++ (NSDictionary<NSString *, id> *)runScenario:(NSString *)scenario {
+    if (![scenario isKindOfClass:NSString.class]) {
+        return @{ @"accepted": @NO, @"error": @"unknownScenario" };
+    }
+    const auto evidence = core3d::native_opening::debug::RunSurfaceProbe(
+        std::string_view(scenario.UTF8String ?: ""));
+    return @{
+        @"accepted": @(evidence.accepted),
+        @"error": [NSString stringWithUTF8String:evidence.error.c_str()],
+        @"documentIdentifier": [NSString stringWithUTF8String:evidence.documentIdentifier.c_str()],
+        @"viewerDocumentIdentifier": [NSString stringWithUTF8String:evidence.viewerDocumentIdentifier.c_str()],
+        @"initialUndoCount": @(evidence.initialUndoCount),
+        @"initialRedoCount": @(evidence.initialRedoCount),
+        @"committedUndoCount": @(evidence.committedUndoCount),
+        @"committedRedoCount": @(evidence.committedRedoCount),
+        @"undoSucceeded": @(evidence.undoSucceeded),
+        @"undoUndoCount": @(evidence.undoUndoCount),
+        @"undoRedoCount": @(evidence.undoRedoCount),
+        @"redoSucceeded": @(evidence.redoSucceeded),
+        @"redoUndoCount": @(evidence.redoUndoCount),
+        @"redoRedoCount": @(evidence.redoRedoCount),
+    };
+}
+@end
+#endif
 
 @implementation Core3DPartBooleanValues
 - (instancetype)initWithOperation:(Core3DPartBooleanOperation)operation

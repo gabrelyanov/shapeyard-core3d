@@ -106,11 +106,13 @@ inline KernelBuild BuildDetached(const Definition& definition,
                 if (!edgeMaker.IsDone() || edgeMaker.Edge().IsNull()) {
                     output = {}; output.status = KernelBuildStatus::CurveRefused; return output;
                 }
-                edges.push_back(edgeMaker.Edge());
-                wireMaker.Add(edges.back());
-                if (!wireMaker.IsDone()) {
+                wireMaker.Add(edgeMaker.Edge());
+                if (!wireMaker.IsDone() || wireMaker.Edge().IsNull()) {
                     output = {}; output.status = KernelBuildStatus::WireRefused; return output;
                 }
+                // MakeWire may copy the input edge when sharing coincident
+                // vertices. Preserve authored order using the edge it installed.
+                edges.push_back(wireMaker.Edge());
             }
             const TopoDS_Wire wire = wireMaker.Wire();
             if (wire.IsNull() || BRepCheck_Wire(wire).Closed() != BRepCheck_NoError

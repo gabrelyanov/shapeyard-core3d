@@ -22,6 +22,7 @@
 #import <Foundation/Foundation.h>
 
 #include <cstring>
+#include <Standard_Failure.hxx>
 
 #import "GLView.h"
 #import "GLViewController.h"
@@ -33,6 +34,17 @@ namespace {
 #ifdef DEBUG
 // Covers iPad Pro 13-inch (M4) and iPad Air 13-inch (M2) viewport backings.
 constexpr NSUInteger kDebugCapturePixelBudget = 8 * 1024 * 1024;
+
+bool Core3DSpatialCameraTraceEnabled()
+{
+    return [NSProcessInfo.processInfo.environment[@"SHAPEYARD_UITEST_C2_SPATIAL_FIXTURE"]
+        isEqualToString:@"1"];
+}
+
+NSString *Core3DSpatialCameraTraceUnits()
+{
+    return NSProcessInfo.processInfo.environment[@"SHAPEYARD_UITEST_C2_UNITS"] ?: @"missing";
+}
 #endif
 
 class EAGLContextRestorer final {
@@ -106,6 +118,7 @@ private:
     BOOL _presentationDelivered;
 #ifdef DEBUG
     BOOL _debugSkipNextPresentation;
+    BOOL _debugProbeFramebufferPrepared;
 #endif
 
 }
@@ -320,6 +333,167 @@ private:
     return YES;
 }
 
+#ifdef DEBUG
+- (BOOL)debugPrepareProbeFramebuffer
+{
+    if (!NSThread.isMainThread || myGLContext == nil || self.window != nil
+        || myController != nil || _debugProbeFramebufferPrepared
+        || myFrameBuffer != 0 || myRenderBuffer != 0 || myDepthBuffer != 0
+        || myBackingWidth != 0 || myBackingHeight != 0) {
+        return NO;
+    }
+
+    EAGLContext *previousContext = EAGLContext.currentContext;
+    if (![EAGLContext setCurrentContext:myGLContext]) return NO;
+
+    GLint savedFramebuffer = 0, savedRenderbuffer = 0;
+    GLint savedViewport[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &savedFramebuffer);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &savedRenderbuffer);
+    glGetIntegerv(GL_VIEWPORT, savedViewport);
+    BOOL prepared = glGetError() == GL_NO_ERROR;
+    GLint colorWidth = 0, colorHeight = 0, depthWidth = 0, depthHeight = 0;
+
+    if (prepared) {
+        glGenFramebuffers(1, &myFrameBuffer);
+        glGenRenderbuffers(1, &myRenderBuffer);
+        glGenRenderbuffers(1, &myDepthBuffer);
+        prepared = myFrameBuffer != 0 && myRenderBuffer != 0
+            && myDepthBuffer != 0 && glGetError() == GL_NO_ERROR;
+    }
+    if (prepared) {
+        glBindFramebuffer(GL_FRAMEBUFFER, myFrameBuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, myRenderBuffer);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA4, 64, 64);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_RENDERBUFFER, myRenderBuffer);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH,
+                                     &colorWidth);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT,
+                                     &colorHeight);
+        glBindRenderbuffer(GL_RENDERBUFFER, myDepthBuffer);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 64, 64);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, myDepthBuffer);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH,
+                                     &depthWidth);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT,
+                                     &depthHeight);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glViewport(0, 0, colorWidth, colorHeight);
+        GLint viewport[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        prepared = glGetError() == GL_NO_ERROR
+            && colorWidth == 64 && colorHeight == 64
+            && depthWidth == 64 && depthHeight == 64
+            && status == GL_FRAMEBUFFER_COMPLETE
+            && viewport[0] == 0 && viewport[1] == 0
+            && viewport[2] == 64 && viewport[3] == 64;
+    }
+
+    if (!prepared) {
+        if (myFrameBuffer != 0) glDeleteFramebuffers(1, &myFrameBuffer);
+        if (myRenderBuffer != 0) glDeleteRenderbuffers(1, &myRenderBuffer);
+        if (myDepthBuffer != 0) glDeleteRenderbuffers(1, &myDepthBuffer);
+        myFrameBuffer = myRenderBuffer = myDepthBuffer = 0;
+        myBackingWidth = myBackingHeight = 0;
+    } else {
+        myBackingWidth = colorWidth;
+        myBackingHeight = colorHeight;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)savedFramebuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)savedRenderbuffer);
+    glViewport(savedViewport[0], savedViewport[1],
+               savedViewport[2], savedViewport[3]);
+    const BOOL restoredState = glGetError() == GL_NO_ERROR;
+    const BOOL restoredContext = [EAGLContext setCurrentContext:previousContext];
+    if (!prepared || !restoredState || !restoredContext) {
+        if (prepared && [EAGLContext setCurrentContext:myGLContext]) {
+            glDeleteFramebuffers(1, &myFrameBuffer);
+            glDeleteRenderbuffers(1, &myRenderBuffer);
+            glDeleteRenderbuffers(1, &myDepthBuffer);
+            (void)[EAGLContext setCurrentContext:previousContext];
+        }
+        myFrameBuffer = myRenderBuffer = myDepthBuffer = 0;
+        myBackingWidth = myBackingHeight = 0;
+        _debugProbeFramebufferPrepared = NO;
+        return NO;
+    }
+    _debugProbeFramebufferPrepared = YES;
+    _hasDrawable = NO;
+    _displayLink.paused = YES;
+    return YES;
+}
+
+- (BOOL)debugPerformWithProbeFramebuffer:(void (^)(void))work
+{
+    if (!NSThread.isMainThread || work == nil || myGLContext == nil
+        || !_debugProbeFramebufferPrepared || self.window != nil
+        || myController != nil || myFrameBuffer == 0 || myRenderBuffer == 0
+        || myDepthBuffer == 0 || myBackingWidth != 64
+        || myBackingHeight != 64) return NO;
+
+    EAGLContext *previousContext = EAGLContext.currentContext;
+    if (![EAGLContext setCurrentContext:myGLContext]) return NO;
+    GLint savedFramebuffer = 0, savedRenderbuffer = 0;
+    GLint savedViewport[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &savedFramebuffer);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &savedRenderbuffer);
+    glGetIntegerv(GL_VIEWPORT, savedViewport);
+    BOOL succeeded = glGetError() == GL_NO_ERROR;
+    if (succeeded) {
+        glBindFramebuffer(GL_FRAMEBUFFER, myFrameBuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, myRenderBuffer);
+        GLint width = 0, height = 0, depthWidth = 0, depthHeight = 0;
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH,
+                                     &width);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT,
+                                     &height);
+        glBindRenderbuffer(GL_RENDERBUFFER, myDepthBuffer);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH,
+                                     &depthWidth);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT,
+                                     &depthHeight);
+        glBindRenderbuffer(GL_RENDERBUFFER, myRenderBuffer);
+        glViewport(0, 0, myBackingWidth, myBackingHeight);
+        GLint viewport[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        succeeded = width == 64 && height == 64
+            && depthWidth == 64 && depthHeight == 64
+            && glCheckFramebufferStatus(GL_FRAMEBUFFER)
+                == GL_FRAMEBUFFER_COMPLETE
+            && viewport[0] == 0 && viewport[1] == 0
+            && viewport[2] == 64 && viewport[3] == 64
+            && glGetError() == GL_NO_ERROR;
+    }
+    if (succeeded) {
+        try {
+            work();
+        } catch (const Standard_Failure& failure) {
+            NSLog(@"Probe framebuffer work failed: %.256s",
+                  failure.GetMessageString() ?: "Standard_Failure");
+            succeeded = NO;
+        } catch (...) {
+            NSLog(@"Probe framebuffer work failed with an unknown exception");
+            succeeded = NO;
+        }
+    }
+
+    if (EAGLContext.currentContext != myGLContext
+        && ![EAGLContext setCurrentContext:myGLContext]) {
+        succeeded = NO;
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)savedFramebuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)savedRenderbuffer);
+        glViewport(savedViewport[0], savedViewport[1],
+                   savedViewport[2], savedViewport[3]);
+        if (glGetError() != GL_NO_ERROR) succeeded = NO;
+    }
+    if (![EAGLContext setCurrentContext:previousContext]) succeeded = NO;
+    return succeeded;
+}
+#endif
+
 - (void) destroyBuffers
 {
     [self invalidatePresentationObservation];
@@ -334,6 +508,9 @@ private:
     myBackingWidth = 0;
     myBackingHeight = 0;
     _hasDrawable = NO;
+#ifdef DEBUG
+    _debugProbeFramebufferPrepared = NO;
+#endif
 }
 
 // =======================================================================
@@ -428,6 +605,13 @@ private:
     if (didPresent) {
         ++_renderedFrameCount;
     }
+#ifdef DEBUG
+    if (Core3DSpatialCameraTraceEnabled()) {
+        NSLog(@"[D146CameraTrace] event=render units=%@ presented=%d frame=%llu drawable=%dx%d",
+            Core3DSpatialCameraTraceUnits(), didPresent,
+            (unsigned long long)_renderedFrameCount, myBackingWidth, myBackingHeight);
+    }
+#endif
     _isDrawing = NO;
     if (didPresent) {
         GLViewController *controller = myController;
@@ -556,6 +740,14 @@ private:
 
     // A size change is itself a frame request, even if the renderer was idle
     // before Auto Layout invalidated the drawable.
+#ifdef DEBUG
+    if (Core3DSpatialCameraTraceEnabled()) {
+        NSLog(@"[D146CameraTrace] event=drawable-resize units=%@ old=%dx%d expected=%dx%d bounds=%.17gx%.17g scale=%.17g",
+            Core3DSpatialCameraTraceUnits(), myBackingWidth, myBackingHeight,
+            expectedWidth, expectedHeight, CGRectGetWidth(self.bounds),
+            CGRectGetHeight(self.bounds), scale);
+    }
+#endif
     _frameRequested = YES;
     [self createBuffers];
     if (!_hasDrawable) {

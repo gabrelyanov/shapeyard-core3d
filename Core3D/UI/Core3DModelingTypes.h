@@ -23,6 +23,17 @@ NS_ASSUME_NONNULL_BEGIN
 @class Core3DSceneFrameSnapshot;
 @class Core3DScenePresentationOverlaySnapshot;
 
+//! Opaque native openings for retained C1/D2/D3/D4 editors. Dictionaries are
+//! descriptive projections only; authority remains in the native object.
+@class Core3DBoundedCurveEditingOpening;
+@class Core3DBoundedCurveCreationOpening;
+@class Core3DPatternEditingOpening;
+@class Core3DPathArrayEditingOpening;
+@class Core3DFeaturePatternEditingOpening;
+@class Core3DFeaturePatternPreparedEdit;
+@class Core3DFeaturePatternPreparation;
+@class Core3DGeneralLoftEditingOpening;
+
 typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultCommitted = 0,
     Core3DProfileConstructionResultRejected,
@@ -32,6 +43,149 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultCancelled,
     Core3DProfileConstructionResultUnchanged,
 };
+
+typedef NS_ENUM(NSInteger, Core3DBoundedCurvePreparationResult) {
+    Core3DBoundedCurvePreparationResultPrepared = 0,
+    Core3DBoundedCurvePreparationResultUnchanged,
+    Core3DBoundedCurvePreparationResultUnsupportedMutation,
+    Core3DBoundedCurvePreparationResultRejected,
+};
+
+//! One native-issued C1 authority. `descriptor` is a complete retained-value
+//! projection and can never be used to construct or refresh an opening.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBoundedCurveEditingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+- (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
+    editedPoleIdentifier:(nullable NSUUID *)editedPoleIdentifier
+    gesture:(NSString *)gesture
+    completion:(void (^)(Core3DBoundedCurvePreparationResult result,
+                          NSString *detail))completion
+    NS_SWIFT_NAME(prepare(candidate:editedPoleIdentifier:gesture:completion:));
+- (void)applyWithCompletion:
+    (void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
+    NS_SWIFT_NAME(apply(completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! One native C1 creation opening for ordinary authoring. `descriptor`
+//! projects the creation context (document identity, units and admission
+//! budgets). A candidate carries explicit construction values only — domain,
+//! degree, knots, pole locals/optional weights and the authored frame. Every
+//! durable identity (owner entity/definition, feature, frame and pole UUIDs)
+//! is minted natively and is never accepted from the candidate.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBoundedCurveCreationOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+- (void)createCandidate:(NSDictionary<NSString *, id> *)candidate
+    name:(NSString *)name
+    completion:(void (^)(Core3DProfileConstructionResult result,
+                          NSString *detail,
+                          NSString *_Nullable entityIdentifier))completion
+    NS_SWIFT_NAME(create(candidate:name:completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Opaque C3-N create/edit authority. The descriptor projects every persisted
+//! station value, but native-issued owner/feature IDs and the opening object are
+//! both required for mutation. Structural station changes are unavailable.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DGeneralLoftEditingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly,getter=isCreating) BOOL creating;
+- (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
+    editedStationIdentifier:(NSUUID *)stationIdentifier
+    completion:(void (^)(Core3DBoundedCurvePreparationResult result,
+                          NSString *detail))completion
+    NS_SWIFT_NAME(prepare(candidate:editedStationIdentifier:completion:));
+- (void)applyWithCompletion:
+    (void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
+    NS_SWIFT_NAME(apply(completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPatternEditingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly) NSInteger projectedDocumentBytes;
+@property(nonatomic,readonly) NSInteger projectedMemoryBytes;
+@property(nonatomic,readonly) NSInteger projectedTopologyNodes;
+- (void)applyCandidate:(NSDictionary<NSString *, id> *)candidate
+    completion:(void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
+    NS_SWIFT_NAME(apply(candidate:completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPathArrayEditingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly) NSInteger projectedInstances;
+@property(nonatomic,readonly) NSInteger projectedDocumentBytes;
+@property(nonatomic,readonly) NSInteger projectedMemoryBytes;
+@property(nonatomic,readonly) NSInteger projectedTopologyNodes;
+@property(nonatomic,readonly) double maximumMeasuredArcErrorInDocumentUnits;
+@property(nonatomic,copy,readonly,nullable) NSString *measuredRefusal;
+//! Atomically reissues this opening's D3 read set with a C1-owned receipt for
+//! the one currently selected retained 3D path. Nil leaves this opening usable.
+- (Core3DPathArrayEditingOpening *_Nullable)replacingPathFromCurrentSelection
+    NS_SWIFT_NAME(replacingPathFromCurrentSelection());
+- (void)applyCandidate:(NSDictionary<NSString *, id> *)candidate
+    completion:(void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
+    NS_SWIFT_NAME(apply(candidate:completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DFeaturePatternPreview : NSObject
+@property(nonatomic,readonly) BOOL admitted;
+@property(nonatomic,copy,readonly) NSString *refusalMessage;
+@property(nonatomic,readonly) NSUInteger generatedFeatureCount;
+@property(nonatomic,readonly) double minimumMeasuredLigamentMM;
+@property(nonatomic,readonly) double removedVolumeMM3;
+@property(nonatomic,readonly) NSUInteger boundarySectionCount;
+@property(nonatomic,readonly) NSUInteger projectedDocumentBytes;
+@property(nonatomic,readonly) NSUInteger projectedMemoryBytes;
+@property(nonatomic,readonly) NSUInteger projectedTopologyNodes;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DFeaturePatternPreparedEdit : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DFeaturePatternPreparation : NSObject
+@property(nonatomic,strong,readonly) Core3DFeaturePatternPreview *preview;
+@property(nonatomic,strong,readonly,nullable) Core3DFeaturePatternPreparedEdit *prepared;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DFeaturePatternEditingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+- (Core3DFeaturePatternPreparation *)prepareCandidate:
+    (NSDictionary<NSString *, id> *)candidate NS_SWIFT_NAME(prepare(candidate:));
+- (void)applyPrepared:(Core3DFeaturePatternPreparedEdit *)prepared
+    completion:(void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
+    NS_SWIFT_NAME(apply(prepared:completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 
 //! Narrow production facade for the retained analytic-prism Boolean owner.
 //! Every value is descriptive. Authority remains in Core3DPartBooleanEditingSession.
@@ -527,6 +681,32 @@ typedef NS_ENUM(NSInteger, Core3DModelingStorageObservation) {
     Core3DModelingStorageObservationCapacity, Core3DModelingStorageObservationBusy,
     Core3DModelingStorageObservationUnknown
 };
+//! Bounded read-time observation of one exact retained request key in the
+//! current document, available after an ordinary cold reopen. It opens no OCAF
+//! command and performs no reservation/prepare/geometry work. It is
+//! descriptive only and never grants verified-receipt, replay, retry or Undo
+//! authority. presentChanged means the retained record exists but a later
+//! ordinary edit/Undo moved the document past the captured effects.
+typedef NS_ENUM(NSInteger, Core3DModelingDocumentEvidence) {
+    Core3DModelingDocumentEvidenceUnavailable = 0,
+    Core3DModelingDocumentEvidencePresentCurrent,
+    Core3DModelingDocumentEvidencePresentChanged,
+    Core3DModelingDocumentEvidenceAbsent,
+    Core3DModelingDocumentEvidenceConflict
+};
+//! Immutable evidence captured from the consumed prepared request and ordinary
+//! native command before any app callback. It is descriptive only and never
+//! grants replay or verified-receipt authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingTerminalEvidence : NSObject
+@property(nonatomic,copy,readonly) NSUUID *requestIdentifier;
+@property(nonatomic,copy,readonly) NSString *documentIdentifier;
+@property(nonatomic,readonly) Core3DModelingStorageObservation storageObservation;
+@property(nonatomic,readonly) NSInteger measuredHistoryDelta;
+@property(nonatomic,copy,readonly) NSArray<NSString *> *entityIdentifiers;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 //! Result of one invocation, not saved-document durability or query authority.
 //! No disposition authorizes automatic replay. Invalid/foreign calls omit IDs.
 __attribute__((objc_subclassing_restricted))
@@ -536,6 +716,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly,nullable) NSUUID *requestIdentifier;
 @property(nonatomic,copy,readonly,nullable) NSString *documentIdentifier;
 @property(nonatomic,copy,readonly) NSArray<NSString *> *entityIdentifiers;
+@property(nonatomic,strong,readonly,nullable) Core3DModelingTerminalEvidence *terminalEvidence;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -1141,6 +1322,54 @@ typedef NS_ENUM(NSInteger, Core3DPBRScalarResult) {
 };
 __attribute__((objc_subclassing_restricted))
 @interface Core3DPBRScalarPreparation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+#if DEBUG
+//! Test-only dispatch into bounded native-opening scenarios. Every accepted
+//! scenario constructs native fixtures and reports observations read from them;
+//! these values never confer production edit authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DNativeOpeningSurfaceDiagnostic : NSObject
++ (NSDictionary<NSString *, id> *)runScenario:(NSString *)scenario
+    NS_SWIFT_NAME(run(scenario:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+#endif
+
+typedef NS_ENUM(NSInteger, Core3DRetainedFinishingPreparationResult) {
+    Core3DRetainedFinishingPreparationResultPrepared = 0,
+    Core3DRetainedFinishingPreparationResultUnchanged,
+    Core3DRetainedFinishingPreparationResultStaleSource,
+    Core3DRetainedFinishingPreparationResultUnsupportedSurface,
+    Core3DRetainedFinishingPreparationResultRejected,
+};
+
+typedef NS_ENUM(NSInteger, Core3DRetainedFinishingCurrentness) {
+    Core3DRetainedFinishingCurrentnessAbsent = 0,
+    Core3DRetainedFinishingCurrentnessCurrent,
+    Core3DRetainedFinishingCurrentnessStale,
+};
+
+//! One fail-closed, selection-bound opening for a retained finishing owner.
+//! Descriptors are presentation data; only this opaque opening may mutate.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DRetainedFinishingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly) Core3DRetainedFinishingCurrentness currentness;
+- (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
+              completion:(void (^)(Core3DRetainedFinishingPreparationResult result,
+                                   NSString *detail))completion
+    NS_SWIFT_NAME(prepare(candidate:completion:));
+- (void)applyWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                      NSString *detail))completion
+    NS_SWIFT_NAME(apply(completion:));
+- (void)regenerateWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                           NSString *detail))completion
+    NS_SWIFT_NAME(regenerate(completion:));
+- (BOOL)cancel;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end

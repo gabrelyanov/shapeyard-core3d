@@ -141,12 +141,33 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document,
         if (document.IsNull() || document->GetData().IsNull()) return false;
         const TDF_Label root = document->Main().FindChild(DocumentRootTag, Standard_False);
         if (root.IsNull()) return true;
+        // Abort or undo rolls back attribute deltas but leaves label nodes.
+        // A subtree is logical absence only when its root and every descendant
+        // carry no live attribute; any live attribute anywhere makes it
+        // nonempty. The inspection is read-only, iterative, and bounded at
+        // 100000 labels (the nearby persistence census ceiling); exceeding the
+        // bound fails closed. It never creates labels, writes markers, forgets
+        // attributes, changes history, or replaces the document.
+        const auto attributeFree = [](const TDF_Label& subtree) {
+            std::vector<TDF_Label> pending{subtree};
+            std::size_t visited = 0;
+            while (!pending.empty()) {
+                const TDF_Label label = pending.back(); pending.pop_back();
+                if (++visited > 100000 || label.HasAttribute()) return false;
+                for (TDF_ChildIterator child(label, Standard_False);
+                     child.More(); child.Next())
+                    pending.push_back(child.Value());
+            }
+            return true;
+        };
+        if (attributeFree(root)) return true;
         Handle(TDataStd_AsciiString) marker;
         if (!root.FindAttribute(TDataStd_AsciiString::GetID(), marker)
             || marker.IsNull()
             || marker->Get().ToCString() != std::string(DocumentMarker)) return false;
         std::vector<Record> staged; std::set<UUID> features; std::size_t aggregate = 0;
         for (TDF_ChildIterator child(root, Standard_False); child.More(); child.Next()) {
+            if (attributeFree(child.Value())) continue;
             Record record; record.label = child.Value();
             if (!ReadBytes(record.label, record.bytes)
                 || !Decode(record.bytes, record.definition)

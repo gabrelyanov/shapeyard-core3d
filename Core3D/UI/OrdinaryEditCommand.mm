@@ -49,6 +49,19 @@ bool OrdinaryEditCommandStamp::ownedCommandIsCurrent() const
         && present && value == _candidateMarker;
 }
 
+bool OrdinaryEditCommandStamp::lendNativeCommand(
+    const Handle(TDocStd_Document)& document, const Handle(TDF_Data)& data,
+    int& transaction) noexcept
+{
+    transaction = 0;
+    try {
+        if (document != _document || data != _data || !ownedCommandIsCurrent())
+            return false;
+        transaction = _transaction;
+        return transaction > 0;
+    } catch (...) { transaction = 0; return false; }
+}
+
 void OrdinaryEditCommandStamp::clear() noexcept
 {
     _proven = false;

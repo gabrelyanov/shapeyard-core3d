@@ -8,6 +8,8 @@
 //
 
 #include "Core3DViewer.h"
+#include "OrdinaryEditCommand.hpp"
+#include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include "../OCCTKit/SavedCutWholeResultCorrespondence.hxx"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
 #include "../OCCTKit/CompositeRecipeAttribute.hxx"
@@ -15,11 +17,14 @@
 #include "../OCCTKit/SavedBooleanProgramBuild.hxx"
 #include "../OCCTKit/SavedFeatureRecords.hxx"
 #include "../OCCTKit/PlanarSweepSolid.hxx"
+#include "../OCCTKit/PatternAllLabelAuthority.hxx"
 #include "../OCCTKit/RectangularLoftSolid.hxx"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/ProfileCurveFace.hxx"
 #include "../OCCTKit/SplineProfileFace.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
+#include "../OCCTKit/ReceiptRecord.hxx"
+#include "../OCCTKit/RetainedFinishingAttribute.hxx"
 
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <TopExp_Explorer.hxx>
@@ -47,6 +52,7 @@
 #include "BRepAlgoAPI_Cut.hxx"
 #include "BRepAlgoAPI_Fuse.hxx"
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
@@ -87,8 +93,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <exception>
+#include <map>
 #include <new>
+#include <set>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <unordered_map>
@@ -112,6 +122,458 @@
 #endif
 
 namespace core3d {
+namespace native_opening::detail {
+struct State final {
+    Core3DViewer* owner = nullptr;
+    std::uint64_t nextContext = 0;
+    std::uint64_t activeContext = 0;
+    std::uint64_t nextMarker = 0;
+    std::uint64_t activeMarker = 0;
+    std::uint64_t recoveryMarker = 0;
+    std::uint64_t recoveryContext = 0;
+    // A committed or outcome-unknown native edit whose affected presentations
+    // are not yet proven against the document. Exact recovery reconciles this
+    // same plan before the shared fence can clear.
+    std::shared_ptr<const CommittedEditPublication> pendingPublication;
+    std::uint64_t publicationContext = 0;
+#if DEBUG
+    // Row-265 lifecycle probe: real closes at this viewer's lease boundary
+    // that must be reported unproven after the real CommitCommand has run.
+    std::uint32_t debugUnprovenCloseResults = 0;
+#endif
+};
+} // namespace native_opening::detail
+
+namespace {
+bool SameElement(const scene::ElementIdentifier& a,
+                 const scene::ElementIdentifier& b) noexcept {
+    return a.entityIdentifier == b.entityIdentifier && a.kind == b.kind
+        && a.topologyIndex == b.topologyIndex
+        && a.geometryRevision == b.geometryRevision;
+}
+}
+
+namespace native_opening {
+bool SameFence(const Fence& a, const Fence& b) noexcept {
+    if (!(a.stamp() == b.stamp())
+        || a.publicationSourceIdentifier() != b.publicationSourceIdentifier()
+        || a.documentGeneration() != b.documentGeneration()
+        || a.modelRevision() != b.modelRevision()
+        || a.selectionMode() != b.selectionMode()
+        || a.document() != b.document() || a.data() != b.data()
+        || a.metersPerUnit() != b.metersPerUnit()
+        || a.sourceReceipts() != b.sourceReceipts()
+        || a.selection().size() != b.selection().size()
+        || a.hovered().has_value() != b.hovered().has_value()) return false;
+    for (std::size_t i = 0; i < a.selection().size(); ++i)
+        if (!SameElement(a.selection()[i], b.selection()[i])) return false;
+    return !a.hovered() || SameElement(*a.hovered(), *b.hovered());
+}
+
+Context::Context(std::weak_ptr<detail::State> state, std::uint64_t identifier,
+                 Fence fence) noexcept
+    : state_(std::move(state)), identifier_(identifier),
+      openingFence_(std::move(fence)) {}
+
+Context::~Context() {
+    if (const auto state = state_.lock(); state && state->activeContext == identifier_
+        && state->activeMarker == 0 && state->recoveryMarker == 0) {
+        state->activeContext = 0;
+    }
+}
+
+std::shared_ptr<const Fence> Context::recapture(
+    std::uint32_t width, std::uint32_t height) const noexcept {
+    const auto state = state_.lock();
+    if (!state || state->owner == nullptr || state->activeContext != identifier_)
+        return {};
+    const auto current = state->owner->recaptureNativeOpeningFence(
+        identifier_, width, height, openingFence_.sourceReceipts());
+    if (!current || !(current->stamp() == openingFence_.stamp())) return {};
+    return current;
+}
+
+bool Context::isCurrent(std::uint32_t width, std::uint32_t height) const noexcept {
+    const auto current = recapture(width, height);
+    return current && SameFence(openingFence_, *current);
+}
+
+bool Context::ownsMarker(std::uint64_t marker) const noexcept {
+    const auto state = state_.lock();
+    return state && state->activeContext == identifier_
+        && state->activeMarker == marker && state->recoveryMarker == 0;
+}
+
+void Context::finishMarker(std::uint64_t marker, bool recovery) noexcept {
+    const auto state = state_.lock();
+    if (!state || state->activeContext != identifier_ || state->activeMarker != marker)
+        return;
+    state->activeMarker = 0;
+    if (recovery) {
+        state->recoveryMarker = marker;
+        state->recoveryContext = identifier_;
+    }
+}
+
+std::shared_ptr<CommandLease> Context::beginCommandLease(
+    const Fence& expected, std::uint32_t width, std::uint32_t height) noexcept {
+    const auto state = state_.lock();
+    const auto fresh = recapture(width, height);
+    if (!state || !fresh || !SameFence(expected, *fresh)
+        || !SameFence(openingFence_, expected) || state->activeMarker != 0
+        || state->recoveryMarker != 0 || state->nextMarker == UINT64_MAX)
+        return {};
+    const auto document = expected.document();
+    const auto data = expected.data();
+    if (document.IsNull() || data.IsNull() || document->GetData() != data
+        || document->HasOpenCommand()) return {};
+    const std::uint64_t marker = ++state->nextMarker;
+    state->activeMarker = marker;
+    try {
+        document->NewCommand();
+        if (!document->HasOpenCommand() || data->Transaction() <= 0) {
+            finishMarker(marker, true);
+            return {};
+        }
+        return std::shared_ptr<CommandLease>(new CommandLease(
+            shared_from_this(), document, data, data->Transaction(), marker));
+    } catch (...) {
+        finishMarker(marker, true);
+        return {};
+    }
+}
+
+std::shared_ptr<CommandLease> Context::borrowCommandLease(
+    OrdinaryEditCommandStamp& ordinary) noexcept {
+    const auto state = state_.lock();
+    const auto document = openingFence_.document();
+    const auto data = openingFence_.data();
+    if (!state || state->activeContext != identifier_
+        || state->activeMarker != 0 || state->recoveryMarker != 0
+        || state->nextMarker == UINT64_MAX || document.IsNull() || data.IsNull()
+        || document->GetData() != data) return {};
+    int transaction = 0;
+    if (!ordinary.lendNativeCommand(document, data, transaction)) return {};
+    const std::uint64_t marker = ++state->nextMarker;
+    state->activeMarker = marker;
+    auto lease = std::shared_ptr<CommandLease>(new CommandLease(
+        shared_from_this(), document, data, transaction, marker, true));
+    lease->ordinary_ = &ordinary;
+    return lease;
+}
+
+bool Context::reconcileRecovery(bool exactStateKnown) noexcept {
+    const auto state = state_.lock();
+    if (!state || !exactStateKnown || state->activeContext != identifier_
+        || state->recoveryContext != identifier_ || state->recoveryMarker == 0
+        || state->activeMarker != 0 || state->owner == nullptr) return false;
+    const auto document = openingFence_.document();
+    if (document.IsNull() || document->HasOpenCommand()
+        || document->GetData() != openingFence_.data()) return false;
+    // Exact recovery first proves the actual committed/aborted document state
+    // for the retained plan and refreshes the corresponding real
+    // presentations; only then may the shared fence clear and a new context
+    // be permitted. A failed reconciliation keeps the fence armed.
+    if (state->pendingPublication) {
+        if (state->publicationContext != identifier_
+            || !state->owner->reconcileNativeOpeningEdit(
+                openingFence_, *state->pendingPublication)) return false;
+        state->pendingPublication.reset();
+        state->publicationContext = 0;
+    }
+    state->recoveryMarker = 0;
+    state->recoveryContext = 0;
+    // Exact recovery is terminal for this authority. Old opening references
+    // may outlive recovery, but may neither block nor acquire a new command.
+    // Every identity, close, and publication proof above has already passed.
+    state->activeContext = 0;
+    return true;
+}
+
+bool Context::publishCommittedEdit(
+    const CommittedEditPublication& publication) noexcept {
+    const auto state = state_.lock();
+    if (!state || state->owner == nullptr || state->activeContext != identifier_
+        || state->activeMarker != 0 || state->recoveryMarker != 0) return false;
+    try {
+        if (state->owner->reconcileNativeOpeningEdit(openingFence_, publication))
+            return true;
+        // A proven commit without a proven publication is never reported as a
+        // pre-command rejection and never retried as another edit: arm the
+        // shared recovery fence and retain the same plan for exact recovery.
+        state->pendingPublication =
+            std::make_shared<const CommittedEditPublication>(publication);
+        state->publicationContext = identifier_;
+    } catch (...) {}
+    // Even if retention itself failed, the unproven committed presentation
+    // state must keep the shared fence armed.
+    state->recoveryMarker = state->nextMarker != 0 ? state->nextMarker : 1;
+    state->recoveryContext = identifier_;
+    return false;
+}
+
+void Context::retainUnprovenEdit(
+    const CommittedEditPublication& publication) noexcept {
+    try {
+        const auto state = state_.lock();
+        if (!state || state->activeContext != identifier_
+            || state->recoveryMarker == 0 || state->recoveryContext != identifier_
+            || state->pendingPublication) return;
+        state->pendingPublication =
+            std::make_shared<const CommittedEditPublication>(publication);
+        state->publicationContext = identifier_;
+    } catch (...) {}
+}
+
+#if DEBUG
+void Context::debugReportNextCloseUnproven() noexcept {
+    const auto state = state_.lock();
+    if (!state || state->activeContext != identifier_
+        || state->activeMarker != 0 || state->recoveryMarker != 0) return;
+    ++state->debugUnprovenCloseResults;
+}
+#endif
+
+CommandLease::CommandLease(std::shared_ptr<Context> context,
+    const Handle(TDocStd_Document)& document, const Handle(TDF_Data)& data,
+    int transaction, std::uint64_t marker, bool borrowed) noexcept
+    : context_(std::move(context)), document_(document), data_(data),
+      transaction_(transaction), marker_(marker), borrowed_(borrowed) {}
+
+CommandLease::~CommandLease() {
+    if (!settled_) {
+        if (borrowed_) {
+            if (context_) context_->finishMarker(marker_, false);
+            settled_ = true;
+        } else retainRecovery();
+    }
+}
+
+bool CommandLease::ownsOpenCommand() const noexcept {
+    try {
+        int ordinaryTransaction = 0;
+        return !settled_ && context_ && context_->ownsMarker(marker_)
+            && !document_.IsNull() && !data_.IsNull()
+            && document_->GetData() == data_ && document_->HasOpenCommand()
+            && data_->Transaction() == transaction_
+            && (!borrowed_ || (ordinary_
+                && ordinary_->lendNativeCommand(document_, data_, ordinaryTransaction)
+                && ordinaryTransaction == transaction_));
+    } catch (...) { return false; }
+}
+
+void CommandLease::retainRecovery() noexcept {
+    if (context_) context_->finishMarker(marker_, true);
+    settled_ = true;
+}
+
+bool CommandLease::commit() noexcept {
+    if (borrowed_) return false;
+    if (!ownsOpenCommand()) { retainRecovery(); return false; }
+    try {
+        if (!document_->CommitCommand() || document_->HasOpenCommand()) {
+            retainRecovery(); return false;
+        }
+#if DEBUG
+        // Row-265 lifecycle probe seam: the real close above ran; the lease
+        // result itself is reported unproven exactly at this boundary, so the
+        // caller maps a genuine outcome-unknown and the shared recovery fence
+        // is armed through the same retainRecovery path as a real failure.
+        if (const auto state = context_ ? context_->state_.lock() : nullptr) {
+            if (state->debugUnprovenCloseResults > 0) {
+                --state->debugUnprovenCloseResults;
+                retainRecovery();
+                return false;
+            }
+        }
+#endif
+        context_->finishMarker(marker_, false);
+        settled_ = true;
+        return true;
+    } catch (...) { retainRecovery(); return false; }
+}
+
+bool CommandLease::abort() noexcept {
+    if (borrowed_) return false;
+    if (!ownsOpenCommand()) { retainRecovery(); return false; }
+    try {
+        document_->AbortCommand();
+        if (document_->HasOpenCommand()) { retainRecovery(); return false; }
+        context_->finishMarker(marker_, false);
+        settled_ = true;
+        return true;
+    } catch (...) { retainRecovery(); return false; }
+}
+} // namespace native_opening
+
+bool Core3DViewer::reconcileNativeOpeningEdit(
+    const native_opening::Fence& fence,
+    const native_opening::CommittedEditPublication& publication) noexcept {
+    if (![NSThread isMainThread]) return false;
+    try {
+        const auto traceRefusal = [](const char* predicate, bool failed) noexcept {
+#if DEBUG
+            if (failed) std::fprintf(
+                stderr, "R179_PUBLISH predicate=%s failed=1\n", predicate);
+#else
+            (void)predicate;
+#endif
+            return failed;
+        };
+        if (traceRefusal("owner-or-context", myDoc.IsNull() || myContext.IsNull()))
+            return false;
+        const Handle(TDocStd_Document) document = myDoc->Document();
+        if (traceRefusal("document-identity",
+                document.IsNull() || fence.document() != document
+                || fence.data().IsNull() || document->GetData() != fence.data())
+            || traceRefusal("document.open-command", document->HasOpenCommand()))
+            return false;
+        const std::size_t affected = publication.created.size()
+            + publication.replaced.size() + publication.removed.size();
+        if (traceRefusal("affected-bounds", affected == 0 || affected > 4096))
+            return false;
+        std::set<std::string> identities;
+        const auto collect = [&](const std::vector<native_opening::CommittedEditItem>&
+                                 items) {
+            for (const auto& item : items)
+                if (item.entityIdentifier.empty() || item.entityIdentifier.size() > 128
+                    || item.entityIdentifier.find('\0') != std::string::npos
+                    || !identities.insert(item.entityIdentifier).second) return false;
+            return true;
+        };
+        if (traceRefusal("identity-syntax",
+                !collect(publication.created) || !collect(publication.replaced)
+                || !collect(publication.removed))) return false;
+        // Document authority: persistent identity -> live free label.
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (traceRefusal("shape-tool", shapes.IsNull())) return false;
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        if (traceRefusal("free-shape-bounds",
+                roots.Length() < 0 || roots.Length() > 50000)) return false;
+        std::map<std::string, TDF_Label> live;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            const TDF_Label label = roots.Value(index);
+            if (label.IsNull() || label.Data() != document->GetData()) {
+                (void)traceRefusal("free-shape-label", true); return false;
+            }
+            const std::string entity = myDoc->EntityIdentifierForLabel(label);
+            if (!entity.empty() && !live.emplace(entity, label).second) {
+                (void)traceRefusal("duplicate-live-identity", true); return false;
+            }
+        }
+        // Renderer authority: persistent identity -> displayed presentation.
+        // Presentations without a resolvable document label are stale
+        // candidates, matched to removals only by their exact previous shape.
+        AIS_ListOfInteractive objects;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
+        if (traceRefusal("displayed-bounds", objects.Extent() > 50000))
+            return false;
+        std::map<std::string, Handle(AIS_Shape)> displayed;
+        std::vector<Handle(AIS_Shape)> stale;
+        for (AIS_ListIteratorOfListOfInteractive iterator(objects);
+             iterator.More(); iterator.Next()) {
+            const auto presentation =
+                Handle(AIS_Shape)::DownCast(iterator.Value());
+            if (presentation.IsNull()) continue;
+            const TDF_Label label = myDoc->ShapeLabel(presentation);
+            if (label.IsNull()) { stale.push_back(presentation); continue; }
+            const std::string entity = myDoc->EntityIdentifierForLabel(label);
+            if (entity.empty() || !displayed.emplace(entity, presentation).second) {
+                (void)traceRefusal("displayed-identity", true); return false;
+            }
+        }
+        const auto reconcileItem = [&](
+                const native_opening::CommittedEditItem& item) {
+            const auto liveLabel = live.find(item.entityIdentifier);
+            const auto current = displayed.find(item.entityIdentifier);
+            if (liveLabel != live.end()) {
+                const TDF_Label label = liveLabel->second;
+                const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+                OcctObjectTransformState state;
+                if (shape.IsNull()
+                    || !myDoc->CaptureObjectTransformStateForLabel(label, state)
+                    || state.entityIdentifier != item.entityIdentifier) {
+                    (void)traceRefusal("committed-state", true); return false;
+                }
+                const bool created = current == displayed.end();
+                Handle(AIS_Shape) presentation;
+                if (!created) {
+                    presentation = current->second;
+                    const bool wasSelected = myContext->IsSelected(presentation);
+                    presentation->SetShape(shape);
+                    presentation->SetLocalTransformation(state.transform);
+                    myContext->Redisplay(presentation, Standard_False);
+                    myContext->RecomputeSelectionOnly(presentation);
+                    if (wasSelected && !myContext->IsSelected(presentation)) {
+                        const auto owner = presentation->GlobalSelOwner();
+                        if (owner.IsNull() || owner->Selectable() != presentation) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+                        myContext->AddOrRemoveSelected(owner, Standard_False);
+                    }
+                } else {
+                    presentation = new AIS_Shape(shape);
+                    presentation->SetLocalTransformation(state.transform);
+                    myDoc->LoadObjectMeterial(label, presentation);
+                    myContext->Display(
+                        presentation, AIS_Shaded, 0, Standard_False);
+                    if (!myContext->IsDisplayed(presentation)) {
+                        (void)traceRefusal("display-created", true); return false;
+                    }
+                    displayed.emplace(item.entityIdentifier, presentation);
+                }
+#if DEBUG
+                unsigned faces = 0, unmeshed = 0;
+                for (TopExp_Explorer face(shape, TopAbs_FACE);
+                     face.More(); face.Next()) {
+                    ++faces;
+                    TopLoc_Location location;
+                    if (BRep_Tool::Triangulation(
+                            TopoDS::Face(face.Current()), location).IsNull())
+                        ++unmeshed;
+                }
+                std::fprintf(stderr,
+                    "R179_PUBLISH entity=%.128s created=%d faces=%u unmeshed=%u\n",
+                    item.entityIdentifier.c_str(), int(created), faces, unmeshed);
+#endif
+                return true;
+            }
+            // The committed document holds no such label: only a stale
+            // presentation may remain, recognized by its exact previous
+            // shape. Absence is consistent (aborted or never displayed).
+            if (current != displayed.end()) {
+                (void)traceRefusal("removal-contradiction", true); return false;
+            }
+            if (item.previousShape.IsNull()) return true;
+            for (auto candidate = stale.begin(); candidate != stale.end();
+                 ++candidate) {
+                if (!(*candidate)->Shape().IsEqual(item.previousShape)) continue;
+                if (myContext->IsSelected(*candidate))
+                    myContext->AddOrRemoveSelected(*candidate, Standard_False);
+                myContext->Remove(*candidate, Standard_False);
+                if (myContext->IsDisplayed(*candidate)) {
+                    (void)traceRefusal("remove-stale", true); return false;
+                }
+                stale.erase(candidate);
+                return true;
+            }
+            return true;
+        };
+        for (const auto& item : publication.replaced)
+            if (!reconcileItem(item)) return false;
+        for (const auto& item : publication.created)
+            if (!reconcileItem(item)) return false;
+        for (const auto& item : publication.removed)
+            if (!reconcileItem(item)) return false;
+        myContext->UpdateCurrentViewer();
+        const auto snapshot = captureSceneSnapshot(64, 64);
+        return !traceRefusal("snapshot-proof",
+            !snapshot || snapshot->publicationSourceIdentifier.empty());
+    } catch (...) { return false; }
+}
+
 // This is synchronous and bounded; no UI session or network wait is admitted.
 OrdinaryEditResult Core3DViewer::repairMeshWinding(
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
@@ -1175,6 +1637,8 @@ struct DocumentReplacementWork {
 };
 
 void Core3DViewer::release() noexcept {
+    if (_nativeOpeningState) _nativeOpeningState->owner = nullptr;
+    _nativeOpeningState.reset();
     // Retire pre-commit source authority on main before graphics teardown.
     (void)discardSavedCutSourceEdit(_savedCutSourceEditWork.lock());
     (void)discardSavedProgramSourceEdit(_savedProgramSourceEditWork.lock());
@@ -1718,6 +2182,120 @@ Handle(OcctDocument) Core3DViewer::getDocument() {
     return myDoc;
 }
 
+bool Core3DViewer::nativeOpeningReady(std::uint64_t contextIdentifier) const noexcept {
+    try {
+        if (_objectInteractor == nullptr || _shapeInteractor == nullptr
+            || hasUnresolvedOrdinaryEdit()
+            || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)
+            || myDoc.IsNull() || myDoc->NativeBooleanOwnerBlocksOtherWork()) return false;
+        const Handle(TDocStd_Document) document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        if (!_nativeOpeningState) return contextIdentifier == 0;
+        const auto& state = *_nativeOpeningState;
+        if (state.owner != this || state.activeMarker != 0 || state.recoveryMarker != 0)
+            return false;
+        return contextIdentifier == 0 ? state.activeContext == 0
+                                      : state.activeContext == contextIdentifier;
+    } catch (...) { return false; }
+}
+
+std::shared_ptr<const native_opening::Fence>
+Core3DViewer::recaptureNativeOpeningFence(
+    std::uint64_t contextIdentifier, std::uint32_t width, std::uint32_t height,
+    const std::vector<std::string>& sourceReceipts) noexcept {
+    if (![NSThread isMainThread] || width == 0 || height == 0
+        || !nativeOpeningReady(contextIdentifier)) {
+#if DEBUG
+        // Non-authoritative factory provenance (F2): name the first false
+        // branch of the next factory attempt. Never feeds admission.
+        std::fprintf(stderr,
+            "R179_FACTORY predicate=%s failed=1 context=%llu\n",
+            ![NSThread isMainThread] ? "main-thread"
+            : (width == 0 || height == 0) ? "viewport" : "nativeOpeningReady",
+            (unsigned long long)contextIdentifier);
+#endif
+        return {};
+    }
+    try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier.empty()
+            || !std::isfinite(snapshot->metersPerUnit)
+            || snapshot->metersPerUnit <= 0.0) {
+#if DEBUG
+            std::fprintf(stderr,
+                "R179_FACTORY predicate=%s failed=1 context=%llu\n",
+                !snapshot ? "snapshot-null" : "snapshot-invalid",
+                (unsigned long long)contextIdentifier);
+#endif
+            return {};
+        }
+        const Handle(TDocStd_Document) document = myDoc->Document();
+        if (document.IsNull() || document->GetData().IsNull()) return {};
+        Standard_Real observedUnit = 0.0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, observedUnit)
+            || observedUnit != snapshot->metersPerUnit) {
+#if DEBUG
+            std::fprintf(stderr,
+                "R179_FACTORY predicate=unit-mismatch failed=1 context=%llu\n",
+                (unsigned long long)contextIdentifier);
+#endif
+            return {};
+        }
+        const auto stamp = myDoc->CaptureNativePlanningStamp(true);
+        if (!stamp) {
+#if DEBUG
+            std::fprintf(stderr,
+                "R179_FACTORY predicate=planning-stamp failed=1 context=%llu\n",
+                (unsigned long long)contextIdentifier);
+#endif
+            return {};
+        }
+        auto fence = std::shared_ptr<native_opening::Fence>(new native_opening::Fence());
+        fence->stamp_ = *stamp;
+        fence->publicationSourceIdentifier_ = snapshot->publicationSourceIdentifier;
+        fence->documentGeneration_ = snapshot->revisions.documentGeneration;
+        fence->modelRevision_ = snapshot->revisions.model;
+        fence->selectionMode_ = snapshot->selectionMode;
+        fence->selection_ = snapshot->selection.selected;
+        fence->hovered_ = snapshot->selection.hovered;
+        fence->document_ = document;
+        fence->data_ = document->GetData();
+        fence->metersPerUnit_ = observedUnit;
+        fence->sourceReceipts_ = sourceReceipts;
+        return fence;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<native_opening::Context>
+Core3DViewer::captureNativeOpeningContext(
+    std::uint32_t width, std::uint32_t height,
+    const std::vector<std::string>& sourceReceipts) noexcept {
+    if (![NSThread isMainThread] || sourceReceipts.size() > 1024) return {};
+    std::unordered_set<std::string> unique;
+    for (const auto& receipt : sourceReceipts) {
+        if (receipt.empty() || receipt.size() > 4096
+            || !unique.insert(receipt).second) return {};
+    }
+    if (!_nativeOpeningState) {
+        _nativeOpeningState = std::make_shared<native_opening::detail::State>();
+        _nativeOpeningState->owner = this;
+    }
+    if (!nativeOpeningReady(0)
+        || _nativeOpeningState->nextContext == UINT64_MAX) {
+#if DEBUG
+        std::fprintf(stderr, "R179_FACTORY predicate=%s failed=1 context=0\n",
+            !nativeOpeningReady(0) ? "context-capture-ready" : "context-exhausted");
+#endif
+        return {};
+    }
+    const std::uint64_t identifier = ++_nativeOpeningState->nextContext;
+    _nativeOpeningState->activeContext = identifier;
+    const auto fence = recaptureNativeOpeningFence(identifier, width, height, sourceReceipts);
+    if (!fence) { _nativeOpeningState->activeContext = 0; return {}; }
+    return std::shared_ptr<native_opening::Context>(new native_opening::Context(
+        _nativeOpeningState, identifier, *fence));
+}
+
 void Core3DViewer::observeNativePlanningInteraction() noexcept {
     if (!myDoc.IsNull()) myDoc->ObserveNativePlanningInteraction();
 }
@@ -1731,6 +2309,7 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
             || myDoc.IsNull() || myDoc->NativeBooleanOwnerBlocksOtherWork()) {
             return false;
         }
+        if (!nativeOpeningReady(0)) return false;
         const Handle(TDocStd_Document) document = myDoc->Document();
         return !document.IsNull() && !document->HasOpenCommand();
     } catch (...) {
@@ -2475,13 +3054,33 @@ OrdinaryEditResult Core3DViewer::commitSavedCutSourceEdit(const std::shared_ptr<
             ||work->detachedGeometry->stop->load())return finish(OrdinaryEditResult::Invalid);
         record.requested.cutSourceRebuild=built;
         record.requested.shape=built->noChange?record.previous.shape:built->newResult;
+        OcctExactLabelReceipt replayTarget;
+        auto replayContext = captureNativeOpeningContext(a->width, a->height,
+            {record.previous.entityIdentifier});
+        dependent_replay::Candidate replayCandidate;
+        replayCandidate.targetEntityIdentifier = record.previous.entityIdentifier;
+        replayCandidate.resultShape = record.requested.shape;
+        replayCandidate.retainedBase = built->newBase;
+        replayCandidate.retainedRecipe = built->values.newEnvelope;
+        replayCandidate.retainedRecipeBytes = built->values.newBytes;
+        replayCandidate.hasRetainedRecipe = true;
+        std::shared_ptr<const dependent_replay::Plan> replayPlan;
+        dependent_replay::ProductionPreparer replayPreparer(
+            std::move(replayCandidate), replayContext);
+        if (!replayContext
+            || !myDoc->CaptureExactFreeLabel(record.previous.label, replayTarget)
+            || myDoc->PrepareDependentReplayPlan(replayTarget,
+                dependent_replay::Mutation::Replace, dependent_replay::Limits{},
+                replayPreparer, replayPlan) != dependent_replay::Refusal::None
+            || !replayPlan) return finish(OrdinaryEditResult::Invalid);
         // Stop and synchronous ordinary dispatch have one atomic decision. Stop
         // that loses this race cannot change the actual ordinary result afterward.
         auto pending=Decision::Pending;
         if(!work->cancellation->decision.compare_exchange_strong(pending,Decision::Committing))return finish(OrdinaryEditResult::Invalid);
         a->consumed=true;
         OrdinaryEditResult result=OrdinaryEditResult::Invalid;
-        auto lease=_ordinaryEditController->beginTransform({record.requested},&result);
+        auto lease=_ordinaryEditController->beginDependentTransform(record.requested,
+            std::move(replayPlan),std::move(replayContext),&result);
         return finish(lease?lease.stageAndCommit():result);
     }catch(...){return finish(OrdinaryEditResult::Invalid);}
 }
@@ -2813,13 +3412,33 @@ OrdinaryEditResult Core3DViewer::commitSavedProgramSourceEdit(const std::shared_
             ||work->detachedGeometry->stop->load())return finish(OrdinaryEditResult::Invalid);
         record.requested.cutProgramSourceRebuild=built;
         record.requested.shape=built->noChange?record.previous.shape:built->newResult;
+        OcctExactLabelReceipt replayTarget;
+        auto replayContext = captureNativeOpeningContext(a->width, a->height,
+            {record.previous.entityIdentifier});
+        dependent_replay::Candidate replayCandidate;
+        replayCandidate.targetEntityIdentifier = record.previous.entityIdentifier;
+        replayCandidate.resultShape = record.requested.shape;
+        replayCandidate.retainedBase = built->newBase;
+        replayCandidate.retainedRecipe = built->values.newProgram;
+        replayCandidate.retainedRecipeBytes = built->values.newBytes;
+        replayCandidate.hasRetainedRecipe = true;
+        std::shared_ptr<const dependent_replay::Plan> replayPlan;
+        dependent_replay::ProductionPreparer replayPreparer(
+            std::move(replayCandidate), replayContext);
+        if (!replayContext
+            || !myDoc->CaptureExactFreeLabel(record.previous.label, replayTarget)
+            || myDoc->PrepareDependentReplayPlan(replayTarget,
+                dependent_replay::Mutation::Replace, dependent_replay::Limits{},
+                replayPreparer, replayPlan) != dependent_replay::Refusal::None
+            || !replayPlan) return finish(OrdinaryEditResult::Invalid);
         // Stop and synchronous ordinary dispatch have one atomic decision. Stop
         // that loses this race cannot change the actual ordinary result afterward.
         auto pending=Decision::Pending;
         if(!work->cancellation->decision.compare_exchange_strong(pending,Decision::Committing))return finish(OrdinaryEditResult::Invalid);
         a->consumed=true;
         OrdinaryEditResult result=OrdinaryEditResult::Invalid;
-        auto lease=_ordinaryEditController->beginTransform({record.requested},&result);
+        auto lease=_ordinaryEditController->beginDependentTransform(record.requested,
+            std::move(replayPlan),std::move(replayContext),&result);
         return finish(lease?lease.stageAndCommit():result);
     }catch(...){return finish(OrdinaryEditResult::Invalid);}
 }
@@ -5429,6 +6048,121 @@ OrdinaryEditResult Core3DViewer::generateTriangleUVAtlas(
     } catch (...) { return OrdinaryEditResult::Invalid; }
 }
 
+namespace {
+bool E1OwnerKeyForLabel(const Handle(OcctDocument)& owner, const TDF_Label& label,
+                        core3d::retained_recipe::OwnerKey& key) noexcept {
+    try {
+        return !owner.IsNull() && !label.IsNull()
+            && core3d::receipt::ParseUUID(owner->DocumentIdentifier(), key.document)
+            && core3d::receipt::ParseUUID(owner->EntityIdentifierForLabel(label), key.entity)
+            && core3d::receipt::ParseUUID(owner->DefinitionIdentifierForLabel(label), key.definition)
+            && core3d::retained_recipe::Valid(key);
+    } catch (...) { return false; }
+}
+
+OrdinaryEditResult E1Finish(const std::shared_ptr<native_opening::CommandLease>& lease,
+                            OcctRetainedFinishingOutcome outcome) noexcept {
+    if (!lease) return OrdinaryEditResult::Busy;
+    if (outcome == OcctRetainedFinishingOutcome::Committed)
+        return lease->commit() ? OrdinaryEditResult::Committed
+                               : OrdinaryEditResult::OutcomeUnknown;
+    if (!lease->abort()) return OrdinaryEditResult::OutcomeUnknown;
+    if (outcome == OcctRetainedFinishingOutcome::Absent)
+        return OrdinaryEditResult::NoChange;
+    if (outcome == OcctRetainedFinishingOutcome::Busy)
+        return OrdinaryEditResult::Busy;
+    return OrdinaryEditResult::Invalid;
+}
+} // namespace
+
+OrdinaryEditResult Core3DViewer::produceRetainedFinishing(
+    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height,
+    const OcctRetainedFinishingSettings& settings) noexcept {
+    if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
+    if (!canBeginCommittedEdit() || myDoc.IsNull() || myContext.IsNull())
+        return OrdinaryEditResult::Busy;
+    try {
+        if (width == 0 || height == 0 || identity.entityIdentifier.empty()
+            || identity.entityIdentifier.size() > 128
+            || identity.publicationSourceIdentifier.empty()
+            || identity.publicationSourceIdentifier.size() > 128)
+            return OrdinaryEditResult::Invalid;
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->selection.selected.size() != 1
+            || snapshot->selection.selected[0].kind != scene::ElementKind::Object
+            || snapshot->selection.selected[0].entityIdentifier != identity.entityIdentifier)
+            return OrdinaryEditResult::Invalid;
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return OrdinaryEditResult::Invalid;
+        const auto selected = myContext->SelectedInteractive();
+        const auto label = myDoc->ShapeLabel(selected);
+        myContext->NextSelected();
+        core3d::retained_recipe::OwnerKey owner;
+        if (myContext->MoreSelected() || !E1OwnerKeyForLabel(myDoc, label, owner))
+            return OrdinaryEditResult::Invalid;
+        const auto context = captureNativeOpeningContext(width, height, {identity.entityIdentifier});
+        if (!context) return OrdinaryEditResult::Busy;
+        const auto lease = context->beginCommandLease(context->openingFence(), width, height);
+        return E1Finish(lease, myDoc->ProduceRetainedFinishing(owner, settings));
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
+OrdinaryEditResult Core3DViewer::regenerateRetainedFinishing(
+    const ObjectFrameIdentity& identity, std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
+    if (!canBeginCommittedEdit() || myDoc.IsNull() || myContext.IsNull())
+        return OrdinaryEditResult::Busy;
+    try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->selection.selected.size() != 1
+            || snapshot->selection.selected[0].entityIdentifier != identity.entityIdentifier)
+            return OrdinaryEditResult::Invalid;
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return OrdinaryEditResult::Invalid;
+        const auto label = myDoc->ShapeLabel(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        core3d::retained_recipe::OwnerKey owner;
+        if (myContext->MoreSelected() || !E1OwnerKeyForLabel(myDoc, label, owner))
+            return OrdinaryEditResult::Invalid;
+        const auto context = captureNativeOpeningContext(width, height, {identity.entityIdentifier});
+        if (!context) return OrdinaryEditResult::Busy;
+        const auto lease = context->beginCommandLease(context->openingFence(), width, height);
+        return E1Finish(lease, myDoc->RegenerateRetainedFinishing(owner));
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
+OcctRetainedFinishingCurrentness Core3DViewer::retainedFinishingCurrentness(
+    const ObjectFrameIdentity& identity) const noexcept {
+    if (![NSThread isMainThread] || myDoc.IsNull() || identity.entityIdentifier.empty())
+        return OcctRetainedFinishingCurrentness::Absent;
+    try {
+        const auto document = myDoc->Document();
+        if (document.IsNull()) return OcctRetainedFinishingCurrentness::Absent;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull()) return OcctRetainedFinishingCurrentness::Absent;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        TDF_Label match;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            const auto label = roots.Value(index);
+            if (myDoc->EntityIdentifierForLabel(label) != identity.entityIdentifier) continue;
+            if (!match.IsNull()) return OcctRetainedFinishingCurrentness::Absent;
+            match = label;
+        }
+        core3d::retained_recipe::OwnerKey owner;
+        return E1OwnerKeyForLabel(myDoc, match, owner)
+            ? myDoc->RetainedFinishingCurrentness(owner)
+            : OcctRetainedFinishingCurrentness::Absent;
+    } catch (...) { return OcctRetainedFinishingCurrentness::Stale; }
+}
+
 OrdinaryEditResult Core3DViewer::renameObjectFromBrowser(
     const ObjectFrameIdentity& identity, const TCollection_ExtendedString& name,
     std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
@@ -5954,6 +6688,17 @@ bool Core3DViewer::traverseLabel (const Handle(TDocStd_Document)& theDoc,
     (void)theNamePrefix;
     (void)theLoc;
     (void)theMapOfShapes;
+    core3d::pattern_owner::RetainedPresentationIndex retained;
+    if (!core3d::pattern_owner::CaptureRetainedPresentationIndex(
+            theDoc, retained)) return true;
+    retained_recipe::UUID entity{};
+    static const Standard_GUID entityIdentifierAttribute(
+        "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+    if (retained_solid::ReadUUID(theLabel, entityIdentifierAttribute, entity)
+        && retained.StateFor(entity)
+            == pattern_owner::RetainedPresentationState::Suppressed) {
+        return false;
+    }
     XCAFPrs_Style aDefStyle;
     aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
     aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
@@ -5970,8 +6715,360 @@ bool Core3DViewer::traverseDocument (const Handle(TDocStd_Document)& theDoc)
     XCAFPrs_Style aDefStyle;
     aDefStyle.SetColorSurf(Quantity_NOC_GRAY80);
     aDefStyle.SetColorCurv(Quantity_NOC_GRAY80);
-    return !displayWithChildren(theDoc, aLabels, aDefStyle);
+    core3d::pattern_owner::RetainedPresentationIndex retained;
+    if (!core3d::pattern_owner::CaptureRetainedPresentationIndex(
+            theDoc, retained)) return true;
+    static const Standard_GUID entityIdentifierAttribute(
+        "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+    TDF_LabelSequence effectivelyVisibleLabels;
+    for (Standard_Integer index = 1; index <= aLabels.Length(); ++index) {
+        retained_recipe::UUID entity{};
+        const TDF_Label& label = aLabels.Value(index);
+        const auto state = retained_solid::ReadUUID(
+            label, entityIdentifierAttribute, entity)
+            ? retained.StateFor(entity)
+            : pattern_owner::RetainedPresentationState::Unretained;
+        if (state != pattern_owner::RetainedPresentationState::Suppressed)
+            effectivelyVisibleLabels.Append(label);
+    }
+    return effectivelyVisibleLabels.IsEmpty()
+        ? false
+        : !displayWithChildren(theDoc, effectivelyVisibleLabels, aDefStyle);
 }
+
+#if DEBUG
+namespace {
+std::uint64_t RetainedSuppressionColdReopenProbe() {
+    using namespace core3d;
+    using namespace core3d::pattern_owner;
+    struct Documents final {
+        Handle(TDocStd_Application) writer = new TDocStd_Application();
+        Handle(TDocStd_Application) reader = new TDocStd_Application();
+        Handle(TDocStd_Document) authored;
+        Handle(TDocStd_Document) reopened;
+        ~Documents() noexcept {
+            try { if (!authored.IsNull()) writer->Close(authored); } catch (...) {}
+            try { if (!reopened.IsNull()) reader->Close(reopened); } catch (...) {}
+        }
+    };
+    const char* phase = "enter";
+    NSLog(@"[RetainedSuppressionColdReopenProbe] phase=enter scenario=0");
+    try {
+        phase = "construct-documents";
+        Documents documents;
+        phase = "writer-format";
+        Core3DDefineSafeBinXCAFFormat(documents.writer);
+        phase = "reader-format";
+        Core3DDefineSafeBinXCAFFormat(documents.reader);
+        phase = "new-document";
+        documents.writer->NewDocument(
+            TCollection_ExtendedString("BinXCAF"), documents.authored);
+        if (documents.authored.IsNull()) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=new-document exit=return-zero authoredNull=1");
+            return 0;
+        }
+        phase = "set-units";
+        XCAFDoc_DocumentTool::SetLengthUnit(documents.authored, 0.001);
+        phase = "shape-tool";
+        const auto shapes =
+            XCAFDoc_DocumentTool::ShapeTool(documents.authored->Main());
+        phase = "color-tool";
+        const auto colors =
+            XCAFDoc_DocumentTool::ColorTool(documents.authored->Main());
+        phase = "layer-tool";
+        const auto layers =
+            XCAFDoc_DocumentTool::LayerTool(documents.authored->Main());
+        if (shapes.IsNull() || colors.IsNull() || layers.IsNull()) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=tools exit=return-zero shapesNull=%d colorsNull=%d layersNull=%d",
+                  int(shapes.IsNull()), int(colors.IsNull()), int(layers.IsNull()));
+            return 0;
+        }
+
+        const auto id = [](std::uint8_t value) {
+            retained_recipe::UUID result{};
+            result.back() = value;
+            return result;
+        };
+        const auto setEntity = [](const TDF_Label& label,
+                                  const retained_recipe::UUID& value) {
+            static const Standard_GUID identifier(
+                "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+            TDataStd_AsciiString::Set(label, identifier,
+                TCollection_AsciiString(retained_solid::UUIDText(value).c_str()));
+        };
+        phase = "source-shape";
+        const TDF_Label source = shapes->AddShape(
+            BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape(), Standard_False);
+        phase = "suppressed-shape";
+        const TDF_Label suppressed = shapes->AddShape(
+            BRepPrimAPI_MakeBox(3.0, 3.0, 3.0).Shape(), Standard_False);
+        phase = "labels";
+        if (source.IsNull() || suppressed.IsNull()) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=labels exit=return-zero sourceNull=%d suppressedNull=%d",
+                  int(source.IsNull()), int(suppressed.IsNull()));
+            return 0;
+        }
+        phase = "source-entity";
+        setEntity(source, id(2));
+        phase = "suppressed-entity";
+        setEntity(suppressed, id(6));
+
+        phase = "hidden-layer";
+        const TDF_Label hiddenLayer = layers->AddLayer(
+            TCollection_ExtendedString("Retained suppression authored layer"));
+        if (hiddenLayer.IsNull()) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=hidden-layer exit=return-zero hiddenLayerNull=1");
+            return 0;
+        }
+        phase = "authored-hidden";
+        colors->SetVisibility(suppressed, Standard_False);
+        phase = "layer-hidden";
+        layers->SetVisibility(hiddenLayer, Standard_False);
+        phase = "assign-layer";
+        layers->SetLayer(suppressed, hiddenLayer, Standard_False);
+
+        phase = "definition";
+        pattern::Definition definition;
+        definition.owner = {id(1), id(2), id(3)};
+        definition.feature = id(4);
+        definition.source = {id(1), id(2), id(3), id(5)};
+        definition.issuance.nextLocalID = 3;
+        definition.members = {
+            {id(2), 1, {0, 0}, pattern::MemberState::Active},
+            {id(6), 2, {0, 1}, pattern::MemberState::Suppressed},
+        };
+        const auto diagnoseCommandFailure = [&](const char* failedPhase) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=%s exit=return-zero undoLimit=%d open=%d undos=%d",
+                  failedPhase,
+                  int(documents.authored->GetUndoLimit()),
+                  int(documents.authored->HasOpenCommand()),
+                  int(documents.authored->GetAvailableUndos()));
+        };
+        // Stage requires a real OCAF command; a fresh document has undo disabled.
+        phase = "undo-limit";
+        documents.authored->SetUndoLimit(1);
+        phase = "command-open";
+        documents.authored->NewCommand();
+        if (!documents.authored->HasOpenCommand()) {
+            diagnoseCommandFailure("command-open");
+            return 0;
+        }
+        phase = "stage";
+        pattern::Record staged;
+        if (!pattern::Stage(documents.authored, definition, staged)) {
+            diagnoseCommandFailure("stage");
+            return 0;
+        }
+        phase = "commit";
+        if (!documents.authored->CommitCommand()) {
+            diagnoseCommandFailure("commit");
+            return 0;
+        }
+        phase = "commit-state";
+        if (documents.authored->HasOpenCommand()
+            || documents.authored->GetAvailableUndos() != 1) {
+            diagnoseCommandFailure("commit-state");
+            return 0;
+        }
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=commit-state exit=continue undoLimit=%d open=%d undos=%d",
+              int(documents.authored->GetUndoLimit()),
+              int(documents.authored->HasOpenCommand()),
+              int(documents.authored->GetAvailableUndos()));
+
+        std::ostringstream output(std::ios::binary | std::ios::out);
+        phase = "save";
+        const auto saveStatus = documents.writer->SaveAs(
+            documents.authored, output);
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=save status=%d",
+              int(saveStatus));
+        if (saveStatus != PCDM_SS_OK) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=save exit=return-zero status=%d",
+                  int(saveStatus));
+            return 0;
+        }
+        phase = "serialized-bytes";
+        const std::string bytes = output.str();
+        const bool serializedEmpty = bytes.empty();
+        const bool serializedOversized =
+            bytes.size() > pattern::MaximumDocumentPatternBytes;
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=serialized-bytes bytes=%llu bound=%llu empty=%d oversized=%d",
+              static_cast<unsigned long long>(bytes.size()),
+              static_cast<unsigned long long>(pattern::MaximumDocumentPatternBytes),
+              int(serializedEmpty), int(serializedOversized));
+        if (serializedEmpty || serializedOversized) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=serialized-bytes exit=return-zero bytes=%llu bound=%llu empty=%d oversized=%d",
+                  static_cast<unsigned long long>(bytes.size()),
+                  static_cast<unsigned long long>(pattern::MaximumDocumentPatternBytes),
+                  int(serializedEmpty), int(serializedOversized));
+            return 0;
+        }
+        phase = "close-writer";
+        documents.writer->Close(documents.authored);
+        phase = "nullify-writer";
+        documents.authored.Nullify();
+        phase = "begin-safe-read";
+        Core3DBeginSafeBinaryRead();
+        phase = "input-stream";
+        std::istringstream input(bytes, std::ios::binary | std::ios::in);
+        phase = "open";
+        const auto openStatus = documents.reader->Open(
+            input, documents.reopened);
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=open status=%d bytes=%llu reopenedNull=%d",
+              int(openStatus), static_cast<unsigned long long>(bytes.size()),
+              int(documents.reopened.IsNull()));
+        if (openStatus != PCDM_RS_OK) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=open exit=return-zero reason=status status=%d bytes=%llu reopenedNull=%d",
+                  int(openStatus), static_cast<unsigned long long>(bytes.size()),
+                  int(documents.reopened.IsNull()));
+            return 0;
+        }
+        phase = "safe-read-rejected";
+        const bool safeReadRejected = Core3DSafeBinaryReadWasRejected();
+        if (safeReadRejected) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=safe-read-rejected exit=return-zero rejected=1");
+            return 0;
+        }
+        phase = "reopened-document";
+        if (documents.reopened.IsNull()) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=reopened-document exit=return-zero reopenedNull=1");
+            return 0;
+        }
+
+        phase = "retained-index";
+        RetainedPresentationIndex retained;
+        const bool retainedIndexCaptured =
+            CaptureRetainedPresentationIndex(documents.reopened, retained);
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=retained-index success=%d members=%llu",
+              int(retainedIndexCaptured),
+              static_cast<unsigned long long>(retained.members.size()));
+        if (!retainedIndexCaptured) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=retained-index exit=return-zero success=0 members=%llu",
+                  static_cast<unsigned long long>(retained.members.size()));
+            return 0;
+        }
+        phase = "free-labels";
+        TDF_LabelSequence freeLabels;
+        XCAFDoc_DocumentTool::ShapeTool(
+            documents.reopened->Main())->GetFreeShapes(freeLabels);
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=free-labels count=%d",
+              int(freeLabels.Length()));
+        phase = "find-suppressed";
+        TDF_Label reopenedSuppressed;
+        static const Standard_GUID identifier(
+            "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+        for (TDF_LabelSequence::Iterator label(freeLabels);
+             label.More(); label.Next()) {
+            retained_recipe::UUID entity{};
+            if (retained_solid::ReadUUID(label.Value(), identifier, entity)
+                && entity == id(6)) reopenedSuppressed = label.Value();
+        }
+        if (reopenedSuppressed.IsNull()) {
+            NSLog(@"[RetainedSuppressionColdReopenProbe] phase=find-suppressed exit=return-zero freeLabels=%d found=0",
+                  int(freeLabels.Length()));
+            return 0;
+        }
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=find-suppressed freeLabels=%d found=1",
+              int(freeLabels.Length()));
+        phase = "reopened-layer-tool";
+        const auto reopenedLayers =
+            XCAFDoc_DocumentTool::LayerTool(documents.reopened->Main());
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=reopened-layer-tool null=%d",
+              int(reopenedLayers.IsNull()));
+        TDF_LabelSequence assignedLayers;
+        phase = "authored-hidden-read";
+        const bool authoredHidden =
+            !XCAFDoc_ColorTool::IsVisible(reopenedSuppressed);
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=authored-hidden-read authoredHidden=%d",
+              int(authoredHidden));
+        phase = "assigned-layers-read";
+        const bool assignedLayersRead = !reopenedLayers.IsNull()
+            && reopenedLayers->GetLayers(reopenedSuppressed, assignedLayers);
+        const bool hasHiddenLayer = assignedLayersRead
+            && assignedLayers.Length() == 1
+            && !reopenedLayers->IsVisible(assignedLayers.First());
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=assigned-layers-read toolNull=%d read=%d count=%d hasHiddenLayer=%d",
+              int(reopenedLayers.IsNull()), int(assignedLayersRead),
+              int(assignedLayers.Length()), int(hasHiddenLayer));
+        phase = "retained-state";
+        const auto state = retained.StateFor(id(6));
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=retained-state state=%d",
+              int(state));
+        std::uint64_t bits =
+            state == RetainedPresentationState::Suppressed ? 1ULL : 0ULL;
+        if (authoredHidden) bits |= 2ULL;
+        if (hasHiddenLayer) bits |= 4ULL;
+        if (!EffectiveVisibility(!authoredHidden, !hasHiddenLayer, state))
+            bits |= 8ULL;
+        pattern::Record readback;
+        bool readbackEvaluated = false;
+        bool readbackSucceeded = false;
+        phase = "observations";
+        if (freeLabels.Length() == 2) {
+            readbackEvaluated = true;
+            readbackSucceeded = pattern::ReadFeature(
+                documents.reopened, id(4), readback);
+            if (readbackSucceeded
+                && readback.definition.members.size() == 2
+                && readback.definition.members[1].localID == 2
+                && readback.definition.members[1].identity == id(6)) bits |= 16ULL;
+        }
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=observations mask=%llu state=%d authoredHidden=%d hasHiddenLayer=%d freeLabels=%d assignedLayers=%d readbackEvaluated=%d readbackSucceeded=%d",
+              static_cast<unsigned long long>(bits), int(state),
+              int(authoredHidden), int(hasHiddenLayer), int(freeLabels.Length()),
+              int(assignedLayers.Length()), int(readbackEvaluated),
+              int(readbackSucceeded));
+        return bits;
+    } catch (const Standard_Failure&) {
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=%s exit=exception kind=Standard_Failure return=0",
+              phase);
+        throw;
+    } catch (const std::exception&) {
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=%s exit=exception kind=std::exception return=0",
+              phase);
+        throw;
+    } catch (...) {
+        NSLog(@"[RetainedSuppressionColdReopenProbe] phase=%s exit=exception kind=unknown return=0",
+              phase);
+        throw;
+    }
+}
+} // namespace
+
+extern "C" std::uint64_t
+Core3DDebugRetainedSuppressionPresentationProbe(std::int32_t scenario) noexcept {
+    using namespace core3d::pattern_owner;
+    try {
+        if (scenario == 0) {
+            return RetainedSuppressionColdReopenProbe();
+        }
+        if (scenario == 1) {
+            const retained_recipe::UUID first{{1}}, second{{2}};
+            const std::uint64_t firstLocal = 7, secondLocal = 11;
+            RetainedPresentationIndex index;
+            index.members.emplace(first, RetainedPresentationState::Active);
+            index.members.emplace(second, RetainedPresentationState::Suppressed);
+            std::uint64_t bits = index.members.size() == 2 ? 1ULL : 0ULL;
+            if (index.StateFor(second) == RetainedPresentationState::Suppressed) bits |= 2ULL;
+            if (index.StateFor(first) == RetainedPresentationState::Active) bits |= 4ULL;
+            if (firstLocal == 7 && secondLocal == 11) bits |= 8ULL;
+            if (index.members.count(first) && index.members.count(second)) bits |= 16ULL;
+            return bits;
+        }
+        if (scenario == 2) {
+            const retained_recipe::UUID unrelated{{9}};
+            RetainedPresentationIndex index;
+            std::uint64_t bits = index.StateFor(unrelated)
+                == RetainedPresentationState::Unretained ? 1ULL : 0ULL;
+            if (EffectiveVisibility(true, true, index.StateFor(unrelated))) bits |= 2ULL;
+            if (!EffectiveVisibility(false, true, index.StateFor(unrelated))) bits |= 4ULL;
+            if (!EffectiveVisibility(true, false, index.StateFor(unrelated))) bits |= 8ULL;
+            if (index.members.empty()) bits |= 16ULL;
+            return bits;
+        }
+    } catch (...) {}
+    return 0;
+}
+#endif
 
 #ifdef DEBUG
 void Core3DViewer::DebugResetProjectTopologyValidationCounters() const

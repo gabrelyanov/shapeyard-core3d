@@ -3,7 +3,9 @@
 // C1-N production owner contract. Implemented by BoundedCurveOwner.mm against
 // OcctDocument; callers never manufacture authority from topology or values.
 #include "BoundedCurveAttribute.hxx"
+#include "BoundedCurveBuild.hxx"
 #include "BoundedCurveEdit.hxx"
+#include "NativeOpeningContext.hxx"
 #include <TDF_Label.hxx>
 #include <TopoDS_Wire.hxx>
 #include <cstdint>
@@ -51,7 +53,7 @@ struct PathReceipt final {
 struct CreateRequest final {
     SceneFence expectedScene;
     PersistedValue persisted;
-    TopoDS_Wire detachedWire;
+    DetachedWire detachedWire;
     std::string requestedName;
 };
 
@@ -66,7 +68,7 @@ struct Prepared final {
     Opening opening;
     PreparedEdit values;
     PersistedValue persisted;
-    TopoDS_Wire detachedWire;
+    DetachedWire detachedWire;
     std::uint64_t preparation = 0;
 };
 
@@ -82,7 +84,8 @@ struct Receipt final {
 
 class OcafOwner final {
 public:
-    explicit OcafOwner(OcctDocument&) noexcept;
+    explicit OcafOwner(OcctDocument&,
+                       std::shared_ptr<native_opening::Context>) noexcept;
     ~OcafOwner();
     OcafOwner(const OcafOwner&) = delete;
     OcafOwner& operator=(const OcafOwner&) = delete;

@@ -9,7 +9,9 @@
 
 #include "OcctSceneSnapshotBuilder.hpp"
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
+#include "../OCCTKit/BoundedCurveEvaluation.hxx"
 #include "../OCCTKit/NativeContactMeshCapture.hxx"
+#include "../OCCTKit/PatternAllLabelAuthority.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -81,6 +83,11 @@
 
 namespace core3d::scene {
 namespace {
+#ifdef DEBUG
+thread_local bool gDebugBoundedCurveObservationArmed = false;
+thread_local std::optional<DebugBoundedCurvePublicationObservation>
+    gDebugBoundedCurveObservation;
+#endif
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
@@ -116,6 +123,10 @@ constexpr std::uint64_t kMaxTexturePixels = 4096ULL * 4096ULL;
 constexpr double kLegacyMetersPerUnit = 0.001;
 constexpr std::size_t kMaxOccurrenceDepth = 1'024;
 constexpr std::size_t kMaxLabelInstanceMappings = 1'000'000;
+constexpr std::size_t kMaxCurveStrokeSegments = 4'096;
+constexpr std::size_t kMaxCurveStrokeEvaluations = 8'193;
+constexpr unsigned kMaxCurveStrokeDepth = 12;
+constexpr double kMaxCurveStrokeAngleRadians = 5.0 * kPi / 180.0;
 constexpr std::size_t kMaxSelectedElements = 50'000;
 constexpr std::size_t kMaxRetainedDefinitionRevisions = 250'000;
 constexpr std::size_t kMaxOverlayMeshes = 16;
@@ -1196,6 +1207,7 @@ struct DefinitionData {
         OcctGeometryRepresentation::Invalid;
     std::uint64_t fingerprint = 0;
     bool closed = false;
+    bool boundedCurve = false;
 };
 
 std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
@@ -1203,6 +1215,18 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
                               const double theAngularDeflection)
 {
     Fingerprint aHash;
+    aHash.AddInteger(static_cast<std::uint8_t>(theMesh.geometryKind));
+    aHash.AddBool(theMesh.nativeC1Wire.has_value());
+    if (theMesh.nativeC1Wire.has_value()) {
+        const NativeC1WireSnapshot& aWire = *theMesh.nativeC1Wire;
+        aHash.AddInteger<std::uint64_t>(aWire.canonicalDefinitionBytes.size());
+        for (const auto aByte : aWire.canonicalDefinitionBytes) aHash.AddByte(aByte);
+        aHash.AddInteger<std::uint64_t>(aWire.canonicalOwnerBytes.size());
+        for (const auto aByte : aWire.canonicalOwnerBytes) aHash.AddByte(aByte);
+        for (const auto aByte : aWire.canonicalDefinitionDigest) aHash.AddByte(aByte);
+        aHash.AddInteger(aWire.definitionRevision);
+        aHash.AddInteger(aWire.frameRevision);
+    }
     aHash.AddString(theMesh.definitionIdentifier);
     aHash.AddDouble(theLinearDeflection);
     aHash.AddDouble(theAngularDeflection);
@@ -2061,6 +2085,232 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     return true;
 }
 
+bool BuildBoundedCurveStroke(
+    const core3d::bounded_curve::Definition& theSavedCurve,
+    const Bounds3d& theControlBounds,
+    const Double3& theSourceOrigin,
+    MeshSnapshot& theMesh)
+{
+    using namespace core3d::bounded_curve;
+    if (Validate(theSavedCurve) != Refusal::None
+        || theSavedCurve.knots.size() < 2 || !IsValid(theControlBounds)) {
+        return false;
+    }
+
+    // Evaluation is identical for 2D and 3D definitions. Promote only this
+    // detached value because the shared evaluator deliberately admits paths.
+    Definition anEvaluationCurve = theSavedCurve;
+    anEvaluationCurve.domain = Domain::Path3D;
+    const double aDx = theControlBounds.maximum.x - theControlBounds.minimum.x;
+    const double aDy = theControlBounds.maximum.y - theControlBounds.minimum.y;
+    const double aDz = theControlBounds.maximum.z - theControlBounds.minimum.z;
+    const double aScale = std::sqrt(aDx * aDx + aDy * aDy + aDz * aDz);
+    if (!IsFinite(aScale) || aScale <= Precision::Confusion()) return false;
+    const double aChordTolerance = std::clamp(aScale * 1.0e-3, 1.0e-6, 100.0);
+    const double aCosineLimit = std::cos(kMaxCurveStrokeAngleRadians);
+    std::size_t anEvaluationCount = 0;
+    std::size_t aSegmentCount = 0;
+
+    struct StrokeSample {
+        double parameter = 0.0;
+        Vector3 point{};
+        Vector3 tangent{};
+    };
+    const auto evaluate = [&](const double theParameter,
+                              StrokeSample& theSample) {
+        if (anEvaluationCount >= kMaxCurveStrokeEvaluations) return false;
+        ++anEvaluationCount;
+        Evaluation aValue;
+        if (Evaluate(anEvaluationCurve, theParameter, aValue)
+                != EvaluationRefusal::None
+            || !Normalize(aValue.derivative, 1.0e-12, theSample.tangent)) {
+            return false;
+        }
+        theSample.parameter = theParameter;
+        theSample.point = aValue.point;
+        return true;
+    };
+
+    std::vector<StrokeSample> aSamples;
+    aSamples.reserve(kMaxCurveStrokeSegments + 1);
+    StrokeSample aFirst;
+    if (!evaluate(theSavedCurve.knots.front().value, aFirst)) return false;
+    aSamples.push_back(aFirst);
+    std::function<bool(const StrokeSample&, const StrokeSample&, unsigned)> refine;
+    refine = [&](const StrokeSample& theLeft,
+                 const StrokeSample& theRight,
+                 const unsigned theDepth) {
+        const double aMiddleParameter =
+            theLeft.parameter + (theRight.parameter - theLeft.parameter) * 0.5;
+        if (!(theLeft.parameter < aMiddleParameter
+              && aMiddleParameter < theRight.parameter)) return false;
+        StrokeSample aMiddle;
+        if (!evaluate(aMiddleParameter, aMiddle)) return false;
+        const Vector3 aChordMiddle = Scale(Add(theLeft.point, theRight.point), 0.5);
+        const double anError = Norm(Subtract(aMiddle.point, aChordMiddle));
+        const double aLeftCosine = Dot(theLeft.tangent, aMiddle.tangent);
+        const double aRightCosine = Dot(aMiddle.tangent, theRight.tangent);
+        if (!Finite(anError) || !Finite(aLeftCosine) || !Finite(aRightCosine)) {
+            return false;
+        }
+        if (anError <= aChordTolerance
+            && aLeftCosine >= aCosineLimit
+            && aRightCosine >= aCosineLimit) {
+            if (aSegmentCount >= kMaxCurveStrokeSegments) return false;
+            ++aSegmentCount;
+            aSamples.push_back(theRight);
+            return true;
+        }
+        if (theDepth == 0) return false;
+        return refine(theLeft, aMiddle, theDepth - 1)
+            && refine(aMiddle, theRight, theDepth - 1);
+    };
+    for (std::size_t aKnot = 1; aKnot < theSavedCurve.knots.size(); ++aKnot) {
+        StrokeSample aRight;
+        if (!evaluate(theSavedCurve.knots[aKnot].value, aRight)
+            || !refine(aSamples.back(), aRight, kMaxCurveStrokeDepth)) {
+            return false;
+        }
+    }
+    if (aSamples.size() < 2 || aSegmentCount + 1 != aSamples.size()) return false;
+
+    std::size_t aVertexCount = 0, anIndexCount = 0, aNumericBytes = 0;
+    if (!CheckedMultiply(aSegmentCount, 4U, aVertexCount)
+        || !CheckedMultiply(aSegmentCount, 6U, anIndexCount)
+        || aVertexCount > kMaxVerticesPerMesh || anIndexCount > kMaxIndicesPerMesh
+        || !CheckedMultiply(aVertexCount, sizeof(Vertex), aNumericBytes)
+        || aNumericBytes > kMaxMeshNumericBytes
+        || anIndexCount * sizeof(std::uint32_t)
+            > kMaxMeshNumericBytes - aNumericBytes) return false;
+    theMesh.vertices.reserve(aVertexCount);
+    theMesh.indices.reserve(anIndexCount);
+    const double aHalfWidth = std::clamp(aScale * 1.5e-3, 1.0e-5, 10.0);
+    Bounds3d aRenderedBounds;
+    for (std::size_t aSegment = 0; aSegment < aSegmentCount; ++aSegment) {
+        const Vector3 aDirectionValue =
+            Subtract(aSamples[aSegment + 1].point, aSamples[aSegment].point);
+        Vector3 aDirection{}, aLateral{}, aNormal{};
+        if (!Normalize(aDirectionValue, Precision::Confusion(), aDirection)) return false;
+        for (const Vector3* aReference : {&theSavedCurve.frame.zAxis,
+                                          &theSavedCurve.frame.yAxis,
+                                          &theSavedCurve.frame.xAxis}) {
+            if (Normalize(Cross(*aReference, aDirection), 1.0e-12, aLateral)) break;
+        }
+        if (!Normalize(Cross(aDirection, aLateral), 1.0e-12, aNormal)) return false;
+        const std::uint32_t aBase = static_cast<std::uint32_t>(theMesh.vertices.size());
+        for (const auto& aPoint : {aSamples[aSegment].point,
+                                   aSamples[aSegment + 1].point}) {
+            for (const double aSign : {-1.0, 1.0}) {
+                const Vector3 aPosition = Add(aPoint, Scale(aLateral, aSign * aHalfWidth));
+                const double x = aPosition[0] - theSourceOrigin.x;
+                const double y = aPosition[1] - theSourceOrigin.y;
+                const double z = aPosition[2] - theSourceOrigin.z;
+                if (!FitsFloat(x) || !FitsFloat(y) || !FitsFloat(z)
+                    || !FitsFloat(aNormal[0]) || !FitsFloat(aNormal[1])
+                    || !FitsFloat(aNormal[2])) return false;
+                theMesh.vertices.push_back({float(x), float(y), float(z),
+                    float(aNormal[0]), float(aNormal[1]), float(aNormal[2]), 0.0f, 0.0f});
+                Extend(aRenderedBounds, x, y, z);
+            }
+        }
+        for (const std::uint32_t anOffset : {0U, 2U, 1U, 1U, 2U, 3U})
+            theMesh.indices.push_back(aBase + anOffset);
+    }
+    if (!IsValid(aRenderedBounds) || !FitsUInt32(theMesh.indices.size())) return false;
+    theMesh.localBounds = aRenderedBounds;
+    theMesh.primitives.push_back(
+        {0, static_cast<std::uint32_t>(theMesh.indices.size()), 0, false});
+    return true;
+}
+
+bool ExtractBoundedCurveDefinition(
+    const Handle(OcctDocument)& theDocument,
+    const TDF_Label& theDefinitionLabel,
+    const std::string& theDefinitionIdentifier,
+    DefinitionData& theDefinition
+#ifdef DEBUG
+    , DebugBoundedCurvePublicationObservation* theDebugObservation
+#endif
+    )
+{
+    std::vector<core3d::bounded_curve::Record> aRecords;
+    if (theDocument.IsNull() || !core3d::bounded_curve::ReadAll(
+            theDocument->Document(), aRecords)) return false;
+    const auto aFound = std::find_if(aRecords.begin(), aRecords.end(),
+        [&](const auto& theRecord) {
+            return theRecord.owner.IsEqual(theDefinitionLabel);
+        });
+    if (aFound == aRecords.end() || !aFound->value) return false;
+    OcctBoundedCurveCapture aCapture;
+    if (!theDocument->ReadBoundedCurveExact(
+            aFound->value->persisted.ownerState.owner, aCapture)
+        || !aCapture.record.owner.IsEqual(theDefinitionLabel)
+        || !aCapture.wire.IsSame(aFound->current)
+        || !core3d::bounded_curve::WireMatchesDefinition(
+            aCapture.persisted, aCapture.wire)) return false;
+
+#ifdef DEBUG
+    if (theDebugObservation != nullptr) {
+        if (theDebugObservation->definitionIdentifier.empty()) {
+            theDebugObservation->entityIdentifier =
+                theDocument->EntityIdentifierForLabel(theDefinitionLabel);
+            theDebugObservation->definitionIdentifier =
+                theDefinitionIdentifier;
+            theDebugObservation->canonicalDefinitionBytes =
+                aCapture.record.value->definitionBytes;
+            theDebugObservation->canonicalOwnerBytes =
+                aCapture.record.value->ownerBytes;
+            theDebugObservation->canonicalDefinitionDigest =
+                aCapture.persisted.ownerState.canonicalDefinitionDigest;
+            if (theDebugObservation->entityIdentifier.empty()) return false;
+        }
+    }
+#endif
+
+    theDefinition.faces.Clear();
+    theDefinition.edges.Clear();
+    theDefinition.vertices.Clear();
+    TopExp::MapShapes(aCapture.wire, TopAbs_EDGE, theDefinition.edges);
+    TopExp::MapShapes(aCapture.wire, TopAbs_VERTEX, theDefinition.vertices);
+    if (theDefinition.edges.IsEmpty() || theDefinition.vertices.IsEmpty()
+        || !FitsUInt32(theDefinition.edges.Extent())
+        || !FitsUInt32(theDefinition.vertices.Extent())) return false;
+#ifdef DEBUG
+    if (theDebugObservation != nullptr
+        && theDebugObservation->definitionIdentifier
+            == theDefinitionIdentifier) {
+        theDebugObservation->edgeCount =
+            static_cast<std::uint32_t>(theDefinition.edges.Extent());
+        theDebugObservation->vertexCount =
+            static_cast<std::uint32_t>(theDefinition.vertices.Extent());
+    }
+#endif
+
+    Bounds3d aBounds;
+    const auto& aFrame = aCapture.persisted.value.definition.frame;
+    for (const auto& aPole : aCapture.persisted.value.definition.controlPoints) {
+        const auto& p = aPole.local;
+        Extend(aBounds,
+            aFrame.origin[0] + aFrame.xAxis[0] * p[0] + aFrame.yAxis[0] * p[1] + aFrame.zAxis[0] * p[2],
+            aFrame.origin[1] + aFrame.xAxis[1] * p[0] + aFrame.yAxis[1] * p[1] + aFrame.zAxis[1] * p[2],
+            aFrame.origin[2] + aFrame.xAxis[2] * p[0] + aFrame.yAxis[2] * p[1] + aFrame.zAxis[2] * p[2]);
+    }
+    if (!IsValid(aBounds)) return false;
+    theDefinition.sourceOrigin = Center(aBounds);
+    MeshSnapshot aMesh;
+    aMesh.definitionIdentifier = theDefinitionIdentifier;
+    aMesh.topology.edgeCount = theDefinition.edges.Extent();
+    aMesh.topology.vertexCount = theDefinition.vertices.Extent();
+    if (!BuildBoundedCurveStroke(aCapture.persisted.value.definition,
+                                 aBounds,
+                                 theDefinition.sourceOrigin,
+                                 aMesh)) return false;
+    theDefinition.mesh = std::move(aMesh);
+    theDefinition.boundedCurve = true;
+    theDefinition.fingerprint = DefinitionFingerprint(theDefinition);
+    return true;
+}
+
 // Publish a supplied local basis only after proving that the ordinary mesh
 // extraction preserved every node attribute and every triangle corner. The
 // definition's outer placement remains in worldFromObject, not in these frames.
@@ -2220,6 +2470,10 @@ std::uint64_t ModelFingerprint(const SceneSnapshot& theScene)
         aHash.AddString(anInstance.name);
         aHash.AddString(anInstance.groupIdentifier);
         aHash.AddString(anInstance.groupName);
+        aHash.AddBool(anInstance.nativeWirePresentation.has_value());
+        if (anInstance.nativeWirePresentation.has_value()) {
+            AddMaterialValues(aHash, *anInstance.nativeWirePresentation);
+        }
     }
     return aHash.Value();
 }
@@ -2991,6 +3245,30 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 }
 
 } // namespace
+
+#ifdef DEBUG
+void DebugBeginBoundedCurvePublicationObservation() noexcept
+{
+    gDebugBoundedCurveObservation.reset();
+    gDebugBoundedCurveObservationArmed = true;
+}
+
+bool DebugTakeBoundedCurvePublicationObservation(
+    DebugBoundedCurvePublicationObservation& theObservation) noexcept
+{
+    if (!gDebugBoundedCurveObservation.has_value()) return false;
+    theObservation = std::move(*gDebugBoundedCurveObservation);
+    gDebugBoundedCurveObservation.reset();
+    gDebugBoundedCurveObservationArmed = false;
+    return true;
+}
+
+void DebugCancelBoundedCurvePublicationObservation() noexcept
+{
+    gDebugBoundedCurveObservation.reset();
+    gDebugBoundedCurveObservationArmed = false;
+}
+#endif
 
 struct OcctSceneSnapshotBuilder::State {
     using LabelInstanceMap =
@@ -4726,10 +5004,17 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             }
         }
         std::vector<OccurrenceData> anOccurrences;
+        pattern_owner::RetainedPresentationIndex aRetainedPresentation;
+        if (!pattern_owner::CaptureRetainedPresentationIndex(
+                aDocument, aRetainedPresentation)) return {};
         std::unordered_set<std::string> anEntityIdentifiers;
         std::unordered_map<std::string, TDF_Label> aPersistentEntityLabels;
         std::unordered_map<std::string, std::size_t> aDefinitionIndices;
         std::vector<DefinitionData> aDefinitions;
+#ifdef DEBUG
+        DebugBoundedCurvePublicationObservation
+            aDebugBoundedCurveObservation;
+#endif
         std::size_t aLabelInstanceMappingCount = 0;
         std::size_t aLayerVisibilityCheckCount = 0;
         const Handle(XCAFDoc_LayerTool) aLayerTool =
@@ -4835,6 +5120,12 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 anOccurrence.labelIdentifiers);
             anOccurrence.definitionIdentifier =
                 theDocument->DefinitionIdentifierForLabel(aDefinitionLabel);
+            const auto aRetainedState =
+                pattern_owner::StateForEntityIdentifier(
+                    aRetainedPresentation,
+                    theDocument->EntityIdentifierForLabel(aDefinitionLabel));
+            anOccurrence.visible = pattern_owner::EffectiveVisibility(
+                anOccurrence.visible, true, aRetainedState);
             if (anOccurrence.entityIdentifier.empty()
                 || anOccurrence.definitionIdentifier.empty()
                 || !anEntityIdentifiers.insert(
@@ -4891,14 +5182,22 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                  aDefinitionIndices) {
                 DefinitionData& aDefinition =
                     aDefinitions[aDefinitionIndex];
-                if (!ExtractDefinitionGeometry(
+                if (!(ExtractBoundedCurveDefinition(
+                          theDocument, aDefinition.label,
+                          aDefinitionIdentifier, aDefinition
+#ifdef DEBUG
+                          , gDebugBoundedCurveObservationArmed
+                              ? &aDebugBoundedCurveObservation : nullptr
+#endif
+                          )
+                      || ExtractDefinitionGeometry(
                         aDefinition.label,
                         aDefinitionIdentifier,
 #ifdef DEBUG
                         static_cast<std::uint8_t>(
                             myState->debugTriangulationFailure),
 #endif
-                        aDefinition)) {
+                        aDefinition))) {
                     return {};
                 }
                 const std::size_t aFaceMapEntryCount =
@@ -5201,17 +5500,32 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             std::vector<std::optional<MaterialSnapshot>> aFaceMaterials(
                 aMesh.primitives.size());
             std::vector<bool> aFaceVisibility(aMesh.primitives.size(), true);
+            if (aDefinition.boundedCurve) {
+                if (aMesh.primitives.size() != 1 || aPbrOverride.has_value()) return {};
+                MaterialSnapshot aMaterial = DefaultMaterial(false);
+                if (aMaterialOverride.has_value()
+                    && !ApplyPreset(aMaterial, *aMaterialOverride, false)) return {};
+                if (aColorOverride.has_value()) {
+                    if (*aColorOverride < Quantity_NOC_BLACK
+                        || *aColorOverride > Quantity_NOC_WHITE) return {};
+                    SetColor(aMaterial, Quantity_Color(*aColorOverride),
+                             aMaterial.baseColor.w);
+                }
+                if (!ValidateMaterial(aMaterial)) return {};
+                aFaceMaterials[0] = std::move(aMaterial);
+            }
             std::unordered_map<std::uint32_t, std::size_t> aPrimitiveByFace;
             for (std::size_t aPrimitiveIndex = 0;
                  aPrimitiveIndex < aMesh.primitives.size(); ++aPrimitiveIndex) {
                 aPrimitiveByFace.emplace(aMesh.primitives[aPrimitiveIndex].faceIndex,
                                          aPrimitiveIndex);
             }
-            RWMesh_FaceIterator aFace(anOccurrence.definitionLabel,
-                                      TopLoc_Location(),
-                                      Standard_True,
-                                      anOccurrence.style);
-            for (; aFace.More(); aFace.Next()) {
+            if (!aDefinition.boundedCurve) {
+              RWMesh_FaceIterator aFace(anOccurrence.definitionLabel,
+                                        TopLoc_Location(),
+                                        Standard_True,
+                                        anOccurrence.style);
+              for (; aFace.More(); aFace.Next()) {
                 const Standard_Integer aFaceMapIndex =
                     aDefinition.faces.FindIndex(aFace.Face());
                 if (aFaceMapIndex <= 0) {
@@ -5269,6 +5583,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         && !Core3DValidateNumericTexture(binding.second)) return {};
                 }
                 aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);
+              }
             }
 
             anInstance.primitiveBindings.reserve(aMesh.primitives.size());
@@ -5830,12 +6145,46 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         }
         aNextState.lastFullNativeContactSources=std::move(contactSources);
 
+#ifdef DEBUG
+        if (gDebugBoundedCurveObservationArmed) {
+            if (aDebugBoundedCurveObservation.definitionIdentifier.empty()) {
+                return {};
+            }
+            const auto anObservedInstance = std::find_if(
+                aScene.instances.begin(), aScene.instances.end(),
+                [&](const InstanceSnapshot& theInstance) {
+                    return theInstance.meshIndex < aScene.meshes.size()
+                        && aScene.meshes[theInstance.meshIndex]
+                            .definitionIdentifier
+                            == aDebugBoundedCurveObservation
+                                .definitionIdentifier;
+                });
+            if (anObservedInstance == aScene.instances.end()
+                || anObservedInstance->meshIndex >= aScene.meshes.size()) {
+                return {};
+            }
+            aDebugBoundedCurveObservation.entityIdentifier =
+                anObservedInstance->entityIdentifier;
+            aDebugBoundedCurveObservation.publicationSourceIdentifier =
+                aScene.publicationSourceIdentifier;
+            aDebugBoundedCurveObservation.modelRevision =
+                aScene.revisions.model;
+        }
+#endif
+
         // Finish every potentially allocating operation before publishing
         // state. A failed allocation must not consume any revision.
         auto aCommittedState = std::make_unique<State>(std::move(aNextState));
         SnapshotPointer aSnapshot =
             std::make_shared<const SceneSnapshot>(std::move(aScene));
         myState.swap(aCommittedState);
+#ifdef DEBUG
+        if (gDebugBoundedCurveObservationArmed) {
+            gDebugBoundedCurveObservation =
+                std::move(aDebugBoundedCurveObservation);
+            gDebugBoundedCurveObservationArmed = false;
+        }
+#endif
         return aSnapshot;
     } catch (const Standard_Failure&) {
         return {};

@@ -5,6 +5,7 @@
 #include <cstdint>
 
 namespace core3d {
+namespace native_opening { class Context; class CommandLease; }
 
 //! These observations prove command ownership/closure only. A typed edit
 //! ledger must separately prove all previous/candidate geometry and metadata.
@@ -56,6 +57,10 @@ public:
 #endif
 
 private:
+    friend class native_opening::Context;
+    friend class native_opening::CommandLease;
+    bool lendNativeCommand(const Handle(TDocStd_Document)&,
+                           const Handle(TDF_Data)&, int&) noexcept;
     bool identityIsCurrent() const;
     bool ownedCommandIsCurrent() const;
     bool readMarker(bool& present, Standard_Integer& value) const;

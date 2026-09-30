@@ -7,9 +7,20 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F17900010000000000000001 /* PatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = F17900020000000000000002 /* PatternNativeCollaborators.mm */; };
+		D3C100010000000000000001 /* PathArrayNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */; };
+		D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */; };
+		E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E17900020000000000000002 /* BoundedCurveOwner.mm */; };
+		E18A00010000000000000001 /* Core3DNativeOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E18A00020000000000000002 /* Core3DNativeOpenings.mm */; };
+		E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26800020000000000000002 /* Core3DFinishingOpenings.mm */; };
+		E18A00030000000000000003 /* NativeOpeningFactories.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E18A00040000000000000004 /* NativeOpeningFactories.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D5A0010000000000000002 /* Core3DModelingTypes.mm */; };
 		C3D5A0010000000000000003 /* Core3DSharedModelingValues.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D5A0010000000000000004 /* Core3DSharedModelingValues.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D515010000000000000001 /* Core3DModelingTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D515020000000000000001 /* Core3DModelingTypes.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		A17900010000000000000001 /* NativeOpeningSurfaceProbe.hxx in Headers */ = {isa = PBXBuildFile; fileRef = A17900020000000000000002 /* NativeOpeningSurfaceProbe.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B17900010000000000000001 /* NativeOpeningContext.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B17900020000000000000002 /* NativeOpeningContext.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C17900010000000000000001 /* PatternAllLabelAuthority.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C17900020000000000000002 /* PatternAllLabelAuthority.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D17900010000000000000001 /* BoundedCurveBuild.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D17900020000000000000002 /* BoundedCurveBuild.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E21B4D902A0684A1CCC615CA /* NativeRigidPlacementEvidence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1D489F58EEF9A8B4F1577DD /* NativeRigidPlacementEvidence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */; };
 		C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */ = {isa = PBXBuildFile; fileRef = C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */; };
@@ -154,6 +165,8 @@
 		3221857D2BB5CC1500040E84 /* GLView.mm in Sources */ = {isa = PBXBuildFile; fileRef = 322185732BB5CC1500040E84 /* GLView.mm */; };
 		322185852BB5D5E100040E84 /* Core3DViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = 322185842BB5D5E100040E84 /* Core3DViewController.mm */; };
 		322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */ = {isa = PBXBuildFile; fileRef = 322185832BB5D5E100040E84 /* Core3DViewController.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		A11A00000000000000000003 /* Core3DAgentMeasurements.h in Headers */ = {isa = PBXBuildFile; fileRef = A11A00000000000000000001 /* Core3DAgentMeasurements.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		A11A00000000000000000004 /* Core3DAgentMeasurements.mm in Sources */ = {isa = PBXBuildFile; fileRef = A11A00000000000000000002 /* Core3DAgentMeasurements.mm */; };
 		3229D3222C00D7780025AECD /* ExportType.h in Headers */ = {isa = PBXBuildFile; fileRef = 3229D3212C00D7780025AECD /* ExportType.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D0E0112F10000100000011 /* Core3DNativeExportOperation.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D0E0132F10000100000013 /* Core3DNativeExportOperation.mm */; };
@@ -234,15 +247,41 @@
 		D4A100020000000000000002 /* FeaturePatternDefinition.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4A100120000000000000012 /* FeaturePatternDefinition.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		D4A100030000000000000003 /* FeaturePatternPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4A100130000000000000013 /* FeaturePatternPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		D4B100010000000000000001 /* FeaturePatternOwnerBridge.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4B100110000000000000011 /* FeaturePatternOwnerBridge.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4C100010000000000000001 /* FeaturePatternChildReceipt.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4C100110000000000000011 /* FeaturePatternChildReceipt.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4C100040000000000000004 /* FeaturePatternBaselineAttribute.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4C100140000000000000014 /* FeaturePatternBaselineAttribute.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4C100050000000000000005 /* FeaturePatternBaselineBinaryDriver.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4C100150000000000000015 /* FeaturePatternBaselineBinaryDriver.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4C100020000000000000002 /* FeaturePatternChildAttribute.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4C100120000000000000012 /* FeaturePatternChildAttribute.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4C100030000000000000003 /* FeaturePatternChildBinaryDriver.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4C100130000000000000013 /* FeaturePatternChildBinaryDriver.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		D4D100010000000000000001 /* FeaturePatternNativeBuild.hxx in Headers */ = {isa = PBXBuildFile; fileRef = D4D100110000000000000011 /* FeaturePatternNativeBuild.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		E16A00010000000000000001 /* NativeOpeningDependentReplay.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E16A00110000000000000011 /* NativeOpeningDependentReplay.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3C300010000000000000001 /* GeneralLoftProof.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3C300110000000000000011 /* GeneralLoftProof.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3C300020000000000000002 /* GeneralLoftSolid.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3C300120000000000000012 /* GeneralLoftSolid.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C3N269010000000000000001 /* GeneralLoftPersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3N269110000000000000011 /* GeneralLoftPersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C3N269020000000000000002 /* GeneralLoftOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3N269120000000000000012 /* GeneralLoftOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3N269130000000000000013 /* GeneralLoftOwner.mm */; };
 		C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1F100110000000000000011 /* BoundedCurveOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		E26600010000000000000001 /* RetainedFinishingAttribute.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600010000000000000002 /* RetainedFinishingAttribute.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		E26600020000000000000001 /* RetainedFinishingBinaryDriver.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26600030000000000000002 /* RetainedFinishingOwner.mm */; };
+		E26600040000000000000001 /* RetainedFinishingRecord.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600040000000000000002 /* RetainedFinishingRecord.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		E26800010000000000000001 /* RetainedFinishingProducer.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26800010000000000000002 /* RetainedFinishingProducer.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		F17900020000000000000002 /* PatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PatternNativeCollaborators.mm; sourceTree = "<group>"; };
+		D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PathArrayNativeCollaborators.mm; sourceTree = "<group>"; };
+		D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FeaturePatternNativeCollaborators.mm; sourceTree = "<group>"; };
+		E17900020000000000000002 /* BoundedCurveOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = BoundedCurveOwner.mm; sourceTree = "<group>"; };
+		E18A00020000000000000002 /* Core3DNativeOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeOpenings.mm; sourceTree = "<group>"; };
+		E26800020000000000000002 /* Core3DFinishingOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFinishingOpenings.mm; sourceTree = "<group>"; };
+		E18A00040000000000000004 /* NativeOpeningFactories.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningFactories.hxx; sourceTree = "<group>"; };
 		C3D5A0010000000000000002 /* Core3DModelingTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DModelingTypes.mm; sourceTree = "<group>"; };
 		C3D5A0010000000000000004 /* Core3DSharedModelingValues.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DSharedModelingValues.h; sourceTree = "<group>"; };
 		C3D515020000000000000001 /* Core3DModelingTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DModelingTypes.h; sourceTree = "<group>"; };
+		A17900020000000000000002 /* NativeOpeningSurfaceProbe.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningSurfaceProbe.hxx; sourceTree = "<group>"; };
+		B17900020000000000000002 /* NativeOpeningContext.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningContext.hxx; sourceTree = "<group>"; };
+		C17900020000000000000002 /* PatternAllLabelAuthority.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = PatternAllLabelAuthority.hxx; sourceTree = "<group>"; };
+		D17900020000000000000002 /* BoundedCurveBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BoundedCurveBuild.hxx; sourceTree = "<group>"; };
 		C1D489F58EEF9A8B4F1577DD /* NativeRigidPlacementEvidence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeRigidPlacementEvidence.hxx; sourceTree = "<group>"; };
 		C03D91020000000000000005 /* GLViewController+QueuedAssetLoading.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GLViewController+QueuedAssetLoading.h"; sourceTree = "<group>"; };
 		C03D91020000000000000004 /* Core3DQueuedAssetRequest.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DQueuedAssetRequest.mm"; sourceTree = "<group>"; };
@@ -391,6 +430,8 @@
 		322185732BB5CC1500040E84 /* GLView.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = GLView.mm; sourceTree = "<group>"; };
 		322185832BB5D5E100040E84 /* Core3DViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DViewController.h; sourceTree = "<group>"; };
 		322185842BB5D5E100040E84 /* Core3DViewController.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DViewController.mm; sourceTree = "<group>"; wrapsLines = 0; };
+		A11A00000000000000000001 /* Core3DAgentMeasurements.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DAgentMeasurements.h; sourceTree = "<group>"; };
+		A11A00000000000000000002 /* Core3DAgentMeasurements.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DAgentMeasurements.mm; sourceTree = "<group>"; };
 		3229D3212C00D7780025AECD /* ExportType.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ExportType.h; sourceTree = "<group>"; };
 		C3D0E0112F10000100000011 /* Core3DNativeExportOperation.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DNativeExportOperation.h; sourceTree = "<group>"; };
 		C3D0E0122F10000100000012 /* Core3DNativeExportOperation+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DNativeExportOperation+Private.h"; sourceTree = "<group>"; };
@@ -485,9 +526,24 @@
 		D4A100120000000000000012 /* FeaturePatternDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternDefinition.hxx; sourceTree = "<group>"; };
 		D4A100130000000000000013 /* FeaturePatternPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternPersistence.hxx; sourceTree = "<group>"; };
 		D4B100110000000000000011 /* FeaturePatternOwnerBridge.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternOwnerBridge.hxx; sourceTree = "<group>"; };
+		D4C100110000000000000011 /* FeaturePatternChildReceipt.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternChildReceipt.hxx; sourceTree = "<group>"; };
+		D4C100140000000000000014 /* FeaturePatternBaselineAttribute.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternBaselineAttribute.hxx; sourceTree = "<group>"; };
+		D4C100150000000000000015 /* FeaturePatternBaselineBinaryDriver.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternBaselineBinaryDriver.hxx; sourceTree = "<group>"; };
+		D4C100120000000000000012 /* FeaturePatternChildAttribute.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternChildAttribute.hxx; sourceTree = "<group>"; };
+		D4C100130000000000000013 /* FeaturePatternChildBinaryDriver.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternChildBinaryDriver.hxx; sourceTree = "<group>"; };
+		D4D100110000000000000011 /* FeaturePatternNativeBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternNativeBuild.hxx; sourceTree = "<group>"; };
+		E16A00110000000000000011 /* NativeOpeningDependentReplay.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningDependentReplay.hxx; sourceTree = "<group>"; };
 		C3C300110000000000000011 /* GeneralLoftProof.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftProof.hxx; sourceTree = "<group>"; };
 		C3C300120000000000000012 /* GeneralLoftSolid.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftSolid.hxx; sourceTree = "<group>"; };
+		C3N269110000000000000011 /* GeneralLoftPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftPersistence.hxx; sourceTree = "<group>"; };
+		C3N269120000000000000012 /* GeneralLoftOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftOwner.hxx; sourceTree = "<group>"; };
+		C3N269130000000000000013 /* GeneralLoftOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = GeneralLoftOwner.mm; sourceTree = "<group>"; };
 		C1F100110000000000000011 /* BoundedCurveOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BoundedCurveOwner.hxx; sourceTree = "<group>"; };
+		E26600010000000000000002 /* RetainedFinishingAttribute.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingAttribute.hxx; sourceTree = "<group>"; };
+		E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingBinaryDriver.hxx; sourceTree = "<group>"; };
+		E26600030000000000000002 /* RetainedFinishingOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RetainedFinishingOwner.mm; sourceTree = "<group>"; };
+		E26600040000000000000002 /* RetainedFinishingRecord.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingRecord.hxx; sourceTree = "<group>"; };
+		E26800010000000000000002 /* RetainedFinishingProducer.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingProducer.hxx; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -737,6 +793,10 @@
 		322185692BB5CB9A00040E84 /* OCCTKit */ = {
 			isa = PBXGroup;
 			children = (
+				F17900020000000000000002 /* PatternNativeCollaborators.mm */,
+				D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */,
+				D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */,
+				E17900020000000000000002 /* BoundedCurveOwner.mm */,
 				C03D91020000000000000001 /* Core3DQueuedAssetInput.h */,
 				C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */,
 				C03D91020000000000000003 /* Core3DQueuedAssetRequest.h */,
@@ -751,6 +811,10 @@
 				322185722BB5CC1500040E84 /* GLViewController.h */,
 				322185712BB5CC1500040E84 /* GLViewController.mm */,
 				C1D489F58EEF9A8B4F1577DD /* NativeRigidPlacementEvidence.hxx */,
+				A17900020000000000000002 /* NativeOpeningSurfaceProbe.hxx */,
+				B17900020000000000000002 /* NativeOpeningContext.hxx */,
+				C17900020000000000000002 /* PatternAllLabelAuthority.hxx */,
+				D17900020000000000000002 /* BoundedCurveBuild.hxx */,
 				D9C4E33DE38B3B1BE57C2A02 /* NativeModelingReceipt.hxx */,
 				E464D00DD99C444AB7E03B9F /* RectangularLoftPersistence.hxx */,
 				C2DC4CE89966F4B545E4C2DC /* NativeModelingTombstone.hxx */,
@@ -778,9 +842,25 @@
 				D4A100120000000000000012 /* FeaturePatternDefinition.hxx */,
 				D4A100130000000000000013 /* FeaturePatternPersistence.hxx */,
 				D4B100110000000000000011 /* FeaturePatternOwnerBridge.hxx */,
+				D4C100110000000000000011 /* FeaturePatternChildReceipt.hxx */,
+				D4C100140000000000000014 /* FeaturePatternBaselineAttribute.hxx */,
+				D4C100150000000000000015 /* FeaturePatternBaselineBinaryDriver.hxx */,
+				D4C100120000000000000012 /* FeaturePatternChildAttribute.hxx */,
+				D4C100130000000000000013 /* FeaturePatternChildBinaryDriver.hxx */,
+				D4D100110000000000000011 /* FeaturePatternNativeBuild.hxx */,
+				E16A00110000000000000011 /* NativeOpeningDependentReplay.hxx */,
+				E18A00040000000000000004 /* NativeOpeningFactories.hxx */,
 				C3C300110000000000000011 /* GeneralLoftProof.hxx */,
 				C3C300120000000000000012 /* GeneralLoftSolid.hxx */,
+				C3N269110000000000000011 /* GeneralLoftPersistence.hxx */,
+				C3N269120000000000000012 /* GeneralLoftOwner.hxx */,
+				C3N269130000000000000013 /* GeneralLoftOwner.mm */,
 				C1F100110000000000000011 /* BoundedCurveOwner.hxx */,
+				E26600010000000000000002 /* RetainedFinishingAttribute.hxx */,
+				E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */,
+				E26600030000000000000002 /* RetainedFinishingOwner.mm */,
+				E26600040000000000000002 /* RetainedFinishingRecord.hxx */,
+				E26800010000000000000002 /* RetainedFinishingProducer.hxx */,
 				322185702BB5CC1400040E84 /* OcctDocument.h */,
 				3221856A2BB5CC1300040E84 /* OcctDocument.mm */,
 				3221856D2BB5CC1400040E84 /* OcctViewer.h */,
@@ -802,9 +882,13 @@
 				3F98EB9F02FC40DF96AF3B3F /* Core3DTransformInspectorSnapshotFactory.hpp */,
 				324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */,
 				322185832BB5D5E100040E84 /* Core3DViewController.h */,
+				A11A00000000000000000001 /* Core3DAgentMeasurements.h */,
+				A11A00000000000000000002 /* Core3DAgentMeasurements.mm */,
 				C3D515020000000000000001 /* Core3DModelingTypes.h */,
 				C3D5A0010000000000000004 /* Core3DSharedModelingValues.h */,
 				C3D5A0010000000000000002 /* Core3DModelingTypes.mm */,
+				E18A00020000000000000002 /* Core3DNativeOpenings.mm */,
+				E26800020000000000000002 /* Core3DFinishingOpenings.mm */,
 				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
 				324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */,
 				324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */,
@@ -997,6 +1081,7 @@
 				329B2ED32C1AF53900F3A763 /* importstl.h in Headers */,
 				71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */,
 				328FBF2C2BC82E8300176AEA /* Core3DViewer.h in Headers */,
+				A11A00000000000000000003 /* Core3DAgentMeasurements.h in Headers */,
 				185461BB2C0F412B00C794A8 /* Core3DContext.hpp in Headers */,
 				18247AD72C0FAF2000674D04 /* Core3DManipulator.hpp in Headers */,
 				32ECC7DE2BCD36E600770594 /* Core3DViewController+AvailabilityManager.h in Headers */,
@@ -1006,6 +1091,10 @@
 				C3D5A0010000000000000003 /* Core3DSharedModelingValues.h in Headers */,
 				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
 				E21B4D902A0684A1CCC615CA /* NativeRigidPlacementEvidence.hxx in Headers */,
+				A17900010000000000000001 /* NativeOpeningSurfaceProbe.hxx in Headers */,
+				B17900010000000000000001 /* NativeOpeningContext.hxx in Headers */,
+				C17900010000000000000001 /* PatternAllLabelAuthority.hxx in Headers */,
+				D17900010000000000000001 /* BoundedCurveBuild.hxx in Headers */,
 				0CB6F091CB719172F34287C2 /* NativeModelingReceipt.hxx in Headers */,
 				2E70B1881BA94908AECBA472 /* RectangularLoftPersistence.hxx in Headers */,
 				A7823241B06814F812CF159D /* NativeModelingTombstone.hxx in Headers */,
@@ -1032,9 +1121,23 @@
 				D4A100020000000000000002 /* FeaturePatternDefinition.hxx in Headers */,
 				D4A100030000000000000003 /* FeaturePatternPersistence.hxx in Headers */,
 				D4B100010000000000000001 /* FeaturePatternOwnerBridge.hxx in Headers */,
+				D4C100010000000000000001 /* FeaturePatternChildReceipt.hxx in Headers */,
+				D4C100040000000000000004 /* FeaturePatternBaselineAttribute.hxx in Headers */,
+				D4C100050000000000000005 /* FeaturePatternBaselineBinaryDriver.hxx in Headers */,
+				D4C100020000000000000002 /* FeaturePatternChildAttribute.hxx in Headers */,
+				D4C100030000000000000003 /* FeaturePatternChildBinaryDriver.hxx in Headers */,
+				D4D100010000000000000001 /* FeaturePatternNativeBuild.hxx in Headers */,
+				E16A00010000000000000001 /* NativeOpeningDependentReplay.hxx in Headers */,
+				E18A00030000000000000003 /* NativeOpeningFactories.hxx in Headers */,
 				C3C300010000000000000001 /* GeneralLoftProof.hxx in Headers */,
 				C3C300020000000000000002 /* GeneralLoftSolid.hxx in Headers */,
+				C3N269010000000000000001 /* GeneralLoftPersistence.hxx in Headers */,
+				C3N269020000000000000002 /* GeneralLoftOwner.hxx in Headers */,
 				C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */,
+				E26600010000000000000001 /* RetainedFinishingAttribute.hxx in Headers */,
+				E26600020000000000000001 /* RetainedFinishingBinaryDriver.hxx in Headers */,
+				E26600040000000000000001 /* RetainedFinishingRecord.hxx in Headers */,
+				E26800010000000000000001 /* RetainedFinishingProducer.hxx in Headers */,
 				3221857A2BB5CC1500040E84 /* OcctDocument.h in Headers */,
 				18A006332BD2B306004931B1 /* ShapeInteractor.hpp in Headers */,
 				329B2ECF2C1AF53900F3A763 /* kdtree.h in Headers */,
@@ -1161,6 +1264,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F17900010000000000000001 /* PatternNativeCollaborators.mm in Sources */,
+				D3C100010000000000000001 /* PathArrayNativeCollaborators.mm in Sources */,
+				D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */,
+				E18A00010000000000000001 /* Core3DNativeOpenings.mm in Sources */,
+				E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */,
 				C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */,
 				C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */,
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
@@ -1198,6 +1306,7 @@
 				1804F28E2C51140A0045084A /* CylinderDriver.cpp in Sources */,
 				18665F042CA2DA8500141E05 /* ModelPart.mm in Sources */,
 				328FBF2B2BC82E8300176AEA /* Core3DViewer.mm in Sources */,
+				A11A00000000000000000004 /* Core3DAgentMeasurements.mm in Sources */,
 				C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */,
 				322185852BB5D5E100040E84 /* Core3DViewController.mm in Sources */,
 				3221857B2BB5CC1500040E84 /* GLViewController.mm in Sources */,
@@ -1213,6 +1322,9 @@
 				18A0062E2BD2A2E5004931B1 /* Interactor.cpp in Sources */,
 				18665F002CA2BDC600141E05 /* NSBundle+Path.m in Sources */,
 				3A3275384C537C4F2CC799D2 /* NativeModelingTombstone.mm in Sources */,
+				E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */,
+				C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */,
+				E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */,
 				322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */,
 				3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */,
 			);

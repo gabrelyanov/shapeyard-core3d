@@ -35,3 +35,4 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/objc_try.h>
 #import <Core3D/Core3DGuidedController.h>
 #import <Core3D/Core3DSceneSnapshot.h>
+#import <Core3D/Core3DAgentMeasurements.h>

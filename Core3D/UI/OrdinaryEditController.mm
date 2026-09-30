@@ -353,6 +353,18 @@ OrdinaryEditLease OrdinaryEditController::beginTransform(
     const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure) noexcept {
     return beginTransformImpl(changes, failure, {});
 }
+OrdinaryEditLease OrdinaryEditController::beginDependentTransform(
+    const OrdinaryTransformChange& change,
+    std::shared_ptr<const dependent_replay::Plan> replay,
+    std::shared_ptr<native_opening::Context> context,
+    OrdinaryEditResult* failure) noexcept {
+    if (!replay || !context) {
+        if (failure) *failure = OrdinaryEditResult::Invalid;
+        return {};
+    }
+    return beginTransformImpl({change}, failure, {}, std::move(replay),
+                              std::move(context));
+}
 OrdinaryEditLease OrdinaryEditController::beginModelingRebuild(const OrdinaryTransformChange& change,
     std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept {
     if (!permit) { if (failure) *failure=OrdinaryEditResult::Invalid; return {}; }
@@ -369,7 +381,9 @@ OrdinaryEditLease OrdinaryEditController::beginModelingPlacement(const OrdinaryT
 }
 OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
     const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure,
-    std::shared_ptr<NativeModelingCommitPermit> permit) noexcept
+    std::shared_ptr<NativeModelingCommitPermit> permit,
+    std::shared_ptr<const dependent_replay::Plan> dependentReplay,
+    std::shared_ptr<native_opening::Context> dependentContext) noexcept
 {
     const auto reject = [&](OrdinaryEditResult reason) {
         if (failure) { *failure = reason; }
@@ -389,6 +403,15 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         const auto document = _document->Document();
         if (document.IsNull() || document->HasOpenCommand()) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Busy)); }
         OrdinaryTransformLedger ledger;
+        if (bool(dependentReplay) != bool(dependentContext)
+            || (dependentReplay && (changes.size() != 1 || permit
+                || (changes.front().operation
+                        != OrdinaryTransformOperation::CylindricalCutSourceRebuild
+                    && changes.front().operation
+                        != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild))))
+            return reject(OrdinaryEditResult::Invalid);
+        ledger.dependentReplay = std::move(dependentReplay);
+        ledger.dependentContext = std::move(dependentContext);
         ledger.records.reserve(changes.size());
         if (permit && changes.size()!=1) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
         std::unordered_set<std::string> entities;
@@ -818,6 +841,21 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             return reject(began == OrdinaryCommandBeginResult::Busy
                 ? OrdinaryEditResult::Busy : began == OrdinaryCommandBeginResult::Invalid
                 ? OrdinaryEditResult::Invalid : OrdinaryEditResult::RetryableFailure);
+        }
+        if (auto& opened = std::get<OrdinaryTransformLedger>(*_pending);
+            opened.dependentReplay) {
+            opened.dependentLease = opened.dependentContext->borrowCommandLease(_command);
+            if (!opened.dependentLease || !opened.dependentLease->ownsOpenCommand()) {
+                const auto closed = _command.abortAndObserve();
+                opened.dependentLease.reset();
+                if (closed == OrdinaryCommandObservation::ClosedWithPriorMarker
+                    && _command.releaseClosed()) {
+                    _pending.reset(); _activeToken = 0;
+                    return reject(OrdinaryEditResult::RetryableFailure);
+                }
+                _state = OrdinaryEditState::OutcomeUnknown;
+                return reject(OrdinaryEditResult::OutcomeUnknown);
+            }
         }
         _state = OrdinaryEditState::OpenOwned;
         return OrdinaryEditLease(self, _activeToken, lifetime);
@@ -2117,6 +2155,41 @@ bool OrdinaryEditController::stageRebuildReceipt(OrdinaryTransformLedger& ledger
     } catch (...) { return false; }
 }
 
+class OrdinaryDependentSourceMutation final
+    : public dependent_replay::SourceMutation {
+public:
+    OrdinaryDependentSourceMutation(OrdinaryEditController& controller,
+        OrdinaryTransformLedger& ledger, OrdinaryTransformRecord& record) noexcept
+        : controller_(controller), ledger_(ledger), record_(record) {}
+    bool stage(OcctDocument&, native_opening::CommandLease& lease) noexcept override {
+        return controller_.stageDependentSource(ledger_, record_, lease);
+    }
+private:
+    OrdinaryEditController& controller_;
+    OrdinaryTransformLedger& ledger_;
+    OrdinaryTransformRecord& record_;
+};
+
+bool OrdinaryEditController::stageDependentSource(OrdinaryTransformLedger& ledger,
+    OrdinaryTransformRecord& record, native_opening::CommandLease& lease) noexcept {
+    if (!ledger.dependentLease || ledger.dependentLease.get() != &lease
+        || !lease.ownsOpenCommand()) return false;
+    if (record.requested.operation
+            == OrdinaryTransformOperation::CylindricalCutSourceRebuild) {
+        return _document->StageSavedCutSourceReplacement(record.previous,
+            *record.requested.cutSourcePatch, record.requested.cutSourceRebuild,
+            ledger.cutSourcePayload, false);
+    }
+    if (record.requested.operation
+            == OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
+        return _document->StageSavedProgramSourceReplacement(record.previous,
+            *record.requested.cutProgramSourcePatch,
+            record.requested.cutProgramSourceRebuild,
+            ledger.cutSourcePayload, false);
+    }
+    return false;
+}
+
 OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) noexcept {
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
@@ -2244,7 +2317,13 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(ledger.modelingReceipt||ledger.records.size()!=1||!record.requested.cutSourcePatch
                     ||!record.requested.cutSourceRebuild||ledger.cutSourcePayload)
                     throw Standard_Failure("Saved cut source staging admission changed");
-                cutSourceStaged=_document->StageSavedCutSourceReplacement(record.previous,
+                if (ledger.dependentReplay) {
+                    if (pairedFault || !ledger.dependentLease) throw Standard_Failure("Dependent source staging fault");
+                    OrdinaryDependentSourceMutation source(*this, ledger, record);
+                    cutSourceStaged = _document->StageDependentReplayPlan(
+                        *ledger.dependentLease, *ledger.dependentReplay, source)
+                        == dependent_replay::Refusal::None;
+                } else cutSourceStaged=_document->StageSavedCutSourceReplacement(record.previous,
                     *record.requested.cutSourcePatch,record.requested.cutSourceRebuild,ledger.cutSourcePayload,pairedFault);
                 if(!cutSourceStaged)throw Standard_Failure("Saved cut source paired staging failed");
             }
@@ -2256,7 +2335,13 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(ledger.modelingReceipt||ledger.records.size()!=1||!record.requested.cutProgramSourcePatch
                     ||!record.requested.cutProgramSourceRebuild||ledger.cutSourcePayload)
                     throw Standard_Failure("Saved program source staging admission changed");
-                programSourceStaged=_document->StageSavedProgramSourceReplacement(record.previous,
+                if (ledger.dependentReplay) {
+                    if (pairedFault || !ledger.dependentLease) throw Standard_Failure("Dependent source staging fault");
+                    OrdinaryDependentSourceMutation source(*this, ledger, record);
+                    programSourceStaged = _document->StageDependentReplayPlan(
+                        *ledger.dependentLease, *ledger.dependentReplay, source)
+                        == dependent_replay::Refusal::None;
+                } else programSourceStaged=_document->StageSavedProgramSourceReplacement(record.previous,
                     *record.requested.cutProgramSourcePatch,record.requested.cutProgramSourceRebuild,ledger.cutSourcePayload,pairedFault);
                 if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
             }
@@ -2421,9 +2506,16 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if(!sealed)throw Standard_Failure("Saved cut complete scene mismatch");
         }
         if (!SealSweepCandidate(_document,ledger)) throw Standard_Failure("Saved sweep complete candidate mismatch");
+        if (ledger.dependentReplay
+            && _document->ReadDependentReplayPlan(*ledger.dependentReplay)
+                != dependent_replay::Refusal::None)
+            throw Standard_Failure("Dependent replay candidate readback failed");
         if (!stageRebuildReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
             throw Standard_Failure("Ordinary rebuild receipt staging failed");
         ledger.candidateSealed = true;
+        // End only the borrowed validation interval. The ordinary stamp still
+        // exclusively owns closure and every uncertain-outcome decision.
+        ledger.dependentLease.reset();
 
 #if DEBUG // Cut475 phase diagnostics only
         if(ledger.cutPrevious)Cut475Trace("ordinary.before-close");
@@ -2529,6 +2621,12 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
         if(ledger.cutPrevious)Cut475Trace("ordinary.candidate-sealed",int(ledger.candidateSealed));
 #endif // Cut475 phase diagnostics only
         if ((!candidate && !previous) || (candidate && !ledger.candidateSealed)) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+        if (candidate && ledger.dependentReplay
+            && _document->ReadDependentReplayPlan(*ledger.dependentReplay)
+                != dependent_replay::Refusal::None) {
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;
         }

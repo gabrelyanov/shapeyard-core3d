@@ -28,6 +28,8 @@ inline constexpr double MaximumAdjacentTwistRadians = 2.6179938779914944; // 150
 enum class Interpolation : std::uint8_t { Ruled = 1 };
 enum class HolePolicy : std::uint8_t { Reject = 1 };
 enum class CapPolicy : std::uint8_t { FlatBothEnds = 1 };
+enum class StructuralOperation : std::uint8_t { InsertStation = 1, RemoveStation = 2 };
+inline constexpr bool Supports(StructuralOperation) noexcept { return false; }
 enum class Admission : std::uint8_t {
     Accepted = 0,
     InvalidSchema,

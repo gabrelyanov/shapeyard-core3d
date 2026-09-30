@@ -79,6 +79,8 @@
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include <set>
+#include <chrono>
+#include <cstdio>
 #include "../OCCTKit/NativeModelingRequest.hxx"
 #include "../OCCTKit/NativeModelingTombstone.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
@@ -1873,6 +1875,83 @@ static NSUUID *Core3DRegisterNativeSolidCompletion(void (^completion)(Core3DProf
     return token;
 }
 
+#if DEBUG
+enum class Core3DDebugNativeSolidDeadlineDecision : std::uint8_t {
+    Pending, DeliveryClaimed, Expired, Completed
+};
+enum class Core3DDebugNativeSolidDeadlinePhase : std::uint8_t {
+    Registered, GeometryStarted, GeometryReturned, MainDeliveryEnqueued,
+    DebugGateHeld, DeliveryClaimed, CommitReturned, CompletionDelivered
+};
+
+@interface Core3DDebugNativeSolidDeadlineTicket : NSObject {
+@public
+    std::atomic<Core3DDebugNativeSolidDeadlineDecision> _decision;
+    std::atomic<Core3DDebugNativeSolidDeadlinePhase> _phase;
+    std::atomic_bool _deadlineFired;
+    std::atomic_bool _overrun;
+    std::atomic_bool _published;
+    std::chrono::steady_clock::time_point _started;
+    NSTimeInterval _budget;
+    NSString *_label;
+    NSString *_token;
+}
+- (instancetype)initWithBudget:(NSTimeInterval)budget label:(NSString *)label token:(NSUUID *)token;
+- (NSDictionary<NSString *,id> *)diagnostic;
+@end
+
+@implementation Core3DDebugNativeSolidDeadlineTicket
+- (instancetype)initWithBudget:(NSTimeInterval)budget label:(NSString *)label token:(NSUUID *)token {
+    self=[super init];
+    if(self){
+        _decision.store(Core3DDebugNativeSolidDeadlineDecision::Pending);
+        _phase.store(Core3DDebugNativeSolidDeadlinePhase::Registered);
+        _deadlineFired.store(false);_overrun.store(false);_published.store(false);
+        _started=std::chrono::steady_clock::now();_budget=budget;
+        _label=[label copy];_token=[token.UUIDString copy];
+    }
+    return self;
+}
+- (NSDictionary<NSString *,id> *)diagnostic {
+    const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-_started).count();
+    NSString *phase=@"registered";
+    switch(_phase.load()){
+        case Core3DDebugNativeSolidDeadlinePhase::GeometryStarted: phase=@"geometry-started";break;
+        case Core3DDebugNativeSolidDeadlinePhase::GeometryReturned: phase=@"geometry-returned";break;
+        case Core3DDebugNativeSolidDeadlinePhase::MainDeliveryEnqueued: phase=@"main-delivery-enqueued";break;
+        case Core3DDebugNativeSolidDeadlinePhase::DebugGateHeld: phase=@"debug-gate-held";break;
+        case Core3DDebugNativeSolidDeadlinePhase::DeliveryClaimed: phase=@"delivery-claimed";break;
+        case Core3DDebugNativeSolidDeadlinePhase::CommitReturned: phase=@"commit-returned";break;
+        case Core3DDebugNativeSolidDeadlinePhase::CompletionDelivered: phase=@"completion-delivered";break;
+        case Core3DDebugNativeSolidDeadlinePhase::Registered: break;
+    }
+    return @{ @"label":_label?:@"", @"token":_token?:@"", @"phase":phase,
+        @"elapsed":@(elapsed), @"budget":@(_budget), @"timedOut":@(_deadlineFired.load()),
+        @"overrun":@(_overrun.load()) };
+}
+@end
+
+@interface Core3DDebugNativeSolidDeadlineRecord : NSObject {
+@public
+    __weak Core3DViewController *_owner;
+    __weak Core3DModelingPlanningContext *_context;
+    std::weak_ptr<core3d::NativeSolidWork> _work;
+    Core3DDebugNativeSolidDeadlineTicket *_ticket;
+    void (^_observer)(NSDictionary<NSString *,id> *);
+}
+@end
+@implementation Core3DDebugNativeSolidDeadlineRecord
+@end
+
+static NSMutableDictionary<NSUUID *,Core3DDebugNativeSolidDeadlineRecord *> *Core3DNativeSolidDeadlineRecords(){
+    static NSMutableDictionary<NSUUID *,Core3DDebugNativeSolidDeadlineRecord *> *records;
+    static dispatch_once_t once;dispatch_once(&once,^{records=[NSMutableDictionary dictionary];});return records;
+}
+static Core3DDebugNativeSolidDeadlineTicket *Core3DPrepareNativeSolidDeadlineCompletion(NSUUID *token);
+static void Core3DFinishNativeSolidDeadlineCompletion(NSUUID *token,Core3DDebugNativeSolidDeadlineTicket *ticket);
+static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNativeSolidDeadlineTicket *ticket);
+#endif
+
 static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConstructionResult result) {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ Core3DDeliverNativeSolidCompletion(token, result); });
@@ -1881,7 +1960,17 @@ static void Core3DDeliverNativeSolidCompletion(NSUUID *token, Core3DProfileConst
     NSMutableDictionary<NSUUID *, id> *callbacks = Core3DNativeSolidCompletionRegistry();
     void (^completion)(Core3DProfileConstructionResult) = callbacks[token];
     [callbacks removeObjectForKey:token]; // Remove before invoking reentrant user code.
+#if DEBUG
+    Core3DDebugNativeSolidDeadlineTicket *deadline=Core3DPrepareNativeSolidDeadlineCompletion(token);
+#endif
     if (completion) completion(result);
+#if DEBUG
+    if(deadline){
+        deadline->_phase.store(Core3DDebugNativeSolidDeadlinePhase::CompletionDelivered);
+        deadline->_decision.store(Core3DDebugNativeSolidDeadlineDecision::Completed);
+        Core3DFinishNativeSolidDeadlineCompletion(token,deadline);
+    }
+#endif
 }
 
 #if DEBUG
@@ -1899,6 +1988,8 @@ static void Core3DGateNativeSolidGeometryDelivery(NSUUID *token,dispatch_block_t
     void (^gate)(void (^)(void))=gates[token];
     [gates removeObjectForKey:token];
     if(!gate){delivery();return;}
+    Core3DDebugNativeSolidDeadlineRecord *record=Core3DNativeSolidDeadlineRecords()[token];
+    if(record)record->_ticket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::DebugGateHeld);
     // Clear the exact pending delivery before admission or any reentrant call.
     // Repeated/off-main resumes cannot promote an owner or consume newer work.
     __block dispatch_block_t pending=[delivery copy];
@@ -3145,14 +3236,32 @@ static NSDictionary *Core3DReservationDebugResult(Core3DReservationOutcome outco
 @interface Core3DModelingAsyncOutcome ()
 - (instancetype)initWithDisposition:(Core3DModelingAsyncDisposition)disposition
     storage:(Core3DModelingStorageObservation)storage request:(NSUUID *)request
-    document:(NSString *)document entities:(NSArray<NSString *> *)entities;
+    document:(NSString *)document entities:(NSArray<NSString *> *)entities
+    terminalEvidence:(Core3DModelingTerminalEvidence *)terminalEvidence;
+@end
+@interface Core3DModelingTerminalEvidence ()
+- (instancetype)initWithRequest:(NSUUID *)request document:(NSString *)document
+    storage:(Core3DModelingStorageObservation)storage historyDelta:(NSInteger)historyDelta
+    entities:(NSArray<NSString *> *)entities;
+@end
+@implementation Core3DModelingTerminalEvidence
+- (instancetype)initWithRequest:(NSUUID *)request document:(NSString *)document
+    storage:(Core3DModelingStorageObservation)storage historyDelta:(NSInteger)historyDelta
+    entities:(NSArray<NSString *> *)entities {
+    if((self=[super init])){_requestIdentifier=[request copy];_documentIdentifier=[document copy];
+        _storageObservation=storage;_measuredHistoryDelta=historyDelta;
+        _entityIdentifiers=[entities copy];}
+    return self;
+}
 @end
 @implementation Core3DModelingAsyncOutcome
 - (instancetype)initWithDisposition:(Core3DModelingAsyncDisposition)disposition
     storage:(Core3DModelingStorageObservation)storage request:(NSUUID *)request
-    document:(NSString *)document entities:(NSArray<NSString *> *)entities {
+    document:(NSString *)document entities:(NSArray<NSString *> *)entities
+    terminalEvidence:(Core3DModelingTerminalEvidence *)terminalEvidence {
     if((self=[super init])){_disposition=disposition;_storageObservation=storage;
-        _requestIdentifier=[request copy];_documentIdentifier=[document copy];_entityIdentifiers=[entities copy];}
+        _requestIdentifier=[request copy];_documentIdentifier=[document copy];_entityIdentifiers=[entities copy];
+        _terminalEvidence=terminalEvidence;}
     return self;
 }
 @end
@@ -3173,6 +3282,7 @@ static NSDictionary *Core3DReservationDebugResult(Core3DReservationOutcome outco
     core3d::receipt::UUID _placementEntity;
     BOOL _loftResolutionBound;
     core3d::receipt::UUID _loftEntity;
+    NSInteger _historyBefore;
 #if DEBUG
     void (^_beforeCompletion)(void);
 #endif
@@ -3224,10 +3334,19 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
     if(prepared){prepared->_requestAsyncGate=nil;prepared->_requestAsyncAfterStart=nil;prepared->_requestAsyncBeforeCompletion=nil;prepared->_requestAsyncGeometryDeliveryGate=nil;}
     auto observer=box->_beforeCompletion;box->_beforeCompletion=nil;
 #endif
+    Core3DViewController *owner=box->_owner;
+    const NSInteger historyAfter=owner?[owner debugDocumentUndoCount]:box->_historyBefore;
+    const NSInteger historyDelta=disposition==Core3DModelingAsyncDispositionCommitted
+        ?MAX(0,historyAfter-box->_historyBefore):0;
+    Core3DModelingTerminalEvidence *evidence=nil;
+    if(box->_requestID&&box->_documentID&&box->_storage!=Core3DModelingStorageObservationNotAttempted){
+        evidence=[[Core3DModelingTerminalEvidence alloc] initWithRequest:box->_requestID
+            document:box->_documentID storage:box->_storage historyDelta:historyDelta entities:entities];
+    }
     box->_prepared=nil;box->_owner=nil;box->_resolution.reset();
     Core3DModelingAsyncOutcome *outcome=[[Core3DModelingAsyncOutcome alloc]
         initWithDisposition:disposition storage:box->_storage request:box->_requestID
-        document:box->_documentID entities:entities];
+        document:box->_documentID entities:entities terminalEvidence:evidence];
 #if DEBUG
     // Ownership/result are already detached and immutable before reentrancy.
     if(observer)observer();
@@ -3572,6 +3691,10 @@ struct NativeModelingPermitIssuer final {
     void (^_debugSavedCutSourceDeliveryGate)(void (^resume)(void));
     std::shared_ptr<core3d::cylindrical_cut::DebugRefusalRecord> _debugLastCutRefusal;
     void (^_debugNextNativeSolidDeliveryGate)(void (^resume)(void));
+    NSTimeInterval _debugNextNativeSolidDeadline;
+    NSString *_debugNextNativeSolidDeadlineLabel;
+    void (^_debugNextNativeSolidDeadlineObserver)(NSDictionary<NSString *,id> *);
+    NSDictionary<NSString *,id> *_debugNativeSolidDeadlineRecord;
 #endif
     BOOL _nativeSolidCancelled;
     __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
@@ -3650,6 +3773,8 @@ struct NativeModelingPermitIssuer final {
     (Core3DPartBooleanOperation)operation metersPerUnit:(double)metersPerUnit shell:(BOOL)shellFixture;
 - (void)core3d_clearDebugPartBooleanFixtureBinding;
 - (BOOL)core3d_matchesDebugPartBooleanFixtureEntityIdentifier:(NSString *)entityIdentifier;
+- (void)core3d_publishNativeSolidDeadlineDiagnostic:(NSDictionary<NSString *,id> *)diagnostic;
+- (void)core3d_expireNativeSolidDeadlineRecord:(Core3DDebugNativeSolidDeadlineRecord *)record;
 #endif
 @end
 
@@ -3699,6 +3824,53 @@ struct NativeModelingPermitIssuer final {
 @implementation Core3DPBRScalarPreparation
 - (instancetype)initPrivate {return [super init];}
 @end
+
+#if DEBUG
+static void Core3DPublishNativeSolidDeadlineRecord(Core3DDebugNativeSolidDeadlineRecord *record){
+    Core3DDebugNativeSolidDeadlineTicket *ticket=record->_ticket;
+    if(!ticket||ticket->_published.exchange(true))return;
+    NSMutableDictionary<NSString *,id> *diagnostic=[[ticket diagnostic] mutableCopy];
+    diagnostic[@"completionRegistryCount"]=@([Core3DNativeSolidCompletionRegistry() count]);
+    diagnostic[@"deliveryGateCount"]=@([Core3DNativeSolidGeometryDeliveryGates() count]);
+    diagnostic[@"deadlineRecordCount"]=@([Core3DNativeSolidDeadlineRecords() count]);
+    Core3DViewController *owner=record->_owner;
+    if(owner)[owner core3d_publishNativeSolidDeadlineDiagnostic:diagnostic];
+    if(record->_observer)record->_observer(diagnostic);
+    record->_observer=nil;
+}
+
+static Core3DDebugNativeSolidDeadlineTicket *Core3DPrepareNativeSolidDeadlineCompletion(NSUUID *token){
+    NSCAssert(NSThread.isMainThread,@"Native deadline completion is main-owned");
+    Core3DDebugNativeSolidDeadlineRecord *record=Core3DNativeSolidDeadlineRecords()[token];
+    if(!record)return nil;
+    if(record->_ticket->_deadlineFired.load())Core3DPublishNativeSolidDeadlineRecord(record);
+    return record->_ticket;
+}
+
+static void Core3DFinishNativeSolidDeadlineCompletion(NSUUID *token,Core3DDebugNativeSolidDeadlineTicket *ticket){
+    Core3DDebugNativeSolidDeadlineRecord *record=Core3DNativeSolidDeadlineRecords()[token];
+    if(!record||record->_ticket!=ticket)return;
+    if(ticket->_deadlineFired.load())Core3DPublishNativeSolidDeadlineRecord(record);
+    [Core3DNativeSolidDeadlineRecords() removeObjectForKey:token];
+    [Core3DNativeSolidGeometryDeliveryGates() removeObjectForKey:token];
+    record->_observer=nil;
+}
+
+static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNativeSolidDeadlineTicket *ticket){
+    NSCAssert(NSThread.isMainThread,@"Native deadline expiry is main-owned");
+    Core3DDebugNativeSolidDeadlineRecord *record=Core3DNativeSolidDeadlineRecords()[token];
+    if(!record||record->_ticket!=ticket)return;
+    Core3DPublishNativeSolidDeadlineRecord(record);
+    if(ticket->_decision.load()==Core3DDebugNativeSolidDeadlineDecision::DeliveryClaimed)return;
+    if(ticket->_decision.load()!=Core3DDebugNativeSolidDeadlineDecision::Expired)return;
+    [Core3DNativeSolidDeadlineRecords() removeObjectForKey:token];
+    [Core3DNativeSolidGeometryDeliveryGates() removeObjectForKey:token];
+    Core3DViewController *owner=record->_owner;
+    if(owner)[owner core3d_expireNativeSolidDeadlineRecord:record];
+    record->_observer=nil;
+    Core3DDeliverNativeSolidCompletion(token,Core3DProfileConstructionResultCancelled);
+}
+#endif
 
 @implementation Core3DViewController {
     __weak dispatch_cancelable_block_t _uiStateChangingBlock;
@@ -7893,6 +8065,44 @@ struct NativeModelingPermitIssuer final {
     } catch (...) { return nil; }
 }
 
+- (NSDictionary<NSString *, id> *)debugPlainProfileCutNativeRoundTrip:
+        (NSString *)entityIdentifier direct:(BOOL)direct {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr || GLController == nil
+        || GLController.viewer == nullptr
+        || GLController.viewer->hasUnresolvedOrdinaryEdit()) return nil;
+    try {
+        const Handle(OcctDocument) document = GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return nil;
+        OcctPlainProfileCutDebugEvidence evidence;
+        if (!document->DebugPlainProfileCutNativeRoundTrip(
+                entityIdentifier.UTF8String,
+                direct ? Standard_True : Standard_False, evidence)) return nil;
+        NSMutableDictionary<NSString *, NSData *> *bytes = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *numbers = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *checks = [NSMutableDictionary dictionary];
+        for (const auto& row : evidence.bytes) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || row.second.empty() || bytes[key] != nil) return nil;
+            bytes[key] = [NSData dataWithBytes:row.second.data() length:row.second.size()];
+        }
+        for (const auto& row : evidence.numbers) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || !std::isfinite(row.second) || numbers[key] != nil) return nil;
+            numbers[key] = @(row.second);
+        }
+        for (const auto& row : evidence.checks) {
+            NSString *key = [NSString stringWithUTF8String:row.first.c_str()];
+            if (key == nil || checks[key] != nil) return nil;
+            checks[key] = @(row.second);
+        }
+        return @{ @"bytes": [bytes copy], @"numbers": [numbers copy],
+                  @"checks": [checks copy] };
+    } catch (...) { return nil; }
+}
+
 - (NSDictionary<NSString *, id> *)debugPlainProfileCutPersistenceProbe:(NSInteger)scenario {
     if (![NSThread isMainThread] || scenario < 0 || scenario > 3
         || GLController == nil || GLController.viewer == nullptr
@@ -8677,6 +8887,45 @@ struct NativeModelingPermitIssuer final {
         result[@"stateSHA"] = [NSString stringWithUTF8String:r::Hex(inspected.effects[0].state).c_str()];
     }
     return result;
+}
+
+// Row279a K3 cold-reopen exact-key document-evidence inspection. Read-only:
+// the ordinary owner, no reservation/prepare/geometry work, no OCAF command,
+// no allocated IDs. QueryVerifiedReceipt stays unavailable; this observation
+// can never grant verified authority or permission to retry/replay.
+- (Core3DModelingDocumentEvidence)inspectModelingDocumentEvidenceForRequest:(NSUUID *)requestID {
+    namespace r = core3d::receipt;
+    if (![NSThread isMainThread] || !GLController || !GLController.viewer || !requestID)
+        return Core3DModelingDocumentEvidenceUnavailable;
+    const auto owner = GLController.viewer->getDocument();
+    if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand())
+        return Core3DModelingDocumentEvidenceUnavailable;
+    r::UUID request;
+    if (!r::ParseUUID(requestID.UUIDString.UTF8String, request))
+        return Core3DModelingDocumentEvidenceUnavailable;
+    r::Catalog catalog;
+    const auto status = r::Read(owner->Document(), catalog);
+    switch (status) {
+        case r::ReadStatus::Absent: return Core3DModelingDocumentEvidenceAbsent;
+        case r::ReadStatus::Malformed: return Core3DModelingDocumentEvidenceConflict;
+        case r::ReadStatus::Unsupported: return Core3DModelingDocumentEvidenceConflict;
+        case r::ReadStatus::Unavailable: return Core3DModelingDocumentEvidenceUnavailable;
+        case r::ReadStatus::Valid: break;
+    }
+    r::Record record;
+    if (!catalog.lookup(request, record)) return Core3DModelingDocumentEvidenceAbsent;
+    // The exact retained key, including its document binding, is enforced
+    // inside InspectDocument; a foreign document/key pair reports conflict.
+    const auto inspected = r::InspectDocument(owner, record.key);
+    switch (inspected.presence) {
+        case r::DocumentPresence::Absent: return Core3DModelingDocumentEvidenceAbsent;
+        case r::DocumentPresence::Conflict: return Core3DModelingDocumentEvidenceConflict;
+        case r::DocumentPresence::Unavailable: return Core3DModelingDocumentEvidenceUnavailable;
+        case r::DocumentPresence::Present:
+            return inspected.effectsCurrent ? Core3DModelingDocumentEvidencePresentCurrent
+                : Core3DModelingDocumentEvidencePresentChanged;
+    }
+    return Core3DModelingDocumentEvidenceUnavailable;
 }
 
 - (void)debugNativeTombstoneProbe:(NSInteger)scenario completion:(void (^)(NSDictionary *))completion {
@@ -14779,7 +15028,8 @@ struct NativeModelingPermitIssuer final {
         // reading supplied request fields. No controller enters this block.
         dispatch_async(dispatch_get_main_queue(),^{
             completion([[Core3DModelingAsyncOutcome alloc] initWithDisposition:Core3DModelingAsyncDispositionRejected
-                storage:Core3DModelingStorageObservationNotAttempted request:nil document:nil entities:@[]]);
+                storage:Core3DModelingStorageObservationNotAttempted request:nil document:nil entities:@[]
+                terminalEvidence:nil]);
         });return;
     }
     Core3DModelingAsyncCompletion *box=[Core3DModelingAsyncCompletion new];
@@ -14789,6 +15039,7 @@ struct NativeModelingPermitIssuer final {
         Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionRejected);return;
     }
     box->_owner=self;box->_prepared=request;box->_requestID=request.requestIdentifier;
+    box->_historyBefore=[self debugDocumentUndoCount];
     box->_documentID=request.documentIdentifier;box->_key=request->_requestKey;
     const auto operation=request->_requestDescriptor.operation;
     const bool loft=operation==core3d::request::Operation::RebuildLoftStation
@@ -15942,6 +16193,39 @@ static unsigned long long Core3DDoubleDebugBits(const double value) noexcept {
     return bits;
 }
 
+static bool Core3DSpatialCameraTraceEnabled() {
+    return [NSProcessInfo.processInfo.environment[@"SHAPEYARD_UITEST_C2_SPATIAL_FIXTURE"]
+        isEqualToString:@"1"];
+}
+
+static NSString *Core3DSpatialCameraDebugValues(Core3DSceneCameraSnapshot *camera,
+                                                 Core3DSceneRevisionVector *revisions) {
+    if (!camera || !revisions) return @"camera.valid=0";
+    return [NSString stringWithFormat:
+        @"camera.valid=1 revisions={snapshot=%llu document=%llu model=%llu presentation=%llu camera=%llu} "
+        @"tuple={projection=%ld eye=[%.17g,%.17g,%.17g] center=[%.17g,%.17g,%.17g] "
+        @"up=[%.17g,%.17g,%.17g] verticalFOV=%.17g orthographicHeight=%.17g "
+        @"near=%.17g far=%.17g aspect=%.17g drawable=%ux%u}",
+        (unsigned long long)revisions.snapshotRevision,
+        (unsigned long long)revisions.documentGeneration,
+        (unsigned long long)revisions.modelRevision,
+        (unsigned long long)revisions.presentationRevision,
+        (unsigned long long)revisions.cameraRevision,
+        (long)camera.projection,
+        camera.eye.x, camera.eye.y, camera.eye.z,
+        camera.center.x, camera.center.y, camera.center.z,
+        camera.up.x, camera.up.y, camera.up.z,
+        camera.verticalFieldOfViewRadians, camera.orthographicHeight,
+        camera.nearPlane, camera.farPlane, camera.aspectRatio,
+        camera.viewportSizePixels.x, camera.viewportSizePixels.y];
+}
+
+static void Core3DRecordSpatialCameraTrace(NSString *event, NSString *values) {
+    if (!Core3DSpatialCameraTraceEnabled()) return;
+    NSString *units = NSProcessInfo.processInfo.environment[@"SHAPEYARD_UITEST_C2_UNITS"] ?: @"missing";
+    NSLog(@"[D146CameraTrace] event=%@ units=%@ %@", event, units, values);
+}
+
 static NSString *Core3DSpatialSnapshotDebugValues(id candidate) {
     if (![candidate isKindOfClass:Core3DSceneSnapshot.class]) {
         return [NSString stringWithFormat:@"valid=0 class=%@", candidate
@@ -15954,7 +16238,7 @@ static NSString *Core3DSpatialSnapshotDebugValues(id candidate) {
         @"snapshotRevision=%llu documentGeneration=%llu modelRevision=%llu "
         @"presentationRevision=%llu cameraRevision=%llu metersPerUnitBits=0x%016llx "
         @"selectionMode=%ld selectionCount=%llu selectedKind=%ld selectedTopologyIndex=%u "
-        @"selectedGeometryRevision=%llu selectedEntity=%@",
+        @"selectedGeometryRevision=%llu selectedEntity=%@ %@",
         (unsigned long long)snapshot.schemaVersion,
         snapshot.publicationSourceIdentifier ?: @"nil",
         (unsigned long long)snapshot.publicationSourceIdentifier.length,
@@ -15969,7 +16253,8 @@ static NSString *Core3DSpatialSnapshotDebugValues(id candidate) {
         (long)selected.kind,
         (unsigned int)selected.topologyIndex,
         (unsigned long long)selected.geometryRevision,
-        selected.entityIdentifier ?: @"nil"];
+        selected.entityIdentifier ?: @"nil",
+        Core3DSpatialCameraDebugValues(snapshot.camera, snapshot.revisions)];
 }
 
 static NSString *Core3DSpatialSceneAuthorityMismatch(Core3DSceneSnapshot *current,
@@ -16017,6 +16302,16 @@ static NSString *Core3DSpatialSceneAuthorityMismatch(Core3DSceneSnapshot *curren
     return [NSString stringWithFormat:@"firstFailed=%@ current={%@} opening={%@}",
         reason ?: @"none", Core3DSpatialSnapshotDebugValues(current),
         Core3DSpatialSnapshotDebugValues(authority)];
+}
+#endif
+
+#if DEBUG
+- (void)debugRecordSpatialSweepCameraTraceEvent:(NSString *)event {
+    if (!Core3DSpatialCameraTraceEnabled() || event.length == 0) return;
+    Core3DSceneFrameSnapshot *frame = [self captureSceneFrameSnapshot];
+    Core3DRecordSpatialCameraTrace(event,
+        frame ? Core3DSpatialCameraDebugValues(frame.camera, frame.revisions)
+              : @"camera.valid=0 capture=nil");
 }
 #endif
 
@@ -16094,6 +16389,12 @@ static NSString *Core3DSpatialSweepApplyDebugDetail(NSString *detail,
         if (!Core3DSpatialSceneAuthorityMatches(after, expected)
             || ![after.selection.selectedElements.firstObject.entityIdentifier
                 isEqualToString:entityIdentifier]) return nil;
+#if DEBUG
+        Core3DRecordSpatialCameraTrace(@"opening-authority",
+            Core3DSpatialSnapshotDebugValues(expected));
+        Core3DRecordSpatialCameraTrace(@"opening-validation",
+            Core3DSpatialSnapshotDebugValues(after));
+#endif
         return [[Core3DSpatialSweepEditorContext alloc] initWithOwner:self opening:opening scene:expected];
     } catch (...) { return nil; }
 }
@@ -16101,6 +16402,7 @@ static NSString *Core3DSpatialSweepApplyDebugDetail(NSString *detail,
 static bool Core3DSpatialContextSceneIsCurrent(Core3DViewController *owner,
                                                 Core3DSpatialSweepEditorContext *context,
                                                 bool requireUnconsumed = true,
+                                                NSString *traceEvent = nil,
                                                 NSString **diagnostic = nullptr) {
     if (!owner || !context || context->_owner != owner || !context->_scene
         || (requireUnconsumed && context->_consumed)) {
@@ -16118,7 +16420,21 @@ static bool Core3DSpatialContextSceneIsCurrent(Core3DViewController *owner,
     Core3DSceneSnapshot *current = [owner captureSceneSnapshot];
     const bool matches = Core3DSpatialSceneAuthorityMatches(current, context->_scene);
 #if DEBUG
+    if (traceEvent.length) {
+        Core3DRecordSpatialCameraTrace(
+            [traceEvent stringByAppendingString:@".opening"],
+            Core3DSpatialSnapshotDebugValues(context->_scene));
+        NSString *currentValues = Core3DSpatialSnapshotDebugValues(current);
+        if (!matches) {
+            currentValues = [currentValues stringByAppendingFormat:@" authority={%@}",
+                Core3DSpatialSceneAuthorityMismatch(current, context->_scene)];
+        }
+        Core3DRecordSpatialCameraTrace(
+            [traceEvent stringByAppendingFormat:@".current match=%d", matches], currentValues);
+    }
     if (!matches && diagnostic) *diagnostic = Core3DSpatialSceneAuthorityMismatch(current, context->_scene);
+#else
+    (void)traceEvent;
 #endif
     return matches;
 }
@@ -16212,7 +16528,8 @@ static bool Core3DPublishCommittedSpatialSweep(
     NSString *authorityDiagnostic = nil;
     const bool validContext = [context isMemberOfClass:Core3DSpatialSweepEditorContext.class];
     if (!validContext
-        || !Core3DSpatialContextSceneIsCurrent(self, context, true, &authorityDiagnostic)) {
+        || !Core3DSpatialContextSceneIsCurrent(self, context, true,
+                                                @"apply-preflight", &authorityDiagnostic)) {
 #if DEBUG
         if (!validContext) authorityDiagnostic = @"firstFailed=context.invalid-type";
 #endif
@@ -16277,7 +16594,7 @@ static bool Core3DPublishCommittedSpatialSweep(
             }
             NSString *postDispatchDiagnostic = nil;
             if (!Core3DSpatialContextSceneIsCurrent(ownerController, context, false,
-                                                     &postDispatchDiagnostic)) {
+                    @"apply-post-dispatch", &postDispatchDiagnostic)) {
                 NSString *detail = @"The candidate failed native proof or the opening became stale. No prefix was applied.";
                 completion(Core3DProfileConstructionResultRejected,
                     Core3DSpatialSweepPrepareDebugDetail(detail, @"post-dispatch-authority",
@@ -17337,6 +17654,48 @@ static bool Core3DPublishCommittedSpatialSweep(
     if (!NSThread.isMainThread || _nativeSolidWork) return;
     _debugNextNativeSolidDeliveryGate = [gate copy];
 }
+
+- (void)core3d_publishNativeSolidDeadlineDiagnostic:(NSDictionary<NSString *,id> *)diagnostic {
+    _debugNativeSolidDeadlineRecord=[diagnostic copy];
+}
+
+- (void)core3d_expireNativeSolidDeadlineRecord:(Core3DDebugNativeSolidDeadlineRecord *)record {
+    Core3DModelingPlanningContext *context=record->_context;
+    const auto exactWork=record->_work.lock();
+    if(!exactWork||_nativeSolidWork!=exactWork)return;
+    if(context&&_modelingConstructionContext==context){
+        [self retireModelingPlanningContext:context];
+        _modelingConstructionContext=nil;
+    }else{
+        _nativeSolidCancelled=YES;
+        core3d::Core3DViewer::cancelNativeSolid(exactWork);
+    }
+    if(_nativeSolidWork==exactWork)_nativeSolidWork.reset();
+}
+
+- (void)debugSetNextNativeSolidCompletionDeadline:(NSTimeInterval)deadline
+    label:(NSString *)label onTimeout:(void (^)(NSDictionary<NSString *,id> *))observer {
+    if(!NSThread.isMainThread||_nativeSolidWork||!std::isfinite(deadline)||deadline<=0
+        ||![label isKindOfClass:NSString.class]||label.length==0||label.length>512)return;
+    _debugNextNativeSolidDeadline=deadline;
+    _debugNextNativeSolidDeadlineLabel=[label copy];
+    _debugNextNativeSolidDeadlineObserver=[observer copy];
+    _debugNativeSolidDeadlineRecord=nil;
+}
+- (void)debugClearNextNativeSolidCompletionDeadline {
+    if(!NSThread.isMainThread)return;
+    _debugNextNativeSolidDeadline=0;
+    _debugNextNativeSolidDeadlineLabel=nil;
+    _debugNextNativeSolidDeadlineObserver=nil;
+}
+- (NSDictionary<NSString *,id> *)debugNativeSolidCompletionDeadlineRecord {
+    if(!NSThread.isMainThread||!_debugNativeSolidDeadlineRecord)return nil;
+    NSMutableDictionary<NSString *,id> *record=[_debugNativeSolidDeadlineRecord mutableCopy];
+    record[@"completionRegistryCount"]=@([Core3DNativeSolidCompletionRegistry() count]);
+    record[@"deliveryGateCount"]=@([Core3DNativeSolidGeometryDeliveryGates() count]);
+    record[@"deadlineRecordCount"]=@([Core3DNativeSolidDeadlineRecords() count]);
+    return record;
+}
 #endif
 
 - (void)runNativeSolidWork:(const std::shared_ptr<core3d::NativeSolidWork>&)work
@@ -17357,6 +17716,36 @@ static bool Core3DPublishCommittedSpatialSweep(
         if (!completionToken) { completion(Core3DProfileConstructionResultBusy); return; }
 #if DEBUG
         if(gate)Core3DNativeSolidGeometryDeliveryGates()[completionToken]=[gate copy];
+        Core3DDebugNativeSolidDeadlineTicket *deadlineTicket=nil;
+        if(_debugNextNativeSolidDeadline>0&&_debugNextNativeSolidDeadlineLabel){
+            deadlineTicket=[[Core3DDebugNativeSolidDeadlineTicket alloc]
+                initWithBudget:_debugNextNativeSolidDeadline label:_debugNextNativeSolidDeadlineLabel token:completionToken];
+            Core3DDebugNativeSolidDeadlineRecord *record=[Core3DDebugNativeSolidDeadlineRecord new];
+            record->_owner=self;record->_context=_modelingConstructionContext;record->_work=work;
+            record->_ticket=deadlineTicket;record->_observer=[_debugNextNativeSolidDeadlineObserver copy];
+            Core3DNativeSolidDeadlineRecords()[completionToken]=record;
+            const int64_t delay=(int64_t)llround(_debugNextNativeSolidDeadline*(double)NSEC_PER_SEC);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,delay),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+                auto expected=Core3DDebugNativeSolidDeadlineDecision::Pending;
+                bool expired=deadlineTicket->_decision.compare_exchange_strong(expected,
+                    Core3DDebugNativeSolidDeadlineDecision::Expired);
+                if(!expired&&expected!=Core3DDebugNativeSolidDeadlineDecision::DeliveryClaimed)return;
+                deadlineTicket->_deadlineFired.store(true);
+                if(!expired)deadlineTicket->_overrun.store(true);
+                NSDictionary<NSString *,id> *diagnostic=[deadlineTicket diagnostic];
+                fprintf(stderr,"T310 native deadline: %s elapsed=%.3f budget=%.3f phase=%s\n",
+                    deadlineTicket->_label.UTF8String,
+                    [diagnostic[@"elapsed"] doubleValue],deadlineTicket->_budget,
+                    [diagnostic[@"phase"] UTF8String]);
+                dispatch_async(dispatch_get_main_queue(),^{
+                    Core3DExpireDebugNativeSolidCompletion(completionToken,deadlineTicket);
+                });
+            });
+        }
+        _debugNextNativeSolidDeadline=0;
+        _debugNextNativeSolidDeadlineLabel=nil;
+        _debugNextNativeSolidDeadlineObserver=nil;
 #endif
         _nativeSolidWork = work; _nativeSolidCancelled = NO;
         __weak Core3DModelingPlanningContext *weakPlanningContext = _modelingConstructionContext;
@@ -17374,13 +17763,24 @@ static bool Core3DPublishCommittedSpatialSweep(
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 #if DEBUG
             core3d::cylindrical_cut::DebugRefusalScope workerScope(diagnostic);
+            if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::GeometryStarted);
 #endif
             core3d::retained_fillet::Outcome filletOutcome=core3d::retained_fillet::Outcome::Built;
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry,&filletOutcome);
+#if DEBUG
+            if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::GeometryReturned);
+            if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::MainDeliveryEnqueued);
+#endif
             dispatch_async(dispatch_get_main_queue(), ^{
 #if DEBUG
                 dispatch_block_t delivery=^{
                 core3d::cylindrical_cut::DebugRefusalScope deliveryScope(diagnostic);
+                if(deadlineTicket){
+                    auto expected=Core3DDebugNativeSolidDeadlineDecision::Pending;
+                    if(!deadlineTicket->_decision.compare_exchange_strong(expected,
+                        Core3DDebugNativeSolidDeadlineDecision::DeliveryClaimed))return;
+                    deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::DeliveryClaimed);
+                }
 #endif
                 Core3DViewController* controller = weakSelf;
                 if (!controller) { CORE3D_CUT_NOTE("delivery.owner-released"); Core3DDeliverNativeSolidCompletion(completionToken, Core3DProfileConstructionResultRejected); return; }
@@ -17447,6 +17847,9 @@ static bool Core3DPublishCommittedSpatialSweep(
                     case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
                 }
                 if(result!=Core3DProfileConstructionResultCommitted)CORE3D_CUT_NOTE("commit.ordinary-result");
+#if DEBUG
+                if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::CommitReturned);
+#endif
                 Core3DDeliverNativeSolidCompletion(completionToken, result);
 #if DEBUG
                 };

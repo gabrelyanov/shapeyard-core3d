@@ -105,6 +105,11 @@ typedef NS_ENUM(NSInteger, Core3DSceneCullMode) {
     Core3DSceneCullModeFront = 2,
 };
 
+typedef NS_ENUM(NSInteger, Core3DSceneGeometryKind) {
+    Core3DSceneGeometryKindSurfaceTriangles = 0,
+    Core3DSceneGeometryKindNativeC1Wire = 1,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneTextureEncoding) {
     Core3DSceneTextureEncodingPNG = 0,
     Core3DSceneTextureEncodingJPEG,
@@ -309,6 +314,14 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneMeshSnapshot : NSObject
 
+@property (nonatomic, assign, readonly) Core3DSceneGeometryKind geometryKind;
+//! Canonical SYCV/SYCO bytes. Empty for surface triangles; immutable scene
+//! description only and never native edit authority.
+@property (nonatomic, copy, readonly) NSData *nativeC1DefinitionData;
+@property (nonatomic, copy, readonly) NSData *nativeC1OwnerData;
+@property (nonatomic, copy, readonly) NSData *nativeC1DefinitionDigest;
+@property (nonatomic, assign, readonly) uint64_t nativeC1DefinitionRevision;
+@property (nonatomic, assign, readonly) uint64_t nativeC1FrameRevision;
 @property (nonatomic, copy, readonly) NSString *definitionIdentifier;
 @property (nonatomic, assign, readonly) uint64_t geometryRevision;
 @property (nonatomic, strong, readonly) Core3DSceneBounds *localBounds;
@@ -367,6 +380,7 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) Core3DSceneCoordinateSpace coordinateSpace;
 @property (nonatomic, assign, readonly) Core3DSceneDepthPolicy depthPolicy;
 @property (nonatomic, assign, readonly) Core3DSceneRenderStyle renderStyle;
+@property (nonatomic, strong, readonly, nullable) Core3DSceneMaterialSnapshot *nativeWirePresentation;
 //! One binding for each face primitive in the referenced mesh.
 @property (nonatomic, copy, readonly) NSArray<Core3DScenePrimitiveBindingSnapshot *> *primitiveBindings;
 

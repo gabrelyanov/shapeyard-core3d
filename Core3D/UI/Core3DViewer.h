@@ -30,6 +30,7 @@
 #endif
 #include <variant>
 #include "../OCCTKit/NativeMeshElementSelection.hpp"
+#include "../OCCTKit/NativeOpeningContext.hxx"
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -378,6 +379,9 @@ namespace core3d {
         std::shared_ptr<ObjectInteractor> getObjectInteractor();
         std::shared_ptr<ShapeInteractor> getShapeInteractor();
         Handle(OcctDocument) getDocument();
+        std::shared_ptr<native_opening::Context> captureNativeOpeningContext(
+            std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+            const std::vector<std::string>& sourceReceipts = {}) noexcept;
         //! True only while no typed operation, including the retained Boolean
         //! editor, owns a command, preview, or exactly-once recovery ledger and
         //! the OCAF document is writable.
@@ -463,6 +467,13 @@ namespace core3d {
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         OrdinaryEditResult generateTriangleUVAtlas(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options = {}) noexcept;
+        OrdinaryEditResult produceRetainedFinishing(const ObjectFrameIdentity& identity,
+            std::uint32_t width, std::uint32_t height,
+            const OcctRetainedFinishingSettings& settings = {}) noexcept;
+        OrdinaryEditResult regenerateRetainedFinishing(const ObjectFrameIdentity& identity,
+            std::uint32_t width, std::uint32_t height) noexcept;
+        OcctRetainedFinishingCurrentness retainedFinishingCurrentness(
+            const ObjectFrameIdentity& identity) const noexcept;
         OrdinaryEditResult renameObjectFromBrowser(const ObjectFrameIdentity& identity,
             const TCollection_ExtendedString& name, std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
@@ -739,6 +750,22 @@ namespace core3d {
             Standard_Integer mode) noexcept;
 #endif
     private:
+        friend class native_opening::Context;
+        friend class native_opening::CommandLease;
+        std::shared_ptr<const native_opening::Fence> recaptureNativeOpeningFence(
+            std::uint64_t contextIdentifier,
+            std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+            const std::vector<std::string>& sourceReceipts) noexcept;
+        bool nativeOpeningReady(std::uint64_t contextIdentifier) const noexcept;
+        //! Reconciles the affected real AIS presentations to a known committed
+        //! native edit for the same live document/data as the issuing fence.
+        //! Document-driven: each affected identity is proven against the actual
+        //! OCAF state (replacement, creation, removal), then the viewer is
+        //! updated through the production presentation path and an ordinary
+        //! snapshot must be capturable. Runs no OCAF command or geometry edit.
+        bool reconcileNativeOpeningEdit(
+            const native_opening::Fence& fence,
+            const native_opening::CommittedEditPublication& publication) noexcept;
         // document traversal
         bool traverseDocument (const Handle(TDocStd_Document)& theDoc);
         bool traverseLabel (const Handle(TDocStd_Document)& theDoc,
@@ -810,6 +837,7 @@ namespace core3d {
         std::function<void(PrimitiveManipulatorType)>
             _interactorRecreatedCallback;
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
+        std::shared_ptr<native_opening::detail::State> _nativeOpeningState;
 #ifdef DEBUG
         Standard_Integer
             _debugTransformInspectorPositionPublicationFallbackMode = 0;

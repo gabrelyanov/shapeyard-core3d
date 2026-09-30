@@ -5,6 +5,8 @@
 #include "PatternBuild.hxx"
 #include "PatternPersistence.hxx"
 #include "PatternRecipeClone.hxx"
+#include "PatternAllLabelAuthority.hxx"
+#include "NativeOpeningContext.hxx"
 #include "CompositeRecipeAttribute.hxx"
 #include "OcctDocument.h"
 #include <Standard_GUID.hxx>
@@ -14,8 +16,13 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#if DEBUG
+#include <cstdio>
+#endif
+
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -46,12 +53,15 @@ struct Snapshot {
     std::vector<LabelReceipt> members;
     pattern_recipe_clone::Source sourceRecipe;
     OcctObjectNameState sourceProfileAndEnclosure;
+    std::shared_ptr<const AllLabelSnapshot> allLabels;
     std::size_t patternDocumentBytes = 0;
     std::size_t compositeDocumentBytes = 0;
     Standard_Integer documentTime = 0;
     bool admitted() const noexcept {
         return !record.label.IsNull() && !source.label.IsNull()
-            && members.size() == record.definition.members.size();
+            && allLabels && allLabels->family == AllLabelFamily::PatternD2
+            && members.size() == record.definition.members.size()
+            && allLabels->members.size() == members.size();
     }
 };
 
@@ -79,6 +89,7 @@ struct PreparedEdit {
     std::vector<LabelReceipt> survivors;
     std::vector<LabelReceipt> removals;
     Standard_Size projectedTopologyNodes = 0;
+    std::shared_ptr<const AllLabelMutation> native;
     Refusal refusal = Refusal::InvalidCandidate;
     bool admitted() const noexcept { return refusal == Refusal::None; }
 };
@@ -117,6 +128,26 @@ inline bool ReadReceipt(OcctDocument& owner, const TDF_Label& label,
         output.label = label; output.shape = XCAFDoc_ShapeTool::GetShape(label);
         return !output.shape.IsNull();
     } catch (...) { output = {}; return false; }
+}
+
+inline std::string RecipeFeatureIdentifier(
+    const pattern_recipe_clone::Source& source) noexcept {
+    try {
+        if (source.family == pattern_recipe_clone::Family::Sweep)
+            return source.sweep.identifier;
+        if (source.family == pattern_recipe_clone::Family::Loft)
+            return source.loft.identifier;
+        if (source.family == pattern_recipe_clone::Family::AnalyticBoolean
+            && source.analyticBoolean.value) {
+            const auto& nodes = source.analyticBoolean.value->definition.nodes;
+            if (!nodes.empty()) {
+                const auto* feature = std::get_if<composite_recipe::FeatureNode>(
+                    &nodes.back().value);
+                if (feature) return retained_solid::UUIDText(feature->feature);
+            }
+        }
+    } catch (...) {}
+    return {};
 }
 
 // Selection may name any surviving member. Every member and the source are
@@ -169,11 +200,43 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
             output.members.push_back(std::move(receipt));
         }
         if (!owner.CaptureObjectNameStateForLabel(output.source.label,
-                output.sourceProfileAndEnclosure)
-            || !output.sourceProfileAndEnclosure.object.profile.IsCurrent(document, output.source.label)
-            || !output.sourceProfileAndEnclosure.object.enclosure.IsCurrent(document, output.source.label)
+                output.sourceProfileAndEnclosure))
+            return Refusal::UnsupportedSource;
+        // Profile and enclosure records are optional: absence is a valid
+        // legacy state. Currency is required only for a record that is
+        // actually present; a stale present record still refuses.
+        const auto& profileRecord = output.sourceProfileAndEnclosure.object.profile;
+        const auto& enclosureRecord = output.sourceProfileAndEnclosure.object.enclosure;
+        if ((!profileRecord.label.IsNull()
+                && !profileRecord.IsCurrent(document, output.source.label))
+            || (!enclosureRecord.label.IsNull()
+                && !enclosureRecord.IsCurrent(document, output.source.label))
             || !pattern_recipe_clone::Capture(document, output.source.label, output.sourceRecipe))
             return Refusal::UnsupportedSource;
+        auto all = std::make_shared<AllLabelSnapshot>();
+        all->documentData = document->GetData();
+        all->documentIdentifier = owner.DocumentIdentifier();
+        all->family = AllLabelFamily::PatternD2;
+        all->recordLabel = match->label;
+        all->featureIdentifier = retained_solid::UUIDText(match->definition.feature);
+        all->canonicalRecordBytes = match->bytes;
+        if (!owner.CaptureExactFreeLabel(output.source.label, all->source))
+            return Refusal::StaleSource;
+        all->members.reserve(output.members.size());
+        for (std::size_t index = 0; index < output.members.size(); ++index) {
+            const auto& member = match->definition.members[index];
+            AllLabelSnapshot::Member exact;
+            exact.key = D2Coordinate{member.coordinate.row, member.coordinate.column};
+            exact.localIdentifier = member.localID;
+            exact.suppressed = member.state == pattern::MemberState::Suppressed;
+            if (!owner.CaptureExactFreeLabel(output.members[index].label, exact.receipt)
+                || !pattern_recipe_clone::Capture(
+                    document, output.members[index].label, exact.recipe))
+                return Refusal::StaleMember;
+            exact.featureIdentifier = RecipeFeatureIdentifier(exact.recipe);
+            all->members.push_back(std::move(exact));
+        }
+        output.allLabels = std::move(all);
         std::vector<composite_recipe::Record> composites;
         if (!composite_recipe::ReadAll(document, composites, output.patternDocumentBytes))
             return Refusal::DocumentBudget;
@@ -236,13 +299,43 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
     } catch (...) { result.refusal = Refusal::InvalidCandidate; return result; }
 }
 
-// The host owns shape copying, D1a profile/enclosure/recipe staging, and label
-// presentation. This callback is deliberately one all-label operation, not a
-// per-member commit surface.
+inline bool SameCompleteReadSet(const Snapshot& left,
+                                const Snapshot& right) noexcept {
+    try {
+        if (!left.allLabels || !right.allLabels
+            || left.record.bytes != right.record.bytes
+            || left.sourceRecipe.family != right.sourceRecipe.family
+            || !pattern_recipe_clone::IsEqual(left.sourceRecipe, right.sourceRecipe)
+            || !left.allLabels->source.IsEqual(right.allLabels->source)
+            || left.allLabels->members.size() != right.allLabels->members.size())
+            return false;
+        for (std::size_t index = 0; index < left.allLabels->members.size(); ++index) {
+            const auto& a = left.allLabels->members[index];
+            const auto& b = right.allLabels->members[index];
+            const auto* ak = std::get_if<D2Coordinate>(&a.key);
+            const auto* bk = std::get_if<D2Coordinate>(&b.key);
+            if (!ak || !bk || ak->row != bk->row || ak->column != bk->column
+                || a.localIdentifier != b.localIdentifier
+                || a.suppressed != b.suppressed
+                || a.featureIdentifier != b.featureIdentifier
+                || !a.receipt.IsEqual(b.receipt)
+                || !pattern_recipe_clone::IsEqual(a.recipe, b.recipe)) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+enum class ReadPhase : std::uint8_t { InsideCommand = 0, AfterCommit };
+
+// The production implementation owns one native command lease. These methods
+// deliberately expose neither per-member commit nor retry.
 struct Stager {
     virtual ~Stager() = default;
+    virtual bool begin(const Snapshot&, const PreparedEdit&) noexcept = 0;
     virtual bool stageAll(const Snapshot&, const PreparedEdit&) noexcept = 0;
-    virtual bool readBackAll(const pattern::Definition&) noexcept = 0;
+    virtual bool readBackAll(const pattern::Definition&, ReadPhase) noexcept = 0;
+    virtual bool commit() noexcept = 0;
+    virtual bool abort() noexcept = 0;
 };
 
 enum class ApplyOutcome : std::uint8_t { Refused = 0, Committed, OutcomeUnknown };
@@ -250,31 +343,66 @@ enum class ApplyOutcome : std::uint8_t { Refused = 0, Committed, OutcomeUnknown 
 inline ApplyOutcome Apply(OcctDocument& owner, const PreparedEdit& prepared,
                           Stager& stager) noexcept {
     const Handle(TDocStd_Document) document = owner.Document();
-    if (!prepared.admitted() || document.IsNull() || document->HasOpenCommand()
-        || document->GetData()->Time() != prepared.opening.documentTime) return ApplyOutcome::Refused;
+    const auto traceRefusal = [](const char* predicate, bool failed) noexcept {
+#if DEBUG
+        if (failed) std::fprintf(stderr, "R179_D2_APPLY predicate=%s failed=1\n", predicate);
+#else
+        (void)predicate;
+#endif
+        return failed;
+    };
+    if (traceRefusal("prepared.not-admitted", !prepared.admitted())
+        || traceRefusal("document.null", document.IsNull())
+        || traceRefusal("document.open-command", document->HasOpenCommand())
+        || traceRefusal("document.time-mismatch",
+            document->GetData()->Time() != prepared.opening.documentTime)) return ApplyOutcome::Refused;
     Snapshot current;
-    if (Capture(owner, owner.EntityIdentifierForLabel(prepared.opening.source.label), current)
-            != Refusal::None
-        || current.record.bytes != prepared.opening.record.bytes
-        || current.members.size() != prepared.opening.members.size()) return ApplyOutcome::Refused;
-    document->NewCommand();
-    if (!document->HasOpenCommand()) return ApplyOutcome::Refused;
+    if (traceRefusal("Capture.current",
+            Capture(owner, owner.EntityIdentifierForLabel(prepared.opening.source.label), current)
+                != Refusal::None)
+        || traceRefusal("SameCompleteReadSet.current", !SameCompleteReadSet(current, prepared.opening))
+        || traceRefusal("stager.begin", !stager.begin(current, prepared))) return ApplyOutcome::Refused;
+    const int undoBefore = document->GetAvailableUndos();
     pattern::Record staged;
     const auto abort = [&]() {
-        try { if (document->HasOpenCommand()) document->AbortCommand(); } catch (...) {}
-        return document->HasOpenCommand() ? ApplyOutcome::OutcomeUnknown : ApplyOutcome::Refused;
+        if (!stager.abort()) return ApplyOutcome::OutcomeUnknown;
+        Snapshot restored;
+        return Capture(owner, owner.EntityIdentifierForLabel(
+                    prepared.opening.source.label), restored) == Refusal::None
+                && SameCompleteReadSet(restored, prepared.opening)
+                && document->GetAvailableUndos() == undoBefore
+            ? ApplyOutcome::Refused : ApplyOutcome::OutcomeUnknown;
     };
     try {
-        if (!stager.stageAll(current, prepared)
-            || !pattern::Stage(document, prepared.candidate, staged)
-            || staged.definition.feature != prepared.candidate.feature
-            || !stager.readBackAll(prepared.candidate)) return abort();
-        const Standard_Boolean reported = document->CommitCommand();
-        if (document->HasOpenCommand()) return ApplyOutcome::OutcomeUnknown;
-        pattern::Record readback;
-        if (!reported || !pattern::ReadFeature(document, prepared.candidate.feature, readback)
-            || readback.bytes != staged.bytes) return ApplyOutcome::OutcomeUnknown;
+        if (traceRefusal("stager.stageAll", !stager.stageAll(current, prepared))
+            || traceRefusal("pattern.Stage", !pattern::Stage(document, prepared.candidate, staged))
+            || traceRefusal("staged.feature-mismatch", staged.definition.feature != prepared.candidate.feature)
+            || traceRefusal("stager.readBackAll.inside-command",
+                !stager.readBackAll(prepared.candidate, ReadPhase::InsideCommand))) return abort();
+        if (!stager.commit()) return ApplyOutcome::OutcomeUnknown;
+        Snapshot after;
+        if (document->HasOpenCommand()
+            || document->GetAvailableUndos() - undoBefore != 1
+            || Capture(owner, owner.EntityIdentifierForLabel(
+                    prepared.opening.source.label), after) != Refusal::None
+            || after.record.bytes != staged.bytes
+            || !stager.readBackAll(prepared.candidate,
+                                   ReadPhase::AfterCommit))
+            return ApplyOutcome::OutcomeUnknown;
         return ApplyOutcome::Committed;
-    } catch (...) { return abort(); }
+    } catch (...) {
+        traceRefusal("Apply.exception", true);
+        return abort();
+    }
 }
+
+//! Reserves all new label identities, builds every actual clone shape and its
+//! retained recipe off-document, and returns a preparation consumable once.
+PreparedEdit PrepareNative(OcctDocument&, const Snapshot&, const Edit&,
+                           const Limits&) noexcept;
+
+//! Production convenience entry point. A false/uncertain close is reported as
+//! OutcomeUnknown exactly once; this function never retries a transaction.
+ApplyOutcome ApplyNative(OcctDocument&, const PreparedEdit&,
+    const std::shared_ptr<native_opening::Context>&) noexcept;
 } // namespace core3d::pattern_owner

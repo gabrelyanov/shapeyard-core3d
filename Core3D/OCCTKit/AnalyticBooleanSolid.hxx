@@ -24,7 +24,8 @@
 
 namespace core3d::analytic_boolean {
 enum class Status { Built, InvalidRecipe, Cancelled, UnsupportedSource,
-    BudgetExceeded, KernelFailure, UnsupportedResult, NoRemovedVolume, VerificationFailed };
+    UnsupportedTool, BudgetExceeded, KernelFailure, UnsupportedResult,
+    NoRemovedVolume, VerificationFailed };
 struct Result {
     TopoDS_Shape solid;
     std::array<double,6> sourceBounds{}, resultBounds{}; // xmin,ymin,zmin,xmax,ymax,zmax.
@@ -108,6 +109,70 @@ inline bool SingleResult(const TopoDS_Shape& raw, TopoDS_Shape& solid) {
     return children==1; // No silently discarded second solid, sheet or wire.
 }
 }
+
+// The D4 feature-pattern surface needs the exact primitive that a retained
+// Boolean step would use, without replaying or mutating the surrounding
+// program.  Keep that construction here so complete-program replay and the
+// detached consumer cannot drift in margin, axis, or bounds semantics.
+struct CylinderToolResult {
+    TopoDS_Shape solid;
+    std::array<double, 6> sourceBounds{};
+    double sourceVolume = 0;
+    double toolStart = 0, toolEnd = 0;
+};
+
+inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
+    const Recipe& recipe, const std::atomic_bool& stop,
+    CylinderToolResult& output) noexcept {
+    output = {};
+    if (stop.load()) return Status::Cancelled;
+    if (!Inspect(recipe)) return Status::InvalidRecipe;
+    if (recipe.operation != Operation::Difference
+        || recipe.tool.kind != OperandKind::Cylinder)
+        return Status::UnsupportedTool;
+    try {
+        OCC_CATCH_SIGNALS
+        if (!detail::Bounded(detachedBase, 1024, stop))
+            return stop.load() ? Status::Cancelled : Status::BudgetExceeded;
+        if (detachedBase.ShapeType() != TopAbs_SOLID)
+            return Status::UnsupportedSource;
+        CylinderToolResult result;
+        const double mm = recipe.metersPerUnit * 1000;
+        if (!detail::ValidSolid(detachedBase, result.sourceVolume)
+            || !detail::Bounds(detachedBase, mm, result.sourceBounds))
+            return Status::UnsupportedSource;
+        const unsigned axis = static_cast<unsigned>(recipe.tool.axis);
+        const double tolerance = std::max(Precision::Confusion() * 32, 1e-5 / mm);
+        const double margin = std::max(tolerance * 4, .001 / mm);
+        if (!std::isfinite(tolerance) || !std::isfinite(margin)
+            || recipe.tool.radius <= tolerance) return Status::InvalidRecipe;
+        result.toolStart = result.sourceBounds[axis] - margin;
+        result.toolEnd = result.sourceBounds[axis + 3] + margin;
+        const double length = result.toolEnd - result.toolStart;
+        if (!std::isfinite(length) || length <= 0 || !std::isfinite(length * mm)
+            || length * mm > 2e6 + 1) return Status::InvalidRecipe;
+        auto origin = recipe.tool.point;
+        origin[axis] = result.toolStart;
+        const gp_Dir direction = axis == 0 ? gp::DX() : axis == 1 ? gp::DY() : gp::DZ();
+        BRepPrimAPI_MakeCylinder cylinder(
+            gp_Ax2(gp_Pnt(origin[0], origin[1], origin[2]), direction),
+            recipe.tool.radius, length);
+        cylinder.Build();
+        if (!cylinder.IsDone() || stop.load())
+            return stop.load() ? Status::Cancelled : Status::KernelFailure;
+        double toolVolume = 0;
+        if (!detail::ValidSolid(cylinder.Shape(), toolVolume)
+            || !detail::Bounded(cylinder.Shape(), 1024, stop))
+            return stop.load() ? Status::Cancelled : Status::KernelFailure;
+        result.solid = cylinder.Shape();
+        output = std::move(result);
+        return Status::Built;
+    } catch (...) {
+        output = {};
+        return stop.load() ? Status::Cancelled : Status::KernelFailure;
+    }
+}
+
 inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
     const std::atomic_bool& stop, Result& output, double expectedWedgeVolume=0) noexcept {
     output={};
@@ -160,6 +225,13 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         }else for(unsigned k=0;k<diskCount;++k){
             auto disk=ring?analytic_boolean_ring::Expand(ringValue,k,recipe.metersPerUnit):recipe.tool;
             if(!disk.identifier)return Status::InvalidRecipe;
+            if(!ring){
+                CylinderToolResult detached;
+                const auto toolStatus=BuildCylinderTool(base,recipe,stop,detached);
+                if(toolStatus!=Status::Built)return toolStatus;
+                result.toolStart=detached.toolStart;result.toolEnd=detached.toolEnd;
+                tools.Append(detached.solid);continue;
+            }
             auto origin=disk.point;origin[axis]=result.toolStart;
             const gp_Dir direction=axis==0?gp::DX():axis==1?gp::DY():gp::DZ();
             BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(gp_Pnt(origin[0],origin[1],origin[2]),direction),recipe.tool.radius,length);

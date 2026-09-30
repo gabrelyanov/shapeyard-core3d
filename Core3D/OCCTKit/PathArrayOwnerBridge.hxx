@@ -7,6 +7,7 @@
 #include "OcctDocument.h"
 #include "PathArrayBuild.hxx"
 #include "PathArrayPersistence.hxx"
+#include "PatternAllLabelAuthority.hxx"
 
 #include <TDocStd_Document.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -18,8 +19,10 @@
 #include <string>
 #include <vector>
 
-namespace core3d::bounded_curve::owner { struct PathReceipt; }
-namespace core3d::pattern_owner { struct AllLabelSnapshot; }
+namespace core3d::bounded_curve::owner {
+struct PathReceipt;
+struct Prepared;
+}
 
 namespace core3d::path_array_owner {
 using path_array::UUID;
@@ -46,6 +49,26 @@ struct PathAuthority final {
     bool currentFor(const path_array::CurveReference& reference) const noexcept {
         return !ownerLabel.IsNull()
             && receipt
+            && locator.owner == reference.owner
+            && locator.feature == reference.feature
+            && locator.definitionRevision == reference.definitionRevision
+            && locator.canonicalDefinitionDigest == reference.canonicalDefinitionDigest
+            && path_array::Matches(reference, persisted)
+            && path_array::Matches(locator, persisted);
+    }
+};
+
+//! A C1 edit may prepare D3 replay against its detached candidate, but that
+//! candidate is not live authority until C1 commits.  The C1 Prepared object
+//! is therefore retained as an unforgeable seal and no PathReceipt is minted.
+struct ProspectivePath final {
+    std::shared_ptr<const c1_owner::Prepared> seal;
+    path_array::CurveReference locator;
+    bounded_curve::PersistedValue persisted;
+    TDF_Label ownerLabel;
+
+    bool sealedFor(const path_array::CurveReference& reference) const noexcept {
+        return seal && !ownerLabel.IsNull()
             && locator.owner == reference.owner
             && locator.feature == reference.feature
             && locator.definitionRevision == reference.definitionRevision
@@ -96,8 +119,28 @@ struct Snapshot final {
     Standard_Integer documentTime = 0;
     std::size_t pathArrayDocumentBytes = 0;
 
+    bool hasCompleteOrdinalAuthority() const noexcept {
+        try {
+        if (!labels || labels->family != pattern_owner::AllLabelFamily::PathArrayD3
+            || labels->featureIdentifier != retained_solid::UUIDText(record.definition.feature)
+            || labels->canonicalRecordBytes != record.bytes
+            || labels->members.size() != record.definition.members.size()) return false;
+        for (std::size_t index = 0; index < labels->members.size(); ++index) {
+            const auto* ordinal = std::get_if<pattern_owner::D3Ordinal>(
+                &labels->members[index].key);
+            const auto& retained = record.definition.members[index];
+            if (!ordinal || ordinal->ordinal != index
+                || retained.coordinate.row != 0
+                || retained.coordinate.column != index
+                || labels->members[index].localIdentifier != retained.localID)
+                return false;
+        }
+        return true;
+        } catch (...) { return false; }
+    }
+
     bool admitted() const noexcept {
-        return !record.label.IsNull() && labels
+        return !record.label.IsNull() && hasCompleteOrdinalAuthority()
             && path.currentFor(record.definition.path);
     }
 };
@@ -137,6 +180,8 @@ struct PreparedEdit final {
     path_array::BuildReceipt buildReceipt;
     std::vector<UUID> survivorEntities;
     std::vector<UUID> removedEntities;
+    std::shared_ptr<const ProspectivePath> prospectivePath;
+    std::shared_ptr<const struct NativeMutation> native;
     Refusal refusal = Refusal::InvalidCandidate;
 
     bool admitted() const noexcept { return refusal == Refusal::None; }
@@ -181,16 +226,25 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
     } catch (...) { output = {}; return Refusal::CorruptTable; }
 }
 
-inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
-                            const Limits& limits, const pattern::IssueUUID& issue) noexcept {
+inline PreparedEdit PrepareWithPath(const Snapshot& opening, const Edit& edit,
+                            const Limits& limits, const pattern::IssueUUID& issue,
+                            const ProspectivePath* prospective) noexcept {
     PreparedEdit result;
     result.opening = opening;
     try {
         if (!opening.admitted()) return result;
         result.candidate = opening.record.definition;
         result.candidatePath = edit.replacementPath.value_or(opening.path);
+        if (prospective) {
+            result.prospectivePath = std::make_shared<ProspectivePath>(*prospective);
+            result.candidatePath = {};
+            result.candidatePath.locator = prospective->locator;
+            result.candidatePath.persisted = prospective->persisted;
+            result.candidatePath.ownerLabel = prospective->ownerLabel;
+        }
         result.candidate.path = result.candidatePath.locator;
-        if (!result.candidatePath.currentFor(result.candidate.path)) {
+        if ((!prospective && !result.candidatePath.currentFor(result.candidate.path))
+            || (prospective && !prospective->sealedFor(result.candidate.path))) {
             result.refusal = Refusal::StalePath; return result;
         }
         result.candidate.distribution = {edit.distribution, edit.count, edit.distance,
@@ -252,14 +306,29 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
     } catch (...) { result.refusal = Refusal::InvalidCandidate; return result; }
 }
 
+inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
+                            const Limits& limits,
+                            const pattern::IssueUUID& issue) noexcept {
+    return PrepareWithPath(opening, edit, limits, issue, nullptr);
+}
+
+inline PreparedEdit PrepareProspective(const Snapshot& opening, const Edit& edit,
+                            const ProspectivePath& path, const Limits& limits,
+                            const pattern::IssueUUID& issue) noexcept {
+    return PrepareWithPath(opening, edit, limits, issue, &path);
+}
+
 // Concrete integration delegates to D2-N's shared all-label copier. It must
 // update surviving labels in place, add only freshly issued members, remove
 // only retired labels, stage copied current source recipes and SYPA/1, then
 // verify every label/entity/definition/local-ID/shape and record byte.
 struct Stager {
     virtual ~Stager() = default;
+    virtual bool begin(const Snapshot&, const PreparedEdit&) noexcept = 0;
     virtual bool stageAll(const Snapshot&, const PreparedEdit&) noexcept = 0;
     virtual bool readBackAll(const path_array::Definition&) noexcept = 0;
+    virtual bool commit() noexcept = 0;
+    virtual bool abort() noexcept = 0;
 };
 
 inline bool StageInsideOwnedCommand(const Handle(TDocStd_Document)& document,
@@ -284,7 +353,7 @@ inline ApplyOutcome Apply(OcctDocument& owner, const PreparedEdit& prepared,
         || document->GetData()->Time() != prepared.opening.documentTime)
         return ApplyOutcome::Refused;
     path_array::Record currentRecord;
-    PathAuthority currentPath;
+    PathAuthority currentPath, currentCandidatePath;
     if (!labels.isCurrent(owner, prepared.opening.labels,
             prepared.opening.record.definition)
         || !path_array::ReadFeature(document, prepared.opening.record.definition.feature,
@@ -293,23 +362,82 @@ inline ApplyOutcome Apply(OcctDocument& owner, const PreparedEdit& prepared,
         || currentRecord.bytes != prepared.opening.record.bytes
         || paths.resolveCurrent(prepared.opening.record.definition.path, currentPath)
             != Refusal::None
-        || !currentPath.currentFor(prepared.opening.record.definition.path))
+        || !currentPath.currentFor(prepared.opening.record.definition.path)
+        || prepared.prospectivePath
+        || paths.resolveCurrent(prepared.candidate.path, currentCandidatePath)
+            != Refusal::None
+        || !currentCandidatePath.currentFor(prepared.candidate.path)
+        || !currentCandidatePath.ownerLabel.IsEqual(prepared.candidatePath.ownerLabel)
+        || currentCandidatePath.persisted.ownerState.canonicalDefinitionDigest
+            != prepared.candidatePath.persisted.ownerState.canonicalDefinitionDigest)
         return ApplyOutcome::Refused;
-    document->NewCommand();
-    if (!document->HasOpenCommand()) return ApplyOutcome::Refused;
+    if (!stager.begin(prepared.opening, prepared)
+        || !document->HasOpenCommand()) return ApplyOutcome::Refused;
     const auto abort = [&]() {
-        try { if (document->HasOpenCommand()) document->AbortCommand(); } catch (...) {}
-        return document->HasOpenCommand() ? ApplyOutcome::OutcomeUnknown : ApplyOutcome::Refused;
+        const bool closed = stager.abort();
+        return !closed || document->HasOpenCommand()
+            ? ApplyOutcome::OutcomeUnknown : ApplyOutcome::Refused;
     };
     try {
         path_array::Record staged;
         if (!StageInsideOwnedCommand(document, prepared, stager, staged)) return abort();
-        const Standard_Boolean reported = document->CommitCommand();
-        if (document->HasOpenCommand()) return ApplyOutcome::OutcomeUnknown;
+        const bool reported = stager.commit();
+        if (!reported || document->HasOpenCommand()) return ApplyOutcome::OutcomeUnknown;
         path_array::Record readback;
-        if (!reported || !path_array::ReadFeature(document, prepared.candidate.feature, readback)
+        if (!path_array::ReadFeature(document, prepared.candidate.feature, readback)
             || readback.bytes != staged.bytes) return ApplyOutcome::OutcomeUnknown;
         return ApplyOutcome::Committed;
     } catch (...) { return abort(); }
 }
+
+
+//! Concrete production collaborators. These functions retain all native
+//! implementation types in PathArrayNativeCollaborators.mm.
+Refusal CaptureNative(OcctDocument&, const std::string& selectedEntity,
+    const std::shared_ptr<native_opening::Context>&, Snapshot&) noexcept;
+//! Re-reads the exact D3 record/labels and mints the replacement solely through
+//! C1's current-path picker. No caller-supplied locator or receipt is accepted.
+Refusal RefreshPathNative(OcctDocument&, const Snapshot&,
+    const std::string& selectedPathEntity,
+    const std::shared_ptr<native_opening::Context>&,
+    Snapshot& refreshed, PathAuthority& replacement) noexcept;
+PreparedEdit PrepareNative(OcctDocument&, const Snapshot&, const Edit&,
+    const Limits&) noexcept;
+ApplyOutcome ApplyNative(OcctDocument&, const PreparedEdit&,
+    const std::shared_ptr<native_opening::Context>&) noexcept;
+
+#if DEBUG
+//! Row-265 lifecycle probe seam. Runs a genuine replacement-path apply session
+//! for an already factory-captured opening: the replacement authority is
+//! minted by the production LivePathResolver (never reconstructed from
+//! values), then the same PrepareNative/ApplyNative pair the ordinary opening
+//! drives runs against the same real lease boundary. A foreign or stale
+//! replacement reference refuses at the real resolver.
+ApplyOutcome ApplyReplacementPathForDebugProbe(
+    OcctDocument&, const Snapshot&,
+    const path_array::CurveReference& replacement, const Edit&,
+    const std::shared_ptr<native_opening::Context>&) noexcept;
+#endif
+
+struct DependentReplayPlan final {
+    std::shared_ptr<const c1_owner::Prepared> c1Seal;
+    std::vector<PreparedEdit> arrays;
+    bool admitted = false;
+};
+
+//! Enumerates every tag-72 record that references the edited C1 owner and
+//! prepares all geometry before C1 acquires its one command lease.
+bool PrepareDependentReplay(OcctDocument&,
+    const std::shared_ptr<native_opening::Context>&,
+    const std::shared_ptr<const c1_owner::Prepared>&,
+    DependentReplayPlan&) noexcept;
+
+//! Called only after the C1 replacement has staged in the caller-owned lease.
+//! It uses StageInsideOwnedCommand directly and never calls Apply.
+bool StageDependentReplayInsideOwnedCommand(OcctDocument&,
+    native_opening::CommandLease&, const DependentReplayPlan&) noexcept;
+
+//! Post-close exact record/label/recipe proof for every replayed array.
+bool VerifyDependentReplayAfterCommit(OcctDocument&,
+    const DependentReplayPlan&) noexcept;
 } // namespace core3d::path_array_owner

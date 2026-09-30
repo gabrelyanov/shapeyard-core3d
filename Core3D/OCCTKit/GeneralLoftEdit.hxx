@@ -21,6 +21,8 @@ struct StationEditProposal {
     Digest expectedRecipeDigest{};
     UUID station{};
     Station replacement;
+    // Produced by GeneralLoftPersistence after parsing and detached proof.
+    // A Swift-supplied digest is descriptive and is never copied here.
     Digest replacementRecipeDigest{};
 };
 

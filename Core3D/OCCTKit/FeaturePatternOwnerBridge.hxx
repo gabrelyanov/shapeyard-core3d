@@ -2,13 +2,17 @@
 
 // Production owner boundary for the already-landed tag-73 cut-feature-pattern
 // kernel. D2 owns distribution/issuance; this file does not redefine it.
+#include <map>
+
 #include "FeaturePatternBuild.hxx"
+#include "FeaturePatternChildAttribute.hxx"
+#include "FeaturePatternNativeBuild.hxx"
 #include "FeaturePatternPersistence.hxx"
 #include "PatternOwnerBridge.hxx"
 #include "RetainedBooleanProgram.hxx"
+#include "NativeOpeningContext.hxx"
 
 #include <algorithm>
-#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -28,6 +32,8 @@ enum class Refusal : std::uint8_t {
     MissingSourceCut,
     StaleHost,
     StaleSource,
+    MissingChildReceipts,
+    MissingHostBaseline,
     CurvedHost,
     InvalidCandidate,
     GeneratedToolDoesNotCutHost,
@@ -45,21 +51,32 @@ enum class Refusal : std::uint8_t {
 // A child is a feature inside the host result, not a second free shape. Its
 // receipt is anchored to the actual current host label and carries independent
 // selector/section evidence so bounds or volume alone can never prove it.
-struct ChildReceipt {
-    TDF_Label hostLabel;
-    UUID childFeature{};
-    UUID instanceIdentity{};
-    std::uint64_t localID = 0;
-    pattern::Coordinate coordinate;
+struct HostBaseReceipt final {
+    TDF_Label recipeLabel;
+    feature_pattern_native::HostBaseline retained;
+
+    bool admitted() const noexcept {
+        return !recipeLabel.IsNull() && retained.retainedRecipeCurrent
+            && feature_pattern_child::Nonzero(retained.retainedRecipeFeature)
+            && feature_pattern_child::Nonzero(retained.baselineRecipeIdentity)
+            && !retained.exactRecipe.empty() && !retained.solid.IsNull();
+    }
+};
+
+struct ChildReceipt final {
+    TDF_Label recordLabel;
+    feature_pattern_child::Receipt persisted;
     pattern::Matrix worldFrame{};
     std::uint32_t boundarySections = 0;
-    std::vector<std::uint8_t> selectorEvidence;
+    std::vector<std::uint8_t> canonicalBytes;
 };
 
 struct Snapshot {
     feature_pattern::Record record;
     pattern_owner::LabelReceipt host;
     pattern_owner::LabelReceipt sourceCarrier;
+    HostBaseReceipt hostBase;
+    feature_pattern_child::PairedRecord paired;
     OcctCylindricalCutProgramSource sourceProgram;
     retained_boolean::Step sourceStep;
     std::vector<ChildReceipt> children;
@@ -69,7 +86,7 @@ struct Snapshot {
     bool admitted() const noexcept {
         return !record.label.IsNull() && !host.label.IsNull()
             && !sourceCarrier.label.IsNull() && !sourceProgram.recipeBytes.empty()
-            && !children.empty();
+            && hostBase.admitted() && !children.empty();
     }
 };
 
@@ -102,22 +119,30 @@ struct Limits {
 // from a dictionary or from the persisted UUIDs alone.
 struct Observer {
     virtual ~Observer() = default;
-    virtual bool planarHost(const pattern_owner::LabelReceipt&) noexcept = 0;
-    virtual bool captureChildren(const TDF_Label&, const feature_pattern::Definition&,
+    virtual bool captureHostBase(const pattern_owner::LabelReceipt&,
+                                 const TDF_Label&, HostBaseReceipt&) noexcept = 0;
+    virtual bool captureChildren(const feature_pattern_child::PairedRecord&,
                                  std::vector<ChildReceipt>&) noexcept = 0;
 };
 
 inline bool SameChild(const ChildReceipt& left,
                       const ChildReceipt& right) noexcept {
-    return left.hostLabel.IsEqual(right.hostLabel)
-        && left.childFeature == right.childFeature
-        && left.instanceIdentity == right.instanceIdentity
-        && left.localID == right.localID
-        && left.coordinate == right.coordinate
+    return (left.recordLabel.IsNull() || left.recordLabel.IsEqual(right.recordLabel))
+        && left.persisted.document == right.persisted.document
+        && left.persisted.hostEntity == right.persisted.hostEntity
+        && left.persisted.hostDefinition == right.persisted.hostDefinition
+        && left.persisted.patternFeature == right.persisted.patternFeature
+        && left.persisted.childFeature == right.persisted.childFeature
+        && left.persisted.instanceIdentity == right.persisted.instanceIdentity
+        && left.persisted.baselineRecipeIdentity == right.persisted.baselineRecipeIdentity
+        && left.persisted.localID == right.persisted.localID
+        && left.persisted.row == right.persisted.row
+        && left.persisted.column == right.persisted.column
+        && left.persisted.selectors == right.persisted.selectors
         && feature_pattern::SameFrame(left.worldFrame, right.worldFrame)
         && left.boundarySections == right.boundarySections
-        && !left.selectorEvidence.empty()
-        && left.selectorEvidence == right.selectorEvidence;
+        && !left.canonicalBytes.empty()
+        && left.canonicalBytes == right.canonicalBytes;
 }
 
 inline bool LocateLabels(OcctDocument& owner,
@@ -178,7 +203,18 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
         if (source == labels.end()
             || source->second.definition != match->definition.sourceCut.definition)
             return Refusal::MissingSourceCarrier;
-        if (!observer.planarHost(host->second)) return Refusal::CurvedHost;
+        feature_pattern_child::PairedRecord paired;
+        if (!owner.ReadFeaturePatternPair(match->definition.feature, paired))
+            return Refusal::MissingChildReceipts;
+        if (!paired.pattern.label.IsEqual(match->label)
+            || !paired.host.IsEqual(host->second.label)
+            || !paired.source.IsEqual(source->second.label))
+            return Refusal::CorruptTable;
+        HostBaseReceipt hostBase;
+        if (!observer.captureHostBase(host->second, paired.baselineRecipe, hostBase)
+            || !hostBase.admitted()
+            || !hostBase.recipeLabel.IsEqual(paired.baselineRecipe))
+            return Refusal::MissingHostBaseline;
 
         OcctCylindricalCutProgramSource program;
         if (!owner.CaptureCylindricalCutProgramSource(source->second.label, program))
@@ -187,7 +223,7 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
         if (identities.document != match->definition.sourceCut.document
             || identities.entity != match->definition.sourceCut.entity
             || identities.definition != match->definition.sourceCut.definition
-            || identities.sourceFeature != match->definition.sourceCut.sourceFeature)
+            || identities.derivedFeature != match->definition.sourceCut.sourceFeature)
             return Refusal::StaleSource;
         const auto* retained = std::get_if<retained_boolean::Program>(&program.recipe);
         if (!retained) return Refusal::MissingSourceCut;
@@ -199,24 +235,29 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
         if (step == retained->steps.end()) return Refusal::MissingSourceCut;
 
         std::vector<ChildReceipt> children;
-        if (!observer.captureChildren(host->second.label, match->definition, children))
+        if (!observer.captureChildren(paired, children))
             return Refusal::MissingGeneratedFeature;
         std::uint32_t active = 0;
         if (!feature_pattern::ActiveCount(match->definition, active)
             || children.size() != active) return Refusal::MissingGeneratedFeature;
         std::set<UUID> seen;
         for (const ChildReceipt& child : children) {
-            if (!child.hostLabel.IsEqual(host->second.label)
-                || child.selectorEvidence.empty()
+            if (child.recordLabel.IsNull() || child.recordLabel.Data() != host->second.label.Data()
+                || child.canonicalBytes.empty()
+                || child.persisted.patternFeature != match->definition.feature
+                || child.persisted.hostEntity != match->definition.host.entity
+                || child.persisted.hostDefinition != match->definition.host.definition
                 || child.boundarySections
                     != match->definition.expectedBoundarySectionsPerFeature
-                || !seen.insert(child.childFeature).second)
+                || !seen.insert(child.persisted.childFeature).second)
                 return Refusal::WrongGeneratedFeature;
         }
 
         output.record = *match;
         output.host = host->second;
         output.sourceCarrier = source->second;
+        output.hostBase = std::move(hostBase);
+        output.paired = std::move(paired);
         output.sourceProgram = std::move(program);
         output.sourceStep = *step;
         output.children = std::move(children);
@@ -231,6 +272,7 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
 struct RebuildProduct {
     TopoDS_Shape result;
     feature_pattern::AdmissionInput evidence;
+    std::optional<feature_pattern::Admission> verifiedAdmission;
     std::vector<ChildReceipt> children;
 };
 
@@ -238,7 +280,8 @@ struct RebuildProduct {
 // placement and cut the complete current host. It may not mutate OCAF.
 struct Rebuilder {
     virtual ~Rebuilder() = default;
-    virtual bool rebuild(const Snapshot&, const feature_pattern::Definition&,
+    virtual bool rebuild(const Snapshot&, const retained_boolean::Step&,
+                         const feature_pattern::Definition&,
                          RebuildProduct&) noexcept = 0;
 };
 
@@ -247,6 +290,10 @@ struct PreparedEdit {
     feature_pattern::Definition candidate;
     feature_pattern::Projection projection;
     feature_pattern::Admission admission;
+    retained_boolean::Step candidateSourceStep;
+    // Empty for a distribution edit. A dependent source edit supplies its
+    // sealed prospective complete-program bytes here.
+    std::vector<std::uint8_t> candidateSourceProgramBytes;
     RebuildProduct rebuilt;
     Refusal refusal = Refusal::InvalidCandidate;
     bool admitted() const noexcept { return refusal == Refusal::None; }
@@ -303,14 +350,20 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
         if (!feature_pattern::Valid(output.candidate)) return output;
 
         const auto* program = std::get_if<retained_boolean::Program>(&opening.sourceProgram.recipe);
-        if (!program || std::none_of(program->steps.begin(), program->steps.end(),
-                [&](const retained_boolean::Step& value) {
-                    return value.operation == analytic_boolean::Operation::Difference
-                        && value.operand.identifier == edit.sourceCutStepID;
-                })) {
+        if (!program) {
             output.refusal = Refusal::MissingSourceCut;
             return output;
         }
+        const auto selected = std::find_if(program->steps.begin(), program->steps.end(),
+            [&](const retained_boolean::Step& value) {
+                return value.operation == analytic_boolean::Operation::Difference
+                    && value.operand.identifier == edit.sourceCutStepID;
+            });
+        if (selected == program->steps.end()) {
+            output.refusal = Refusal::MissingSourceCut;
+            return output;
+        }
+        output.candidateSourceStep = *selected;
         feature_pattern::ExpansionBudget budget;
         budget.existingDocumentBytes = limits.existingDocumentBytes
             + opening.featurePatternDocumentBytes - opening.record.bytes.size();
@@ -326,10 +379,12 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
             output.refusal = Refusal::ExpansionBudget;
             return output;
         }
-        if (!rebuilder.rebuild(opening, output.candidate, output.rebuilt)
+        if (!rebuilder.rebuild(opening, output.candidateSourceStep,
+                               output.candidate, output.rebuilt)
             || output.rebuilt.result.IsNull()) return output;
-        output.admission = feature_pattern::Admit(output.candidate,
-                                                   output.rebuilt.evidence);
+        output.admission = output.rebuilt.verifiedAdmission
+            ? *output.rebuilt.verifiedAdmission
+            : feature_pattern::Admit(output.candidate, output.rebuilt.evidence);
         output.refusal = Map(output.admission.refusal);
         if (output.refusal != Refusal::None) return output;
         if (output.rebuilt.children.size() != output.admission.attribution.size()) {
@@ -339,13 +394,14 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
         for (const auto& attribution : output.admission.attribution) {
             const auto child = std::find_if(output.rebuilt.children.begin(),
                 output.rebuilt.children.end(), [&](const ChildReceipt& value) {
-                    return value.childFeature == attribution.childFeature
-                        && value.instanceIdentity == attribution.instanceIdentity
-                        && value.localID == attribution.instanceLocalID
-                        && value.coordinate == attribution.coordinate;
+                    return value.persisted.childFeature == attribution.childFeature
+                        && value.persisted.instanceIdentity == attribution.instanceIdentity
+                        && value.persisted.localID == attribution.instanceLocalID
+                        && value.persisted.row == attribution.coordinate.row
+                        && value.persisted.column == attribution.coordinate.column;
                 });
             if (child == output.rebuilt.children.end()
-                || child->selectorEvidence.empty()) {
+                || child->persisted.selectors.empty() || child->canonicalBytes.empty()) {
                 output.refusal = Refusal::WrongGeneratedFeature;
                 return output;
             }
@@ -360,6 +416,8 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
 struct Readback {
     pattern_owner::LabelReceipt host;
     pattern_owner::LabelReceipt sourceCarrier;
+    HostBaseReceipt hostBase;
+    feature_pattern_child::PairedRecord paired;
     std::vector<std::uint8_t> sourceProgramBytes;
     std::vector<ChildReceipt> children;
 };
@@ -368,10 +426,20 @@ struct Readback {
 // its source carrier receipt, and all feature receipts before tag 73 is staged.
 struct Stager {
     virtual ~Stager() = default;
+    virtual bool begin(const Snapshot&, const PreparedEdit&) noexcept = 0;
     virtual bool stageAll(const Snapshot&, const PreparedEdit&) noexcept = 0;
     virtual bool readBackAll(const feature_pattern::Definition&,
                              Readback&) noexcept = 0;
+    virtual bool commit() noexcept = 0;
+    virtual bool abort() noexcept = 0;
 };
+
+inline const std::vector<std::uint8_t>& ExpectedSourceBytes(
+    const PreparedEdit& prepared) noexcept {
+    return prepared.candidateSourceProgramBytes.empty()
+        ? prepared.opening.sourceProgram.recipeBytes
+        : prepared.candidateSourceProgramBytes;
+}
 
 inline bool ExactReadback(const PreparedEdit& prepared,
                           const Readback& readback) noexcept {
@@ -381,16 +449,47 @@ inline bool ExactReadback(const PreparedEdit& prepared,
         || !readback.sourceCarrier.label.IsEqual(prepared.opening.sourceCarrier.label)
         || readback.sourceCarrier.entity != prepared.opening.sourceCarrier.entity
         || readback.sourceCarrier.definition != prepared.opening.sourceCarrier.definition
-        || readback.sourceProgramBytes != prepared.opening.sourceProgram.recipeBytes
+        || !readback.hostBase.recipeLabel.IsEqual(prepared.opening.hostBase.recipeLabel)
+        || readback.hostBase.retained.exactRecipe
+            != prepared.opening.hostBase.retained.exactRecipe
+        || !readback.paired.host.IsEqual(prepared.opening.paired.host)
+        || !readback.paired.baselineRecipe.IsEqual(
+            prepared.opening.paired.baselineRecipe)
+        || !readback.paired.source.IsEqual(prepared.opening.paired.source)
+        || readback.paired.pattern.bytes.empty()
+        || readback.sourceProgramBytes != ExpectedSourceBytes(prepared)
         || readback.children.size() != prepared.rebuilt.children.size()) return false;
     for (const ChildReceipt& expected : prepared.rebuilt.children) {
         const auto actual = std::find_if(readback.children.begin(), readback.children.end(),
             [&](const ChildReceipt& value) {
-                return value.childFeature == expected.childFeature;
+                return value.persisted.childFeature == expected.persisted.childFeature;
             });
         if (actual == readback.children.end() || !SameChild(expected, *actual)) return false;
     }
     return readback.host.shape.IsEqual(prepared.rebuilt.result);
+}
+
+inline bool SameSnapshot(const Snapshot& left,
+                         const Snapshot& right) noexcept {
+    if (left.record.bytes != right.record.bytes
+        || !left.record.label.IsEqual(right.record.label)
+        || !left.host.label.IsEqual(right.host.label)
+        || !left.sourceCarrier.label.IsEqual(right.sourceCarrier.label)
+        || !left.host.shape.IsEqual(right.host.shape)
+        || !left.sourceCarrier.shape.IsEqual(right.sourceCarrier.shape)
+        || !left.hostBase.recipeLabel.IsEqual(right.hostBase.recipeLabel)
+        || left.hostBase.retained.exactRecipe != right.hostBase.retained.exactRecipe
+        || !left.hostBase.retained.solid.IsEqual(right.hostBase.retained.solid)
+        || left.sourceProgram.recipeBytes != right.sourceProgram.recipeBytes
+        || left.children.size() != right.children.size()) return false;
+    for (const ChildReceipt& expected : left.children) {
+        const auto actual = std::find_if(right.children.begin(), right.children.end(),
+            [&](const ChildReceipt& value) {
+                return value.persisted.childFeature == expected.persisted.childFeature;
+            });
+        if (actual == right.children.end() || !SameChild(expected, *actual)) return false;
+    }
+    return true;
 }
 
 enum class ApplyOutcome : std::uint8_t { Refused = 0, Committed, OutcomeUnknown };
@@ -404,50 +503,41 @@ inline ApplyOutcome Apply(OcctDocument& owner, const PreparedEdit& prepared,
     Snapshot current;
     if (Capture(owner, owner.EntityIdentifierForLabel(prepared.opening.host.label),
                 observer, current) != Refusal::None
-        || current.record.bytes != prepared.opening.record.bytes
-        || !current.host.label.IsEqual(prepared.opening.host.label)
-        || !current.sourceCarrier.label.IsEqual(prepared.opening.sourceCarrier.label)
-        || !current.host.shape.IsEqual(prepared.opening.host.shape)
-        || !current.sourceCarrier.shape.IsEqual(prepared.opening.sourceCarrier.shape)
-        || current.sourceProgram.recipeBytes != prepared.opening.sourceProgram.recipeBytes
-        || current.children.size() != prepared.opening.children.size())
+        || !SameSnapshot(current, prepared.opening))
         return ApplyOutcome::Refused;
-    for (const ChildReceipt& expected : prepared.opening.children) {
-        const auto actual = std::find_if(current.children.begin(), current.children.end(),
-            [&](const ChildReceipt& value) {
-                return value.childFeature == expected.childFeature;
-            });
-        if (actual == current.children.end() || !SameChild(expected, *actual))
-            return ApplyOutcome::Refused;
-    }
 
-    document->NewCommand();
-    if (!document->HasOpenCommand()) return ApplyOutcome::Refused;
+    if (!stager.begin(current, prepared) || !document->HasOpenCommand())
+        return ApplyOutcome::Refused;
     const auto abort = [&]() {
-        try {
-            if (document->HasOpenCommand()) document->AbortCommand();
-        } catch (...) {}
-        return document->HasOpenCommand()
-            ? ApplyOutcome::OutcomeUnknown : ApplyOutcome::Refused;
+        if (!stager.abort() || document->HasOpenCommand())
+            return ApplyOutcome::OutcomeUnknown;
+        Snapshot restored;
+        return Capture(owner,
+                owner.EntityIdentifierForLabel(prepared.opening.host.label),
+                observer, restored) == Refusal::None
+            && SameSnapshot(prepared.opening, restored)
+                ? ApplyOutcome::Refused : ApplyOutcome::OutcomeUnknown;
     };
     try {
-        feature_pattern::Record staged;
         Readback readback;
         if (!stager.stageAll(current, prepared)
-            || !feature_pattern::Stage(document, prepared.candidate, staged)
-            || staged.definition.feature != prepared.candidate.feature
             || !stager.readBackAll(prepared.candidate, readback)
             || !ExactReadback(prepared, readback)) return abort();
-        const Standard_Boolean reported = document->CommitCommand();
-        if (document->HasOpenCommand()) return ApplyOutcome::OutcomeUnknown;
-        feature_pattern::Record persisted;
-        if (!reported
-            || !feature_pattern::ReadFeature(document, prepared.candidate.feature,
-                                             persisted)
-            || persisted.bytes != staged.bytes) return ApplyOutcome::OutcomeUnknown;
+        if (!stager.commit() || document->HasOpenCommand())
+            return ApplyOutcome::OutcomeUnknown;
+        Readback persisted;
+        if (!stager.readBackAll(prepared.candidate, persisted)
+            || !ExactReadback(prepared, persisted)) return ApplyOutcome::OutcomeUnknown;
         return ApplyOutcome::Committed;
     } catch (...) {
         return abort();
     }
 }
+
+Refusal CaptureNative(OcctDocument&, const std::string&,
+    const std::shared_ptr<native_opening::Context>&, Snapshot&) noexcept;
+PreparedEdit PrepareNative(OcctDocument&, const Snapshot&, const Edit&,
+                           const Limits&) noexcept;
+ApplyOutcome ApplyNative(OcctDocument&, const PreparedEdit&,
+    const std::shared_ptr<native_opening::Context>&) noexcept;
 } // namespace core3d::feature_pattern_owner

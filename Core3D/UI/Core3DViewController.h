@@ -139,6 +139,30 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
 
+//! Capture one fail-closed retained editor opening from the exact current
+//! whole-object selection. Main-thread only; nil never changes model/history.
+- (Core3DBoundedCurveEditingOpening *_Nullable)openBoundedCurveEditor
+    NS_SWIFT_NAME(openBoundedCurveEditor());
+//! Capture one fail-closed C1 creation opening for the current document. No
+//! selection is required; the candidate supplies explicit construction values
+//! and native code mints every durable identity. nil never changes history.
+- (Core3DBoundedCurveCreationOpening *_Nullable)openBoundedCurveCreation
+    NS_SWIFT_NAME(openBoundedCurveCreation());
+- (Core3DPatternEditingOpening *_Nullable)openPatternEditor
+    NS_SWIFT_NAME(openPatternEditor());
+- (Core3DPathArrayEditingOpening *_Nullable)openPathArrayEditor
+    NS_SWIFT_NAME(openPathArrayEditor());
+- (Core3DFeaturePatternEditingOpening *_Nullable)openFeaturePatternEditor
+    NS_SWIFT_NAME(openFeaturePatternEditor());
+- (Core3DGeneralLoftEditingOpening *_Nullable)openGeneralLoftEditor
+    NS_SWIFT_NAME(openGeneralLoftEditor());
+//! Begins an ordinary C3-N creation from explicit ordered station dictionaries.
+//! Native code issues every durable identity before returning the opening.
+- (Core3DGeneralLoftEditingOpening *_Nullable)beginGeneralLoftCreationWithStations:
+    (NSArray<NSDictionary<NSString *, id> *> *)stations
+    orderAxis:(NSArray<NSNumber *> *)orderAxis requestedName:(NSString *)requestedName
+    NS_SWIFT_NAME(beginGeneralLoftCreation(stations:orderAxis:requestedName:));
+
 //! Read-only retained-input discovery. Returns nil for absent, malformed,
 //! unsupported or unqualified composite ownership; it never falls back to a
 //! free-object/saved-cut editor. The returned session owns the native capture.
@@ -171,6 +195,9 @@ __attribute__((objc_subclassing_restricted))
 - (void)cancelNativeViewportPresentation:(NSUUID *)identifier;
 - (BOOL)isNativeViewportPresentationCurrent:(NSUUID *)identifier;
 #ifdef DEBUG
+//! Read-only, opt-in C2 UI-test camera trace. Compiled out of Release.
+- (void)debugRecordSpatialSweepCameraTraceEvent:(NSString *)event
+    NS_SWIFT_NAME(debugRecordSpatialSweepCameraTrace(event:));
 // DEBUG-only lighting diagnosis; no native geometry or persisted material mutation.
 - (NSDictionary<NSString *, id> *_Nullable)debugNativeLightingState;
 - (BOOL)debugSetNativeHeadlightDirectionX:(double)x y:(double)y z:(double)z
@@ -468,6 +495,16 @@ __attribute__((objc_subclassing_restricted))
     patch:(Core3DSavedCutSourcePatch *)patch expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(beginSavedProgramCutSourceEdit(_:patch:expected:completion:));
+//! Capture one fail-closed retained finishing opening from the exact current
+//! whole-object selection. Main-thread only; nil never changes model/history.
+- (Core3DRetainedFinishingOpening *_Nullable)openRetainedFinishingEditor
+    NS_SWIFT_NAME(openRetainedFinishingEditor());
+//! Capture one fail-closed retained finishing opening for a host-resolved entity
+//! identifier only; the target is host-resolved, never response-supplied. Same
+//! owner/lease boundary as the selection opening. Main-thread only; nil never
+//! changes model/history/selection.
+- (Core3DRetainedFinishingOpening *_Nullable)openRetainedFinishingOpeningForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(openRetainedFinishingOpening(entityIdentifier:));
 #if DEBUG
 //! One-shot main delivery gate for real worker lifecycle qualification.
 - (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
@@ -475,7 +512,19 @@ __attribute__((objc_subclassing_restricted))
 //! Holds the next native solid's completed geometry at its main-thread delivery boundary.
 - (void)debugSetNextNativeSolidDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
     NS_SWIFT_NAME(debugSetNextNativeSolidDeliveryGate(_:));
+//! One-shot diagnostic deadline for the next admitted native solid. Main-thread only.
+- (void)debugSetNextNativeSolidCompletionDeadline:(NSTimeInterval)deadline
+    label:(NSString *)label
+    onTimeout:(void (^_Nullable)(NSDictionary<NSString *,id> *diagnostic))observer
+    NS_SWIFT_NAME(debugSetNextNativeSolidCompletionDeadline(_:label:onTimeout:));
+- (void)debugClearNextNativeSolidCompletionDeadline
+    NS_SWIFT_NAME(debugClearNextNativeSolidCompletionDeadline());
+- (nullable NSDictionary<NSString *,id> *)debugNativeSolidCompletionDeadlineRecord
+    NS_SWIFT_NAME(debugNativeSolidCompletionDeadlineRecord());
 + (NSDictionary<NSString *,NSNumber *> *)debugSavedCutSourceMMConversionProbe;
+//! UI-test fixture data for one retained cylindrical solid in the requested units.
++ (NSData *_Nullable)debugRetainedFinishingFixtureAssetData:(double)metersPerUnit
+    NS_SWIFT_NAME(debugRetainedFinishingFixtureAssetData(metersPerUnit:));
 #endif
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));
@@ -1230,6 +1279,11 @@ __attribute__((objc_subclassing_restricted))
 //! H6 read-only observation of one validated committed SYCR/4 cut carrier.
 - (NSDictionary<NSString *, id> *_Nullable)debugPlainProfileCutRetention:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugPlainProfileCutRetention(entityIdentifier:));
+//! DEBUG-only strict-digest probe over an actual native direct/indexed
+//! writer-reader round trip of the reopened SYCR/4 carrier.
+- (NSDictionary<NSString *, id> *_Nullable)debugPlainProfileCutNativeRoundTrip:(NSString *)entityIdentifier
+    direct:(BOOL)direct
+    NS_SWIFT_NAME(debugPlainProfileCutNativeRoundTrip(entityIdentifier:direct:));
 //! H6 production-codec corruption and exact D81 boundary controls. It never
 //! installs a registry entry or creates a product edit route.
 - (NSDictionary<NSString *, id> *)debugPlainProfileCutPersistenceProbe:(NSInteger)scenario
@@ -1287,6 +1341,17 @@ __attribute__((objc_subclassing_restricted))
 //! Public B10 Lantern.Post component baseline. No held-out edit is accepted.
 + (NSData *_Nullable)debugB10SpatialSweepFixtureDataWithMetersPerUnit:(double)metersPerUnit
     NS_SWIFT_NAME(debugB10SpatialSweepFixtureData(metersPerUnit:));
+//! R179 Objects UI-test fixture. Builds a saved BinXCAF document holding the real
+//! retained state for kind c1/d2/d3/d4/d4-child at the requested unit scale.
+//! The native source document is closed before these exact bytes are returned.
++ (NSData *_Nullable)debugR179ObjectsFixtureDataWithKind:(NSString *)kind
+                                           metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugR179ObjectsFixtureData(kind:metersPerUnit:));
+//! Read-only validation of the currently open document against the R179 fixture
+//! contract for kind. Returns nil when no document is open; the dictionary always
+//! carries schema/kind/stage, and valid=YES only when every native check passes.
+- (NSDictionary<NSString *, id> *_Nullable)debugR179ObjectsFixtureEvidenceForKind:(NSString *)kind
+    NS_SWIFT_NAME(debugR179ObjectsFixtureEvidence(kind:));
 //! Exact SYCR/SYCV/SCSW, identity, commitment and BRep evidence read from the
 //! currently open production document. This does not mutate document state.
 - (NSDictionary<NSString *, id> *_Nullable)debugSpatialSweepDurabilityEvidence:(NSString *)entityIdentifier
@@ -1415,6 +1480,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSNumber *_Nullable)debugDocumentMetersPerUnit;
 //! Authoritative OCAF history depth for migration/transaction assertions.
 - (NSInteger)debugDocumentUndoCount;
+//! Row279a K3: bounded read-only document-evidence inspection of one exact
+//! retained request key after an ordinary reopen. Descriptive only; it never
+//! grants verified-receipt, replay or Undo authority, opens no OCAF command
+//! and does no reservation/prepare/geometry work. A missing or different
+//! native store reports Unavailable, never permission to retry.
+- (Core3DModelingDocumentEvidence)inspectModelingDocumentEvidenceForRequest:(NSUUID *)requestID
+    NS_SWIFT_NAME(inspectModelingDocumentEvidenceForRequest(_:));
 //! Read-only observation of the actual native application's lifecycle/history.
 //! These DEBUG diagnostics cannot authorize edits or persist an AI job.
 //! Diagnostic fixed-memory mutation stamp; NOT a public edit token/readiness lease.

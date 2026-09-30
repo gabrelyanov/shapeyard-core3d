@@ -7,6 +7,8 @@
 #include "../OCCTKit/RectangularLoftRebuild.hxx"
 #include "NativeModelingRequest.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
+#include "../OCCTKit/NativeOpeningDependentReplay.hxx"
+#include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include "../OCCTKit/SavedProgramSourceDetachedWork.hxx"
 #include "../OCCTKit/RetainedBooleanEditValues.hxx"
@@ -180,6 +182,9 @@ struct OrdinaryTransformLedger {
     OcctSavedGroupState groupsPrevious, groupsRequested, groupsCandidate;
     bool groupOriginChanges = false;
     bool candidateSealed = false;
+    std::shared_ptr<const dependent_replay::Plan> dependentReplay;
+    std::shared_ptr<native_opening::Context> dependentContext;
+    std::shared_ptr<native_opening::CommandLease> dependentLease;
     std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
     PrimitiveManipulatorType manipulatorType = static_cast<PrimitiveManipulatorType>(0);
     bool hadManipulator = false;
@@ -355,6 +360,7 @@ public:
 };
 
 class OrdinaryEditController;
+class OrdinaryDependentSourceMutation;
 
 //! Move-only authority for one synchronous stage/close interval. Destruction
 //! requests owned abort/reconciliation; unknown truth remains in the controller.
@@ -390,6 +396,11 @@ public:
     OrdinaryEditController& operator=(const OrdinaryEditController&) = delete;
     OrdinaryEditLease beginTransform(const std::vector<OrdinaryTransformChange>& changes,
                                      OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginDependentTransform(
+        const OrdinaryTransformChange&,
+        std::shared_ptr<const dependent_replay::Plan>,
+        std::shared_ptr<native_opening::Context>,
+        OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginMeshCopy(const Handle(AIS_Shape)& source,
         const TCollection_ExtendedString& name, OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginCreation(const std::vector<OrdinaryCreationRequest>& requests,
@@ -420,6 +431,7 @@ public:
 #endif
 private:
     friend class OrdinaryEditLease;
+    friend class OrdinaryDependentSourceMutation;
     using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger, OrdinaryCreationLedger, OrdinaryAppearanceLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
@@ -427,7 +439,9 @@ private:
     OrdinaryEditResult stageCreationAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileCreationImpl() noexcept;
     OrdinaryEditLease beginTransformImpl(const std::vector<OrdinaryTransformChange>& changes,
-        OrdinaryEditResult* failure, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
+        OrdinaryEditResult* failure, std::shared_ptr<NativeModelingCommitPermit> permit,
+        std::shared_ptr<const dependent_replay::Plan> dependentReplay = {},
+        std::shared_ptr<native_opening::Context> dependentContext = {}) noexcept;
     bool bindPlacementReceipt(OrdinaryTransformLedger& ledger,const OrdinaryTransformChange& change,
         const OcctObjectTransformState& previous,std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
     bool capturePlacementReceipt(const OrdinaryTransformLedger& ledger,placement::Evidence& out) noexcept;
@@ -459,6 +473,8 @@ private:
     bool savedProgramSourceChangeMatches(const OrdinaryTransformChange& request,
         const OcctObjectTransformState& previous) const noexcept;
     bool presentationMatches(const OrdinaryTransformLedger& ledger, bool committed) const noexcept;
+    bool stageDependentSource(OrdinaryTransformLedger&, OrdinaryTransformRecord&,
+        native_opening::CommandLease&) noexcept;
     void clearResolved() noexcept;
 
     Handle(OcctDocument) _document;

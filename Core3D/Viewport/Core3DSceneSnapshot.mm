@@ -152,6 +152,12 @@ static_assert(sizeof(std::uint32_t) == 4,
 
 @interface Core3DSceneMeshSnapshot ()
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
+                                geometryKind:(Core3DSceneGeometryKind)geometryKind
+                     nativeC1DefinitionData:(NSData *)nativeC1DefinitionData
+                          nativeC1OwnerData:(NSData *)nativeC1OwnerData
+                   nativeC1DefinitionDigest:(NSData *)nativeC1DefinitionDigest
+               nativeC1DefinitionRevision:(uint64_t)nativeC1DefinitionRevision
+                    nativeC1FrameRevision:(uint64_t)nativeC1FrameRevision
                              geometryRevision:(uint64_t)geometryRevision
                                   localBounds:(Core3DSceneBounds *)localBounds
                                     faceCount:(uint32_t)faceCount
@@ -187,6 +193,7 @@ static_assert(sizeof(std::uint32_t) == 4,
                           coordinateSpace:(Core3DSceneCoordinateSpace)coordinateSpace
                               depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
                               renderStyle:(Core3DSceneRenderStyle)renderStyle
+                    nativeWirePresentation:(nullable Core3DSceneMaterialSnapshot *)nativeWirePresentation
                         primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings;
 @end
 
@@ -1708,6 +1715,12 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 @implementation Core3DSceneMeshSnapshot
 
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
+                                geometryKind:(Core3DSceneGeometryKind)geometryKind
+                     nativeC1DefinitionData:(NSData *)nativeC1DefinitionData
+                          nativeC1OwnerData:(NSData *)nativeC1OwnerData
+                   nativeC1DefinitionDigest:(NSData *)nativeC1DefinitionDigest
+               nativeC1DefinitionRevision:(uint64_t)nativeC1DefinitionRevision
+                    nativeC1FrameRevision:(uint64_t)nativeC1FrameRevision
                              geometryRevision:(uint64_t)geometryRevision
                                   localBounds:(Core3DSceneBounds *)localBounds
                                     faceCount:(uint32_t)faceCount
@@ -1727,6 +1740,12 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         NSParameterAssert(vertexData.length / sizeof(Core3DSceneVertex) == vertexCount);
         NSParameterAssert(indexData.length / sizeof(uint32_t) == indexCount);
 
+        _geometryKind = geometryKind;
+        _nativeC1DefinitionData = [nativeC1DefinitionData copy];
+        _nativeC1OwnerData = [nativeC1OwnerData copy];
+        _nativeC1DefinitionDigest = [nativeC1DefinitionDigest copy];
+        _nativeC1DefinitionRevision = nativeC1DefinitionRevision;
+        _nativeC1FrameRevision = nativeC1FrameRevision;
         _definitionIdentifier = [definitionIdentifier copy];
         _geometryRevision = geometryRevision;
         _localBounds = localBounds;
@@ -1772,6 +1791,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                           coordinateSpace:(Core3DSceneCoordinateSpace)coordinateSpace
                               depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
                               renderStyle:(Core3DSceneRenderStyle)renderStyle
+                    nativeWirePresentation:(nullable Core3DSceneMaterialSnapshot *)nativeWirePresentation
                         primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings {
     self = [super init];
     if (self) {
@@ -1795,6 +1815,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _coordinateSpace = coordinateSpace;
         _depthPolicy = depthPolicy;
         _renderStyle = renderStyle;
+        _nativeWirePresentation = nativeWirePresentation;
         _primitiveBindings = [primitiveBindings copy];
     }
     return self;
@@ -2624,12 +2645,29 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     std::unordered_set<std::string> definitionIdentifiers;
     definitionIdentifiers.reserve(snapshot.meshes.size());
     for (const MeshSnapshot& mesh : snapshot.meshes) {
+        const bool isWire = mesh.geometryKind == GeometryKind::NativeC1Wire;
+        const bool validWire = isWire && mesh.nativeC1Wire.has_value()
+            && !mesh.nativeC1Wire->canonicalDefinitionBytes.empty()
+            && !mesh.nativeC1Wire->canonicalOwnerBytes.empty()
+            && mesh.nativeC1Wire->canonicalDefinitionBytes.size() <= 16 * 1024
+            && mesh.nativeC1Wire->canonicalOwnerBytes.size() <= 16 * 1024
+            && mesh.nativeC1Wire->definitionRevision != 0
+            && mesh.nativeC1Wire->frameRevision != 0
+            && mesh.topology.faceCount == 0
+            && mesh.topology.edgeCount != 0
+            && mesh.topology.vertexCount != 0
+            && mesh.vertices.empty() && mesh.indices.empty()
+            && mesh.primitives.empty() && mesh.cornerTangents.empty()
+            && mesh.tangentBasis == TangentBasis::None;
+        const bool validSurface = mesh.geometryKind == GeometryKind::SurfaceTriangles
+            && !mesh.nativeC1Wire.has_value()
+            && !mesh.vertices.empty() && !mesh.indices.empty();
         if (!IsValidIdentifier(mesh.definitionIdentifier)
             || !accountString(mesh.definitionIdentifier)
             || !definitionIdentifiers.insert(mesh.definitionIdentifier).second
             || mesh.geometryRevision == 0
             || !HasValidCornerTangents(mesh)
-            || mesh.vertices.empty() || mesh.indices.empty()
+            || (!validWire && !validSurface)
             || !mesh.localBounds.valid || !IsValid(mesh.localBounds)
             || !CheckedAdd(totalVertices, mesh.vertices.size(), totalVertices)
             || totalVertices > kMaximumDTOVertices
@@ -2692,7 +2730,8 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             }
             expectedFirstIndex = firstIndex + indexCount;
         }
-        if (mesh.primitives.empty() || expectedFirstIndex != mesh.indices.size()) {
+        if ((!isWire && mesh.primitives.empty())
+            || expectedFirstIndex != mesh.indices.size()) {
             return false;
         }
     }
@@ -2704,6 +2743,9 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     for (std::size_t instanceIndex = 0;
          instanceIndex < snapshot.instances.size(); ++instanceIndex) {
         const InstanceSnapshot& instance = snapshot.instances[instanceIndex];
+        const bool isWire = instance.meshIndex < snapshot.meshes.size()
+            && snapshot.meshes[instance.meshIndex].geometryKind
+                == GeometryKind::NativeC1Wire;
         if (!IsValidIdentifier(instance.entityIdentifier)
             || !accountString(instance.entityIdentifier)
             || instance.name.size() > kMaximumNameBytes
@@ -2718,6 +2760,14 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !IsValid(instance.coordinateSpace)
             || !IsValid(instance.depthPolicy)
             || !IsValid(instance.renderStyle)
+            || (isWire != instance.nativeWirePresentation.has_value())
+            || (instance.nativeWirePresentation.has_value()
+                && (!IsValid(*instance.nativeWirePresentation)
+                    || instance.nativeWirePresentation->baseColorTextureIndex >= 0
+                    || instance.nativeWirePresentation->emissiveTextureIndex >= 0
+                    || instance.nativeWirePresentation->metallicRoughnessTextureIndex >= 0
+                    || instance.nativeWirePresentation->occlusionTextureIndex >= 0
+                    || instance.nativeWirePresentation->normalTextureIndex >= 0))
             || !instance.referenceAxis.has_value()
             || !IsValid(*instance.referenceAxis)
             || (!instance.visible && instance.selectable)
@@ -3315,6 +3365,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
     for (std::size_t meshIndex = 0;
          meshIndex < snapshot.meshes.size(); ++meshIndex) {
         const MeshSnapshot& mesh = snapshot.meshes[meshIndex];
+        if (mesh.geometryKind != GeometryKind::SurfaceTriangles
+            || mesh.nativeC1Wire.has_value()) return false;
         const bool isMirrorPlane = hasMirrorPlanePrefix && meshIndex < 6;
         const bool isMirrorPreview =
             snapshot.kind == PresentationOverlayKind::MirrorPreview
@@ -3977,6 +4029,17 @@ NSArray<Output *> *ObjectArrayFromVector(
 }
 
 Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
+    const NativeC1WireSnapshot wire = value.nativeC1Wire.value_or(
+        NativeC1WireSnapshot());
+    NSData *wireDefinition = wire.canonicalDefinitionBytes.empty() ? NSData.data :
+        [NSData dataWithBytes:wire.canonicalDefinitionBytes.data()
+                       length:wire.canonicalDefinitionBytes.size()];
+    NSData *wireOwner = wire.canonicalOwnerBytes.empty() ? NSData.data :
+        [NSData dataWithBytes:wire.canonicalOwnerBytes.data()
+                       length:wire.canonicalOwnerBytes.size()];
+    NSData *wireDigest = value.nativeC1Wire.has_value()
+        ? [NSData dataWithBytes:wire.canonicalDefinitionDigest.data() length:wire.canonicalDefinitionDigest.size()]
+        : NSData.data;
     NSData *tangents = value.cornerTangents.empty() ? NSData.data :
         [NSData dataWithBytes:value.cornerTangents.data()
                        length:value.cornerTangents.size() * sizeof(Float4)];
@@ -4004,6 +4067,12 @@ Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
 
     return [[Core3DSceneMeshSnapshot alloc]
         initWithDefinitionIdentifier:StringFromUTF8(value.definitionIdentifier)
+                       geometryKind:static_cast<Core3DSceneGeometryKind>(value.geometryKind)
+            nativeC1DefinitionData:wireDefinition
+                 nativeC1OwnerData:wireOwner
+          nativeC1DefinitionDigest:wireDigest
+      nativeC1DefinitionRevision:wire.definitionRevision
+           nativeC1FrameRevision:wire.frameRevision
                     geometryRevision:value.geometryRevision
                          localBounds:BoundsFromScene(value.localBounds)
                            faceCount:value.topology.faceCount
@@ -4051,6 +4120,8 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
                  coordinateSpace:CoordinateSpaceFromScene(value.coordinateSpace)
                      depthPolicy:DepthPolicyFromScene(value.depthPolicy)
                      renderStyle:RenderStyleFromScene(value.renderStyle)
+           nativeWirePresentation:value.nativeWirePresentation.has_value()
+               ? MaterialFromScene(*value.nativeWirePresentation) : nil
                primitiveBindings:bindings];
 }
 

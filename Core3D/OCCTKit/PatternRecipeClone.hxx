@@ -33,6 +33,7 @@ struct Source {
     Family family = Family::None;
     TDF_Label owner;
     TopoDS_Shape ownerShape;
+    bool carrierLengthUnitPresent = false;
     double carrierMetersPerUnit = 0;
     sweep_persistence::Record sweep;
     loft_persistence::Record loft;
@@ -150,7 +151,9 @@ inline bool IsEqual(const Source& left, const Source& right) noexcept {
         const bool sameShape = left.ownerShape.IsNull() ? right.ownerShape.IsNull()
             : !right.ownerShape.IsNull() && left.ownerShape.IsEqual(right.ownerShape);
         return left.family == right.family && sameOwner && sameShape
-            && left.carrierMetersPerUnit == right.carrierMetersPerUnit
+            && left.carrierLengthUnitPresent == right.carrierLengthUnitPresent
+            && (!left.carrierLengthUnitPresent
+                || left.carrierMetersPerUnit == right.carrierMetersPerUnit)
             && left.sweep.IsEqual(right.sweep) && left.loft.IsEqual(right.loft)
             && ((!left.analyticBoolean.value && !right.analyticBoolean.value)
                 || (left.analyticBoolean.value && right.analyticBoolean.value
@@ -199,23 +202,33 @@ inline bool Capture(const Handle(TDocStd_Document)& document,
         if (document.IsNull() || owner.IsNull() || owner.Data() != document->GetData()
             || retained_solid::HasRecord(owner)) return false;
         Source value; value.owner = owner; value.ownerShape = XCAFDoc_ShapeTool::GetShape(owner);
-        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, value.carrierMetersPerUnit)
-            || !std::isfinite(value.carrierMetersPerUnit)
-            || value.carrierMetersPerUnit <= 0) return false;
-        if (value.ownerShape.IsNull() || value.ownerShape.ShapeType() != TopAbs_SOLID) return false;
-        if (composite_recipe::HasRecord(owner)) {
-            if (!IsCurrentAnalyticBoolean(document, owner, value.analyticBoolean,
-                                          value.analyticDefinition)) return false;
-            value.family = Family::AnalyticBoolean;
-            output = std::move(value); return true;
+        if (value.ownerShape.IsNull()) return false;
+        double carrierMetersPerUnit = 0;
+        value.carrierLengthUnitPresent = XCAFDoc_DocumentTool::GetLengthUnit(
+            document, carrierMetersPerUnit);
+        if (value.carrierLengthUnitPresent) {
+            if (!std::isfinite(carrierMetersPerUnit) || carrierMetersPerUnit <= 0) return false;
+            value.carrierMetersPerUnit = carrierMetersPerUnit;
         }
         if (!sweep_persistence::Read(document, owner, value.sweep)
             || !loft_persistence::Read(document, owner, value.loft)) return false;
-        const unsigned families = unsigned(!value.sweep.label.IsNull())
-            + unsigned(!value.loft.label.IsNull());
+        const bool hasAnalyticBoolean = composite_recipe::HasRecord(owner);
+        const unsigned families = unsigned(hasAnalyticBoolean)
+            + unsigned(!value.sweep.label.IsNull()) + unsigned(!value.loft.label.IsNull());
         if (families > 1) return false;
-        value.family = !value.sweep.label.IsNull() ? Family::Sweep
+        value.family = hasAnalyticBoolean ? Family::AnalyticBoolean
+            : !value.sweep.label.IsNull() ? Family::Sweep
             : !value.loft.label.IsNull() ? Family::Loft : Family::None;
+        if (value.family == Family::None) {
+            output = std::move(value); return true;
+        }
+        if (!value.carrierLengthUnitPresent
+            || value.ownerShape.ShapeType() != TopAbs_SOLID) return false;
+        if (value.family == Family::AnalyticBoolean) {
+            if (!IsCurrentAnalyticBoolean(document, owner, value.analyticBoolean,
+                                          value.analyticDefinition)) return false;
+            output = std::move(value); return true;
+        }
         if ((value.family == Family::Sweep
                 && (!value.sweep.IsCurrent(document, owner)
                     || !value.sweep.boundShape.IsEqual(value.ownerShape)))
@@ -348,7 +361,7 @@ inline bool Prepare(const Source& source, const TopoDS_Shape& destinationShape,
     output = {};
     try {
         if (source.owner.IsNull() || source.ownerShape.IsNull()
-            || destinationShape.IsNull() || destinationShape.ShapeType() != TopAbs_SOLID
+            || destinationShape.IsNull()
             || destinationShape.IsPartner(source.ownerShape)) return false;
         Prepared value; value.family = source.family; value.binding = destinationShape;
         if (source.family == Family::None) {
@@ -357,6 +370,7 @@ inline bool Prepare(const Source& source, const TopoDS_Shape& destinationShape,
             if (!newFeatureIdentifier.empty()) return false;
             output = std::move(value); return true;
         }
+        if (destinationShape.ShapeType() != TopAbs_SOLID) return false;
         const std::string& oldIdentifier = source.family == Family::Sweep
             ? source.sweep.identifier : source.loft.identifier;
         if (!profile::IsIdentifier(newFeatureIdentifier)
@@ -379,6 +393,58 @@ inline bool Prepare(const Source& source, const TopoDS_Shape& destinationShape,
             if (!SameLocalIDs(source.loft.definition, value.loft)
                 || !loft_persistence::Encode(value.loft, encoded)) return false;
         } else return false;
+        output = std::move(value); return true;
+    } catch (...) { output = {}; return false; }
+}
+
+// Rebuild one already-existing survivor from a freshly captured source. This
+// is intentionally not the independent-copy path above: the survivor keeps
+// its original feature identifier, recipe record label and every owner-local
+// ID. Structural source edits which cannot preserve those IDs refuse rather
+// than silently turning the survivor into a new clone.
+inline bool PrepareReplacement(const Source& updatedSource,
+                               const Source& existingClone,
+                               const TopoDS_Shape& destinationShape,
+                               const std::optional<gp_Trsf>& bakedTransform,
+                               Prepared& output) noexcept {
+    output = {};
+    try {
+        if (updatedSource.owner.IsNull() || existingClone.owner.IsNull()
+            || updatedSource.owner.IsEqual(existingClone.owner)
+            || destinationShape.IsNull() || destinationShape.ShapeType() != TopAbs_SOLID
+            || destinationShape.IsPartner(existingClone.ownerShape)
+            || updatedSource.family != existingClone.family
+            || (updatedSource.family != Family::Sweep
+                && updatedSource.family != Family::Loft)) return false;
+        Prepared value; value.family = existingClone.family;
+        value.binding = destinationShape;
+        if (value.family == Family::Sweep) {
+            if (existingClone.sweep.label.IsNull()
+                || !SameLocalIDs(updatedSource.sweep.definition,
+                                 existingClone.sweep.definition)
+                || !profile::IsIdentifier(existingClone.sweep.identifier)) return false;
+            value.featureIdentifier = existingClone.sweep.identifier;
+            value.sweep = updatedSource.sweep.definition;
+            if (bakedTransform
+                && !ComposeFrame(updatedSource.sweep.definition.constructionFrame,
+                                 *bakedTransform, value.sweep.constructionFrame)) return false;
+            std::vector<double> encoded;
+            if (!SameLocalIDs(existingClone.sweep.definition, value.sweep)
+                || !sweep_persistence::Encode(value.sweep, encoded)) return false;
+        } else {
+            if (existingClone.loft.label.IsNull()
+                || !SameLocalIDs(updatedSource.loft.definition,
+                                 existingClone.loft.definition)
+                || !profile::IsIdentifier(existingClone.loft.identifier)) return false;
+            value.featureIdentifier = existingClone.loft.identifier;
+            value.loft = updatedSource.loft.definition;
+            if (bakedTransform
+                && !ComposeFrame(updatedSource.loft.definition.constructionFrame,
+                                 *bakedTransform, value.loft.constructionFrame)) return false;
+            std::vector<double> encoded;
+            if (!SameLocalIDs(existingClone.loft.definition, value.loft)
+                || !loft_persistence::Encode(value.loft, encoded)) return false;
+        }
         output = std::move(value); return true;
     } catch (...) { output = {}; return false; }
 }
@@ -464,6 +530,76 @@ inline bool StageAnalyticBoolean(
         output.analyticBooleanBytes = readback.value->bytes;
         output.identities = prepared.identities;
         return true;
+    } catch (...) { output = {}; return false; }
+}
+
+// Replace the survivor root and retained recipe together in the caller's one
+// owned command, reusing its original metadata label, and prove the updated
+// source remained exact. Analytic/composite replacement is outside the
+// accepted D1 copy policy and therefore has no fallback here.
+inline bool StageReplacement(const Handle(TDocStd_Document)& document,
+                             const Source& capturedUpdatedSource,
+                             const Source& capturedExistingClone,
+                             const TDF_Label& destinationOwner,
+                             const Prepared& prepared,
+                             Candidate& output) noexcept {
+    output = {};
+    try {
+        Source liveSource, liveClone;
+        if (document.IsNull() || !document->HasOpenCommand()
+            || destinationOwner.IsNull() || destinationOwner.Data() != document->GetData()
+            || !destinationOwner.IsEqual(capturedExistingClone.owner)
+            || prepared.family != capturedUpdatedSource.family
+            || prepared.family != capturedExistingClone.family
+            || (prepared.family != Family::Sweep && prepared.family != Family::Loft)
+            || !Capture(document, capturedUpdatedSource.owner, liveSource)
+            || !IsEqual(liveSource, capturedUpdatedSource)
+            || !Capture(document, destinationOwner, liveClone)
+            || !IsEqual(liveClone, capturedExistingClone)
+            || prepared.binding.IsPartner(liveClone.ownerShape))
+            return false;
+        Candidate candidate; candidate.family = prepared.family;
+        candidate.ownerEntityIdentifier = {};
+        candidate.ownerDefinitionIdentifier = {};
+        if (prepared.family == Family::Sweep) {
+            const TDF_Label recordLabel = liveClone.sweep.label;
+            if (prepared.featureIdentifier != liveClone.sweep.identifier
+                || !SameLocalIDs(liveClone.sweep.definition, prepared.sweep)
+                || !sweep_persistence::Stage(document, destinationOwner,
+                    prepared.sweep, liveClone.sweep.identifier)) return false;
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapes.IsNull()) return false;
+            shapes->SetShape(destinationOwner, prepared.binding);
+            TNaming_Builder(recordLabel).Select(prepared.binding, prepared.binding);
+            if (!sweep_persistence::Read(document, destinationOwner, candidate.sweep)
+                || candidate.sweep.label.IsNull()
+                || !candidate.sweep.label.IsEqual(recordLabel)
+                || candidate.sweep.identifier != liveClone.sweep.identifier
+                || !SameLocalIDs(liveClone.sweep.definition,
+                                 candidate.sweep.definition)
+                || !candidate.sweep.IsCurrent(document, destinationOwner)) return false;
+        } else {
+            const TDF_Label recordLabel = liveClone.loft.label;
+            if (prepared.featureIdentifier != liveClone.loft.identifier
+                || !SameLocalIDs(liveClone.loft.definition, prepared.loft)
+                || !loft_persistence::Stage(document, destinationOwner,
+                    prepared.loft, liveClone.loft.identifier)) return false;
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapes.IsNull()) return false;
+            shapes->SetShape(destinationOwner, prepared.binding);
+            TNaming_Builder(recordLabel).Select(prepared.binding, prepared.binding);
+            if (!loft_persistence::Read(document, destinationOwner, candidate.loft)
+                || candidate.loft.label.IsNull()
+                || !candidate.loft.label.IsEqual(recordLabel)
+                || candidate.loft.identifier != liveClone.loft.identifier
+                || !SameLocalIDs(liveClone.loft.definition,
+                                 candidate.loft.definition)
+                || !candidate.loft.IsCurrent(document, destinationOwner)) return false;
+        }
+        Source afterSource;
+        if (!Capture(document, capturedUpdatedSource.owner, afterSource)
+            || !IsEqual(afterSource, capturedUpdatedSource)) return false;
+        output = std::move(candidate); return true;
     } catch (...) { output = {}; return false; }
 }
 
