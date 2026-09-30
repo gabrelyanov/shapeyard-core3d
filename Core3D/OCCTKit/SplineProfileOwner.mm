@@ -3,6 +3,7 @@
 #include "SplineProfileOwner.hxx"
 #include "OcctDocument.h"
 #include "ReceiptRecord.hxx"
+#include "RetainedSolidAttribute.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BinObjMgt_RRelocationTable.hxx>
 #include <BinObjMgt_SRelocationTable.hxx>
@@ -400,6 +401,17 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared,
                 return Refuse(Outcome::busy, "identity-issuance-refused");
         }
         DetachedSolid detached; if (!Build(definition, detached)) return Refuse(Outcome::refused, "rebuild-refused");
+        // Keep native identity and previous geometry for the same post-commit
+        // publication/recovery path used by the bounded-curve and loft owners.
+        native_opening::CommittedEditPublication publication;
+        if (found->second.capture.create) {
+            publication.created.push_back({issued.front().EntityIdentifier(), {}});
+        } else {
+            if (!found->second.capture.exact)
+                return Refuse(Outcome::staleDefinition, "capture-unavailable");
+            publication.replaced.push_back({retained_solid::UUIDText(definition.owner.entity),
+                found->second.capture.exact->solid});
+        }
         const int before = state_->document->Document()->GetAvailableUndos();
         auto lease = state_->context->beginCommandLease(state_->context->openingFence(), 64, 64);
         if (!lease) return Refuse(Outcome::busy, "command-refused");
@@ -414,11 +426,16 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared,
             return Refuse(restored ? Outcome::refused : Outcome::recoveryRequired,
                           restored ? "stage-refused" : "abort-unknown");
         }
-        if (!lease->commit()) return Refuse(Outcome::outcomeUnknown, "close-unknown");
+        if (!lease->commit()) {
+            state_->context->retainUnprovenEdit(publication);
+            return Refuse(Outcome::outcomeUnknown, "close-unknown");
+        }
         OcctSplineProfileCapture read;
         const int delta = state_->document->Document()->GetAvailableUndos() - before;
         if (delta != 1 || !state_->document->ReadSplineProfileExact(definition.owner, read)
             || !staged.IsEqual(read)) return Refuse(Outcome::outcomeUnknown, "post-close-proof-failed");
+        if (!state_->context->publishCommittedEdit(publication))
+            return Refuse(Outcome::recoveryRequired, "publication-unproven");
         Receipt receipt; receipt.outcome = Outcome::committed; receipt.reason = "committed";
         receipt.session = prepared->opening.session; receipt.preparation = prepared->preparation;
         receipt.historyDelta = delta; state_->captures.erase(receipt.session);
