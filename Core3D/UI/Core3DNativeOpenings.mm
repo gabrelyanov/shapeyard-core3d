@@ -235,9 +235,12 @@ NSDictionary *PatternDescriptor(const core3d::pattern_owner::Snapshot& opening,
 
 bool PatternEdit(NSDictionary *value, const core3d::pattern_owner::Snapshot& opening,
                  double metersPerUnit, core3d::pattern_owner::Edit& output) {
-    if (!ExactKeys(value, @[@"rowAxis", @"columnAxis", @"rowCount", @"columnCount",
-            @"rowSpacingMM", @"columnSpacingMM", @"radialPivotMM", @"sweepDegrees",
-            @"suppressedEntityIdentifiers"])) return false;
+    NSArray *keys = @[@"rowAxis", @"columnAxis", @"rowCount", @"columnCount",
+        @"rowSpacingMM", @"columnSpacingMM", @"radialPivotMM", @"sweepDegrees",
+        @"suppressedEntityIdentifiers"];
+    const bool hasNewCoordinates = value[@"suppressedNewMemberCoordinates"] != nil;
+    if (hasNewCoordinates) keys = [keys arrayByAddingObject:@"suppressedNewMemberCoordinates"];
+    if (!ExactKeys(value, keys)) return false;
     std::uint64_t rows = 0, columns = 0; double sweep = 0;
     if (!std::isfinite(metersPerUnit) || metersPerUnit <= 0) return false;
     const double millimetresPerUnit = metersPerUnit * 1000.0;
@@ -254,6 +257,26 @@ bool PatternEdit(NSDictionary *value, const core3d::pattern_owner::Snapshot& ope
         && SuppressedEntities(value[@"suppressedEntityIdentifiers"],
                               opening.members, output.suppressed);
     if (!valid) return false;
+    if (hasNewCoordinates) {
+        id coordinates = value[@"suppressedNewMemberCoordinates"];
+        if (![coordinates isKindOfClass:NSArray.class]
+            || [coordinates count] > core3d::pattern::MaximumInstances
+            || rows == 0 || columns == 0
+            || rows * columns > core3d::pattern::MaximumInstances) return false;
+        for (id coordinate in coordinates) {
+            std::uint64_t row = 0, column = 0;
+            if (![coordinate isKindOfClass:NSDictionary.class]
+                || !ExactKeys(coordinate, @[@"row", @"column"])
+                || !Integer(coordinate[@"row"], UINT32_MAX, row)
+                || !Integer(coordinate[@"column"], UINT32_MAX, column)
+                || row >= rows || column >= columns || (row == 0 && column == 0)) return false;
+            const Coordinate key{std::uint32_t(row), std::uint32_t(column)};
+            // Existing members still require the exact retained entity receipt.
+            for (const auto& member : opening.record.definition.members)
+                if (member.coordinate == key) return false;
+            if (!output.suppressed.insert(key).second) return false;
+        }
+    }
     output.rowSpacing /= millimetresPerUnit;
     output.columnSpacing /= millimetresPerUnit;
     for (double& value : output.radialPivotLocal) value /= millimetresPerUnit;
@@ -1466,6 +1489,35 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
 - (NSInteger)projectedTopologyNodes { return ClampToNSInteger(_opening.metrics.sourceTopologyNodes); }
 - (double)maximumMeasuredArcErrorInDocumentUnits { return 0; }
 - (NSString *)measuredRefusal { return nil; }
+- (Core3DPathArrayEditingOpening *)replacingPathWithEntityIdentifier:(NSString *)entityIdentifier {
+    State expected = State::Open;
+    if (!NSThread.isMainThread
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || !_state.compare_exchange_strong(expected, State::Prepared)) return nil;
+    try {
+        if (_owner.IsNull() || !_context || !_context->isCurrent(64, 64)
+            || !entityIdentifier.UTF8String) { _state.store(State::Open); return nil; }
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        core3d::path_array_owner::Snapshot refreshed;
+        core3d::path_array_owner::PathAuthority replacement;
+        if (core3d::path_array_owner::RefreshPathNative(*_owner, _opening,
+                entity, _context, refreshed, replacement)
+                    != core3d::path_array_owner::Refusal::None
+            || !_context->isCurrent(64, 64)) {
+            _state.store(State::Open); return nil;
+        }
+        Core3DPathArrayEditingOpening *next =
+            [[Core3DPathArrayEditingOpening alloc] initWithOwner:_owner
+                context:_context opening:std::move(refreshed)
+                replacementPath:std::move(replacement)];
+        if (!next) { _state.store(State::Open); return nil; }
+        _state.store(State::Cancelled);
+        _replacementPath.reset(); _context.reset();
+        return next;
+    } catch (...) { _state.store(State::Open); return nil; }
+}
 - (Core3DPathArrayEditingOpening *)replacingPathFromCurrentSelection {
     State expected = State::Open;
     if (!NSThread.isMainThread

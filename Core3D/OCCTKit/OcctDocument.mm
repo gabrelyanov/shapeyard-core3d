@@ -15533,6 +15533,145 @@ bool GeneralLoftIdentityMatches(const core3d::general_loft::Definition& definiti
         && UUIDText(definition.owner.definition) == ownerDefinition;
 }
 
+// Diagnostic only: bounded hex windows from buffers already used by the gate.
+void TraceGeneralLoftTransientBytes(const char* side, const char* phase,
+    const std::string& actual, const std::string& expected) noexcept {
+#if DEBUG
+    static const char hex[] = "0123456789ABCDEF";
+    const std::size_t size = std::max(actual.size(), expected.size());
+    std::size_t differing = 0, ranges = 0, logged = 0;
+    const auto differs = [&](std::size_t offset) {
+        return offset >= actual.size() || offset >= expected.size()
+            || actual[offset] != expected[offset];
+    };
+    for (std::size_t offset = 0; offset < size;) {
+        if (!differs(offset)) { ++offset; continue; }
+        const std::size_t first = offset;
+        do { ++differing; ++offset; } while (offset < size && differs(offset));
+        ++ranges;
+        if (logged >= 64) continue;
+        const std::size_t windowStart = first > 16 ? first - 16 : 0;
+        char a[129] = {}, b[129] = {};
+        const auto window = [&](const std::string& bytes, char* output) {
+            std::size_t count = 0;
+            while (count < 64 && windowStart + count < bytes.size()) {
+                const unsigned char value =
+                    static_cast<unsigned char>(bytes[windowStart + count]);
+                output[2 * count] = hex[value >> 4];
+                output[2 * count + 1] = hex[value & 15];
+                ++count;
+            }
+        };
+        window(actual, a); window(expected, b);
+        NSLog(@"R4_C3N transient-bytes side=%s phase=%s range=%zu start=%zu end=%zu window=%zu actual-hex=%s expected-hex=%s",
+              side, phase, ranges - 1, first, offset - 1, windowStart, a, b);
+        ++logged;
+    }
+    NSLog(@"R4_C3N transient-bytes side=%s phase=%s actual=%zu expected=%zu differing=%zu ranges=%zu logged=%zu truncated=%u",
+          side, phase, actual.size(), expected.size(), differing, ranges, logged,
+          unsigned(logged != ranges));
+#else
+    (void)side; (void)phase; (void)actual; (void)expected;
+#endif
+}
+
+// C3-only policy: use only after retained traces establish that the raw
+// mismatch is confined to Modified/Checked bookkeeping on valid shapes.
+// Keep Free, Orientable, Closed, Infinite, Convex and all geometry exact.
+bool GeneralLoftTransientFlagBytes(const TopoDS_Shape& source,
+    const std::string& sourceBytes, std::string& bytes, const char* side) noexcept {
+    bytes.clear();
+    const char* phase = "source-preconditions";
+    Standard_Integer shapeIndex = 0;
+    const auto refused = [&](const char* reason) -> bool {
+#if DEBUG
+        NSLog(@"R4_C3N transient side=%s phase=%s reason=%s shape-index=%d",
+              side, phase, reason, int(shapeIndex));
+#else
+        (void)side; (void)phase; (void)reason; (void)shapeIndex;
+#endif
+        return false;
+    };
+    try {
+        if (source.IsNull()) return refused("null-source");
+        if (source.ShapeType() != TopAbs_SOLID) return refused("source-not-solid");
+        if (sourceBytes.empty()) return refused("empty-source-bytes");
+        phase = "bounded-traversal";
+        // Bound traversal before asking OCCT to copy the graph.
+        std::vector<std::pair<TopoDS_Shape, unsigned>> pending{{source, 0}};
+        TopTools_IndexedMapOfShape originals;
+        std::size_t visits = 0;
+        while (!pending.empty()) {
+            const auto node = pending.back(); pending.pop_back();
+            if (++visits > 8192) return refused("visit-limit");
+            if (node.second > 64) return refused("depth-limit");
+            originals.Add(node.first);
+            for (TopoDS_Iterator it(node.first); it.More(); it.Next()) {
+                if (pending.size() >= 8192) return refused("pending-limit");
+                pending.emplace_back(it.Value(), node.second + 1);
+            }
+        }
+        phase = "deep-copy";
+        BRepBuilderAPI_Copy copied(source, Standard_True, Standard_False);
+        if (!copied.IsDone()) return refused("copy-not-done");
+        if (copied.Shape().IsNull()) return refused("null-copy");
+        if (copied.Shape().ShapeType() != TopAbs_SOLID) return refused("copy-not-solid");
+        const TopoDS_Shape detached = copied.Shape();
+        std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> pairs;
+        pairs.reserve(originals.Extent());
+        phase = "copy-map-and-flags";
+        for (Standard_Integer i = 1; i <= originals.Extent(); ++i) {
+            shapeIndex = i;
+            const TopoDS_Shape original = originals(i);
+            TopoDS_Shape copy = copied.ModifiedShape(original);
+            if (copy.IsNull()) return refused("null-counterpart");
+            if (copy.IsPartner(original)) return refused("shared-counterpart");
+            if (copy.ShapeType() != original.ShapeType()) return refused("counterpart-type");
+            // Preserve source flags except Checked: validate private topology
+            // afresh, then restore the candidate pair for the byte audit.
+            copy.Free(original.Free());
+            copy.Modified(original.Modified());
+            copy.Checked(Standard_False);
+            copy.Orientable(original.Orientable());
+            copy.Closed(original.Closed());
+            copy.Infinite(original.Infinite());
+            copy.Convex(original.Convex());
+            pairs.emplace_back(original, copy);
+        }
+        shapeIndex = 0;
+        phase = "private-validation";
+        if (!BRepCheck_Analyzer(detached, Standard_True).IsValid())
+            return refused("invalid-private-copy");
+        phase = "restore-source-flags";
+        for (auto& pair : pairs) {
+            pair.second.Modified(pair.first.Modified());
+            pair.second.Checked(pair.first.Checked());
+        }
+        // Refuse if copying/checking changed ANY other serialized field,
+        // including a number, location, orientation, sharing or record order.
+        std::string preserved;
+        phase = "copy-preservation";
+        if (!core3d::retained_part_boolean::ExactShapeBytes(detached, preserved))
+            return refused("copy-serialization");
+        if (preserved != sourceBytes) {
+            TraceGeneralLoftTransientBytes(side, phase, preserved, sourceBytes);
+            return refused("copy-bytes-changed");
+        }
+        phase = "clear-transient-flags";
+        for (auto& pair : pairs) {
+            pair.second.Modified(Standard_False);
+            pair.second.Checked(Standard_False);
+        }
+        phase = "normalized-serialization";
+        if (!core3d::retained_part_boolean::ExactShapeBytes(detached, bytes))
+            return refused("normalized-serialization");
+#if DEBUG
+        NSLog(@"R4_C3N transient side=%s result=serialized bytes=%zu", side, bytes.size());
+#endif
+        return true;
+    } catch (...) { bytes.clear(); return refused("exception"); }
+}
+
 bool CompleteGeneralLoftCapture(const Handle(TDocStd_Document)& document,
     const std::string& documentID,
     const core3d::general_loft::persistence::Record& hinted,
@@ -15590,7 +15729,7 @@ bool CompleteGeneralLoftCapture(const Handle(TDocStd_Document)& document,
                 if (differs) {
                     ++differingBytes;
                     if (!inRange) {
-                        recordingRange = ranges.size() < 8;
+                        recordingRange = ranges.size() < 64;
                         if (recordingRange) ranges.push_back({offset, offset});
                     } else if (recordingRange) {
                         ranges.back().end = offset;
@@ -15668,7 +15807,7 @@ bool CompleteGeneralLoftCapture(const Handle(TDocStd_Document)& document,
             if (ranges.empty()) rangeSummary = "<none>";
             NSLog(@"R4_C3N bytes actual=%zu expected=%zu differing=%zu ranges=%s",
                   actual.size(), expected.size(), differingBytes, rangeSummary.c_str());
-            for (std::size_t index = 0; index < std::min(ranges.size(), std::size_t(3)); ++index) {
+            for (std::size_t index = 0; index < ranges.size(); ++index) {
                 const auto& range = ranges[index];
                 const std::string actualLine = escapedWindow(actual, range.start, range.end);
                 const std::string expectedLine = escapedWindow(expected, range.start, range.end);
@@ -15680,7 +15819,18 @@ bool CompleteGeneralLoftCapture(const Handle(TDocStd_Document)& document,
                 NSLog(@"R4_C3N bytes range=%zu expected-section=%s", index, expectedSection.c_str());
             }
 #endif
-            return RefuseGeneralLoftCapture("capture-exact-shape-bytes");
+            // Raw diagnostics above remain authoritative. Only the two
+            // proven transient flags may differ, on independently checked
+            // private copies whose remaining bytes must stay exact.
+            std::string stableActual, stableExpected;
+            if (!GeneralLoftTransientFlagBytes(current, actual, stableActual, "actual"))
+                return RefuseGeneralLoftCapture("capture-exact-shape-bytes");
+            if (!GeneralLoftTransientFlagBytes(rebuilt.solid, expected, stableExpected, "expected"))
+                return RefuseGeneralLoftCapture("capture-exact-shape-bytes");
+            if (stableActual != stableExpected) {
+                TraceGeneralLoftTransientBytes("pair", "normalized-equality", stableActual, stableExpected);
+                return RefuseGeneralLoftCapture("capture-exact-shape-bytes");
+            }
         }
         OcctExactLabelReceipt exact;
         if (!owner.CaptureObjectVisibilityStateForLabel(record->owner, exact.visibility))

@@ -157,6 +157,10 @@ __attribute__((objc_subclassing_restricted))
 //! the one currently selected retained 3D path. Nil leaves this opening usable.
 - (Core3DPathArrayEditingOpening *_Nullable)replacingPathFromCurrentSelection
     NS_SWIFT_NAME(replacingPathFromCurrentSelection());
+//! Resolve an Objects path choice inside this opening without changing scene selection.
+//! The exact live fence, original D3 read set and current C1 owner are revalidated.
+- (Core3DPathArrayEditingOpening *_Nullable)replacingPathWithEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(replacingPath(entityIdentifier:));
 - (void)applyCandidate:(NSDictionary<NSString *, id> *)candidate
     completion:(void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
     NS_SWIFT_NAME(apply(candidate:completion:));
