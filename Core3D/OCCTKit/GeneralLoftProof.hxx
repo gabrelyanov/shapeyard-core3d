@@ -122,11 +122,13 @@ inline AdmittedSolid ProveDetached(const Definition& definition,
         receipt.segmentCount = definition.stations.front().segments.size();
         if (build.stationWires.size() != receipt.stationCount
             || build.stationEdges.size() != receipt.stationCount
+            || build.resultStationEdges.size() != receipt.stationCount
             || build.generatedSides.size() + 1 != receipt.stationCount) {
             receipt.status = ProofStatus::InputChanged; return output;
         }
         for (std::size_t station = 0; station < receipt.stationCount; ++station) {
-            if (build.stationEdges[station].size() != receipt.segmentCount) {
+            if (build.stationEdges[station].size() != receipt.segmentCount
+                || build.resultStationEdges[station].size() != receipt.segmentCount) {
                 receipt.status = ProofStatus::ReorderedCorrespondence; return output;
             }
             if (station + 1 < receipt.stationCount
@@ -189,10 +191,17 @@ inline AdmittedSolid ProveDetached(const Definition& definition,
 
         // Every authored station seam must survive once as the boundary shared
         // by its two neighbouring interval faces (or by side + cap at an end).
+        std::set<Standard_Integer> seamIndices;
         for (std::size_t station = 0; station < receipt.stationCount; ++station)
             for (std::size_t segment = 0; segment < receipt.segmentCount; ++segment) {
-                const TopoDS_Edge& seam = build.stationEdges[station][segment];
-                if (!proof_detail::SameShapeIn(seam, edges)) {
+                const TopoDS_Edge& input = build.stationEdges[station][segment];
+                const TopoDS_Edge& seam = build.resultStationEdges[station][segment];
+                // Recompute the unique source-to-result binding over the solid's
+                // own edge map; the builder's correspondence table is untrusted.
+                const Standard_Integer expected = solid_detail::ExactResultEdge(input, edges);
+                if (!proof_detail::SameShapeIn(seam, edges) || expected <= 0
+                    || edges.FindIndex(seam) != expected
+                    || !seamIndices.insert(expected).second) {
                     receipt.status = ProofStatus::MissingSeam; return output;
                 }
                 const TopoDS_Face& a = station == 0 ? build.firstCap

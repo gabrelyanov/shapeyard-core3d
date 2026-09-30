@@ -9,17 +9,21 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepCheck_Wire.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRep_Tool.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Precision.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Solid.hxx>
 #include <TopoDS_Wire.hxx>
 #include <atomic>
+#include <set>
 
 namespace core3d::general_loft {
 
@@ -32,7 +36,8 @@ struct KernelBuild {
     KernelBuildStatus status = KernelBuildStatus::InvalidDefinition;
     TopoDS_Solid solid;
     std::vector<TopoDS_Wire> stationWires;
-    std::vector<std::vector<TopoDS_Edge>> stationEdges;
+    std::vector<std::vector<TopoDS_Edge>> stationEdges; // immutable input edges
+    std::vector<std::vector<TopoDS_Edge>> resultStationEdges; // exact result images
     std::vector<std::vector<TopoDS_Face>> generatedSides;
     TopoDS_Face firstCap;
     TopoDS_Face lastCap;
@@ -74,6 +79,33 @@ inline Handle(Geom_BSplineCurve) ExactCurve(const bounded_curve::Definition& val
 inline double PinnedTolerance(const Definition& value) noexcept {
     // One nanometre expressed in document units, never below OCCT confusion.
     return std::max(Precision::Confusion(), 1.0e-9 / value.dimensionMetersPerUnit);
+}
+
+// An immutable loft may copy an edge TShape to add surface representations.
+// Bind its result image only through the identical 3D curve object, location
+// and complete parameter domain. Coordinate proximity is never correspondence.
+inline Standard_Integer ExactResultEdge(const TopoDS_Edge& input,
+                                        const TopTools_IndexedMapOfShape& resultEdges) {
+    if (input.IsNull()) return 0;
+    TopLoc_Location inputLocation;
+    Standard_Real inputFirst = 0, inputLast = 0;
+    const Handle(Geom_Curve)& inputCurve =
+        BRep_Tool::Curve(input, inputLocation, inputFirst, inputLast);
+    if (inputCurve.IsNull() || !std::isfinite(inputFirst)
+        || !std::isfinite(inputLast) || inputFirst >= inputLast) return 0;
+    Standard_Integer match = 0;
+    for (Standard_Integer i = 1; i <= resultEdges.Extent(); ++i) {
+        if (resultEdges(i).ShapeType() != TopAbs_EDGE) continue;
+        TopLoc_Location resultLocation;
+        Standard_Real resultFirst = 0, resultLast = 0;
+        const Handle(Geom_Curve)& resultCurve = BRep_Tool::Curve(
+            TopoDS::Edge(resultEdges(i)), resultLocation, resultFirst, resultLast);
+        if (resultCurve != inputCurve || resultLocation != inputLocation
+            || resultFirst != inputFirst || resultLast != inputLast) continue;
+        if (match != 0) return 0; // ambiguous images are refusal
+        match = i;
+    }
+    return match;
 }
 } // namespace solid_detail
 
@@ -154,6 +186,22 @@ inline KernelBuild BuildDetached(const Definition& definition,
                     output = {}; output.status = KernelBuildStatus::TopologyRefused; return output;
                 }
                 interval.push_back(TopoDS::Face(generated));
+            }
+        }
+        // GeneratedFace above still consumes the original wire-edge identities.
+        // Keep those inputs and record a separate, one-to-one result binding.
+        TopTools_IndexedMapOfShape resultEdges;
+        TopExp::MapShapes(output.solid, TopAbs_EDGE, resultEdges);
+        std::set<Standard_Integer> boundEdges;
+        output.resultStationEdges.resize(output.stationEdges.size());
+        for (std::size_t station = 0; station < output.stationEdges.size(); ++station) {
+            auto& images = output.resultStationEdges[station];
+            for (const TopoDS_Edge& input : output.stationEdges[station]) {
+                const Standard_Integer index = solid_detail::ExactResultEdge(input, resultEdges);
+                if (index <= 0 || !boundEdges.insert(index).second) {
+                    output = {}; output.status = KernelBuildStatus::TopologyRefused; return output;
+                }
+                images.push_back(TopoDS::Edge(resultEdges(index)));
             }
         }
         output.status = KernelBuildStatus::BuiltUnproven;

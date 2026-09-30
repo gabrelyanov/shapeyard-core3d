@@ -148,6 +148,10 @@ __attribute__((objc_subclassing_restricted))
 //! and native code mints every durable identity. nil never changes history.
 - (Core3DBoundedCurveCreationOpening *_Nullable)openBoundedCurveCreation
     NS_SWIFT_NAME(openBoundedCurveCreation());
+- (Core3DSplineProfileEditingOpening *_Nullable)beginSplineProfileCreation
+    NS_SWIFT_NAME(beginSplineProfileCreation());
+- (Core3DSplineProfileEditingOpening *_Nullable)openSplineProfileEditor
+    NS_SWIFT_NAME(openSplineProfileEditor());
 - (Core3DPatternEditingOpening *_Nullable)openPatternEditor
     NS_SWIFT_NAME(openPatternEditor());
 - (Core3DPathArrayEditingOpening *_Nullable)openPathArrayEditor
@@ -1360,6 +1364,8 @@ __attribute__((objc_subclassing_restricted))
 //! the active document and unavailable outside DEBUG.
 + (NSDictionary<NSString *, NSNumber *> *)debugBoundedCurvePersistenceProbe:(NSUInteger)scenario
     NS_SWIFT_NAME(debugBoundedCurvePersistenceProbe(_:));
++ (NSDictionary<NSString *, NSNumber *> *)debugC4SplineProfileOwnerProbe:(NSUInteger)scenario
+    NS_SWIFT_NAME(debugC4SplineProfileOwnerProbe(_:));
 //! Detached A1a evidence only; reports that the document command stayed closed.
 - (NSDictionary<NSString *, NSNumber *> *)debugRetainedPartBooleanProbe
     NS_SWIFT_NAME(debugRetainedPartBooleanProbe());

@@ -22,6 +22,7 @@
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/ProfileCurveFace.hxx"
 #include "../OCCTKit/SplineProfileFace.hxx"
+#include "../OCCTKit/SplineProfilePersistence.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
@@ -2415,8 +2416,12 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 // SplineProfileExpectedVolume has already admitted it.
                 if (!geometry->spline->revolveAxis) { return false; }
                 axis = SplineRevolveAxis3D(*geometry->spline->revolveAxis, geometry->plane);
-            }
-            if (geometry->depth == 360.0) {
+                SplineRevolveResult built;
+                if (!BuildSplineProfileRevolve(profileFace,
+                        *geometry->spline->revolveAxis, geometry->plane,
+                        geometry->depth, expected, geometry->cancelled, built)) return false;
+                result = built.solid;
+            } else if (geometry->depth == 360.0) {
                 BRepPrimAPI_MakeRevol sweep(profileFace, axis, Standard_True);
                 if (!sweep.IsDone()) { return false; }
                 result = sweep.Shape();
@@ -2426,6 +2431,11 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 if (!sweep.IsDone()) { return false; }
                 result = sweep.Shape();
             }
+        } else if (geometry->spline) {
+            TopoDS_Solid built;
+            if (!BuildSplineProfileExtrude(profileFace, geometry->plane,
+                    geometry->depth, expected, geometry->cancelled, built)) return false;
+            result = built;
         } else {
             const gp_Vec direction = geometry->plane == 0 ? gp_Vec(0, 0, geometry->depth)
                 : geometry->plane == 1 ? gp_Vec(0, geometry->depth, 0) : gp_Vec(geometry->depth, 0, 0);
@@ -2479,6 +2489,27 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         geometry->built = true;
         return true;
     } catch (...) { return false; }
+}
+
+bool spline_profile::BuildWithDetachedProfileBranch(
+    const ProfileCurveSection& section, const SplineProfileSpec& spline,
+    int plane, double extent, bool revolve, TopoDS_Solid& solid,
+    int& seamFaces) noexcept {
+    solid.Nullify(); seamFaces = 0;
+    try {
+        auto geometry = std::make_shared<ProfileSolidGeometry>();
+        geometry->curves = section; geometry->spline = spline;
+        geometry->plane = plane; geometry->depth = extent; geometry->revolve = revolve;
+        if (!BuildProfileSolidGeometry(geometry) || geometry->solid.IsNull()
+            || geometry->solid.ShapeType() != TopAbs_SOLID) return false;
+        solid = TopoDS::Solid(geometry->solid);
+        if (revolve && (!spline.revolveAxis
+            || !ProveSplineRevolveSeam(solid,
+                SplineRevolveAxis3D(*spline.revolveAxis, plane), extent, seamFaces))) {
+            solid.Nullify(); seamFaces = 0; return false;
+        }
+        return true;
+    } catch (...) { solid.Nullify(); seamFaces = 0; return false; }
 }
 
 std::shared_ptr<SavedCutSourceDetachedWork> Core3DViewer::makeSavedCutSourceDetachedWork() noexcept {

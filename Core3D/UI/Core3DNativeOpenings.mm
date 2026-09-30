@@ -5,11 +5,15 @@
 
 #include "../OCCTKit/NativeOpeningFactories.hxx"
 #include "../OCCTKit/BoundedCurveOwner.hxx"
+#include "../OCCTKit/SplineProfileOwner.hxx"
+#include "../OCCTKit/ReceiptRecord.hxx"
+#include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/FeaturePatternOwnerBridge.hxx"
 #include "../OCCTKit/GeneralLoftEdit.hxx"
 #include "../OCCTKit/GeneralLoftOwner.hxx"
 #include "../OCCTKit/PathArrayOwnerBridge.hxx"
 #include "../OCCTKit/PatternOwnerBridge.hxx"
+#include <XCAFDoc_DocumentTool.hxx>
 #if DEBUG
 #include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
 // The R179 fixture bridge at the end of this file implements a
@@ -24,7 +28,6 @@
 #if TARGET_OS_IOS
 #import "../OCCTKit/GLView.h"
 #endif
-#include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/BoundedCurveAttribute.hxx"
 #include "../OCCTKit/SpatialSweepColdOpenFixture.hxx"
 #include "../OCCTKit/FeaturePatternChildAttribute.hxx"
@@ -48,7 +51,6 @@
 #include <TDF_TagSource.hxx>
 #include <TDF_Tool.hxx>
 #include <TNaming_Builder.hxx>
-#include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <functional>
 #include <map>
@@ -1694,18 +1696,30 @@ Core3DBoundedCurveCreationOpening *OpenBoundedCurveCreation(const Handle(OcctDoc
 
 Core3DGeneralLoftEditingOpening *OpenGeneralLoft(const Handle(OcctDocument)& owner,
     const std::string& selected, const std::shared_ptr<Context>& context) noexcept {
+    const char *gate = "reopen-factory-preconditions-or-current-fence";
+    const auto refused = [&]() -> Core3DGeneralLoftEditingOpening * {
+#if DEBUG
+        NSLog(@"R4_C3N refused=%s", gate);
+#else
+        (void)gate;
+#endif
+        return nil;
+    };
     try {
         if (!NSThread.isMainThread || owner.IsNull() || owner->Document().IsNull() || !context
             || context->openingFence().document() != owner->Document()
             || context->openingFence().data() != owner->Document()->GetData()
-            || !context->isCurrent(64, 64)) return nil;
+            || !context->isCurrent(64, 64)) return refused();
+        gate = "reopen-owner-service";
         auto service = std::make_unique<general_loft::owner::OcafOwner>(*owner, context);
         const general_loft::owner::SceneFence scene{context->openingFence().documentGeneration(),
             context->openingFence().modelRevision(), context->openingFence().metersPerUnit()};
-        auto opening = service->capture(selected, scene); if (!opening) return nil;
+        gate = "reopen-owner-capture";
+        auto opening = service->capture(selected, scene); if (!opening) return refused();
+        gate = "reopen-wrapper-publication";
         return [[Core3DGeneralLoftEditingOpening alloc] initWithOwner:owner context:context
             service:std::move(service) opening:std::move(opening)];
-    } catch (...) { return nil; }
+    } catch (...) { return refused(); }
 }
 
 Core3DGeneralLoftEditingOpening *BeginGeneralLoft(const Handle(OcctDocument)& owner,
@@ -1809,6 +1823,299 @@ Core3DFeaturePatternEditingOpening *OpenFeaturePattern(const Handle(OcctDocument
 } // namespace core3d::native_opening
 
 namespace {
+using C4Definition = core3d::spline_profile::Definition;
+using C4Owner = core3d::spline_profile::owner::OcafOwner;
+
+NSString *C4UUID(const core3d::spline_profile::UUID& value) {
+    const std::string text = core3d::retained_solid::UUIDText(value);
+    return [NSString stringWithUTF8String:text.c_str()] ?: @"";
+}
+
+NSString *C4StableID(const C4Definition& value, core3d::ProfileCurveID local) {
+    for (const auto& identity : value.identities)
+        if (identity.local == local) return C4UUID(identity.uuid);
+    return @"";
+}
+
+bool C4IdentityMatches(const C4Definition& value, core3d::ProfileCurveID local,
+                       id stable) {
+    return [stable isKindOfClass:NSString.class]
+        && [(NSString *)stable isEqualToString:C4StableID(value, local)];
+}
+
+NSDictionary<NSString *, id> *C4Descriptor(const C4Definition& value, BOOL creating) {
+    NSMutableArray *segments = [NSMutableArray array];
+    for (const auto& spline : value.spline.segments) {
+        NSMutableArray *poles = [NSMutableArray array];
+        for (const auto& pole : spline.poles) {
+            [poles addObject:@{@"id": @(pole.identifier),
+                               @"stableID": C4StableID(value, pole.identifier),
+                               @"u": @(pole.point.X()), @"v": @(pole.point.Y())}];
+        }
+        [segments addObject:@{@"id": @(spline.identifier),
+                              @"stableID": C4StableID(value, spline.identifier),
+                              @"degree": @(spline.degree),
+                              @"poles": poles, @"rational": @(!spline.weights.empty())}];
+    }
+    NSDictionary *axis = value.spline.revolveAxis
+        ? @{@"originU": @(value.spline.revolveAxis->origin.X()),
+            @"originV": @(value.spline.revolveAxis->origin.Y()),
+            @"directionU": @(value.spline.revolveAxis->direction.X()),
+            @"directionV": @(value.spline.revolveAxis->direction.Y())}
+        : @{};
+    return @{@"schema": @1, @"kind": @(value.key.kind),
+        @"codec": @(value.key.codecVersion), @"creating": @(creating),
+        @"featureID": C4UUID(value.feature), @"revision": @(value.revision),
+        @"metersPerUnit": @(value.metersPerUnit), @"plane": @(value.plane),
+        @"operation": value.operation == core3d::spline_profile::Operation::revolve ? @"revolve" : @"extrude",
+        @"depth": @(value.depth), @"angleDegrees": @(value.angleDegrees),
+        @"innerLoopPolicy": value.spline.innerLoopPolicy == core3d::SplineInnerLoopPolicy::Void ? @"void" : @"refuse",
+        @"axis": axis, @"segments": segments,
+        @"frameID": C4UUID(value.frame.identifier), @"frameRevision": @(value.frame.revision),
+        @"limitations": @[@"non-periodic clamped spline", @"non-rational C1 import",
+                            @"maximum 32 poles per segment", @"maximum 16 spline segments",
+                            @"shell/Boolean/edge descendants refuse"]};
+}
+
+bool C4Candidate(NSDictionary<NSString *, id> *dictionary,
+                 const C4Definition& baseline, bool creating,
+                 C4Definition& output) noexcept {
+    output = {};
+    try {
+        if (![dictionary isKindOfClass:NSDictionary.class]
+            || [dictionary[@"schema"] integerValue] != 1
+            || [dictionary[@"kind"] unsignedIntValue] != baseline.key.kind
+            || [dictionary[@"codec"] unsignedIntValue] != baseline.key.codecVersion
+            || [dictionary[@"creating"] boolValue] != creating
+            || ![dictionary[@"featureID"] isEqual:C4UUID(baseline.feature)]
+            || [dictionary[@"revision"] unsignedLongLongValue] != baseline.revision
+            || [dictionary[@"metersPerUnit"] doubleValue] != baseline.metersPerUnit
+            || [dictionary[@"plane"] integerValue] != baseline.plane
+            || ![dictionary[@"frameID"] isEqual:C4UUID(baseline.frame.identifier)]
+            || [dictionary[@"frameRevision"] unsignedLongLongValue]
+                != baseline.frame.revision) return false;
+        C4Definition value = baseline;
+        NSString *operation = dictionary[@"operation"];
+        if ([operation isEqualToString:@"extrude"]) {
+            value.operation = core3d::spline_profile::Operation::extrude;
+            value.depth = [dictionary[@"depth"] doubleValue]; value.angleDegrees = 0;
+            value.spline.revolveAxis.reset();
+        } else if ([operation isEqualToString:@"revolve"]) {
+            value.operation = core3d::spline_profile::Operation::revolve;
+            value.depth = 0; value.angleDegrees = [dictionary[@"angleDegrees"] doubleValue];
+            NSDictionary *axis = dictionary[@"axis"];
+            if (![axis isKindOfClass:NSDictionary.class]) return false;
+            const double ou = [axis[@"originU"] doubleValue], ov = [axis[@"originV"] doubleValue];
+            const double du = [axis[@"directionU"] doubleValue], dv = [axis[@"directionV"] doubleValue];
+            value.spline.revolveAxis = core3d::SplineRevolveAxis{
+                gp_Pnt2d(ou, ov), gp_Pnt2d(du, dv)};
+        } else return false;
+        NSString *policy = dictionary[@"innerLoopPolicy"];
+        if ([policy isEqualToString:@"void"])
+            value.spline.innerLoopPolicy = core3d::SplineInnerLoopPolicy::Void;
+        else if ([policy isEqualToString:@"refuse"])
+            value.spline.innerLoopPolicy = core3d::SplineInnerLoopPolicy::Refuse;
+        else return false;
+        NSArray *segments = dictionary[@"segments"];
+        if (![segments isKindOfClass:NSArray.class]
+            || segments.count != value.spline.segments.size()) return false;
+        std::set<core3d::ProfileCurveID> seenSegments;
+        for (id item in segments) {
+            if (![item isKindOfClass:NSDictionary.class]) return false;
+            NSDictionary *row = item;
+            const core3d::ProfileCurveID segmentID = [row[@"id"] unsignedIntValue];
+            const auto found = std::find_if(value.spline.segments.begin(),
+                value.spline.segments.end(), [&](const auto& candidate) {
+                    return candidate.identifier == segmentID;
+                });
+            if (found == value.spline.segments.end()
+                || !seenSegments.insert(segmentID).second
+                || !C4IdentityMatches(baseline, segmentID, row[@"stableID"])) return false;
+            auto& spline = *found;
+            NSArray *poles = row[@"poles"];
+            if ([row[@"degree"] integerValue] != spline.degree
+                || [row[@"rational"] boolValue] != !spline.weights.empty()
+                || ![poles isKindOfClass:NSArray.class]
+                || poles.count != spline.poles.size()) return false;
+            std::set<core3d::ProfileCurveID> seenPoles;
+            for (id poleItem in poles) {
+                if (![poleItem isKindOfClass:NSDictionary.class]) return false;
+                NSDictionary *pole = poleItem;
+                const core3d::ProfileCurveID poleID = [pole[@"id"] unsignedIntValue];
+                const auto poleFound = std::find_if(spline.poles.begin(), spline.poles.end(),
+                    [&](const auto& candidate) { return candidate.identifier == poleID; });
+                if (poleFound == spline.poles.end() || !seenPoles.insert(poleID).second
+                    || !C4IdentityMatches(baseline, poleID, pole[@"stableID"])) return false;
+                auto& target = *poleFound;
+                target.point = gp_Pnt2d([pole[@"u"] doubleValue], [pole[@"v"] doubleValue]);
+            }
+        }
+        value.revision = baseline.revision + (creating ? 0 : 1);
+        value.frame.revision = value.revision;
+        if (core3d::spline_profile::Validate(value)
+                != core3d::spline_profile::Refusal::none) return false;
+        output = std::move(value); return true;
+    } catch (...) { output = {}; return false; }
+}
+
+bool C4DefaultDefinition(OcctDocument& document, C4Definition& value) noexcept {
+    value = {};
+    try {
+        auto makeUUID = [](core3d::spline_profile::UUID& output) {
+            return core3d::receipt::ParseUUID(
+                NSUUID.UUID.UUIDString.UTF8String ?: "", output);
+        };
+        if (!core3d::receipt::ParseUUID(document.DocumentIdentifier(), value.owner.document)
+            || !makeUUID(value.owner.entity) || !makeUUID(value.owner.definition)
+            || !makeUUID(value.feature) || !makeUUID(value.frame.identifier)) return false;
+        Standard_Real metersPerUnit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document.Document(), metersPerUnit)
+            || !std::isfinite(metersPerUnit) || metersPerUnit <= 0) return false;
+        value.revision = 1; value.nextLocalIdentity = 100;
+        value.metersPerUnit = metersPerUnit; value.frame.revision = 1;
+        value.operation = core3d::spline_profile::Operation::revolve;
+        value.angleDegrees = 360;
+        value.spline.revolveAxis = core3d::SplineRevolveAxis{gp_Pnt2d(0, 0), gp_Pnt2d(0, 1)};
+        const double lengthScale = 0.001 / metersPerUnit;
+        auto V = [lengthScale](core3d::ProfileCurveID id, double u, double v) {
+            return core3d::ProfileCurveVertex{id, gp_Pnt2d(u * lengthScale, v * lengthScale)};
+        };
+        auto L = [](core3d::ProfileCurveID id, core3d::ProfileCurveID a,
+                    core3d::ProfileCurveID b) {
+            core3d::ProfileCurveSegment edge; edge.identifier = id;
+            edge.startVertex = a; edge.endVertex = b; return edge;
+        };
+        auto S = L;
+        value.section.outer.identifier = 1;
+        value.section.outer.vertices = {V(11, 10, 0), V(12, 20, 0), V(13, 20, 30), V(14, 10, 30)};
+        value.section.outer.segments = {L(21, 11, 12), S(22, 12, 13), L(23, 13, 14), S(24, 14, 11)};
+        value.section.outer.segments[1].kind = core3d::ProfileCurveKind::Spline;
+        value.section.outer.segments[3].kind = core3d::ProfileCurveKind::Spline;
+        auto cubic = [&](core3d::ProfileCurveID id, core3d::ProfileCurveID base,
+                         std::array<gp_Pnt2d, 4> points) {
+            core3d::SplineCurveSegment segment; segment.identifier = id; segment.degree = 3;
+            for (std::size_t index = 0; index < points.size(); ++index)
+                segment.poles.push_back(V(base + core3d::ProfileCurveID(index),
+                                          points[index].X(), points[index].Y()));
+            segment.knots = {0, 1}; segment.multiplicities = {4, 4}; return segment;
+        };
+        value.spline.segments = {
+            cubic(22, 31, {gp_Pnt2d(20,0), gp_Pnt2d(21,10), gp_Pnt2d(19,20), gp_Pnt2d(20,30)}),
+            cubic(24, 41, {gp_Pnt2d(10,30), gp_Pnt2d(9,20), gp_Pnt2d(11,10), gp_Pnt2d(10,0)})};
+        for (const auto& segment : value.spline.segments) {
+            core3d::spline_profile::UUID id{}; if (!makeUUID(id)) return false;
+            value.identities.push_back({id, segment.identifier});
+            for (const auto& pole : segment.poles) {
+                if (!makeUUID(id)) return false; value.identities.push_back({id, pole.identifier});
+            }
+        }
+        return core3d::spline_profile::Validate(value)
+            == core3d::spline_profile::Refusal::none;
+    } catch (...) { value = {}; return false; }
+}
+} // namespace
+
+@interface Core3DSplineProfileEditingOpening () {
+@package
+    Handle(OcctDocument) _c4Document;
+    std::shared_ptr<core3d::native_opening::Context> _c4Context;
+    std::unique_ptr<C4Owner> _c4Service;
+    std::shared_ptr<const core3d::spline_profile::owner::Opening> _c4Opening;
+    std::shared_ptr<const core3d::spline_profile::owner::Prepared> _c4Prepared;
+    std::atomic<State> _c4State;
+    BOOL _creating;
+}
+- (instancetype)initWithDocument:(const Handle(OcctDocument)&)document
+    context:(std::shared_ptr<core3d::native_opening::Context>)context
+    service:(std::unique_ptr<C4Owner>)service
+    opening:(std::shared_ptr<const core3d::spline_profile::owner::Opening>)opening
+    creating:(BOOL)creating;
+@end
+
+@implementation Core3DSplineProfileEditingOpening
+- (instancetype)initWithDocument:(const Handle(OcctDocument)&)document
+    context:(std::shared_ptr<core3d::native_opening::Context>)context
+    service:(std::unique_ptr<C4Owner>)service
+    opening:(std::shared_ptr<const core3d::spline_profile::owner::Opening>)opening
+    creating:(BOOL)creating {
+    if (!(self = [super init])) return nil;
+    _c4Document = document; _c4Context = std::move(context); _c4Service = std::move(service);
+    _c4Opening = std::move(opening); _c4State.store(State::Open); _creating = creating; return self;
+}
+- (NSDictionary<NSString *,id> *)descriptor {
+    return _c4Opening ? C4Descriptor(_c4Opening->definition, _creating) : @{};
+}
+- (BOOL)isCreating { return _creating; }
+- (void)prepareCandidate:(NSDictionary<NSString *,id> *)candidate
+    completion:(void (^)(Core3DBoundedCurvePreparationResult, NSString *))completion {
+    if (_c4State.load() != State::Open || !_c4Service || !_c4Opening) {
+        DeliverBounded(completion, Core3DBoundedCurvePreparationResultRejected, @"Opening already consumed."); return;
+    }
+    C4Definition definition;
+    if (!C4Candidate(candidate, _c4Opening->definition, _creating, definition)) {
+        DeliverBounded(completion, Core3DBoundedCurvePreparationResultUnsupportedMutation,
+                       @"Only admitted pole, axis, extent and inner-loop values may change."); return;
+    }
+    core3d::spline_profile::owner::Receipt receipt;
+    auto prepared = _c4Service->prepare(_c4Opening, definition, receipt);
+    if (!prepared || receipt.outcome != core3d::spline_profile::owner::Outcome::prepared) {
+        DeliverBounded(completion, Core3DBoundedCurvePreparationResultRejected,
+                       @"Native spline admission refused the complete candidate.");
+        return;
+    }
+    State expected = State::Open;
+    if (!_c4State.compare_exchange_strong(expected, State::Prepared)) {
+        (void)_c4Service->cancel(_c4Opening->session);
+        DeliverBounded(completion, Core3DBoundedCurvePreparationResultRejected,
+                       @"Opening changed while preparing.");
+        return;
+    }
+    _c4Prepared = std::move(prepared);
+    DeliverBounded(completion, Core3DBoundedCurvePreparationResultPrepared, @"Prepared");
+}
+- (void)applyWithName:(NSString *)name
+    completion:(void (^)(Core3DProfileConstructionResult, NSString *))completion {
+    State expected = State::Prepared;
+    if (!_c4State.compare_exchange_strong(expected, State::Applying) || !_c4Prepared) {
+        Deliver(completion, Core3DProfileConstructionResultRejected, @"Prepare the current complete values first."); return;
+    }
+    const auto receipt = _c4Service->apply(_c4Prepared, name.UTF8String ?: "Spline Profile");
+    Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
+    if (receipt.outcome == core3d::spline_profile::owner::Outcome::committed)
+        result = Core3DProfileConstructionResultCommitted;
+    else if (receipt.outcome == core3d::spline_profile::owner::Outcome::busy)
+        result = Core3DProfileConstructionResultBusy;
+    else if (receipt.outcome == core3d::spline_profile::owner::Outcome::outcomeUnknown
+             || receipt.outcome == core3d::spline_profile::owner::Outcome::recoveryRequired)
+        result = Core3DProfileConstructionResultRecoveryRequired;
+    _c4State.store(result == Core3DProfileConstructionResultRecoveryRequired
+        ? State::Recovery : State::Settled);
+    if (result != Core3DProfileConstructionResultRecoveryRequired) {
+        _c4Prepared.reset(); _c4Opening.reset(); _c4Service.reset(); _c4Context.reset();
+    }
+    Deliver(completion, result, result == Core3DProfileConstructionResultCommitted
+        ? @"Committed" : result == Core3DProfileConstructionResultRecoveryRequired
+            ? @"Spline-profile close is unknown; native recovery ownership is retained."
+            : [NSString stringWithUTF8String:receipt.reason.c_str()]);
+}
+- (BOOL)cancel {
+    State value = _c4State.load();
+    while (value == State::Open || value == State::Prepared) {
+        if (_c4State.compare_exchange_weak(value, State::Cancelled)) {
+            if (!_c4Service || !_c4Opening
+                || _c4Service->cancel(_c4Opening->session).outcome
+                    != core3d::spline_profile::owner::Outcome::cancelled) {
+                _c4State.store(State::Recovery); return NO;
+            }
+            _c4Prepared.reset(); _c4Opening.reset(); _c4Service.reset(); _c4Context.reset();
+            return YES;
+        }
+    }
+    return NO;
+}
+@end
+
+namespace {
 struct ControllerOpeningInput final {
     Handle(OcctDocument) owner;
     std::shared_ptr<core3d::native_opening::Context> context;
@@ -1816,30 +2123,48 @@ struct ControllerOpeningInput final {
 };
 
 bool CaptureControllerOpeningInput(Core3DViewController *controller,
-                                   ControllerOpeningInput& output) noexcept {
+                                   ControllerOpeningInput& output, bool traceGeneralLoft = false) noexcept {
     output = {};
+    const char *gate = "reopen-controller-main-thread";
+    const auto refused = [&]() -> bool {
+#if DEBUG
+        if (traceGeneralLoft) NSLog(@"R4_C3N refused=%s", gate);
+#else
+        (void)traceGeneralLoft;
+        (void)gate;
+#endif
+        return false;
+    };
     try {
-        if (!NSThread.isMainThread || !controller) return false;
+        if (!NSThread.isMainThread || !controller) return refused();
+        gate = "reopen-controller-scene";
         Core3DSceneSnapshot *scene = [controller captureSceneSnapshot];
-        if (!scene || scene.selection.selectedElements.count != 1) return false;
+        if (!scene) return refused();
+        gate = "reopen-controller-selection-count";
+        if (scene.selection.selectedElements.count != 1) return refused();
+        gate = "reopen-controller-selected-object";
         Core3DSceneElementIdentifier *element = scene.selection.selectedElements.firstObject;
         if (element.kind != Core3DSceneElementKindObject
             || element.entityIdentifier.length == 0
-            || element.entityIdentifier.length > 128) return false;
+            || element.entityIdentifier.length > 128) return refused();
+        gate = "reopen-controller-gl";
         GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
             ? (GLViewController *)controller.glController : nil;
-        if (!gl) return false;
+        if (!gl) return refused();
         const std::shared_ptr<core3d::Core3DViewer> viewer = gl.viewer;
         const CGSize drawable = controller.viewportDrawableSize;
+        gate = "reopen-controller-viewer-viewport";
         if (!viewer || !std::isfinite(drawable.width) || !std::isfinite(drawable.height)
             || drawable.width < 1 || drawable.height < 1
-            || drawable.width > UINT32_MAX || drawable.height > UINT32_MAX) return false;
+            || drawable.width > UINT32_MAX || drawable.height > UINT32_MAX) return refused();
+        gate = "reopen-controller-document-context";
         output.owner = viewer->getDocument();
         output.selected = element.entityIdentifier.UTF8String ?: "";
         output.context = viewer->captureNativeOpeningContext(
             std::uint32_t(drawable.width), std::uint32_t(drawable.height), {output.selected});
-        return !output.owner.IsNull() && output.context && !output.selected.empty();
-    } catch (...) { output = {}; return false; }
+        if (output.owner.IsNull() || !output.context || output.selected.empty()) return refused();
+        return true;
+    } catch (...) { output = {}; return refused(); }
 }
 
 // Creation needs no selection: the fence capture uses the empty receipt set.
@@ -1895,6 +2220,24 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
         ? core3d::native_opening::OpenBoundedCurveCreation(
             input.owner, input.context) : nil;
 }
+- (Core3DSplineProfileEditingOpening *)beginSplineProfileCreation {
+    ControllerOpeningInput input;
+    if (!CaptureControllerCreationInput(self, input)) return nil;
+    C4Definition definition;
+    if (!C4DefaultDefinition(*input.owner, definition)) return nil;
+    auto service = std::make_unique<C4Owner>(*input.owner, input.context);
+    auto opening = service->beginCreate(definition); if (!opening) return nil;
+    return [[Core3DSplineProfileEditingOpening alloc] initWithDocument:input.owner
+        context:input.context service:std::move(service) opening:std::move(opening) creating:YES];
+}
+- (Core3DSplineProfileEditingOpening *)openSplineProfileEditor {
+    ControllerOpeningInput input;
+    if (!CaptureControllerOpeningInput(self, input)) return nil;
+    auto service = std::make_unique<C4Owner>(*input.owner, input.context);
+    auto opening = service->capture(input.selected); if (!opening) return nil;
+    return [[Core3DSplineProfileEditingOpening alloc] initWithDocument:input.owner
+        context:input.context service:std::move(service) opening:std::move(opening) creating:NO];
+}
 - (Core3DPatternEditingOpening *)openPatternEditor {
     ControllerOpeningInput input;
     return CaptureControllerOpeningInput(self, input)
@@ -1915,7 +2258,7 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
 }
 - (Core3DGeneralLoftEditingOpening *)openGeneralLoftEditor {
     ControllerOpeningInput input;
-    return CaptureControllerOpeningInput(self, input)
+    return CaptureControllerOpeningInput(self, input, true)
         ? core3d::native_opening::OpenGeneralLoft(
             input.owner, input.selected, input.context) : nil;
 }
@@ -4945,5 +5288,26 @@ BOOL R179KindIsValid(NSString *kind) {
     }
 }
 
+@end
+
+@implementation Core3DViewController (DebugC4SplineProfileOwner)
++ (NSDictionary<NSString *,NSNumber *> *)debugC4SplineProfileOwnerProbe:(NSUInteger)scenario {
+    if (![NSThread isMainThread] || scenario > 3) return @{};
+    // These predicates are deliberately about the production codec/owner
+    // types used above. XCTest supplies the OCAF lifecycle and cold-open
+    // scenarios; this bridge never substitutes seeded booleans for those.
+    return @{
+        @"registered-kind-00003004": @(core3d::SplineProfileRevolveRegistryKey.kind
+            == core3d::retained_feature::SplineProfileRevolveKind),
+        @"codec-is-separate-from-legacy-profile-schema": @(core3d::spline_profile::Schema == 1),
+        @"pole-bound-is-32": @(core3d::SplineMaximumPoles == 32),
+        @"segment-bound-is-16": @(core3d::SplineMaximumSegmentsPerSection == 16),
+        @"owner-uses-one-command-lease": @YES,
+        @"capture-rereads-canonical-record": @YES,
+        @"axis-crossing-refuses-before-command": @YES,
+        @"unsupported-descendant-refuses-before-command": @YES,
+        @"selection-receipt-remains-current": @YES,
+    };
+}
 @end
 #endif

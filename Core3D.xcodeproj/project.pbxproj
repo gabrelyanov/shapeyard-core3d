@@ -11,6 +11,9 @@
 		D3C100010000000000000001 /* PathArrayNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */; };
 		D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */; };
 		E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E17900020000000000000002 /* BoundedCurveOwner.mm */; };
+		C4A000010000000000000001 /* SplineProfileOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C4A000110000000000000001 /* SplineProfileOwner.mm */; };
+		C4A000020000000000000002 /* SplineProfileOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C4A000120000000000000002 /* SplineProfileOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C4A000030000000000000003 /* SplineProfilePersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C4A000130000000000000003 /* SplineProfilePersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E18A00010000000000000001 /* Core3DNativeOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E18A00020000000000000002 /* Core3DNativeOpenings.mm */; };
 		E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26800020000000000000002 /* Core3DFinishingOpenings.mm */; };
 		E18A00030000000000000003 /* NativeOpeningFactories.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E18A00040000000000000004 /* NativeOpeningFactories.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -272,6 +275,9 @@
 		D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PathArrayNativeCollaborators.mm; sourceTree = "<group>"; };
 		D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FeaturePatternNativeCollaborators.mm; sourceTree = "<group>"; };
 		E17900020000000000000002 /* BoundedCurveOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = BoundedCurveOwner.mm; sourceTree = "<group>"; };
+		C4A000110000000000000001 /* SplineProfileOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SplineProfileOwner.mm; sourceTree = "<group>"; };
+		C4A000120000000000000002 /* SplineProfileOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SplineProfileOwner.hxx; sourceTree = "<group>"; };
+		C4A000130000000000000003 /* SplineProfilePersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SplineProfilePersistence.hxx; sourceTree = "<group>"; };
 		E18A00020000000000000002 /* Core3DNativeOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeOpenings.mm; sourceTree = "<group>"; };
 		E26800020000000000000002 /* Core3DFinishingOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFinishingOpenings.mm; sourceTree = "<group>"; };
 		E18A00040000000000000004 /* NativeOpeningFactories.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningFactories.hxx; sourceTree = "<group>"; };
@@ -797,6 +803,9 @@
 				D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */,
 				D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */,
 				E17900020000000000000002 /* BoundedCurveOwner.mm */,
+				C4A000110000000000000001 /* SplineProfileOwner.mm */,
+				C4A000120000000000000002 /* SplineProfileOwner.hxx */,
+				C4A000130000000000000003 /* SplineProfilePersistence.hxx */,
 				C03D91020000000000000001 /* Core3DQueuedAssetInput.h */,
 				C03D91020000000000000002 /* Core3DQueuedAssetInput.mm */,
 				C03D91020000000000000003 /* Core3DQueuedAssetRequest.h */,
@@ -1134,6 +1143,8 @@
 				C3N269010000000000000001 /* GeneralLoftPersistence.hxx in Headers */,
 				C3N269020000000000000002 /* GeneralLoftOwner.hxx in Headers */,
 				C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */,
+				C4A000020000000000000002 /* SplineProfileOwner.hxx in Headers */,
+				C4A000030000000000000003 /* SplineProfilePersistence.hxx in Headers */,
 				E26600010000000000000001 /* RetainedFinishingAttribute.hxx in Headers */,
 				E26600020000000000000001 /* RetainedFinishingBinaryDriver.hxx in Headers */,
 				E26600040000000000000001 /* RetainedFinishingRecord.hxx in Headers */,
@@ -1324,6 +1335,7 @@
 				3A3275384C537C4F2CC799D2 /* NativeModelingTombstone.mm in Sources */,
 				E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */,
 				C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */,
+				C4A000010000000000000001 /* SplineProfileOwner.mm in Sources */,
 				E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */,
 				322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */,
 				3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */,

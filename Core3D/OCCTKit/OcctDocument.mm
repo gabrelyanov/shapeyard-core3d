@@ -144,6 +144,7 @@ struct Cut475Scope {
 #include "SpatialSweepG0Transaction.hxx"
 #include "SpatialSweepEditor.hxx"
 #include "BoundedCurveBinaryDriver.hxx"
+#include "SplineProfilePersistence.hxx"
 #include "FeaturePatternChildBinaryDriver.hxx"
 #include "FeaturePatternBaselineBinaryDriver.hxx"
 #include <BRepCheck_Analyzer.hxx>
@@ -2900,6 +2901,14 @@ public:
                     && !core3d::general_loft::persistence::ReadAll(
                         Handle(TDocStd_Document)::DownCast(theDocument), myGeneralLoftRecords))))
                 rejectTypes();
+            if (myReaderStatus == PCDM_RS_OK && mySplineProfileBudget) {
+                std::vector<core3d::spline_profile::Record> records;
+                if (mySplineProfileBudget->rejected
+                    || (mySplineProfileBudget->records
+                        && !core3d::spline_profile::ReadAll(
+                            Handle(TDocStd_Document)::DownCast(theDocument), records)))
+                    rejectTypes();
+            }
             if(myReaderStatus==PCDM_RS_OK&&myRetainedFinishingBudget
                 &&(myRetainedFinishingBudget->rejected||(myRetainedFinishingBudget->records
                     &&!Core3DValidateRetainedFinishingDocument(
@@ -3022,6 +3031,8 @@ public:
             aTable,theMessageDriver,myBoundedCurveBudget,RejectSafeBinaryRead);
         core3d::general_loft::persistence::Register(
             aTable, theMessageDriver, myGeneralLoftBudget, RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::spline_profile::Register(
+            aTable, theMessageDriver, mySplineProfileBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::retained_finishing::Register(
             aTable,theMessageDriver,myRetainedFinishingBudget,RejectSafeBinaryRead);
         core3d::feature_pattern_child::Register(
@@ -3060,6 +3071,7 @@ private:
         if (myBoundedCurveBudget) myBoundedCurveBudget->reset();
         if (myGeneralLoftBudget) myGeneralLoftBudget->reset();
         myGeneralLoftRecords.clear();
+        if (mySplineProfileBudget) mySplineProfileBudget->reset();
         if (myRetainedFinishingBudget) myRetainedFinishingBudget->reset();
         if (myFeaturePatternChildBudget) *myFeaturePatternChildBudget = {};
         if (myFeaturePatternBaselineBudget) myFeaturePatternBaselineBudget->reset();
@@ -3083,6 +3095,8 @@ private:
     std::shared_ptr<core3d::general_loft::persistence::ReadBudget> myGeneralLoftBudget=
         std::make_shared<core3d::general_loft::persistence::ReadBudget>();
     std::vector<core3d::general_loft::persistence::Record> myGeneralLoftRecords;
+    std::shared_ptr<core3d::spline_profile::ReadBudget> mySplineProfileBudget=
+        std::make_shared<core3d::spline_profile::ReadBudget>();
     std::shared_ptr<core3d::retained_finishing::ReadBudget> myRetainedFinishingBudget=
         std::make_shared<core3d::retained_finishing::ReadBudget>();
     std::shared_ptr<core3d::feature_pattern_child::Budget> myFeaturePatternChildBudget=
@@ -15501,6 +15515,15 @@ Standard_Boolean OcctGeneralLoftCapture::IsEqual(
 }
 
 namespace {
+bool RefuseGeneralLoftCapture(const char *gate) noexcept {
+#if DEBUG
+    NSLog(@"R4_C3N refused=%s", gate);
+#else
+    (void)gate;
+#endif
+    return false;
+}
+
 bool GeneralLoftIdentityMatches(const core3d::general_loft::Definition& definition,
                                 const std::string& document, const std::string& entity,
                                 const std::string& ownerDefinition) noexcept {
@@ -15517,40 +15540,158 @@ bool CompleteGeneralLoftCapture(const Handle(TDocStd_Document)& document,
     output = {};
     try {
         using namespace core3d::general_loft;
-        if (document.IsNull() || document->GetData().IsNull() || !hinted.value) return false;
+        if (document.IsNull() || document->GetData().IsNull() || !hinted.value)
+            return RefuseGeneralLoftCapture("capture-document-or-hint");
         std::vector<persistence::Record> records;
-        if (!persistence::ReadAll(document, records)) return false;
+        if (!persistence::ReadAll(document, records))
+            return RefuseGeneralLoftCapture("capture-complete-read-all");
         const persistence::Record* record = nullptr;
         for (const auto& value : records)
             if (value.value->definition.owner == hinted.value->definition.owner) {
-                if (record) return false; record = &value;
+                if (record) return RefuseGeneralLoftCapture("capture-duplicate-owner"); record = &value;
             }
         if (!record || record->owner.IsNull() || record->label.IsNull()
             || record->owner.Data() != document->GetData()
-            || !record->label.Father().IsEqual(record->owner)) return false;
+            || !record->label.Father().IsEqual(record->owner))
+            return RefuseGeneralLoftCapture("capture-owner-label-binding");
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
         if (shapes.IsNull() || !XCAFDoc_ShapeTool::IsFree(record->owner)
             || !XCAFDoc_ShapeTool::IsSimpleShape(record->owner)
-            || XCAFDoc_ShapeTool::IsAssembly(record->owner)) return false;
+            || XCAFDoc_ShapeTool::IsAssembly(record->owner))
+            return RefuseGeneralLoftCapture("capture-free-simple-owner");
         const TopoDS_Shape current = XCAFDoc_ShapeTool::GetShape(record->owner);
         if (current.IsNull() || current.ShapeType() != TopAbs_SOLID
-            || !current.IsEqual(record->current)) return false;
+            || !current.IsEqual(record->current))
+            return RefuseGeneralLoftCapture("capture-current-solid-binding");
         std::atomic_bool cancelled{false};
         const AdmittedSolid rebuilt = BuildAndProveDetached(record->value->definition, cancelled);
         std::string actual, expected;
-        if (!rebuilt.admitted()
-            || !core3d::retained_part_boolean::ExactShapeBytes(current, actual)
-            || !core3d::retained_part_boolean::ExactShapeBytes(rebuilt.solid, expected)
-            || actual != expected) return false;
+        if (!rebuilt.admitted()) {
+#if DEBUG
+            NSLog(@"R4_C3N capture-proof=%u", unsigned(rebuilt.proof.status));
+#endif
+            return RefuseGeneralLoftCapture("capture-rebuild-proof");
+        }
+        if (!core3d::retained_part_boolean::ExactShapeBytes(current, actual))
+            return RefuseGeneralLoftCapture("capture-actual-shape-serialization");
+        if (!core3d::retained_part_boolean::ExactShapeBytes(rebuilt.solid, expected))
+            return RefuseGeneralLoftCapture("capture-rebuilt-shape-serialization");
+        if (actual != expected) {
+#if DEBUG
+            struct ByteDifferenceRange { std::size_t start, end; };
+            std::vector<ByteDifferenceRange> ranges;
+            std::size_t differingBytes = 0;
+            const std::size_t comparedSize = std::max(actual.size(), expected.size());
+            bool inRange = false;
+            bool recordingRange = false;
+            for (std::size_t offset = 0; offset < comparedSize; ++offset) {
+                const bool differs = offset >= actual.size() || offset >= expected.size()
+                    || actual[offset] != expected[offset];
+                if (differs) {
+                    ++differingBytes;
+                    if (!inRange) {
+                        recordingRange = ranges.size() < 8;
+                        if (recordingRange) ranges.push_back({offset, offset});
+                    } else if (recordingRange) {
+                        ranges.back().end = offset;
+                    }
+                    inRange = true;
+                } else {
+                    inRange = false;
+                    recordingRange = false;
+                }
+            }
+            const auto escapedWindow = [](const std::string& bytes,
+                                          std::size_t rangeStart,
+                                          std::size_t rangeEnd) {
+                if (rangeStart >= bytes.size()) return std::string("<outside-buffer>");
+                std::size_t begin = rangeStart;
+                while (begin > 0 && bytes[begin - 1] != '\n') --begin;
+                std::size_t end = std::min(rangeEnd + 1, bytes.size());
+                while (end < bytes.size() && bytes[end] != '\n') ++end;
+                const std::size_t cappedEnd = std::min(end, begin + std::size_t(200));
+                static const char hex[] = "0123456789ABCDEF";
+                std::string result;
+                result.reserve((cappedEnd - begin) * 4 + 16);
+                for (std::size_t offset = begin; offset < cappedEnd; ++offset) {
+                    const unsigned char byte = static_cast<unsigned char>(bytes[offset]);
+                    if (byte >= 0x20 && byte <= 0x7e) {
+                        result.push_back(static_cast<char>(byte));
+                    } else {
+                        result += "\\x";
+                        result.push_back(hex[byte >> 4]);
+                        result.push_back(hex[byte & 0x0f]);
+                    }
+                }
+                if (cappedEnd < end) result += "<truncated>";
+                return result;
+            };
+            const auto precedingSection = [&](const std::string& bytes, std::size_t offset) {
+                static const char* const names[] = {
+                    "Locations", "Curve2ds", "Curves", "Polygon3D",
+                    "PolygonOnTriangulations", "Surfaces", "Triangulations", "TShapes"
+                };
+                std::size_t lineStart = 0;
+                std::size_t matchedStart = std::string::npos;
+                std::size_t matchedEnd = 0;
+                const std::size_t limit = std::min(offset, bytes.size());
+                while (lineStart < limit) {
+                    std::size_t lineEnd = bytes.find('\n', lineStart);
+                    if (lineEnd == std::string::npos || lineEnd > limit) lineEnd = limit;
+                    std::size_t textStart = lineStart;
+                    while (textStart < lineEnd
+                        && (bytes[textStart] == ' ' || bytes[textStart] == '\t')) ++textStart;
+                    for (const char* name : names) {
+                        const std::size_t length = std::strlen(name);
+                        if (lineEnd - textStart >= length
+                            && bytes.compare(textStart, length, name) == 0
+                            && (textStart + length == lineEnd
+                                || bytes[textStart + length] == ' '
+                                || bytes[textStart + length] == '\t')) {
+                            matchedStart = lineStart;
+                            matchedEnd = lineEnd;
+                            break;
+                        }
+                    }
+                    if (lineEnd == limit) break;
+                    lineStart = lineEnd + 1;
+                }
+                if (matchedStart == std::string::npos) return std::string("<none>");
+                return escapedWindow(bytes, matchedStart, matchedEnd ? matchedEnd - 1 : matchedEnd);
+            };
+            std::string rangeSummary;
+            for (std::size_t index = 0; index < ranges.size(); ++index) {
+                if (index) rangeSummary += ",";
+                rangeSummary += std::to_string(ranges[index].start) + ".."
+                    + std::to_string(ranges[index].end);
+            }
+            if (ranges.empty()) rangeSummary = "<none>";
+            NSLog(@"R4_C3N bytes actual=%zu expected=%zu differing=%zu ranges=%s",
+                  actual.size(), expected.size(), differingBytes, rangeSummary.c_str());
+            for (std::size_t index = 0; index < std::min(ranges.size(), std::size_t(3)); ++index) {
+                const auto& range = ranges[index];
+                const std::string actualLine = escapedWindow(actual, range.start, range.end);
+                const std::string expectedLine = escapedWindow(expected, range.start, range.end);
+                const std::string actualSection = precedingSection(actual, range.start);
+                const std::string expectedSection = precedingSection(expected, range.start);
+                NSLog(@"R4_C3N bytes range=%zu actual-line=%s", index, actualLine.c_str());
+                NSLog(@"R4_C3N bytes range=%zu expected-line=%s", index, expectedLine.c_str());
+                NSLog(@"R4_C3N bytes range=%zu actual-section=%s", index, actualSection.c_str());
+                NSLog(@"R4_C3N bytes range=%zu expected-section=%s", index, expectedSection.c_str());
+            }
+#endif
+            return RefuseGeneralLoftCapture("capture-exact-shape-bytes");
+        }
         OcctExactLabelReceipt exact;
-        if (!owner.CaptureObjectVisibilityStateForLabel(record->owner, exact.visibility)
-            || !CaptureWholeObjectScalarAppearance(document, record->owner, exact.appearance))
-            return false;
+        if (!owner.CaptureObjectVisibilityStateForLabel(record->owner, exact.visibility))
+            return RefuseGeneralLoftCapture("capture-visibility");
+        if (!CaptureWholeObjectScalarAppearance(document, record->owner, exact.appearance))
+            return RefuseGeneralLoftCapture("capture-appearance");
         exact.documentData = document->GetData(); exact.documentIdentifier = documentID;
         output.documentData = document->GetData(); output.documentIdentifier = documentID;
         output.ownerReceipt = std::move(exact); output.record = *record;
         output.solid = TopoDS::Solid(current); return true;
-    } catch (...) { output = {}; return false; }
+    } catch (...) { output = {}; return RefuseGeneralLoftCapture("capture-complete-exception"); }
 }
 } // namespace
 
@@ -15580,17 +15721,20 @@ Standard_Boolean OcctDocument::CaptureGeneralLoftExact(
     try {
         if (![NSThread isMainThread] || myOcafDoc.IsNull()
             || context.openingFence().document() != myOcafDoc
-            || context.openingFence().data() != myOcafDoc->GetData()) return Standard_False;
+            || context.openingFence().data() != myOcafDoc->GetData())
+            return RefuseGeneralLoftCapture("capture-context-document");
         std::vector<core3d::general_loft::persistence::Record> records;
-        if (!core3d::general_loft::persistence::ReadAll(myOcafDoc, records)) return Standard_False;
+        if (!core3d::general_loft::persistence::ReadAll(myOcafDoc, records))
+            return RefuseGeneralLoftCapture("capture-read-all");
         const core3d::general_loft::persistence::Record* match = nullptr;
         for (const auto& record : records)
             if (EntityIdentifierForLabel(record.owner) == entityIdentifier) {
-                if (match) return Standard_False; match = &record;
+                if (match) return RefuseGeneralLoftCapture("capture-duplicate-entity"); match = &record;
             }
-        return match && CompleteGeneralLoftCapture(
+        if (!match) return RefuseGeneralLoftCapture("capture-entity-record-missing");
+        return CompleteGeneralLoftCapture(
             myOcafDoc, DocumentIdentifier(), *match, *this, capture);
-    } catch (...) { capture = {}; return Standard_False; }
+    } catch (...) { capture = {}; return RefuseGeneralLoftCapture("capture-lookup-exception"); }
 }
 
 Standard_Boolean OcctDocument::HasUnsupportedGeneralLoftDependent(
@@ -15671,6 +15815,182 @@ Standard_Boolean OcctDocument::StageGeneralLoftReplacement(
         shapes->SetShape(current.record.owner, admitted.solid);
         TNaming_Builder(current.record.label).Select(admitted.solid, admitted.solid);
         return ReadGeneralLoftExact(definition.owner, capture)
+            && capture.record.owner.IsEqual(opening.record.owner)
+            && capture.record.label.IsEqual(opening.record.label);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctSplineProfileCapture::IsEqual(
+    const OcctSplineProfileCapture& other) const noexcept {
+    try {
+        return !documentData.IsNull() && documentData == other.documentData
+            && documentIdentifier == other.documentIdentifier
+            && ownerReceipt.IsEqual(other.ownerReceipt)
+            && !record.label.IsNull() && record.label.IsEqual(other.record.label)
+            && !record.owner.IsNull() && record.owner.IsEqual(other.record.owner)
+            && !record.attribute.IsNull() && !other.record.attribute.IsNull()
+            && record.attribute->bytes() == other.record.attribute->bytes()
+            && !solid.IsNull() && solid.IsEqual(other.solid);
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+bool CompleteSplineProfileCapture(const Handle(TDocStd_Document)& document,
+    const core3d::spline_profile::Record& hint, const OcctDocument& owner,
+    OcctSplineProfileCapture& output) noexcept {
+    output = {};
+    try {
+        if (document.IsNull() || hint.owner.IsNull()) return false;
+        std::vector<core3d::spline_profile::Record> records;
+        if (!core3d::spline_profile::ReadAll(document, records)) return false;
+        const core3d::spline_profile::Record* exact = nullptr;
+        for (const auto& record : records) {
+            if (record.attribute->definition().owner
+                    == hint.attribute->definition().owner) {
+                if (exact) return false;
+                exact = &record;
+            }
+        }
+        if (!exact || exact->owner.IsNull() || !exact->label.Father().IsEqual(exact->owner)
+            || !XCAFDoc_ShapeTool::IsFree(exact->owner)
+            || XCAFDoc_ShapeTool::GetShape(exact->owner).ShapeType() != TopAbs_SOLID)
+            return false;
+        core3d::spline_profile::DetachedSolid rebuilt;
+        if (!core3d::spline_profile::Build(exact->attribute->definition(), rebuilt)
+            || !PlainProfileRebuildCorresponds(rebuilt.solid, exact->shape)) return false;
+        OcctExactLabelReceipt receipt;
+        if (!owner.CaptureObjectVisibilityStateForLabel(exact->owner, receipt.visibility)
+            || !CaptureWholeObjectScalarAppearance(document, exact->owner,
+                                                    receipt.appearance)) return false;
+        receipt.documentData = document->GetData();
+        receipt.documentIdentifier = owner.DocumentIdentifier();
+        OcctSplineProfileCapture captured;
+        captured.documentData = document->GetData();
+        captured.documentIdentifier = receipt.documentIdentifier;
+        captured.ownerReceipt = std::move(receipt);
+        captured.record = *exact;
+        captured.definition = exact->attribute->definition();
+        captured.solid = TopoDS::Solid(exact->shape);
+        output = std::move(captured); return true;
+    } catch (...) { output = {}; return false; }
+}
+}
+
+Standard_Boolean OcctDocument::ReadSplineProfileExact(
+    const core3d::retained_recipe::OwnerKey& owner,
+    OcctSplineProfileCapture& capture) const noexcept {
+    capture = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::retained_recipe::Valid(owner)) return Standard_False;
+        std::vector<core3d::spline_profile::Record> records;
+        if (!core3d::spline_profile::ReadAll(myOcafDoc, records)) return Standard_False;
+        const core3d::spline_profile::Record* match = nullptr;
+        for (const auto& record : records)
+            if (record.attribute->definition().owner == owner) {
+                if (match) return Standard_False;
+                match = &record;
+            }
+        return match && CompleteSplineProfileCapture(myOcafDoc, *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::CaptureSplineProfileExact(
+    const std::string& entityIdentifier,
+    const core3d::native_opening::Context& context,
+    OcctSplineProfileCapture& capture) const noexcept {
+    capture = {};
+    try {
+        const auto& fence = context.openingFence();
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::profile::IsIdentifier(entityIdentifier)
+            || fence.document() != myOcafDoc || fence.data() != myOcafDoc->GetData())
+            return Standard_False;
+        std::vector<core3d::spline_profile::Record> records;
+        if (!core3d::spline_profile::ReadAll(myOcafDoc, records)) return Standard_False;
+        const core3d::spline_profile::Record* match = nullptr;
+        for (const auto& record : records)
+            if (EntityIdentifierForLabel(record.owner) == entityIdentifier) {
+                if (match) return Standard_False;
+                match = &record;
+            }
+        return match && CompleteSplineProfileCapture(myOcafDoc, *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageSplineProfileCreate(
+    core3d::native_opening::CommandLease& lease,
+    const OcctIssuedLabelIdentity& identity,
+    const core3d::spline_profile::Definition& definition,
+    const core3d::spline_profile::DetachedSolid& detached,
+    const std::string& requestedName, OcctSplineProfileCapture& capture) noexcept {
+    capture = {};
+    try {
+        const auto reservation = myExactIdentityReservations.find(identity.reservation_);
+        std::vector<std::uint8_t> canonical;
+        const TCollection_ExtendedString name(requestedName.c_str(), Standard_True);
+        if (!ExactLeaseOwns(myOcafDoc, lease)
+            || reservation == myExactIdentityReservations.end()
+            || reservation->second.first != identity.entityIdentifier_
+            || reservation->second.second != identity.definitionIdentifier_
+            || core3d::retained_solid::UUIDText(definition.owner.document) != DocumentIdentifier()
+            || core3d::retained_solid::UUIDText(definition.owner.entity) != identity.entityIdentifier_
+            || core3d::retained_solid::UUIDText(definition.owner.definition) != identity.definitionIdentifier_
+            || !core3d::spline_profile::Encode(definition, canonical)
+            || canonical != detached.canonical || detached.solid.IsNull()
+            || !OcctObjectNameIsValid(name)) return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        const TDF_Label owner = shapes->NewShape();
+        shapes->SetShape(owner, detached.solid);
+        TDataStd_AsciiString::Set(owner, EntityIdentifierAttributeID(),
+            TCollection_AsciiString(identity.entityIdentifier_.c_str()));
+        TDataStd_AsciiString::Set(owner, DefinitionIdentifierAttributeID(),
+            TCollection_AsciiString(identity.definitionIdentifier_.c_str()));
+        if (!SetGeometryRepresentationForLabel(owner, OcctGeometryRepresentation::BRep))
+            return Standard_False;
+        TDataStd_Name::Set(owner, name);
+        const TDF_Label record = owner.FindChild(core3d::spline_profile::RecordTag, Standard_True);
+        if (record.HasAttribute()) return Standard_False;
+        Handle(core3d::spline_profile::Attribute) attribute =
+            new core3d::spline_profile::Attribute();
+        attribute->definition_ = definition; attribute->bytes_ = canonical;
+        record.AddAttribute(attribute); TNaming_Builder(record).Select(detached.solid, detached.solid);
+        if (!ReadSplineProfileExact(definition.owner, capture)
+            || !capture.record.owner.IsEqual(owner)
+            || !capture.record.label.IsEqual(record)) return Standard_False;
+        myExactIdentityReservations.erase(reservation);
+        return Standard_True;
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageSplineProfileReplacement(
+    core3d::native_opening::CommandLease& lease,
+    const OcctSplineProfileCapture& opening,
+    const core3d::spline_profile::Definition& definition,
+    const core3d::spline_profile::DetachedSolid& detached,
+    OcctSplineProfileCapture& capture) noexcept {
+    capture = {};
+    try {
+        OcctSplineProfileCapture current; std::vector<std::uint8_t> canonical;
+        if (!ExactLeaseOwns(myOcafDoc, lease)
+            || !ReadSplineProfileExact(opening.definition.owner, current)
+            || !opening.IsEqual(current)
+            || !(definition.owner == opening.definition.owner)
+            || definition.feature != opening.definition.feature
+            || definition.revision != opening.definition.revision + 1
+            || !core3d::spline_profile::Encode(definition, canonical)
+            || canonical != detached.canonical || detached.solid.IsNull())
+            return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        Handle(core3d::spline_profile::Attribute) attribute;
+        if (shapes.IsNull() || !current.record.label.FindAttribute(
+                core3d::spline_profile::AttributeID(), attribute) || attribute.IsNull())
+            return Standard_False;
+        attribute->Backup(); attribute->definition_ = definition; attribute->bytes_ = canonical;
+        shapes->SetShape(current.record.owner, detached.solid);
+        TNaming_Builder(current.record.label).Select(detached.solid, detached.solid);
+        return ReadSplineProfileExact(definition.owner, capture)
             && capture.record.owner.IsEqual(opening.record.owner)
             && capture.record.label.IsEqual(opening.record.label);
     } catch (...) { capture = {}; return Standard_False; }

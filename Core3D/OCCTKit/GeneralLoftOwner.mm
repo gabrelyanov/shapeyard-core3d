@@ -196,20 +196,31 @@ std::shared_ptr<const Opening> OcafOwner::beginCreation(
 
 std::shared_ptr<const Opening> OcafOwner::capture(
     const std::string& entityIdentifier, const SceneFence& scene) noexcept {
+    const char *gate = "reopen-owner-bound-scene";
+    const auto refused = [&]() -> std::shared_ptr<const Opening> {
+#if DEBUG
+        NSLog(@"R4_C3N refused=%s", gate);
+#else
+        (void)gate;
+#endif
+        return {};
+    };
     if (![NSThread isMainThread] || !state_ || !state_->bound()
         || !SameScene(scene, state_->context->openingFence())
-        || state_->nextSession == UINT64_MAX) return {};
+        || state_->nextSession == UINT64_MAX) return refused();
     try {
+        gate = "reopen-owner-document-capture";
         OcctGeneralLoftCapture exact;
         if (!state_->document->CaptureGeneralLoftExact(
-                entityIdentifier, *state_->context, exact)) return {};
+                entityIdentifier, *state_->context, exact)) return refused();
+        gate = "reopen-owner-session-publication";
         auto opening = std::make_shared<Opening>();
         opening->scene = scene; opening->definition = exact.record.value->definition;
         opening->session = ++state_->nextSession;
         state_->sessions.emplace(opening->session,
             State::Session{opening, {}, std::move(exact)});
         return opening;
-    } catch (...) { return {}; }
+    } catch (...) { return refused(); }
 }
 
 std::shared_ptr<const Prepared> OcafOwner::prepare(
@@ -310,6 +321,16 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared) noexce
                 || !s->second.exact.IsEqual(current))
                 return Refusal(scene, Outcome::staleDefinition, "opening-changed");
         }
+        // OCAF readback alone cannot publish a renderable/selectable solid.
+        // Keep the affected identity native and retain the same plan if close
+        // or viewer publication is unproven; never retry the command.
+        native_opening::CommittedEditPublication publication;
+        if (prepared->opening.creating) {
+            publication.created.push_back({s->second.issued.EntityIdentifier(), {}});
+        } else {
+            publication.replaced.push_back({retained_solid::UUIDText(
+                s->second.exact.record.value->definition.owner.entity), s->second.exact.solid});
+        }
         const int undoBefore = state_->document->Document()->GetAvailableUndos();
         auto lease = state_->context->beginCommandLease(
             state_->context->openingFence(), FenceWidth, FenceHeight);
@@ -326,12 +347,17 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared) noexce
             return Refusal(scene, aborted ? Outcome::refused : Outcome::recoveryRequired,
                            aborted ? "staging-refused" : "abort-unknown");
         }
-        if (!lease->commit()) return Refusal(scene, Outcome::outcomeUnknown, "close-unknown");
+        if (!lease->commit()) {
+            state_->context->retainUnprovenEdit(publication);
+            return Refusal(scene, Outcome::outcomeUnknown, "close-unknown");
+        }
         OcctGeneralLoftCapture read;
         const int historyDelta = state_->document->Document()->GetAvailableUndos() - undoBefore;
         if (historyDelta != 1 || !state_->document->ReadGeneralLoftExact(
                 prepared->candidate.owner, read) || !staged.IsEqual(read))
             return Refusal(scene, Outcome::outcomeUnknown, "post-close-unreadable");
+        if (!state_->context->publishCommittedEdit(publication))
+            return Refusal(scene, Outcome::recoveryRequired, "publication-unproven");
         Receipt receipt; receipt.outcome = Outcome::committed; receipt.reason = "committed";
         receipt.scene = scene; receipt.definition = prepared->candidate;
         receipt.session = prepared->opening.session; receipt.preparation = prepared->preparation;

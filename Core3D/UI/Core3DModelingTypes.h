@@ -27,6 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 //! descriptive projections only; authority remains in the native object.
 @class Core3DBoundedCurveEditingOpening;
 @class Core3DBoundedCurveCreationOpening;
+@class Core3DSplineProfileEditingOpening;
 @class Core3DPatternEditingOpening;
 @class Core3DPathArrayEditingOpening;
 @class Core3DFeaturePatternEditingOpening;
@@ -105,6 +106,25 @@ __attribute__((objc_subclassing_restricted))
 - (void)applyWithCompletion:
     (void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
     NS_SWIFT_NAME(apply(completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Complete C4 create/edit opening. The descriptor carries stable UUIDs and
+//! source values only; this opaque object retains the current OCAF authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSplineProfileEditingOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly,getter=isCreating) BOOL creating;
+- (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
+    completion:(void (^)(Core3DBoundedCurvePreparationResult result,
+                          NSString *detail))completion
+    NS_SWIFT_NAME(prepare(candidate:completion:));
+- (void)applyWithName:(NSString *)name
+    completion:(void (^)(Core3DProfileConstructionResult result,
+                          NSString *detail))completion
+    NS_SWIFT_NAME(apply(name:completion:));
 - (BOOL)cancel;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

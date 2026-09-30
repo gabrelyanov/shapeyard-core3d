@@ -30,6 +30,7 @@
 #include "BoundedCurveAttribute.hxx"
 #include "BoundedCurveBuild.hxx"
 #include "GeneralLoftPersistence.hxx"
+#include "SplineProfilePersistence.hxx"
 #include "FeaturePatternChildAttribute.hxx"
 #include "RetainedFinishingRecord.hxx"
 
@@ -339,6 +340,19 @@ struct OcctGeneralLoftCapture {
     TopoDS_Solid solid;
     Standard_EXPORT Standard_Boolean IsEqual(
         const OcctGeneralLoftCapture& other) const noexcept;
+};
+
+//! Exact C4 owner + sidecar source record. The BRep is checked against an
+//! independent rebuild before this receipt can cross into an editor opening.
+struct OcctSplineProfileCapture {
+    Handle(TDF_Data) documentData;
+    std::string documentIdentifier;
+    OcctExactLabelReceipt ownerReceipt;
+    core3d::spline_profile::Record record;
+    core3d::spline_profile::Definition definition;
+    TopoDS_Solid solid;
+    Standard_EXPORT Standard_Boolean IsEqual(
+        const OcctSplineProfileCapture& other) const noexcept;
 };
 
 //! A bounded nonempty Unicode object name. Display names are never identity.
@@ -1152,6 +1166,26 @@ public:
         const core3d::general_loft::Definition& definition,
         const core3d::general_loft::AdmittedSolid& admitted,
         OcctGeneralLoftCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean CaptureSplineProfileExact(
+        const std::string& entityIdentifier,
+        const core3d::native_opening::Context& context,
+        OcctSplineProfileCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadSplineProfileExact(
+        const core3d::retained_recipe::OwnerKey& owner,
+        OcctSplineProfileCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean StageSplineProfileCreate(
+        core3d::native_opening::CommandLease& lease,
+        const OcctIssuedLabelIdentity& identity,
+        const core3d::spline_profile::Definition& definition,
+        const core3d::spline_profile::DetachedSolid& detached,
+        const std::string& requestedName,
+        OcctSplineProfileCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean StageSplineProfileReplacement(
+        core3d::native_opening::CommandLease& lease,
+        const OcctSplineProfileCapture& opening,
+        const core3d::spline_profile::Definition& definition,
+        const core3d::spline_profile::DetachedSolid& detached,
+        OcctSplineProfileCapture& capture) noexcept;
     //! Stage only the name in the caller's open command; verify exact readback
     //! and unchanged geometry/identity/transform. Never commit or notify here.
     Standard_EXPORT Standard_Boolean SetObjectNameForLabel(
