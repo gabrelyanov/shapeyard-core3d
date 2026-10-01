@@ -4936,13 +4936,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>());
 }
 
 #if DEBUG
@@ -17583,6 +17583,14 @@ Standard_Boolean OcctDocument::undo() {
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
                 core3d::debug::LiveTransactionObservation::Kind::UndoCompleted, myOcafDoc);
+            // R179/D249 passive census after a successful Undo. Diagnostics
+            // only; failures here must not affect the history result.
+            try {
+                const std::string census =
+                    core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
+                std::fprintf(stderr, "R179_LOFT_CENSUS phase=undo %s\n",
+                             census.c_str());
+            } catch (...) {}
 #endif
             NotifyChanges();
 			return Standard_True;
@@ -17604,6 +17612,14 @@ Standard_Boolean OcctDocument::redo() {
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
                 core3d::debug::LiveTransactionObservation::Kind::RedoCompleted, myOcafDoc);
+            // R179/D249 passive census after a successful Redo. Diagnostics
+            // only; failures here must not affect the history result.
+            try {
+                const std::string census =
+                    core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
+                std::fprintf(stderr, "R179_LOFT_CENSUS phase=redo %s\n",
+                             census.c_str());
+            } catch (...) {}
 #endif
 			NotifyChanges();
 			return Standard_True;
@@ -17645,6 +17661,16 @@ std::string OcctDocument::save(
     }
 
     try {
+#if DEBUG
+        // R179/D249 passive census immediately before SaveAs. Diagnostics
+        // only; failures here must not affect the save.
+        try {
+            const std::string census =
+                core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
+            std::fprintf(stderr, "R179_LOFT_CENSUS phase=save %s\n",
+                         census.c_str());
+        } catch (...) {}
+#endif
         PCDM_StoreStatus status = app->SaveAs(
             myOcafDoc, path.c_str(), progress); // ".cbf"
         if (status != PCDM_SS_OK) {

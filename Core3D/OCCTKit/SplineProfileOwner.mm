@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+#include <cstdio>
+
 #include "SplineProfileOwner.hxx"
 #include "OcctDocument.h"
 #include "ReceiptRecord.hxx"
@@ -247,30 +249,62 @@ Standard_Boolean BinaryDriver::Paste(const BinObjMgt_Persistent& source,
     try {
         const auto attribute = Handle(Attribute)::DownCast(target);
         if (attribute.IsNull() || !attribute->bytes_.empty() || !budget_
-            || budget_->rejected || relocation.GetHeaderData().IsNull()) return Refuse();
+            || budget_->rejected || relocation.GetHeaderData().IsNull()) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_READ_REFUSED stage=target\n");
+#endif
+            return Refuse();
+        }
         const auto version = relocation.GetHeaderData()->StorageVersion();
         if (!version.IsIntegerValue()
             || version.IntegerValue() < TDocStd_FormatVersion_VERSION_10
-            || version.IntegerValue() > TDocStd_FormatVersion_CURRENT) return Refuse();
-        const auto start = source.Position(), length = source.Length();
-        if (length < 0 || length > INT_MAX - 8 || start < 8 || start > length + 8)
+            || version.IntegerValue() > TDocStd_FormatVersion_CURRENT) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_READ_REFUSED stage=version\n");
+#endif
             return Refuse();
-        const auto end = length + 8;
+        }
+        constexpr Standard_Integer RecordHeaderBytes =
+            Standard_Integer(3 * sizeof(Standard_Integer));
+        const auto start = source.Position(), length = source.Length();
+        if (length < 0 || length > INT_MAX - RecordHeaderBytes
+            || start < RecordHeaderBytes || start > length + RecordHeaderBytes) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_READ_REFUSED stage=bounds\n");
+#endif
+            return Refuse();
+        }
+        const auto end = length + RecordHeaderBytes;
         Standard_Integer schema = 0, count = 0;
         if (!(source >> schema >> count) || schema != 1
             || count <= 0 || count > Standard_Integer(MaximumPayloadBytes)
             || source.Position() > end || count != end - source.Position()
             || budget_->bytes > MaximumDocumentAggregateBytes
             || std::size_t(count) > MaximumDocumentAggregateBytes - budget_->bytes
-            || budget_->records >= MaximumRecordsPerDocument) return Refuse();
+            || budget_->records >= MaximumRecordsPerDocument) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_READ_REFUSED stage=envelope\n");
+#endif
+            return Refuse();
+        }
         std::vector<std::uint8_t> bytes(static_cast<std::size_t>(count));
         Definition definition;
         if (!source.GetByteArray(bytes.data(), count) || source.Position() != end
-            || !Decode(bytes, definition)) return Refuse();
+            || !Decode(bytes, definition)) {
+#if DEBUG
+            std::fprintf(stderr, "R179_SPLINE_READ_REFUSED stage=bytes\n");
+#endif
+            return Refuse();
+        }
         attribute->bytes_ = std::move(bytes); attribute->definition_ = std::move(definition);
         budget_->bytes += std::size_t(count); ++budget_->records;
         return Standard_True;
-    } catch (...) { return Refuse(); }
+    } catch (...) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SPLINE_READ_REFUSED stage=exception\n");
+#endif
+        return Refuse();
+    }
 }
 
 void BinaryDriver::Paste(const Handle(TDF_Attribute)& source,

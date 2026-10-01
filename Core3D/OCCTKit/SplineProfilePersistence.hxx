@@ -275,19 +275,19 @@ inline const Standard_GUID& AttributeID() {
     static const Standard_GUID id("E5BBF47C-90EC-4A42-8FA3-FD4661D9A520"); return id;
 }
 
-class Attribute final : public TDF_Attribute {
+class Core3D_SplineProfile final : public TDF_Attribute {
 public:
-    DEFINE_STANDARD_RTTI_INLINE(Attribute, TDF_Attribute)
+    DEFINE_STANDARD_RTTI_INLINE(Core3D_SplineProfile, TDF_Attribute)
     const Standard_GUID& ID() const override { return AttributeID(); }
-    Handle(TDF_Attribute) NewEmpty() const override { return new Attribute(); }
+    Handle(TDF_Attribute) NewEmpty() const override { return new Core3D_SplineProfile(); }
     void Restore(const Handle(TDF_Attribute)& source) override {
-        const auto value = Handle(Attribute)::DownCast(source);
+        const auto value = Handle(Core3D_SplineProfile)::DownCast(source);
         if (value.IsNull()) Standard_Failure::Raise("C4 restore type");
         bytes_ = value->bytes_; definition_ = value->definition_;
     }
     void Paste(const Handle(TDF_Attribute)& target,
                const Handle(TDF_RelocationTable)&) const override {
-        const auto value = Handle(Attribute)::DownCast(target);
+        const auto value = Handle(Core3D_SplineProfile)::DownCast(target);
         if (value.IsNull()) Standard_Failure::Raise("C4 paste type");
         value->Backup(); value->bytes_ = bytes_; value->definition_ = definition_;
     }
@@ -299,6 +299,7 @@ private:
     Definition definition_;
     std::vector<std::uint8_t> bytes_;
 };
+using Attribute = Core3D_SplineProfile;
 
 struct Record final { TDF_Label label; TDF_Label owner; Handle(Attribute) attribute; TopoDS_Shape shape; };
 bool ReadAll(const Handle(TDocStd_Document)&, std::vector<Record>&) noexcept;
@@ -338,4 +339,16 @@ inline void Register(const Handle(BinMDF_ADriverTable)& table,
                      void (*reject)() noexcept = nullptr) {
     table->AddDriver(new BinaryDriver(messenger, budget, reject));
 }
+
+// Storage wrapper for the production writers: installs the one existing
+// BinaryDriver on the base table so save serializes the C4 record with the
+// same canonical codec the reader already uses.
+template<class Base> class StorageDriver : public Base {
+public:
+    Handle(BinMDF_ADriverTable) AttributeDrivers(const Handle(Message_Messenger)& messenger) override {
+        auto table = Base::AttributeDrivers(messenger);
+        Register(table, messenger, std::make_shared<ReadBudget>());
+        return table;
+    }
+};
 } // namespace core3d::spline_profile

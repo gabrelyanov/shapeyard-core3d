@@ -14,6 +14,14 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <memory>
+#if DEBUG
+// R179/D249 diagnostic-only includes. Never compiled into Release.
+#include <TDF_Tool.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TDataStd_AsciiString.hxx>
+#include <set>
+#include <string>
+#endif
 
 class OcctDocument;
 
@@ -330,4 +338,222 @@ private:
             Standard_Failure::Raise("General loft writer document");
     }
 };
+#if DEBUG
+// R179/D249 passive diagnostics, not product behavior. Read-only census of an
+// already loaded OCAF document: it never creates labels or children, never
+// mutates OCAF, history, presentation, selection or caches, never calls a
+// mesher and never recaptures a scene snapshot. Bounded at
+// profile::MaximumLabels inspected labels and CensusMaximumOutputBytes per
+// emitted string, with an explicit truncated/error status and
+// inspected/emitted counts. All failures are caught locally.
+namespace debug {
+inline constexpr std::size_t CensusMaximumOutputBytes = 64 * 1024;
+
+inline std::string CensusClean(const char* raw, std::size_t limit) noexcept {
+    std::string out;
+    try {
+        if (raw == nullptr) return out;
+        for (const char* p = raw; *p != '\0' && out.size() < limit; ++p) {
+            const char c = *p;
+            const bool keep = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z') || c == '-' || c == ':' || c == '.'
+                || c == ',';
+            out.push_back(keep ? c : '?');
+        }
+    } catch (...) { out.clear(); }
+    return out;
+}
+
+inline std::string CensusGuid(const Standard_GUID& id) noexcept {
+    try {
+        char buffer[64] = {};
+        id.ToCString(buffer);
+        return CensusClean(buffer, 48);
+    } catch (...) { return std::string(); }
+}
+
+inline std::string CensusEntry(const TDF_Label& label) noexcept {
+    try {
+        if (label.IsNull()) return std::string("-");
+        TCollection_AsciiString entry;
+        TDF_Tool::Entry(label, entry);
+        const std::string text = CensusClean(entry.ToCString(), 64);
+        return text.empty() ? std::string("-") : text;
+    } catch (...) { return std::string("error"); }
+}
+
+inline std::string CensusRawIdentifier(const TDF_Label& label,
+                                       const Standard_GUID& id) noexcept {
+    try {
+        Handle(TDataStd_AsciiString) attribute;
+        if (label.IsNull() || !label.FindAttribute(id, attribute)
+            || attribute.IsNull()) return std::string();
+        return CensusClean(attribute->Get().ToCString(), 128);
+    } catch (...) { return std::string(); }
+}
+
+inline std::string Census(const Handle(TDocStd_Document)& document,
+                          const std::string& targetEntityIdentifier) noexcept {
+    std::size_t inspected = 0, emitted = 0;
+    std::size_t entityCount = 0, ownerCount = 0, recipeCount = 0;
+    std::size_t targetLabels = 0, targetFreeSimple = 0, readAllRecords = 0;
+    bool truncated = false, failed = false, readAllOk = false;
+    std::string documentIdentity, entityRows, ownerRows, recipeRows;
+    std::size_t remaining = CensusMaximumOutputBytes - 1024;
+    const std::string target = CensusClean(targetEntityIdentifier.c_str(), 128);
+    const auto append = [&](std::string& section, const std::string& row) {
+        if (truncated || row.size() > remaining) { truncated = true; return false; }
+        try { section += row; } catch (...) { truncated = true; return false; }
+        remaining -= row.size();
+        ++emitted;
+        return true;
+    };
+    try {
+        if (document.IsNull() || document->GetData().IsNull()) {
+            failed = true;
+        } else {
+            const Standard_GUID entityGuid("0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+            const Standard_GUID definitionGuid("3611F2B2-C694-4E12-AED8-A2A97A3D283B");
+            const Standard_GUID documentGuid("74386E4E-F620-498F-8092-E6D883AF33A4");
+            documentIdentity = CensusRawIdentifier(document->Main(), documentGuid);
+            // Non-creating lookup only: never instantiate a tool attribute for
+            // a diagnostic.
+            Handle(XCAFDoc_ShapeTool) shapeTool;
+            if (!document->Main().IsNull()) {
+                const TDF_Label shapesLabel =
+                    document->Main().FindChild(1, Standard_False);
+                if (!shapesLabel.IsNull())
+                    shapesLabel.FindAttribute(XCAFDoc_ShapeTool::GetID(), shapeTool);
+            }
+            std::set<std::string> ownersSeen;
+            for (TDF_ChildIterator it(document->GetData()->Root(), Standard_True);
+                 it.More(); it.Next()) {
+                if (++inspected > std::size_t(profile::MaximumLabels)) {
+                    truncated = true;
+                    break;
+                }
+                const TDF_Label label = it.Value();
+                const std::string entity = CensusRawIdentifier(label, entityGuid);
+                if (!entity.empty()) {
+                    ++entityCount;
+                    if (!target.empty() && entity == target) {
+                        ++targetLabels;
+                        if (XCAFDoc_ShapeTool::IsFree(label)
+                            && XCAFDoc_ShapeTool::IsSimpleShape(label))
+                            ++targetFreeSimple;
+                    }
+                    if (!append(entityRows, CensusEntry(label) + "=" + entity + ";"))
+                        break;
+                }
+                if (!label.IsAttribute(AttributeID())) continue;
+                ++recipeCount;
+                Handle(Attribute) attribute;
+                const bool hasAttribute =
+                    label.FindAttribute(AttributeID(), attribute)
+                    && !attribute.IsNull();
+                const bool hasPayload =
+                    hasAttribute && static_cast<bool>(attribute->value());
+                const TDF_Label owner = label.Father();
+                const std::string ownerEntry = CensusEntry(owner);
+                std::string row = "entry=" + CensusEntry(label)
+                    + "|tag=" + std::to_string(label.Tag())
+                    + "|parent=" + ownerEntry
+                    + "|attribute=" + (hasAttribute ? "1" : "0")
+                    + "|payload=" + (hasPayload ? "1" : "0");
+                if (hasPayload) {
+                    const Definition& definition = attribute->value()->definition;
+                    row += "|document="
+                        + retained_solid::UUIDText(definition.owner.document)
+                        + "|entity="
+                        + retained_solid::UUIDText(definition.owner.entity)
+                        + "|definition="
+                        + retained_solid::UUIDText(definition.owner.definition)
+                        + "|feature=" + retained_solid::UUIDText(definition.feature)
+                        + "|revision="
+                        + std::to_string(definition.definitionRevision);
+                }
+                Handle(TNaming_NamedShape) binding;
+                const bool hasBinding =
+                    label.FindAttribute(TNaming_NamedShape::GetID(), binding)
+                    && !binding.IsNull();
+                TopoDS_Shape bound, ownerShape;
+                if (hasBinding) bound = binding->Get();
+                if (!owner.IsNull()) ownerShape = XCAFDoc_ShapeTool::GetShape(owner);
+                row += std::string("|binding=") + (hasBinding ? "1" : "0")
+                    + "|binding-shape="
+                    + (bound.IsNull() ? std::string("null")
+                       : std::to_string(static_cast<int>(bound.ShapeType())))
+                    + "|binding-equal-owner="
+                    + ((bound.IsNull() || ownerShape.IsNull())
+                       ? std::string("na")
+                       : std::string(bound.IsEqual(ownerShape) ? "1" : "0"))
+                    + "|attributes=";
+                std::string attributes;
+                for (TDF_AttributeIterator a(label); a.More(); a.Next()) {
+                    if (!attributes.empty()) attributes += ",";
+                    attributes += CensusGuid(a.Value()->ID());
+                    if (attributes.size() > 512) {
+                        attributes += ",truncated";
+                        break;
+                    }
+                }
+                row += attributes.empty() ? std::string("-") : attributes;
+                row += ";";
+                if (!append(recipeRows, row)) break;
+                if (!owner.IsNull() && ownersSeen.insert(ownerEntry).second) {
+                    ++ownerCount;
+                    const std::string ownerEntity =
+                        CensusRawIdentifier(owner, entityGuid);
+                    const std::string ownerDefinition =
+                        CensusRawIdentifier(owner, definitionGuid);
+                    const std::string ownerRow = ownerEntry
+                        + "|entity="
+                        + (ownerEntity.empty() ? std::string("-") : ownerEntity)
+                        + "|definition="
+                        + (ownerDefinition.empty() ? std::string("-")
+                           : ownerDefinition)
+                        + "|top="
+                        + (shapeTool.IsNull() ? std::string("na")
+                           : std::string(shapeTool->IsTopLevel(owner) ? "1" : "0"))
+                        + "|shape="
+                        + (XCAFDoc_ShapeTool::IsShape(owner) ? "1" : "0")
+                        + "|free="
+                        + (XCAFDoc_ShapeTool::IsFree(owner) ? "1" : "0")
+                        + "|simple="
+                        + (XCAFDoc_ShapeTool::IsSimpleShape(owner) ? "1" : "0")
+                        + "|assembly="
+                        + (XCAFDoc_ShapeTool::IsAssembly(owner) ? "1" : "0")
+                        + "|reference="
+                        + (XCAFDoc_ShapeTool::IsReference(owner) ? "1" : "0")
+                        + "|getshape="
+                        + (ownerShape.IsNull() ? std::string("null")
+                           : std::to_string(static_cast<int>(
+                               ownerShape.ShapeType())))
+                        + ";";
+                    if (!append(ownerRows, ownerRow)) break;
+                }
+            }
+            std::vector<Record> records;
+            readAllOk = ReadAll(document, records);
+            readAllRecords = records.size();
+        }
+    } catch (...) { failed = true; }
+    const std::string head = std::string("document=")
+        + (documentIdentity.empty() ? std::string("-") : documentIdentity)
+        + " status=" + (failed ? "error" : (truncated ? "truncated" : "ok"))
+        + " inspected=" + std::to_string(inspected)
+        + " emitted=" + std::to_string(emitted)
+        + " target=" + (target.empty() ? std::string("-") : target)
+        + " entity-labels=" + std::to_string(entityCount)
+        + " owners=" + std::to_string(ownerCount)
+        + " recipes=" + std::to_string(recipeCount)
+        + " raw-target-labels=" + std::to_string(targetLabels)
+        + " raw-target-free-simple=" + std::to_string(targetFreeSimple)
+        + " readall=" + (readAllOk ? "ok" : "fail")
+        + " readall-records=" + std::to_string(readAllRecords);
+    return head + " entity=[" + entityRows + "] owners=[" + ownerRows
+        + "] recipes=[" + recipeRows + "]";
+}
+} // namespace debug
+#endif
 } // namespace core3d::general_loft::persistence

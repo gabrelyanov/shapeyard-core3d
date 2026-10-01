@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#if DEBUG
+// R179/D249 diagnostic-only include. Never compiled into Release.
+#include <cstdio>
+#endif
 
 namespace core3d::general_loft::owner {
 namespace {
@@ -365,6 +369,16 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared) noexce
             return Refusal(scene, Outcome::outcomeUnknown, "post-close-unreadable");
         if (!state_->context->publishCommittedEdit(publication))
             return Refusal(scene, Outcome::recoveryRequired, "publication-unproven");
+#if DEBUG
+        // R179/D249 passive census after successful readback/publication.
+        // Diagnostics only: failures here must not affect the committed result.
+        try {
+            const std::string census = persistence::debug::Census(
+                state_->document->Document(), "");
+            std::fprintf(stderr, "R179_LOFT_CENSUS phase=loft-apply %s\n",
+                         census.c_str());
+        } catch (...) {}
+#endif
         Receipt receipt; receipt.outcome = Outcome::committed; receipt.reason = "committed";
         receipt.scene = scene; receipt.definition = prepared->candidate;
         receipt.session = prepared->opening.session; receipt.preparation = prepared->preparation;

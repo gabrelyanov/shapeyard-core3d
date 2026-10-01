@@ -26,6 +26,10 @@
 #include "../OCCTKit/EnclosureGeometry.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
+#if DEBUG
+// R179/D249 diagnostic-only include. Never compiled into Release.
+#include "../OCCTKit/GeneralLoftPersistence.hxx"
+#endif
 
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <TopExp_Explorer.hxx>
@@ -7488,10 +7492,32 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 		// CBF files created before persistent scene identity need a one-time
 		// migration. Do this while the candidate is isolated, before it becomes
 		// the editable document and before normal undo history is enabled.
+#if DEBUG
+		// R179/D249 passive census of the isolated candidate, immediately
+		// before legacy migration. Diagnostics only.
+		try {
+			const std::string census =
+				core3d::general_loft::persistence::debug::Census(candidate, "");
+			std::fprintf(stderr,
+				"R179_LOFT_CENSUS phase=import-pre-migration %s\n",
+				census.c_str());
+		} catch (...) {}
+#endif
 		if (!myDoc->MigrateLegacyIdentifiers(candidate)) {
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InternalFailure;
 		}
+#if DEBUG
+		// R179/D249 passive census of the isolated candidate, immediately
+		// after legacy migration. Diagnostics only.
+		try {
+			const std::string census =
+				core3d::general_loft::persistence::debug::Census(candidate, "");
+			std::fprintf(stderr,
+				"R179_LOFT_CENSUS phase=import-post-migration %s\n",
+				census.c_str());
+		} catch (...) {}
+#endif
 		candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
 
 #if DEBUG
@@ -7615,6 +7641,16 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
             return result;
         }
 
+#if DEBUG
+        // R179/D249 passive census of the candidate after the isolated Open,
+        // before it is closed. Diagnostics only.
+        try {
+            const std::string census =
+                core3d::general_loft::persistence::debug::Census(candidate, "");
+            std::fprintf(stderr, "R179_LOFT_CENSUS phase=validate-cbf %s\n",
+                         census.c_str());
+        } catch (...) {}
+#endif
         TDF_LabelMap activeDefinitionLabels;
         const bool isValid = HasValidOptionalLengthUnit(candidate)
             && ValidateShapeTree(
@@ -7798,6 +7834,52 @@ void Core3DViewer::showGrid(bool show) {
     myView->Redraw();
 }
 
+#if DEBUG
+namespace {
+// R179/D249 passive diagnostic. Reads only the already captured snapshot; it
+// never recaptures, meshes or redraws. Bounded to 64 KiB with an explicit
+// truncated/error status and an explicit invalid-mesh-index marker (an invalid
+// index is never dereferenced).
+std::string R179SceneInstanceCensus(const scene::SceneSnapshot& snapshot) noexcept {
+    const auto clean = [](const std::string& raw) {
+        return core3d::general_loft::persistence::debug::CensusClean(
+            raw.c_str(), 128);
+    };
+    try {
+        std::string rows;
+        std::size_t emitted = 0, index = 0;
+        bool truncated = false;
+        for (const auto& instance : snapshot.instances) {
+            const std::string row = std::to_string(index++)
+                + "|entity=" + clean(instance.entityIdentifier)
+                + "|definition="
+                + (instance.meshIndex >= snapshot.meshes.size()
+                    ? std::string("INVALID-MESH-INDEX")
+                    : clean(snapshot.meshes[instance.meshIndex].definitionIdentifier))
+                + "|role=" + std::to_string(static_cast<unsigned>(instance.role))
+                + "|visible=" + (instance.visible ? "1" : "0")
+                + "|selectable=" + (instance.selectable ? "1" : "0")
+                + "|selected=" + (instance.selected ? "1" : "0")
+                + "|mesh=" + std::to_string(instance.meshIndex)
+                + ";";
+            if (truncated || rows.size() + row.size() > 64 * 1024 - 256) {
+                truncated = true;
+                break;
+            }
+            rows += row;
+            ++emitted;
+        }
+        return std::string("status=") + (truncated ? "truncated" : "ok")
+            + " instances=" + std::to_string(snapshot.instances.size())
+            + " emitted=" + std::to_string(emitted)
+            + " rows=[" + rows + "]";
+    } catch (...) {
+        return "status=error";
+    }
+}
+} // namespace
+#endif
+
 bool Core3DViewer::selectObjectFromBrowser(
     const ObjectFrameIdentity& identity,
     const std::uint32_t viewportWidth,
@@ -7854,7 +7936,17 @@ bool Core3DViewer::selectObjectFromBrowser(
         }
         if (matchingInstances != 1) {
 #if DEBUG
-            std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance-count\n");
+            // R179/D249: keep the exact refusal. The two census strings are
+            // computed only after reaching this failure block; both are
+            // passive, bounded and never selection authority.
+            std::string nativeRows = "status=error";
+            std::string sceneRows = "status=error";
+            try {
+                nativeRows = core3d::general_loft::persistence::debug::Census(
+                    myDoc->Document(), identity.entityIdentifier);
+                sceneRows = R179SceneInstanceCensus(*snapshot);
+            } catch (...) {}
+            std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance-count entity=%.128s matching=%zu total=%zu document=%.128s publication=%.128s generation=%llu model=%llu native=%s scene=%s\n", identity.entityIdentifier.c_str(), matchingInstances, snapshot->instances.size(), myDoc->DocumentIdentifier().c_str(), snapshot->publicationSourceIdentifier.c_str(), static_cast<unsigned long long>(snapshot->revisions.documentGeneration), static_cast<unsigned long long>(snapshot->revisions.model), nativeRows.c_str(), sceneRows.c_str());
 #endif
             return false;
         }

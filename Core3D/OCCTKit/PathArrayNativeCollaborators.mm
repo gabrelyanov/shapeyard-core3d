@@ -847,6 +847,26 @@ bool PrepareDependentReplay(OcctDocument& owner,
             prepared->persisted.ownerState.definitionRevision;
         prospective.locator.canonicalDefinitionDigest =
             prepared->persisted.ownerState.canonicalDefinitionDigest;
+        if (prospective.persisted.value.definition.domain
+                != bounded_curve::Domain::Path3D) {
+            // A non-Path3D curve can have no path-array dependent, so the
+            // Path3D seal does not apply; a record that still names one is
+            // an unsupported dependent and must fail closed.
+            if (prospective.ownerLabel.IsNull()
+                || !bounded_curve::ValidatePersisted(prepared->persisted))
+                return false;
+            std::vector<path_array::Record> records;
+            if (!path_array::ReadAll(owner.Document(), records)) return false;
+            for (const auto& record : records) {
+                if (record.definition.path.owner
+                        == prepared->opening.retained.authority.owner)
+                    return false;
+            }
+            DependentReplayPlan plan; plan.c1Seal = prepared;
+            plan.admitted = true;
+            output = std::move(plan);
+            return true;
+        }
         if (!prospective.sealedFor(prospective.locator)) return false;
 
         std::vector<path_array::Record> records;
