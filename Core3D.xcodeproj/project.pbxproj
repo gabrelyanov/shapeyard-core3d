@@ -18,6 +18,23 @@
 		E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26800020000000000000002 /* Core3DFinishingOpenings.mm */; };
 		E18A00030000000000000003 /* NativeOpeningFactories.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E18A00040000000000000004 /* NativeOpeningFactories.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D5A0010000000000000002 /* Core3DModelingTypes.mm */; };
+		B1E000010000000000000001 /* Core3DEdgeTreatmentTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */; };
+		B1E200010000000000000001 /* Core3DEdgeTreatmentR2Types.mm in Sources */ = {isa = PBXBuildFile; fileRef = B1E200110000000000000011 /* Core3DEdgeTreatmentR2Types.mm */; };
+		B1E200020000000000000002 /* Core3DEdgeTreatmentR2Types.h in Headers */ = {isa = PBXBuildFile; fileRef = B1E200120000000000000012 /* Core3DEdgeTreatmentR2Types.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		B1E200030000000000000003 /* RetainedEdgeTreatmentR2Values.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E200130000000000000013 /* RetainedEdgeTreatmentR2Values.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E200040000000000000004 /* RetainedEdgeTreatmentR2Snapshot.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E200140000000000000014 /* RetainedEdgeTreatmentR2Snapshot.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E200050000000000000005 /* RetainedEdgeTreatmentR2Build.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E200150000000000000015 /* RetainedEdgeTreatmentR2Build.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B2E000010000000000000001 /* Core3DFaceSelectorTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = B2E000110000000000000011 /* Core3DFaceSelectorTypes.mm */; };
+		B2E000020000000000000002 /* Core3DFaceSelectorTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = B2E000120000000000000012 /* Core3DFaceSelectorTypes.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		B2E000030000000000000003 /* RetainedFaceSelector.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B2E000130000000000000013 /* RetainedFaceSelector.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B2E000040000000000000004 /* RetainedFaceSelectorValues.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B2E000140000000000000014 /* RetainedFaceSelectorValues.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E000020000000000000002 /* Core3DEdgeTreatmentTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = B1E000120000000000000012 /* Core3DEdgeTreatmentTypes.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		B1E000030000000000000003 /* RetainedEdgeTreatmentStorageKey.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E000130000000000000013 /* RetainedEdgeTreatmentStorageKey.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E000040000000000000004 /* RetainedEdgeTreatmentDefinition.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E000140000000000000014 /* RetainedEdgeTreatmentDefinition.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E000050000000000000005 /* RetainedEdgeTreatmentAttribute.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E000150000000000000015 /* RetainedEdgeTreatmentAttribute.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E000060000000000000006 /* RetainedEdgeTreatmentBinaryDriver.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E000160000000000000016 /* RetainedEdgeTreatmentBinaryDriver.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E000070000000000000007 /* RetainedEdgeTreatmentSnapshot.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E000170000000000000017 /* RetainedEdgeTreatmentSnapshot.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		B1E000080000000000000008 /* RetainedEdgeTreatmentBuild.hxx in Headers */ = {isa = PBXBuildFile; fileRef = B1E000180000000000000018 /* RetainedEdgeTreatmentBuild.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3D5A0010000000000000003 /* Core3DSharedModelingValues.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D5A0010000000000000004 /* Core3DSharedModelingValues.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C3D515010000000000000001 /* Core3DModelingTypes.h in Headers */ = {isa = PBXBuildFile; fileRef = C3D515020000000000000001 /* Core3DModelingTypes.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		A17900010000000000000001 /* NativeOpeningSurfaceProbe.hxx in Headers */ = {isa = PBXBuildFile; fileRef = A17900020000000000000002 /* NativeOpeningSurfaceProbe.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -282,6 +299,23 @@
 		E26800020000000000000002 /* Core3DFinishingOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFinishingOpenings.mm; sourceTree = "<group>"; };
 		E18A00040000000000000004 /* NativeOpeningFactories.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningFactories.hxx; sourceTree = "<group>"; };
 		C3D5A0010000000000000002 /* Core3DModelingTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DModelingTypes.mm; sourceTree = "<group>"; };
+		B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DEdgeTreatmentTypes.mm; sourceTree = "<group>"; };
+		B1E200110000000000000011 /* Core3DEdgeTreatmentR2Types.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DEdgeTreatmentR2Types.mm; sourceTree = "<group>"; };
+		B1E200120000000000000012 /* Core3DEdgeTreatmentR2Types.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DEdgeTreatmentR2Types.h; sourceTree = "<group>"; };
+		B1E200130000000000000013 /* RetainedEdgeTreatmentR2Values.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentR2Values.hxx; sourceTree = "<group>"; };
+		B1E200140000000000000014 /* RetainedEdgeTreatmentR2Snapshot.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentR2Snapshot.hxx; sourceTree = "<group>"; };
+		B1E200150000000000000015 /* RetainedEdgeTreatmentR2Build.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentR2Build.hxx; sourceTree = "<group>"; };
+		B2E000110000000000000011 /* Core3DFaceSelectorTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFaceSelectorTypes.mm; sourceTree = "<group>"; };
+		B2E000120000000000000012 /* Core3DFaceSelectorTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DFaceSelectorTypes.h; sourceTree = "<group>"; };
+		B2E000130000000000000013 /* RetainedFaceSelector.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFaceSelector.hxx; sourceTree = "<group>"; };
+		B2E000140000000000000014 /* RetainedFaceSelectorValues.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFaceSelectorValues.hxx; sourceTree = "<group>"; };
+		B1E000120000000000000012 /* Core3DEdgeTreatmentTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DEdgeTreatmentTypes.h; sourceTree = "<group>"; };
+		B1E000130000000000000013 /* RetainedEdgeTreatmentStorageKey.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentStorageKey.hxx; sourceTree = "<group>"; };
+		B1E000140000000000000014 /* RetainedEdgeTreatmentDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentDefinition.hxx; sourceTree = "<group>"; };
+		B1E000150000000000000015 /* RetainedEdgeTreatmentAttribute.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentAttribute.hxx; sourceTree = "<group>"; };
+		B1E000160000000000000016 /* RetainedEdgeTreatmentBinaryDriver.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentBinaryDriver.hxx; sourceTree = "<group>"; };
+		B1E000170000000000000017 /* RetainedEdgeTreatmentSnapshot.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentSnapshot.hxx; sourceTree = "<group>"; };
+		B1E000180000000000000018 /* RetainedEdgeTreatmentBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedEdgeTreatmentBuild.hxx; sourceTree = "<group>"; };
 		C3D5A0010000000000000004 /* Core3DSharedModelingValues.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DSharedModelingValues.h; sourceTree = "<group>"; };
 		C3D515020000000000000001 /* Core3DModelingTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DModelingTypes.h; sourceTree = "<group>"; };
 		A17900020000000000000002 /* NativeOpeningSurfaceProbe.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningSurfaceProbe.hxx; sourceTree = "<group>"; };
@@ -837,6 +871,17 @@
 				C0A100160000000000000016 /* RetainedRecipeAdmission.hxx */,
 				C0A100170000000000000017 /* RetainedRecipeSnapshot.hxx */,
 				C0A100180000000000000018 /* RetainedRecipeProbe.hxx */,
+				B1E000130000000000000013 /* RetainedEdgeTreatmentStorageKey.hxx */,
+				B1E000140000000000000014 /* RetainedEdgeTreatmentDefinition.hxx */,
+				B2E000130000000000000013 /* RetainedFaceSelector.hxx */,
+				B2E000140000000000000014 /* RetainedFaceSelectorValues.hxx */,
+				B1E000150000000000000015 /* RetainedEdgeTreatmentAttribute.hxx */,
+				B1E000160000000000000016 /* RetainedEdgeTreatmentBinaryDriver.hxx */,
+				B1E000170000000000000017 /* RetainedEdgeTreatmentSnapshot.hxx */,
+				B1E000180000000000000018 /* RetainedEdgeTreatmentBuild.hxx */,
+				B1E200130000000000000013 /* RetainedEdgeTreatmentR2Values.hxx */,
+				B1E200140000000000000014 /* RetainedEdgeTreatmentR2Snapshot.hxx */,
+				B1E200150000000000000015 /* RetainedEdgeTreatmentR2Build.hxx */,
 				D1A100110000000000000011 /* PatternRecipeClone.hxx */,
 				D2A100110000000000000011 /* PatternBuild.hxx */,
 				D2A100120000000000000012 /* PatternDefinition.hxx */,
@@ -896,6 +941,12 @@
 				C3D515020000000000000001 /* Core3DModelingTypes.h */,
 				C3D5A0010000000000000004 /* Core3DSharedModelingValues.h */,
 				C3D5A0010000000000000002 /* Core3DModelingTypes.mm */,
+				B1E000120000000000000012 /* Core3DEdgeTreatmentTypes.h */,
+				B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */,
+				B1E200120000000000000012 /* Core3DEdgeTreatmentR2Types.h */,
+				B1E200110000000000000011 /* Core3DEdgeTreatmentR2Types.mm */,
+				B2E000120000000000000012 /* Core3DFaceSelectorTypes.h */,
+				B2E000110000000000000011 /* Core3DFaceSelectorTypes.mm */,
 				E18A00020000000000000002 /* Core3DNativeOpenings.mm */,
 				E26800020000000000000002 /* Core3DFinishingOpenings.mm */,
 				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
@@ -1116,6 +1167,20 @@
 				C0A100060000000000000006 /* RetainedRecipeAdmission.hxx in Headers */,
 				C0A100070000000000000007 /* RetainedRecipeSnapshot.hxx in Headers */,
 				C0A100080000000000000008 /* RetainedRecipeProbe.hxx in Headers */,
+				B1E000020000000000000002 /* Core3DEdgeTreatmentTypes.h in Headers */,
+				B2E000020000000000000002 /* Core3DFaceSelectorTypes.h in Headers */,
+				B2E000030000000000000003 /* RetainedFaceSelector.hxx in Headers */,
+				B2E000040000000000000004 /* RetainedFaceSelectorValues.hxx in Headers */,
+				B1E000030000000000000003 /* RetainedEdgeTreatmentStorageKey.hxx in Headers */,
+				B1E000040000000000000004 /* RetainedEdgeTreatmentDefinition.hxx in Headers */,
+				B1E000050000000000000005 /* RetainedEdgeTreatmentAttribute.hxx in Headers */,
+				B1E000060000000000000006 /* RetainedEdgeTreatmentBinaryDriver.hxx in Headers */,
+				B1E000070000000000000007 /* RetainedEdgeTreatmentSnapshot.hxx in Headers */,
+				B1E000080000000000000008 /* RetainedEdgeTreatmentBuild.hxx in Headers */,
+				B1E200020000000000000002 /* Core3DEdgeTreatmentR2Types.h in Headers */,
+				B1E200030000000000000003 /* RetainedEdgeTreatmentR2Values.hxx in Headers */,
+				B1E200040000000000000004 /* RetainedEdgeTreatmentR2Snapshot.hxx in Headers */,
+				B1E200050000000000000005 /* RetainedEdgeTreatmentR2Build.hxx in Headers */,
 				D1A100010000000000000001 /* PatternRecipeClone.hxx in Headers */,
 				D2A100010000000000000001 /* PatternBuild.hxx in Headers */,
 				D2A100020000000000000002 /* PatternDefinition.hxx in Headers */,
@@ -1319,6 +1384,9 @@
 				328FBF2B2BC82E8300176AEA /* Core3DViewer.mm in Sources */,
 				A11A00000000000000000004 /* Core3DAgentMeasurements.mm in Sources */,
 				C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */,
+				B1E000010000000000000001 /* Core3DEdgeTreatmentTypes.mm in Sources */,
+				B1E200010000000000000001 /* Core3DEdgeTreatmentR2Types.mm in Sources */,
+				B2E000010000000000000001 /* Core3DFaceSelectorTypes.mm in Sources */,
 				322185852BB5D5E100040E84 /* Core3DViewController.mm in Sources */,
 				3221857B2BB5CC1500040E84 /* GLViewController.mm in Sources */,
 				323E89E52BD1454E0035FF45 /* Core3DViewController+GLViewControllerProtocol.mm in Sources */,

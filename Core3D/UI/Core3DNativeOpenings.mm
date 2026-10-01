@@ -2332,6 +2332,20 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
     return [[Core3DSplineProfileEditingOpening alloc] initWithDocument:input.owner
         context:input.context service:std::move(service) opening:std::move(opening) creating:NO];
 }
+// Row-277 C4 AI command bridge (Core3DViewController.h): both entries return the
+// same opaque Core3DSplineProfileEditingOpening the row-270 owner methods vend.
+// The edit entry fences the exact reviewed target before delegating; nil never
+// changes model or history.
+- (Core3DSplineProfileEditingOpening *)beginAISplineProfileCreation {
+    return [self beginSplineProfileCreation];
+}
+- (Core3DSplineProfileEditingOpening *)openAISplineProfileEditorForEntityIdentifier:(NSString *)entityIdentifier {
+    if (entityIdentifier.length == 0 || entityIdentifier.length > 128) return nil;
+    ControllerOpeningInput input;
+    if (!CaptureControllerOpeningInput(self, input)) return nil;
+    if (input.selected != entityIdentifier.UTF8String) return nil;
+    return [self openSplineProfileEditor];
+}
 - (Core3DPatternEditingOpening *)openPatternEditor {
     ControllerOpeningInput input;
     return CaptureControllerOpeningInput(self, input)

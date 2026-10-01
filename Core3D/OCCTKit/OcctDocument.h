@@ -27,6 +27,9 @@
 #include "SavedCutSourceEdit.hxx"
 #include "RetainedBooleanEditValues.hxx"
 #include "RetainedRecipeSnapshot.hxx"
+#include "RetainedEdgeTreatmentSnapshot.hxx"
+#include "RetainedEdgeTreatmentR2Snapshot.hxx"
+#include "RetainedFaceSelector.hxx"
 #include "BoundedCurveAttribute.hxx"
 #include "BoundedCurveBuild.hxx"
 #include "GeneralLoftPersistence.hxx"
@@ -69,7 +72,7 @@
 class XCAFDoc_VisMaterial;
 
 class Message_ProgressRange;
-namespace core3d { class OrdinaryEditController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
+namespace core3d { class OrdinaryEditController; class Core3DViewer; class BevelOperationController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
 namespace core3d::native_opening { class CommandLease; }
 namespace core3d::native_opening { class Context; }
 namespace core3d::bounded_curve::owner { class OcafOwner; }
@@ -187,6 +190,8 @@ struct OcctObjectTransformState
     core3d::sweep_persistence::Record sweep;
     core3d::loft_persistence::Record loft;
     core3d::retained_solid::Record retained;
+    std::optional<core3d::retained_edge_treatment::Record> edgeTreatment;
+    std::optional<core3d::retained_edge_treatment::r2::Record> edgeTreatmentR2;
     gp_Trsf transform;
     std::array<Standard_Real, 8> scalars = {{0, 0, 0, 0, 0, 0, 1, 1}};
     std::array<Standard_Boolean, 8> present = {};
@@ -1195,6 +1200,26 @@ public:
     //! On failure clears the output so a caller cannot reuse stale proof.
     Standard_EXPORT Standard_Boolean CaptureObjectTransformStateForLabel(
         const TDF_Label& label, OcctObjectTransformState& state) const noexcept;
+    Standard_EXPORT std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>
+    CaptureRetainedEdgeTreatment(const TDF_Label& owner,
+        const core3d::retained_recipe::RevisionFence& expected,
+        core3d::retained_edge_treatment::Refusal&) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatments(
+        core3d::retained_edge_treatment::Refusal&) const noexcept;
+    Standard_EXPORT std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot>
+    CaptureRetainedEdgeTreatmentR2(const TDF_Label& owner,
+        const core3d::retained_recipe::RevisionFence& expected,
+        core3d::retained_edge_treatment::Refusal&) const noexcept;
+    Standard_EXPORT std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationCapture>
+    CaptureRetainedBooleanMigrationR2(const TDF_Label& owner,
+        const core3d::retained_recipe::RevisionFence& expected,
+        core3d::retained_edge_treatment::Refusal&) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatmentsR2(
+        core3d::retained_edge_treatment::Refusal&) const noexcept;
+    Standard_EXPORT core3d::retained_face_selector::Resolution ResolveRetainedFaceSelector(
+        const core3d::retained_edge_treatment::Snapshot& snapshot,
+        const core3d::retained_face_selector::SelectorIntent& intent,
+        const core3d::retained_recipe::RevisionFence& expected) const noexcept;
     //! Write exactly one translation scalar in the caller's already-open OCAF
     //! command. Axis is 0...2 and value uses raw document model units. The
     //! definition, representation, coordinate ceiling, and read-back are
@@ -1496,6 +1521,27 @@ private:
   void CloseNativeSession() noexcept;
   bool myNativeSessionClosed = false;
   friend class core3d::OrdinaryEditController;
+  friend class core3d::Core3DViewer;
+  // The bevel/fillet apply path stages the captured retained edit through the
+  // same private gate as the ordinary edit owner; no other caller is admitted.
+  friend class core3d::BevelOperationController;
+  Standard_Boolean StageRetainedEdgeTreatment(
+      const core3d::retained_edge_treatment::Snapshot& original,
+      const core3d::retained_edge_treatment::Edit& edit,
+      const core3d::retained_edge_treatment::DetachedResult& built,
+      core3d::retained_edge_treatment::Record& readback,
+      core3d::retained_edge_treatment::Refusal&) noexcept;
+  Standard_Boolean StageRetainedEdgeTreatmentR2(
+      const core3d::retained_edge_treatment::r2::Snapshot&,
+      const core3d::retained_edge_treatment::r2::DetachedResult&,
+      core3d::retained_edge_treatment::r2::Record&,
+      core3d::retained_edge_treatment::Refusal&) noexcept;
+  Standard_Boolean StageRetainedBooleanMigrationR2(
+      const core3d::retained_edge_treatment::r2::MigrationCapture&,
+      const core3d::retained_edge_treatment::r2::MigrationM3&,
+      const core3d::retained_edge_treatment::r2::DetachedResult&,
+      core3d::retained_edge_treatment::r2::Record&,
+      core3d::retained_edge_treatment::Refusal&) noexcept;
   // Only the ordinary owner may pair geometry and an already-current record.
   Standard_Boolean StageSavedSweepReplacement(const OcctObjectTransformState& previous,
       const TopoDS_Shape& candidate, const core3d::planar_sweep::Definition& definition,

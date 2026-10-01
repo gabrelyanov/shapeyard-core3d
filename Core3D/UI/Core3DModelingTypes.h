@@ -113,6 +113,10 @@ __attribute__((objc_subclassing_restricted))
 
 //! Complete C4 create/edit opening. The descriptor carries stable UUIDs and
 //! source values only; this opaque object retains the current OCAF authority.
+//! Row-277 AI commands reuse this same opening across capture/review/apply/
+//! cancel: the bridge copies the complete frozen descriptor, patches only
+//! admitted pole/axis/extent/inner-loop values, and submits one candidate. No
+//! mintable token or second mutation path is exposed for that route.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DSplineProfileEditingOpening : NSObject
 @property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;

@@ -53,6 +53,388 @@ struct Cut475Scope {
 #if DEBUG
 #include "NativeLiveTransactionObserverProbe.hxx"
 #endif
+#import <Foundation/Foundation.h>
+#include "OcctDocument.h"
+#include "RetainedEdgeTreatmentBuild.hxx"
+#include "RetainedEdgeTreatmentR2Build.hxx"
+#include "RetainedSolidAttribute.hxx"
+#include "CompositeRecipeAttribute.hxx"
+
+namespace {
+bool SameB1Base(const core3d::retained_edge_treatment::BaseBinding& first,
+    const core3d::retained_edge_treatment::BaseBinding& second) noexcept {
+    return first.family == second.family && first.source == second.source
+        && first.sourceNode == second.sourceNode && first.sourceSchema == second.sourceSchema
+        && first.sourceRecipeDigest == second.sourceRecipeDigest
+        && first.metersPerLocalUnit == second.metersPerLocalUnit;
+}
+} // namespace
+// OcctDocument member definitions must sit at global scope: inside the
+// anonymous namespace they do not bind to ::OcctDocument, so the Snapshot
+// friendship would not cover them.
+
+std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot>
+OcctDocument::CaptureRetainedEdgeTreatmentR2(
+    const TDF_Label& owner, const core3d::retained_recipe::RevisionFence& expected,
+    core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
+    namespace et = core3d::retained_edge_treatment;
+    namespace r2 = core3d::retained_edge_treatment::r2;
+    refusal = et::Refusal::MalformedCarrier;
+    try {
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||owner.IsNull()
+            ||owner.Data()!=myOcafDoc->GetData()||!core3d::retained_recipe::Valid(expected)){
+            refusal=et::Refusal::StaleSnapshot;return {};
+        }
+        std::optional<et::RecordR2> treatment;
+        if(!et::ReadR2(myOcafDoc,owner,treatment,refusal)||!treatment)return {};
+        const auto* boolean=std::get_if<r2::BooleanBaseBinding>(&treatment->value->definition.base);
+        if(!boolean){refusal=et::Refusal::UnsupportedBase;return {};}
+        auto result=std::shared_ptr<r2::Snapshot>(new r2::Snapshot);
+        result->ownerLabel_=owner;result->sourceLabel_=treatment->label;
+        result->definition_=treatment->value->definition;result->definitionBytes_=treatment->value->bytes;
+        result->base_=treatment->value->base;result->current_=treatment->current;
+        result->owner_.owner=result->definition_.owner;result->owner_.fence=expected;
+        result->owner_.outputNode=result->definition_.outputNode;
+        result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
+        result->nonce_=std::uint64_t(myOcafDoc->GetData()->Time());
+        // The versioned joint census validates and copies the complete source.
+        core3d::retained_solid::Record legacy;core3d::composite_recipe::Record composite;
+        if(boolean->format==r2::PrefixFormat::SYRS){
+            Handle(core3d::retained_solid::Attribute) source;
+            if(!treatment->label.FindAttribute(core3d::retained_solid::AttributeID(),source)
+                ||source.IsNull()||!source->value()){refusal=et::Refusal::MalformedCarrier;return {};}
+            r2::LegacyBooleanBase retained{source->value()->envelope,source->value()->bytes};
+            result->source_=r2::RetainedBooleanBase{*boolean,std::move(retained)};
+            result->sourceBytes_=source->value()->bytes;
+        }else{
+            Handle(core3d::composite_recipe::Attribute) source;
+            if(!treatment->label.FindAttribute(core3d::composite_recipe::AttributeID(),source)
+                ||source.IsNull()||!source->value()){refusal=et::Refusal::MalformedCarrier;return {};}
+            r2::CompositeBooleanBase retained{source->value()->definition,source->value()->bytes};
+            result->source_=r2::RetainedBooleanBase{*boolean,std::move(retained)};
+            result->sourceBytes_=source->value()->bytes;
+        }
+        if(!ValidateRetainedEdgeTreatmentsR2(refusal))return {};
+        refusal=et::Refusal::None;return result;
+    }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
+}
+
+std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationCapture>
+OcctDocument::CaptureRetainedBooleanMigrationR2(
+    const TDF_Label& owner,const core3d::retained_recipe::RevisionFence& expected,
+    core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    refusal=et::Refusal::MalformedCarrier;
+    try{
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||owner.IsNull()
+            ||owner.Data()!=myOcafDoc->GetData()||!core3d::retained_recipe::Valid(expected)){
+            refusal=et::Refusal::StaleSnapshot;return {};
+        }
+        // M1: capture is read-only and refuses an already-enrolled owner.
+        std::optional<et::RecordR2> existing;
+        if(!et::ReadR2(myOcafDoc,owner,existing,refusal)||existing){refusal=et::Refusal::UnsupportedOperation;return {};}
+        core3d::retained_solid::Record source;
+        if(!core3d::retained_solid::Read(myOcafDoc,owner,source)||!source.value){refusal=et::Refusal::UnsupportedBase;return {};}
+        auto result=std::shared_ptr<r2::MigrationCapture>(new r2::MigrationCapture);
+        result->ownerLabel_=owner;result->sourceLabel_=source.label;result->original_=source.value->envelope;
+        result->originalBytes_=source.value->bytes;result->originalBase_=source.value->base;
+        result->originalCurrent_=source.current;result->owner_.fence=expected;
+        const auto identity=core3d::retained_boolean::Identities(source.value->envelope);
+        result->owner_.owner={identity.document,identity.entity,identity.definition};
+        result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
+        result->nonce_=std::uint64_t(myOcafDoc->GetData()->Time());
+        refusal=et::Refusal::None;return result;
+    }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
+}
+
+Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatmentsR2(
+    core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    try{
+        if(myOcafDoc.IsNull()){refusal=et::Refusal::MalformedCarrier;return Standard_False;}
+        std::size_t aggregate=0;TDF_LabelMap owners;
+        for(TDF_ChildIterator it(myOcafDoc->Main(),Standard_True);it.More();it.Next()){
+            Handle(et::Attribute) treatment;if(!it.Value().FindAttribute(et::AttributeID(),treatment)||!treatment->valueR2())continue;
+            const TDF_Label owner=it.Value().Father();if(owner.IsNull()||!owners.Add(owner)||it.Value().Tag()<core3d::retained_solid::MinimumRecordTag){refusal=et::Refusal::MultipleOwners;return Standard_False;}
+            const auto& definition=treatment->valueR2()->definition;const auto* base=std::get_if<r2::BooleanBaseBinding>(&definition.base);
+            if(!base||treatment->valueR2()->bytes.size()>8'388'608-aggregate){refusal=et::Refusal::Budget;return Standard_False;}
+            aggregate+=treatment->valueR2()->bytes.size();
+            Handle(core3d::retained_solid::Attribute) syrs;Handle(core3d::composite_recipe::Attribute) a1;Handle(TNaming_NamedShape) named;
+            const bool hasSYRS=it.Value().FindAttribute(core3d::retained_solid::AttributeID(),syrs);
+            const bool hasA1=it.Value().FindAttribute(core3d::composite_recipe::AttributeID(),a1);
+            if(hasSYRS==hasA1||!it.Value().FindAttribute(TNaming_NamedShape::GetID(),named)
+                ||(base->format==r2::PrefixFormat::SYRS)!=hasSYRS){refusal=et::Refusal::MalformedCarrier;return Standard_False;}
+            const std::vector<std::uint8_t>* sourceBytes=hasSYRS?&syrs->value()->bytes:&a1->value()->bytes;
+            core3d::retained_recipe::Digest digest{};
+            if(!sourceBytes||!CC_SHA256(sourceBytes->data(),CC_LONG(sourceBytes->size()),digest.data())
+                ||digest!=base->sourceRecipeDigest){refusal=et::Refusal::NoncurrentSource;return Standard_False;}
+            for(TDF_AttributeIterator attribute(it.Value());attribute.More();attribute.Next()){
+                const auto& id=attribute.Value()->ID();if(id!=et::AttributeID()&&id!=TNaming_NamedShape::GetID()
+                    &&id!=core3d::retained_solid::AttributeID()&&id!=core3d::composite_recipe::AttributeID()){
+                    refusal=et::Refusal::MalformedCarrier;return Standard_False;
+                }
+            }
+            for(TDF_ChildIterator child(it.Value(),Standard_True);child.More();child.Next())if(child.Value().HasAttribute()){
+                refusal=et::Refusal::MalformedCarrier;return Standard_False;
+            }
+        }
+        refusal=et::Refusal::None;return Standard_True;
+    }catch(...){refusal=et::Refusal::MalformedCarrier;return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
+    const core3d::retained_edge_treatment::r2::Snapshot& original,
+    const core3d::retained_edge_treatment::r2::DetachedResult& built,
+    core3d::retained_edge_treatment::r2::Record& readback,
+    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    readback={};refusal=et::Refusal::StageFailed;
+    try{
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
+            ||original.ownerLabel_.IsNull()||built.nonce_!=original.nonce_||built.result_.IsNull())return Standard_False;
+        std::optional<et::RecordR2> live;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,live,refusal)||!live
+            ||live->value->bytes!=original.definitionBytes_)return Standard_False;
+        std::vector<std::uint8_t> exact;if(!r2::Encode(built.definition_,exact,refusal)||exact!=built.definitionBytes_)return Standard_False;
+        Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation))return Standard_False;
+        auto payload=std::make_shared<et::PayloadR2>();payload->definition=built.definition_;
+        payload->bytes=built.definitionBytes_;payload->base=built.base_;
+        et::Attribute::SetR2(original.sourceLabel_,payload);TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
+        if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
+        std::optional<et::RecordR2> stored;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
+        readback={stored->label,stored->owner,std::make_shared<r2::Definition>(stored->value->definition),stored->value->bytes,stored->value->base,stored->current};
+        refusal=et::Refusal::None;return Standard_True;
+    }catch(...){readback={};refusal=et::Refusal::StageFailed;return Standard_False;}
+}
+
+Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
+    const core3d::retained_edge_treatment::r2::MigrationCapture& original,
+    const core3d::retained_edge_treatment::r2::MigrationM3& request,
+    const core3d::retained_edge_treatment::r2::DetachedResult& built,
+    core3d::retained_edge_treatment::r2::Record& readback,
+    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=core3d::retained_edge_treatment;
+    if(request.version!=1||built.nonce_!=original.nonce_){refusal=et::Refusal::IdentityMismatch;return Standard_False;}
+    // Migration and optional append are one ordinary command: strip only the
+    // active legacy fillet tail, restage the same SYRS authority, then SYET.
+    auto snapshot=CaptureRetainedEdgeTreatmentR2(original.ownerLabel_,original.owner_.fence,refusal);
+    if(snapshot){refusal=et::Refusal::UnsupportedOperation;return Standard_False;}
+    core3d::retained_solid::Record live;
+    if(!core3d::retained_solid::Read(myOcafDoc,original.ownerLabel_,live)||!live.value
+        ||live.value->bytes!=original.originalBytes_||!live.current.IsEqual(original.originalCurrent_)){
+        refusal=et::Refusal::StaleSnapshot;return Standard_False;
+    }
+    core3d::retained_boolean::Recipe prefix;
+    if(!core3d::retained_boolean::Decode(built.prefixBytes_,prefix)){
+        refusal=et::Refusal::MalformedCarrier;return Standard_False;
+    }
+    if(const auto* program=std::get_if<core3d::retained_boolean::Program>(&prefix);
+        program&&!program->filletSteps.empty()){
+        refusal=et::Refusal::MalformedCarrier;return Standard_False;
+    }
+    std::vector<std::uint8_t> definitionBytes;
+    if(!core3d::retained_edge_treatment::r2::Encode(built.definition_,definitionBytes,refusal)
+        ||definitionBytes!=built.definitionBytes_||built.result_.IsNull())return Standard_False;
+    Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);
+    if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=et::Refusal::StageFailed;return Standard_False;}
+    Handle(core3d::retained_solid::Attribute) source;
+    if(!original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),source)||source.IsNull()){
+        refusal=et::Refusal::StageFailed;return Standard_False;
+    }
+    auto sourcePayload=std::make_shared<core3d::retained_solid::Payload>();
+    sourcePayload->envelope=std::move(prefix);sourcePayload->bytes=built.prefixBytes_;
+    sourcePayload->base=original.originalBase_;source->Backup();source->value_=sourcePayload;
+    auto treatmentPayload=std::make_shared<et::PayloadR2>();
+    treatmentPayload->definition=built.definition_;treatmentPayload->bytes=built.definitionBytes_;
+    treatmentPayload->base=built.base_;
+    et::Attribute::SetR2(original.sourceLabel_,treatmentPayload);
+    TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
+    if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
+    std::optional<et::RecordR2> stored;
+    if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
+    readback={stored->label,stored->owner,
+        std::make_shared<core3d::retained_edge_treatment::r2::Definition>(stored->value->definition),
+        stored->value->bytes,stored->value->base,stored->current};
+    refusal=et::Refusal::None;return Standard_True;
+}
+
+namespace {
+bool SameFence(const core3d::retained_recipe::RevisionFence& first,
+    const core3d::retained_recipe::RevisionFence& second) noexcept {
+    if (first.documentGeneration != second.documentGeneration
+        || first.modelRevision != second.modelRevision
+        || first.effectiveMetersPerUnit != second.effectiveMetersPerUnit
+        || first.ownerShape != second.ownerShape || first.ownerRecipe != second.ownerRecipe
+        || first.ownerPlacement != second.ownerPlacement || first.ownerMaterial != second.ownerMaterial
+        || first.dependencies.size() != second.dependencies.size()) return false;
+    for (std::size_t index = 0; index < first.dependencies.size(); ++index) {
+        const auto& lhs = first.dependencies[index]; const auto& rhs = second.dependencies[index];
+        if (!(lhs.locator == rhs.locator) || lhs.geometry != rhs.geometry || lhs.recipe != rhs.recipe
+            || lhs.placement != rhs.placement || lhs.material != rhs.material
+            || lhs.groups != rhs.groups) return false;
+    }
+    return true;
+}
+}
+
+core3d::retained_face_selector::Resolution OcctDocument::ResolveRetainedFaceSelector(
+    const core3d::retained_edge_treatment::Snapshot& snapshot,
+    const core3d::retained_face_selector::SelectorIntent& intent,
+    const core3d::retained_recipe::RevisionFence& expected) const noexcept {
+    using namespace core3d::retained_face_selector;
+    Resolution output;
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || !snapshot.current()
+            || snapshot.ownerLabel_.IsNull() || snapshot.ownerLabel_.Data() != myOcafDoc->GetData()
+            || !core3d::retained_recipe::Valid(expected)
+            || !XCAFDoc_ShapeTool::GetShape(snapshot.ownerLabel_).IsEqual(snapshot.current_)) {
+            output.refusal = Refusal::StaleSource;
+            return output;
+        }
+        core3d::retained_edge_treatment::ReplayBudget budget;
+        const std::atomic_bool cancelled{false};
+        Resolve(snapshot.current_, intent, snapshot.dimensionMetersPerUnit(), budget, cancelled, output);
+        return output;
+    } catch (...) {
+        output = {};
+        output.refusal = Refusal::NativeFailure;
+        return output;
+    }
+}
+
+std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>
+OcctDocument::CaptureRetainedEdgeTreatment(
+    const TDF_Label& owner,
+    const core3d::retained_recipe::RevisionFence& expected,
+    core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
+    using namespace core3d::retained_edge_treatment;
+    refusal=Refusal::MalformedCarrier;
+    try {
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||owner.IsNull()
+            ||owner.Data()!=myOcafDoc->GetData()||!core3d::retained_recipe::Valid(expected)){
+            refusal=Refusal::StaleSnapshot;return {};
+        }
+        core3d::profile::Record profile;core3d::enclosure::Record enclosure;
+        if(!core3d::profile::Read(myOcafDoc,owner,profile)
+            ||!core3d::enclosure::Read(myOcafDoc,owner,enclosure))return {};
+        const bool hasProfile=!profile.label.IsNull(),hasEnclosure=!enclosure.label.IsNull();
+        if(hasProfile==hasEnclosure){refusal=Refusal::UnsupportedBase;return {};}
+        std::optional<Record> treatment;
+        if(!Read(myOcafDoc,owner,treatment,refusal))return {};
+        auto result=std::shared_ptr<Snapshot>(new Snapshot);
+        result->ownerLabel_=owner;result->owner_.fence=expected;result->current_=XCAFDoc_ShapeTool::GetShape(owner);
+        if(result->current_.IsNull()){refusal=Refusal::NoncurrentSource;return {};}
+        if(hasProfile){if(!profile.IsCurrent(myOcafDoc,owner)){refusal=Refusal::NoncurrentSource;return {};}result->source_=profile.parameters;result->sourceLabel_=profile.label;result->sourceIdentifier_=profile.identifier;core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Profile,core3d::profile::SchemaFor(profile.parameters),profile.values,result->sourceBytes_);}
+        else {if(!enclosure.IsCurrent(myOcafDoc,owner)){refusal=Refusal::NoncurrentSource;return {};}result->source_=enclosure.parameters;result->sourceLabel_=enclosure.label;result->sourceIdentifier_=enclosure.identifier;core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Enclosure,enclosure.parameters.definition.constructionFrame?2:1,enclosure.values,result->sourceBytes_);}
+        if(treatment){result->definition_=treatment->value->definition;result->definitionBytes_=treatment->value->bytes;result->base_=treatment->value->base;TopoDS_Shape replayed;std::vector<StepProof>proofs;ReplayBudget budget;if(!Replay(result->base_,*result->definition_,replayed,proofs,budget,refusal)||!EquivalentReplayGeometry(result->current_,replayed,budget,refusal))return {};result->chargedBudget_=budget;}
+        else result->base_=result->current_;
+        result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
+        result->nonce_=std::uint64_t(myOcafDoc->GetData()->Time());refusal=Refusal::None;return result;
+    } catch(...){refusal=Refusal::MalformedCarrier;return {};}
+}
+
+Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatments(
+    core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
+    if(myOcafDoc.IsNull()){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
+    bool hasR2=false;
+    for(TDF_ChildIterator it(myOcafDoc->Main(),Standard_True);it.More();it.Next()){
+        Handle(core3d::retained_edge_treatment::Attribute) value;
+        if(it.Value().FindAttribute(core3d::retained_edge_treatment::AttributeID(),value)
+            &&!value.IsNull()&&value->valueR2()){hasR2=true;break;}
+    }
+    if(hasR2)return ValidateRetainedEdgeTreatmentsR2(refusal);
+    std::vector<core3d::retained_solid::Record> retained;
+    if(myOcafDoc.IsNull()||!core3d::retained_solid::ReadAll(myOcafDoc,retained)){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
+    std::size_t bytes=0;for(const auto&r:retained){if(!r.value||r.value->bytes.size()>8388608-bytes){refusal=core3d::retained_edge_treatment::Refusal::Budget;return Standard_False;}bytes+=r.value->bytes.size();}
+    std::vector<core3d::composite_recipe::Record> composite;if(!core3d::composite_recipe::ReadAll(myOcafDoc,composite,bytes)){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
+    for(const auto&r:composite){if(!r.value||r.value->bytes.size()>8388608-bytes){refusal=core3d::retained_edge_treatment::Refusal::Budget;return Standard_False;}bytes+=r.value->bytes.size();}
+    std::vector<core3d::retained_edge_treatment::Record> records;return core3d::retained_edge_treatment::ReadAll(myOcafDoc,bytes,records,refusal)?Standard_True:Standard_False;
+}
+
+Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
+    const core3d::retained_edge_treatment::Snapshot& original,
+    const core3d::retained_edge_treatment::Edit& edit,
+    const core3d::retained_edge_treatment::DetachedResult& built,
+    core3d::retained_edge_treatment::Record& readback,
+    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    using namespace core3d::retained_edge_treatment;
+    readback={};refusal=Refusal::StageFailed;
+    try {
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
+            ||original.ownerLabel_.IsNull()||original.ownerLabel_.Data()!=myOcafDoc->GetData()
+            ||built.nonce_!=original.nonce_||built.result_.IsNull())return Standard_False;
+        std::optional<Record> live;if(!Read(myOcafDoc,original.ownerLabel_,live,refusal))return Standard_False;
+        if(bool(live)!=bool(original.definition_)||(live&&live->value->bytes!=original.definitionBytes_)
+            ||!XCAFDoc_ShapeTool::GetShape(original.ownerLabel_).IsEqual(original.current_)){
+            refusal=Refusal::StaleSnapshot;return Standard_False;
+        }
+        Definition expected=original.definition_.value_or(original.seed_);
+        if (built.selectorAppend_) {
+            const auto& admitted=*built.selectorAppend_;
+            const auto* append=std::get_if<Append>(&edit);
+            if(!append||admitted.captureNonce_!=original.nonce_
+                ||!SameFence(admitted.fence_,original.owner_.fence)
+                ||!SameB1Base(admitted.base_,expected.base)
+                ||admitted.edit_.kind!=Kind::ConstantFillet
+                ||append->kind!=admitted.edit_.kind||append->amountMM!=admitted.edit_.amountMM
+                ||append->anchors!=admitted.edit_.anchors
+                ||admitted.issuedStep_.kind!=Kind::ConstantFillet
+                ||admitted.issuedStep_.amountMM!=admitted.edit_.amountMM
+                ||admitted.issuedStep_.anchors!=admitted.edit_.anchors
+                ||!admitted.issuedStep_.selector
+                ||admitted.issuedStep_.localID!=expected.issuance.nextLocalID){
+                refusal=Refusal::ReplayMismatch;return Standard_False;
+            }
+            std::vector<std::uint8_t> admittedSourceBytes;
+            if(const auto* profile=std::get_if<core3d::profile::Parameters>(&admitted.source_)){
+                std::vector<double> values;
+                if(!core3d::profile::Encode(*profile,values)
+                    ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Profile,
+                        core3d::profile::SchemaFor(*profile),values,admittedSourceBytes)){
+                    refusal=Refusal::MalformedCarrier;return Standard_False;
+                }
+            }else if(const auto* enclosure=std::get_if<core3d::enclosure::Parameters>(&admitted.source_)){
+                std::vector<double> values;
+                if(!core3d::enclosure::Encode(*enclosure,values)
+                    ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Enclosure,
+                        enclosure->definition.constructionFrame?2:1,values,admittedSourceBytes)){
+                    refusal=Refusal::MalformedCarrier;return Standard_False;
+                }
+            }
+            if(admittedSourceBytes!=original.sourceBytes_){refusal=Refusal::IdentityMismatch;return Standard_False;}
+            ReplayBudget stageBudget=built.budget_;core3d::retained_face_selector::Resolution resolution;
+            const std::atomic_bool cancelled{false};
+            const auto selectorRefusal=core3d::retained_face_selector::Resolve(original.current_,
+                admitted.issuedStep_.selector->intent,expected.base.metersPerLocalUnit,
+                stageBudget,cancelled,resolution);
+            if(selectorRefusal!=core3d::retained_face_selector::Refusal::None||!resolution.proof
+                ||core3d::retained_face_selector::VerifyReceipt(*resolution.proof,admitted.issuedStep_,
+                    expected.base.metersPerLocalUnit,stageBudget)!=core3d::retained_face_selector::Refusal::None){
+                refusal=Refusal::ReplayMismatch;return Standard_False;
+            }
+            expected.schema=2;++expected.issuance.nextLocalID;
+            expected.steps.push_back(admitted.issuedStep_);expected.outputNode=admitted.issuedStep_.node;
+        }
+        else if(const auto*p=std::get_if<Append>(&edit)){if(built.definition_.steps.size()!=expected.steps.size()+1||built.definition_.steps.back().selector){refusal=Refusal::ReplayMismatch;return Standard_False;}expected.steps.push_back(built.definition_.steps.back());if(expected.steps.back().kind!=p->kind||expected.steps.back().amountMM!=p->amountMM||expected.steps.back().anchors!=p->anchors){refusal=Refusal::ReplayMismatch;return Standard_False;}}
+        else if(const auto*p=std::get_if<SetAmount>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}it->amountMM=p->amountMM;}
+        else if(const auto*p=std::get_if<ReplaceTargets>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}it->anchors=p->anchors;}
+        else if(const auto*p=std::get_if<Remove>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}expected.issuance.retiredLocalIDs.push_back(it->localID);expected.steps.erase(it);}
+        if(expected.steps.empty())expected.outputNode=expected.base.sourceNode;else expected.outputNode=expected.steps.back().node;
+        std::vector<std::uint8_t>expectedBytes;
+        if(!std::holds_alternative<RebuildSource>(edit)
+            &&(!Encode(expected,expectedBytes,refusal)||expectedBytes!=built.definitionBytes_))return Standard_False;
+        if(built.definition_.steps!=expected.steps||built.definition_.outputNode!=expected.outputNode){refusal=Refusal::ReplayMismatch;return Standard_False;}
+        Handle(AIS_Shape)presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=Refusal::StageFailed;return Standard_False;}
+        bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);
+        if(!sourceStaged){refusal=Refusal::StageFailed;return Standard_False;}
+        core3d::profile::Record profile;core3d::enclosure::Record enclosure;if(!core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile)||!core3d::enclosure::Read(myOcafDoc,original.ownerLabel_,enclosure)){refusal=Refusal::StageFailed;return Standard_False;}const TDF_Label metadata=!profile.label.IsNull()?profile.label:enclosure.label;
+        auto payload=std::make_shared<Payload>();payload->definition=built.definition_;payload->bytes=built.definitionBytes_;payload->base=built.base_;Attribute::Set(metadata,payload);TNaming_Builder(metadata).Select(built.result_,built.result_);
+        std::optional<Record>stored;if(!Read(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored||stored->value->bytes!=built.definitionBytes_){refusal=Refusal::StageFailed;return Standard_False;}readback=*stored;refusal=Refusal::None;return Standard_True;
+    } catch(...){readback={};refusal=Refusal::StageFailed;return Standard_False;}
+}
+
+Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocStd_Document)& document){
+    if(document.IsNull())return Standard_False;std::vector<core3d::retained_edge_treatment::Record> records;core3d::retained_edge_treatment::Refusal refusal;return core3d::retained_edge_treatment::ReadAll(document,0,records,refusal)?Standard_True:Standard_False;
+}
 #include "../Scene/MikkTangentSpace.hpp"
 #include <RWMesh_FaceIterator.hxx>
 #include "CoherentMeshUVAtlas.hpp"
@@ -141,6 +523,8 @@ struct Cut475Scope {
 #include "RetainedFinishingBinaryDriver.hxx"
 #include "RetainedFinishingProducer.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
+#include "RetainedEdgeTreatmentBinaryDriver.hxx"
+#include "RetainedEdgeTreatmentBuild.hxx"
 #include "SpatialSweepG0Transaction.hxx"
 #include "SpatialSweepEditor.hxx"
 #include "BoundedCurveBinaryDriver.hxx"
@@ -3027,6 +3411,8 @@ public:
         if (myAllowRetainedSolid) core3d::retained_solid::Register(aTable,theMessageDriver,myRetainedBudget,RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::composite_recipe::Register(
             aTable,theMessageDriver,myRetainedBudget,myBoundedCurveBudget,RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::retained_edge_treatment::Register(
+            aTable, theMessageDriver, myRetainedBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::bounded_curve::Register(
             aTable,theMessageDriver,myBoundedCurveBudget,RejectSafeBinaryRead);
         core3d::general_loft::persistence::Register(
@@ -4936,13 +5322,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>());
 }
 
 #if DEBUG
@@ -5502,6 +5888,13 @@ Standard_Boolean ValidateGeometryDocument(
         std::vector<core3d::composite_recipe::Record> composites;
         if(!core3d::composite_recipe::ReadAll(document,composites,retainedBytes,
             curveBytes,curves.size()))return Standard_False;
+        for(const auto& record:composites){
+            if(!record.value||record.value->bytes.size()>core3d::composite_recipe::MaximumDocumentAggregateBytes-retainedBytes)return Standard_False;
+            retainedBytes+=record.value->bytes.size();
+        }
+        std::vector<core3d::retained_edge_treatment::Record> treatments;
+        core3d::retained_edge_treatment::Refusal treatmentRefusal;
+        if(!core3d::retained_edge_treatment::ReadAll(document,retainedBytes,treatments,treatmentRefusal))return Standard_False;
         TDF_LabelMap retainedOwners;
         for(const auto& record:retained)if(!retainedOwners.Add(record.owner))return Standard_False;
         for(const auto& record:composites)if(retainedOwners.Contains(record.owner))return Standard_False;
@@ -13922,6 +14315,18 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && profile.IsEqual(other.profile)
             && enclosure.IsEqual(other.enclosure)
             && sweep.IsEqual(other.sweep) && loft.IsEqual(other.loft) && retained.IsEqual(other.retained)
+            && ((!edgeTreatment&&!other.edgeTreatment)
+                || (edgeTreatment&&other.edgeTreatment
+                    && edgeTreatment->label.IsEqual(other.edgeTreatment->label)
+                    && edgeTreatment->value->bytes==other.edgeTreatment->value->bytes
+                    && edgeTreatment->value->base.IsEqual(other.edgeTreatment->value->base)
+                    && edgeTreatment->current.IsEqual(other.edgeTreatment->current)))
+            && ((!edgeTreatmentR2&&!other.edgeTreatmentR2)
+                || (edgeTreatmentR2&&other.edgeTreatmentR2
+                    && edgeTreatmentR2->label.IsEqual(other.edgeTreatmentR2->label)
+                    && edgeTreatmentR2->bytes==other.edgeTreatmentR2->bytes
+                    && edgeTreatmentR2->base.IsEqual(other.edgeTreatmentR2->base)
+                    && edgeTreatmentR2->current.IsEqual(other.edgeTreatmentR2->current)))
             && present == other.present && scalars == other.scalars;
     } catch (...) {
         return Standard_False;
@@ -13953,6 +14358,14 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
             || !core3d::sweep_persistence::Read(myOcafDoc, label, captured.sweep)
             || !core3d::loft_persistence::Read(myOcafDoc, label, captured.loft)
             || !core3d::retained_solid::Read(myOcafDoc,label,captured.retained)) return Standard_False;
+        core3d::retained_edge_treatment::Refusal treatmentRefusal;
+        std::optional<core3d::retained_edge_treatment::RecordR2> treatmentR2;
+        if(!core3d::retained_edge_treatment::ReadR2(myOcafDoc,label,treatmentR2,treatmentRefusal))return Standard_False;
+        if(treatmentR2){captured.edgeTreatmentR2=core3d::retained_edge_treatment::r2::Record{
+            treatmentR2->label,treatmentR2->owner,
+            std::make_shared<core3d::retained_edge_treatment::r2::Definition>(treatmentR2->value->definition),
+            treatmentR2->value->bytes,treatmentR2->value->base,treatmentR2->current};}
+        else if(!core3d::retained_edge_treatment::Read(myOcafDoc,label,captured.edgeTreatment,treatmentRefusal))return Standard_False;
         OcctAuthoredFrameRecord frames;
         const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
         if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;

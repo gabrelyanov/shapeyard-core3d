@@ -377,6 +377,9 @@ inline AttributedBuild BuildAttributedPattern(
     const std::atomic_bool& stop) noexcept {
     AttributedBuild output;
     const auto refuse = [&](Status status) {
+#if DEBUG
+        std::fprintf(stderr, "R179_D4_BUILD_REFUSED status=%u\n", unsigned(status));
+#endif
         AttributedBuild empty; empty.status = status; return empty;
     };
     try {
@@ -588,8 +591,13 @@ inline AttributedBuild BuildAttributedPattern(
         for (const auto& selector : result.selectors) {
             auto receipt = detail::ReceiptFor(definition, baseline, selector);
             std::vector<std::uint8_t> canonical;
-            if (!feature_pattern_child::Encode(receipt, canonical))
+            if (!feature_pattern_child::Encode(receipt, canonical)) {
+#if DEBUG
+                std::fprintf(stderr, "R179_D4_SELECTOR_MISSING site=receipt-encode localID=%llu\n",
+                    static_cast<unsigned long long>(selector.instanceLocalID));
+#endif
                 return refuse(Status::SelectorMissing);
+            }
             result.childReceipts.push_back(std::move(receipt));
         }
         return result;

@@ -20,6 +20,9 @@
 #import <Core3D/Core3DTransformInspectorSnapshot.h>
 
 #import <Core3D/Core3DModelingTypes.h>
+#import <Core3D/Core3DEdgeTreatmentTypes.h>
+#import <Core3D/Core3DEdgeTreatmentR2Types.h>
+#import <Core3D/Core3DFaceSelectorTypes.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -152,6 +155,16 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(beginSplineProfileCreation());
 - (Core3DSplineProfileEditingOpening *_Nullable)openSplineProfileEditor
     NS_SWIFT_NAME(openSplineProfileEditor());
+//! Row-277 C4 AI command bridge: narrow host entry points that delegate exactly
+//! to beginSplineProfileCreation/openSplineProfileEditor above and return the
+//! same opaque opening. The edit entry additionally refuses unless the sole
+//! selected object identifier equals entityIdentifier, so the AI route can never
+//! capture authority for a part other than the reviewed target. No second
+//! service, no mintable token, no selection-driven mutation path.
+- (Core3DSplineProfileEditingOpening *_Nullable)beginAISplineProfileCreation
+    NS_SWIFT_NAME(beginAISplineProfileCreation());
+- (Core3DSplineProfileEditingOpening *_Nullable)openAISplineProfileEditorForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(openAISplineProfileEditor(entityIdentifier:));
 - (Core3DPatternEditingOpening *_Nullable)openPatternEditor
     NS_SWIFT_NAME(openPatternEditor());
 - (Core3DPathArrayEditingOpening *_Nullable)openPathArrayEditor
@@ -1193,6 +1206,11 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugBeginBevelWithEntityIdentifier:(NSString *)entityIdentifier
                        edgeTopologyIndices:(NSArray<NSNumber *> *)edgeTopologyIndices
     NS_SWIFT_NAME(debugBeginBevel(entityIdentifier:edgeTopologyIndices:));
+- (NSDictionary<NSString *,NSNumber *> *)debugB1EdgeTreatmentProbe:(NSInteger)scenario
+    NS_SWIFT_NAME(debugB1EdgeTreatmentProbe(scenario:));
++ (NSDictionary<NSString *,id> *)debugB1R2RetainedBooleanCodec:(double)metersPerLocalUnit
+    NS_SWIFT_NAME(debugB1R2RetainedBooleanCodec(metersPerLocalUnit:));
+- (NSDictionary<NSString *,id> *)debugB1R2EditabilityInventory;
 //! Multi-body variant used to prove aggregate Bevel result budgets. Every
 //! entity has one nonempty array of zero-based TopExp edge indices.
 - (BOOL)debugBeginBevelWithEntityIdentifiers:(NSArray<NSString *> *)entityIdentifiers
@@ -1833,6 +1851,74 @@ __attribute__((objc_subclassing_restricted))
 #endif
 
 - (void)addTestPrimitives;
+
+- (Core3DEdgeTreatmentCapture *)captureEdgeTreatment:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(captureEdgeTreatment(entityIdentifier:expected:));
+- (Core3DEdgeTreatmentTargetCapture *)captureEdgeTreatmentTargets:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(captureEdgeTreatmentTargets(entityIdentifier:expected:));
+- (Core3DFaceSelectorQuery *)resolveFaceSelector:(Core3DEdgeTreatmentSnapshot *)snapshot
+    intent:(Core3DFaceSelectorIntent *)intent expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(resolveFaceSelector(_:intent:expected:));
+- (Core3DFaceSelectorQuery *)resolveLegacyFaceSelector:(Core3DCylindricalCutProgramSnapshot *)snapshot
+    intent:(Core3DFaceSelectorIntent *)intent expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(resolveLegacyFaceSelector(_:intent:expected:));
+#ifdef DEBUG
+- (Core3DFaceSelectorProbeResult *)debugFaceSelectorProof:(Core3DFaceSelectorFixture)fixture
+    metersPerLocalUnit:(double)metersPerLocalUnit
+    NS_SWIFT_NAME(debugFaceSelectorProof(_:metersPerLocalUnit:));
+#endif
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot
+    kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM
+    targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentAppend(_:kind:amountMM:targets:expected:completion:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppend:
+      (Core3DEdgeTreatmentSnapshot *)snapshot
+    amountMM:(double)amountMM
+    proof:(Core3DFaceSelectorProof *)proof
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void (^)(Core3DEdgeTreatmentResult *result))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentSelectorAppend(_:amountMM:proof:expected:completion:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAmount:(Core3DEdgeTreatmentSnapshot *)snapshot
+    featureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentAmount(_:featureIdentifier:amountMM:expected:completion:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentTargets:(Core3DEdgeTreatmentSnapshot *)snapshot
+    featureIdentifier:(NSString *)featureIdentifier targets:(Core3DEdgeTreatmentTargetCapture *)targets
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentTargets(_:featureIdentifier:targets:expected:completion:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentRemoval:(Core3DEdgeTreatmentSnapshot *)snapshot
+    featureIdentifier:(NSString *)featureIdentifier expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentRemoval(_:featureIdentifier:expected:completion:));
+- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation;
+- (Core3DEdgeTreatmentCaptureR2 *)captureEdgeTreatmentR2:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(captureEdgeTreatmentR2(_:expected:));
+- (nullable Core3DRetainedBooleanMigrationCaptureR2 *)captureRetainedBooleanMigrationR2:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(captureRetainedBooleanMigrationR2(_:expected:));
+- (Core3DFaceSelectorQueryR2 *)resolveFaceSelectorR2:(Core3DEdgeTreatmentSnapshotR2 *)snapshot
+    intent:(Core3DFaceSelectorIntent *)intent expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(resolveFaceSelectorR2(_:intent:expected:));
+- (Core3DRetainedBooleanMigrationReviewR2 *)reviewRetainedBooleanMigrationR2:
+    (Core3DRetainedBooleanMigrationCaptureR2 *)original
+    request:(Core3DRetainedBooleanMigrationRequestR2 *)request expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(reviewRetainedBooleanMigrationR2(_:request:expected:));
+- (Core3DEdgeTreatmentOperation *)beginRetainedBooleanMigrationR2:
+    (Core3DRetainedBooleanMigrationCaptureR2 *)original
+    request:(Core3DRetainedBooleanMigrationRequestR2 *)request
+    proof:(Core3DRetainedBooleanMigrationProofR2 *)proof expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginRetainedBooleanMigrationR2(_:request:proof:expected:completion:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppendR2:
+    (Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM
+    proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentSelectorAppendR2(_:amountMM:proof:expected:completion:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentEditR2:(Core3DEdgeTreatmentSnapshotR2 *)original
+    edit:(Core3DRetainedBooleanEditR2 *)edit expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentEditR2(_:edit:expected:completion:));
 
 - (void)sendNotifyUIState:(UIStateChanging)state NS_REFINED_FOR_SWIFT;
 - (void)viewWillUpdateUIState:(UIStateChanging)state;

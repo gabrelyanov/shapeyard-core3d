@@ -3,6 +3,7 @@
 // ordinary OCAF transaction; no document command is opened by this codec.
 #include "EnclosureParameters.hxx"
 #include "ProfilePersistence.hxx"
+#include "RetainedEdgeTreatmentStorageKey.hxx"
 namespace core3d::enclosure {
 inline const Standard_GUID& SchemaID() {
     static const Standard_GUID id("22E0916D-E068-4556-9200-6F6D54F12D9E");return id;
@@ -82,7 +83,8 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
         for (TDF_AttributeIterator it(label); it.More(); it.Next()) {
             const auto& id = it.Value()->ID();
             if (id != SchemaID() && id != CountID() && id != IdentityID()
-                && id != TNaming_NamedShape::GetID()) return false;
+                && id != TNaming_NamedShape::GetID()
+                && id != retained_edge_treatment::AttributeID()) return false;
         }
         record.values.resize(count->Get());
         int present = 0, childrenInspected = 0;

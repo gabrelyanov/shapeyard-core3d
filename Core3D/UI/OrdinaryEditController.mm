@@ -433,7 +433,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
                 && !IsCylindricalCutOperation(request.operation)
                 && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild
-                && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
+                && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+                && request.operation != OrdinaryTransformOperation::RetainedEdgeTreatment) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
@@ -478,6 +479,28 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 || !presentations.insert(request.presentation.get()).second) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
+            const bool requestsTreatmentR2=bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2);
+            const bool pairedTreatment=!requestsTreatmentR2&&(request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
+                ||((request.operation==OrdinaryTransformOperation::ProfileRebuild
+                    ||request.operation==OrdinaryTransformOperation::EnclosureRebuild)
+                    &&record.previous.edgeTreatment.has_value()));
+            const bool pairedTreatmentR2=request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
+                &&(bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2));
+            if((pairedTreatment&&pairedTreatmentR2)
+                ||bool(request.edgeTreatmentSnapshot)!=pairedTreatment
+                ||request.edgeTreatmentEdit.has_value()!=pairedTreatment
+                ||bool(request.edgeTreatmentResult)!=pairedTreatment
+                ||(pairedTreatment&&(permit||changes.size()!=1
+                    ||request.edgeTreatmentResult->result().IsNull()
+                    ||!request.edgeTreatmentResult->result().IsEqual(request.shape))))
+                CORE3D_CUT_REFUSE("ordinary.b1-paired-admission",reject(OrdinaryEditResult::Invalid));
+            if((bool(request.edgeTreatmentSnapshotR2)+bool(request.edgeTreatmentMigrationR2)!=int(pairedTreatmentR2))
+                ||bool(request.edgeTreatmentResultR2)!=pairedTreatmentR2
+                ||request.edgeTreatmentMigrationRequestR2.has_value()!=bool(request.edgeTreatmentMigrationR2)
+                ||(pairedTreatmentR2&&(permit||changes.size()!=1
+                    ||request.edgeTreatmentResultR2->result().IsNull()
+                    ||!request.edgeTreatmentResultR2->result().IsEqual(request.shape))))
+                CORE3D_CUT_REFUSE("ordinary.b1-r2-paired-admission",reject(OrdinaryEditResult::Invalid));
             if(bool(request.placementContinuation)!=(permit&&permit->operation_==receipt::Operation::SetPlacement))
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if (permit && !(permit->operation_==receipt::Operation::SetPlacement
@@ -567,6 +590,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && !IsCylindricalCutOperation(request.operation)
                 && request.operation != OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 && request.operation != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
+                if(request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment){}
+                else
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             const auto representation = record.previous.resolvedRepresentation;
@@ -2277,7 +2302,32 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
-            bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false;
+            bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false,treatmentStaged=false,treatmentStagedR2=false;
+            if(record.requested.edgeTreatmentSnapshot){
+                core3d::retained_edge_treatment::Refusal refusal;
+                core3d::retained_edge_treatment::Record readback;
+                treatmentStaged=record.requested.edgeTreatmentEdit&&record.requested.edgeTreatmentResult
+                    &&_document->StageRetainedEdgeTreatment(*record.requested.edgeTreatmentSnapshot,
+                        *record.requested.edgeTreatmentEdit,*record.requested.edgeTreatmentResult,readback,refusal);
+                if(!treatmentStaged)throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
+                ledger.edgeTreatmentReadback=std::move(readback);
+            }
+            if(record.requested.edgeTreatmentResultR2){
+                core3d::retained_edge_treatment::Refusal refusal;
+                core3d::retained_edge_treatment::r2::Record readback;
+                if(record.requested.edgeTreatmentMigrationR2){
+                    treatmentStagedR2=record.requested.edgeTreatmentMigrationRequestR2
+                        &&_document->StageRetainedBooleanMigrationR2(*record.requested.edgeTreatmentMigrationR2,
+                            *record.requested.edgeTreatmentMigrationRequestR2,
+                            *record.requested.edgeTreatmentResultR2,readback,refusal);
+                }else if(record.requested.edgeTreatmentSnapshotR2){
+                    treatmentStagedR2=_document->StageRetainedEdgeTreatmentR2(
+                        *record.requested.edgeTreatmentSnapshotR2,*record.requested.edgeTreatmentResultR2,
+                        readback,refusal);
+                }
+                if(!treatmentStagedR2)throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
+                ledger.edgeTreatmentReadbackR2=std::move(readback);
+            }
             if (record.requested.operation==OrdinaryTransformOperation::SweepRebuild) {
                 bool pairedFault=false;
 #if DEBUG
@@ -2345,7 +2395,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     *record.requested.cutProgramSourcePatch,record.requested.cutProgramSourceRebuild,ledger.cutSourcePayload,pairedFault);
                 if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
             }
-            const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged;
+            const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged||treatmentStaged;
             const bool vertexMove=record.requested.operation==OrdinaryTransformOperation::MeshVertexMove;
             const bool regionExtrude=record.requested.operation==OrdinaryTransformOperation::MeshRegionExtrude;
             const bool regionInset=record.requested.operation==OrdinaryTransformOperation::MeshRegionInset;
@@ -2372,10 +2422,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     && !_document->StageMeshRegionPartition(record.previous.label,regionPartition))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
-                || (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
+                || (!treatmentStaged && record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
                     && !profile::Stage(_document->Document(), record.previous.label,
                         *record.requested.profileRebuild, record.previous.profile.identifier))
-                || (record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild
+                || (!treatmentStaged && record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild
                     && !enclosure::Stage(_document->Document(),record.previous.label,
                         *record.requested.enclosureRebuild,record.previous.enclosure.identifier))
                 || !_document->CaptureObjectTransformStateForLabel(record.previous.label, record.candidate)
@@ -2383,15 +2433,54 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
                 || (!cutStaged && record.requested.operation != OrdinaryTransformOperation::ProfileRebuild
-                    && !record.candidate.profile.IsEqual(record.previous.profile))
+                    && (treatmentStaged
+                        // A staged B1 treatment restages the same source recipe
+                        // against the new owner shape, so the old bound shape
+                        // must not be required. Recipe label, identifier,
+                        // values and unit stay exact and the binding must be
+                        // current on the candidate owner.
+                        ? (record.candidate.profile.label.IsNull()!=record.previous.profile.label.IsNull()
+                            || (!record.candidate.profile.label.IsNull()
+                                && (!record.candidate.profile.label.IsEqual(record.previous.profile.label)
+                                    || record.candidate.profile.label.Data()!=record.previous.profile.label.Data()
+                                    || record.candidate.profile.identifier!=record.previous.profile.identifier
+                                    || record.candidate.profile.values!=record.previous.profile.values
+                                    || record.candidate.profile.parameters.metersPerUnit
+                                        !=record.previous.profile.parameters.metersPerUnit
+                                    || !record.candidate.profile.IsCurrent(
+                                        _document->Document(),record.previous.label))))
+                        : !record.candidate.profile.IsEqual(record.previous.profile)))
                 || (!cutStaged && record.requested.operation != OrdinaryTransformOperation::EnclosureRebuild
-                    && !record.candidate.enclosure.IsEqual(record.previous.enclosure))
+                    && (treatmentStaged
+                        ? (record.candidate.enclosure.label.IsNull()!=record.previous.enclosure.label.IsNull()
+                            || (!record.candidate.enclosure.label.IsNull()
+                                && (!record.candidate.enclosure.label.IsEqual(record.previous.enclosure.label)
+                                    || record.candidate.enclosure.label.Data()!=record.previous.enclosure.label.Data()
+                                    || record.candidate.enclosure.identifier!=record.previous.enclosure.identifier
+                                    || record.candidate.enclosure.values!=record.previous.enclosure.values
+                                    || record.candidate.enclosure.parameters.metersPerUnit
+                                        !=record.previous.enclosure.parameters.metersPerUnit
+                                    || !record.candidate.enclosure.IsCurrent(
+                                        _document->Document(),record.previous.label))))
+                        : !record.candidate.enclosure.IsEqual(record.previous.enclosure)))
                 || (featureStaged ? (record.candidate.present!=record.previous.present
                     || !sweep_rebuild::SameRawScalars(record.candidate.scalars,record.previous.scalars))
                     : record.candidate.scalars != EncodedTransform(record.requested.transform))
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
                 || (!loftStaged && !cutStaged && !record.candidate.loft.IsEqual(record.previous.loft))
                 || (!cutStaged && !cutSourceStaged && !programSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
+                || (treatmentStaged
+                    ?(!record.candidate.edgeTreatment||!ledger.edgeTreatmentReadback
+                        ||record.candidate.edgeTreatment->value->bytes!=ledger.edgeTreatmentReadback->value->bytes)
+                    :(record.candidate.edgeTreatment.has_value()!=record.previous.edgeTreatment.has_value()
+                        ||(record.candidate.edgeTreatment&&record.previous.edgeTreatment
+                            &&record.candidate.edgeTreatment->value->bytes!=record.previous.edgeTreatment->value->bytes)))
+                || (treatmentStagedR2
+                    ?(!record.candidate.edgeTreatmentR2||!ledger.edgeTreatmentReadbackR2
+                        ||record.candidate.edgeTreatmentR2->bytes!=ledger.edgeTreatmentReadbackR2->bytes)
+                    :(record.candidate.edgeTreatmentR2.has_value()!=record.previous.edgeTreatmentR2.has_value()
+                        ||(record.candidate.edgeTreatmentR2&&record.previous.edgeTreatmentR2
+                            &&record.candidate.edgeTreatmentR2->bytes!=record.previous.edgeTreatmentR2->bytes)))
                 || record.candidate.meshRegionPartition!=regionPartition
                 || record.candidate.meshUVAtlasVersion != (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     ? record.requested.meshUVAtlasOptions.version

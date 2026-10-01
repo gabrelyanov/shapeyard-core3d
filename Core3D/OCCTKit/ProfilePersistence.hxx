@@ -2,6 +2,7 @@
 
 #include "ProfileDefinition.hxx"
 #include "ProfileConstructionFrame.hxx"
+#include "RetainedEdgeTreatmentStorageKey.hxx"
 #include <TDocStd_Document.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TopoDS_Shape.hxx>
@@ -355,7 +356,8 @@ inline bool Read(const Handle(TDocStd_Document)& document, const TDF_Label& owne
         for (TDF_AttributeIterator it(label); it.More(); it.Next()) {
             const auto& id = it.Value()->ID();
             if (id != SchemaID() && id != CountID() && id != IdentityID()
-                && id != TNaming_NamedShape::GetID()) return false;
+                && id != TNaming_NamedShape::GetID()
+                && id != retained_edge_treatment::AttributeID()) return false;
         }
         record.values.resize(count->Get());
         int present = 0, childrenInspected = 0;

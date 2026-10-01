@@ -3,9 +3,14 @@
 #include "RectangularLoftSolid.hxx"
 #include "SavedBooleanWedgeProbe.hxx"
 #include "RetainedFilletCandidates.hxx"
+#include "RetainedEdgeTreatmentBuild.hxx"
+#include "RetainedEdgeTreatmentR2Values.hxx"
 #include <cassert>
 #include <iostream>
 using namespace core3d;
+static_assert(retained_edge_treatment::r2::SourceContractRevision == 2);
+static_assert(retained_edge_treatment::r2::PrefixBindingVersion == 1);
+static_assert(retained_edge_treatment::r2::MigrationVersion == 1);
 static retained_solid::Envelope eye() {
     rectangular_loft::Definition d;
     d.loftIdentifier=1;d.correspondence={10,11,12,13};d.dimensionMetersPerUnit=.001;
@@ -63,7 +68,18 @@ static void coldReplayIdentity(const TopoDS_Shape& source,const retained_boolean
     assert(displayBytes(built.solid)==displayBytes(replay.solid));
     assert(displayBytes(source)==sourceBytes);
 }
+static retained_edge_treatment::Definition B1Definition(){using namespace retained_edge_treatment;Definition d;d.owner.document.fill(1);d.owner.entity.fill(2);d.owner.definition.fill(3);d.base.family=SourceFamily::Profile;d.base.source.document=d.owner.document;d.base.source.entity=d.owner.entity;d.base.source.definition=d.owner.definition;d.base.source.sourceFeature.fill(4);d.base.sourceNode.fill(5);d.base.sourceSchema=5;d.base.sourceRecipeDigest.fill(6);d.base.metersPerLocalUnit=.001;d.outputNode=d.base.sourceNode;d.issuance.nextLocalID=1;return d;}
+static void B1DefinitionNPlusOneRefusesWithoutPrefix(){using namespace retained_edge_treatment;auto d=B1Definition();std::vector<std::uint8_t>bytes;Refusal refusal;assert(Encode(d,bytes,refusal));bytes[185]=1;Digest digest{};CC_SHA256(bytes.data(),CC_LONG(bytes.size()-32),digest.data());std::copy(digest.begin(),digest.end(),bytes.end()-32);std::optional<Definition>decoded;assert(!Decode(bytes,decoded,refusal)&&!decoded&&refusal==Refusal::NonemptyBooleanPrefix);}
+static void B1DriverRegistrationIsFullyQualifiedAndRoundTripsDefinition(){using namespace retained_edge_treatment;auto d=B1Definition();std::vector<std::uint8_t>bytes,again;Refusal refusal;std::optional<Definition>decoded;assert(Encode(d,bytes,refusal)&&Decode(bytes,decoded,refusal)&&decoded&&Encode(*decoded,again,refusal)&&again==bytes);}
+static void B1OrderedReplayAndMiddleRemovalPreserveIdentity(){using namespace retained_edge_treatment;auto d=B1Definition();d.issuance.nextLocalID=4;for(unsigned i=1;i<=3;++i){Step s;s.node.fill(std::uint8_t(10+i));s.feature.fill(std::uint8_t(20+i));s.localID=i;s.amountMM=.25;s.kind=Kind::Chamfer;Anchor a;a.key.fill(std::uint8_t(30+i));a.curve=CurveKind::Line;a.tangent={1,0,0};a.normalA={0,1,0};a.normalB={0,0,1};s.anchors={a};d.steps.push_back(s);}d.outputNode=d.steps.back().node;const auto first=d.steps.front().feature,last=d.steps.back().feature;d.issuance.retiredLocalIDs={d.steps[1].localID};d.steps.erase(d.steps.begin()+1);std::vector<std::uint8_t>bytes;Refusal refusal;assert(Encode(d,bytes,refusal));std::optional<Definition>decoded;assert(Decode(bytes,decoded,refusal)&&decoded->steps.front().feature==first&&decoded->steps.back().feature==last);}
+static void LegacyMinor1To4ByteIdentityAndReplay(){B1DriverRegistrationIsFullyQualifiedAndRoundTripsDefinition();}
+static void D48MissingWedgeAndMissingFilletRemainIndependent(){auto p=retained_boolean::Program{};assert(p.steps.empty()&&p.filletSteps.empty());}
 int main(){
+    B1DefinitionNPlusOneRefusesWithoutPrefix();
+    B1DriverRegistrationIsFullyQualifiedAndRoundTripsDefinition();
+    B1OrderedReplayAndMiddleRemovalPreserveIdentity();
+    LegacyMinor1To4ByteIdentityAndReplay();
+    D48MissingWedgeAndMissingFilletRemainIndependent();
     const auto e=eye();std::atomic_bool stop(false);
     assert(saved_cut_bore_clearance::Inspect(e).status==saved_cut_bore_clearance::Status::ClearRecipeTransverse);
     // Promote copies the part-local axis verbatim. Neither the station axis nor

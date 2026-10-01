@@ -81,6 +81,11 @@
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <ShapeAnalysis_Surface.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <BRepBndLib.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -127,6 +132,509 @@
 #endif
 
 namespace core3d {
+
+namespace {
+retained_edge_treatment::UUID MintEdgeTreatmentUUID() noexcept {
+    retained_edge_treatment::UUID id{};arc4random_buf(id.data(),id.size());
+    id[6]=std::uint8_t((id[6]&0x0f)|0x40);id[8]=std::uint8_t((id[8]&0x3f)|0x80);return id;
+}
+
+bool SameSelectorMembership(const retained_face_selector::FaceMembershipProof& lhs,
+    const retained_face_selector::FaceMembershipProof& rhs) noexcept {
+    if (lhs.intent() != rhs.intent() || lhs.plane() != rhs.plane()
+        || lhs.coverage() != rhs.coverage() || lhs.wireCount() != rhs.wireCount()
+        || lhs.uniqueEdgeCount() != rhs.uniqueEdgeCount()
+        || lhs.selectedEdgeCount() != rhs.selectedEdgeCount()
+        || lhs.boundaryUses().size() != rhs.boundaryUses().size()) return false;
+    for (std::size_t index = 0; index < lhs.boundaryUses().size(); ++index) {
+        const auto& first = lhs.boundaryUses()[index];
+        const auto& second = rhs.boundaryUses()[index];
+        if (first.selected != second.selected || first.direction != second.direction
+            || !first.edge.IsSame(second.edge) || first.ownerFaces.size() != second.ownerFaces.size()) return false;
+    }
+    return true;
+}
+
+bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double metersPerLocalUnit,
+    retained_edge_treatment::Anchor& output) {
+    namespace et = retained_edge_treatment;
+    if (use.ownerFaces.size() != 2 || !std::isfinite(metersPerLocalUnit)
+        || metersPerLocalUnit <= 0) return false;
+    BRepAdaptor_Curve curve(use.edge);
+    const auto type = curve.GetType();
+    if (type != GeomAbs_Line && type != GeomAbs_Circle) return false;
+    const double parameter = (curve.FirstParameter() + curve.LastParameter()) * .5;
+    gp_Pnt point; gp_Vec tangent; curve.D1(parameter, point, tangent);
+    if (tangent.SquareMagnitude() <= Precision::SquareConfusion()) return false;
+    tangent.Normalize();
+    if (use.direction == retained_face_selector::FaceUseDirection::Reversed) tangent.Reverse();
+    const double millimetersPerLocal = metersPerLocalUnit * 1000.0;
+    output.key = MintEdgeTreatmentUUID();
+    output.curve = type == GeomAbs_Line ? et::CurveKind::Line : et::CurveKind::Circle;
+    output.pointMM = {point.X() * millimetersPerLocal, point.Y() * millimetersPerLocal,
+        point.Z() * millimetersPerLocal};
+    output.tangent = {tangent.X(), tangent.Y(), tangent.Z()};
+    output.circleRadiusMM = type == GeomAbs_Circle
+        ? curve.Circle().Radius() * millimetersPerLocal : 0;
+    std::array<std::array<double, 3>, 2> normals{};
+    for (std::size_t index = 0; index < 2; ++index) {
+        const TopoDS_Face& face = use.ownerFaces[index];
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        ShapeAnalysis_Surface analysis(surface);
+        const gp_Pnt2d uv = analysis.ValueOfUV(point, 1e-7);
+        BRepLProp_SLProps properties(BRepAdaptor_Surface(face), uv.X(), uv.Y(), 1, 1e-9);
+        if (!properties.IsNormalDefined()) return false;
+        gp_Dir normal = properties.Normal();
+        if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+        normals[index] = {normal.X(), normal.Y(), normal.Z()};
+    }
+    if (normals[1] < normals[0]) std::swap(normals[0], normals[1]);
+    output.normalA = normals[0]; output.normalB = normals[1];
+    return true;
+}
+}
+
+std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatment(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot,
+    const retained_edge_treatment::Edit& edit,const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!snapshot||!canBeginCommittedEdit()||myDoc.IsNull()
+        ||myContext.IsNull()||!width||!height||snapshot->ownerLabel_.IsNull())return {};
+    try{
+        const auto scene=captureSceneSnapshot(width,height);if(!scene
+            ||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||scene->revisions.documentGeneration!=identity.documentGeneration
+            ||scene->revisions.model!=identity.modelRevision
+            ||scene->revisions.presentation!=presentationRevision)return {};
+        myContext->InitSelected();if(!myContext->MoreSelected())return {};auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+        if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(snapshot->ownerLabel_)
+            ||!selected->Shape().IsEqual(snapshot->current_))return {};
+        et::Definition candidate=snapshot->definition_.value_or(snapshot->seed_);
+        if(const auto* append=std::get_if<et::Append>(&edit)){
+            if(candidate.steps.size()>=et::MaximumSteps||append->anchors.empty()){refusal=et::Refusal::Budget;return {};}
+            et::Step step;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();step.localID=candidate.issuance.nextLocalID++;step.kind=append->kind;step.amountMM=append->amountMM;step.anchors=append->anchors;std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});candidate.steps.push_back(std::move(step));candidate.outputNode=candidate.steps.back().node;
+        }else if(const auto* amount=std::get_if<et::SetAmount>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==amount->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}i->amountMM=amount->amountMM;
+        }else if(const auto* targets=std::get_if<et::ReplaceTargets>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==targets->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}if(i->selector){refusal=et::Refusal::UnsupportedOperation;return {};}i->anchors=targets->anchors;std::sort(i->anchors.begin(),i->anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
+        }else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(i->localID);std::sort(candidate.issuance.retiredLocalIDs.begin(),candidate.issuance.retiredLocalIDs.end());candidate.steps.erase(i);candidate.outputNode=candidate.steps.empty()?candidate.base.sourceNode:candidate.steps.back().node;
+        }else if(const auto* rebuild=std::get_if<et::RebuildSource>(&edit)){std::vector<double>values;std::vector<std::uint8_t>bytes;bool encoded=false;if(const auto*p=std::get_if<profile::Parameters>(&rebuild->requested)){encoded=profile::Encode(*p,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(*p),values,bytes);}else if(const auto*e=std::get_if<enclosure::Parameters>(&rebuild->requested)){encoded=enclosure::Encode(*e,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,e->definition.constructionFrame?2:1,values,bytes);}if(!encoded||!composite_recipe::Hash(bytes,candidate.base.sourceRecipeDigest)){refusal=et::Refusal::MalformedCarrier;return {};}}
+        std::vector<std::uint8_t>bytes;if(!et::Encode(candidate,bytes,refusal))return {};
+        auto work=std::make_shared<et::Work>();work->snapshot_=snapshot;work->edit_=edit;work->candidate_=std::move(candidate);work->label_=snapshot->ownerLabel_;work->presentation_=selected;work->state_=et::Work::State::Prepared;refusal=et::Refusal::None;return work;
+    }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
+std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
+Core3DViewer::captureEdgeTreatmentSelectorTargets(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
+    const retained_face_selector::SelectorIntent& intent,
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height,
+    retained_face_selector::Refusal& refusal) noexcept {
+    namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
+    refusal = fs::Refusal::StaleSource;
+    if (![NSThread isMainThread] || !original || !original->current() || myDoc.IsNull()
+        || myContext.IsNull() || !width || !height || original->ownerLabel_.IsNull()) return {};
+    try {
+        const auto scene = captureSceneSnapshot(width, height);
+        if (!scene || scene->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || scene->revisions.documentGeneration != identity.documentGeneration
+            || scene->revisions.model != identity.modelRevision
+            || scene->revisions.presentation != presentationRevision) return {};
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return {};
+        const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || selected.IsNull()
+            || !myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+            || !selected->Shape().IsEqual(original->current_)) return {};
+        et::ReplayBudget budget = original->chargedBudget_;
+        const std::atomic_bool cancelled{false}; fs::Resolution resolution;
+        refusal = fs::Resolve(original->current_, intent, original->dimensionMetersPerUnit(),
+            budget, cancelled, resolution);
+        if (refusal != fs::Refusal::None || !resolution.proof) return {};
+        return std::shared_ptr<const et::SelectorTargetCapture>(
+            new et::SelectorTargetCapture(original, resolution.proof, budget));
+    } catch (...) { refusal = fs::Refusal::NativeFailure; return {}; }
+}
+
+std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmentSelectorAppend(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
+    const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>& targets,
+    double amountMM, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
+    refusal = et::Refusal::StaleSnapshot;
+    if (![NSThread isMainThread] || !original || !targets || targets->original_ != original
+        || !std::isfinite(amountMM) || amountMM <= 0 || amountMM > 20
+        || !canBeginCommittedEdit() || myDoc.IsNull() || myContext.IsNull()
+        || !width || !height || original->ownerLabel_.IsNull()) {
+        if (std::isfinite(amountMM) && amountMM > 0 && amountMM <= 20) return {};
+        refusal = et::Refusal::InvalidAmount; return {};
+    }
+    try {
+        const auto scene = captureSceneSnapshot(width, height);
+        if (!scene || scene->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || scene->revisions.documentGeneration != identity.documentGeneration
+            || scene->revisions.model != identity.modelRevision
+            || scene->revisions.presentation != presentationRevision) return {};
+        myContext->InitSelected(); if (!myContext->MoreSelected()) return {};
+        const auto selected = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || selected.IsNull()
+            || !myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+            || !selected->Shape().IsEqual(original->current_)) return {};
+        et::ReplayBudget budget = targets->chargedBudget_;
+        const std::atomic_bool cancelled{false}; fs::Resolution refreshed;
+        const fs::Refusal queryRefusal = fs::Resolve(original->current_, targets->proof().intent(),
+            original->dimensionMetersPerUnit(), budget, cancelled, refreshed);
+        if (queryRefusal != fs::Refusal::None || !refreshed.proof
+            || !SameSelectorMembership(targets->proof(), *refreshed.proof)) {
+            refusal = et::Refusal::StaleSnapshot; return {};
+        }
+        et::Definition candidate = original->definition_.value_or(original->seed_);
+        if (candidate.steps.size() >= et::MaximumSteps) { refusal = et::Refusal::Budget; return {}; }
+        struct Issued { et::Anchor anchor; fs::FaceUseDirection direction; };
+        std::vector<Issued> issued;
+        for (const auto& use : refreshed.proof->boundaryUses()) if (use.selected) {
+            Issued value;
+            if (!SelectorAnchor(use, original->dimensionMetersPerUnit(), value.anchor)) {
+                refusal = et::Refusal::UnsupportedEdge; return {};
+            }
+            value.direction = use.direction; issued.push_back(std::move(value));
+        }
+        if (issued.empty() || issued.size() != refreshed.proof->selectedEdgeCount()) {
+            refusal = et::Refusal::ReplayMismatch; return {};
+        }
+        std::sort(issued.begin(), issued.end(), [](const Issued& lhs, const Issued& rhs) {
+            return lhs.anchor.key < rhs.anchor.key;
+        });
+        et::Step step; step.node = MintEdgeTreatmentUUID(); step.feature = MintEdgeTreatmentUUID();
+        step.localID = candidate.issuance.nextLocalID++; step.kind = et::Kind::ConstantFillet;
+        step.amountMM = amountMM;
+        fs::SelectorReceipt receipt; receipt.intent = refreshed.proof->intent();
+        receipt.face = refreshed.proof->plane(); receipt.coverage = refreshed.proof->coverage();
+        receipt.wireCount = refreshed.proof->wireCount();
+        receipt.boundaryUseCount = std::uint32_t(refreshed.proof->boundaryUses().size());
+        receipt.boundaryUniqueEdgeCount = refreshed.proof->uniqueEdgeCount();
+        for (const auto& value : issued) {
+            step.anchors.push_back(value.anchor);
+            receipt.entries.push_back({value.anchor.key, value.direction});
+        }
+        step.selector = std::move(receipt); candidate.schema = 2;
+        candidate.steps.push_back(step); candidate.outputNode = step.node;
+        std::vector<std::uint8_t> encoded;
+        if (!et::Encode(candidate, encoded, refusal)) return {};
+        auto admitted = std::shared_ptr<et::SelectorAppendValues>(new et::SelectorAppendValues);
+        admitted->captureNonce_ = original->nonce_; admitted->fence_ = original->owner_.fence;
+        admitted->source_ = original->source_; admitted->base_ = candidate.base;
+        admitted->edit_ = et::Append{et::Kind::ConstantFillet, amountMM, step.anchors};
+        admitted->issuedStep_ = step; admitted->chargedBudget_ = budget;
+        auto work = std::make_shared<et::Work>(); work->snapshot_ = original;
+        work->selectorAppend_ = admitted; work->edit_ = admitted->edit_;
+        work->candidate_ = std::move(candidate); work->label_ = original->ownerLabel_;
+        work->presentation_ = selected; work->state_ = et::Work::State::Prepared;
+        refusal = et::Refusal::None; return work;
+    } catch (...) { refusal = et::Refusal::BuildFailed; return {}; }
+}
+
+std::shared_ptr<const retained_edge_treatment::DetachedInput> Core3DViewer::edgeTreatmentGeometry(const std::shared_ptr<retained_edge_treatment::Work>&work) noexcept {
+    using namespace retained_edge_treatment;
+    if(![NSThread isMainThread]||!work||!work->snapshot_
+        ||work->state_!=Work::State::Prepared)return {};
+    auto input=std::shared_ptr<DetachedInput>(new DetachedInput);
+    input->selectorAppend_=work->selectorAppend_;
+    // A selector capture owns main-thread document/topology authority and must
+    // never cross the detached boundary. Only its admitted value adjunct does.
+    if(!work->selectorAppend_) input->snapshot_=work->snapshot_;
+    input->edit_=work->edit_;input->candidate_=work->candidate_;
+    input->source_=work->selectorAppend_?work->selectorAppend_->source_:work->snapshot_->source_;
+    input->nonce_=work->snapshot_->nonce_;input->base_=work->snapshot_->base_;
+    input->chargedBudget_=work->selectorAppend_?work->selectorAppend_->chargedBudget_
+        :work->snapshot_->chargedBudget_;
+    input->cancelled_=work->cancelled_;work->state_=Work::State::Building;return input;
+}
+
+std::shared_ptr<const retained_edge_treatment::DetachedResult> Core3DViewer::buildEdgeTreatment(const std::shared_ptr<const retained_edge_treatment::DetachedInput>&input,retained_edge_treatment::Refusal&refusal) noexcept {
+    using namespace retained_edge_treatment;refusal=Refusal::BuildFailed;if(!input||!input->cancelled_||input->cancelled_->load()) {refusal=Refusal::Cancelled;return {};}
+    try{auto result=std::shared_ptr<DetachedResult>(new DetachedResult);
+        result->nonce_=input->nonce_;
+        result->source_=std::holds_alternative<RebuildSource>(input->edit_)
+            ?std::get<RebuildSource>(input->edit_).requested:input->source_;
+        result->definition_=input->candidate_;result->base_=input->base_;
+        result->selectorAppend_=input->selectorAppend_;result->budget_=input->chargedBudget_;
+        if(!Encode(result->definition_,result->definitionBytes_,refusal)
+            ||!Replay(result->base_,result->definition_,result->result_,result->proofs_,result->budget_,refusal))return {};
+        if(input->cancelled_->load()){refusal=Refusal::Cancelled;return { };}
+        refusal=Refusal::None;return result;}catch(...){refusal=Refusal::BuildFailed;return {};}
+}
+
+bool Core3DViewer::cancelEdgeTreatment(const std::shared_ptr<retained_edge_treatment::Work>&work) noexcept {if(!work)return false;work->cancelled_->store(true);if([NSThread isMainThread])work->state_=retained_edge_treatment::Work::State::Settled;return true;}
+
+std::vector<retained_edge_treatment::Anchor> Core3DViewer::captureEdgeTreatmentTargets(const std::shared_ptr<const retained_edge_treatment::Snapshot>&snapshot,retained_edge_treatment::Refusal&refusal) noexcept {
+    namespace et=retained_edge_treatment;std::vector<et::Anchor> result;refusal=et::Refusal::UnsupportedEdge;if(![NSThread isMainThread]||!snapshot||myContext.IsNull()||!canBeginCommittedEdit())return result;
+    try{TopTools_IndexedDataMapOfShapeListOfShape adjacency;TopExp::MapShapesAndAncestors(snapshot->current_,TopAbs_EDGE,TopAbs_FACE,adjacency);myContext->InitSelected();while(myContext->MoreSelected()){if(!myContext->HasSelectedShape()){myContext->NextSelected();continue;}TopoDS_Shape selected=myContext->SelectedShape();myContext->NextSelected();if(selected.ShapeType()!=TopAbs_EDGE)continue;TopoDS_Edge edge=TopoDS::Edge(selected);int index=adjacency.FindIndex(edge);if(index<=0||adjacency.FindFromIndex(index).Extent()!=2){result.clear();return result;}BRepAdaptor_Curve curve(edge);double t=(curve.FirstParameter()+curve.LastParameter())*.5;gp_Pnt point;gp_Vec derivative;curve.D1(t,point,derivative);if(derivative.SquareMagnitude()<=Precision::SquareConfusion()){result.clear();return result;}derivative.Normalize();et::Anchor anchor;anchor.key=MintEdgeTreatmentUUID();anchor.curve=curve.GetType()==GeomAbs_Line?et::CurveKind::Line:curve.GetType()==GeomAbs_Circle?et::CurveKind::Circle:et::CurveKind(0);if(int(anchor.curve)==0){result.clear();return result;}anchor.pointMM={point.X(),point.Y(),point.Z()};anchor.tangent={derivative.X(),derivative.Y(),derivative.Z()};anchor.circleRadiusMM=anchor.curve==et::CurveKind::Circle?curve.Circle().Radius():0;std::array<std::array<double,3>,2>normals{};int faceIndex=0;for(TopTools_ListIteratorOfListOfShape it(adjacency.FindFromIndex(index));it.More();it.Next()){TopoDS_Face face=TopoDS::Face(it.Value());Handle(Geom_Surface)surface=BRep_Tool::Surface(face);ShapeAnalysis_Surface analysis(surface);gp_Pnt2d uv=analysis.ValueOfUV(point,1e-7);BRepLProp_SLProps props(BRepAdaptor_Surface(face),uv.X(),uv.Y(),1,1e-9);if(!props.IsNormalDefined()){result.clear();return result;}gp_Dir normal=props.Normal();if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();normals[faceIndex++]={normal.X(),normal.Y(),normal.Z()};}anchor.normalA=normals[0];anchor.normalB=normals[1];result.push_back(anchor);}if(result.empty()||result.size()>et::MaximumAnchorsPerStep){result.clear();return result;}std::sort(result.begin(),result.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});refusal=et::Refusal::None;return result;}catch(...){result.clear();return result;}
+}
+
+retained_face_selector::Resolution Core3DViewer::resolveFaceSelector(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot,
+    const retained_face_selector::SelectorIntent& intent) noexcept {
+    retained_face_selector::Resolution result;
+    if (![NSThread isMainThread] || !snapshot || !snapshot->current() || myDoc.IsNull()) {
+        result.refusal = retained_face_selector::Refusal::StaleSource;
+        return result;
+    }
+    return myDoc->ResolveRetainedFaceSelector(*snapshot, intent, snapshot->owner().fence);
+}
+
+retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatment(const std::shared_ptr<retained_edge_treatment::Work>&work,const std::shared_ptr<const retained_edge_treatment::DetachedResult>&result) noexcept {
+    namespace et=retained_edge_treatment;et::CommitResult answer;if(![NSThread isMainThread]||!work||!result||work->state_!=et::Work::State::Building||result->nonce_!=work->snapshot_->nonce_){answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StaleSnapshot;return answer;}if(work->cancelled_->load()){work->state_=et::Work::State::Settled;answer.outcome=et::CommitOutcome::Cancelled;answer.refusal=et::Refusal::Cancelled;return answer;}
+    try{OrdinaryTransformChange change;change.label=work->label_;change.presentation=work->presentation_;change.shape=result->result_;change.transform=work->presentation_->LocalTransformation();change.operation=OrdinaryTransformOperation::RetainedEdgeTreatment;change.edgeTreatmentSnapshot=work->snapshot_;change.edgeTreatmentEdit=work->edit_;change.edgeTreatmentResult=result;OrdinaryEditResult ordinary=OrdinaryEditResult::Invalid;work->state_=et::Work::State::Committing;auto lease=_ordinaryEditController->beginTransform({change},&ordinary);if(lease)ordinary=lease.stageAndCommit();work->state_=et::Work::State::Settled;if(ordinary==OrdinaryEditResult::Committed){answer.outcome=et::CommitOutcome::Committed;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=1;for(const auto&s:result->definition_.steps)answer.replayedFeatures.push_back(s.feature);}else if(ordinary==OrdinaryEditResult::NoChange){answer.outcome=et::CommitOutcome::Unchanged;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=0;}else if(ordinary==OrdinaryEditResult::Busy){answer.outcome=et::CommitOutcome::Busy;answer.refusal=et::Refusal::Busy;}else if(ordinary==OrdinaryEditResult::OutcomeUnknown){answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();}else{answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StageFailed;}return answer;}catch(...){work->state_=et::Work::State::Settled;answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();return answer;}
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::MigrationReview>
+Core3DViewer::reviewRetainedBooleanMigrationR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>& original,
+    const retained_edge_treatment::r2::MigrationM3& request,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!original||request.version!=1||request.selectors.size()>8
+        ||!width||!height||myDoc.IsNull()||myContext.IsNull())return {};
+    try{
+        std::uint64_t previous=0;for(const auto& binding:request.selectors){
+            if(!binding.oldStepID||binding.oldStepID<=previous
+                ||!retained_face_selector::ValidIntent(binding.intent)){refusal=et::Refusal::MalformedCarrier;return {};}
+            previous=binding.oldStepID;
+        }
+        if(request.append&&(!retained_face_selector::ValidIntent(request.append->intent)
+            ||!std::isfinite(request.append->amountMM)||request.append->amountMM<=0||request.append->amountMM>20)){
+            refusal=et::Refusal::InvalidAmount;return {};
+        }
+        const auto scene=captureSceneSnapshot(width,height);
+        if(!scene||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||scene->revisions.documentGeneration!=identity.documentGeneration
+            ||scene->revisions.model!=identity.modelRevision
+            ||scene->revisions.presentation!=presentationRevision)return {};
+        auto review=std::shared_ptr<r2::MigrationReview>(new r2::MigrationReview);
+        review->original_=original;review->request_=request;
+        std::vector<std::uint8_t> digestBytes=original->originalBytes_;
+        digestBytes.push_back(std::uint8_t(request.selectors.size()));digestBytes.push_back(request.append?1:0);
+        CC_SHA256(digestBytes.data(),CC_LONG(digestBytes.size()),review->requestDigest_.data());
+        // Each requested semantic binding is independently resolved on its exact
+        // preceding replay stage during prepare; review never issues identities.
+        refusal=et::Refusal::None;return review;
+    }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::Snapshot> Core3DViewer::captureEdgeTreatmentR2(
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,retained_edge_treatment::Refusal& refusal) noexcept {
+    refusal=retained_edge_treatment::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+    const auto scene=captureSceneSnapshot(width,height);if(!scene
+        ||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+        ||scene->revisions.documentGeneration!=identity.documentGeneration
+        ||scene->revisions.model!=identity.modelRevision
+        ||scene->revisions.presentation!=presentationRevision)return {};
+    myContext->InitSelected();if(!myContext->MoreSelected())return {};
+    const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+    if(myContext->MoreSelected()||selected.IsNull())return {};
+    retained_recipe::RevisionFence fence;fence.documentGeneration=identity.documentGeneration;
+    fence.modelRevision=identity.modelRevision;fence.effectiveMetersPerUnit=1;
+    fence.ownerShape.fill(1);fence.ownerRecipe.fill(1);fence.ownerPlacement.fill(1);fence.ownerMaterial.fill(1);
+    retained_recipe::DependencyRead dependency;dependency.locator.owner.document.fill(1);dependency.locator.owner.entity.fill(1);
+    dependency.locator.owner.definition.fill(1);dependency.locator.node.fill(1);dependency.locator.sourceFeature.fill(1);
+    dependency.geometry.fill(1);dependency.recipe.fill(1);dependency.placement.fill(1);dependency.material.fill(1);dependency.groups.fill(1);
+    fence.dependencies.push_back(dependency);
+    return myDoc->CaptureRetainedEdgeTreatmentR2(myDoc->ShapeLabel(selected),fence,refusal);
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>
+Core3DViewer::captureRetainedBooleanMigrationR2(const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    refusal=retained_edge_treatment::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+    const auto scene=captureSceneSnapshot(width,height);if(!scene
+        ||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+        ||scene->revisions.documentGeneration!=identity.documentGeneration
+        ||scene->revisions.model!=identity.modelRevision
+        ||scene->revisions.presentation!=presentationRevision)return {};
+    myContext->InitSelected();if(!myContext->MoreSelected())return {};
+    const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+    if(myContext->MoreSelected()||selected.IsNull())return {};
+    retained_recipe::RevisionFence fence;fence.documentGeneration=identity.documentGeneration;
+    fence.modelRevision=identity.modelRevision;fence.effectiveMetersPerUnit=1;
+    fence.ownerShape.fill(1);fence.ownerRecipe.fill(1);fence.ownerPlacement.fill(1);fence.ownerMaterial.fill(1);
+    retained_recipe::DependencyRead dependency;dependency.locator.owner.document.fill(1);dependency.locator.owner.entity.fill(1);
+    dependency.locator.owner.definition.fill(1);dependency.locator.node.fill(1);dependency.locator.sourceFeature.fill(1);
+    dependency.geometry.fill(1);dependency.recipe.fill(1);dependency.placement.fill(1);dependency.material.fill(1);dependency.groups.fill(1);
+    fence.dependencies.push_back(dependency);
+    return myDoc->CaptureRetainedBooleanMigrationR2(myDoc->ShapeLabel(selected),fence,refusal);
+}
+
+std::shared_ptr<retained_edge_treatment::r2::Work>
+Core3DViewer::prepareRetainedBooleanMigrationR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>& original,
+    const retained_edge_treatment::r2::MigrationM3& request,
+    const std::shared_ptr<const retained_edge_treatment::r2::MigrationReview>& review,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!original||!review||review->original_!=original
+        ||request.version!=1||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull())return {};
+    try{
+        myContext->InitSelected();if(!myContext->MoreSelected())return {};
+        auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+        if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+            ||!selected->Shape().IsEqual(original->originalCurrent_))return {};
+        auto prefix=original->original_;
+        const auto identityValue=retained_boolean::Identities(prefix);
+        std::uint64_t nextOperandID=std::uint64_t(1),nextStepID=1,nextEdgeID=1;
+        std::vector<retained_fillet::Step> imported;
+        std::uint8_t wireMajor=1,wireMinor=1;
+        if(auto* program=std::get_if<retained_boolean::Program>(&prefix)){
+            wireMajor=2;wireMinor=program->codecMinor;nextOperandID=program->nextOperandID;
+            nextStepID=program->nextFilletStepID;nextEdgeID=program->nextFilletEdgeID;
+            imported=program->filletSteps;program->filletSteps.clear();
+        }else nextOperandID=std::uint64_t(std::get<retained_boolean::Legacy>(prefix).operandID)+1;
+        std::vector<std::uint8_t> prefixBytes;if(!retained_boolean::Encode(prefix,prefixBytes)){
+            refusal=et::Refusal::MalformedCarrier;return {};
+        }
+        r2::BooleanBaseBinding binding;binding.sourceWireMajor=wireMajor;binding.sourceWireMinor=wireMinor;
+        binding.source={identityValue.document,identityValue.entity,identityValue.definition,identityValue.sourceFeature};
+        binding.sourceSchema=std::visit([](const auto& value){if constexpr(std::is_same_v<std::decay_t<decltype(value)>,retained_boolean::Legacy>)return value.sourceSchema;else return value.source.schema;},prefix);
+        binding.metersPerLocalUnit=identityValue.metersPerUnit;
+        CC_SHA256(prefixBytes.data(),CC_LONG(prefixBytes.size()),binding.sourceRecipeDigest.data());
+        r2::LegacyPrefixBinding links;links.rootNode=MintEdgeTreatmentUUID();
+        const std::size_t operationCount=std::visit([](const auto& value)->std::size_t{if constexpr(std::is_same_v<std::decay_t<decltype(value)>,retained_boolean::Legacy>)return 1;else return value.steps.size();},prefix);
+        r2::UUID left=links.rootNode;
+        for(std::size_t index=0;index<operationCount;++index){r2::LegacyLink link;
+            link.operandID=std::visit([&](const auto& value)->std::uint32_t{if constexpr(std::is_same_v<std::decay_t<decltype(value)>,retained_boolean::Legacy>)return value.operandID;else return value.steps[index].operand.identifier;},prefix);
+            link.node=MintEdgeTreatmentUUID();link.feature=index+1==operationCount?identityValue.derivedFeature:MintEdgeTreatmentUUID();
+            link.toolNode=MintEdgeTreatmentUUID();link.toolFeature=MintEdgeTreatmentUUID();link.leftNode=left;link.rightNode=link.toolNode;
+            left=link.node;links.links.push_back(link);
+        }
+        binding.sourceNode=left;binding.prefix=links;
+        r2::MigrationM3Provenance provenance;provenance.originalRecipeDigest={};
+        CC_SHA256(original->originalBytes_.data(),CC_LONG(original->originalBytes_.size()),provenance.originalRecipeDigest.data());
+        provenance.nextOperandID=nextOperandID;provenance.nextFilletStepID=nextStepID;provenance.nextFilletEdgeID=nextEdgeID;
+        r2::Definition candidate;candidate.owner={identityValue.document,identityValue.entity,identityValue.definition};
+        candidate.base=binding;candidate.issuance.nextLocalID=nextStepID;candidate.outputNode=binding.sourceNode;
+        const double mmPerLocal=identityValue.metersPerUnit*1000;
+        for(const auto& old:imported){et::Step step;step.localID=old.stepIdentifier;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();
+            step.kind=et::Kind::ConstantFillet;step.amountMM=old.radiusLocal*mmPerLocal;
+            for(const auto& oldAnchor:old.anchors){et::Anchor anchor;anchor.key=MintEdgeTreatmentUUID();anchor.curve=et::CurveKind(oldAnchor.curveKind);
+                for(unsigned axis=0;axis<3;++axis){anchor.pointMM[axis]=oldAnchor.anchorPoint[axis]*mmPerLocal;anchor.tangent[axis]=oldAnchor.axis[axis];}
+                anchor.normalA={1,0,0};anchor.normalB={0,1,0};anchor.circleRadiusMM=oldAnchor.circleRadius*mmPerLocal;step.anchors.push_back(anchor);
+                provenance.anchors.push_back({oldAnchor.identifier,anchor.key,false});}
+            std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
+            candidate.steps.push_back(step);provenance.steps.push_back({old.stepIdentifier,step.node,step.feature,false});candidate.outputNode=step.node;
+        }
+        binding.migration=std::move(provenance);candidate.base=binding;
+        if(request.append){refusal=et::Refusal::UnsupportedOperation;return {};}
+        std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
+        auto work=std::make_shared<r2::Work>();work->migration_=original;work->review_=review;work->mutation_=request;
+        work->candidate_=candidate;work->source_=r2::RetainedBooleanBase{binding,r2::LegacyBooleanBase{prefix,prefixBytes}};
+        work->prefixBytes_=prefixBytes;work->base_=original->originalCurrent_;work->originalCurrent_=original->originalCurrent_;
+        work->nonce_=original->nonce_;work->label_=original->ownerLabel_;work->presentation_=selected;work->state_=r2::Work::State::Prepared;
+        refusal=et::Refusal::None;return work;
+    }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>
+Core3DViewer::captureEdgeTreatmentSelectorTargetsR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>& original,
+    const retained_face_selector::SelectorIntent& intent,const ObjectFrameIdentity&,
+    std::uint64_t,std::uint32_t,std::uint32_t,retained_face_selector::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;namespace fs=retained_face_selector;
+    refusal=fs::Refusal::StaleSource;if(![NSThread isMainThread]||!original||!original->current())return {};
+    et::ReplayBudget budget;fs::Resolution resolution;const std::atomic_bool cancelled{false};
+    refusal=fs::Resolve(original->current_,intent,original->dimensionMetersPerUnit(),budget,cancelled,resolution);
+    if(refusal!=fs::Refusal::None||!resolution.proof)return {};
+    auto value=std::shared_ptr<r2::SelectorTargetCapture>(new r2::SelectorTargetCapture);
+    value->original_=original;value->proof_=resolution.proof;value->chargedBudget_.buildStages=budget.buildStages;
+    value->chargedBudget_.topologyVisits=budget.topologyVisits;return value;
+}
+
+std::shared_ptr<retained_edge_treatment::r2::Work>
+Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>& original,
+    const std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>& targets,
+    double amountMM,const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;namespace fs=retained_face_selector;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!original||!targets||targets->original_!=original
+        ||!std::isfinite(amountMM)||amountMM<=0||amountMM>20||original->definition_.steps.size()>=et::MaximumSteps)return {};
+    r2::Definition candidate=original->definition_;et::Step step;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();
+    step.localID=candidate.issuance.nextLocalID++;step.kind=et::Kind::ConstantFillet;step.amountMM=amountMM;
+    fs::SelectorReceipt receipt;receipt.intent=targets->proof_->intent();receipt.face=targets->proof_->plane();receipt.coverage=targets->proof_->coverage();
+    receipt.wireCount=targets->proof_->wireCount();receipt.boundaryUseCount=std::uint32_t(targets->proof_->boundaryUses().size());receipt.boundaryUniqueEdgeCount=targets->proof_->uniqueEdgeCount();
+    for(const auto& use:targets->proof_->boundaryUses())if(use.selected){et::Anchor anchor;if(!SelectorAnchor(use,original->dimensionMetersPerUnit(),anchor)){refusal=et::Refusal::UnsupportedEdge;return {};}
+        step.anchors.push_back(anchor);receipt.entries.push_back({anchor.key,use.direction});}
+    std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
+    std::sort(receipt.entries.begin(),receipt.entries.end(),[](const fs::ReceiptEntry&a,const fs::ReceiptEntry&b){return a.anchorKey<b.anchorKey;});step.selector=receipt;
+    candidate.steps.push_back(step);candidate.outputNode=step.node;std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
+    auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->candidate_=candidate;work->source_=original->source_;
+    work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;work->label_=original->ownerLabel_;
+    work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
+}
+
+std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTreatmentEditR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>& original,
+    const retained_edge_treatment::r2::Edit& edit,const ObjectFrameIdentity&,
+    std::uint64_t,std::uint32_t,std::uint32_t,retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!original)return {};
+    r2::Definition candidate=original->definition_;
+    if(const auto* amount=std::get_if<et::SetAmount>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==amount->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}row->amountMM=amount->amountMM;}
+    else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(row->localID);candidate.steps.erase(row);candidate.outputNode=candidate.steps.empty()?std::get<r2::BooleanBaseBinding>(candidate.base).sourceNode:candidate.steps.back().node;}
+    else {refusal=et::Refusal::UnsupportedDependency;return {};}
+    std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
+    auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=edit;work->candidate_=candidate;
+    work->source_=original->source_;work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;
+    work->label_=original->ownerLabel_;work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::edgeTreatmentGeometryR2(
+    const std::shared_ptr<retained_edge_treatment::r2::Work>& work) noexcept {
+    namespace r2=retained_edge_treatment::r2;if(![NSThread isMainThread]||!work||work->state_!=r2::Work::State::Prepared)return {};
+    auto input=std::shared_ptr<r2::DetachedInput>(new r2::DetachedInput);input->nonce_=work->nonce_;input->candidate_=work->candidate_;
+    input->source_=work->source_;input->base_=work->base_;input->originalCurrent_=work->originalCurrent_;input->chargedBudget_=work->chargedBudget_;
+    input->cancelled_=work->cancelled_;work->state_=r2::Work::State::Building;return input;
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer::buildEdgeTreatmentR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>& input,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;refusal=et::Refusal::BuildFailed;
+    if(!input||!input->cancelled_||input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
+    auto result=std::shared_ptr<r2::DetachedResult>(new r2::DetachedResult);result->nonce_=input->nonce_;result->definition_=input->candidate_;
+    result->source_=input->source_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
+    if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
+    et::ReplayBudget budget;if(!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal))return {};
+    refusal=et::Refusal::None;return result;
+}
+bool Core3DViewer::cancelEdgeTreatmentR2(const std::shared_ptr<retained_edge_treatment::r2::Work>& work) noexcept {if(!work)return false;work->cancelled_->store(true);return true;}
+
+retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatmentR2(
+    const std::shared_ptr<retained_edge_treatment::r2::Work>& work,
+    const std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>& result) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;et::CommitResult answer;
+    if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_){answer.refusal=et::Refusal::StaleSnapshot;return answer;}
+    OrdinaryTransformChange change;change.label=work->label_;change.presentation=work->presentation_;change.shape=result->result_;
+    change.transform=work->presentation_.IsNull()?gp_Trsf():work->presentation_->LocalTransformation();change.operation=OrdinaryTransformOperation::RetainedEdgeTreatment;
+    change.edgeTreatmentSnapshotR2=work->snapshot_;change.edgeTreatmentMigrationR2=work->migration_;if(work->migration_)change.edgeTreatmentMigrationRequestR2=std::get<r2::MigrationM3>(work->mutation_);change.edgeTreatmentResultR2=result;
+    OrdinaryEditResult ordinary=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginTransform({change},&ordinary);if(lease)ordinary=lease.stageAndCommit();
+    if(ordinary==OrdinaryEditResult::Committed){answer.outcome=et::CommitOutcome::Committed;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=1;}
+    else if(ordinary==OrdinaryEditResult::OutcomeUnknown){answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();}
+    else{answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StageFailed;answer.measuredUndoDelta=0;}return answer;
+}
 namespace native_opening::detail {
 struct State final {
     Core3DViewer* owner = nullptr;
@@ -2437,6 +2945,9 @@ struct ProfileSolidGeometry : ProfileDefinition {
     TopoDS_Shape solid;
     std::array<double, 6> bounds{};
     bool built = false;
+    std::optional<retained_edge_treatment::Definition> treatmentDefinition;
+    TopoDS_Shape treatmentBase;
+    std::vector<retained_edge_treatment::StepProof> treatmentProofs;
 };
 
 
@@ -2583,6 +3094,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             solid = TopoDS::Solid(shelled);
             if (!BRepCheck_Analyzer(solid, Standard_True).IsValid()) return false;
         }
+        if(geometry->treatmentDefinition){geometry->treatmentBase=solid;TopoDS_Shape treated;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Replay(solid,*geometry->treatmentDefinition,treated,geometry->treatmentProofs,budget,refusal))return false;solid=TopoDS::Solid(treated);}
         Bnd_Box bounds;
         BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
         if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
@@ -2776,6 +3288,9 @@ struct EnclosureSolidGeometry {
     std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
     EnclosureSolidResult result;
     bool built = false;
+    std::optional<retained_edge_treatment::Definition> treatmentDefinition;
+    TopoDS_Shape treatmentBase;
+    std::vector<retained_edge_treatment::StepProof> treatmentProofs;
 };
 struct CutSolidGeometry {
     cut_display::Settings displaySettings;
@@ -2962,6 +3477,8 @@ struct NativeSolidWork {
     double metersPerUnit = 0;
     bool frameFirst = false;
     bool consumed = false;
+    std::shared_ptr<const retained_edge_treatment::Snapshot> edgeTreatmentSnapshot;
+    std::optional<retained_edge_treatment::Edit> edgeTreatmentEdit;
 };
 
 // Thread-safe cancellation owns only private detached geometry and atomics.
@@ -3763,6 +4280,13 @@ std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
             result.dimensionMetersPerUnit = 0; // Unsupported physical scale does not hide a manual recipe.
         result.current = state.profile.IsCurrent(myDoc->Document(), label)
             && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        if(result.current){
+            namespace et=retained_edge_treatment;auto capture=std::shared_ptr<et::Snapshot>(new et::Snapshot);
+            capture->ownerLabel_=label;capture->sourceLabel_=state.profile.label;capture->sourceIdentifier_=state.profile.identifier;capture->source_=state.profile.parameters;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
+            auto&seed=capture->seed_;seed.schema=1;receipt::ParseUUID(myDoc->DocumentIdentifier(),seed.owner.document);receipt::ParseUUID(state.entityIdentifier,seed.owner.entity);receipt::ParseUUID(state.definitionIdentifier,seed.owner.definition);seed.base.source.document=seed.owner.document;seed.base.source.entity=seed.owner.entity;seed.base.source.definition=seed.owner.definition;receipt::ParseUUID(state.profile.identifier,seed.base.source.sourceFeature);seed.base.sourceNode=MintEdgeTreatmentUUID();seed.base.family=et::SourceFamily::Profile;seed.base.sourceSchema=std::uint32_t(profile::SchemaFor(state.profile.parameters));seed.base.metersPerLocalUnit=result.dimensionMetersPerUnit;seed.outputNode=seed.base.sourceNode;seed.issuance.nextLocalID=1;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,seed.base.sourceSchema,state.profile.values,capture->sourceBytes_);composite_recipe::Hash(capture->sourceBytes_,seed.base.sourceRecipeDigest);
+            if(state.edgeTreatment){capture->definition_=state.edgeTreatment->value->definition;capture->definitionBytes_=state.edgeTreatment->value->bytes;capture->seed_=*capture->definition_;TopoDS_Shape replayed;std::vector<et::StepProof>proofs;et::Refusal replayRefusal;if(!et::Replay(capture->base_,*capture->definition_,replayed,proofs,capture->chargedBudget_,replayRefusal)||!et::EquivalentReplayGeometry(capture->current_,replayed,capture->chargedBudget_,replayRefusal))return {};}
+            capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;result.edgeTreatment=std::move(capture);
+        }
         return result;
     } catch (...) { return {}; }
 }
@@ -3804,6 +4328,13 @@ std::optional<StoredEnclosureSnapshot> Core3DViewer::storedEnclosureDefinition(
         result.sourceState = state;
         result.current = state.enclosure.IsCurrent(myDoc->Document(), label)
             && enclosure::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        if(result.current){
+            namespace et=retained_edge_treatment;auto capture=std::shared_ptr<et::Snapshot>(new et::Snapshot);
+            capture->ownerLabel_=label;capture->sourceLabel_=state.enclosure.label;capture->sourceIdentifier_=state.enclosure.identifier;capture->source_=state.enclosure.parameters;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
+            auto&seed=capture->seed_;seed.schema=1;receipt::ParseUUID(myDoc->DocumentIdentifier(),seed.owner.document);receipt::ParseUUID(state.entityIdentifier,seed.owner.entity);receipt::ParseUUID(state.definitionIdentifier,seed.owner.definition);seed.base.source.document=seed.owner.document;seed.base.source.entity=seed.owner.entity;seed.base.source.definition=seed.owner.definition;receipt::ParseUUID(state.enclosure.identifier,seed.base.source.sourceFeature);seed.base.sourceNode=MintEdgeTreatmentUUID();seed.base.family=et::SourceFamily::Enclosure;seed.base.sourceSchema=state.enclosure.parameters.definition.constructionFrame?2:1;seed.base.metersPerLocalUnit=result.dimensionMetersPerUnit;seed.outputNode=seed.base.sourceNode;seed.issuance.nextLocalID=1;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,seed.base.sourceSchema,state.enclosure.values,capture->sourceBytes_);composite_recipe::Hash(capture->sourceBytes_,seed.base.sourceRecipeDigest);
+            if(state.edgeTreatment){capture->definition_=state.edgeTreatment->value->definition;capture->definitionBytes_=state.edgeTreatment->value->bytes;capture->seed_=*capture->definition_;TopoDS_Shape replayed;std::vector<et::StepProof>proofs;et::Refusal replayRefusal;if(!et::Replay(capture->base_,*capture->definition_,replayed,proofs,capture->chargedBudget_,replayRefusal)||!et::EquivalentReplayGeometry(capture->current_,replayed,capture->chargedBudget_,replayRefusal))return {};}
+            capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;result.edgeTreatment=std::move(capture);
+        }
         return result;
     } catch (...) { return {}; }
 }
@@ -3831,7 +4362,10 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
     try {
         const auto current = storedProfileDefinition(identity, presentationRevision, width, height);
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
-            || current->definitionIdentifier != original.definitionIdentifier) return {};
+            || current->definitionIdentifier != original.definitionIdentifier
+            || bool(current->edgeTreatment)!=bool(original.edgeTreatment)
+            || (current->edgeTreatment&&original.edgeTreatment
+                && current->edgeTreatment->definitionBytes_!=original.edgeTreatment->definitionBytes_)) return {};
         std::vector<double> originalValues, currentValues, requestedValues;
         if (!profile::Encode(original.parameters, originalValues)
             || !profile::Encode(current->parameters, currentValues) || originalValues != currentValues
@@ -3847,6 +4381,12 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         profileSolidGeometry(work)->constructionFrame = parameters.constructionFrame;
         profileSolidGeometry(work)->shells = parameters.shells;
         profileSolidGeometry(work)->shellMetersPerUnit = parameters.metersPerUnit;
+        if(original.edgeTreatment&&original.edgeTreatment->definition_){
+            retained_edge_treatment::Definition candidate=*original.edgeTreatment->definition_;
+            std::vector<std::uint8_t> sourceBytes;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(parameters),requestedValues,sourceBytes);composite_recipe::Hash(sourceBytes,candidate.base.sourceRecipeDigest);
+            profileSolidGeometry(work)->treatmentDefinition=candidate;
+            work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{parameters};
+        }
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
@@ -3874,7 +4414,10 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
             || current->definitionIdentifier != original.definitionIdentifier
             || current->dimensionMetersPerUnit != original.dimensionMetersPerUnit
-            || !current->sourceState.IsEqual(original.sourceState)) return {};
+            || !current->sourceState.IsEqual(original.sourceState)
+            || bool(current->edgeTreatment)!=bool(original.edgeTreatment)
+            || (current->edgeTreatment&&original.edgeTreatment
+                && current->edgeTreatment->definitionBytes_!=original.edgeTreatment->definitionBytes_)) return {};
         std::vector<double> originalValues, currentValues, requestedValues;
         if (!enclosure::Encode(original.parameters, originalValues)
             || !enclosure::Encode(current->parameters, currentValues) || originalValues != currentValues
@@ -3886,6 +4429,12 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)) return {};
         auto work = prepareEnclosureSolid(parameters, identity, presentationRevision, width, height);
         if (!work) return {};
+        if(original.edgeTreatment&&original.edgeTreatment->definition_){
+            retained_edge_treatment::Definition candidate=*original.edgeTreatment->definition_;
+            std::vector<std::uint8_t> sourceBytes;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,parameters.definition.constructionFrame?2:1,requestedValues,sourceBytes);composite_recipe::Hash(sourceBytes,candidate.base.sourceRecipeDigest);
+            auto enclosureGeometry=std::get<std::shared_ptr<EnclosureSolidGeometry>>(work->geometry);enclosureGeometry->treatmentDefinition=candidate;
+            work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{parameters};
+        }
         record.requested.label = label; record.requested.presentation = selected;
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::EnclosureRebuild;
@@ -4443,6 +4992,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
     if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&payload)) {
         if (!*p || (*p)->built || !(*p)->cancelled || (*p)->cancelled->load()) return false;
         (*p)->built=BuildEnclosureSolidGeometry((*p)->parameters.definition,(*p)->cancelled,(*p)->result);
+        if((*p)->built&&(*p)->treatmentDefinition){(*p)->treatmentBase=(*p)->result.solid;TopoDS_Shape treated;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Replay((*p)->treatmentBase,*(*p)->treatmentDefinition,treated,(*p)->treatmentProofs,budget,refusal))return (*p)->built=false;(*p)->result.solid=treated;}
         return (*p)->built;
     }
     return false;
@@ -4708,6 +5258,17 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 carrier->base=(*cutPayload)->detachedBase;record.requested.cut=std::move(carrier);
             }
             record.requested.shape = completed->solid;
+            if(work->edgeTreatmentSnapshot&&work->edgeTreatmentEdit){
+                auto treatment=std::shared_ptr<retained_edge_treatment::DetachedResult>(new retained_edge_treatment::DetachedResult);
+                treatment->nonce_=work->edgeTreatmentSnapshot->nonce_;treatment->source_=std::get<retained_edge_treatment::RebuildSource>(*work->edgeTreatmentEdit).requested;
+                if(const auto profileGeometry=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&work->geometry)){
+                    if(!*profileGeometry||!(*profileGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*profileGeometry)->treatmentDefinition;treatment->base_=(*profileGeometry)->treatmentBase;treatment->proofs_=(*profileGeometry)->treatmentProofs;
+                }else if(const auto enclosureGeometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry)){
+                    if(!*enclosureGeometry||!(*enclosureGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*enclosureGeometry)->treatmentDefinition;treatment->base_=(*enclosureGeometry)->treatmentBase;treatment->proofs_=(*enclosureGeometry)->treatmentProofs;
+                }else return OrdinaryEditResult::Invalid;
+                treatment->result_=completed->solid;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Encode(treatment->definition_,treatment->definitionBytes_,refusal))return OrdinaryEditResult::Invalid;
+                record.requested.edgeTreatmentSnapshot=work->edgeTreatmentSnapshot;record.requested.edgeTreatmentEdit=work->edgeTreatmentEdit;record.requested.edgeTreatmentResult=std::move(treatment);
+            }
             OrdinaryEditResult result = OrdinaryEditResult::Invalid;
             auto lease = work->modelingPermit
                 ? _ordinaryEditController->beginModelingRebuild(record.requested,work->modelingPermit,&result)

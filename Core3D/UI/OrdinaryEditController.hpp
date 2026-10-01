@@ -12,6 +12,8 @@
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include "../OCCTKit/SavedProgramSourceDetachedWork.hxx"
 #include "../OCCTKit/RetainedBooleanEditValues.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentSnapshot.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentR2Snapshot.hxx"
 #include "../OCCTKit/SourceFaceProvenanceRecord.hxx"
 #include <SelectMgr_EntityOwner.hxx>
 #include <memory>
@@ -29,7 +31,7 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing, WedgeCut, RetainedFillet };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing, WedgeCut, RetainedFillet, RetainedEdgeTreatment };
 inline bool IsCylindricalCutOperation(OrdinaryTransformOperation op) noexcept {
     return op==OrdinaryTransformOperation::CylindricalCut||op==OrdinaryTransformOperation::CylindricalCutRing||op==OrdinaryTransformOperation::WedgeCut||op==OrdinaryTransformOperation::RetainedFillet;
 }
@@ -163,6 +165,15 @@ struct OrdinaryTransformChange {
     // one-bore fields, a radius/append carrier or an AI permit above.
     std::optional<saved_cut_source_edit::Patch> cutProgramSourcePatch;
     std::shared_ptr<const SavedProgramSourceDetachedResult> cutProgramSourceRebuild;
+    // B1 is the only non-Boolean retained suffix. The immutable capture, closed
+    // edit and detached proof travel together; none is a commit permit.
+    std::shared_ptr<const retained_edge_treatment::Snapshot> edgeTreatmentSnapshot;
+    std::optional<retained_edge_treatment::Edit> edgeTreatmentEdit;
+    std::shared_ptr<const retained_edge_treatment::DetachedResult> edgeTreatmentResult;
+    std::shared_ptr<const retained_edge_treatment::r2::Snapshot> edgeTreatmentSnapshotR2;
+    std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture> edgeTreatmentMigrationR2;
+    std::optional<retained_edge_treatment::r2::MigrationM3> edgeTreatmentMigrationRequestR2;
+    std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> edgeTreatmentResultR2;
 };
 
 struct OrdinaryTransformRecord {
@@ -177,6 +188,8 @@ struct OrdinaryTransformLedger {
     std::shared_ptr<const OcctSavedCutSceneState> cutPrevious,cutCandidate;
     // Minted by the paired document stage, never supplied as a request payload.
     std::shared_ptr<const retained_solid::Payload> cutSourcePayload;
+    std::optional<retained_edge_treatment::Record> edgeTreatmentReadback;
+    std::optional<retained_edge_treatment::r2::Record> edgeTreatmentReadbackR2;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::vector<OrdinaryTransformRecord> records;
     OcctSavedGroupState groupsPrevious, groupsRequested, groupsCandidate;

@@ -8,6 +8,7 @@
 
 #include "AIS_InteractiveContext.hxx"
 #include "OcctDocument.h"
+#include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
 
 #include <AIS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
@@ -43,6 +44,11 @@ struct BevelSourceSelection {
     //! Zero-based indices in deterministic TopExp edge traversal order.
     std::vector<Standard_Size> edgeTopologyIndices;
     Standard_Integer selectionMode = AIS_Shape::SelectionMode(TopAbs_SHAPE);
+    // Native capture/plan supplied by the view-controller's main-thread B1
+    // admission. The worker receives only detached copies and proof values.
+    std::shared_ptr<const retained_edge_treatment::Snapshot> retainedCapture;
+    std::optional<retained_edge_treatment::Edit> retainedEdit;
+    std::shared_ptr<const retained_edge_treatment::DetachedResult> retainedResult;
 };
 
 //! Frozen v1 rail eligibility shared by read-only selection capture and the
@@ -169,6 +175,9 @@ private:
         std::string definitionIdentifier;
         Standard_Size topologyNodeCount = 0;
         Standard_Size sourceEdgeCount = 0;
+        std::shared_ptr<const retained_edge_treatment::Snapshot> retainedCapture;
+        std::optional<retained_edge_treatment::Edit> retainedEdit;
+        std::shared_ptr<const retained_edge_treatment::DetachedResult> retainedResult;
     };
 
     Standard_Boolean tryPrepareSources(

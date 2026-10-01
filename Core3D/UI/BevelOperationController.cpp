@@ -1066,6 +1066,21 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             aSource.edges = std::move(aCanonicalEdges);
             aSource.edgeTopologyIndices =
                 std::move(aCanonicalEdgeIndices);
+            const bool hasRetainedPlan=bool(aSelection.retainedCapture)
+                &&aSelection.retainedEdit.has_value()&&bool(aSelection.retainedResult);
+            const auto coverage=myDoc->RetainedRecipeCoverageForLabel(aSelection.documentLabel);
+            if ((hasRetainedPlan
+                    && (coverage != OcctRetainedRecipeCoverage::CurrentProfile
+                        || theSelection.size() != 1
+                        || !aSelection.retainedResult->result().IsEqual(aShape)))
+                || (!hasRetainedPlan
+                    && coverage != OcctRetainedRecipeCoverage::Absent
+                    && coverage != OcctRetainedRecipeCoverage::CurrentProfile)) {
+                return Standard_False;
+            }
+            aSource.retainedCapture=aSelection.retainedCapture;
+            aSource.retainedEdit=aSelection.retainedEdit;
+            aSource.retainedResult=aSelection.retainedResult;
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
                     != aSource.edgeTopologyIndices) {
@@ -1641,6 +1656,15 @@ BevelApplyResult BevelOperationController::apply() noexcept
 		for (const Source& source : mySources) {
 			const OcctRetainedRecipeCoverage aCoverage =
 				myDoc->RetainedRecipeCoverageForLabel(source.label);
+			if (source.retainedCapture) {
+				if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile) {
+					myCanApply = Standard_False;
+					myState = BevelPreviewState::Failed;
+					notifyPreviewStateChanged();
+					return BevelApplyResult::NoChange;
+				}
+				continue;
+			}
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				continue;
 			}
@@ -1841,9 +1865,17 @@ BevelApplyResult BevelOperationController::apply() noexcept
 #endif
         for (Standard_Size anIndex = 0;
              anIndex < mySources.size(); ++anIndex) {
-            if (!myDoc->ReplaceShape(
-                    mySources[anIndex].label,
-                    myPreviewResults[anIndex])) {
+            const auto& source=mySources[anIndex];
+            Standard_Boolean staged=Standard_False;
+            if(source.retainedCapture){
+                core3d::retained_edge_treatment::Record readback;
+                core3d::retained_edge_treatment::Refusal refusal;
+                staged=source.retainedEdit&&source.retainedResult
+                    &&source.retainedResult->result().IsEqual(myPreviewResults[anIndex]->Shape())
+                    &&myDoc->StageRetainedEdgeTreatment(*source.retainedCapture,
+                        *source.retainedEdit,*source.retainedResult,readback,refusal);
+            }else staged=myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
+            if (!staged) {
                 (void)abortOpenCommand(aDocument);
                 myState = BevelPreviewState::Failed;
                 notifyPreviewStateChanged();

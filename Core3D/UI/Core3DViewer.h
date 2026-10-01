@@ -31,6 +31,8 @@
 #include <variant>
 #include "../OCCTKit/NativeMeshElementSelection.hpp"
 #include "../OCCTKit/NativeOpeningContext.hxx"
+#include "../OCCTKit/RetainedFaceSelector.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentR2Build.hxx"
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -146,6 +148,7 @@ namespace core3d {
         std::string featureIdentifier;
         double dimensionMetersPerUnit = 0;
         bool current = false;
+        std::shared_ptr<const retained_edge_treatment::Snapshot> edgeTreatment;
     };
     struct StoredEnclosureSnapshot {
         enclosure::Parameters parameters;
@@ -159,6 +162,7 @@ namespace core3d {
         // provider payload. Retains exact root/binding, identity and transform
         // through the existing shared native object-state validation contract.
         OcctObjectTransformState sourceState;
+        std::shared_ptr<const retained_edge_treatment::Snapshot> edgeTreatment;
     };
     struct MeshVertexEditWork;
     struct MeshVertexEditSnapshot {
@@ -268,6 +272,85 @@ namespace core3d {
     std::shared_ptr<NativeSolidWork> prepareCylindricalCut(const CylindricalCutSnapshot&,
         const std::optional<cylindrical_cut::CreateEdit>&,const std::optional<cylindrical_cut::RadiusEdit>&,
         const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
+    std::shared_ptr<retained_edge_treatment::Work> prepareEdgeTreatment(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
+        const retained_edge_treatment::Edit&,const ObjectFrameIdentity&,
+        std::uint64_t,std::uint32_t,std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
+    captureEdgeTreatmentSelectorTargets(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
+        const retained_face_selector::SelectorIntent& intent,
+        const ObjectFrameIdentity& identity,
+        std::uint64_t presentationRevision,
+        std::uint32_t width, std::uint32_t height,
+        retained_face_selector::Refusal& refusal) noexcept;
+    std::shared_ptr<retained_edge_treatment::Work> prepareEdgeTreatmentSelectorAppend(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
+        const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>& targets,
+        double amountMM, const ObjectFrameIdentity& identity,
+        std::uint64_t presentationRevision,
+        std::uint32_t width, std::uint32_t height,
+        retained_edge_treatment::Refusal& refusal) noexcept;
+    static std::shared_ptr<const retained_edge_treatment::DetachedInput> edgeTreatmentGeometry(
+        const std::shared_ptr<retained_edge_treatment::Work>&) noexcept;
+    static std::shared_ptr<const retained_edge_treatment::DetachedResult> buildEdgeTreatment(
+        const std::shared_ptr<const retained_edge_treatment::DetachedInput>&,
+        retained_edge_treatment::Refusal&) noexcept;
+    static bool cancelEdgeTreatment(const std::shared_ptr<retained_edge_treatment::Work>&) noexcept;
+    std::vector<retained_edge_treatment::Anchor> captureEdgeTreatmentTargets(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
+        retained_edge_treatment::Refusal&) noexcept;
+    retained_face_selector::Resolution resolveFaceSelector(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
+        const retained_face_selector::SelectorIntent&) noexcept;
+    retained_edge_treatment::CommitResult commitEdgeTreatment(
+        const std::shared_ptr<retained_edge_treatment::Work>&,
+        const std::shared_ptr<const retained_edge_treatment::DetachedResult>&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::MigrationReview>
+    reviewRetainedBooleanMigrationR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>&,
+        const retained_edge_treatment::r2::MigrationM3&, const ObjectFrameIdentity&,
+        std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::Snapshot> captureEdgeTreatmentR2(
+        const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>
+    captureRetainedBooleanMigrationR2(const ObjectFrameIdentity&, std::uint64_t,
+        std::uint32_t, std::uint32_t, retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<retained_edge_treatment::r2::Work> prepareRetainedBooleanMigrationR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>&,
+        const retained_edge_treatment::r2::MigrationM3&,
+        const std::shared_ptr<const retained_edge_treatment::r2::MigrationReview>&,
+        const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>
+    captureEdgeTreatmentSelectorTargetsR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
+        const retained_face_selector::SelectorIntent&, const ObjectFrameIdentity&,
+        std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_face_selector::Refusal&) noexcept;
+    std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentSelectorAppendR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
+        const std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>&,
+        double, const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentEditR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
+        const retained_edge_treatment::r2::Edit&, const ObjectFrameIdentity&,
+        std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    static std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> edgeTreatmentGeometryR2(
+        const std::shared_ptr<retained_edge_treatment::r2::Work>&) noexcept;
+    static std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> buildEdgeTreatmentR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>&,
+        retained_edge_treatment::Refusal&) noexcept;
+    static bool cancelEdgeTreatmentR2(
+        const std::shared_ptr<retained_edge_treatment::r2::Work>&) noexcept;
+    retained_edge_treatment::CommitResult commitEdgeTreatmentR2(
+        const std::shared_ptr<retained_edge_treatment::r2::Work>&,
+        const std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>&) noexcept;
     // Public whole-program packet: append one separated same-axis bore or change
     // one identified operand's radius. Same ordinary worker/ownership slot.
     std::optional<CylindricalCutProgramSnapshot> cylindricalCutProgramSource(const ObjectFrameIdentity&,
