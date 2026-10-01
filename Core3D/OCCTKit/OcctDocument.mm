@@ -423,12 +423,23 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         if(!std::holds_alternative<RebuildSource>(edit)
             &&(!Encode(expected,expectedBytes,refusal)||expectedBytes!=built.definitionBytes_))return Standard_False;
         if(built.definition_.steps!=expected.steps||built.definition_.outputNode!=expected.outputNode){refusal=Refusal::ReplayMismatch;return Standard_False;}
-        Handle(AIS_Shape)presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=Refusal::StageFailed;return Standard_False;}
+        Handle(AIS_Shape)presentation=new AIS_Shape(built.result_);const bool shapeReplaced=ReplaceShape(original.ownerLabel_,presentation)?true:false;
+#if DEBUG
+        std::fprintf(stderr,"B1B2_STAGE phase=replace-shape result=%d\n",shapeReplaced?1:0);
+#endif
+        if(!shapeReplaced){refusal=Refusal::StageFailed;return Standard_False;}
         bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);
+#if DEBUG
+        std::fprintf(stderr,"B1B2_STAGE phase=source-stage result=%d\n",sourceStaged?1:0);
+#endif
         if(!sourceStaged){refusal=Refusal::StageFailed;return Standard_False;}
         core3d::profile::Record profile;core3d::enclosure::Record enclosure;if(!core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile)||!core3d::enclosure::Read(myOcafDoc,original.ownerLabel_,enclosure)){refusal=Refusal::StageFailed;return Standard_False;}const TDF_Label metadata=!profile.label.IsNull()?profile.label:enclosure.label;
         auto payload=std::make_shared<Payload>();payload->definition=built.definition_;payload->bytes=built.definitionBytes_;payload->base=built.base_;Attribute::Set(metadata,payload);TNaming_Builder(metadata).Select(built.result_,built.result_);
-        std::optional<Record>stored;if(!Read(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored||stored->value->bytes!=built.definitionBytes_){refusal=Refusal::StageFailed;return Standard_False;}readback=*stored;refusal=Refusal::None;return Standard_True;
+        std::optional<Record>stored;const bool syetReadback=Read(myOcafDoc,original.ownerLabel_,stored,refusal)&&stored&&stored->value->bytes==built.definitionBytes_;
+#if DEBUG
+        std::fprintf(stderr,"B1B2_STAGE phase=syet-readback result=%d\n",syetReadback?1:0);
+#endif
+        if(!syetReadback){refusal=Refusal::StageFailed;return Standard_False;}readback=*stored;refusal=Refusal::None;return Standard_True;
     } catch(...){readback={};refusal=Refusal::StageFailed;return Standard_False;}
 }
 
@@ -14358,14 +14369,60 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
             || !core3d::sweep_persistence::Read(myOcafDoc, label, captured.sweep)
             || !core3d::loft_persistence::Read(myOcafDoc, label, captured.loft)
             || !core3d::retained_solid::Read(myOcafDoc,label,captured.retained)) return Standard_False;
-        core3d::retained_edge_treatment::Refusal treatmentRefusal;
-        std::optional<core3d::retained_edge_treatment::RecordR2> treatmentR2;
-        if(!core3d::retained_edge_treatment::ReadR2(myOcafDoc,label,treatmentR2,treatmentRefusal))return Standard_False;
-        if(treatmentR2){captured.edgeTreatmentR2=core3d::retained_edge_treatment::r2::Record{
-            treatmentR2->label,treatmentR2->owner,
-            std::make_shared<core3d::retained_edge_treatment::r2::Definition>(treatmentR2->value->definition),
-            treatmentR2->value->bytes,treatmentR2->value->base,treatmentR2->current};}
-        else if(!core3d::retained_edge_treatment::Read(myOcafDoc,label,captured.edgeTreatment,treatmentRefusal))return Standard_False;
+        // Fail-closed native carrier dispatch: identify the sole treatment
+        // attribute among the owner's immediate children and select its
+        // exclusive payload arm. Never probe R2 first or dispatch on schema:
+        // B2's schema-2 profile/enclosure carrier lives on the B1 arm.
+        core3d::retained_edge_treatment::Refusal treatmentRefusal=core3d::retained_edge_treatment::Refusal::None;
+        Handle(core3d::retained_edge_treatment::Attribute) treatmentAttribute;
+        Standard_Integer treatmentAttributeCount=0;
+        for(TDF_ChildIterator it(label);it.More();it.Next()){
+            Handle(TDF_Attribute) rawAttribute;
+            if(!it.Value().FindAttribute(core3d::retained_edge_treatment::AttributeID(),rawAttribute))continue;
+            treatmentAttribute=Handle(core3d::retained_edge_treatment::Attribute)::DownCast(rawAttribute);
+            if(treatmentAttribute.IsNull()){treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
+#if DEBUG
+                std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=wrong-type refusal=%d\n",int(treatmentRefusal));
+#endif
+                return Standard_False;}
+            ++treatmentAttributeCount;
+        }
+        if(treatmentAttributeCount>1){treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
+#if DEBUG
+            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=duplicate refusal=%d\n",int(treatmentRefusal));
+#endif
+            return Standard_False;}
+        if(treatmentAttributeCount==0){
+#if DEBUG
+            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=none refusal=%d\n",int(treatmentRefusal));
+#endif
+        }
+        else if(treatmentAttribute->value()&&!treatmentAttribute->valueR2()){
+            const bool b1Read=core3d::retained_edge_treatment::Read(myOcafDoc,label,captured.edgeTreatment,treatmentRefusal)
+                &&captured.edgeTreatment.has_value();
+#if DEBUG
+            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=b1 refusal=%d\n",int(treatmentRefusal));
+#endif
+            if(!b1Read)return Standard_False;
+        }
+        else if(treatmentAttribute->valueR2()&&!treatmentAttribute->value()){
+            std::optional<core3d::retained_edge_treatment::RecordR2> treatmentR2;
+            const bool r2Read=core3d::retained_edge_treatment::ReadR2(myOcafDoc,label,treatmentR2,treatmentRefusal)
+                &&treatmentR2.has_value();
+#if DEBUG
+            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=r2 refusal=%d\n",int(treatmentRefusal));
+#endif
+            if(!r2Read)return Standard_False;
+            captured.edgeTreatmentR2=core3d::retained_edge_treatment::r2::Record{
+                treatmentR2->label,treatmentR2->owner,
+                std::make_shared<core3d::retained_edge_treatment::r2::Definition>(treatmentR2->value->definition),
+                treatmentR2->value->bytes,treatmentR2->value->base,treatmentR2->current};
+        }
+        else{treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
+#if DEBUG
+            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=neither-or-both refusal=%d\n",int(treatmentRefusal));
+#endif
+            return Standard_False;}
         OcctAuthoredFrameRecord frames;
         const auto frameState = Core3DReadAuthoredFrameOwner(myOcafDoc, label, frames);
         if (frameState == OcctAuthoredFrameReadState::Invalid) return Standard_False;

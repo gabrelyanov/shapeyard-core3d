@@ -10,7 +10,9 @@
 #include <BRepTools.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <cstdio>
 #include <istream>
 #include <locale>
 #include <ostream>
@@ -201,6 +203,35 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
                 build.Build(); if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
                 candidate = build.Shape();
             }
+#if DEBUG
+            const int rawKernelRootType = candidate.IsNull() ? -1 : int(candidate.ShapeType());
+            std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-raw type=%d\n", rawKernelRootType);
+#endif
+            // Normalize every successful kernel result to a single forward
+            // valid solid before volume measurement, proof values or
+            // assignment to current: a direct solid, or a compound with
+            // exactly one immediate solid child (TopoDS_Iterator carries the
+            // cumulative location/orientation; the child's geometry and
+            // location are preserved, never rebuilt or healed). Empty,
+            // multi-child, nested-container, shell, compsolid and other roots
+            // are refused with the existing build failure.
+            if (candidate.IsNull()) { refusal = Refusal::BuildFailed; return false; }
+            if (candidate.ShapeType() == TopAbs_COMPOUND) {
+                TopoDS_Iterator child(candidate);
+                if (!child.More() || child.Value().ShapeType() != TopAbs_SOLID) {
+                    refusal = Refusal::BuildFailed; return false;
+                }
+                const TopoDS_Shape only = child.Value(); child.Next();
+                if (child.More()) { refusal = Refusal::BuildFailed; return false; }
+                candidate = only;
+            }
+            if (candidate.ShapeType() != TopAbs_SOLID || candidate.Orientation() != TopAbs_FORWARD) {
+                refusal = Refusal::BuildFailed; return false;
+            }
+#if DEBUG
+            std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-accepted raw=%d type=%d\n",
+                rawKernelRootType, int(candidate.ShapeType()));
+#endif
             GProp_GProps after; BRepGProp::VolumeProperties(candidate, after);
             // Native volumes are local-unit-cubed; the check and the proof
             // fields below are physical cubic millimetres. For a millimetre
