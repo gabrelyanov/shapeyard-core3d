@@ -14243,6 +14243,16 @@ Standard_Boolean OcctDocument::CaptureExactFreeLabel(
                         || !source.sweep.label.IsNull()))
                 || !CaptureScalarAppearanceForSavedSweepRebuild(
                     label, captured.appearance)) return Standard_False;
+        } else if (object.retained.value) {
+            // A saved cut deliberately replaces the standalone
+            // profile/enclosure metadata with its retained carrier. That
+            // carrier is required metadata, not unsupported subshape styling.
+            // The transform-state capture above already validated the record
+            // fail-closed against the current shape and the
+            // document/entity/definition IDs and units, so a set payload here
+            // is the validated retained record for this exact label.
+            if (!CaptureScalarAppearanceForSavedCut(
+                    label, captured.appearance)) return Standard_False;
         } else if (!CaptureScalarAppearanceForMeshCopy(
                        label, captured.appearance)) return Standard_False;
         captured.documentData = myOcafDoc->GetData();
