@@ -92,6 +92,47 @@ inline bool ReadbackGeometry(const TopoDS_Shape& shape, ReplayBudget& budget, To
 }
 } // namespace detail
 
+// D253 mutable-topology isolation. Replay and verification must never run on
+// a shared live/stored TopoDS handle: the kernel and native validity checking
+// legitimately write mutable TShape bookkeeping (Modified/Checked) on faces
+// they visit, including untouched faces a fillet reuses, and on a shared
+// handle that bookkeeping escapes into the retained base/original topology —
+// no OCAF attribute delta backs up a bit inside a shared TShape. A
+// BRepBuilderAPI_Copy is not byte-stable (the existing D235/D236 evidence in
+// OcctDocument.mm: Curve2ds 50 vs 40), so detachment is a bounded BinTools
+// round trip — the same persistence phase the exact geometry policy already
+// trusts for readback — verified against the original under the existing
+// mesh-independent V3 commitment (detail::CommitGeometry). No new equivalence
+// arm and no tolerance: a shape whose readback reconstruction would not
+// reproduce the exact committed bytes is refused, never replayed on shared
+// topology. The round trip preserves the seven packed per-TShape flags, so
+// the detached copy carries the same bookkeeping state as the original.
+inline bool DetachReplayGeometry(const TopoDS_Shape& shared, ReplayBudget& budget,
+    TopoDS_Shape& detached, Refusal& refusal) noexcept {
+    detached.Nullify();
+    try {
+        if (shared.IsNull()) { refusal = Refusal::ReplayMismatch; return false; }
+        detail::GeometryBuffer buffer; std::ostream writer(&buffer);
+        BinTools::Write(shared, writer, Standard_False, Standard_False, BinTools_FormatVersion_VERSION_4);
+        if (!writer.good() || buffer.size() == 0 || buffer.size() >= detail::MaximumGeometryBytes) {
+            refusal = Refusal::Budget; return false;
+        }
+        buffer.read(); std::istream reader(&buffer); BinTools::Read(detached, reader);
+        if (!reader.good() || detached.IsNull() || !detail::ChargeTopology(detached, budget)) {
+            detached.Nullify(); refusal = Refusal::Budget; return false;
+        }
+        Digest committedShared{}, committedDetached{};
+        if (!detail::CommitGeometry(shared, budget, committedShared)
+            || !detail::CommitGeometry(detached, budget, committedDetached)) {
+            detached.Nullify(); refusal = Refusal::Budget; return false;
+        }
+        if (committedShared != committedDetached) {
+            detached.Nullify(); refusal = Refusal::ReplayMismatch; return false;
+        }
+        refusal = Refusal::None; return true;
+    } catch (...) { detached.Nullify(); refusal = Refusal::BuildFailed; return false; }
+}
+
 // Authoritative replay equivalence: the observed current shape must commit to
 // the exact mesh-independent V3 bytes of an authoritative replay of the stored
 // definition, or of that replay after the bounded binary readback phase above.
@@ -175,7 +216,13 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
     output.Nullify(); proofs.clear();
     try {
         if (base.IsNull() || !detail::valid(definition, refusal)) return false;
-        TopoDS_Shape current = base;
+        // D253: every replay — detached build, synchronous verification from a
+        // stored base and source-rebind — runs on genuinely private topology
+        // produced by the shared verified detachment helper, so selector
+        // resolution, anchor resolution, the kernel and validity checking
+        // never write mutable TShape bookkeeping into live/stored shapes.
+        TopoDS_Shape current;
+        if (!DetachReplayGeometry(base, budget, current, refusal)) return false;
         const std::atomic_bool neverCancelled{false};
         for (const Step& step : definition.steps) {
             if (step.selector) {

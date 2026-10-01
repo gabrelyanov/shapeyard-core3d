@@ -2760,6 +2760,14 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
 #endif // Cut475 phase diagnostics only
         if ((!SweepGuardMatches(_document,ledger,candidate)||!CutGuardMatches(_document,ledger,candidate)||!TransformGroupsMatch(_document,ledger,candidate))) return OrdinaryEditResult::OutcomeUnknown;
         if (!rebuildReceiptMatches(ledger,candidate)) return OrdinaryEditResult::OutcomeUnknown;
+        // D253: only now that the ordinary owner has proven closure with the
+        // sealed candidate is the measured treatment history companion bound
+        // to the actual committed delta; a verified prior-state settlement
+        // validates rollback and discharges the uncommitted companion. An
+        // unknown outcome keeps the existing recovery path untouched.
+        if (candidate ? !_document->FinalizeTreatmentHistoryCompanion()
+            : !_document->SettleTreatmentHistoryCompanionOnPrior())
+            return OrdinaryEditResult::OutcomeUnknown;
 #if DEBUG
         if (candidate && ledger.modelingReceipt && ledger.modelingReceipt->permit->debugBeforeReleaseFailure_) {
             ledger.modelingReceipt->permit->debugBeforeReleaseFailure_=false;

@@ -56,9 +56,13 @@
 #include "EnclosurePersistence.hxx"
 
 #include <TDF_Data.hxx>
+#include <TDF_Delta.hxx>
 #include <TCollection_ExtendedString.hxx>
+#include <TNaming_Evolution.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_TShape.hxx>
 #include <array>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,6 +93,56 @@ namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
 namespace core3d::retained_program_suffix { struct Probe; }
+
+// D253 native treatment history companion — document-internal measured state
+// for one staged retained-treatment transaction. One companion records the
+// real owner-label-subtree TNaming naming state (label entries, attribute
+// presence, versions, evolution, shape-pair and current-binding state), the
+// exact source-recipe/SYET-carrier state and the original topology's
+// transient Modified/Checked bookkeeping, once before staging and once after
+// coherent staging. The ordinary edit owner binds it to the actual committed
+// TDF delta only after proving closure with the sealed candidate; undo() and
+// redo() engage it only for the matching live delta, run real OCAF history
+// first, validate that the captured semantic state was restored, and only
+// then restore the captured naming-version scalars (and, on Undo, the
+// original topology's measured bookkeeping bits) before NotifyChanges. It
+// carries only measured state needed for reversible restoration — never
+// archive bytes, never app/AI authority — and is released with the native
+// document session.
+namespace core3d::treatment_history {
+struct NamingState {
+    TDF_Label label;
+    std::string labelEntry;
+    Standard_Integer version = 0;
+    TNaming_Evolution evolution = TNaming_PRIMITIVE;
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> shapePairs;
+    TopoDS_Shape currentBinding;
+};
+struct FlagState {
+    Handle(TopoDS_TShape) tshape;
+    bool modified = false;
+    bool checked = false;
+};
+struct Companion {
+    Handle(TDF_Data) data;
+    TDF_Label ownerLabel;
+    std::string ownerEntry;
+    std::vector<NamingState> before;
+    std::vector<NamingState> after;
+    TopoDS_Shape ownerShapeBefore;
+    TopoDS_Shape ownerShapeAfter;
+    std::vector<std::uint8_t> sourceBytesBefore;
+    std::vector<std::uint8_t> sourceBytesAfter;
+    bool syetBefore = false;
+    bool syetAfter = false;
+    std::vector<std::uint8_t> syetBytesBefore;
+    std::vector<std::uint8_t> syetBytesAfter;
+    std::vector<FlagState> flagsBefore;
+    Standard_Integer undoDepthBefore = -1;
+    bool afterCaptured = false;
+    Handle(TDF_Delta) delta;
+};
+} // namespace core3d::treatment_history
 
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
@@ -1525,6 +1579,17 @@ private:
   // The bevel/fillet apply path stages the captured retained edit through the
   // same private gate as the ordinary edit owner; no other caller is admitted.
   friend class core3d::BevelOperationController;
+  // D253 native treatment history companion lifecycle, owned by the document
+  // and driven only by the ordinary edit owner (finalize on proven candidate
+  // closure, discharge on verified prior-state settlement) and by the native
+  // history boundary (engage only the matching live TDF delta). No app/AI
+  // authority API.
+  Standard_Boolean FinalizeTreatmentHistoryCompanion() noexcept;
+  Standard_Boolean SettleTreatmentHistoryCompanionOnPrior() noexcept;
+  void ReleaseTreatmentHistoryCompanions() noexcept;
+  void PruneTreatmentHistoryCompanions() noexcept;
+  Standard_Boolean ApplyTreatmentHistoryAfterHistoryChange(
+      const Handle(TDF_Delta)& engaged, Standard_Boolean undoDirection) noexcept;
   Standard_Boolean StageRetainedEdgeTreatment(
       const core3d::retained_edge_treatment::Snapshot& original,
       const core3d::retained_edge_treatment::Edit& edit,
@@ -1604,6 +1669,10 @@ private:
   Handle(TDocStd_Document) myOcafDoc;
   std::unique_ptr<core3d::part_boolean::owner::PartBooleanOwner> myPartBooleanOwner;
   std::unique_ptr<core3d::retained_feature::OcafOwnerService> myRetainedFeatureOwner;
+  // D253: the unfinalized measured companion of an in-flight treatment
+  // transaction, and the bounded set of companions bound to live TDF deltas.
+  std::unique_ptr<core3d::treatment_history::Companion> myPendingTreatmentCompanion;
+  std::deque<std::unique_ptr<core3d::treatment_history::Companion>> myTreatmentHistoryCompanions;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;

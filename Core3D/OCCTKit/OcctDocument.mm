@@ -18,12 +18,19 @@
 #include "RetainedProgramSuffixProbe.hxx"
 #endif
 #include <TNaming_Builder.hxx>
+#include <TNaming_NamedShape.hxx>
+#include <TNaming_Iterator.hxx>
 #include <BRepTools.hxx>
 #include <BinTools_ShapeReader.hxx>
 #include <BinTools_ShapeSet.hxx>
 #include <BinTools_ShapeWriter.hxx>
 #include <TDF_Delta.hxx>
 #include <TDF_DeltaList.hxx>
+#include <TDF_AttributeDelta.hxx>
+#include <TDF_AttributeDeltaList.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDF_Tool.hxx>
+#include <algorithm>
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -276,6 +283,216 @@ bool SameFence(const core3d::retained_recipe::RevisionFence& first,
 }
 }
 
+// D253 native treatment history companion helpers: measured, bounded,
+// fail-closed capture and structural comparison of the real owner-subtree
+// TNaming naming state around one staged retained-treatment transaction, plus
+// the original topology's transient Modified/Checked bookkeeping. No fixture
+// constants, no write-time masking: restoration is validated against state
+// actually measured inside this transaction. SetVersion is used only after
+// real OCAF history has reproduced the captured evolution, shape-pair and
+// current-binding state. Per the vendored OCCT 7.8.0 sources
+// (TNaming_NamedShape.cxx: the TNaming_Builder constructor performs
+// Backup/Clear/myVersion++ on an existing attribute;
+// TNaming_DeltaOnModification::Apply rebuilds the restored pair list through
+// a fresh builder, which advances the serialized version scalar again without
+// changing the restored semantic state; TNaming_NamedShape::Restore copies
+// the version scalar back verbatim on transaction abort), the scalar restored
+// here is exactly the one that was live together with the validated state, so
+// dependent naming/selection/delta semantics are preserved.
+namespace {
+namespace treatment_history = core3d::treatment_history;
+
+constexpr std::size_t kTreatmentHistoryMaxLabelsVisited = 65536;
+constexpr std::size_t kTreatmentHistoryMaxNamingLabels = 1024;
+constexpr std::size_t kTreatmentHistoryMaxShapePairs = 4096;
+constexpr std::size_t kTreatmentHistoryMaxFlagShapes = 65536;
+constexpr std::size_t kTreatmentHistoryMaxCompanions = 32;
+constexpr std::size_t kTreatmentHistoryMaxDeltaAttributes = 8192;
+
+bool TreatmentHistorySameShape(const TopoDS_Shape& first, const TopoDS_Shape& second) noexcept {
+    try {
+        if (first.IsNull() || second.IsNull()) return first.IsNull() && second.IsNull();
+        return first.IsEqual(second);
+    } catch (...) { return false; }
+}
+
+bool CaptureTreatmentNamingState(const TDF_Label& label, bool& hasAttribute,
+    treatment_history::NamingState& state) noexcept {
+    hasAttribute = false; state = treatment_history::NamingState();
+    try {
+        if (label.IsNull()) return false;
+        Handle(TNaming_NamedShape) naming;
+        if (!label.FindAttribute(TNaming_NamedShape::GetID(), naming)) return true;
+        if (naming.IsNull()) return false;
+        state.label = label;
+        TCollection_AsciiString entry;
+        TDF_Tool::Entry(label, entry);
+        state.labelEntry = entry.ToCString();
+        state.version = naming->Version();
+        state.evolution = naming->Evolution();
+        state.currentBinding = naming->Get();
+        for (TNaming_Iterator it(naming); it.More(); it.Next()) {
+            if (state.shapePairs.size() >= kTreatmentHistoryMaxShapePairs) return false;
+            state.shapePairs.push_back({it.OldShape(), it.NewShape()});
+        }
+        hasAttribute = true;
+        return true;
+    } catch (...) { hasAttribute = false; state = treatment_history::NamingState(); return false; }
+}
+
+// Captures every TNaming_NamedShape-bearing label of the owner subtree,
+// sorted by label entry so two captures compare positionally as sets.
+bool CaptureTreatmentSubtreeNaming(const TDF_Label& owner,
+    std::vector<treatment_history::NamingState>& states) noexcept {
+    states.clear();
+    try {
+        if (owner.IsNull()) return false;
+        bool has = false;
+        treatment_history::NamingState ownerState;
+        if (!CaptureTreatmentNamingState(owner, has, ownerState)) return false;
+        if (has) states.push_back(std::move(ownerState));
+        std::size_t visited = 0;
+        for (TDF_ChildIterator it(owner, Standard_True); it.More(); it.Next()) {
+            if (++visited > kTreatmentHistoryMaxLabelsVisited) {
+                states.clear(); return false;
+            }
+            bool childHas = false;
+            treatment_history::NamingState child;
+            if (!CaptureTreatmentNamingState(it.Value(), childHas, child)) { states.clear(); return false; }
+            if (childHas) {
+                if (states.size() >= kTreatmentHistoryMaxNamingLabels) { states.clear(); return false; }
+                states.push_back(std::move(child));
+            }
+        }
+        std::sort(states.begin(), states.end(), [](const treatment_history::NamingState& lhs,
+            const treatment_history::NamingState& rhs) { return lhs.labelEntry < rhs.labelEntry; });
+        return true;
+    } catch (...) { states.clear(); return false; }
+}
+
+// Structural equality of two sorted naming-state sets: label entries,
+// evolution, shape-pair state and current bindings. The serialized version
+// scalar is compared only when explicitly requested (after restoration).
+bool SameTreatmentNamingSet(const std::vector<treatment_history::NamingState>& expected,
+    const std::vector<treatment_history::NamingState>& actual, bool compareVersions) noexcept {
+    try {
+        if (expected.size() != actual.size()) return false;
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            const treatment_history::NamingState& e = expected[index];
+            const treatment_history::NamingState& a = actual[index];
+            if (e.labelEntry != a.labelEntry || e.label != a.label || e.evolution != a.evolution
+                || e.shapePairs.size() != a.shapePairs.size()
+                || (compareVersions && e.version != a.version)
+                || !TreatmentHistorySameShape(e.currentBinding, a.currentBinding)) return false;
+            for (std::size_t pair = 0; pair < e.shapePairs.size(); ++pair) {
+                if (!TreatmentHistorySameShape(e.shapePairs[pair].first, a.shapePairs[pair].first)
+                    || !TreatmentHistorySameShape(e.shapePairs[pair].second, a.shapePairs[pair].second))
+                    return false;
+            }
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool CaptureTreatmentTransientFlags(const TopoDS_Shape& shape,
+    std::vector<treatment_history::FlagState>& flags) noexcept {
+    flags.clear();
+    try {
+        if (shape.IsNull()) return false;
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, map);
+        if (map.Extent() <= 0 || std::size_t(map.Extent()) > kTreatmentHistoryMaxFlagShapes) return false;
+        for (Standard_Integer index = 1; index <= map.Extent(); ++index) {
+            const Handle(TopoDS_TShape)& tshape = map(index).TShape();
+            if (tshape.IsNull()) { flags.clear(); return false; }
+            flags.push_back({tshape,
+                tshape->Modified() ? true : false, tshape->Checked() ? true : false});
+        }
+        return true;
+    } catch (...) { flags.clear(); return false; }
+}
+
+bool CheckTreatmentTransientFlags(const TopoDS_Shape& shape,
+    const std::vector<treatment_history::FlagState>& captured) noexcept {
+    try {
+        if (shape.IsNull()) return false;
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, map);
+        if (std::size_t(map.Extent()) != captured.size()) return false;
+        for (const auto& entry : captured) {
+            if (entry.tshape.IsNull()) return false;
+            TopoDS_Shape probe;
+            probe.TShape(entry.tshape);
+            if (!map.Contains(probe)) return false;
+            if ((entry.tshape->Modified() ? true : false) != entry.modified
+                || (entry.tshape->Checked() ? true : false) != entry.checked) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+// Restores exactly the two measured bookkeeping bits on the measured TShapes,
+// Modified before Checked (setting Modified true clears Checked), then
+// verifies the complete flag state. Free, Orientable, Closed, Infinite,
+// Convex and all geometry stay untouched.
+bool RestoreTreatmentTransientFlags(const TopoDS_Shape& shape,
+    const std::vector<treatment_history::FlagState>& captured) noexcept {
+    try {
+        for (const auto& entry : captured) {
+            if (entry.tshape.IsNull()) return false;
+            entry.tshape->Modified(entry.modified ? Standard_True : Standard_False);
+            entry.tshape->Checked(entry.checked ? Standard_True : Standard_False);
+        }
+        return CheckTreatmentTransientFlags(shape, captured);
+    } catch (...) { return false; }
+}
+
+bool CaptureTreatmentSourceBytes(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    std::vector<std::uint8_t>& bytes) noexcept {
+    bytes.clear();
+    try {
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        if (!core3d::profile::Read(document, owner, profile)
+            || !core3d::enclosure::Read(document, owner, enclosure)) return false;
+        const bool hasProfile = !profile.label.IsNull(), hasEnclosure = !enclosure.label.IsNull();
+        if (hasProfile == hasEnclosure) return false;
+        if (hasProfile)
+            return core3d::composite_recipe::EncodeScalarRecipe(
+                core3d::composite_recipe::RecipeKind::Profile,
+                core3d::profile::SchemaFor(profile.parameters), profile.values, bytes);
+        return core3d::composite_recipe::EncodeScalarRecipe(
+            core3d::composite_recipe::RecipeKind::Enclosure,
+            enclosure.parameters.definition.constructionFrame ? 2 : 1, enclosure.values, bytes);
+    } catch (...) { bytes.clear(); return false; }
+}
+
+bool CaptureTreatmentCarrierBytes(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    bool& present, std::vector<std::uint8_t>& bytes) noexcept {
+    present = false; bytes.clear();
+    try {
+        std::optional<core3d::retained_edge_treatment::Record> record;
+        core3d::retained_edge_treatment::Refusal refusal = core3d::retained_edge_treatment::Refusal::None;
+        if (!core3d::retained_edge_treatment::Read(document, owner, record, refusal)) return false;
+        if (record) {
+            if (!record->value) return false;
+            present = true; bytes = record->value->bytes;
+        }
+        return true;
+    } catch (...) { present = false; bytes.clear(); return false; }
+}
+
+// One measured side (before staging or after coherent staging) of a
+// companion: subtree naming state, exact source recipe and SYET carrier.
+bool CaptureTreatmentCompanionSide(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    std::vector<treatment_history::NamingState>& naming, std::vector<std::uint8_t>& sourceBytes,
+    bool& syetPresent, std::vector<std::uint8_t>& syetBytes) noexcept {
+    return CaptureTreatmentSubtreeNaming(owner, naming)
+        && CaptureTreatmentSourceBytes(document, owner, sourceBytes)
+        && CaptureTreatmentCarrierBytes(document, owner, syetPresent, syetBytes);
+}
+} // anonymous namespace
+
 core3d::retained_face_selector::Resolution OcctDocument::ResolveRetainedFaceSelector(
     const core3d::retained_edge_treatment::Snapshot& snapshot,
     const core3d::retained_face_selector::SelectorIntent& intent,
@@ -401,6 +618,28 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 refusal=Refusal::NoncurrentSource;return Standard_False;
             }
         }else{refusal=Refusal::MalformedCarrier;return Standard_False;}
+        // D253 measured history companion: capture the actual owner-subtree
+        // naming state, the exact source/SYET state and the original
+        // topology's transient Modified/Checked bookkeeping before any
+        // mutation of this transaction. Values are measured, never hard-coded;
+        // capture failure refuses the staging atomically.
+        auto treatmentCompanion=std::unique_ptr<core3d::treatment_history::Companion>(
+            new core3d::treatment_history::Companion);
+        treatmentCompanion->data=myOcafDoc->GetData();
+        treatmentCompanion->ownerLabel=original.ownerLabel_;
+        {
+            TCollection_AsciiString ownerEntry;
+            TDF_Tool::Entry(original.ownerLabel_,ownerEntry);
+            treatmentCompanion->ownerEntry=ownerEntry.ToCString();
+        }
+        treatmentCompanion->undoDepthBefore=myOcafDoc->GetAvailableUndos();
+        treatmentCompanion->ownerShapeBefore=original.current_;
+        if(!CaptureTreatmentCompanionSide(myOcafDoc,original.ownerLabel_,treatmentCompanion->before,
+                treatmentCompanion->sourceBytesBefore,treatmentCompanion->syetBefore,
+                treatmentCompanion->syetBytesBefore)
+            ||!CaptureTreatmentTransientFlags(original.current_,treatmentCompanion->flagsBefore)){
+            refusal=Refusal::StageFailed;return Standard_False;
+        }
         Definition expected=original.definition_.value_or(original.seed_);
         if (built.selectorAppend_) {
             const auto& admitted=*built.selectorAppend_;
@@ -566,7 +805,20 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=syet-readback result=%d\n",syetReadback?1:0);
 #endif
-        if(!syetReadback){refusal=Refusal::StageFailed;return Standard_False;}readback=*stored;refusal=Refusal::None;return Standard_True;
+        if(!syetReadback){refusal=Refusal::StageFailed;return Standard_False;}
+        // D253: capture the corresponding real candidate values now that the
+        // owner shape, source recipe and SYET payload/binding are coherent and
+        // fully read back. The companion stays unfinalized until the ordinary
+        // owner proves closure with this sealed candidate.
+        treatmentCompanion->ownerShapeAfter=built.result_;
+        if(!CaptureTreatmentCompanionSide(myOcafDoc,original.ownerLabel_,treatmentCompanion->after,
+                treatmentCompanion->sourceBytesAfter,treatmentCompanion->syetAfter,
+                treatmentCompanion->syetBytesAfter)){
+            refusal=Refusal::StageFailed;return Standard_False;
+        }
+        treatmentCompanion->afterCaptured=true;
+        myPendingTreatmentCompanion=std::move(treatmentCompanion);
+        readback=*stored;refusal=Refusal::None;return Standard_True;
     } catch(...){readback={};refusal=Refusal::StageFailed;return Standard_False;}
 }
 
@@ -5567,6 +5819,9 @@ void OcctDocument::CloseNativeSession() noexcept
     myNativeSessionClosed = true;
     if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
     myRetainedFeatureOwner.reset();
+    // D253: treatment history companions are bound to this session's live TDF
+    // deltas only; they never cross a document replacement or destruction.
+    ReleaseTreatmentHistoryCompanions();
     if (myPartBooleanOwner) myPartBooleanOwner->retireForDocumentReplacement();
     myPartBooleanOwner.reset();
     if (myNativeAuthority) myNativeAuthority->Detach();
@@ -5616,6 +5871,9 @@ void OcctDocument::InitDoc()
   myPartBooleanOwner.reset();
   if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
   myRetainedFeatureOwner.reset();
+  // D253: treatment history companions are bound to the outgoing document's
+  // live TDF deltas only; document replacement releases them.
+  ReleaseTreatmentHistoryCompanions();
   // close old document
   if (!myOcafDoc.IsNull())
   {
@@ -18178,6 +18436,180 @@ void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(
     anAis->SetLocalTransformation(ObjectTransformForLabel(aRefLabel));
 }
 
+void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
+    try {
+        myPendingTreatmentCompanion.reset();
+        myTreatmentHistoryCompanions.clear();
+    } catch (...) {}
+}
+
+void OcctDocument::PruneTreatmentHistoryCompanions() noexcept {
+    try {
+        if (myOcafDoc.IsNull()) { myTreatmentHistoryCompanions.clear(); return; }
+        // Only companions bound to a delta that is still live in either
+        // history list are retained; discarded redo branches and trimmed
+        // history release theirs. A foreign or mismatched delta is rejected.
+        std::unordered_set<const TDF_Delta*> live;
+        for (const Handle(TDF_Delta)& delta : myOcafDoc->GetUndos()) live.insert(delta.get());
+        for (const Handle(TDF_Delta)& delta : myOcafDoc->GetRedos()) live.insert(delta.get());
+        for (auto it = myTreatmentHistoryCompanions.begin(); it != myTreatmentHistoryCompanions.end();) {
+            if ((*it)->delta.IsNull() || !live.count((*it)->delta.get()))
+                it = myTreatmentHistoryCompanions.erase(it);
+            else ++it;
+        }
+        while (myTreatmentHistoryCompanions.size() > kTreatmentHistoryMaxCompanions)
+            myTreatmentHistoryCompanions.pop_front();
+    } catch (...) { myTreatmentHistoryCompanions.clear(); }
+}
+
+Standard_Boolean OcctDocument::FinalizeTreatmentHistoryCompanion() noexcept {
+    if (!myPendingTreatmentCompanion) return Standard_True;
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand())
+            return Standard_False;
+        auto& pending = *myPendingTreatmentCompanion;
+        if (!pending.afterCaptured || pending.data.IsNull()
+            || pending.data.get() != myOcafDoc->GetData().get()
+            || pending.undoDepthBefore < 0)
+            return Standard_False;
+        // Exactly one delta for this transaction; a full history trims the
+        // oldest delta instead of growing (pruned companions cover that).
+        const Standard_Integer depth = myOcafDoc->GetAvailableUndos();
+        const Standard_Integer limit = myOcafDoc->GetUndoLimit();
+        const bool depthAsExpected = depth == pending.undoDepthBefore + 1
+            || (limit > 0 && pending.undoDepthBefore >= limit && depth == pending.undoDepthBefore);
+        if (!depthAsExpected) return Standard_False;
+        const TDF_DeltaList& undos = myOcafDoc->GetUndos();
+        if (undos.IsEmpty()) return Standard_False;
+        // Bind the companion to the actual committed delta only when that
+        // delta verifiably touches the captured owner label.
+        const Handle(TDF_Delta)& committed = undos.Last();
+        bool touchesOwner = false;
+        std::size_t scanned = 0;
+        for (TDF_ListIteratorOfAttributeDeltaList it(committed->AttributeDeltas()); it.More(); it.Next()) {
+            if (++scanned > kTreatmentHistoryMaxDeltaAttributes) return Standard_False;
+            const Handle(TDF_AttributeDelta)& attributeDelta = it.Value();
+            if (attributeDelta.IsNull()) return Standard_False;
+            TCollection_AsciiString entry;
+            TDF_Tool::Entry(attributeDelta->Label(), entry);
+            if (pending.ownerEntry == entry.ToCString()) { touchesOwner = true; break; }
+        }
+        if (!touchesOwner) return Standard_False;
+        pending.delta = committed;
+        myTreatmentHistoryCompanions.push_back(std::move(myPendingTreatmentCompanion));
+        myPendingTreatmentCompanion.reset();
+        PruneTreatmentHistoryCompanions();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept {
+    if (!myPendingTreatmentCompanion) return Standard_True;
+    std::unique_ptr<core3d::treatment_history::Companion> companion =
+        std::move(myPendingTreatmentCompanion);
+    myPendingTreatmentCompanion.reset();
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || companion->data.IsNull() || companion->data.get() != myOcafDoc->GetData().get())
+            return Standard_False;
+        // Verified prior-state settlement. TDF abort commits the transaction
+        // and applies its inverse delta without history, so the captured
+        // semantic state (label/attribute identities, evolution, shape-pair
+        // and current-binding state, exact source/SYET state, owner geometry
+        // and the original topology's transient bookkeeping) must already be
+        // back in place; the naming-version scalars, which the delta-apply
+        // builder advanced, are then restored to the measured values and the
+        // complete state is verified. Only then is the uncommitted companion
+        // discarded; never repair, never fabricate.
+        std::vector<core3d::treatment_history::NamingState> now;
+        std::vector<std::uint8_t> sourceNow, syetBytesNow;
+        bool syetNow = false;
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion->ownerLabel, now,
+                sourceNow, syetNow, syetBytesNow)
+            || !SameTreatmentNamingSet(companion->before, now, false)
+            || sourceNow != companion->sourceBytesBefore
+            || syetNow != companion->syetBefore || syetBytesNow != companion->syetBytesBefore
+            || !XCAFDoc_ShapeTool::GetShape(companion->ownerLabel).IsEqual(companion->ownerShapeBefore)
+            || !CheckTreatmentTransientFlags(companion->ownerShapeBefore, companion->flagsBefore))
+            return Standard_False;
+        for (const auto& state : companion->before) {
+            Handle(TNaming_NamedShape) naming;
+            if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull())
+                return Standard_False;
+            naming->SetVersion(state.version);
+        }
+        std::vector<core3d::treatment_history::NamingState> verified;
+        if (!CaptureTreatmentSubtreeNaming(companion->ownerLabel, verified)
+            || !SameTreatmentNamingSet(companion->before, verified, true)) return Standard_False;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+// Engaged only for the matching live TDF delta, after real OCAF history has
+// been applied. Validates that the captured semantic state (label/attribute
+// identities, evolution, shape-pair and current-binding state, exact
+// source/SYET state, owner geometry) was actually restored, then restores the
+// captured naming-version scalars for this side — and, on Undo, the original
+// topology's measured Modified/Checked bookkeeping — and verifies the
+// complete state. Finally the companion is associated with the actual
+// resulting inverse delta (TDF_Data::Undo commits a fresh inverse delta).
+// Any mismatch is an honest failure for the existing recovery path, never a
+// fabricated success.
+Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
+    const Handle(TDF_Delta)& engaged, Standard_Boolean undoDirection) noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || engaged.IsNull()) return Standard_False;
+        core3d::treatment_history::Companion* companion = nullptr;
+        for (auto& candidate : myTreatmentHistoryCompanions) {
+            if (!candidate->delta.IsNull() && candidate->delta.get() == engaged.get()) {
+                companion = candidate.get(); break;
+            }
+        }
+        if (!companion || companion->data.IsNull()
+            || companion->data.get() != myOcafDoc->GetData().get()) return Standard_False;
+        const std::vector<core3d::treatment_history::NamingState>& side =
+            undoDirection ? companion->before : companion->after;
+        const TopoDS_Shape& sideShape =
+            undoDirection ? companion->ownerShapeBefore : companion->ownerShapeAfter;
+        const std::vector<std::uint8_t>& sideSource =
+            undoDirection ? companion->sourceBytesBefore : companion->sourceBytesAfter;
+        const bool sideSyet = undoDirection ? companion->syetBefore : companion->syetAfter;
+        const std::vector<std::uint8_t>& sideSyetBytes =
+            undoDirection ? companion->syetBytesBefore : companion->syetBytesAfter;
+        std::vector<core3d::treatment_history::NamingState> now;
+        std::vector<std::uint8_t> sourceNow, syetBytesNow;
+        bool syetNow = false;
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion->ownerLabel, now,
+                sourceNow, syetNow, syetBytesNow)
+            || !SameTreatmentNamingSet(side, now, false)
+            || sourceNow != sideSource
+            || syetNow != sideSyet || syetBytesNow != sideSyetBytes
+            || !XCAFDoc_ShapeTool::GetShape(companion->ownerLabel).IsEqual(sideShape))
+            return Standard_False;
+        for (const auto& state : side) {
+            Handle(TNaming_NamedShape) naming;
+            if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull())
+                return Standard_False;
+            naming->SetVersion(state.version);
+        }
+        if (undoDirection
+            && !RestoreTreatmentTransientFlags(sideShape, companion->flagsBefore))
+            return Standard_False;
+        std::vector<core3d::treatment_history::NamingState> verified;
+        if (!CaptureTreatmentSubtreeNaming(companion->ownerLabel, verified)
+            || !SameTreatmentNamingSet(side, verified, true)) return Standard_False;
+        // Associate the companion with the actual resulting inverse delta:
+        // TDF_Data::Undo commits a fresh inverse delta during history
+        // application; TDocStd_Document prepends it to the redo list on Undo
+        // and appends it to the undo list on Redo.
+        const TDF_DeltaList& inverse = undoDirection ? myOcafDoc->GetRedos() : myOcafDoc->GetUndos();
+        if (inverse.IsEmpty()) return Standard_False;
+        companion->delta = undoDirection ? inverse.First() : inverse.Last();
+        PruneTreatmentHistoryCompanions();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::undo() {
     if (NativeBooleanOwnerBlocksOtherWork()) return Standard_False;
     if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
@@ -18185,7 +18617,28 @@ Standard_Boolean OcctDocument::undo() {
 		return Standard_False;
     }
     try {
+        // D253: identify a finalized companion bound to the live undo-top
+        // delta before changing history; unrelated deltas keep the existing
+        // behavior untouched.
+        Handle(TDF_Delta) engagedTreatmentDelta;
+        {
+            const TDF_DeltaList& undos = myOcafDoc->GetUndos();
+            if (!undos.IsEmpty()) {
+                const Handle(TDF_Delta)& top = undos.Last();
+                for (const auto& companion : myTreatmentHistoryCompanions) {
+                    if (!companion->delta.IsNull() && companion->delta.get() == top.get()) {
+                        engagedTreatmentDelta = top; break;
+                    }
+                }
+            }
+        }
         if (myOcafDoc->Undo()) {
+            // Restoration precedes the authority fence advance, NotifyChanges,
+            // redraw and any externally visible success; a failed validation
+            // is an honest unknown outcome, never a fabricated success.
+            if (!engagedTreatmentDelta.IsNull()
+                && !ApplyTreatmentHistoryAfterHistoryChange(engagedTreatmentDelta, Standard_True))
+                return Standard_False;
             if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(
@@ -18214,7 +18667,29 @@ Standard_Boolean OcctDocument::redo() {
 		return Standard_False;
     }
     try {
+        // D253: identify a finalized companion bound to the live redo delta
+        // before changing history. OCCT keeps the most recent redo at the
+        // FRONT of the list (TDocStd_Document::Redo applies myRedos.First()),
+        // unlike undos where the most recent is Last().
+        Handle(TDF_Delta) engagedTreatmentDelta;
+        {
+            const TDF_DeltaList& redos = myOcafDoc->GetRedos();
+            if (!redos.IsEmpty()) {
+                const Handle(TDF_Delta)& top = redos.First();
+                for (const auto& companion : myTreatmentHistoryCompanions) {
+                    if (!companion->delta.IsNull() && companion->delta.get() == top.get()) {
+                        engagedTreatmentDelta = top; break;
+                    }
+                }
+            }
+        }
 		if (myOcafDoc->Redo()) {
+            // Restoration precedes the authority fence advance, NotifyChanges,
+            // redraw and any externally visible success; a failed validation
+            // is an honest unknown outcome, never a fabricated success.
+            if (!engagedTreatmentDelta.IsNull()
+                && !ApplyTreatmentHistoryAfterHistoryChange(engagedTreatmentDelta, Standard_False))
+                return Standard_False;
             if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
 #if DEBUG
             if (myLiveProbe) myLiveProbe->Record(

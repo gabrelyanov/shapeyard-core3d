@@ -350,7 +350,16 @@ std::shared_ptr<const retained_edge_treatment::DetachedInput> Core3DViewer::edge
     if(!work->selectorAppend_) input->snapshot_=work->snapshot_;
     input->edit_=work->edit_;input->candidate_=work->candidate_;
     input->source_=work->selectorAppend_?work->selectorAppend_->source_:work->snapshot_->source_;
-    input->nonce_=work->snapshot_->nonce_;input->base_=work->snapshot_->base_;
+    input->nonce_=work->snapshot_->nonce_;
+    // D253: genuinely detached, bounded native replay geometry is produced
+    // here, while still at the owner boundary, through the shared verified
+    // detachment helper. The worker's mutable TShapes — including untouched
+    // faces a fillet may reuse — stay disjoint from live owner/source/history
+    // TShapes; native witnesses resolve on the private input during replay.
+    // The snapshot retains document authority; only private geometry crosses.
+    {ReplayBudget detachBudget;Refusal detachRefusal=Refusal::None;TopoDS_Shape detachedBase;
+    if(!DetachReplayGeometry(work->snapshot_->base_,detachBudget,detachedBase,detachRefusal))return {};
+    input->base_=detachedBase;}
     input->chargedBudget_=work->selectorAppend_?work->selectorAppend_->chargedBudget_
         :work->snapshot_->chargedBudget_;
     input->cancelled_=work->cancelled_;work->state_=Work::State::Building;return input;
