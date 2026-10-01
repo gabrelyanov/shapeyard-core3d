@@ -401,8 +401,11 @@ Receipt OcafOwner::apply(
         // Freeze all affected native identities before opening the one command.
         // A replacement must reconcile the selected AIS wire as well as OCAF.
         native_opening::CommittedEditPublication publication;
+        // previousShape is the validated exact capture's record.current, proven
+        // IsEqual to the owner label's admitted shape by the gate above.
         publication.replaced.push_back({retained_solid::UUIDText(
-            found->second.exact.persisted.ownerState.owner.entity), {}});
+            found->second.exact.persisted.ownerState.owner.entity),
+            found->second.exact.record.current});
         if (!path_array_owner::AppendDependentReplayPublication(
                 found->second.dependents, publication))
             return Refusal(scene, Outcome::refused, "publication-plan-refused");

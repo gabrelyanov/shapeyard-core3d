@@ -2948,6 +2948,9 @@ struct ProfileSolidGeometry : ProfileDefinition {
     std::optional<retained_edge_treatment::Definition> treatmentDefinition;
     TopoDS_Shape treatmentBase;
     std::vector<retained_edge_treatment::StepProof> treatmentProofs;
+    // D253 source-edit rebind inputs: main-thread verified value data only.
+    std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
+    std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
 };
 
 
@@ -3094,7 +3097,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             solid = TopoDS::Solid(shelled);
             if (!BRepCheck_Analyzer(solid, Standard_True).IsValid()) return false;
         }
-        if(geometry->treatmentDefinition){geometry->treatmentBase=solid;TopoDS_Shape treated;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Replay(solid,*geometry->treatmentDefinition,treated,geometry->treatmentProofs,budget,refusal))return false;solid=TopoDS::Solid(treated);}
+        if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,budget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
         Bnd_Box bounds;
         BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
         if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
@@ -3291,6 +3294,9 @@ struct EnclosureSolidGeometry {
     std::optional<retained_edge_treatment::Definition> treatmentDefinition;
     TopoDS_Shape treatmentBase;
     std::vector<retained_edge_treatment::StepProof> treatmentProofs;
+    // D253 source-edit rebind inputs: main-thread verified value data only.
+    std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
+    std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
 };
 struct CutSolidGeometry {
     cut_display::Settings displaySettings;
@@ -4382,9 +4388,15 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         profileSolidGeometry(work)->shells = parameters.shells;
         profileSolidGeometry(work)->shellMetersPerUnit = parameters.metersPerUnit;
         if(original.edgeTreatment&&original.edgeTreatment->definition_){
-            retained_edge_treatment::Definition candidate=*original.edgeTreatment->definition_;
-            std::vector<std::uint8_t> sourceBytes;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(parameters),requestedValues,sourceBytes);composite_recipe::Hash(sourceBytes,candidate.base.sourceRecipeDigest);
-            profileSolidGeometry(work)->treatmentDefinition=candidate;
+            namespace et=retained_edge_treatment;
+            // A source edit moves native edges; the stored selector witnesses
+            // must be verified against the old source and rebound against the
+            // actually rebuilt stage, never replayed with stale midpoints.
+            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
+            if(!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,*original.edgeTreatment->definition_,
+                original.edgeTreatment->definitionBytes_,rebindBudget,rebindRefusal,roles))return {};
+            auto geometry=profileSolidGeometry(work);
+            geometry->treatmentRebind=std::move(roles);geometry->treatmentRebuildSource=parameters;
             work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{parameters};
         }
         record.requested.label = label; record.requested.presentation = selected;
@@ -4430,9 +4442,15 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
         auto work = prepareEnclosureSolid(parameters, identity, presentationRevision, width, height);
         if (!work) return {};
         if(original.edgeTreatment&&original.edgeTreatment->definition_){
-            retained_edge_treatment::Definition candidate=*original.edgeTreatment->definition_;
-            std::vector<std::uint8_t> sourceBytes;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,parameters.definition.constructionFrame?2:1,requestedValues,sourceBytes);composite_recipe::Hash(sourceBytes,candidate.base.sourceRecipeDigest);
-            auto enclosureGeometry=std::get<std::shared_ptr<EnclosureSolidGeometry>>(work->geometry);enclosureGeometry->treatmentDefinition=candidate;
+            namespace et=retained_edge_treatment;
+            // A source edit moves native edges; the stored selector witnesses
+            // must be verified against the old source and rebound against the
+            // actually rebuilt stage, never replayed with stale midpoints.
+            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
+            if(!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,*original.edgeTreatment->definition_,
+                original.edgeTreatment->definitionBytes_,rebindBudget,rebindRefusal,roles))return {};
+            auto enclosureGeometry=std::get<std::shared_ptr<EnclosureSolidGeometry>>(work->geometry);
+            enclosureGeometry->treatmentRebind=std::move(roles);enclosureGeometry->treatmentRebuildSource=parameters;
             work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{parameters};
         }
         record.requested.label = label; record.requested.presentation = selected;
@@ -4992,7 +5010,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
     if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&payload)) {
         if (!*p || (*p)->built || !(*p)->cancelled || (*p)->cancelled->load()) return false;
         (*p)->built=BuildEnclosureSolidGeometry((*p)->parameters.definition,(*p)->cancelled,(*p)->result);
-        if((*p)->built&&(*p)->treatmentDefinition){(*p)->treatmentBase=(*p)->result.solid;TopoDS_Shape treated;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Replay((*p)->treatmentBase,*(*p)->treatmentDefinition,treated,(*p)->treatmentProofs,budget,refusal))return (*p)->built=false;(*p)->result.solid=treated;}
+        if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,budget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
         return (*p)->built;
     }
     return false;

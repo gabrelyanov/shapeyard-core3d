@@ -367,6 +367,40 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             ||!XCAFDoc_ShapeTool::GetShape(original.ownerLabel_).IsEqual(original.current_)){
             refusal=Refusal::StaleSnapshot;return Standard_False;
         }
+        // Paired staging prevalidation: capture and validate the complete old
+        // owner state while its carrier is still current, before any mutation.
+        // Document/owner authority, exactly one editable free simple solid,
+        // representation class, identity, source label/identifier/values,
+        // saved transform/scalar presence, dependent-source restrictions,
+        // treatment bytes and the existing binding are verified here as one
+        // unit; no semantic capture runs between setting the new shape and
+        // installing the coherent source/SYET triple below.
+        OcctObjectTransformState priorState;
+        if(!CaptureObjectTransformStateForLabel(original.ownerLabel_,priorState)
+            ||!priorState.shape.IsEqual(original.current_)
+            ||HasUnroutedRetainedDependent(original.ownerLabel_)
+            ||bool(priorState.edgeTreatment)!=bool(live)
+            ||(priorState.edgeTreatment&&live
+                &&priorState.edgeTreatment->value->bytes!=live->value->bytes)){
+            refusal=Refusal::StageFailed;return Standard_False;
+        }
+        if(const auto*profileSource=std::get_if<core3d::profile::Parameters>(&original.source_)){
+            (void)profileSource;
+            if(priorState.profile.label.IsNull()
+                ||!priorState.profile.label.IsEqual(original.sourceLabel_)
+                ||priorState.profile.identifier!=original.sourceIdentifier_
+                ||!priorState.profile.IsCurrent(myOcafDoc,original.ownerLabel_)){
+                refusal=Refusal::NoncurrentSource;return Standard_False;
+            }
+        }else if(const auto*enclosureSource=std::get_if<core3d::enclosure::Parameters>(&original.source_)){
+            (void)enclosureSource;
+            if(priorState.enclosure.label.IsNull()
+                ||!priorState.enclosure.label.IsEqual(original.sourceLabel_)
+                ||priorState.enclosure.identifier!=original.sourceIdentifier_
+                ||!priorState.enclosure.IsCurrent(myOcafDoc,original.ownerLabel_)){
+                refusal=Refusal::NoncurrentSource;return Standard_False;
+            }
+        }else{refusal=Refusal::MalformedCarrier;return Standard_False;}
         Definition expected=original.definition_.value_or(original.seed_);
         if (built.selectorAppend_) {
             const auto& admitted=*built.selectorAppend_;
@@ -419,15 +453,51 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         else if(const auto*p=std::get_if<ReplaceTargets>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}it->anchors=p->anchors;}
         else if(const auto*p=std::get_if<Remove>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}expected.issuance.retiredLocalIDs.push_back(it->localID);expected.steps.erase(it);}
         if(expected.steps.empty())expected.outputNode=expected.base.sourceNode;else expected.outputNode=expected.steps.back().node;
-        std::vector<std::uint8_t>expectedBytes;
-        if(!std::holds_alternative<RebuildSource>(edit)
-            &&(!Encode(expected,expectedBytes,refusal)||expectedBytes!=built.definitionBytes_))return Standard_False;
+        if(const auto*rebuild=std::get_if<RebuildSource>(&edit)){
+            // A source edit moves native edges, so the valid expectation is an
+            // independently recomputed, validated rebind of the stored
+            // definition against the actually rebuilt source stage — never the
+            // unchanged original steps and never the worker's own output.
+            // Exact byte equality to that expectation stays binding, and the
+            // candidate base/result are independently tied to it.
+            if(!original.definition_){refusal=Refusal::IdentityMismatch;return Standard_False;}
+            SourceRebindRoles roles;ReplayBudget roleBudget;
+            SourceRebindResult expectation;ReplayBudget expectationBudget=built.budget_;
+            if(!CaptureSourceRebindRoles(original.base_,*original.definition_,original.definitionBytes_,roleBudget,refusal,roles)
+                ||!ApplySourceRebind(roles,rebuild->requested,built.base_,expectationBudget,refusal,expectation))return Standard_False;
+            if(expectation.bytes!=built.definitionBytes_){
+                refusal=Refusal::ReplayMismatch;return Standard_False;
+            }
+            ReplayBudget geometryBudget=built.budget_;
+            if(!EquivalentReplayGeometry(built.result_,expectation.treated,geometryBudget,refusal))return Standard_False;
+            expected=expectation.definition;
+        }else{
+            std::vector<std::uint8_t>expectedBytes;
+            if(!Encode(expected,expectedBytes,refusal)||expectedBytes!=built.definitionBytes_)return Standard_False;
+        }
         if(built.definition_.steps!=expected.steps||built.definition_.outputNode!=expected.outputNode){refusal=Refusal::ReplayMismatch;return Standard_False;}
-        Handle(AIS_Shape)presentation=new AIS_Shape(built.result_);const bool shapeReplaced=ReplaceShape(original.ownerLabel_,presentation)?true:false;
+        const OcctGeometryRepresentation pairedRepresentation=
+            priorState.resolvedRepresentation==OcctGeometryRepresentation::LegacyUnknown
+                ?OcctGeometryRepresentation::BRep:priorState.resolvedRepresentation;
+        // With the ordinary controller's already open command, set the owner
+        // shape and immediately stage the source recipe and the treatment
+        // payload/binding. The prevalidated owner's transform attributes are
+        // preserved verbatim; nothing here resets a placed owner's transform.
+        Handle(XCAFDoc_ShapeTool) shapeTool=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        bool shapeStaged=false;
+        if(!shapeTool.IsNull()&&!built.result_.IsNull()
+            &&pairedRepresentation==OcctGeometryRepresentation::BRep
+            &&built.result_.ShapeType()==TopAbs_SOLID){
+            shapeTool->SetShape(original.ownerLabel_,built.result_);
+            const TopoDS_Shape storedShape=XCAFDoc_ShapeTool::GetShape(original.ownerLabel_);
+            shapeStaged=!storedShape.IsNull()&&storedShape.IsEqual(built.result_)
+                &&IsEditableFreeSimpleDefinitionLabel(original.ownerLabel_)
+                &&EnsureGeometryRepresentationForMutation(original.ownerLabel_);
+        }
 #if DEBUG
-        std::fprintf(stderr,"B1B2_STAGE phase=replace-shape result=%d\n",shapeReplaced?1:0);
+        std::fprintf(stderr,"B1B2_STAGE phase=replace-shape result=%d\n",shapeStaged?1:0);
 #endif
-        if(!shapeReplaced){refusal=Refusal::StageFailed;return Standard_False;}
+        if(!shapeStaged){refusal=Refusal::StageFailed;return Standard_False;}
         bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=source-stage result=%d\n",sourceStaged?1:0);
@@ -435,6 +505,63 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         if(!sourceStaged){refusal=Refusal::StageFailed;return Standard_False;}
         core3d::profile::Record profile;core3d::enclosure::Record enclosure;if(!core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile)||!core3d::enclosure::Read(myOcafDoc,original.ownerLabel_,enclosure)){refusal=Refusal::StageFailed;return Standard_False;}const TDF_Label metadata=!profile.label.IsNull()?profile.label:enclosure.label;
         auto payload=std::make_shared<Payload>();payload->definition=built.definition_;payload->bytes=built.definitionBytes_;payload->base=built.base_;Attribute::Set(metadata,payload);TNaming_Builder(metadata).Select(built.result_,built.result_);
+        // Strict full capture/readback, performed once now that the owner
+        // shape, its source recipe and the SYET payload/binding are coherent:
+        // exact new owner shape, preserved identity/materials/placement, valid
+        // requested source values, exact candidate treatment bytes and a
+        // current binding. Any incomplete stage reaches the controller's
+        // existing verified rollback through the refusal return.
+        OcctObjectTransformState stagedState;
+        bool pairedReadback=CaptureObjectTransformStateForLabel(original.ownerLabel_,stagedState)
+            &&stagedState.shape.IsEqual(built.result_)
+            &&stagedState.entityIdentifier==priorState.entityIdentifier
+            &&stagedState.definitionIdentifier==priorState.definitionIdentifier
+            &&stagedState.present==priorState.present
+            &&stagedState.scalars==priorState.scalars
+            &&stagedState.edgeTreatment.has_value()
+            &&stagedState.edgeTreatment->value->bytes==built.definitionBytes_
+            &&stagedState.edgeTreatment->IsCurrent(myOcafDoc,original.ownerLabel_);
+        const auto sameRestagedSource=[&](const auto&staged,const auto&prior){
+            if(staged.label.IsNull()!=prior.label.IsNull())return false;
+            if(staged.label.IsNull())return true;
+            return staged.label.IsEqual(prior.label)&&staged.label.Data()==prior.label.Data()
+                &&staged.identifier==prior.identifier&&staged.values==prior.values
+                &&staged.parameters.metersPerUnit==prior.parameters.metersPerUnit
+                &&staged.IsCurrent(myOcafDoc,original.ownerLabel_);
+        };
+        if(pairedReadback){
+            if(const auto*rebuild=std::get_if<RebuildSource>(&edit)){
+                std::vector<double> requestedValues;
+                if(const auto*requestedProfile=std::get_if<core3d::profile::Parameters>(&rebuild->requested))
+                    pairedReadback=core3d::profile::Encode(*requestedProfile,requestedValues)
+                        &&!stagedState.profile.label.IsNull()
+                        &&stagedState.profile.label.IsEqual(priorState.profile.label)
+                        &&stagedState.profile.label.Data()==priorState.profile.label.Data()
+                        &&stagedState.profile.identifier==original.sourceIdentifier_
+                        &&stagedState.profile.values==requestedValues
+                        &&stagedState.profile.parameters.metersPerUnit==priorState.profile.parameters.metersPerUnit
+                        &&stagedState.profile.IsCurrent(myOcafDoc,original.ownerLabel_)
+                        &&sameRestagedSource(stagedState.enclosure,priorState.enclosure);
+                else if(const auto*requestedEnclosure=std::get_if<core3d::enclosure::Parameters>(&rebuild->requested))
+                    pairedReadback=core3d::enclosure::Encode(*requestedEnclosure,requestedValues)
+                        &&!stagedState.enclosure.label.IsNull()
+                        &&stagedState.enclosure.label.IsEqual(priorState.enclosure.label)
+                        &&stagedState.enclosure.label.Data()==priorState.enclosure.label.Data()
+                        &&stagedState.enclosure.identifier==original.sourceIdentifier_
+                        &&stagedState.enclosure.values==requestedValues
+                        &&stagedState.enclosure.parameters.metersPerUnit==priorState.enclosure.parameters.metersPerUnit
+                        &&stagedState.enclosure.IsCurrent(myOcafDoc,original.ownerLabel_)
+                        &&sameRestagedSource(stagedState.profile,priorState.profile);
+                else pairedReadback=false;
+            }else{
+                pairedReadback=sameRestagedSource(stagedState.profile,priorState.profile)
+                    &&sameRestagedSource(stagedState.enclosure,priorState.enclosure);
+            }
+        }
+#if DEBUG
+        std::fprintf(stderr,"B1B2_STAGE phase=paired-readback result=%d\n",pairedReadback?1:0);
+#endif
+        if(!pairedReadback){refusal=Refusal::StageFailed;return Standard_False;}
         std::optional<Record>stored;const bool syetReadback=Read(myOcafDoc,original.ownerLabel_,stored,refusal)&&stored&&stored->value->bytes==built.definitionBytes_;
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=syet-readback result=%d\n",syetReadback?1:0);
@@ -18158,9 +18285,62 @@ std::string OcctDocument::save(
             return {};
         }
         const TCollection_ExtendedString aBinXCAFFormat("BinXCAF");
-        return path + (myOcafDoc->StorageFormat().IsEqual(aBinXCAFFormat)
+        const std::string savedPath = path + (myOcafDoc->StorageFormat().IsEqual(aBinXCAFFormat)
             ? ".xbf"
             : ".cbf");
+#if DEBUG
+        // D253 bounded byte observation, diagnostics only: retain the exact
+        // small saved file so the supervisor can attribute the Undo/baseline
+        // byte difference field-by-field. This never alters the returned file,
+        // its timestamps, the native document, its history or the save result;
+        // a read failure or an oversize file is an explicit unavailable
+        // observation, never truncated "equality" evidence.
+        try {
+            constexpr std::size_t observationCap = 65536;
+            @autoreleasepool {
+                NSData* savedBytes = [NSData
+                    dataWithContentsOfFile:[NSString stringWithUTF8String:savedPath.c_str()]];
+                const std::string documentID = DocumentIdentifier();
+                double lengthUnit = 0;
+                const bool unitKnown = XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, lengthUnit)
+                    ? true : false;
+                if (savedBytes == nil) {
+                    std::fprintf(stderr, "B1B2_SAVE_BYTES phase=unavailable reason=read doc=%s\n",
+                        documentID.c_str());
+                } else if (savedBytes.length > observationCap) {
+                    std::fprintf(stderr,
+                        "B1B2_SAVE_BYTES phase=unavailable reason=size-cap doc=%s bytes=%llu\n",
+                        documentID.c_str(), (unsigned long long)savedBytes.length);
+                } else {
+                    std::array<unsigned char, 32> digest{};
+                    CC_SHA256(savedBytes.bytes, CC_LONG(savedBytes.length), digest.data());
+                    char hex[65] = {};
+                    for (int index = 0; index < 32; ++index)
+                        std::snprintf(hex + 2 * index, 3, "%02x", digest[index]);
+                    std::fprintf(stderr,
+                        "B1B2_SAVE_BYTES phase=saved doc=%s unit=%.17g unitKnown=%d time=%lld undos=%d redos=%d bytes=%llu sha256=%s\n",
+                        documentID.c_str(), unitKnown ? lengthUnit : 0.0, unitKnown ? 1 : 0,
+                        (long long)myOcafDoc->GetData()->Time(),
+                        myOcafDoc->GetAvailableUndos(), myOcafDoc->GetAvailableRedos(),
+                        (unsigned long long)savedBytes.length, hex);
+                    NSString* encoded = [savedBytes base64EncodedStringWithOptions:0];
+                    constexpr NSUInteger chunkExtent = 1024;
+                    const NSUInteger chunks = (encoded.length + chunkExtent - 1) / chunkExtent;
+                    for (NSUInteger index = 0; index < chunks; ++index) {
+                        NSString* part = [encoded substringWithRange:NSMakeRange(index * chunkExtent,
+                            MIN(chunkExtent, encoded.length - index * chunkExtent))];
+                        std::fprintf(stderr, "B1B2_SAVE_BYTES phase=chunk index=%llu data=%s\n",
+                            (unsigned long long)index, part.UTF8String);
+                    }
+                    std::fprintf(stderr, "B1B2_SAVE_BYTES phase=complete chunks=%llu\n",
+                        (unsigned long long)chunks);
+                }
+            }
+        } catch (...) {
+            std::fprintf(stderr, "B1B2_SAVE_BYTES phase=unavailable reason=exception\n");
+        }
+#endif
+        return savedPath;
     } catch (const Standard_Failure& failure) {
         std::cout << "Save CBF failure: " << failure.GetMessageString() << std::endl;
         return {};
