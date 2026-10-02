@@ -2300,6 +2300,22 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
         return true;
     } catch (...) { output = {}; return refused(); }
 }
+
+// Row-277 C4: builds the spline-profile editing opening from an already-captured
+// input, so callers that captured exactly once (manual editor, AI edit entry)
+// never trigger a second context capture.
+Core3DSplineProfileEditingOpening *OpenSplineProfileEditorFromInput(ControllerOpeningInput& input) {
+    auto service = std::make_unique<C4Owner>(*input.owner, input.context);
+    auto opening = service->capture(input.selected);
+    if (!opening) {
+#if DEBUG
+        std::fprintf(stderr, "R179_SPLINE_OPEN_REFUSED stage=capture\n");
+#endif
+        return nil;
+    }
+    return [[Core3DSplineProfileEditingOpening alloc] initWithDocument:input.owner
+        context:input.context service:std::move(service) opening:std::move(opening) creating:NO];
+}
 } // namespace
 
 @implementation Core3DViewController (RetainedEditorOpenings)
@@ -2333,16 +2349,7 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
 #endif
         return nil;
     }
-    auto service = std::make_unique<C4Owner>(*input.owner, input.context);
-    auto opening = service->capture(input.selected);
-    if (!opening) {
-#if DEBUG
-        std::fprintf(stderr, "R179_SPLINE_OPEN_REFUSED stage=capture\n");
-#endif
-        return nil;
-    }
-    return [[Core3DSplineProfileEditingOpening alloc] initWithDocument:input.owner
-        context:input.context service:std::move(service) opening:std::move(opening) creating:NO];
+    return OpenSplineProfileEditorFromInput(input);
 }
 // Row-277 C4 AI command bridge (Core3DViewController.h): both entries return the
 // same opaque Core3DSplineProfileEditingOpening the row-270 owner methods vend.
@@ -2356,7 +2363,7 @@ bool CaptureControllerCreationInput(Core3DViewController *controller,
     ControllerOpeningInput input;
     if (!CaptureControllerOpeningInput(self, input)) return nil;
     if (input.selected != entityIdentifier.UTF8String) return nil;
-    return [self openSplineProfileEditor];
+    return OpenSplineProfileEditorFromInput(input);
 }
 - (Core3DPatternEditingOpening *)openPatternEditor {
     ControllerOpeningInput input;

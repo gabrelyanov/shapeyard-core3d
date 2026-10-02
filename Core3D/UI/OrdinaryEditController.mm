@@ -573,11 +573,44 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 }
             }
             const bool geometryChanges = !record.previous.shape.IsEqual(request.shape);
+            // Row-424 retained-treatment route: a fully bound B1/R2 treatment
+            // travels its already-defined paired authority/staging path (staged
+            // below inside this same command) instead of the generic
+            // loft-mutation or retained-prefix occurrence-edit restrictions
+            // below. Neither guard is removed and the enum is not whitelisted:
+            // the route holds only with the exclusive typed authority, one
+            // owner in one command, no permit and the exact candidate already
+            // proven above, plus an unchanged placement, BRep authority and a
+            // current captured source whose carrier bytes match the owner's
+            // live record. Owner/label/current-source binding and the final
+            // source/recipe/geometry readback are re-proven by the paired
+            // staging inside the open command. Ordinary, unbound, stale or
+            // malformed mutations still hit the original fail-closed guards.
+            const bool treatmentRoute = geometryChanges
+                && request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
+                && (pairedTreatment||pairedTreatmentR2)
+                && record.previous.resolvedRepresentation==OcctGeometryRepresentation::BRep
+                && !request.rotationAroundPivot
+                && MatricesEqual(record.previous.transform,request.transform)
+                && (pairedTreatment
+                    ? (request.edgeTreatmentSnapshot->current()
+                        && record.previous.edgeTreatment.has_value()
+                            ==request.edgeTreatmentSnapshot->definition().has_value()
+                        && (!record.previous.edgeTreatment
+                            || record.previous.edgeTreatment->value->bytes
+                                ==request.edgeTreatmentSnapshot->canonicalBytes()))
+                    : (request.edgeTreatmentSnapshotR2
+                        ? (request.edgeTreatmentSnapshotR2->current()
+                            && record.previous.edgeTreatmentR2
+                            && record.previous.edgeTreatmentR2->bytes
+                                ==request.edgeTreatmentSnapshotR2->canonicalBytes())
+                        : !record.previous.edgeTreatmentR2));
             // A first cylindrical cut consumes the loft source record below;
             // its typed cut admission and paired staging still prove the change.
             if (!record.previous.loft.label.IsNull() && geometryChanges
                 && request.operation!=OrdinaryTransformOperation::LoftStationRebuild
-                && !IsCylindricalCutOperation(request.operation)) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+                && !IsCylindricalCutOperation(request.operation)
+                && !treatmentRoute) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if (!record.previous.sweep.label.IsNull() && geometryChanges
                 && request.operation!=OrdinaryTransformOperation::SweepRebuild)
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
@@ -655,7 +688,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             }
             if(record.previous.retained.value&&!IsCylindricalCutOperation(request.operation)
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild
-                &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild) {
+                &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+                && !treatmentRoute) {
                 // An occurrence edit never changes the original-local result,
                 // retained base or cylinder. No reserved-placement fallback.
                 OcctCylindricalCutSource cut;double originalRadius=0,candidateRadius=0;

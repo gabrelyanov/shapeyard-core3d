@@ -418,8 +418,9 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
     } catch (...) { refusal = et::Refusal::BuildFailed; return {}; }
 }
 
-std::shared_ptr<const retained_edge_treatment::DetachedInput> Core3DViewer::edgeTreatmentGeometry(const std::shared_ptr<retained_edge_treatment::Work>&work) noexcept {
+std::shared_ptr<const retained_edge_treatment::DetachedInput> Core3DViewer::edgeTreatmentGeometry(const std::shared_ptr<retained_edge_treatment::Work>&work,retained_edge_treatment::Refusal&refusal) noexcept {
     using namespace retained_edge_treatment;
+    refusal=Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!work||!work->snapshot_
         ||work->state_!=Work::State::Prepared)return {};
     auto input=std::shared_ptr<DetachedInput>(new DetachedInput);
@@ -436,12 +437,14 @@ std::shared_ptr<const retained_edge_treatment::DetachedInput> Core3DViewer::edge
     // faces a fillet may reuse — stay disjoint from live owner/source/history
     // TShapes; native witnesses resolve on the private input during replay.
     // The snapshot retains document authority; only private geometry crosses.
+    // The exact D253 detachment gate is preserved; on refusal the real
+    // detachment cause propagates to the caller instead of being lost.
     {ReplayBudget detachBudget;Refusal detachRefusal=Refusal::None;TopoDS_Shape detachedBase;
-    if(!DetachReplayGeometry(work->snapshot_->base_,detachBudget,detachedBase,detachRefusal))return {};
+    if(!DetachReplayGeometry(work->snapshot_->base_,detachBudget,detachedBase,detachRefusal)){refusal=detachRefusal;return {};}
     input->base_=detachedBase;}
     input->chargedBudget_=work->selectorAppend_?work->selectorAppend_->chargedBudget_
         :work->snapshot_->chargedBudget_;
-    input->cancelled_=work->cancelled_;work->state_=Work::State::Building;return input;
+    input->cancelled_=work->cancelled_;work->state_=Work::State::Building;refusal=Refusal::None;return input;
 }
 
 std::shared_ptr<const retained_edge_treatment::DetachedResult> Core3DViewer::buildEdgeTreatment(const std::shared_ptr<const retained_edge_treatment::DetachedInput>&input,retained_edge_treatment::Refusal&refusal) noexcept {
@@ -516,8 +519,21 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
         et::ReplayBudget budget;const std::atomic_bool cancelled{false};
         r2::MigrationStages stages;
         if(!r2::PrepareMigrationStages(original->original_,original->originalBase_,cancelled,
-            budget,stages,refusal))return {};
-        if(!et::EquivalentReplayGeometry(stages.postTreatment,original->originalCurrent_,budget,refusal)){
+            budget,stages,refusal)){
+#if DEBUG
+            std::fprintf(stderr,"B1B2_REVIEW phase=stage-preparation refusal=%s\n",et::RefusalCode(refusal));
+#endif
+            return {};
+        }
+        // Actual/expectation roles: the live captured current is the actual;
+        // the independently replayed post-treatment stage is the authoritative
+        // rebuilt expectation. Only the expectation may undergo the bounded
+        // binary-readback normalization inside EquivalentReplayGeometry — the
+        // observed candidate is never normalized to make it pass.
+        if(!et::EquivalentReplayGeometry(original->originalCurrent_,stages.postTreatment,budget,refusal)){
+#if DEBUG
+            std::fprintf(stderr,"B1B2_REVIEW phase=equivalence refusal=%s\n",et::RefusalCode(refusal));
+#endif
             refusal=et::Refusal::StaleSnapshot;return {};
         }
         const auto identityValue=retained_boolean::Identities(original->original_);
@@ -533,14 +549,22 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
             fs::Resolution resolution;
             const auto queryRefusal=fs::Resolve(stages.stepStages[stageIndex],binding.intent,
                 identityValue.metersPerUnit,budget,cancelled,resolution);
-            if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);return {};}
+            if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);
+#if DEBUG
+                std::fprintf(stderr,"B1B2_REVIEW phase=old-step-membership refusal=%s\n",et::RefusalCode(refusal));
+#endif
+                return {};}
             review->proofs_.push_back(resolution.proof);
         }
         if(request.append){
             fs::Resolution resolution;
             const auto queryRefusal=fs::Resolve(stages.postTreatment,request.append->intent,
                 identityValue.metersPerUnit,budget,cancelled,resolution);
-            if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);return {};}
+            if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);
+#if DEBUG
+                std::fprintf(stderr,"B1B2_REVIEW phase=append-membership refusal=%s\n",et::RefusalCode(refusal));
+#endif
+                return {};}
             review->appendProof_=resolution.proof;
         }
         review->chargedBudget_.buildStages=budget.buildStages;

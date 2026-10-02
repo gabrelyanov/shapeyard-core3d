@@ -21657,7 +21657,19 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     // Cancellation provenance: retain only the admitted immutable snapshot
     // and any native requested-source bytes; never a recaptured scene.
     std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> stopSnapshot=snapshot->native;NSData *stopRequestedSource=requestedSource;operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){B1BindQ2(dto,stopSnapshot,stopRequestedSource,nil);[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];
-    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork);if(!geometry){refuse(refusal);return operation;}dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{core3d::retained_edge_treatment::Refusal buildRefusal;auto built=core3d::Core3DViewer::buildEdgeTreatment(geometry,buildRefusal);dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;if(!built){r.outcome=buildRefusal==core3d::retained_edge_treatment::Refusal::Cancelled?core3d::retained_edge_treatment::CommitOutcome::Cancelled:core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=buildRefusal;r.measuredUndoDelta=0;}else r=viewer->commitEdgeTreatment(operation->nativeWork,built);auto dto=B1Result(r);B1BindQ2(dto,snapshot->native,requestedSource,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;}catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
+    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);core3d::retained_edge_treatment::Refusal geometryRefusal;auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork,geometryRefusal);
+#if DEBUG
+    std::fprintf(stderr,"B1B2_Q2 op=%p phase=prepare refusal=%s detach refusal=%s\n",(__bridge void*)operation,core3d::retained_edge_treatment::RefusalCode(refusal),core3d::retained_edge_treatment::RefusalCode(geometryRefusal));
+#endif
+    if(!geometry){refuse(operation->nativeWork?geometryRefusal:refusal);return operation;}dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{core3d::retained_edge_treatment::Refusal buildRefusal;auto built=core3d::Core3DViewer::buildEdgeTreatment(geometry,buildRefusal);
+#if DEBUG
+    std::fprintf(stderr,"B1B2_Q2 op=%p phase=build refusal=%s\n",(__bridge void*)operation,core3d::retained_edge_treatment::RefusalCode(buildRefusal));
+#endif
+    dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;if(!built){r.outcome=buildRefusal==core3d::retained_edge_treatment::Refusal::Cancelled?core3d::retained_edge_treatment::CommitOutcome::Cancelled:core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=buildRefusal;r.measuredUndoDelta=0;}else r=viewer->commitEdgeTreatment(operation->nativeWork,built);
+#if DEBUG
+    std::fprintf(stderr,"B1B2_Q2 op=%p phase=commit outcome=%d refusal=%s\n",(__bridge void*)operation,int(r.outcome),core3d::retained_edge_treatment::RefusalCode(r.refusal));
+#endif
+    auto dto=B1Result(r);B1BindQ2(dto,snapshot->native,requestedSource,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;}catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;auto target=(Core3DEdgeTreatmentNativeTargets*)targets;if(![native isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->nativeSnapshot!=native->native)return [self core3d_beginEdgeTreatment:nil edit:core3d::retained_edge_treatment::Append{} expected:expected completion:completion];core3d::retained_edge_treatment::Append edit{core3d::retained_edge_treatment::Kind(kind),amountMM,target->nativeAnchors};return [self core3d_beginEdgeTreatment:native edit:edit expected:expected completion:completion];}
@@ -21693,11 +21705,18 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         operation->nativeWork=viewer->prepareEdgeTreatmentSelectorAppend(native->native,targets,
             amountMM,identity,expected.revisions.presentationRevision,
             std::uint32_t(size.width),std::uint32_t(size.height),refusal);
-        auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork);
-        if(!geometry){refuse(refusal);return operation;}
+        core3d::retained_edge_treatment::Refusal geometryRefusal;
+        auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork,geometryRefusal);
+#if DEBUG
+        std::fprintf(stderr,"B1B2_Q2 op=%p phase=prepare refusal=%s detach refusal=%s\n",(__bridge void*)operation,core3d::retained_edge_treatment::RefusalCode(refusal),core3d::retained_edge_treatment::RefusalCode(geometryRefusal));
+#endif
+        if(!geometry){refuse(operation->nativeWork?geometryRefusal:refusal);return operation;}
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
             core3d::retained_edge_treatment::Refusal buildRefusal;
             auto built=core3d::Core3DViewer::buildEdgeTreatment(geometry,buildRefusal);
+#if DEBUG
+            std::fprintf(stderr,"B1B2_Q2 op=%p phase=build refusal=%s\n",(__bridge void*)operation,core3d::retained_edge_treatment::RefusalCode(buildRefusal));
+#endif
             dispatch_async(dispatch_get_main_queue(),^{
                 if(operation->settled)return;operation->settled=YES;
                 if(!built){core3d::retained_edge_treatment::CommitResult result;
@@ -21709,6 +21728,9 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
                     auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;
                     if(callback)callback(dto);return;}
                 auto result=viewer->commitEdgeTreatment(operation->nativeWork,built);
+#if DEBUG
+                std::fprintf(stderr,"B1B2_Q2 op=%p phase=commit outcome=%d refusal=%s\n",(__bridge void*)operation,int(result.outcome),core3d::retained_edge_treatment::RefusalCode(result.refusal));
+#endif
                 auto dto=B1Result(result);B1BindQ2(dto,native->native,nil,built);
                 auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;
                 if(callback)callback(dto);

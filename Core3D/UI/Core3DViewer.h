@@ -293,8 +293,12 @@ namespace core3d {
         std::uint64_t presentationRevision,
         std::uint32_t width, std::uint32_t height,
         retained_edge_treatment::Refusal& refusal) noexcept;
+    // The internal native refusal output carries the real geometry-stage
+    // cause (thread/work/state or the D253 detachment refusal) so a null
+    // detached input never loses it. No public Swift DTO/enum change.
     static std::shared_ptr<const retained_edge_treatment::DetachedInput> edgeTreatmentGeometry(
-        const std::shared_ptr<retained_edge_treatment::Work>&) noexcept;
+        const std::shared_ptr<retained_edge_treatment::Work>&,
+        retained_edge_treatment::Refusal&) noexcept;
     static std::shared_ptr<const retained_edge_treatment::DetachedResult> buildEdgeTreatment(
         const std::shared_ptr<const retained_edge_treatment::DetachedInput>&,
         retained_edge_treatment::Refusal&) noexcept;

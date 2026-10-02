@@ -52,4 +52,42 @@ inline bool ReadR2(const Handle(TDocStd_Document)& document,const TDF_Label& own
         output=std::move(record);refusal=Refusal::None;return true;
     }catch(...){output.reset();refusal=Refusal::MalformedCarrier;return false;}
 }
+
+// Strict mixed-arm whole-document traversal for save/import/export validation.
+// Every treatment attribute must carry exactly one payload arm; that arm — and
+// only that arm — is validated by its full native reader (B1 Read / R2 ReadR2,
+// including canonical decode and the exact current naming binding), typed
+// records of both families are retained, one treatment per owner is enforced,
+// and B1 and R2 bytes accumulate into the same existing aggregate. Never
+// turned into "skip R2", "has R2, return true", a !value() continue, or a
+// schema dispatch: B2's schema-2 Q2 carrier lives on the B1 arm. The
+// standalone B1 reader (ReadAll) is unchanged for its existing callers.
+inline bool ReadAllMixed(const Handle(TDocStd_Document)& document,std::size_t priorBytes,
+    std::vector<Record>& output,std::vector<RecordR2>& outputR2,Refusal& refusal) noexcept {
+    output.clear();outputR2.clear();
+    try{
+        if(document.IsNull()){refusal=Refusal::MalformedCarrier;return false;}
+        std::size_t total=priorBytes;
+        for(TDF_ChildIterator it(document->Main(),Standard_True);it.More();it.Next()){
+            Handle(Attribute) a;if(!it.Value().FindAttribute(AttributeID(),a))continue;
+            if(it.Value().Father().IsNull()||a.IsNull()||bool(a->value())==bool(a->valueR2())){
+                refusal=Refusal::MalformedCarrier;return false;
+            }
+            if(a->value()){
+                std::optional<Record> one;
+                if(!Read(document,it.Value().Father(),one,refusal)||!one)return false;
+                if(one->label!=it.Value()){refusal=Refusal::MultipleOwners;return false;}
+                if(one->value->bytes.size()>8388608-total){refusal=Refusal::Budget;return false;}
+                total+=one->value->bytes.size();output.push_back(*one);
+            }else{
+                std::optional<RecordR2> one;
+                if(!ReadR2(document,it.Value().Father(),one,refusal)||!one)return false;
+                if(!one->label.IsEqual(it.Value())){refusal=Refusal::MultipleOwners;return false;}
+                if(one->value->bytes.size()>8388608-total){refusal=Refusal::Budget;return false;}
+                total+=one->value->bytes.size();outputR2.push_back(*one);
+            }
+        }
+        refusal=Refusal::None;return true;
+    }catch(...){output.clear();outputR2.clear();refusal=Refusal::MalformedCarrier;return false;}
+}
 } // namespace core3d::retained_edge_treatment

@@ -111,27 +111,67 @@ inline bool ReadbackGeometry(const TopoDS_Shape& shape, ReplayBudget& budget, To
 inline bool DetachReplayGeometry(const TopoDS_Shape& shared, ReplayBudget& budget,
     TopoDS_Shape& detached, Refusal& refusal) noexcept {
     detached.Nullify();
+#if DEBUG
+    // Row-424 attribution: name the actual failing stage with its refusal, the
+    // existing budget counters and — once both commits exist — the two
+    // mesh-independent V3 commitment digests (first 8 bytes each). Diagnostics
+    // only; no branch, budget or equivalence behavior changes.
+    const auto traceFailure=[&](const char* stage){
+        std::fprintf(stderr,"B1B2_DETACH stage=%s refusal=%s buildStages=%zu topologyVisits=%zu\n",
+            stage,RefusalCode(refusal),budget.buildStages,budget.topologyVisits);
+    };
+    const auto traceDigest=[](const char* tag,const Digest& digest){
+        std::fprintf(stderr,"B1B2_DETACH digest=%s %02x%02x%02x%02x%02x%02x%02x%02x\n",tag,
+            digest[0],digest[1],digest[2],digest[3],digest[4],digest[5],digest[6],digest[7]);
+    };
+#endif
     try {
-        if (shared.IsNull()) { refusal = Refusal::ReplayMismatch; return false; }
+        if (shared.IsNull()) { refusal = Refusal::ReplayMismatch;
+#if DEBUG
+            traceFailure("null-input");
+#endif
+            return false; }
         detail::GeometryBuffer buffer; std::ostream writer(&buffer);
         BinTools::Write(shared, writer, Standard_False, Standard_False, BinTools_FormatVersion_VERSION_4);
         if (!writer.good() || buffer.size() == 0 || buffer.size() >= detail::MaximumGeometryBytes) {
-            refusal = Refusal::Budget; return false;
+            refusal = Refusal::Budget;
+#if DEBUG
+            traceFailure("write");
+#endif
+            return false;
         }
         buffer.read(); std::istream reader(&buffer); BinTools::Read(detached, reader);
         if (!reader.good() || detached.IsNull() || !detail::ChargeTopology(detached, budget)) {
-            detached.Nullify(); refusal = Refusal::Budget; return false;
+            detached.Nullify(); refusal = Refusal::Budget;
+#if DEBUG
+            traceFailure("read");
+#endif
+            return false;
         }
         Digest committedShared{}, committedDetached{};
         if (!detail::CommitGeometry(shared, budget, committedShared)
             || !detail::CommitGeometry(detached, budget, committedDetached)) {
-            detached.Nullify(); refusal = Refusal::Budget; return false;
+            detached.Nullify(); refusal = Refusal::Budget;
+#if DEBUG
+            traceFailure("commit");
+#endif
+            return false;
         }
         if (committedShared != committedDetached) {
-            detached.Nullify(); refusal = Refusal::ReplayMismatch; return false;
+            detached.Nullify(); refusal = Refusal::ReplayMismatch;
+#if DEBUG
+            traceFailure("commitment-mismatch");
+            traceDigest("shared",committedShared);
+            traceDigest("detached",committedDetached);
+#endif
+            return false;
         }
         refusal = Refusal::None; return true;
-    } catch (...) { detached.Nullify(); refusal = Refusal::BuildFailed; return false; }
+    } catch (...) { detached.Nullify(); refusal = Refusal::BuildFailed;
+#if DEBUG
+        traceFailure("exception");
+#endif
+        return false; }
 }
 
 // Authoritative replay equivalence: the observed current shape must commit to

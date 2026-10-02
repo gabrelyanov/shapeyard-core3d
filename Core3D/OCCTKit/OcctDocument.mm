@@ -182,6 +182,54 @@ OcctDocument::CaptureRetainedBooleanEnrollmentR2(
     }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
 }
 
+// Strict per-carrier R2 structural validation for the whole-document
+// mixed-arm save/reopen/export validation below: exclusive SYRS/A1 source
+// co-carrier matching the binding's prefix format, the exact source digest
+// committed in the binding, the minimum record tag and a closed
+// attribute/child neighbourhood. The carrier's canonical decode, ownership
+// and exact current naming binding are already proven by the full R2 reader
+// (et::ReadR2) inside et::ReadAllMixed before this runs. Mirrors the existing
+// staging-time ValidateRetainedEdgeTreatmentsR2 conjuncts, which stay as-is.
+static bool Core3DValidateRetainedEdgeTreatmentR2Carrier(
+    const TDF_Label& label,
+    const Handle(core3d::retained_edge_treatment::Attribute)& treatment,
+    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    try{
+        if(label.IsNull()||treatment.IsNull()||!treatment->valueR2()){
+            refusal=et::Refusal::MalformedCarrier;return false;
+        }
+        if(label.Tag()<core3d::retained_solid::MinimumRecordTag){
+            refusal=et::Refusal::MultipleOwners;return false;
+        }
+        const auto& definition=treatment->valueR2()->definition;
+        const auto* base=std::get_if<r2::BooleanBaseBinding>(&definition.base);
+        if(!base){refusal=et::Refusal::Budget;return false;}
+        Handle(core3d::retained_solid::Attribute) syrs;Handle(core3d::composite_recipe::Attribute) a1;
+        Handle(TNaming_NamedShape) named;
+        const bool hasSYRS=label.FindAttribute(core3d::retained_solid::AttributeID(),syrs);
+        const bool hasA1=label.FindAttribute(core3d::composite_recipe::AttributeID(),a1);
+        if(hasSYRS==hasA1||!label.FindAttribute(TNaming_NamedShape::GetID(),named)
+            ||(base->format==r2::PrefixFormat::SYRS)!=hasSYRS){
+            refusal=et::Refusal::MalformedCarrier;return false;
+        }
+        const std::vector<std::uint8_t>* sourceBytes=hasSYRS?&syrs->value()->bytes:&a1->value()->bytes;
+        core3d::retained_recipe::Digest digest{};
+        if(!sourceBytes||!CC_SHA256(sourceBytes->data(),CC_LONG(sourceBytes->size()),digest.data())
+            ||digest!=base->sourceRecipeDigest){refusal=et::Refusal::NoncurrentSource;return false;}
+        for(TDF_AttributeIterator attribute(label);attribute.More();attribute.Next()){
+            const auto& id=attribute.Value()->ID();if(id!=et::AttributeID()&&id!=TNaming_NamedShape::GetID()
+                &&id!=core3d::retained_solid::AttributeID()&&id!=core3d::composite_recipe::AttributeID()){
+                refusal=et::Refusal::MalformedCarrier;return false;
+            }
+        }
+        for(TDF_ChildIterator child(label,Standard_True);child.More();child.Next())if(child.Value().HasAttribute()){
+            refusal=et::Refusal::MalformedCarrier;return false;
+        }
+        return true;
+    }catch(...){refusal=et::Refusal::MalformedCarrier;return false;}
+}
+
 Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatmentsR2(
     core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
     namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
@@ -713,19 +761,29 @@ OcctDocument::CaptureRetainedEdgeTreatment(
 Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatments(
     core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
     if(myOcafDoc.IsNull()){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
-    bool hasR2=false;
-    for(TDF_ChildIterator it(myOcafDoc->Main(),Standard_True);it.More();it.Next()){
-        Handle(core3d::retained_edge_treatment::Attribute) value;
-        if(it.Value().FindAttribute(core3d::retained_edge_treatment::AttributeID(),value)
-            &&!value.IsNull()&&value->valueR2()){hasR2=true;break;}
-    }
-    if(hasR2)return ValidateRetainedEdgeTreatmentsR2(refusal);
     std::vector<core3d::retained_solid::Record> retained;
-    if(myOcafDoc.IsNull()||!core3d::retained_solid::ReadAll(myOcafDoc,retained)){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
+    if(!core3d::retained_solid::ReadAll(myOcafDoc,retained)){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
     std::size_t bytes=0;for(const auto&r:retained){if(!r.value||r.value->bytes.size()>8388608-bytes){refusal=core3d::retained_edge_treatment::Refusal::Budget;return Standard_False;}bytes+=r.value->bytes.size();}
     std::vector<core3d::composite_recipe::Record> composite;if(!core3d::composite_recipe::ReadAll(myOcafDoc,composite,bytes)){refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;}
     for(const auto&r:composite){if(!r.value||r.value->bytes.size()>8388608-bytes){refusal=core3d::retained_edge_treatment::Refusal::Budget;return Standard_False;}bytes+=r.value->bytes.size();}
-    std::vector<core3d::retained_edge_treatment::Record> records;return core3d::retained_edge_treatment::ReadAll(myOcafDoc,bytes,records,refusal)?Standard_True:Standard_False;
+    // Complete mixed-arm whole-document validation: each treatment attribute
+    // carries exactly one payload arm, inspected by that arm's full native
+    // reader with B1 and R2 bytes in the same existing aggregate; every R2
+    // carrier additionally passes the strict source-digest/ownership
+    // structural validation. No "has R2" short-circuit, no skipped arm.
+    std::vector<core3d::retained_edge_treatment::Record> records;
+    std::vector<core3d::retained_edge_treatment::RecordR2> recordsR2;
+    if(!core3d::retained_edge_treatment::ReadAllMixed(myOcafDoc,bytes,records,recordsR2,refusal))return Standard_False;
+    TDF_LabelMap owners;
+    for(const auto& record:recordsR2){
+        if(!owners.Add(record.owner)){refusal=core3d::retained_edge_treatment::Refusal::MultipleOwners;return Standard_False;}
+        Handle(core3d::retained_edge_treatment::Attribute) carrier;
+        if(!record.label.FindAttribute(core3d::retained_edge_treatment::AttributeID(),carrier)){
+            refusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;return Standard_False;
+        }
+        if(!Core3DValidateRetainedEdgeTreatmentR2Carrier(record.label,carrier,refusal))return Standard_False;
+    }
+    return Standard_True;
 }
 
 Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
@@ -1019,7 +1077,22 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
 }
 
 Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocStd_Document)& document){
-    if(document.IsNull())return Standard_False;std::vector<core3d::retained_edge_treatment::Record> records;core3d::retained_edge_treatment::Refusal refusal;return core3d::retained_edge_treatment::ReadAll(document,0,records,refusal)?Standard_True:Standard_False;
+    if(document.IsNull())return Standard_False;
+    // Same complete mixed-arm validation as the save boundary: one payload arm
+    // per attribute with that arm's full reader, both arms' bytes in the
+    // aggregate, plus the strict R2 carrier structural validation.
+    std::vector<core3d::retained_edge_treatment::Record> records;
+    std::vector<core3d::retained_edge_treatment::RecordR2> recordsR2;
+    core3d::retained_edge_treatment::Refusal refusal;
+    if(!core3d::retained_edge_treatment::ReadAllMixed(document,0,records,recordsR2,refusal))return Standard_False;
+    TDF_LabelMap owners;
+    for(const auto& record:recordsR2){
+        if(!owners.Add(record.owner))return Standard_False;
+        Handle(core3d::retained_edge_treatment::Attribute) carrier;
+        if(!record.label.FindAttribute(core3d::retained_edge_treatment::AttributeID(),carrier)
+            ||!Core3DValidateRetainedEdgeTreatmentR2Carrier(record.label,carrier,refusal))return Standard_False;
+    }
+    return Standard_True;
 }
 #include "../Scene/MikkTangentSpace.hpp"
 #include <RWMesh_FaceIterator.hxx>
@@ -5914,18 +5987,33 @@ void Core3DDefineSafeBinXCAFFormat(
     if (application.IsNull()) {
         return;
     }
+    // Stored triangulation is part of the durable source-geometry witness:
+    // the fully wrapped writers must persist it, or a saved source loses the
+    // mesh arrays its row-268 SourceRevision digest covers and cold reopen
+    // reports Stale. Wrapper stack, order, storage version 12 (quick writer
+    // included), the shared TNaming driver and the normals policy are
+    // unchanged; the inherited setter reaches the actual shared naming driver
+    // through the virtual AttributeDrivers table. A previously saved file
+    // that already omitted triangulation still reads back without it and
+    // keeps reporting Stale.
+    Handle(BinDrivers_DocumentStorageDriver) ocafStorage =
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>();
+    ocafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinOcaf"),
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>());
+        ocafStorage);
+    Handle(BinDrivers_DocumentStorageDriver) xcafStorage =
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>();
+    xcafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>());
+        xcafStorage);
 }
 
 #if DEBUG
@@ -6495,9 +6583,22 @@ Standard_Boolean ValidateGeometryDocument(
             if(!record.value||record.value->bytes.size()>core3d::composite_recipe::MaximumDocumentAggregateBytes-retainedBytes)return Standard_False;
             retainedBytes+=record.value->bytes.size();
         }
+        // Complete mixed-arm treatment validation: exactly one payload arm per
+        // attribute, inspected by that arm's full native reader with B1 and R2
+        // bytes in the same existing aggregate; each R2 carrier must also hold
+        // its exact source digest, prefix binding and ownership structurally.
+        // The document is never short-circuited because an R2 attribute exists.
         std::vector<core3d::retained_edge_treatment::Record> treatments;
+        std::vector<core3d::retained_edge_treatment::RecordR2> treatmentsR2;
         core3d::retained_edge_treatment::Refusal treatmentRefusal;
-        if(!core3d::retained_edge_treatment::ReadAll(document,retainedBytes,treatments,treatmentRefusal))return Standard_False;
+        if(!core3d::retained_edge_treatment::ReadAllMixed(document,retainedBytes,treatments,treatmentsR2,treatmentRefusal))return Standard_False;
+        TDF_LabelMap treatmentOwners;
+        for(const auto& record:treatmentsR2){
+            if(!treatmentOwners.Add(record.owner))return Standard_False;
+            Handle(core3d::retained_edge_treatment::Attribute) carrier;
+            if(!record.label.FindAttribute(core3d::retained_edge_treatment::AttributeID(),carrier)
+                ||!Core3DValidateRetainedEdgeTreatmentR2Carrier(record.label,carrier,treatmentRefusal))return Standard_False;
+        }
         TDF_LabelMap retainedOwners;
         for(const auto& record:retained)if(!retainedOwners.Add(record.owner))return Standard_False;
         for(const auto& record:composites)if(retainedOwners.Contains(record.owner))return Standard_False;
@@ -24178,6 +24279,40 @@ struct AssetAtlasProbe {
         };
         return clauses[scenario][bit];
     }
+    // DEBUG-only trace context: Run sets (scenario, unit) per unit pass and
+    // the probe helpers take an optional step prefix. Public product
+    // signatures are untouched; failure-only conjunct lines keep the 64-line
+    // /192-character Report limits from being exhausted by routine success.
+    struct TraceState { int scenario = 0; double unit = 0.001; };
+    static TraceState& Trace() {
+        static thread_local TraceState state{};
+        return state;
+    }
+    static void TraceLine(const char* prefix, const char* suffix,
+                          const std::string& detail) {
+        if (!prefix) return;
+        Report(Trace().scenario, Trace().unit,
+               (std::string(prefix) + suffix).c_str(), detail);
+    }
+    static const char* PreparationName(meshcopy::PreparationResult value) {
+        switch (value) {
+            case meshcopy::PreparationResult::Ready: return "Ready";
+            case meshcopy::PreparationResult::Cancelled: return "Cancelled";
+            case meshcopy::PreparationResult::Unsupported: return "Unsupported";
+            case meshcopy::PreparationResult::TooLarge: return "TooLarge";
+            case meshcopy::PreparationResult::Invalid: return "Invalid";
+        }
+        return "?";
+    }
+    static std::string DigestPrefix(const Digest& value) {
+        static const char hex[] = "0123456789abcdef";
+        std::string out;
+        for (std::size_t index = 0; index < 4 && index < value.size(); ++index) {
+            out.push_back(hex[value[index] >> 4]);
+            out.push_back(hex[value[index] & 15]);
+        }
+        return out;
+    }
     struct Part {
         retained_recipe::OwnerKey key;
         TDF_Label owner, record;
@@ -24192,12 +24327,233 @@ struct AssetAtlasProbe {
     struct DeltaState {
         Standard_Integer undos = 0;
         std::vector<std::string> rawMembers;
+        // Freshly resolved current member shapes serialized WITH triangulation
+        // and normals: the cached-handle Raw(false,false) helper never saw
+        // mesh bytes, so zero-delta needs this resolved-current witness too.
+        std::vector<std::string> resolvedMembers;
         std::vector<std::pair<UUID, std::vector<std::uint8_t>>> records;
     };
     static UUID IndexedUUID(std::uint8_t seed, std::size_t index) {
         UUID value{}; value.fill(seed);
         value[0] = std::uint8_t(index); value[1] = std::uint8_t(index >> 8);
         return value;
+    }
+    // Read-only resolved-current witness: resolve the live member by OwnerKey
+    // (never a cached handle) and serialize WITH triangulation and normals.
+    static bool ResolvedCurrentWitness(const Handle(TDocStd_Document)& doc,
+                                       const retained_recipe::OwnerKey& key,
+                                       std::string& out) {
+        out.clear();
+        TDF_Label label; retained_solid::Record retained;
+        if (!retained_finishing::producer::detail::Resolve(doc, key, label, retained)
+            || retained.current.IsNull()) return false;
+        std::ostringstream stream(std::ios::out | std::ios::binary);
+        BRepTools::Write(retained.current, stream, Standard_True, Standard_True,
+                         TopTools_FormatVersion_VERSION_3);
+        out = stream.str();
+        return !out.empty();
+    }
+    // The product SourceRevision hashing route: default BRepTools text
+    // (triangles, no normals, CURRENT format) of the freshly resolved current.
+    static std::string DefaultGeometryText(const Handle(TDocStd_Document)& doc,
+                                           const retained_recipe::OwnerKey& key) {
+        TDF_Label label; retained_solid::Record retained;
+        if (!retained_finishing::producer::detail::Resolve(doc, key, label, retained)
+            || retained.current.IsNull()) return {};
+        std::ostringstream stream(std::ios::out | std::ios::binary);
+        BRepTools::Write(retained.current, stream);
+        return stream.str();
+    }
+    // Bounded text comparison evidence: lengths and first differing offset,
+    // never the full BRep text.
+    static std::string TextDifference(const std::string& before,
+                                      const std::string& after) {
+        if (before == after) return {};
+        std::size_t at = 0;
+        while (at < before.size() && at < after.size() && before[at] == after[at]) ++at;
+        return "lengths=" + std::to_string(before.size()) + "vs"
+            + std::to_string(after.size()) + " first-diff=" + std::to_string(at);
+    }
+    // Per-face stored-mesh snapshot: F/N/T, null faces, UV/normals flags,
+    // ordered node/triangle/UV/normal array hashes and the binary deflection.
+    struct FaceMesh {
+        bool null = true;
+        int nodes = 0, triangles = 0;
+        bool uv = false, normals = false;
+        double deflection = 0;
+        Digest nodesHash{}, trianglesHash{}, uvHash{}, normalsHash{};
+    };
+    static std::vector<FaceMesh> MeshSnapshot(const Handle(TDocStd_Document)& doc,
+                                              const retained_recipe::OwnerKey& key) {
+        std::vector<FaceMesh> faces;
+        TDF_Label label; retained_solid::Record retained;
+        if (!retained_finishing::producer::detail::Resolve(doc, key, label, retained)
+            || retained.current.IsNull()) return faces;
+        for (TopExp_Explorer it(retained.current, TopAbs_FACE); it.More(); it.Next()) {
+            FaceMesh face;
+            TopLoc_Location location;
+            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location);
+            if (!mesh.IsNull()) {
+                face.null = false;
+                face.nodes = mesh->NbNodes();
+                face.triangles = mesh->NbTriangles();
+                face.uv = mesh->HasUVNodes();
+                face.normals = mesh->HasNormals();
+                face.deflection = mesh->Deflection();
+                std::vector<std::uint8_t> bytes;
+                const auto append = [&bytes](const void* data, std::size_t size) {
+                    const auto* first = static_cast<const std::uint8_t*>(data);
+                    bytes.insert(bytes.end(), first, first + size);
+                };
+                for (int node = 1; node <= mesh->NbNodes(); ++node) {
+                    const gp_Pnt point = mesh->Node(node);
+                    const double xyz[3] = {point.X(), point.Y(), point.Z()};
+                    append(xyz, sizeof xyz);
+                }
+                retained_solid::Hash(bytes, face.nodesHash);
+                bytes.clear();
+                for (int triangle = 1; triangle <= mesh->NbTriangles(); ++triangle) {
+                    int ids[3]; mesh->Triangle(triangle).Get(ids[0], ids[1], ids[2]);
+                    append(ids, sizeof ids);
+                }
+                retained_solid::Hash(bytes, face.trianglesHash);
+                if (face.uv) {
+                    bytes.clear();
+                    for (int node = 1; node <= mesh->NbNodes(); ++node) {
+                        const auto uv = mesh->UVNode(node);
+                        const double xy[2] = {uv.X(), uv.Y()};
+                        append(xy, sizeof xy);
+                    }
+                    retained_solid::Hash(bytes, face.uvHash);
+                }
+                if (face.normals) {
+                    bytes.clear();
+                    for (int node = 1; node <= mesh->NbNodes(); ++node) {
+                        gp_Vec3f normal; mesh->Normal(node, normal);
+                        append(&normal, sizeof normal);
+                    }
+                    retained_solid::Hash(bytes, face.normalsHash);
+                }
+            }
+            faces.push_back(face);
+        }
+        return faces;
+    }
+    // Empty when the snapshots are equal; otherwise the differing aspect
+    // names plus measured totals of the AFTER snapshot.
+    static std::string MeshDifference(const std::vector<FaceMesh>& before,
+                                      const std::vector<FaceMesh>& after) {
+        int totalNodes = 0, totalTriangles = 0, nullFaces = 0;
+        for (const auto& face : after) {
+            totalNodes += face.nodes; totalTriangles += face.triangles;
+            if (face.null) ++nullFaces;
+        }
+        const std::string totals = " faces=" + std::to_string(after.size())
+            + " nodes=" + std::to_string(totalNodes)
+            + " triangles=" + std::to_string(totalTriangles)
+            + " null=" + std::to_string(nullFaces);
+        if (before.size() != after.size())
+            return "face-count=" + std::to_string(before.size()) + "vs"
+                + std::to_string(after.size()) + totals;
+        std::string diff;
+        for (std::size_t index = 0; index < before.size(); ++index) {
+            const auto& a = before[index];
+            const auto& b = after[index];
+            std::string aspects;
+            if (a.null != b.null) aspects += " null-face";
+            if (a.nodes != b.nodes || !(a.nodesHash == b.nodesHash)) aspects += " nodes";
+            if (a.triangles != b.triangles || !(a.trianglesHash == b.trianglesHash))
+                aspects += " triangles";
+            if (a.uv != b.uv || !(a.uvHash == b.uvHash)) aspects += " uv";
+            if (a.deflection != b.deflection) aspects += " deflection";
+            if (a.normals != b.normals || !(a.normalsHash == b.normalsHash))
+                aspects += " normals";
+            if (!aspects.empty())
+                diff += " face=" + std::to_string(index) + ":" + aspects;
+        }
+        return diff.empty() ? std::string() : diff + totals;
+    }
+    // Sharing invariant: owner TNaming current and the child-13 record TNaming
+    // current stay IsEqual; the retained base copy stays distinct.
+    static bool SharingWitness(const Handle(TDocStd_Document)& doc,
+                               const retained_recipe::OwnerKey& key,
+                               std::string& detail) {
+        TDF_Label label; retained_solid::Record retained;
+        if (!retained_finishing::producer::detail::Resolve(doc, key, label, retained)
+            || retained.current.IsNull() || !retained.value) {
+            detail = "unresolved";
+            return false;
+        }
+        const auto ownerShape = XCAFDoc_ShapeTool::GetShape(label);
+        const bool ownerCurrent = !ownerShape.IsNull()
+            && retained.current.IsEqual(ownerShape);
+        const bool baseDistinct = !retained.value->base.IsNull()
+            && !retained.current.IsEqual(retained.value->base);
+        detail = std::string("owner-current=") + (ownerCurrent ? "1" : "0")
+            + " base-distinct=" + (baseDistinct ? "1" : "0");
+        return ownerCurrent && baseDistinct;
+    }
+    // Member-local chart ordinal -> sorted fitted segment ranks, in the same
+    // ordering as the build's chart identity derivation.
+    static std::map<std::uint64_t, std::vector<std::uint64_t>> SurvivorSplits(
+        const build::LayoutEvidence& layout, std::size_t memberIndex) {
+        std::map<std::uint64_t, std::vector<std::uint64_t>> splits;
+        const auto ranks = build::detail::SegmentRanks(layout.charts, layout.packed);
+        for (const auto& entry : ranks) {
+            if (entry.first.first < 0
+                || std::size_t(entry.first.first) >= layout.chartMembers.size())
+                continue;
+            const auto& chartMember = layout.chartMembers[std::size_t(entry.first.first)];
+            if (chartMember.first != memberIndex) continue;
+            splits[chartMember.second].push_back(entry.second);
+        }
+        for (auto& entry : splits) std::sort(entry.second.begin(), entry.second.end());
+        return splits;
+    }
+    static std::string SplitsText(
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& splits) {
+        std::string text;
+        for (const auto& entry : splits) {
+            if (!text.empty()) text += ";";
+            text += std::to_string(entry.first) + ":";
+            for (std::size_t index = 0; index < entry.second.size(); ++index)
+                text += (index ? "," : "") + std::to_string(entry.second[index]);
+        }
+        return text;
+    }
+    // Read-only per-member mesh preparation after a BuildAtlas refusal: the
+    // real PreparationResult and stored counts per captured member.
+    static void TraceMeshPreparation(const Handle(TDocStd_Document)& doc,
+                                     const Capture& capture, const char* prefix) {
+        if (!prefix) return;
+        for (std::size_t index = 0; index < capture.members.size(); ++index) {
+            const auto& key = capture.members[index].slot.owner;
+            TDF_Label label; retained_solid::Record retained;
+            if (!retained_finishing::producer::detail::Resolve(doc, key, label, retained)
+                || retained.current.IsNull()) {
+                TraceLine(prefix, ".mesh-prepare",
+                          "member=" + std::to_string(index) + " unresolved");
+                continue;
+            }
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            const auto preparation = meshcopy::PrepareCurrentTessellationCopy(
+                retained.current, copy, cancelled);
+            if (preparation == meshcopy::PreparationResult::Ready) continue;
+            int nodes = 0, triangles = 0;
+            for (TopExp_Explorer it(retained.current, TopAbs_FACE); it.More(); it.Next()) {
+                TopLoc_Location location;
+                const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location);
+                if (!mesh.IsNull()) { nodes += mesh->NbNodes(); triangles += mesh->NbTriangles(); }
+            }
+            TraceLine(prefix, ".mesh-prepare",
+                "member=" + std::to_string(index)
+                + " key=" + retained_solid::UUIDText(key.entity).substr(0, 8)
+                + " preparation=" + std::to_string(int(preparation))
+                + "(" + PreparationName(preparation) + ")"
+                + " nodes=" + std::to_string(nodes)
+                + " triangles=" + std::to_string(triangles));
+        }
     }
     // Generalized multi-solid fixture builder modeled on
     // retained_solid::Probe::New. The retained envelope keeps the profile
@@ -24207,14 +24563,18 @@ struct AssetAtlasProbe {
     // cross-checks recipe values against the current geometry, so reusing
     // the profile-style envelope per member is admitted evidence.
     static Part AddPart(App& holder, int kind, std::uint8_t seed,
-                        retained_finishing::UnwrapPolicy requested, double unit) {
+                        retained_finishing::UnwrapPolicy requested, double unit,
+                        const char* tracePrefix = nullptr) {
         const auto doc = holder.doc;
         if (doc.IsNull() || doc->HasOpenCommand())
             throw std::invalid_argument("atlas probe command");
         const double n = .001 / unit;
         TopoDS_Shape shape;
         if (kind == 1) shape = BRepPrimAPI_MakeCylinder(10 * n, 25 * n).Shape();
-        else if (kind == 2) shape = BRepPrimAPI_MakeCone(12 * n, 4 * n, 25 * n).Shape();
+        // Same physical frustum as a bounded conical sector: narrow enough to
+        // pass the mesh-copy budgets, still an Other/conical face that only
+        // the diagnosed-fallback route can produce.
+        else if (kind == 2) shape = BRepPrimAPI_MakeCone(12 * n, 4 * n, 25 * n, 0.01).Shape();
         else shape = BRepPrimAPI_MakeBox(40 * n, 30 * n, 20 * n).Shape();
         // meshcopy reads only stored triangulation: mesh BEFORE the retained
         // record is created so the row-268 geometry fence (whose digest
@@ -24270,33 +24630,123 @@ struct AssetAtlasProbe {
         retained_finishing::Definition candidate; std::string diagnosis;
         const auto producerStatus = retained_finishing::producer::BuildDerivative(
             doc, ownerLabel, capture, finishingSettings, candidate, diagnosis);
-        if (producerStatus != retained_finishing::producer::Status::Produced)
-            throw std::invalid_argument("atlas probe receipt status="
-                + std::to_string(int(producerStatus)) + " diagnosis="
-                + diagnosis.substr(0, 160));
+        if (producerStatus != retained_finishing::producer::Status::Produced) {
+            // Read-only mesh diagnostics on the actual resolved record: the
+            // real mesh-copy preparation (never inferred from status 4) plus
+            // per-face stored counts and the first budget-refusing face.
+            std::string preparation = "unresolved", counts;
+            TDF_Label resolvedLabel; retained_solid::Record resolved;
+            if (retained_finishing::producer::detail::Resolve(
+                    doc, part.key, resolvedLabel, resolved)
+                && !resolved.current.IsNull()) {
+                std::atomic_bool cancelled{false};
+                meshcopy::CurrentTessellationCopy copy;
+                const auto prep = meshcopy::PrepareCurrentTessellationCopy(
+                    resolved.current, copy, cancelled);
+                preparation = std::to_string(int(prep)) + "(" + PreparationName(prep) + ")";
+                // Diagnostic mirrors of the meshcopy caps
+                // (CurrentTessellationMeshCopy.hxx); the enum above stays the
+                // authoritative result.
+                int face = 0, failFace = -1, nodes = 0, triangles = 0;
+                for (TopExp_Explorer it(resolved.current, TopAbs_FACE); it.More(); it.Next()) {
+                    TopLoc_Location location;
+                    const auto mesh = BRep_Tool::Triangulation(
+                        TopoDS::Face(it.Current()), location);
+                    const int faceNodes = mesh.IsNull() ? 0 : mesh->NbNodes();
+                    const int faceTriangles = mesh.IsNull() ? 0 : mesh->NbTriangles();
+                    if (failFace < 0 && (mesh.IsNull() || faceNodes > 12288 - nodes
+                        || faceTriangles > 4096 - triangles))
+                        failFace = face;
+                    nodes += faceNodes; triangles += faceTriangles; ++face;
+                }
+                counts = " face=" + std::to_string(failFace)
+                    + " nodes=" + std::to_string(nodes)
+                    + " triangles=" + std::to_string(triangles);
+                if (tracePrefix && kind == 2) {
+                    if (prep != meshcopy::PreparationResult::Ready)
+                        TraceLine(tracePrefix, ".prepare",
+                                  "preparation=" + preparation + counts);
+                    TraceLine(tracePrefix, ".producer",
+                              "status=" + std::to_string(int(producerStatus))
+                              + " diagnosis=" + diagnosis.substr(0, 120));
+                }
+            }
+            throw std::invalid_argument("atlas probe receipt kind="
+                + std::to_string(kind) + " status=" + std::to_string(int(producerStatus))
+                + " preparation=" + preparation + counts + " diagnosis="
+                + diagnosis.substr(0, 120));
+        }
         retained_finishing::owner::Staging staging;
         const auto prepareOutcome = retained_finishing::owner::Prepare(
             staging, doc, candidate, capture.source);
-        if (prepareOutcome != retained_finishing::owner::Outcome::Prepared)
+        if (prepareOutcome != retained_finishing::owner::Outcome::Prepared) {
+            if (tracePrefix && kind == 2)
+                TraceLine(tracePrefix, ".owner-prepare",
+                          "outcome=" + std::to_string(int(prepareOutcome)));
             throw std::invalid_argument("atlas probe receipt prepare outcome="
                 + std::to_string(int(prepareOutcome)));
+        }
         retained_finishing::SourceRevision observed;
         {
             retained_finishing::producer::Capture fenced;
-            if (!retained_finishing::producer::CaptureSource(doc, part.key, fenced))
+            if (!retained_finishing::producer::CaptureSource(doc, part.key, fenced)) {
+                if (tracePrefix && kind == 2)
+                    TraceLine(tracePrefix, ".refence", "capture-failed");
                 throw std::invalid_argument("atlas probe re-fence kind=" + std::to_string(kind));
+            }
             observed = fenced.source;
         }
         const auto commitOutcome = retained_finishing::owner::Commit(staging, doc, observed);
-        if (commitOutcome != retained_finishing::owner::Outcome::Committed)
+        if (commitOutcome != retained_finishing::owner::Outcome::Committed) {
+            if (tracePrefix && kind == 2)
+                TraceLine(tracePrefix, ".owner-commit",
+                          "outcome=" + std::to_string(int(commitOutcome)));
             throw std::invalid_argument("atlas probe receipt commit outcome="
                 + std::to_string(int(commitOutcome)));
-        if (!doc->CommitCommand())
+        }
+        if (!doc->CommitCommand()) {
+            if (tracePrefix && kind == 2)
+                TraceLine(tracePrefix, ".commit-command", "failed");
             throw std::invalid_argument("atlas probe receipt commit commit-command");
+        }
         part.receipt = candidate;
+        if (tracePrefix && kind == 2) {
+            // Successful construction summary: measured face/node/triangle
+            // counts, the actual read-only mesh preparation, the producer
+            // and owner outcomes, and the committed receipt read-back.
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            const auto preparation = meshcopy::PrepareCurrentTessellationCopy(
+                part.current, copy, cancelled);
+            int faces = 0, nodes = 0, triangles = 0;
+            for (TopExp_Explorer it(part.current, TopAbs_FACE); it.More(); it.Next()) {
+                ++faces;
+                TopLoc_Location location;
+                const auto mesh = BRep_Tool::Triangulation(
+                    TopoDS::Face(it.Current()), location);
+                if (!mesh.IsNull()) { nodes += mesh->NbNodes(); triangles += mesh->NbTriangles(); }
+            }
+            int quality = -1, policy = -1;
+            retained_finishing::Record readBack;
+            if (retained_finishing::Read(doc, part.owner, readBack) && readBack.value) {
+                quality = int(readBack.value->definition.quality);
+                policy = int(readBack.value->definition.unwrap);
+            }
+            TraceLine(tracePrefix, ".fixture",
+                "faces=" + std::to_string(faces)
+                + " nodes=" + std::to_string(nodes)
+                + " triangles=" + std::to_string(triangles)
+                + " preparation=" + std::to_string(int(preparation))
+                + "(" + PreparationName(preparation) + ")"
+                + " producer=" + std::to_string(int(producerStatus))
+                + " owner=" + std::to_string(int(commitOutcome))
+                + " quality=" + std::to_string(quality)
+                + " policy=" + std::to_string(policy));
+        }
         return part;
     }
-    static Fixture New(App& holder, double unit, int extraBoxes = 0, bool cone = false) {
+    static Fixture New(App& holder, double unit, int extraBoxes = 0, bool cone = false,
+                       const char* tracePrefix = nullptr) {
         Core3DDefineSafeBinXCAFFormat(holder.app);
         holder.app->NewDocument("BinXCAF", holder.doc);
         if (holder.doc.IsNull()) throw std::invalid_argument("atlas probe document");
@@ -24314,15 +24764,15 @@ struct AssetAtlasProbe {
         fixture.atlas.document = documentID;
         fixture.atlas.atlas = IndexedUUID(0x77, 1);
         fixture.parts.push_back(AddPart(holder, 0, 0x21,
-            retained_finishing::UnwrapPolicy::Planar, unit));
+            retained_finishing::UnwrapPolicy::Planar, unit, tracePrefix));
         fixture.parts.push_back(AddPart(holder, 1, 0x22,
-            retained_finishing::UnwrapPolicy::Cylindrical, unit));
+            retained_finishing::UnwrapPolicy::Cylindrical, unit, tracePrefix));
         for (int extra = 0; extra < extraBoxes; ++extra)
             fixture.parts.push_back(AddPart(holder, 0, std::uint8_t(0x31 + extra),
-                retained_finishing::UnwrapPolicy::Planar, unit));
+                retained_finishing::UnwrapPolicy::Planar, unit, tracePrefix));
         if (cone)
             fixture.parts.push_back(AddPart(holder, 2, 0x41,
-                retained_finishing::UnwrapPolicy::Planar, unit));
+                retained_finishing::UnwrapPolicy::Planar, unit, tracePrefix));
         doc->ClearUndos();
         if (!Core3DValidateRetainedFinishingDocument(doc))
             throw std::invalid_argument("atlas probe fixture receipts");
@@ -24383,8 +24833,12 @@ struct AssetAtlasProbe {
         state = {};
         if (doc.IsNull()) return false;
         state.undos = doc->GetUndos().Size();
-        for (const auto& part : parts)
+        for (const auto& part : parts) {
             state.rawMembers.push_back(retained_solid::Probe::Raw(part.current));
+            std::string resolved;
+            if (!ResolvedCurrentWitness(doc, part.key, resolved)) return false;
+            state.resolvedMembers.push_back(std::move(resolved));
+        }
         std::vector<persistence::Record> records;
         if (!persistence::ReadAll(doc, records)) return false;
         for (const auto& record : records)
@@ -24395,7 +24849,9 @@ struct AssetAtlasProbe {
                           const std::vector<Part>& parts, const DeltaState& state) {
         DeltaState now;
         return CaptureDelta(doc, parts, now) && now.undos == state.undos
-            && now.rawMembers == state.rawMembers && now.records == state.records;
+            && now.rawMembers == state.rawMembers
+            && now.resolvedMembers == state.resolvedMembers
+            && now.records == state.records;
     }
     static build::Status MapOwner(owner::Outcome outcome) {
         switch (outcome) {
@@ -24432,43 +24888,66 @@ struct AssetAtlasProbe {
         return build::Status::Malformed;
     }
     // Build + stage + commit in exactly one OCAF command (the product block
-    // sequence the thin OcctDocument gates wrap).
+    // sequence the thin OcctDocument gates wrap). tracePrefix is a DEBUG-only
+    // step prefix: each failure return emits its own named line.
     static build::Status CommitCandidate(App& holder, const Key& atlas,
                                          const Capture& capture,
                                          const build::Settings& settings,
                                          Definition* result = nullptr,
                                          std::vector<MemberUVAssignment>* committed = nullptr,
                                          build::LayoutEvidence* layout = nullptr,
-                                         std::string* diagnosisOut = nullptr) {
+                                         std::string* diagnosisOut = nullptr,
+                                         const char* tracePrefix = nullptr) {
         const auto doc = holder.doc;
-        if (doc.IsNull() || doc->HasOpenCommand()) return build::Status::Busy;
+        if (doc.IsNull() || doc->HasOpenCommand()) {
+            TraceLine(tracePrefix, ".busy", "busy");
+            return build::Status::Busy;
+        }
         Definition candidate; std::vector<MemberUVAssignment> assignments;
         std::string diagnosis;
         const auto built = build::BuildAtlas(
             doc, atlas, capture, settings, candidate, assignments, diagnosis, layout);
         if (built != build::Status::Built) {
             if (diagnosisOut) *diagnosisOut = diagnosis;
+            TraceLine(tracePrefix, ".build",
+                      "status=" + std::to_string(int(built)) + " diagnosis="
+                      + diagnosis.substr(0, 120));
+            if (built == build::Status::UnsupportedSurface)
+                TraceMeshPreparation(doc, capture, tracePrefix);
             return built;
         }
         std::vector<Member> observed;
-        if (!build::ObserveMembers(doc, candidate.members, observed))
+        if (!build::ObserveMembers(doc, candidate.members, observed)) {
+            TraceLine(tracePrefix, ".observe", "failed");
             return build::Status::StaleSource;
+        }
         doc->NewCommand();
         owner::Staging staging;
         auto outcome = owner::Prepare(staging, doc, candidate, assignments, observed);
+        if (outcome != owner::Outcome::Prepared)
+            TraceLine(tracePrefix, ".owner-prepare",
+                      "outcome=" + std::to_string(int(outcome)));
         if (outcome == owner::Outcome::Prepared) {
             std::vector<Member> fenced;
-            if (!build::ObserveMembers(doc, candidate.members, fenced))
+            if (!build::ObserveMembers(doc, candidate.members, fenced)) {
+                TraceLine(tracePrefix, ".reobserve", "failed");
                 outcome = owner::Outcome::StaleSource;
-            else
+            } else {
                 outcome = owner::Commit(staging, doc, fenced);
+                if (outcome != owner::Outcome::Committed)
+                    TraceLine(tracePrefix, ".owner-commit",
+                              "outcome=" + std::to_string(int(outcome)));
+            }
         }
         if (outcome != owner::Outcome::Committed) {
             owner::Cancel(staging);
             doc->AbortCommand();
             return MapOwner(outcome);
         }
-        if (!doc->CommitCommand()) return build::Status::PersistenceFailure;
+        if (!doc->CommitCommand()) {
+            TraceLine(tracePrefix, ".commit-command", "failed");
+            return build::Status::PersistenceFailure;
+        }
         if (result) *result = candidate;
         if (committed) *committed = std::move(assignments);
         return build::Status::Built;
@@ -24479,22 +24958,39 @@ struct AssetAtlasProbe {
                                         Definition* result = nullptr,
                                         std::vector<MemberUVAssignment>* committed = nullptr,
                                         build::LayoutEvidence* layout = nullptr,
-                                        std::string* diagnosis = nullptr) {
+                                        std::string* diagnosis = nullptr,
+                                        const char* tracePrefix = nullptr) {
         Capture capture;
-        if (!build::CaptureMembers(holder.doc, members, capture))
-            return CaptureFailure(holder.doc, members);
-        return CommitCandidate(holder, atlas, capture, settings, result, committed, layout, diagnosis);
+        if (!build::CaptureMembers(holder.doc, members, capture)) {
+            const auto failure = CaptureFailure(holder.doc, members);
+            TraceLine(tracePrefix, ".capture",
+                      "status=" + std::to_string(int(failure)));
+            return failure;
+        }
+        return CommitCandidate(holder, atlas, capture, settings, result, committed,
+                               layout, diagnosis, tracePrefix);
     }
     // EditAssetAtlasMembership-equivalent on a raw document: survivors keep
     // order and identities; removing the last member removes the record.
     static build::Status EditMembershipRaw(App& holder, const Key& atlas,
                                            const std::vector<OwnerKey>& remove,
-                                           const std::vector<OwnerKey>& add) {
+                                           const std::vector<OwnerKey>& add,
+                                           build::LayoutEvidence* layout = nullptr,
+                                           const char* tracePrefix = nullptr) {
         const auto doc = holder.doc;
-        if (doc.IsNull() || doc->HasOpenCommand()) return build::Status::Busy;
+        if (doc.IsNull() || doc->HasOpenCommand()) {
+            TraceLine(tracePrefix, ".busy", "busy");
+            return build::Status::Busy;
+        }
         persistence::Record record;
-        if (!persistence::Read(doc, atlas, record)) return build::Status::Malformed;
-        if (!record.value) return build::Status::MissingMember;
+        if (!persistence::Read(doc, atlas, record)) {
+            TraceLine(tracePrefix, ".read", "failed");
+            return build::Status::Malformed;
+        }
+        if (!record.value) {
+            TraceLine(tracePrefix, ".present", "absent");
+            return build::Status::MissingMember;
+        }
         std::vector<OwnerKey> members;
         for (const auto& member : record.value->definition.members) {
             bool removed = false;
@@ -24513,7 +25009,8 @@ struct AssetAtlasProbe {
         }
         const build::Settings settings{record.value->definition.resolutionTexels,
                                        record.value->definition.gutterTexels};
-        return BuildAndCommit(holder, atlas, members, settings);
+        return BuildAndCommit(holder, atlas, members, settings, nullptr, nullptr,
+                              layout, nullptr, tracePrefix);
     }
     static bool ResolvePart(const Handle(TDocStd_Document)& doc,
                             const retained_recipe::OwnerKey& key, Part& part) {
@@ -24545,14 +25042,32 @@ struct AssetAtlasProbe {
             return true;
         } catch (...) { return false; }
     }
+    // 1 = current; 2 = observed but stale, or observation failed; 0 = read
+    // failure or absent record. With a trace prefix each refusing stage emits
+    // its own named line instead of hiding behind the combined return.
     static int Currentness(const Handle(TDocStd_Document)& doc, const Key& atlas,
-                           Definition* output = nullptr) {
+                           Definition* output = nullptr,
+                           std::vector<Member>* observedOut = nullptr,
+                           const char* tracePrefix = nullptr) {
         persistence::Record record;
-        if (!persistence::Read(doc, atlas, record) || !record.value) return 0;
+        if (!persistence::Read(doc, atlas, record)) {
+            TraceLine(tracePrefix, ".read", "failed");
+            return 0;
+        }
+        if (!record.value) {
+            TraceLine(tracePrefix, ".present", "absent");
+            return 0;
+        }
         std::vector<Member> observed;
-        if (!build::ObserveMembers(doc, record.value->definition.members, observed)) return 2;
+        if (!build::ObserveMembers(doc, record.value->definition.members, observed)) {
+            TraceLine(tracePrefix, ".observe", "failed");
+            return 2;
+        }
+        if (observedOut) *observedOut = observed;
         if (output) *output = record.value->definition;
-        return Current(record.value->definition, observed) ? 1 : 2;
+        if (Current(record.value->definition, observed)) return 1;
+        TraceLine(tracePrefix, ".current", "stale");
+        return 2;
     }
     static bool SameCorners(const MemberUVAssignment& first,
                             const MemberUVAssignment& second) {
@@ -24721,7 +25236,10 @@ struct AssetAtlasProbe {
             const auto status = build::BuildAtlas(doc, fixture.atlas, capture, {2048, 4},
                                                   candidate, assignments, diagnosis);
             if (status == build::Status::StaleSource) bits |= 1ull << 0;
-            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+            else Report(1, unit, "s1.b0.status", "status=" + std::to_string(int(status)));
+            const bool same = SameDelta(doc, fixture.parts, before);
+            if (!same) Report(1, unit, "s1.b0.zero-delta", "changed");
+            deltaOk = deltaOk && same;
         }
         {
             // missing: a well-formed OwnerKey with no retained solid.
@@ -24735,10 +25253,17 @@ struct AssetAtlasProbe {
                 return bits;
             }
             Capture capture;
-            if (build::ClassifyMember(doc, missing) == build::Status::MissingMember
-                && !build::CaptureMembers(doc, {missing, fixture.parts[0].key}, capture))
-                bits |= 1ull << 1;
-            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+            const auto classify = build::ClassifyMember(doc, missing);
+            bool captureRefused = false;
+            if (classify == build::Status::MissingMember)
+                captureRefused = !build::CaptureMembers(doc, {missing, fixture.parts[0].key}, capture);
+            if (classify == build::Status::MissingMember && captureRefused) bits |= 1ull << 1;
+            else Report(1, unit, "s1.b1.status",
+                        "classify=" + std::to_string(int(classify))
+                        + " capture-refused=" + (captureRefused ? "1" : "0"));
+            const bool same = SameDelta(doc, fixture.parts, before);
+            if (!same) Report(1, unit, "s1.b1.zero-delta", "changed");
+            deltaOk = deltaOk && same;
         }
         {
             // foreign: document-UUID mismatch, and a member already fenced by
@@ -24773,7 +25298,13 @@ struct AssetAtlasProbe {
             }
             if (foreignDocument && captured && fenced == build::Status::ForeignMember)
                 bits |= 1ull << 2;
-            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+            else Report(1, unit, "s1.b2.status",
+                        "foreign-document=" + std::string(foreignDocument ? "1" : "0")
+                        + " captured=" + (captured ? "1" : "0")
+                        + " fenced=" + std::to_string(int(fenced)));
+            const bool same = SameDelta(doc, fixture.parts, before);
+            if (!same) Report(1, unit, "s1.b2.zero-delta", "changed");
+            deltaOk = deltaOk && same;
         }
         {
             // over-budget: nine distinct admitted members.
@@ -24805,7 +25336,12 @@ struct AssetAtlasProbe {
                                            candidate, assignments, diagnosis);
             }
             if (captureRefused && status == build::Status::OverBudget) bits |= 1ull << 3;
-            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+            else Report(1, unit, "s1.b3.status",
+                        "capture-refused=" + std::string(captureRefused ? "1" : "0")
+                        + " status=" + std::to_string(int(status)));
+            const bool same = SameDelta(doc, fixture.parts, before);
+            if (!same) Report(1, unit, "s1.b3.zero-delta", "changed");
+            deltaOk = deltaOk && same;
         }
         {
             // painted: image-backed texture content on the third member.
@@ -24834,27 +25370,85 @@ struct AssetAtlasProbe {
                 retained_solid::UUIDText(fixture.parts[2].key.entity)) != std::string::npos;
             if (flagged && status == build::Status::PaintedRebakeRequired
                 && !diagnosis.empty() && names) bits |= 1ull << 4;
-            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+            else Report(1, unit, "s1.b4.status",
+                        "flagged=" + std::string(flagged ? "1" : "0")
+                        + " status=" + std::to_string(int(status))
+                        + " diagnosis=" + (diagnosis.empty() ? "empty" : "present")
+                        + " named=" + (names ? "1" : "0"));
+            const bool same = SameDelta(doc, fixture.parts, before);
+            if (!same) Report(1, unit, "s1.b4.zero-delta", "changed");
+            deltaOk = deltaOk && same;
         }
         {
-            // unsupported: a diagnosed-fallback derivative (cone, planar request).
-            App holder; auto fixture = New(holder, unit, 0, true);
+            // unsupported: a diagnosed-fallback derivative (bounded conical
+            // sector, planar request). The committed row-268 receipt is read
+            // back from the cone's actual resolved owner and must be present,
+            // canonical, Valid, fallback quality AND policy, and bound to the
+            // fixture key; then ClassifyMember must take the quality/policy
+            // rejection route and capture stays refused with zero delta.
+            App holder; auto fixture = New(holder, unit, 0, true, "s1.unsupported");
             const auto doc = holder.doc;
             if (fixture.parts.size() != 3
                 || fixture.parts[2].receipt.quality != retained_finishing::Quality::DiagnosedFallback) {
                 Report(1, unit, "unsupported-fixture");
                 return bits;
             }
+            TDF_Label ownerLabel; retained_solid::Record retained;
+            const bool resolved = retained_finishing::producer::detail::Resolve(
+                doc, fixture.parts[2].key, ownerLabel, retained);
+            retained_finishing::Record receipt;
+            const bool read = resolved
+                && retained_finishing::Read(doc, ownerLabel, receipt);
+            if (!read) Report(1, unit, "s1.unsupported.receipt-read",
+                              "resolved=" + std::string(resolved ? "1" : "0"));
+            const bool present = read && receipt.value != nullptr;
+            if (read && !present) Report(1, unit, "s1.unsupported.receipt-present", "absent");
+            retained_finishing::Refusal refusal = retained_finishing::Refusal::None;
+            std::vector<std::uint8_t> canonical;
+            const bool valid = present
+                && retained_finishing::Valid(receipt.value->definition, refusal)
+                && refusal == retained_finishing::Refusal::None
+                && retained_finishing::Encode(receipt.value->definition, canonical)
+                && canonical == receipt.value->bytes;
+            if (present && !valid)
+                Report(1, unit, "s1.unsupported.receipt-valid",
+                       "refusal=" + std::to_string(int(refusal))
+                       + " canonical=" + std::to_string(
+                           canonical == receipt.value->bytes ? 1 : 0));
+            const bool ownerBound = present
+                && receipt.value->definition.owner == fixture.parts[2].key;
+            if (present && !ownerBound)
+                Report(1, unit, "s1.unsupported.receipt-owner", "mismatch");
+            const bool quality = present && receipt.value->definition.quality
+                == retained_finishing::Quality::DiagnosedFallback;
+            if (present && !quality)
+                Report(1, unit, "s1.unsupported.quality",
+                       "quality=" + std::to_string(int(receipt.value->definition.quality)));
+            const bool policy = present && receipt.value->definition.unwrap
+                == retained_finishing::UnwrapPolicy::DiagnosedFallback;
+            if (present && !policy)
+                Report(1, unit, "s1.unsupported.policy",
+                       "unwrap=" + std::to_string(int(receipt.value->definition.unwrap)));
+            if (!(read && present && valid && ownerBound && quality && policy))
+                return bits;
             DeltaState before;
             if (!CaptureDelta(doc, fixture.parts, before)) {
                 Report(1, unit, "unsupported-capture-delta");
                 return bits;
             }
             Capture capture;
-            if (build::ClassifyMember(doc, fixture.parts[2].key) == build::Status::UnsupportedSurface
-                && !build::CaptureMembers(doc, {fixture.parts[2].key, fixture.parts[0].key}, capture))
+            const auto classify = build::ClassifyMember(doc, fixture.parts[2].key);
+            if (classify != build::Status::UnsupportedSurface)
+                Report(1, unit, "s1.unsupported.classify",
+                       "status=" + std::to_string(int(classify)));
+            const bool captureRefused =
+                !build::CaptureMembers(doc, {fixture.parts[2].key, fixture.parts[0].key}, capture);
+            if (!captureRefused) Report(1, unit, "s1.unsupported.capture-refused", "captured");
+            if (classify == build::Status::UnsupportedSurface && captureRefused)
                 bits |= 1ull << 5;
-            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+            const bool same = SameDelta(doc, fixture.parts, before);
+            if (!same) Report(1, unit, "s1.unsupported.zero-delta", "changed");
+            deltaOk = deltaOk && same;
         }
         if (deltaOk) bits |= 1ull << 6;
         bits |= 1ull << 7;
@@ -25094,41 +25688,102 @@ struct AssetAtlasProbe {
     }
     static std::uint64_t Scenario3(double unit) {
         std::uint64_t bits = 0;
-        App holder;
-        auto fixture = New(holder, unit, 1);
-        const auto doc = holder.doc;
-        const std::vector<retained_recipe::OwnerKey> two{
-            fixture.parts[0].key, fixture.parts[1].key};
-        const std::string rawBox = retained_solid::Probe::Raw(fixture.parts[0].current);
-        const std::string rawCylinder = retained_solid::Probe::Raw(fixture.parts[1].current);
+        // Only plain value witnesses cross the owner destruction: the atlas
+        // key, the three owner keys, the committed definition, the committed
+        // receipt definitions, serialized text/mesh snapshots and the saved
+        // bytes. No App, document, label, shape handle or Record wrapper
+        // leaves the fixture scope below.
+        std::string stored;
+        Key atlasKey{};
+        std::vector<retained_recipe::OwnerKey> partKeys;
         Definition committed;
-        const auto commitStatus = BuildAndCommit(
-            holder, fixture.atlas, two, {2048, 4}, &committed);
-        if (commitStatus != build::Status::Built) {
-            Report(3, unit, "build-and-commit",
-                   "status=" + std::to_string(int(commitStatus)));
-            return 0;
-        }
+        build::LayoutEvidence lastLayout;
+        bool haveLayout = false;
+        std::vector<retained_finishing::Definition> receipts;
+        std::string textBox, textCylinder;
+        std::vector<FaceMesh> meshBox, meshCylinder;
+        bool sharingBox = false, sharingCylinder = false;
+        std::set<UUID> originalCharts, originalResources;
         {
-            // bit0: undo removes the atlas record and leaves members
-            // byte-identical; redo reinstalls an equal-layoutProof record.
-            bool undone = false;
-            if (doc->Undo()) {
-                persistence::Record after;
-                const bool absent = persistence::Read(doc, fixture.atlas, after) && !after.value;
-                const bool intact = retained_solid::Probe::Raw(fixture.parts[0].current) == rawBox
-                    && retained_solid::Probe::Raw(fixture.parts[1].current) == rawCylinder;
-                if (absent && intact && doc->Redo()) {
-                    persistence::Record restored;
-                    if (persistence::Read(doc, fixture.atlas, restored) && restored.value
-                        && restored.value->definition.layoutProof == committed.layoutProof)
-                        undone = true;
-                }
+            App holder;
+            auto fixture = New(holder, unit, 1);
+            const auto doc = holder.doc;
+            atlasKey = fixture.atlas;
+            for (const auto& part : fixture.parts) partKeys.push_back(part.key);
+            const std::vector<retained_recipe::OwnerKey> two{partKeys[0], partKeys[1]};
+            // bit0's mesh restoration compares the resolved-current witness
+            // (triangulation and normals included), not cached raw text.
+            std::string witnessBox, witnessCylinder;
+            const bool witnesses = ResolvedCurrentWitness(doc, partKeys[0], witnessBox)
+                && ResolvedCurrentWitness(doc, partKeys[1], witnessCylinder);
+            Definition built;
+            const auto commitStatus = BuildAndCommit(
+                holder, atlasKey, two, {2048, 4}, &built, nullptr, &lastLayout);
+            if (commitStatus != build::Status::Built) {
+                Report(3, unit, "build-and-commit",
+                       "status=" + std::to_string(int(commitStatus)));
+                return 0;
             }
-            if (undone) bits |= 1ull << 0;
+            committed = built;
+            haveLayout = true;
+            {
+                // bit0: undo removes the atlas record and leaves members
+                // byte-identical; redo reinstalls an equal-layoutProof record.
+                bool undone = false;
+                if (doc->Undo()) {
+                    persistence::Record after;
+                    const bool absent = persistence::Read(doc, atlasKey, after) && !after.value;
+                    std::string nowBox, nowCylinder;
+                    const bool intact = witnesses
+                        && ResolvedCurrentWitness(doc, partKeys[0], nowBox)
+                        && ResolvedCurrentWitness(doc, partKeys[1], nowCylinder)
+                        && nowBox == witnessBox && nowCylinder == witnessCylinder;
+                    if (absent && intact && doc->Redo()) {
+                        persistence::Record restored;
+                        if (persistence::Read(doc, atlasKey, restored) && restored.value
+                            && restored.value->definition.layoutProof == committed.layoutProof)
+                            undone = true;
+                    }
+                }
+                if (undone) bits |= 1ull << 0;
+            }
+            // Pre-save observations for the cold-reopen diagnostics: the
+            // registered writer's actual triangle/normal flags, default
+            // geometry text, per-face mesh arrays and owner/record/base
+            // sharing per member, plus the committed receipt definitions.
+            {
+                const auto writer = Handle(BinDrivers_DocumentStorageDriver)::DownCast(
+                    holder.app->WriterFromFormat(TCollection_ExtendedString("BinXCAF")));
+                if (writer.IsNull() || !writer->IsWithTriangles())
+                    Report(3, unit, "s3.b1.writer-flags",
+                        writer.IsNull() ? "unregistered"
+                        : std::string("triangles=")
+                            + (writer->IsWithTriangles() ? "1" : "0")
+                            + " normals=" + (writer->IsWithNormals() ? "1" : "0"));
+            }
+            textBox = DefaultGeometryText(doc, partKeys[0]);
+            textCylinder = DefaultGeometryText(doc, partKeys[1]);
+            meshBox = MeshSnapshot(doc, partKeys[0]);
+            meshCylinder = MeshSnapshot(doc, partKeys[1]);
+            std::string shareDetail;
+            sharingBox = SharingWitness(doc, partKeys[0], shareDetail);
+            sharingCylinder = SharingWitness(doc, partKeys[1], shareDetail);
+            for (const auto& key : partKeys) {
+                TDF_Label label; retained_solid::Record retained;
+                retained_finishing::Record receipt;
+                if (retained_finishing::producer::detail::Resolve(doc, key, label, retained)
+                    && retained_finishing::Read(doc, label, receipt) && receipt.value)
+                    receipts.push_back(receipt.value->definition);
+                else
+                    receipts.push_back({}); // index alignment; reopen reports it
+            }
+            for (const auto& chart : committed.charts) originalCharts.insert(chart.chart);
+            for (const auto& resource : committed.resources)
+                originalResources.insert(resource.identity);
+            stored = retained_solid::Probe::Save(holder);
         }
-        // bit1: save, owner destruction, unseeded cold reopen.
-        const auto stored = retained_solid::Probe::Save(holder);
+        // The fixture scope ended: App's destructor closed the document and
+        // every original handle is released. Reopen is unseeded.
         App second;
         {
             std::vector<persistence::Record> records;
@@ -25139,64 +25794,318 @@ struct AssetAtlasProbe {
             }
         }
         second.doc->SetUndoLimit(40);
-        Definition reopened;
+        // Post-reopen witnesses, before any remesh or membership edit:
+        // geometry text, stored mesh arrays, sharing and real receipt
+        // currentness against a fresh source. Failure-only lines.
         {
-            bool stable = Currentness(second.doc, fixture.atlas, &reopened) == 1
-                && reopened.key == committed.key
-                && reopened.members.size() == committed.members.size()
-                && reopened.charts.size() == committed.charts.size()
-                && reopened.resources.size() == committed.resources.size()
-                && reopened.layoutProof == committed.layoutProof;
-            for (std::size_t index = 0; stable && index < committed.members.size(); ++index)
-                stable = reopened.members[index].member == committed.members[index].member;
-            for (std::size_t index = 0; stable && index < committed.charts.size(); ++index)
-                stable = reopened.charts[index].chart == committed.charts[index].chart;
-            for (std::size_t index = 0; stable && index < committed.resources.size(); ++index)
-                stable = reopened.resources[index].identity == committed.resources[index].identity;
+            const auto textDiff = TextDifference(textBox, DefaultGeometryText(second.doc, partKeys[0]));
+            if (!textDiff.empty()) Report(3, unit, "s3.b1.geometry-text-box", textDiff);
+        }
+        {
+            const auto textDiff = TextDifference(textCylinder, DefaultGeometryText(second.doc, partKeys[1]));
+            if (!textDiff.empty()) Report(3, unit, "s3.b1.geometry-text-cylinder", textDiff);
+        }
+        {
+            const auto diff = MeshDifference(meshBox, MeshSnapshot(second.doc, partKeys[0]));
+            if (!diff.empty()) Report(3, unit, "s3.b1.mesh-box", diff);
+        }
+        {
+            const auto diff = MeshDifference(meshCylinder, MeshSnapshot(second.doc, partKeys[1]));
+            if (!diff.empty()) Report(3, unit, "s3.b1.mesh-cylinder", diff);
+        }
+        {
+            std::string detail;
+            const bool post = SharingWitness(second.doc, partKeys[0], detail);
+            if (!post || !sharingBox)
+                Report(3, unit, "s3.b1.sharing-box",
+                       detail + " pre=" + (sharingBox ? "1" : "0"));
+        }
+        {
+            std::string detail;
+            const bool post = SharingWitness(second.doc, partKeys[1], detail);
+            if (!post || !sharingCylinder)
+                Report(3, unit, "s3.b1.sharing-cylinder",
+                       detail + " pre=" + (sharingCylinder ? "1" : "0"));
+        }
+        for (std::size_t index = 0; index < partKeys.size(); ++index) {
+            TDF_Label label; retained_solid::Record retained;
+            retained_finishing::Record receipt;
+            retained_finishing::SourceRevision live;
+            const bool resolved =
+                retained_finishing::producer::detail::Resolve(second.doc, partKeys[index], label, retained)
+                && retained_finishing::Read(second.doc, label, receipt) && receipt.value
+                && retained_finishing::producer::detail::Source(second.doc, partKeys[index], live);
+            if (!resolved || !retained_finishing::Current(receipt.value->definition, live))
+                Report(3, unit, "s3.b1.receipt-current",
+                       "member=" + std::to_string(index) + (resolved ? " stale" : " unresolved"));
+        }
+        Definition reopened;
+        std::vector<Member> observed;
+        {
+            // bit1: currentness with every conjunct named; a failed Current
+            // does not short-circuit the safe record-identity diagnostics.
+            const int currentness = Currentness(second.doc, atlasKey, &reopened,
+                                                &observed, "s3.b1");
+            if (currentness == 2 && !observed.empty()) {
+                // Observation succeeded but the atlas is stale: name each
+                // differing fenced/observed member conjunct.
+                if (observed.size() != committed.members.size())
+                    Report(3, unit, "s3.b1.observed-count",
+                           "observed=" + std::to_string(observed.size())
+                           + " fenced=" + std::to_string(committed.members.size()));
+                for (std::size_t index = 0; index < committed.members.size(); ++index) {
+                    const auto& fenced = committed.members[index];
+                    const Member* seen = nullptr;
+                    for (const auto& member : observed)
+                        if (member.owner == fenced.owner) { seen = &member; break; }
+                    const std::string at = "index=" + std::to_string(index)
+                        + " owner=" + retained_solid::UUIDText(fenced.owner.entity).substr(0, 8);
+                    if (!seen) { Report(3, unit, "s3.b1.member.owner", at + " missing"); continue; }
+                    if (!(seen->member == fenced.member))
+                        Report(3, unit, "s3.b1.member.uuid", at);
+                    if (!(seen->finishing == fenced.finishing))
+                        Report(3, unit, "s3.b1.member.finishing", at);
+                    const auto& a = fenced.source;
+                    const auto& b = seen->source;
+                    if (a.documentGeneration != b.documentGeneration)
+                        Report(3, unit, "s3.b1.source.generation",
+                               at + " fenced=" + std::to_string(a.documentGeneration)
+                               + " observed=" + std::to_string(b.documentGeneration));
+                    if (a.modelRevision != b.modelRevision)
+                        Report(3, unit, "s3.b1.source.model-revision",
+                               at + " fenced=" + std::to_string(a.modelRevision)
+                               + " observed=" + std::to_string(b.modelRevision));
+                    if (!(a.geometry == b.geometry))
+                        Report(3, unit, "s3.b1.source.geometry",
+                               at + " fenced=" + DigestPrefix(a.geometry)
+                               + " observed=" + DigestPrefix(b.geometry));
+                    if (!(a.recipe == b.recipe))
+                        Report(3, unit, "s3.b1.source.recipe",
+                               at + " fenced=" + DigestPrefix(a.recipe)
+                               + " observed=" + DigestPrefix(b.recipe));
+                    if (!(a.placement == b.placement))
+                        Report(3, unit, "s3.b1.source.placement",
+                               at + " fenced=" + DigestPrefix(a.placement)
+                               + " observed=" + DigestPrefix(b.placement));
+                    if (!(a.material == b.material))
+                        Report(3, unit, "s3.b1.source.material",
+                               at + " fenced=" + DigestPrefix(a.material)
+                               + " observed=" + DigestPrefix(b.material));
+                    if (!(a.groups == b.groups))
+                        Report(3, unit, "s3.b1.source.groups",
+                               at + " fenced=" + DigestPrefix(a.groups)
+                               + " observed=" + DigestPrefix(b.groups));
+                }
+            }
+            bool stable = currentness == 1;
+            if (!observed.empty()) {
+                const bool keyOk = reopened.key == committed.key;
+                if (!keyOk)
+                    Report(3, unit, "s3.b1.key",
+                           "reopened=" + retained_solid::UUIDText(reopened.key.atlas).substr(0, 8)
+                           + " committed=" + retained_solid::UUIDText(committed.key.atlas).substr(0, 8));
+                const bool membersCount = reopened.members.size() == committed.members.size();
+                if (!membersCount)
+                    Report(3, unit, "s3.b1.members-count",
+                           "reopened=" + std::to_string(reopened.members.size())
+                           + " committed=" + std::to_string(committed.members.size()));
+                const bool chartsCount = reopened.charts.size() == committed.charts.size();
+                if (!chartsCount)
+                    Report(3, unit, "s3.b1.charts-count",
+                           "reopened=" + std::to_string(reopened.charts.size())
+                           + " committed=" + std::to_string(committed.charts.size()));
+                const bool resourcesCount = reopened.resources.size() == committed.resources.size();
+                if (!resourcesCount)
+                    Report(3, unit, "s3.b1.resources-count",
+                           "reopened=" + std::to_string(reopened.resources.size())
+                           + " committed=" + std::to_string(committed.resources.size()));
+                const bool layoutProof = reopened.layoutProof == committed.layoutProof;
+                if (!layoutProof)
+                    Report(3, unit, "s3.b1.layout-proof",
+                           "reopened=" + DigestPrefix(reopened.layoutProof)
+                           + " committed=" + DigestPrefix(committed.layoutProof));
+                bool memberIds = true, chartIds = true, resourceIds = true;
+                for (std::size_t index = 0; index < committed.members.size(); ++index) {
+                    const bool ok = index < reopened.members.size()
+                        && reopened.members[index].member == committed.members[index].member;
+                    if (!ok) {
+                        Report(3, unit, "s3.b1.member-id", "index=" + std::to_string(index));
+                        memberIds = false;
+                    }
+                }
+                for (std::size_t index = 0; index < committed.charts.size(); ++index) {
+                    const bool ok = index < reopened.charts.size()
+                        && reopened.charts[index].chart == committed.charts[index].chart;
+                    if (!ok) {
+                        Report(3, unit, "s3.b1.chart-id", "index=" + std::to_string(index));
+                        chartIds = false;
+                    }
+                }
+                for (std::size_t index = 0; index < committed.resources.size(); ++index) {
+                    const bool ok = index < reopened.resources.size()
+                        && reopened.resources[index].identity == committed.resources[index].identity;
+                    if (!ok) {
+                        Report(3, unit, "s3.b1.resource-id", "index=" + std::to_string(index));
+                        resourceIds = false;
+                    }
+                }
+                stable = stable && keyOk && membersCount && chartsCount && resourcesCount
+                    && layoutProof && memberIds && chartIds && resourceIds;
+            }
             if (stable) bits |= 1ull << 1;
         }
-        std::set<UUID> originalCharts, originalResources;
-        for (const auto& chart : committed.charts) originalCharts.insert(chart.chart);
-        for (const auto& resource : committed.resources) originalResources.insert(resource.identity);
+        // Owner material/recipe digests for a differing resource identity.
+        const auto resourceOwnerDigests = [&](const UUID& identity) -> std::string {
+            for (const auto& chart : committed.charts) {
+                if (!(chart.material == identity)) continue;
+                for (const auto& member : committed.members) {
+                    if (!(member.member == chart.member)) continue;
+                    for (std::size_t index = 0;
+                         index < partKeys.size() && index < receipts.size(); ++index) {
+                        if (!(receipts[index].owner == member.owner)) continue;
+                        std::string out;
+                        for (const auto& material : receipts[index].materials)
+                            out += " material=" + DigestPrefix(material.content);
+                        return out + " recipe=" + DigestPrefix(receipts[index].source.recipe);
+                    }
+                }
+            }
+            return {};
+        };
         {
             // bit2: removing one member after cold reopen keeps every
             // survivor identity.
-            if (EditMembershipRaw(second, fixture.atlas, {committed.members[1].owner}, {})
-                == build::Status::Built) {
+            build::LayoutEvidence editedLayout;
+            const auto editStatus = EditMembershipRaw(second, atlasKey,
+                {committed.members[1].owner}, {}, &editedLayout, "s3.b2.remove");
+            if (editStatus != build::Status::Built) {
+                Report(3, unit, "s3.b2.edit-built",
+                       "status=" + std::to_string(int(editStatus)));
+            } else {
                 persistence::Record edited;
-                bool kept = persistence::Read(second.doc, fixture.atlas, edited) && edited.value
-                    && edited.value->definition.members.size() == 1
-                    && edited.value->definition.members[0].member == committed.members[0].member
-                    && !edited.value->definition.charts.empty()
-                    && !edited.value->definition.resources.empty();
-                for (const auto& chart : edited.value->definition.charts)
-                    kept = kept && chart.member == committed.members[0].member
-                        && originalCharts.count(chart.chart) == 1;
-                for (const auto& resource : edited.value->definition.resources)
-                    kept = kept && originalResources.count(resource.identity) == 1;
-                if (kept) bits |= 1ull << 2;
+                const bool readOk = persistence::Read(second.doc, atlasKey, edited);
+                if (!readOk) Report(3, unit, "s3.b2.read", "failed");
+                const bool present = readOk && edited.value != nullptr;
+                if (readOk && !present) Report(3, unit, "s3.b2.present", "absent");
+                if (present) {
+                    const auto& definition = edited.value->definition;
+                    const bool membersOne = definition.members.size() == 1;
+                    if (!membersOne)
+                        Report(3, unit, "s3.b2.members-one",
+                               "size=" + std::to_string(definition.members.size()));
+                    const bool survivorMember = membersOne
+                        && definition.members[0].member == committed.members[0].member;
+                    if (membersOne && !survivorMember)
+                        Report(3, unit, "s3.b2.survivor-member", "index=0");
+                    const bool chartsPresent = !definition.charts.empty();
+                    if (!chartsPresent) Report(3, unit, "s3.b2.charts-present", "empty");
+                    const bool resourcesPresent = !definition.resources.empty();
+                    if (!resourcesPresent) Report(3, unit, "s3.b2.resources-present", "empty");
+                    bool chartMember = true, chartId = true, resourceId = true;
+                    for (std::size_t index = 0; index < definition.charts.size(); ++index) {
+                        const auto& chart = definition.charts[index];
+                        if (!(chart.member == committed.members[0].member)) {
+                            chartMember = false;
+                            Report(3, unit, "s3.b2.chart-member",
+                                   "index=" + std::to_string(index));
+                        }
+                        if (originalCharts.count(chart.chart) != 1) {
+                            chartId = false;
+                            Report(3, unit, "s3.b2.chart-id",
+                                   "index=" + std::to_string(index));
+                        }
+                    }
+                    for (std::size_t index = 0; index < definition.resources.size(); ++index) {
+                        const auto& resource = definition.resources[index];
+                        if (originalResources.count(resource.identity) == 1) continue;
+                        resourceId = false;
+                        Report(3, unit, "s3.b2.resource-id",
+                               "index=" + std::to_string(index)
+                               + " resource="
+                               + retained_solid::UUIDText(resource.identity).substr(0, 8)
+                               + resourceOwnerDigests(resource.identity));
+                    }
+                    if (membersOne && survivorMember && chartsPresent && resourcesPresent
+                        && chartMember && chartId && resourceId) bits |= 1ull << 2;
+                    if (haveLayout) {
+                        const auto before = SurvivorSplits(lastLayout, 0);
+                        const auto after = SurvivorSplits(editedLayout, 0);
+                        if (before != after)
+                            Report(3, unit, "s3.b2.survivor-splits",
+                                   "before=" + SplitsText(before)
+                                   + " after=" + SplitsText(after));
+                    }
+                    lastLayout = editedLayout;
+                }
             }
         }
         {
             // bit3: adding a member mints one new member UUID and keeps the
             // existing identities.
             Part third;
-            if (ResolvePart(second.doc, fixture.parts[2].key, third)
-                && EditMembershipRaw(second, fixture.atlas, {}, {third.key})
-                    == build::Status::Built) {
+            const bool resolvedThird = ResolvePart(second.doc, partKeys[2], third);
+            if (!resolvedThird) Report(3, unit, "s3.b3.resolve-third", "failed");
+            build::LayoutEvidence addedLayout;
+            build::Status editStatus = build::Status::Malformed;
+            if (resolvedThird)
+                editStatus = EditMembershipRaw(second, atlasKey, {}, {third.key},
+                                               &addedLayout, "s3.b3.add");
+            if (!resolvedThird || editStatus != build::Status::Built) {
+                if (resolvedThird)
+                    Report(3, unit, "s3.b3.edit-built",
+                           "status=" + std::to_string(int(editStatus)));
+            } else {
                 persistence::Record edited;
-                const UUID minted = build::detail::MemberUUID(fixture.atlas.atlas, third.key);
-                bool kept = persistence::Read(second.doc, fixture.atlas, edited) && edited.value
-                    && edited.value->definition.members.size() == 2
-                    && retained_recipe::Nonzero(minted)
-                    && !(minted == committed.members[0].member)
-                    && !(minted == committed.members[1].member)
-                    && edited.value->definition.members[0].member == committed.members[0].member
-                    && edited.value->definition.members[1].member == minted;
-                for (const auto& chart : edited.value->definition.charts)
-                    if (chart.member == committed.members[0].member)
-                        kept = kept && originalCharts.count(chart.chart) == 1;
-                if (kept) bits |= 1ull << 3;
+                const bool readOk = persistence::Read(second.doc, atlasKey, edited);
+                if (!readOk) Report(3, unit, "s3.b3.read", "failed");
+                const bool present = readOk && edited.value != nullptr;
+                if (readOk && !present) Report(3, unit, "s3.b3.present", "absent");
+                if (present) {
+                    const auto& definition = edited.value->definition;
+                    const UUID minted = build::detail::MemberUUID(atlasKey.atlas, third.key);
+                    const bool membersTwo = definition.members.size() == 2;
+                    if (!membersTwo)
+                        Report(3, unit, "s3.b3.members-two",
+                               "size=" + std::to_string(definition.members.size()));
+                    const bool mintedNonzero = retained_recipe::Nonzero(minted);
+                    if (!mintedNonzero) Report(3, unit, "s3.b3.minted-nonzero", "zero");
+                    const bool notFirst = !(minted == committed.members[0].member);
+                    if (!notFirst) Report(3, unit, "s3.b3.minted-not-first", "collision");
+                    const bool notSecond = !(minted == committed.members[1].member);
+                    if (!notSecond) Report(3, unit, "s3.b3.minted-not-second", "collision");
+                    bool survivorMember = false, newMember = false;
+                    if (membersTwo) {
+                        survivorMember =
+                            definition.members[0].member == committed.members[0].member;
+                        if (!survivorMember) Report(3, unit, "s3.b3.survivor-member", "index=0");
+                        newMember = definition.members[1].member == minted;
+                        if (!newMember) Report(3, unit, "s3.b3.new-member", "index=1");
+                    } else {
+                        Report(3, unit, "s3.b3.survivor-member", "unavailable");
+                        Report(3, unit, "s3.b3.new-member", "unavailable");
+                    }
+                    bool survivorChart = true;
+                    for (std::size_t index = 0; index < definition.charts.size(); ++index) {
+                        const auto& chart = definition.charts[index];
+                        if (chart.member == committed.members[0].member
+                            && originalCharts.count(chart.chart) != 1) {
+                            survivorChart = false;
+                            Report(3, unit, "s3.b3.survivor-chart",
+                                   "index=" + std::to_string(index));
+                        }
+                    }
+                    if (membersTwo && mintedNonzero && notFirst && notSecond
+                        && survivorMember && newMember && survivorChart) bits |= 1ull << 3;
+                    if (haveLayout) {
+                        const auto before = SurvivorSplits(lastLayout, 0);
+                        const auto after = SurvivorSplits(addedLayout, 0);
+                        if (before != after)
+                            Report(3, unit, "s3.b3.survivor-splits",
+                                   "before=" + SplitsText(before)
+                                   + " after=" + SplitsText(after));
+                    }
+                    lastLayout = addedLayout;
+                }
             }
         }
         Part editedFirst;
@@ -25204,17 +26113,17 @@ struct AssetAtlasProbe {
         {
             // bit4: a real source edit marks the whole atlas Stale; stale use
             // (the pre-edit fences) is refused with zero delta.
-            if (!ResolvePart(second.doc, fixture.parts[0].key, editedFirst)) {
+            if (!ResolvePart(second.doc, partKeys[0], editedFirst)) {
                 Report(3, unit, "resolve-edited-first");
                 return bits;
             }
             Part editedThird;
-            if (!ResolvePart(second.doc, fixture.parts[2].key, editedThird)) {
+            if (!ResolvePart(second.doc, partKeys[2], editedThird)) {
                 Report(3, unit, "resolve-edited-third");
                 return bits;
             }
             persistence::Record record;
-            if (!persistence::Read(second.doc, fixture.atlas, record) || !record.value) {
+            if (!persistence::Read(second.doc, atlasKey, record) || !record.value) {
                 Report(3, unit, "read-pre-edit-record");
                 return bits;
             }
@@ -25232,17 +26141,50 @@ struct AssetAtlasProbe {
             }
             Definition candidate; std::vector<MemberUVAssignment> assignments;
             std::string diagnosis;
-            const auto staleUse = build::BuildAtlas(second.doc, fixture.atlas,
+            const auto staleUse = build::BuildAtlas(second.doc, atlasKey,
                 staleCapture, {2048, 4}, candidate, assignments, diagnosis);
-            if (Currentness(second.doc, fixture.atlas) == 2
+            if (Currentness(second.doc, atlasKey) == 2
                 && staleUse == build::Status::StaleSource
                 && SameDelta(second.doc, editedParts, afterEdit)) bits |= 1ull << 4;
+        }
+        {
+            // Diagnostic summary before regeneration: per member, the real
+            // receipt's Current against the live post-scale source versus the
+            // freshly captured build fence. This observes the implemented
+            // gate; it adds no gate.
+            persistence::Record current;
+            std::string fences;
+            if (persistence::Read(second.doc, atlasKey, current) && current.value) {
+                for (std::size_t index = 0;
+                     index < current.value->definition.members.size(); ++index) {
+                    const auto& member = current.value->definition.members[index];
+                    TDF_Label label; retained_solid::Record retained;
+                    retained_finishing::Record receipt;
+                    retained_finishing::SourceRevision live;
+                    bool receiptCurrent = false, fenceLive = false;
+                    if (retained_finishing::producer::detail::Resolve(
+                            second.doc, member.owner, label, retained)
+                        && retained_finishing::Read(second.doc, label, receipt)
+                        && receipt.value
+                        && retained_finishing::producer::detail::Source(
+                            second.doc, member.owner, live)) {
+                        receiptCurrent =
+                            retained_finishing::Current(receipt.value->definition, live);
+                        fenceLive = member.source == live;
+                    }
+                    if (!fences.empty()) fences += ";";
+                    fences += "m" + std::to_string(index)
+                        + " receipt-current=" + (receiptCurrent ? "1" : "0")
+                        + " fence-live=" + (fenceLive ? "1" : "0");
+                }
+            }
+            Report(3, unit, "s3.b5.member-fences", fences);
         }
         {
             // bit5: explicit regenerate commits a DIFFERENT layoutProof with
             // survivor identities unchanged.
             persistence::Record before;
-            if (!persistence::Read(second.doc, fixture.atlas, before) || !before.value) {
+            if (!persistence::Read(second.doc, atlasKey, before) || !before.value) {
                 Report(3, unit, "read-pre-regenerate-record");
                 return bits;
             }
@@ -25257,26 +26199,62 @@ struct AssetAtlasProbe {
                 owners.push_back(member.owner);
             Capture capture;
             Definition regenerated;
-            if (build::CaptureMembers(second.doc, owners, capture)
-                && CommitCandidate(second, fixture.atlas, capture,
+            const bool captured = build::CaptureMembers(second.doc, owners, capture);
+            if (!captured) Report(3, unit, "s3.b5.capture", "failed");
+            build::LayoutEvidence regenLayout;
+            build::Status commitStatus = build::Status::Malformed;
+            if (captured)
+                commitStatus = CommitCandidate(second, atlasKey, capture,
                         {before.value->definition.resolutionTexels,
                          before.value->definition.gutterTexels},
-                        &regenerated) == build::Status::Built) {
-                bool stable = !(regenerated.layoutProof == priorProof)
-                    && regenerated.members.size() == priorMembers.size()
-                    && regenerated.charts.size() == priorCharts.size();
-                for (const auto& member : regenerated.members)
-                    stable = stable && priorMembers.count(member.member) == 1;
-                for (const auto& chart : regenerated.charts)
-                    stable = stable && priorCharts.count(chart.chart) == 1;
-                if (stable) bits |= 1ull << 5;
+                        &regenerated, nullptr, &regenLayout, nullptr, "s3.b5.regenerate");
+            if (!captured || commitStatus != build::Status::Built) {
+                if (captured)
+                    Report(3, unit, "s3.b5.commit-built",
+                           "status=" + std::to_string(int(commitStatus)));
+            } else {
+                const bool proofChanged = !(regenerated.layoutProof == priorProof);
+                if (!proofChanged) Report(3, unit, "s3.b5.proof-changed", "unchanged");
+                const bool membersCount = regenerated.members.size() == priorMembers.size();
+                if (!membersCount)
+                    Report(3, unit, "s3.b5.members-count",
+                           "size=" + std::to_string(regenerated.members.size()));
+                const bool chartsCount = regenerated.charts.size() == priorCharts.size();
+                if (!chartsCount)
+                    Report(3, unit, "s3.b5.charts-count",
+                           "size=" + std::to_string(regenerated.charts.size()));
+                bool memberIds = true, chartIds = true;
+                for (std::size_t index = 0; index < regenerated.members.size(); ++index) {
+                    if (priorMembers.count(regenerated.members[index].member) == 1) continue;
+                    memberIds = false;
+                    Report(3, unit, "s3.b5.member-id", "index=" + std::to_string(index));
+                }
+                for (std::size_t index = 0; index < regenerated.charts.size(); ++index) {
+                    if (priorCharts.count(regenerated.charts[index].chart) == 1) continue;
+                    chartIds = false;
+                    Report(3, unit, "s3.b5.chart-id", "index=" + std::to_string(index));
+                }
+                if (proofChanged && membersCount && chartsCount && memberIds && chartIds)
+                    bits |= 1ull << 5;
+                if (haveLayout) {
+                    for (std::size_t index = 0; index < owners.size(); ++index) {
+                        const auto priorSplits = SurvivorSplits(lastLayout, index);
+                        const auto newSplits = SurvivorSplits(regenLayout, index);
+                        if (priorSplits != newSplits)
+                            Report(3, unit, "s3.b5.survivor-splits",
+                                   "member=" + std::to_string(index)
+                                   + " before=" + SplitsText(priorSplits)
+                                   + " after=" + SplitsText(newSplits));
+                    }
+                }
+                lastLayout = regenLayout;
             }
         }
         {
             // bit6: a held-out gutter edit (gutterTexels 3) commits in
             // exactly one command.
             persistence::Record before;
-            if (!persistence::Read(second.doc, fixture.atlas, before) || !before.value) {
+            if (!persistence::Read(second.doc, atlasKey, before) || !before.value) {
                 Report(3, unit, "read-pre-gutter-record");
                 return bits;
             }
@@ -25286,13 +26264,31 @@ struct AssetAtlasProbe {
                 owners.push_back(member.owner);
             Capture capture;
             Definition reguttered;
-            if (build::CaptureMembers(second.doc, owners, capture)
-                && CommitCandidate(second, fixture.atlas, capture, {2048, 3}, &reguttered)
-                    == build::Status::Built
-                && second.doc->GetUndos().Size() == undosBefore + 1
-                && reguttered.gutterTexels == 3
-                && !(reguttered.layoutProof == before.value->definition.layoutProof))
-                bits |= 1ull << 6;
+            const bool captured = build::CaptureMembers(second.doc, owners, capture);
+            if (!captured) Report(3, unit, "s3.b6.capture", "failed");
+            build::Status commitStatus = build::Status::Malformed;
+            if (captured)
+                commitStatus = CommitCandidate(second, atlasKey, capture, {2048, 3},
+                                               &reguttered, nullptr, nullptr, nullptr,
+                                               "s3.b6.gutter");
+            const bool commitBuilt = captured && commitStatus == build::Status::Built;
+            if (captured && !commitBuilt)
+                Report(3, unit, "s3.b6.commit-built",
+                       "status=" + std::to_string(int(commitStatus)));
+            const bool undoPlusOne = commitBuilt
+                && second.doc->GetUndos().Size() == undosBefore + 1;
+            if (commitBuilt && !undoPlusOne)
+                Report(3, unit, "s3.b6.undo-plus-one",
+                       "undos=" + std::to_string(second.doc->GetUndos().Size()));
+            const bool gutterThree = commitBuilt && reguttered.gutterTexels == 3;
+            if (commitBuilt && !gutterThree)
+                Report(3, unit, "s3.b6.gutter-three",
+                       "gutter=" + std::to_string(reguttered.gutterTexels));
+            const bool proofChanged = commitBuilt
+                && !(reguttered.layoutProof == before.value->definition.layoutProof);
+            if (commitBuilt && !proofChanged)
+                Report(3, unit, "s3.b6.proof-changed", "unchanged");
+            if (commitBuilt && undoPlusOne && gutterThree && proofChanged) bits |= 1ull << 6;
         }
         bits |= 1ull << 7;
         return bits;
@@ -25303,6 +26299,7 @@ struct AssetAtlasProbe {
         std::uint64_t bits = ~0ull;
         for (double unit : {0.001, 1.0}) {
             std::uint64_t unitBits = 0;
+            Trace() = {scenario, unit};
             try {
                 switch (scenario) {
                     case 0: unitBits = Scenario0(unit); break;
