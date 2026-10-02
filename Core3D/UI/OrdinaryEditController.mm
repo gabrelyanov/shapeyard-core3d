@@ -479,14 +479,16 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 || !presentations.insert(request.presentation.get()).second) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
-            const bool requestsTreatmentR2=bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2);
+            const bool requestsTreatmentR2=bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2)
+                ||bool(request.edgeTreatmentEnrollmentR2);
             const bool pairedTreatment=!requestsTreatmentR2&&(request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
                 ||((request.operation==OrdinaryTransformOperation::ProfileRebuild
                     ||request.operation==OrdinaryTransformOperation::EnclosureRebuild
                     ||request.operation==OrdinaryTransformOperation::LoftStationRebuild)
                     &&record.previous.edgeTreatment.has_value()));
             const bool pairedTreatmentR2=request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
-                &&(bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2));
+                &&(bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2)
+                    ||bool(request.edgeTreatmentEnrollmentR2));
             if((pairedTreatment&&pairedTreatmentR2)
                 ||bool(request.edgeTreatmentSnapshot)!=pairedTreatment
                 ||request.edgeTreatmentEdit.has_value()!=pairedTreatment
@@ -495,7 +497,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     ||request.edgeTreatmentResult->result().IsNull()
                     ||!request.edgeTreatmentResult->result().IsEqual(request.shape))))
                 CORE3D_CUT_REFUSE("ordinary.b1-paired-admission",reject(OrdinaryEditResult::Invalid));
-            if((bool(request.edgeTreatmentSnapshotR2)+bool(request.edgeTreatmentMigrationR2)!=int(pairedTreatmentR2))
+            if((bool(request.edgeTreatmentSnapshotR2)+bool(request.edgeTreatmentMigrationR2)
+                    +bool(request.edgeTreatmentEnrollmentR2)!=int(pairedTreatmentR2))
                 ||bool(request.edgeTreatmentResultR2)!=pairedTreatmentR2
                 ||request.edgeTreatmentMigrationRequestR2.has_value()!=bool(request.edgeTreatmentMigrationR2)
                 ||(pairedTreatmentR2&&(permit||changes.size()!=1
@@ -2322,6 +2325,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                         &&_document->StageRetainedBooleanMigrationR2(*record.requested.edgeTreatmentMigrationR2,
                             *record.requested.edgeTreatmentMigrationRequestR2,
                             *record.requested.edgeTreatmentResultR2,readback,refusal);
+                }else if(record.requested.edgeTreatmentEnrollmentR2){
+                    treatmentStagedR2=_document->StageRetainedBooleanEnrollmentR2(
+                        *record.requested.edgeTreatmentEnrollmentR2,*record.requested.edgeTreatmentResultR2,
+                        readback,refusal);
                 }else if(record.requested.edgeTreatmentSnapshotR2){
                     treatmentStagedR2=_document->StageRetainedEdgeTreatmentR2(
                         *record.requested.edgeTreatmentSnapshotR2,*record.requested.edgeTreatmentResultR2,

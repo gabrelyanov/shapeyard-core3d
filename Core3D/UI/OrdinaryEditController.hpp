@@ -173,6 +173,9 @@ struct OrdinaryTransformChange {
     std::shared_ptr<const retained_edge_treatment::r2::Snapshot> edgeTreatmentSnapshotR2;
     std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture> edgeTreatmentMigrationR2;
     std::optional<retained_edge_treatment::r2::MigrationM3> edgeTreatmentMigrationRequestR2;
+    // A1 first enrollment of an un-enrolled A1-composite RetainedBoolean owner;
+    // mutually exclusive with the snapshot and migration arms above.
+    std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture> edgeTreatmentEnrollmentR2;
     std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> edgeTreatmentResultR2;
 };
 

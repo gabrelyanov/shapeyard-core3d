@@ -1,6 +1,7 @@
 #pragma once
 #include "CompositeRecipeCodec.hxx"
 #include "RetainedSolidAttribute.hxx"
+#include "RetainedEdgeTreatmentStorageKey.hxx"
 #include <TDF_Attribute.hxx>
 #include <TDF_AttributeIterator.hxx>
 #include <TDF_ChildIterator.hxx>
@@ -179,8 +180,13 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
             }
             if (sources != value->sourceShapes.size()) return false;
             for (TDF_AttributeIterator attributes(label); attributes.More(); attributes.Next())
+                // The paired SYET/R2 treatment attribute shares this label once
+                // an A1 first enrollment lands (same carrier rule the profile,
+                // enclosure and loft readers already apply); it is the only
+                // additional attribute ever tolerated here.
                 if (attributes.Value()->ID() != AttributeID()
-                    && attributes.Value()->ID() != TNaming_NamedShape::GetID()) return false;
+                    && attributes.Value()->ID() != TNaming_NamedShape::GetID()
+                    && attributes.Value()->ID() != retained_edge_treatment::AttributeID()) return false;
             int descendants = 0;
             for (TDF_ChildIterator child(label, Standard_True); child.More(); child.Next())
                 if (++descendants > profile::MaximumLabels || child.Value().HasAttribute()) return false;

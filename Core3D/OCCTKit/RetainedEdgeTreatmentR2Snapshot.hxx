@@ -72,6 +72,32 @@ class MigrationReview final {
     ReplayBudget chargedBudget_;
     std::vector<std::shared_ptr<const fs::FaceMembershipProof>> proofs_;
 };
+// A1 first enrollment: the read-only capture of an A1-composite RetainedBoolean
+// owner that holds no R2 record yet, and the reviewed first append (selector
+// proof resolved against the exact untreated carrier shape). The composite
+// carrier is the enrollment authority and is never restaged by this lane.
+class EnrollmentCapture final {
+    friend class ::OcctDocument; friend class core3d::Core3DViewer;
+    TDF_Label ownerLabel_, sourceLabel_;
+    rr::OwnerSnapshot owner_;
+    composite_recipe::Definition original_;
+    std::vector<std::uint8_t> originalBytes_;
+    TopoDS_Shape originalCurrent_;
+    ReplayBudget chargedBudget_;
+    std::uint64_t nonce_ = 0, presentationRevision_ = 0;
+public:
+    const rr::OwnerSnapshot& owner() const noexcept { return owner_; }
+    const composite_recipe::Definition& source() const noexcept { return original_; }
+    const std::vector<std::uint8_t>& canonicalOriginalBytes() const noexcept { return originalBytes_; }
+};
+class EnrollmentReview final {
+    friend class core3d::Core3DViewer;
+    std::shared_ptr<const EnrollmentCapture> original_;
+    Digest requestDigest_{};
+    SelectorAppendIntent request_;
+    std::shared_ptr<const fs::FaceMembershipProof> proof_;
+    ReplayBudget chargedBudget_;
+};
 class SelectorTargetCapture final {
     friend class core3d::Core3DViewer;
     std::shared_ptr<const Snapshot> original_;
@@ -119,6 +145,7 @@ private:
     std::shared_ptr<const Snapshot> snapshot_;
     std::shared_ptr<const MigrationCapture> migration_;
     std::shared_ptr<const MigrationReview> review_;
+    std::shared_ptr<const EnrollmentCapture> enrollment_;
     std::variant<Edit, MigrationM3> mutation_;
     Definition candidate_;
     BaseRecipe source_;

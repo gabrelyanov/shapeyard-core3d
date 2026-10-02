@@ -207,6 +207,34 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 @end
 
+// A1 first enrollment of an un-enrolled A1-composite RetainedBoolean owner.
+// Capture/proof values are native-only; only the request has a typed
+// construction, and it cannot mint a capture, a proof or a receipt.
+@interface Core3DRetainedBooleanEnrollmentRequestR2 : NSObject
+@property(nonatomic,readonly) uint32_t version;
+@property(nonatomic,strong,readonly) Core3DFaceSelectorIntent *intent;
+@property(nonatomic,readonly) double amountMM;
+- (nullable instancetype)initWithIntent:(Core3DFaceSelectorIntent *)intent
+    amountMM:(double)amountMM NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+@interface Core3DRetainedBooleanEnrollmentCaptureR2 : NSObject
+@property(nonatomic,copy,readonly) NSString *documentIdentifier, *entityIdentifier, *definitionIdentifier;
+@property(nonatomic,copy,readonly) NSData *canonicalOriginalBytes;
+@property(nonatomic,readonly,getter=isCurrent) BOOL current;
+@property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
+- (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+@end
+@interface Core3DRetainedBooleanEnrollmentProofR2 : NSObject
+@property(nonatomic,copy,readonly) NSData *requestDigest;
+- (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+@end
+@interface Core3DRetainedBooleanEnrollmentReviewR2 : NSObject
+@property(nonatomic,strong,readonly,nullable) Core3DRetainedBooleanEnrollmentProofR2 *proof;
+@property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
+- (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+@end
+
 @interface Core3DRetainedBooleanEditR2 : NSObject
 @property(nonatomic,readonly) Core3DRetainedBooleanEditKindR2 kind;
 @property(nonatomic,copy,readonly,nullable) NSString *featureIdentifier;

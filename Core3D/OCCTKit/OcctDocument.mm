@@ -155,6 +155,33 @@ OcctDocument::CaptureRetainedBooleanMigrationR2(
     }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
 }
 
+std::shared_ptr<const core3d::retained_edge_treatment::r2::EnrollmentCapture>
+OcctDocument::CaptureRetainedBooleanEnrollmentR2(
+    const TDF_Label& owner,const core3d::retained_recipe::RevisionFence& expected,
+    core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    refusal=et::Refusal::MalformedCarrier;
+    try{
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||owner.IsNull()
+            ||owner.Data()!=myOcafDoc->GetData()||!core3d::retained_recipe::Valid(expected)){
+            refusal=et::Refusal::StaleSnapshot;return {};
+        }
+        // A1 first enrollment: capture is read-only and refuses an
+        // already-enrolled owner; the migration lane owns legacy SYRS owners.
+        std::optional<et::RecordR2> existing;
+        if(!et::ReadR2(myOcafDoc,owner,existing,refusal)||existing){refusal=et::Refusal::UnsupportedOperation;return {};}
+        core3d::composite_recipe::Record source;
+        if(!core3d::composite_recipe::Read(myOcafDoc,owner,source)||!source.value){refusal=et::Refusal::UnsupportedBase;return {};}
+        auto result=std::shared_ptr<r2::EnrollmentCapture>(new r2::EnrollmentCapture);
+        result->ownerLabel_=owner;result->sourceLabel_=source.label;result->original_=source.value->definition;
+        result->originalBytes_=source.value->bytes;result->originalCurrent_=source.current;result->owner_.fence=expected;
+        result->owner_.owner=source.value->definition.owner;
+        result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
+        result->nonce_=std::uint64_t(myOcafDoc->GetData()->Time());
+        refusal=et::Refusal::None;return result;
+    }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
+}
+
 Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatmentsR2(
     core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
     namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
@@ -285,6 +312,57 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
         std::make_shared<core3d::retained_edge_treatment::r2::Definition>(stored->value->definition),
         stored->value->bytes,{},stored->value->base,stored->current};
     refusal=et::Refusal::None;return Standard_True;
+}
+
+Standard_Boolean OcctDocument::StageRetainedBooleanEnrollmentR2(
+    const core3d::retained_edge_treatment::r2::EnrollmentCapture& original,
+    const core3d::retained_edge_treatment::r2::DetachedResult& built,
+    core3d::retained_edge_treatment::r2::Record& readback,
+    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    readback={};refusal=et::Refusal::StageFailed;
+    try{
+        if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
+            ||original.ownerLabel_.IsNull()||original.ownerLabel_.Data()!=myOcafDoc->GetData()
+            ||built.nonce_!=original.nonce_){refusal=et::Refusal::IdentityMismatch;return Standard_False;}
+        // First enrollment only: an owner that already holds an R2 record
+        // refuses atomically before any mutation.
+        auto snapshot=CaptureRetainedEdgeTreatmentR2(original.ownerLabel_,original.owner_.fence,refusal);
+        if(snapshot){refusal=et::Refusal::UnsupportedOperation;return Standard_False;}
+        core3d::composite_recipe::Record live;
+        if(!core3d::composite_recipe::Read(myOcafDoc,original.ownerLabel_,live)||!live.value
+            ||!live.label.IsEqual(original.sourceLabel_)
+            ||live.value->bytes!=original.originalBytes_||!live.current.IsEqual(original.originalCurrent_)){
+            refusal=et::Refusal::StaleSnapshot;return Standard_False;
+        }
+        // The composite carrier is the enrollment authority and is never
+        // restaged: the detached result must keep it byte-exact and unchanged.
+        const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&built.source_);
+        if(!booleanBase||built.sourceChanged()
+            ||!std::holds_alternative<r2::CompositeBooleanBase>(booleanBase->source)
+            ||built.canonicalPrefixBytes()!=original.originalBytes_)return Standard_False;
+        std::vector<std::uint8_t> definitionBytes;
+        if(!r2::Encode(built.definition_,definitionBytes,refusal)
+            ||definitionBytes!=built.definitionBytes_||built.result_.IsNull())return Standard_False;
+        Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);
+        if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=et::Refusal::StageFailed;return Standard_False;}
+        Handle(core3d::composite_recipe::Attribute) source;
+        if(!original.sourceLabel_.FindAttribute(core3d::composite_recipe::AttributeID(),source)||source.IsNull()){
+            refusal=et::Refusal::StageFailed;return Standard_False;
+        }
+        auto treatmentPayload=std::make_shared<et::PayloadR2>();
+        treatmentPayload->definition=built.definition_;treatmentPayload->bytes=built.definitionBytes_;
+        treatmentPayload->base=built.base_;
+        et::Attribute::SetR2(original.sourceLabel_,treatmentPayload);
+        TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
+        if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
+        std::optional<et::RecordR2> stored;
+        if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
+        readback={stored->label,stored->owner,
+            std::make_shared<r2::Definition>(stored->value->definition),
+            stored->value->bytes,{},stored->value->base,stored->current};
+        refusal=et::Refusal::None;return Standard_True;
+    }catch(...){readback={};refusal=et::Refusal::StageFailed;return Standard_False;}
 }
 
 namespace {
@@ -21013,6 +21091,17 @@ CaptureOutcome PartBooleanOwner::capture(const TDF_Label& carrier) noexcept {
     try {
         if (!boundTo(owner_.Document()) || activeSession_ || recoverySession_
             || document_->HasOpenCommand()) { output.receipt = refuse("capture-owner-busy"); return output; }
+        // An enrolled R2 treatment binds the composite carrier digest; a direct
+        // Boolean editor edit would retire it silently. Refuse until the
+        // treatment-lane graph rebuild (SetBooleanOperation/SetInputPlacement)
+        // exists. Unreachable before the first A1 enrollment lands.
+        {
+            std::optional<core3d::retained_edge_treatment::RecordR2> enrolled;
+            core3d::retained_edge_treatment::Refusal enrolledRefusal
+                = core3d::retained_edge_treatment::Refusal::None;
+            if (!core3d::retained_edge_treatment::ReadR2(document_, carrier, enrolled, enrolledRefusal)
+                || enrolled) { output.receipt = refuse("capture-enrolled-treatment"); return output; }
+        }
         const auto opening = owner_.CaptureNativePlanningStamp(true);
         if (!opening) { output.receipt = refuse("capture-native-authority-busy"); return output; }
         composite_recipe::Record record;

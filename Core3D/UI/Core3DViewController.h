@@ -1919,6 +1919,18 @@ __attribute__((objc_subclassing_restricted))
     edit:(Core3DRetainedBooleanEditR2 *)edit expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     NS_SWIFT_NAME(beginEdgeTreatmentEditR2(_:edit:expected:completion:));
+- (nullable Core3DRetainedBooleanEnrollmentCaptureR2 *)captureRetainedBooleanEnrollmentR2:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(captureRetainedBooleanEnrollmentR2(_:expected:));
+- (Core3DRetainedBooleanEnrollmentReviewR2 *)reviewRetainedBooleanEnrollmentR2:
+    (Core3DRetainedBooleanEnrollmentCaptureR2 *)original
+    request:(Core3DRetainedBooleanEnrollmentRequestR2 *)request expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(reviewRetainedBooleanEnrollmentR2(_:request:expected:));
+- (Core3DEdgeTreatmentOperation *)beginRetainedBooleanEnrollmentR2:
+    (Core3DRetainedBooleanEnrollmentCaptureR2 *)original
+    proof:(Core3DRetainedBooleanEnrollmentProofR2 *)proof expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginRetainedBooleanEnrollmentR2(_:proof:expected:completion:));
 
 - (void)sendNotifyUIState:(UIStateChanging)state NS_REFINED_FOR_SWIFT;
 - (void)viewWillUpdateUIState:(UIStateChanging)state;

@@ -320,6 +320,20 @@ namespace core3d {
     std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>
     captureRetainedBooleanMigrationR2(const ObjectFrameIdentity&, std::uint64_t,
         std::uint32_t, std::uint32_t, retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture>
+    captureRetainedBooleanEnrollmentR2(const ObjectFrameIdentity&, std::uint64_t,
+        std::uint32_t, std::uint32_t, retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::EnrollmentReview>
+    reviewRetainedBooleanEnrollmentR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture>&,
+        const retained_edge_treatment::r2::SelectorAppendIntent&, const ObjectFrameIdentity&,
+        std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<retained_edge_treatment::r2::Work> prepareRetainedBooleanEnrollmentR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture>&,
+        const std::shared_ptr<const retained_edge_treatment::r2::EnrollmentReview>&,
+        const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareRetainedBooleanMigrationR2(
         const std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>&,
         const retained_edge_treatment::r2::MigrationM3&,

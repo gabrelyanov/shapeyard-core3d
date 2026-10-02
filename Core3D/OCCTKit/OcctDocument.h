@@ -1268,6 +1268,10 @@ public:
     CaptureRetainedBooleanMigrationR2(const TDF_Label& owner,
         const core3d::retained_recipe::RevisionFence& expected,
         core3d::retained_edge_treatment::Refusal&) const noexcept;
+    Standard_EXPORT std::shared_ptr<const core3d::retained_edge_treatment::r2::EnrollmentCapture>
+    CaptureRetainedBooleanEnrollmentR2(const TDF_Label& owner,
+        const core3d::retained_recipe::RevisionFence& expected,
+        core3d::retained_edge_treatment::Refusal&) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatmentsR2(
         core3d::retained_edge_treatment::Refusal&) const noexcept;
     Standard_EXPORT core3d::retained_face_selector::Resolution ResolveRetainedFaceSelector(
@@ -1604,6 +1608,11 @@ private:
   Standard_Boolean StageRetainedBooleanMigrationR2(
       const core3d::retained_edge_treatment::r2::MigrationCapture&,
       const core3d::retained_edge_treatment::r2::MigrationM3&,
+      const core3d::retained_edge_treatment::r2::DetachedResult&,
+      core3d::retained_edge_treatment::r2::Record&,
+      core3d::retained_edge_treatment::Refusal&) noexcept;
+  Standard_Boolean StageRetainedBooleanEnrollmentR2(
+      const core3d::retained_edge_treatment::r2::EnrollmentCapture&,
       const core3d::retained_edge_treatment::r2::DetachedResult&,
       core3d::retained_edge_treatment::r2::Record&,
       core3d::retained_edge_treatment::Refusal&) noexcept;

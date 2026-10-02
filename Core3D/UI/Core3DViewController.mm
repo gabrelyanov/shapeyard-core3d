@@ -3909,6 +3909,10 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 @implementation Core3DFaceSelectorNativeProofR2 @end
 @interface Core3DRetainedBooleanNativeMigrationProofR2:Core3DRetainedBooleanMigrationProofR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationReview> native;}@end
 @implementation Core3DRetainedBooleanNativeMigrationProofR2 @end
+@interface Core3DRetainedBooleanNativeEnrollmentCaptureR2:Core3DRetainedBooleanEnrollmentCaptureR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::EnrollmentCapture> native;}@end
+@implementation Core3DRetainedBooleanNativeEnrollmentCaptureR2 @end
+@interface Core3DRetainedBooleanNativeEnrollmentProofR2:Core3DRetainedBooleanEnrollmentProofR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::EnrollmentReview> native;}@end
+@implementation Core3DRetainedBooleanNativeEnrollmentProofR2 @end
 
 @interface Core3DEdgeTreatmentVector3 ()
 - (instancetype)initWithX:(double)x y:(double)y z:(double)z;
@@ -4048,6 +4052,34 @@ void B1BindR2Migration(Core3DEdgeTreatmentResult *value,
     if(built&&!built->canonicalPrefixBytes().empty())
         candidateSource=[NSData dataWithBytes:built->canonicalPrefixBytes().data() length:built->canonicalPrefixBytes().size()];
     [value setValue:B1SHA256(candidateSource) forKey:@"candidateSourceSHA256"];
+    std::vector<std::uint8_t> candidateBytes;et::Refusal refusal=et::Refusal::None;
+    if(built&&r2::Encode(built->definition(),candidateBytes,refusal))
+        [value setValue:B1SHA256([NSData dataWithBytes:candidateBytes.data() length:candidateBytes.size()]) forKey:@"candidateRecipeSHA256"];
+}
+void B1BindR2Enrollment(Core3DEdgeTreatmentResult *value,
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::EnrollmentCapture>&capture,
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){
+    namespace et=core3d::retained_edge_treatment;namespace r2=et::r2;
+    if(!value||!capture)return;
+    const auto& graph=capture->source();
+    const core3d::composite_recipe::SourceNode* left=nullptr;
+    for(const auto& node:graph.nodes)if(const auto* source=std::get_if<core3d::composite_recipe::SourceNode>(&node.value)){left=source;break;}
+    if(!left)return;
+    [value setValue:B1ID(graph.owner.document) forKey:@"documentIdentifier"];
+    [value setValue:B1ID(graph.owner.entity) forKey:@"entityIdentifier"];
+    [value setValue:B1ID(left->original.sourceFeature) forKey:@"sourceFeatureIdentifier"];
+    [value setValue:@(left->inputToCarrier.carrierMetersPerUnit) forKey:@"dimensionMetersPerUnit"];
+    [value setValue:@"composite" forKey:@"sourceFamily"];
+    [value setValue:@"a1Composite" forKey:@"carrier"];
+    [value setValue:@"a1TwoInput" forKey:@"prefixState"];
+    NSData *originalSource=[NSData dataWithBytes:capture->canonicalOriginalBytes().data() length:capture->canonicalOriginalBytes().size()];
+    [value setValue:B1SHA256(originalSource) forKey:@"originalSourceSHA256"];
+    // No pre-enrollment SYET exists; the original recipe digest stays empty
+    // (unknown), never a zero-filled or fabricated value.
+    [value setValue:@"" forKey:@"originalRecipeSHA256"];
+    // Enrollment never restages the composite carrier: original and candidate
+    // source bytes are the same exact prefix bytes.
+    [value setValue:B1SHA256(originalSource) forKey:@"candidateSourceSHA256"];
     std::vector<std::uint8_t> candidateBytes;et::Refusal refusal=et::Refusal::None;
     if(built&&r2::Encode(built->definition(),candidateBytes,refusal))
         [value setValue:B1SHA256([NSData dataWithBytes:candidateBytes.data() length:candidateBytes.size()]) forKey:@"candidateRecipeSHA256"];
@@ -21571,6 +21603,21 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [capture setValue:@YES forKey:@"current"];[capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;
 }
 
+- (Core3DRetainedBooleanEnrollmentCaptureR2 *)captureRetainedBooleanEnrollmentR2:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
+    if(!NSThread.isMainThread||!expected||!GLController.viewer)return nil;
+    const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;
+    identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;
+    identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;
+    auto native=GLController.viewer->captureRetainedBooleanEnrollmentR2(identity,expected.revisions.presentationRevision,
+        std::uint32_t(size.width),std::uint32_t(size.height),refusal);if(!native)return nil;
+    auto capture=B1Object<Core3DRetainedBooleanNativeEnrollmentCaptureR2>(Core3DRetainedBooleanNativeEnrollmentCaptureR2.class);capture->native=native;
+    const auto& graph=native->source();
+    [capture setValue:B1ID(graph.owner.document) forKey:@"documentIdentifier"];
+    [capture setValue:B1ID(graph.owner.entity) forKey:@"entityIdentifier"];[capture setValue:B1ID(graph.owner.definition) forKey:@"definitionIdentifier"];
+    [capture setValue:[NSData dataWithBytes:native->canonicalOriginalBytes().data() length:native->canonicalOriginalBytes().size()] forKey:@"canonicalOriginalBytes"];
+    [capture setValue:@YES forKey:@"current"];[capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;
+}
+
 - (Core3DFaceSelectorQueryR2 *)resolveFaceSelectorR2:(Core3DEdgeTreatmentSnapshotR2 *)snapshot
     intent:(Core3DFaceSelectorIntent *)intent expected:(Core3DSceneSnapshot *)expected {
     auto query=B1Object<Core3DFaceSelectorQueryR2>(Core3DFaceSelectorQueryR2.class);core3d::retained_face_selector::SelectorIntent nativeIntent;
@@ -21600,6 +21647,20 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [result setValue:proof forKey:@"proof"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
 }
 
+- (Core3DRetainedBooleanEnrollmentReviewR2 *)reviewRetainedBooleanEnrollmentR2:(Core3DRetainedBooleanEnrollmentCaptureR2 *)original
+    request:(Core3DRetainedBooleanEnrollmentRequestR2 *)request expected:(Core3DSceneSnapshot *)expected {
+    auto result=B1Object<Core3DRetainedBooleanEnrollmentReviewR2>(Core3DRetainedBooleanEnrollmentReviewR2.class);
+    auto native=(Core3DRetainedBooleanNativeEnrollmentCaptureR2*)original;if(![native isKindOfClass:Core3DRetainedBooleanNativeEnrollmentCaptureR2.class]||!expected||!request||request.version!=1)return result;
+    core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(request.intent,intent))return result;
+    const core3d::retained_edge_treatment::r2::SelectorAppendIntent mutation{intent,request.amountMM};
+    const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;
+    identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
+    core3d::retained_edge_treatment::Refusal refusal;auto review=GLController.viewer->reviewRetainedBooleanEnrollmentR2(native->native,mutation,identity,
+        expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);
+    if(!review)return result;auto proof=B1Object<Core3DRetainedBooleanNativeEnrollmentProofR2>(Core3DRetainedBooleanNativeEnrollmentProofR2.class);proof->native=review;
+    [result setValue:proof forKey:@"proof"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
+}
+
 - (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatmentR2:(std::shared_ptr<core3d::retained_edge_treatment::r2::Work>)work
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     provenance:(void(^)(Core3DEdgeTreatmentResult *,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&))provenance {
@@ -21619,6 +21680,14 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     if(request.append){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(request.append.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion provenance:nil];mutation.append=core3d::retained_edge_treatment::r2::SelectorAppendIntent{intent,request.append.amountMM};}
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
     core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanMigrationR2(capture->native,mutation,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Migration(dto,nativeCapture,built);}];
+}
+
+- (Core3DEdgeTreatmentOperation *)beginRetainedBooleanEnrollmentR2:(Core3DRetainedBooleanEnrollmentCaptureR2 *)original proof:(Core3DRetainedBooleanEnrollmentProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
+    auto capture=(Core3DRetainedBooleanNativeEnrollmentCaptureR2*)original;auto admitted=(Core3DRetainedBooleanNativeEnrollmentProofR2*)proof;
+    const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
+    // The reviewed request travels inside the proof; prepare consumes only the
+    // reviewed values, so no second unbound request copy is accepted here.
+    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanEnrollmentR2(capture->native,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Enrollment(dto,nativeCapture,built);}];
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppendR2:(Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {

@@ -155,6 +155,42 @@ bool SameSelectorMembership(const retained_face_selector::FaceMembershipProof& l
     return true;
 }
 
+// A1 first-enrollment graph admission: exactly two source nodes and one Part
+// Boolean feature node whose two inputs are those sources, on a SYCR/1 wire,
+// with both placements agreeing on a positive carrier unit. Anything else is
+// not an admitted two-input composite and refuses before any binding is built.
+struct A1GraphAdmission {
+    const core3d::composite_recipe::SourceNode* left = nullptr;
+    const core3d::composite_recipe::SourceNode* right = nullptr;
+    const core3d::composite_recipe::FeatureNode* boolean = nullptr;
+    double metersPerLocalUnit = 0;
+};
+bool AdmitA1Graph(const core3d::composite_recipe::Definition& graph, A1GraphAdmission& output) noexcept {
+    output = A1GraphAdmission();
+    if (graph.schemaVersion != 1) return false;
+    std::vector<const core3d::composite_recipe::SourceNode*> sources;
+    const core3d::composite_recipe::FeatureNode* boolean = nullptr;
+    for (const auto& node : graph.nodes) {
+        if (const auto* source = std::get_if<core3d::composite_recipe::SourceNode>(&node.value)) {
+            sources.push_back(source);
+        } else if (const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(&node.value)) {
+            if (boolean) return false;
+            boolean = feature;
+        }
+    }
+    if (sources.size() != 2 || !boolean || boolean->inputs.size() != 2
+        || boolean->kind != core3d::composite_recipe::PartBooleanFeatureKind
+        || boolean->codecVersion != core3d::composite_recipe::PartBooleanFeatureCodec
+        || boolean->inputs[0] != sources[0]->node || boolean->inputs[1] != sources[1]->node
+        || boolean->node != graph.outputNode) return false;
+    const double unit = sources[0]->inputToCarrier.carrierMetersPerUnit;
+    if (!std::isfinite(unit) || unit <= 0
+        || sources[1]->inputToCarrier.carrierMetersPerUnit != unit) return false;
+    output.left = sources[0]; output.right = sources[1]; output.boolean = boolean;
+    output.metersPerLocalUnit = unit;
+    return true;
+}
+
 bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double metersPerLocalUnit,
     retained_edge_treatment::Anchor& output) {
     namespace et = retained_edge_treatment;
@@ -438,6 +474,47 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
 }
 
+std::shared_ptr<const retained_edge_treatment::r2::EnrollmentReview>
+Core3DViewer::reviewRetainedBooleanEnrollmentR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture>& original,
+    const retained_edge_treatment::r2::SelectorAppendIntent& request,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    namespace fs=retained_face_selector;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!original||!width||!height||myDoc.IsNull()||myContext.IsNull())return {};
+    try{
+        if(!fs::ValidIntent(request.intent)||!std::isfinite(request.amountMM)
+            ||request.amountMM<=0||request.amountMM>20){refusal=et::Refusal::InvalidAmount;return {};}
+        const auto scene=captureSceneSnapshot(width,height);
+        if(!scene||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||scene->revisions.documentGeneration!=identity.documentGeneration
+            ||scene->revisions.model!=identity.modelRevision
+            ||scene->revisions.presentation!=presentationRevision)return {};
+        // The first append's selector resolves against the exact untreated
+        // carrier shape and unit; the proof travels with the review and is the
+        // only source of treatment anchors for this lane.
+        A1GraphAdmission admitted;
+        if(!AdmitA1Graph(original->original_,admitted)||original->originalCurrent_.IsNull()){
+            refusal=et::Refusal::UnsupportedBase;return {};
+        }
+        et::ReplayBudget budget;fs::Resolution resolution;const std::atomic_bool cancelled{false};
+        if(fs::Resolve(original->originalCurrent_,request.intent,admitted.metersPerLocalUnit,
+            budget,cancelled,resolution)!=fs::Refusal::None||!resolution.proof){
+            refusal=et::Refusal::UnsupportedEdge;return {};
+        }
+        auto review=std::shared_ptr<r2::EnrollmentReview>(new r2::EnrollmentReview);
+        review->original_=original;review->request_=request;review->proof_=resolution.proof;
+        review->chargedBudget_.buildStages=budget.buildStages;
+        review->chargedBudget_.topologyVisits=budget.topologyVisits;
+        std::vector<std::uint8_t> digestBytes=original->originalBytes_;
+        digestBytes.push_back(0);digestBytes.push_back(1);
+        CC_SHA256(digestBytes.data(),CC_LONG(digestBytes.size()),review->requestDigest_.data());
+        refusal=et::Refusal::None;return review;
+    }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
 std::shared_ptr<const retained_edge_treatment::r2::Snapshot> Core3DViewer::captureEdgeTreatmentR2(
     const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
     std::uint32_t width,std::uint32_t height,retained_edge_treatment::Refusal& refusal) noexcept {
@@ -483,6 +560,30 @@ Core3DViewer::captureRetainedBooleanMigrationR2(const ObjectFrameIdentity& ident
     dependency.geometry.fill(1);dependency.recipe.fill(1);dependency.placement.fill(1);dependency.material.fill(1);dependency.groups.fill(1);
     fence.dependencies.push_back(dependency);
     return myDoc->CaptureRetainedBooleanMigrationR2(myDoc->ShapeLabel(selected),fence,refusal);
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture>
+Core3DViewer::captureRetainedBooleanEnrollmentR2(const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    refusal=retained_edge_treatment::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+    const auto scene=captureSceneSnapshot(width,height);if(!scene
+        ||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+        ||scene->revisions.documentGeneration!=identity.documentGeneration
+        ||scene->revisions.model!=identity.modelRevision
+        ||scene->revisions.presentation!=presentationRevision)return {};
+    myContext->InitSelected();if(!myContext->MoreSelected())return {};
+    const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+    if(myContext->MoreSelected()||selected.IsNull())return {};
+    retained_recipe::RevisionFence fence;fence.documentGeneration=identity.documentGeneration;
+    fence.modelRevision=identity.modelRevision;fence.effectiveMetersPerUnit=1;
+    fence.ownerShape.fill(1);fence.ownerRecipe.fill(1);fence.ownerPlacement.fill(1);fence.ownerMaterial.fill(1);
+    retained_recipe::DependencyRead dependency;dependency.locator.owner.document.fill(1);dependency.locator.owner.entity.fill(1);
+    dependency.locator.owner.definition.fill(1);dependency.locator.node.fill(1);dependency.locator.sourceFeature.fill(1);
+    dependency.geometry.fill(1);dependency.recipe.fill(1);dependency.placement.fill(1);dependency.material.fill(1);dependency.groups.fill(1);
+    fence.dependencies.push_back(dependency);
+    return myDoc->CaptureRetainedBooleanEnrollmentR2(myDoc->ShapeLabel(selected),fence,refusal);
 }
 
 std::shared_ptr<retained_edge_treatment::r2::Work>
@@ -551,6 +652,67 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
         work->candidate_=candidate;work->source_=r2::RetainedBooleanBase{binding,r2::LegacyBooleanBase{prefix,prefixBytes}};
         work->prefixBytes_=prefixBytes;work->base_=original->originalCurrent_;work->originalCurrent_=original->originalCurrent_;
         work->nonce_=original->nonce_;work->label_=original->ownerLabel_;work->presentation_=selected;work->state_=r2::Work::State::Prepared;
+        refusal=et::Refusal::None;return work;
+    }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
+std::shared_ptr<retained_edge_treatment::r2::Work>
+Core3DViewer::prepareRetainedBooleanEnrollmentR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture>& original,
+    const std::shared_ptr<const retained_edge_treatment::r2::EnrollmentReview>& review,
+    const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    namespace fs=retained_face_selector;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!original||!review||review->original_!=original
+        ||!review->proof_||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull())return {};
+    try{
+        myContext->InitSelected();if(!myContext->MoreSelected())return {};
+        auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+        if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+            ||!selected->Shape().IsEqual(original->originalCurrent_))return {};
+        const auto& graph=original->original_;
+        A1GraphAdmission admitted;
+        if(!AdmitA1Graph(graph,admitted)){refusal=et::Refusal::UnsupportedBase;return {};}
+        // The reviewed request is the only mutation source: the exact reviewed
+        // amount and the proof resolved against the untreated carrier shape.
+        r2::BooleanBaseBinding binding;binding.format=r2::PrefixFormat::A1Composite;
+        binding.sourceWireMajor=1;binding.sourceWireMinor=0;
+        binding.source={graph.owner.document,graph.owner.entity,graph.owner.definition,
+            admitted.left->original.sourceFeature};
+        binding.sourceNode=admitted.boolean->node;binding.sourceSchema=graph.schemaVersion;
+        binding.metersPerLocalUnit=admitted.metersPerLocalUnit;
+        CC_SHA256(original->originalBytes_.data(),CC_LONG(original->originalBytes_.size()),
+            binding.sourceRecipeDigest.data());
+        r2::CompositePrefixBinding links;
+        links.links.push_back({admitted.boolean->node,admitted.boolean->feature,
+            admitted.boolean->inputs[0],admitted.boolean->inputs[1]});
+        binding.prefix=links;
+        r2::Definition candidate;candidate.owner=graph.owner;candidate.base=binding;
+        candidate.issuance.nextLocalID=1;candidate.outputNode=binding.sourceNode;
+        et::Step step;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();
+        step.localID=candidate.issuance.nextLocalID++;step.kind=et::Kind::ConstantFillet;
+        step.amountMM=review->request_.amountMM;
+        fs::SelectorReceipt receipt;receipt.intent=review->proof_->intent();receipt.face=review->proof_->plane();
+        receipt.coverage=review->proof_->coverage();
+        receipt.wireCount=review->proof_->wireCount();
+        receipt.boundaryUseCount=std::uint32_t(review->proof_->boundaryUses().size());
+        receipt.boundaryUniqueEdgeCount=review->proof_->uniqueEdgeCount();
+        for(const auto& use:review->proof_->boundaryUses())if(use.selected){et::Anchor anchor;
+            if(!SelectorAnchor(use,binding.metersPerLocalUnit,anchor)){refusal=et::Refusal::UnsupportedEdge;return {};}
+            step.anchors.push_back(anchor);receipt.entries.push_back({anchor.key,use.direction});}
+        std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
+        std::sort(receipt.entries.begin(),receipt.entries.end(),[](const fs::ReceiptEntry&a,const fs::ReceiptEntry&b){return a.anchorKey<b.anchorKey;});
+        step.selector=receipt;
+        candidate.steps.push_back(step);candidate.outputNode=step.node;
+        std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
+        auto work=std::make_shared<r2::Work>();work->enrollment_=original;work->candidate_=candidate;
+        work->source_=r2::RetainedBooleanBase{binding,r2::CompositeBooleanBase{graph,original->originalBytes_}};
+        work->prefixBytes_=original->originalBytes_;work->base_=original->originalCurrent_;
+        work->originalCurrent_=original->originalCurrent_;
+        work->nonce_=original->nonce_;work->label_=original->ownerLabel_;work->presentation_=selected;
+        work->state_=r2::Work::State::Prepared;
         refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
 }
@@ -689,7 +851,7 @@ retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatmentR2(
     if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_){answer.refusal=et::Refusal::StaleSnapshot;return answer;}
     OrdinaryTransformChange change;change.label=work->label_;change.presentation=work->presentation_;change.shape=result->result_;
     change.transform=work->presentation_.IsNull()?gp_Trsf():work->presentation_->LocalTransformation();change.operation=OrdinaryTransformOperation::RetainedEdgeTreatment;
-    change.edgeTreatmentSnapshotR2=work->snapshot_;change.edgeTreatmentMigrationR2=work->migration_;if(work->migration_)change.edgeTreatmentMigrationRequestR2=std::get<r2::MigrationM3>(work->mutation_);change.edgeTreatmentResultR2=result;
+    change.edgeTreatmentSnapshotR2=work->snapshot_;change.edgeTreatmentMigrationR2=work->migration_;if(work->migration_)change.edgeTreatmentMigrationRequestR2=std::get<r2::MigrationM3>(work->mutation_);change.edgeTreatmentEnrollmentR2=work->enrollment_;change.edgeTreatmentResultR2=result;
     OrdinaryEditResult ordinary=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginTransform({change},&ordinary);if(lease)ordinary=lease.stageAndCommit();
     if(ordinary==OrdinaryEditResult::Committed){answer.outcome=et::CommitOutcome::Committed;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=1;}
     else if(ordinary==OrdinaryEditResult::OutcomeUnknown){answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();}

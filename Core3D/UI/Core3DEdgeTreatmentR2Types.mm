@@ -97,6 +97,9 @@ static NSData *R2DoubleData(const std::vector<double>& values) {
 @implementation Core3DFaceSelectorQueryR2 @end
 @implementation Core3DRetainedBooleanMigrationProofR2 @end
 @implementation Core3DRetainedBooleanMigrationReviewR2 @end
+@implementation Core3DRetainedBooleanEnrollmentCaptureR2 @end
+@implementation Core3DRetainedBooleanEnrollmentProofR2 @end
+@implementation Core3DRetainedBooleanEnrollmentReviewR2 @end
 @interface Core3DRetainedBooleanEditR2 ()
 - (instancetype)initPrivate;
 @end
@@ -190,6 +193,13 @@ static NSData *R2DoubleData(const std::vector<double>& values) {
 - (nullable instancetype)initWithIntent:(Core3DFaceSelectorIntent *)intent amountMM:(double)amountMM {
     if (!intent || !isfinite(amountMM) || amountMM <= 0 || amountMM > 20) return nil;
     if ((self = [super init])) { _intent = intent; _amountMM = amountMM; }
+    return self;
+}
+@end
+@implementation Core3DRetainedBooleanEnrollmentRequestR2
+- (nullable instancetype)initWithIntent:(Core3DFaceSelectorIntent *)intent amountMM:(double)amountMM {
+    if (!intent || !isfinite(amountMM) || amountMM <= 0 || amountMM > 20) return nil;
+    if ((self = [super init])) { _version = 1; _intent = intent; _amountMM = amountMM; }
     return self;
 }
 @end
